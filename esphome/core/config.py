@@ -19,6 +19,7 @@ from esphome.const import (
     CONF_FRIENDLY_NAME,
     CONF_INCLUDES,
     CONF_LIBRARIES,
+    CONF_MANUFACTURER,
     CONF_MIN_VERSION,
     CONF_NAME,
     CONF_NAME_ADD_MAC_SUFFIX,
@@ -96,10 +97,33 @@ def valid_include(value):
     return value
 
 
-def valid_project_name(value: str):
-    if value.count(".") != 1:
-        raise cv.Invalid("project name needs to have a namespace")
-    return value
+def _validate_project_info(config):
+    name = config[CONF_NAME]
+    dot_count = name.count(".")
+    if CONF_MANUFACTURER not in config:
+        if dot_count != 1:
+            raise cv.Invalid(
+                f"'{CONF_MANUFACTURER}' is a required option for [{CONF_PROJECT}]"
+            )
+        author, name = name.split(".", 1)
+        config[CONF_MANUFACTURER] = author
+        config[CONF_NAME] = name
+        _LOGGER.warning(
+            "Prefixing %s %s with %s namespace is deprecated and will be disallowed in a future release. "
+            "Please see current documentation for the correct way to define the %s information.",
+            CONF_PROJECT,
+            CONF_NAME,
+            CONF_MANUFACTURER,
+            CONF_PROJECT,
+        )
+    elif dot_count != 0:
+        author, name = name.split(".", 1)
+        raise cv.Invalid(
+            f"Remove {CONF_MANUFACTURER} namespace '{author}.' from the {CONF_PROJECT} {CONF_NAME}",
+            path=[CONF_NAME],
+        )
+
+    return config
 
 
 if "ESPHOME_DEFAULT_COMPILE_PROCESS_LIMIT" in os.environ:
@@ -109,7 +133,6 @@ if "ESPHOME_DEFAULT_COMPILE_PROCESS_LIMIT" in os.environ:
     )
 else:
     _compile_process_limit_default = cv.UNDEFINED
-
 
 CONF_ESP8266_RESTORE_FROM_FLASH = "esp8266_restore_from_flash"
 CONFIG_SCHEMA = cv.All(
@@ -145,20 +168,22 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_INCLUDES, default=[]): cv.ensure_list(valid_include),
             cv.Optional(CONF_LIBRARIES, default=[]): cv.ensure_list(cv.string_strict),
             cv.Optional(CONF_NAME_ADD_MAC_SUFFIX, default=False): cv.boolean,
-            cv.Optional(CONF_PROJECT): cv.Schema(
-                {
-                    cv.Required(CONF_NAME): cv.All(
-                        cv.string_strict, valid_project_name
-                    ),
-                    cv.Required(CONF_VERSION): cv.string_strict,
-                    cv.Optional(CONF_ON_UPDATE): automation.validate_automation(
-                        {
-                            cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
-                                ProjectUpdateTrigger
-                            ),
-                        }
-                    ),
-                }
+            cv.Optional(CONF_PROJECT): cv.All(
+                cv.Schema(
+                    {
+                        cv.Optional(CONF_MANUFACTURER): cv.string_strict,
+                        cv.Required(CONF_NAME): cv.string_strict,
+                        cv.Required(CONF_VERSION): cv.string_strict,
+                        cv.Optional(CONF_ON_UPDATE): automation.validate_automation(
+                            {
+                                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                                    ProjectUpdateTrigger
+                                ),
+                            }
+                        ),
+                    }
+                ),
+                _validate_project_info,
             ),
             cv.Optional(CONF_MIN_VERSION, default=ESPHOME_VERSION): cv.All(
                 cv.version_number, cv.validate_esphome_version
@@ -394,6 +419,7 @@ async def to_code(config):
 
     if project_conf := config.get(CONF_PROJECT):
         cg.add_define("ESPHOME_PROJECT_NAME", project_conf[CONF_NAME])
+        cg.add_define("ESPHOME_PROJECT_AUTHOR", project_conf[CONF_MANUFACTURER])
         cg.add_define("ESPHOME_PROJECT_VERSION", project_conf[CONF_VERSION])
         cg.add_define("ESPHOME_PROJECT_VERSION_30", project_conf[CONF_VERSION][:29])
         for conf in project_conf.get(CONF_ON_UPDATE, []):

@@ -346,6 +346,7 @@ class DeviceInfoResponse : public ProtoMessage {
   bool has_deep_sleep{false};
   std::string project_name{};
   std::string project_version{};
+  std::string project_manufacturer{};
   uint32_t webserver_port{0};
   uint32_t legacy_bluetooth_proxy_version{0};
   uint32_t bluetooth_proxy_feature_flags{0};

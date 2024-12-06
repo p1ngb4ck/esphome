@@ -826,6 +826,10 @@ bool DeviceInfoResponse::decode_length(uint32_t field_id, ProtoLengthDelimited v
       this->project_version = value.as_string();
       return true;
     }
+    case 18: {
+      this->project_manufacturer = value.as_string();
+      return true;
+    }
     case 12: {
       this->manufacturer = value.as_string();
       return true;
@@ -852,6 +856,7 @@ void DeviceInfoResponse::encode(ProtoWriteBuffer buffer) const {
   buffer.encode_bool(7, this->has_deep_sleep);
   buffer.encode_string(8, this->project_name);
   buffer.encode_string(9, this->project_version);
+  buffer.encode_string(18, this->project_manufacturer);
   buffer.encode_uint32(10, this->webserver_port);
   buffer.encode_uint32(11, this->legacy_bluetooth_proxy_version);
   buffer.encode_uint32(15, this->bluetooth_proxy_feature_flags);
@@ -899,6 +904,10 @@ void DeviceInfoResponse::dump_to(std::string &out) const {
 
   out.append("  project_version: ");
   out.append("'").append(this->project_version).append("'");
+  out.append("\n");
+
+  out.append("  project_manufacturer: ");
+  out.append("'").append(this->project_manufacturer).append("'");
   out.append("\n");
 
   out.append("  webserver_port: ");

@@ -1479,7 +1479,13 @@ DeviceInfoResponse APIConnection::device_info(const DeviceInfoRequest &msg) {
   resp.has_deep_sleep = deep_sleep::global_has_deep_sleep;
 #endif
 #ifdef ESPHOME_PROJECT_NAME
-  resp.project_name = ESPHOME_PROJECT_NAME;
+  if (this->client_api_version_major_ > 1 ||
+      (this->client_api_version_major_ == 1 && this->client_api_version_minor_ >= 11)) {
+    resp.project_name = ESPHOME_PROJECT_NAME;
+    resp.project_manufacturer = ESPHOME_PROJECT_MANUFACTURER;
+  } else {
+    resp.project_name = ESPHOME_PROJECT_MANUFACTURER "." ESPHOME_PROJECT_NAME;
+  }
   resp.project_version = ESPHOME_PROJECT_VERSION;
 #endif
 #ifdef USE_WEBSERVER
