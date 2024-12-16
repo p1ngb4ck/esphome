@@ -18,7 +18,8 @@ class HttpRequestUpdate : public update::UpdateEntity, public PollingComponent {
   void perform(bool force) override;
   void check() override { this->update(); }
 
-  void set_source_url(const std::string &source_url) { this->source_url_ = source_url; }
+  void set_source_url(const std::string &source_urls) { this->source_urls_ = {source_urls}; }
+  void set_source_urls(const std::vector<std::string> &source_urls) { this->source_urls_ = source_urls; }
 
   void set_request_parent(HttpRequestComponent *request_parent) { this->request_parent_ = request_parent; }
   void set_ota_parent(OtaHttpRequestComponent *ota_parent) { this->ota_parent_ = ota_parent; }
@@ -28,7 +29,8 @@ class HttpRequestUpdate : public update::UpdateEntity, public PollingComponent {
  protected:
   HttpRequestComponent *request_parent_;
   OtaHttpRequestComponent *ota_parent_;
-  std::string source_url_;
+  std::vector<std::string> source_urls_;
+  size_t current_source_{0};
 };
 
 }  // namespace http_request

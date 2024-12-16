@@ -21,19 +21,33 @@ void HttpRequestUpdate::setup() {
       this->update_info_.progress = progress;
       this->publish_state();
     } else if (state == ota::OTAState::OTA_ABORT || state == ota::OTAState::OTA_ERROR) {
-      this->state_ = update::UPDATE_STATE_AVAILABLE;
-      this->status_set_error("Failed to install firmware");
-      this->publish_state();
+      if (this->current_source_ + 1 < this->source_urls_.size()) {
+        this->current_source_++;
+        this->defer("update", [this]() {
+          this->update();
+          this->perform(true);
+        });
+      } else {
+        this->current_source_ = 0;
+        this->state_ = update::UPDATE_STATE_AVAILABLE;
+        this->status_set_error("Failed to install firmware");
+        this->publish_state();
+      }
     }
   });
 }
 
 void HttpRequestUpdate::update() {
-  auto container = this->request_parent_->get(this->source_url_);
+  std::string current_source = this->source_urls_[this->current_source_];
+  auto container = this->request_parent_->get(current_source);
 
   if (container == nullptr || container->status_code != HTTP_STATUS_OK) {
-    std::string msg = str_sprintf("Failed to fetch manifest from %s", this->source_url_.c_str());
+    std::string msg = str_sprintf("Failed to fetch manifest from %s", current_source.c_str());
     this->status_set_error(msg.c_str());
+    if (this->current_source_ + 1 < this->source_urls_.size()) {
+      this->current_source_++;
+      this->defer("update", [this]() { this->update(); });
+    }
     return;
   }
 
@@ -99,7 +113,7 @@ void HttpRequestUpdate::update() {
   });
 
   if (!valid) {
-    std::string msg = str_sprintf("Failed to parse JSON from %s", this->source_url_.c_str());
+    std::string msg = str_sprintf("Failed to parse JSON from %s", current_source.c_str());
     this->status_set_error(msg.c_str());
     return;
   }
@@ -108,10 +122,10 @@ void HttpRequestUpdate::update() {
   if (this->update_info_.firmware_url.find("http") == std::string::npos) {
     std::string path = this->update_info_.firmware_url;
     if (path[0] == '/') {
-      std::string domain = this->source_url_.substr(0, this->source_url_.find('/', 8));
+      std::string domain = current_source.substr(0, current_source.find('/', 8));
       this->update_info_.firmware_url = domain + path;
     } else {
-      std::string domain = this->source_url_.substr(0, this->source_url_.rfind('/') + 1);
+      std::string domain = current_source.substr(0, current_source.rfind('/') + 1);
       this->update_info_.firmware_url = domain + path;
     }
   }
