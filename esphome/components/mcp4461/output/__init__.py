@@ -1,0 +1,52 @@
+import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome.components import output
+from esphome.const import CONF_CHANNEL, CONF_ID
+from .. import Mcp4461Component, CONF_MCP4461_ID, mcp4461_ns
+
+DEPENDENCIES = ["mcp4461"]
+
+Mcp4461Wiper = mcp4461_ns.class_("Mcp4461Wiper", output.FloatOutput)
+
+MCP4461WiperIdx = mcp4461_ns.enum("MCP4461WiperIdx")
+CHANNEL_OPTIONS = {
+    "A": MCP4461WiperIdx.MCP4461_WIPER_0,
+    "B": MCP4461WiperIdx.MCP4461_WIPER_1,
+    "C": MCP4461WiperIdx.MCP4461_WIPER_2,
+    "D": MCP4461WiperIdx.MCP4461_WIPER_3,
+    "E": MCP4461WiperIdx.MCP4461_WIPER_4,
+    "F": MCP4461WiperIdx.MCP4461_WIPER_5,
+    "G": MCP4461WiperIdx.MCP4461_WIPER_6,
+    "H": MCP4461WiperIdx.MCP4461_WIPER_7,
+}
+
+CONF_ENABLE = "enable"
+CONF_TERMINAL_A = "terminal_a"
+CONF_TERMINAL_B = "terminal_b"
+CONF_TERMINAL_W = "terminal_w"
+
+CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
+    {
+        cv.Required(CONF_ID): cv.declare_id(Mcp4461Wiper),
+        cv.GenerateID(CONF_MCP4461_ID): cv.use_id(Mcp4461Component),
+        cv.Required(CONF_CHANNEL): cv.enum(CHANNEL_OPTIONS, upper=True),
+        cv.Optional(CONF_ENABLE, default=True): cv.boolean,
+        cv.Optional(CONF_TERMINAL_A, default=True): cv.boolean,
+        cv.Optional(CONF_TERMINAL_B, default=True): cv.boolean,
+        cv.Optional(CONF_TERMINAL_W, default=True): cv.boolean,
+    }
+)
+
+
+async def to_code(config):
+    parent = await cg.get_variable(config[CONF_MCP4461_ID])
+    var = cg.new_Pvariable(
+        config[CONF_ID],
+        parent,
+        config[CONF_CHANNEL],
+        config[CONF_ENABLE],
+        config[CONF_TERMINAL_A],
+        config[CONF_TERMINAL_B],
+        config[CONF_TERMINAL_W],
+    )
+    await output.register_output(var, config)
