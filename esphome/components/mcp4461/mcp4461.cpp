@@ -60,7 +60,7 @@ void Mcp4461Component::loop() {
           }
           uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
           if (new_terminal_value != this->get_terminal_register(terminal_connector)) {
-            ESP_LOGV(TAG, "updating terminal %d to new value %d", (uint8_t) terminal_connector, new_terminal_value);
+            ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector), new_terminal_value);
             this->set_terminal_register(terminal_connector, new_terminal_value);
           }
         }
