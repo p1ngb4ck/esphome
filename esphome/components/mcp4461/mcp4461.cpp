@@ -128,13 +128,7 @@ uint16_t Mcp4461Component::get_wiper_level(uint8_t wiper) {
   }
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
-    if (wiper > 3) {
-      this->status_set_warning();
-      ESP_LOGW(TAG, "Error fetching nonvolatile wiper %d value", wiper);
-    } else {
-      this->status_set_warning();
-      ESP_LOGW(TAG, "Error fetching wiper %d value", wiper);
-    }
+    ESP_LOGW(TAG, "Error fetching %swiper %" PRIu8 " value", (wiper > 3) ? "nonvolatile " : "", wiper);
     return 0;
   }
   return buf;
