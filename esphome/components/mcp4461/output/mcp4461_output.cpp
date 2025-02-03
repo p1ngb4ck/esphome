@@ -7,7 +7,7 @@
 namespace esphome {
 namespace mcp4461 {
 
-static const char *const TAG = "mcp4461";
+static const char *const TAG = "mcp4461.output";
 
 void Mcp4461Wiper::write_state(float state) {
   ESP_LOGV(TAG, "Got value %02f from frontend", state);
