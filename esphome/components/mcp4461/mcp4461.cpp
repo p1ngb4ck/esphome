@@ -137,7 +137,7 @@ uint16_t Mcp4461Component::get_wiper_level(uint8_t wiper) {
 void Mcp4461Component::update_wiper_level(uint8_t wiper) {
   uint16_t data;
   data = this->get_wiper_level(wiper);
-  ESP_LOGV(TAG, "Got value %d from wiper %d", data, wiper);
+  ESP_LOGV(TAG, "Got value %" PRIu16 " from wiper %" PRIu8, data, wiper);
   this->reg_[wiper].state = data;
 }
 
