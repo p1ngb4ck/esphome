@@ -10,7 +10,7 @@ namespace mcp4461 {
 
 class Mcp4461Wiper : public output::FloatOutput {
  public:
-  Mcp4461Wiper(Mcp4461Component *parent, MCP4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
+  Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
                bool terminal_w)
       : parent_(parent),
         wiper_(wiper),
@@ -42,7 +42,7 @@ class Mcp4461Wiper : public output::FloatOutput {
  protected:
   void write_state(float state) override;
   Mcp4461Component *parent_;
-  MCP4461WiperIdx wiper_;
+  Mcp4461WiperIdx wiper_;
   bool enable_;
   uint16_t state_;
   bool terminal_a_;
