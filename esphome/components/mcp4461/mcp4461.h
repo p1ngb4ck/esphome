@@ -88,7 +88,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   friend class Mcp4461Wiper;
   bool is_writing_();
   uint8_t get_wiper_address_(uint8_t wiper);
-  void write_wiper_level_(uint8_t wiper, uint16_t value);
+  void write_wiper_level_(uint8_t wiper, uint16_t value, bool nonvolatile = false);
   void mcp4461_write_(uint8_t addr, uint16_t data);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
 
