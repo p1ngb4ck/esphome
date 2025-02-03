@@ -31,12 +31,16 @@ void Mcp4461Component::dump_config() {
   ESP_LOGCONFIG(TAG, "mcp4461:");
   LOG_I2C_DEVICE(this);
   for (uint8_t i = 0; i < 8; ++i) {
-    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "]: %s", i, ONOFF(this->reg_[i].enabled));
-    ESP_LOGCONFIG(TAG, "  ├── State: %" PRIu16, this->reg_[i].state);
-    ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
-    ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
-    ESP_LOGCONFIG(TAG, "  ├── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
-    ESP_LOGCONFIG(TAG, "  └── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
+    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "] level: %" PRIu16, this->reg_[i].state);
+    // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
+    // so also invalid for nonvolatile. For these, only print current level.
+    if(i < 4) {
+      ESP_LOGCONFIG(TAG, "  ├── Status: %s", i, ONOFF(this->reg_[i].enabled));
+      ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
+      ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
+      ESP_LOGCONFIG(TAG, "  ├── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
+      ESP_LOGCONFIG(TAG, "  └── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
+    }
   }
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Communication with mcp4461 failed!");
@@ -343,7 +347,7 @@ void Mcp4461Component::disable_terminal(MCP4461WiperIdx wiper, char terminal) {
 
 uint16_t Mcp4461Component::get_eeprom_value(MCP4461EEPRomLocation location) {
   uint8_t reg = 0;
-  reg |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>location * 0x10));
+  reg |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
   reg |= static_cast<uint8_t> Mcp4461Commands::READ;
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
