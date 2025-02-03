@@ -72,8 +72,8 @@ void Mcp4461Component::loop() {
 
 uint16_t Mcp4461Component::get_status_register() {
   uint8_t reg = 0;
-  reg |= (uint8_t) Mcp4461Addresses::MCP4461_STATUS;
-  reg |= (uint8_t) Mcp4461Commands::READ;
+  reg |= static_cast<uint8_t>(Mcp4461Addresses::MCP4461_STATUS);
+  reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
