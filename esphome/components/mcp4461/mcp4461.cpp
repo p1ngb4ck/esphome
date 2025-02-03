@@ -341,7 +341,7 @@ void Mcp4461Component::set_eeprom_value(MCP4461EEPRomLocation location, uint16_t
   this->mcp4461_write_(addr, value, true);
 }
 
-void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false) {
+void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile) {
   uint8_t reg = 0;
   if (data > 0xFF) {
     reg = 1;
