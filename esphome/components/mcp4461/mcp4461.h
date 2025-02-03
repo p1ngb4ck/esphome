@@ -40,7 +40,7 @@ enum MCP4461WiperIdx : uint8_t {
   MCP4461_WIPER_7 = 7
 };
 
-enum MCP4461EEPRomLocation {
+enum MCP4461EEPRomLocation : uint8_t {
   MCP4461_EEPROM_0 = 0,
   MCP4461_EEPROM_1 = 1,
   MCP4461_EEPROM_2 = 2,
