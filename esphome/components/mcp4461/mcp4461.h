@@ -18,7 +18,7 @@ struct WiperState {
 enum class Mcp4461Defaults : uint8_t { WIPER_VALUE = 0x80 };
 enum class Mcp4461Commands : uint8_t { WRITE = 0x00, INCREMENT = 0x04, DECREMENT = 0x08, READ = 0x0C };
 
-enum class Mcp4461Addresses {
+enum class Mcp4461Addresses : uint8_t {
   MCP4461_VW0 = 0x00,
   MCP4461_VW1 = 0x10,
   MCP4461_VW2 = 0x60,
