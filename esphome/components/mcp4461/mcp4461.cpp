@@ -142,7 +142,7 @@ void Mcp4461Component::update_wiper_level(uint8_t wiper) {
 }
 
 void Mcp4461Component::set_wiper_level(uint8_t wiper, uint16_t value) {
-  ESP_LOGV(TAG, "Setting MCP4461 wiper %d to %d!", wiper, value);
+  ESP_LOGV(TAG, "Setting MCP4461 wiper %" PRIu8 " to %" PRIu16 "!", wiper, value);
   this->reg_[wiper].state = value;
   this->update_ = true;
 }
