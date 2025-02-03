@@ -164,7 +164,7 @@ void Mcp4461Component::enable_wiper(uint8_t wiper) {
 }
 
 void Mcp4461Component::disable_wiper(uint8_t wiper) {
-  ESP_LOGV(TAG, "Disabling wiper %d", wiper);
+  ESP_LOGV(TAG, "Disabling wiper %" PRIu8, wiper);
   this->reg_[wiper].terminal_hw = false;
   this->update_ = true;
 }
