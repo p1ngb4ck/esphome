@@ -22,7 +22,7 @@ void Mcp4461Component::setup() {
 void Mcp4461Component::begin_() {
   for (uint8_t i = 0; i < 8; i++) {
     if (this->reg_[i].enabled) {
-      this->reg_[i].state = this->get_wiper_level(i);
+      this->reg_[i].state = this->read_wiper_level_(i);
     }
   }
 }
@@ -48,7 +48,7 @@ void Mcp4461Component::loop() {
     uint8_t i;
     for (i = 0; i < 8; i++) {
       // set wiper i state if changed
-      if (this->reg_[i].state != this->get_wiper_level(i)) {
+      if (this->reg_[i].state != this->read_wiper_level_(i)) {
         this->write_wiper_level_(i, this->reg_[i].state);
       }
       // terminal register changes only applicable to wipers 0-3 !
@@ -61,8 +61,8 @@ void Mcp4461Component::loop() {
           }
           uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
           if (new_terminal_value != this->get_terminal_register(terminal_connector)) {
-            ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector),
-              new_terminal_value);
+            ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8,
+              static_cast<uint8_t>(terminal_connector), new_terminal_value);
             this->set_terminal_register(terminal_connector, new_terminal_value);
           }
         }
@@ -85,7 +85,7 @@ uint16_t Mcp4461Component::get_status_register() {
   return buf;
 }
 
-bool Mcp4461Component::is_writing_() { return (bool) ((this->get_status_register() >> 4) & 0x01); }
+bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
 
 uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
   uint8_t addr;
@@ -117,7 +117,12 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
   return addr;
 }
 
-uint16_t Mcp4461Component::get_wiper_level(uint8_t wiper) {
+uint16_t Mcp4461Component::get_wiper_level(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  return this->read_wiper_level_(wiper_idx);
+}
+
+uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
   uint8_t reg = 0;
   uint16_t buf = 0;
   reg |= this->get_wiper_address_(wiper);
@@ -136,57 +141,70 @@ uint16_t Mcp4461Component::get_wiper_level(uint8_t wiper) {
   return buf;
 }
 
-void Mcp4461Component::update_wiper_level(uint8_t wiper) {
+void Mcp4461Component::update_wiper_level(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
   uint16_t data;
   data = this->get_wiper_level(wiper);
-  ESP_LOGV(TAG, "Got value %" PRIu16 " from wiper %" PRIu8, data, wiper);
-  this->reg_[wiper].state = data;
+  ESP_LOGV(TAG, "Got value %" PRIu16 " from wiper %" PRIu8, data, wiper_idx);
+  this->reg_[wiper_idx].state = data;
 }
 
-void Mcp4461Component::set_wiper_level(uint8_t wiper, uint16_t value) {
-  ESP_LOGV(TAG, "Setting MCP4461 wiper %" PRIu8 " to %" PRIu16 "!", wiper, value);
-  this->reg_[wiper].state = value;
-  this->update_ = true;
-}
-
-void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
+void Mcp4461Component::set_wiper_level(MCP4461WiperIdx wiper, uint16_t value) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
   if (data > 0x100) {
     ESP_LOGW(TAG, "ignoring invalid wiper level %" PRIu16 "!");
     return;
   }
-  this->mcp4461_write_(this->get_wiper_address_(wiper), value);
-}
-
-void Mcp4461Component::enable_wiper(uint8_t wiper) {
-  ESP_LOGV(TAG, "Enabling wiper %" PRIu8, wiper);
-  this->reg_[wiper].terminal_hw = true;
+  ESP_LOGV(TAG, "Setting MCP4461 wiper %" PRIu8 " to %" PRIu16 "!", wiper_idx, value);
+  this->reg_[wiper_idx].state = value;
   this->update_ = true;
 }
 
-void Mcp4461Component::disable_wiper(uint8_t wiper) {
-  ESP_LOGV(TAG, "Disabling wiper %" PRIu8, wiper);
-  this->reg_[wiper].terminal_hw = false;
+void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  bool nonvolatile = false;
+  if (wiper_idx > 3) {
+    nonvolatile = true;
+  }
+  this->mcp4461_write_(this->get_wiper_address_(wiper_idx), value, nonvolatile);
+}
+
+void Mcp4461Component::enable_wiper(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  ESP_LOGV(TAG, "Enabling wiper %" PRIu8, wiper_idx);
+  this->reg_[wiper_idx].terminal_hw = true;
   this->update_ = true;
 }
 
-void Mcp4461Component::increase_wiper(uint8_t wiper) {
-  ESP_LOGV(TAG, "Increasing wiper %d", wiper);
+void Mcp4461Component::disable_wiper(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  ESP_LOGV(TAG, "Disabling wiper %" PRIu8, wiper_idx);
+  this->reg_[wiper_idx].terminal_hw = false;
+  this->update_ = true;
+}
+
+void Mcp4461Component::increase_wiper(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  ESP_LOGV(TAG, "Increasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
-  addr = this->get_wiper_address_(wiper);
+  addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>Mcp4461Commands::INCREMENT;
   this->write(&this->address_, reg, sizeof(reg));
+  this->reg_[wiper_idx].state++;
 }
 
-void Mcp4461Component::decrease_wiper(uint8_t wiper) {
-  ESP_LOGV(TAG, "Decreasing wiper %d", wiper);
+void Mcp4461Component::decrease_wiper(MCP4461WiperIdx wiper) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  ESP_LOGV(TAG, "Decreasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
-  addr = this->get_wiper_address_(wiper);
+  addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>Mcp4461Commands::DECREMENT;
   this->write(&this->address_, reg, sizeof(reg));
+  this->reg_[wiper_idx].state--;
 }
 
 uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector) {
@@ -236,6 +254,9 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
   }
   uint8_t terminal_data;
   terminal_data = this->get_terminal_register(terminal_connector);
+  if (terminal_data == 0) {
+    return;
+  }
   ESP_LOGV(TAG, "Got terminal register %" PRIu8 " data %0xh", static_cast<uint8_t>terminal_connector,
     terminal_data);
   uint8_t wiper_index = 0;
@@ -259,28 +280,31 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
   } else if (static_cast<uint8_t>terminal_connector == 1) {
     addr = static_cast<uint8_t>Mcp4461Addresses::MCP4461_TCON1;
   } else {
+    ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified",
+      static_cast<uint8_t>terminal_connector);
     return;
   }
   this->mcp4461_write_(addr, data);
 }
 
-void Mcp4461Component::enable_terminal(uint8_t wiper, char terminal) {
-  if (wiper > 3) {
+void Mcp4461Component::enable_terminal(MCP4461WiperIdx wiper, char terminal) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  if (wiper_idx > 3) {
     return;
   }
-  ESP_LOGV(TAG, "Enabling terminal %c of wiper %d", terminal, wiper);
+  ESP_LOGV(TAG, "Enabling terminal %c of wiper %" PRIu8 "", terminal, wiper_idx);
   switch (terminal) {
     case 'h':
-      this->reg_[wiper].terminal_hw = true;
+      this->reg_[wiper_idx].terminal_hw = true;
       break;
     case 'a':
-      this->reg_[wiper].terminal_a = true;
+      this->reg_[wiper_idx].terminal_a = true;
       break;
     case 'b':
-      this->reg_[wiper].terminal_b = true;
+      this->reg_[wiper_idx].terminal_b = true;
       break;
     case 'w':
-      this->reg_[wiper].terminal_w = true;
+      this->reg_[wiper_idx].terminal_w = true;
       break;
     default:
       this->status_set_warning();
@@ -290,23 +314,24 @@ void Mcp4461Component::enable_terminal(uint8_t wiper, char terminal) {
   this->update_ = true;
 }
 
-void Mcp4461Component::disable_terminal(uint8_t wiper, char terminal) {
-  if (wiper > 3) {
+void Mcp4461Component::disable_terminal(MCP4461WiperIdx wiper, char terminal) {
+  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  if (wiper_idx > 3) {
     return;
   }
-  ESP_LOGV(TAG, "Disabling terminal %c of wiper %d", terminal, wiper);
+  ESP_LOGV(TAG, "Disabling terminal %c of wiper %" PRIu8 "", terminal, wiper_idx);
   switch (terminal) {
     case 'h':
-      this->reg_[wiper].terminal_hw = false;
+      this->reg_[wiper_idx].terminal_hw = false;
       break;
     case 'a':
-      this->reg_[wiper].terminal_a = false;
+      this->reg_[wiper_idx].terminal_a = false;
       break;
     case 'b':
-      this->reg_[wiper].terminal_b = false;
+      this->reg_[wiper_idx].terminal_b = false;
       break;
     case 'w':
-      this->reg_[wiper].terminal_w = false;
+      this->reg_[wiper_idx].terminal_w = false;
       break;
     default:
       this->status_set_warning();
