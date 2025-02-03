@@ -9,7 +9,7 @@ namespace mcp4461 {
 static const char *const TAG = "mcp4461";
 
 void Mcp4461Component::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up mcp4461 (0x%02X)...", this->address_);
+  ESP_LOGCONFIG(TAG, "Setting up mcp4461 (0x%02" PRIX8 ")...", this->address_);
   auto err = this->write(nullptr, 0);
   if (err != i2c::ERROR_OK) {
     this->mark_failed();
