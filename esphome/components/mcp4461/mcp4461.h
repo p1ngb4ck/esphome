@@ -48,7 +48,7 @@ enum MCP4461EEPRomLocation : uint8_t {
   MCP4461_EEPROM_4 = 4
 };
 
-enum class Mcp4461TerminalIdx { MCP4461_TERMINAL_0 = 0, MCP4461_TERMINAL_1 = 1 };
+enum class Mcp4461TerminalIdx : uint8_t { MCP4461_TERMINAL_0 = 0, MCP4461_TERMINAL_1 = 1 };
 
 class Mcp4461Wiper;
 
