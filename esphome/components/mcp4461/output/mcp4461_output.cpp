@@ -14,13 +14,13 @@ void Mcp4461Wiper::write_state(float state) {
   const float max_taps = 256.0;
   state = state * 1000.0;
   if (state > max_taps) {
-    ESP_LOGW(TAG, "Cannot set taps > 0.256 for wiper %" PRIu8 ", clamping to 0.256!",
+    ESP_LOGW(TAG, "Cannot set taps > 0.256 for wiper %" PRIu8 "", clamping to 0.256!",
              static_cast<uint8_t>(this->wiper_));
     state = 256.0;
   }
   uint16_t taps;
   taps = static_cast<uint16_t>(state);
-  ESP_LOGV(TAG, "Setting wiper %" PRIu8 " to value %" PRIu16 ", static_cast<uint8_t>(this->wiper_), taps);
+  ESP_LOGV(TAG, "Setting wiper %" PRIu8 " to value %" PRIu16 "", static_cast<uint8_t>(this->wiper_), taps);
   this->state_ = state;
   this->parent_->set_wiper_level(this->wiper_, taps);
 }
