@@ -20,7 +20,7 @@ void Mcp4461Wiper::write_state(float state) {
   }
   uint16_t taps;
   taps = static_cast<uint16_t>(state);
-  ESP_LOGV(TAG, "Setting wiper %d to value %d", this->wiper_, taps);
+  ESP_LOGV(TAG, "Setting wiper %" PRIu8 " to value %" PRIu16 ", static_cast<uint8_t>(this->wiper_), taps);
   this->state_ = state;
   this->parent_->set_wiper_level(this->wiper_, taps);
 }
@@ -29,7 +29,7 @@ uint16_t Mcp4461Wiper::get_wiper_level() { return this->parent_->get_wiper_level
 
 void Mcp4461Wiper::save_level() {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot save level for nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot save level for nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   uint8_t nonvolatile_wiper = this->wiper_ + 4;
@@ -38,7 +38,7 @@ void Mcp4461Wiper::save_level() {
 
 void Mcp4461Wiper::enable_wiper() {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot enable nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot enable nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->enable_wiper(this->wiper_);
@@ -46,7 +46,7 @@ void Mcp4461Wiper::enable_wiper() {
 
 void Mcp4461Wiper::disable_wiper() {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot disable nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot disable nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->disable_wiper(this->wiper_);
@@ -54,7 +54,7 @@ void Mcp4461Wiper::disable_wiper() {
 
 void Mcp4461Wiper::increase_wiper() {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot increase nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot increase nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->increase_wiper(this->wiper_);
@@ -62,7 +62,7 @@ void Mcp4461Wiper::increase_wiper() {
 
 void Mcp4461Wiper::decrease_wiper() {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot decrease nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot decrease nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->decrease_wiper(this->wiper_);
@@ -70,7 +70,7 @@ void Mcp4461Wiper::decrease_wiper() {
 
 void Mcp4461Wiper::enable_terminal(char terminal) {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot get/set terminals nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot get/set terminals nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->enable_terminal(this->wiper_, terminal);
@@ -78,7 +78,7 @@ void Mcp4461Wiper::enable_terminal(char terminal) {
 
 void Mcp4461Wiper::disable_terminal(char terminal) {
   if (this->wiper_ > 3) {
-    ESP_LOGW(TAG, "Cannot get/set terminals for nonvolatile wiper %d !", this->wiper_);
+    ESP_LOGW(TAG, "Cannot get/set terminals for nonvolatile wiper %" PRIu8 " !", static_cast<uint8_t>(this->wiper_));
     return;
   }
   this->parent_->disable_terminal(this->wiper_, terminal);
