@@ -92,7 +92,6 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void mcp4461_write_(uint8_t addr, uint16_t data);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
 
- private:
   WiperState reg_[8];
   void begin_();
   bool update_ = false;
