@@ -151,6 +151,7 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
   if (wiper > 3) {
     while (this->is_writing_()) {
       ESP_LOGV(TAG, "delaying during eeprom write");
+      yield();
     }
   }
   this->mcp4461_write_(this->get_wiper_address_(wiper), value);
