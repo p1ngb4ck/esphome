@@ -122,7 +122,8 @@ uint16_t Mcp4461Component::get_wiper_level(uint8_t wiper) {
   reg |= (uint8_t) Mcp4461Commands::READ;
   if (wiper > 3) {
     while (this->is_writing_()) {
-      ESP_LOGV(TAG, "delaying during eeprom write");
+      ESP_LOGVV(TAG, "delaying during eeprom write");
+      yield();
     }
   }
   if (!this->read_byte_16(reg, &buf)) {
