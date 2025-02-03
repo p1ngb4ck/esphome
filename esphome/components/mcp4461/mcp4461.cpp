@@ -29,6 +29,14 @@ void Mcp4461Component::begin_() {
 void Mcp4461Component::dump_config() {
   ESP_LOGCONFIG(TAG, "mcp4461:");
   LOG_I2C_DEVICE(this);
+  for (uint8_t i = 0; i < 8; ++i) {
+    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "]: %s", i, ONOFF(this->reg_[i].enabled));
+    ESP_LOGCONFIG(TAG, "  ├── State: %" PRIu16, this->reg_[i].state);
+    ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
+    ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
+    ESP_LOGCONFIG(TAG, "  ├── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
+    ESP_LOGCONFIG(TAG, "  └── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
+  }
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Communication with mcp4461 failed!");
   }
