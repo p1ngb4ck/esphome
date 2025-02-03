@@ -155,7 +155,7 @@ void Mcp4461Component::update_wiper_level(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
-  if (data > 0x100) {
+  if (value > 0x100) {
     ESP_LOGW(TAG, "ignoring invalid wiper level %" PRIu16 "!");
     return;
   }
@@ -343,7 +343,7 @@ void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
   this->update_ = true;
 }
 
-uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EeepromLocation location) {
+uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   uint8_t reg = 0;
   reg |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
@@ -356,7 +356,7 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EeepromLocation location) {
   return buf;
 }
 
-void Mcp4461Component::set_eeprom_value(Mcp4461EeepromLocation location, uint16_t value) {
+void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t value) {
   uint8_t addr = 0;
   if (value > 511) {
     return;
