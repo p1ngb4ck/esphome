@@ -100,16 +100,16 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
   }
   switch (wiper) {
     case 0:
-      addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_VW0;
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW0);
       break;
     case 1:
-      addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_VW1;
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW1);
       break;
     case 2:
-      addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_VW2;
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW2);
       break;
     case 3:
-      addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_VW3;
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW3);
       break;
     default:
       ESP_LOGE(TAG, "unknown wiper specified");
@@ -122,7 +122,7 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
 }
 
 uint16_t Mcp4461Component::get_wiper_level(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   return this->read_wiper_level_(wiper_idx);
 }
 
@@ -130,7 +130,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
   uint8_t reg = 0;
   uint16_t buf = 0;
   reg |= this->get_wiper_address_(wiper);
-  reg |= static_cast<uint8_t> Mcp4461Commands::READ;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   if (wiper > 3) {
     while (this->is_writing_()) {
       ESP_LOGVV(TAG, "delaying during eeprom write");
@@ -146,7 +146,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
 }
 
 void Mcp4461Component::update_wiper_level(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   uint16_t data;
   data = this->get_wiper_level(wiper);
   ESP_LOGV(TAG, "Got value %" PRIu16 " from wiper %" PRIu8, data, wiper_idx);
@@ -154,7 +154,7 @@ void Mcp4461Component::update_wiper_level(MCP4461WiperIdx wiper) {
 }
 
 void Mcp4461Component::set_wiper_level(MCP4461WiperIdx wiper, uint16_t value) {
-  uint8_t wiper_idx = static_cast<uint8_t>wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (data > 0x100) {
     ESP_LOGW(TAG, "ignoring invalid wiper level %" PRIu16 "!");
     return;
@@ -165,7 +165,7 @@ void Mcp4461Component::set_wiper_level(MCP4461WiperIdx wiper, uint16_t value) {
 }
 
 void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   bool nonvolatile = false;
   if (wiper_idx > 3) {
     nonvolatile = true;
@@ -174,39 +174,39 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
 }
 
 void Mcp4461Component::enable_wiper(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   ESP_LOGV(TAG, "Enabling wiper %" PRIu8, wiper_idx);
   this->reg_[wiper_idx].terminal_hw = true;
   this->update_ = true;
 }
 
 void Mcp4461Component::disable_wiper(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   ESP_LOGV(TAG, "Disabling wiper %" PRIu8, wiper_idx);
   this->reg_[wiper_idx].terminal_hw = false;
   this->update_ = true;
 }
 
 void Mcp4461Component::increase_wiper(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   ESP_LOGV(TAG, "Increasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
-  reg |= static_cast<uint8_t> Mcp4461Commands::INCREMENT;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::INCREMENT);
   this->write(&this->address_, reg, sizeof(reg));
   this->reg_[wiper_idx].state++;
 }
 
 void Mcp4461Component::decrease_wiper(MCP4461WiperIdx wiper) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   ESP_LOGV(TAG, "Decreasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
-  reg |= static_cast<uint8_t> Mcp4461Commands::DECREMENT;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::DECREMENT);
   this->write(&this->address_, reg, sizeof(reg));
   this->reg_[wiper_idx].state--;
 }
@@ -219,14 +219,14 @@ uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx termi
     i = 2;
   }
   uint8_t new_value_byte_array[8];
-  new_value_byte_array[0] = static_cast<uint8_t> this->reg_[i].terminal_b;
-  new_value_byte_array[1] = static_cast<uint8_t> this->reg_[i].terminal_w;
-  new_value_byte_array[2] = static_cast<uint8_t> this->reg_[i].terminal_a;
-  new_value_byte_array[3] = static_cast<uint8_t> this->reg_[i].terminal_hw;
-  new_value_byte_array[4] = static_cast<uint8_t> this->reg_[(i + 1)].terminal_b;
-  new_value_byte_array[5] = static_cast<uint8_t> this->reg_[(i + 1)].terminal_w;
-  new_value_byte_array[6] = static_cast<uint8_t> this->reg_[(i + 1)].terminal_a;
-  new_value_byte_array[7] = static_cast<uint8_t> this->reg_[(i + 1)].terminal_hw;
+  new_value_byte_array[0] = static_cast<uint8_t>(this->reg_[i].terminal_b);
+  new_value_byte_array[1] = static_cast<uint8_t>(this->reg_[i].terminal_w);
+  new_value_byte_array[2] = static_cast<uint8_t>(this->reg_[i].terminal_a);
+  new_value_byte_array[3] = static_cast<uint8_t>(this->reg_[i].terminal_hw);
+  new_value_byte_array[4] = static_cast<uint8_t>(this->reg_[(i + 1)].terminal_b);
+  new_value_byte_array[5] = static_cast<uint8_t>(this->reg_[(i + 1)].terminal_w);
+  new_value_byte_array[6] = static_cast<uint8_t>(this->reg_[(i + 1)].terminal_a);
+  new_value_byte_array[7] = static_cast<uint8_t>(this->reg_[(i + 1)].terminal_hw);
   unsigned char new_value_byte = 0;
   uint8_t b;
   for (b = 0; b < 8; b++) {
@@ -237,12 +237,12 @@ uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx termi
 
 uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_connector) {
   uint8_t reg = 0;
-  if (static_cast<uint8_t>terminal_connector == 0) {
-    reg |= static_cast<uint8_t> Mcp4461Addresses::MCP4461_TCON0;
+  if (static_cast<uint8_t>(terminal_connector) == 0) {
+    reg |= static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON0);
   } else {
-    reg |= static_cast<uint8_t> Mcp4461Addresses::MCP4461_TCON1;
+    reg |= static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON1);
   }
-  reg |= static_cast<uint8_t> Mcp4461Commands::READ;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
@@ -264,7 +264,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
   ESP_LOGV(TAG, "Got terminal register %" PRIu8 " data %0xh", static_cast<uint8_t>(terminal_connector),
     terminal_data);
   uint8_t wiper_index = 0;
-  if (static_cast<uint8_t>terminal_connector == 1) {
+  if (static_cast<uint8_t>(terminal_connector) == 1) {
     wiper_index = 2;
   }
   this->reg_[wiper_index].terminal_b = ((terminal_data >> 0) & 0x01);
@@ -280,9 +280,9 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
 void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
   uint8_t addr;
   if (static_cast<uint8_t>(terminal_connector) == 0) {
-    addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_TCON0;
+    addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON0);
   } else if (static_cast<uint8_t>(terminal_connector) == 1) {
-    addr = static_cast<uint8_t> Mcp4461Addresses::MCP4461_TCON1;
+    addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON1);
   } else {
     ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified",
       static_cast<uint8_t>(terminal_connector));
@@ -292,7 +292,7 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
 }
 
 void Mcp4461Component::enable_terminal(MCP4461WiperIdx wiper, char terminal) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (wiper_idx > 3) {
     return;
   }
@@ -319,7 +319,7 @@ void Mcp4461Component::enable_terminal(MCP4461WiperIdx wiper, char terminal) {
 }
 
 void Mcp4461Component::disable_terminal(MCP4461WiperIdx wiper, char terminal) {
-  uint8_t wiper_idx = static_cast<uint8_t> wiper;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (wiper_idx > 3) {
     return;
   }
@@ -348,7 +348,7 @@ void Mcp4461Component::disable_terminal(MCP4461WiperIdx wiper, char terminal) {
 uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EeepromLocation location) {
   uint8_t reg = 0;
   reg |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
-  reg |= static_cast<uint8_t> Mcp4461Commands::READ;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
@@ -379,7 +379,7 @@ void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
   value_byte = static_cast<uint8_t>(data & 0x00ff);
   ESP_LOGV(TAG, "Writing value %" PRIu16 " to address %" PRIu8 "", data, addr);
   reg |= addr;
-  reg |= static_cast<uint8_t> Mcp4461Commands::WRITE;
+  reg |= static_cast<uint8_t>(Mcp4461Commands::WRITE);
   if (nonvolatile) {
     while (this->is_writing_()) {
       ESP_LOGV(TAG, "Waiting while eeprom busy");
