@@ -29,7 +29,7 @@ enum class Mcp4461Addresses : uint8_t {
   MCP4461_EEPROM_1 = 0xB0
 };
 
-enum MCP4461WiperIdx {
+enum MCP4461WiperIdx : uint8_t {
   MCP4461_WIPER_0 = 0,
   MCP4461_WIPER_1 = 1,
   MCP4461_WIPER_2 = 2,
