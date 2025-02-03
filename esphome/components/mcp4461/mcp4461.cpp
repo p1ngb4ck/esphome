@@ -34,7 +34,7 @@ void Mcp4461Component::dump_config() {
     ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "] level: %" PRIu16, this->reg_[i].state);
     // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
     // so also invalid for nonvolatile. For these, only print current level.
-    if(i < 4) {
+    if (i < 4) {
       ESP_LOGCONFIG(TAG, "  ├── Status: %s", i, ONOFF(this->reg_[i].enabled));
       ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
       ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
@@ -66,7 +66,7 @@ void Mcp4461Component::loop() {
           uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
           if (new_terminal_value != this->get_terminal_register(terminal_connector)) {
             ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector),
-              new_terminal_value);
+                     new_terminal_value);
             this->set_terminal_register(terminal_connector, new_terminal_value);
           }
         }
@@ -261,8 +261,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
   if (terminal_data == 0) {
     return;
   }
-  ESP_LOGV(TAG, "Got terminal register %" PRIu8 " data %0xh", static_cast<uint8_t>(terminal_connector),
-    terminal_data);
+  ESP_LOGV(TAG, "Got terminal register %" PRIu8 " data %0xh", static_cast<uint8_t>(terminal_connector), terminal_data);
   uint8_t wiper_index = 0;
   if (static_cast<uint8_t>(terminal_connector) == 1) {
     wiper_index = 2;
@@ -284,8 +283,7 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
   } else if (static_cast<uint8_t>(terminal_connector) == 1) {
     addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON1);
   } else {
-    ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified",
-      static_cast<uint8_t>(terminal_connector));
+    ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified", static_cast<uint8_t>(terminal_connector));
     return;
   }
   this->mcp4461_write_(addr, data);
