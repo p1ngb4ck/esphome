@@ -8,7 +8,7 @@ DEPENDENCIES = ["mcp4461"]
 
 Mcp4461Wiper = mcp4461_ns.class_("Mcp4461Wiper", output.FloatOutput)
 
-MCP4461WiperIdx = mcp4461_ns.class("MCP4461WiperIdx")
+MCP4461WiperIdx = mcp4461_ns.class_("MCP4461WiperIdx")
 CHANNEL_OPTIONS = {
     "A": MCP4461WiperIdx::MCP4461_WIPER_0,
     "B": MCP4461WiperIdx::MCP4461_WIPER_1,
