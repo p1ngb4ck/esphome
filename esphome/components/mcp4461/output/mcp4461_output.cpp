@@ -33,7 +33,8 @@ void Mcp4461Wiper::save_level() {
     ESP_LOGW(TAG, "Cannot save level for nonvolatile wiper %" PRIu8 " !", wiper_idx);
     return;
   }
-  Mcp4461WiperIdx nonvolatile_wiper = wiper_idx + 4;
+  uint8_t nonvolatile_wiper_idx = wiper_idx + 4;
+  Mcp4461WiperIdx nonvolatile_wiper = static_cast<Mcp4461WiperIdx>(nonvolatile_wiper_idx);
   this->parent_->set_wiper_level(nonvolatile_wiper, this->state_);
 }
 
