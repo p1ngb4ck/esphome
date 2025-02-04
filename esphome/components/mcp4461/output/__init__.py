@@ -8,16 +8,16 @@ DEPENDENCIES = ["mcp4461"]
 
 Mcp4461Wiper = mcp4461_ns.class_("Mcp4461Wiper", output.FloatOutput)
 
-MCP4461WiperIdx = mcp4461_ns.enum("Mcp4461WiperIdx")
+Mcp4461WiperIdx = mcp4461_ns.enum("Mcp4461WiperIdx")
 CHANNEL_OPTIONS = {
-    "A": MCP4461WiperIdx.MCP4461_WIPER_0,
-    "B": MCP4461WiperIdx.MCP4461_WIPER_1,
-    "C": MCP4461WiperIdx.MCP4461_WIPER_2,
-    "D": MCP4461WiperIdx.MCP4461_WIPER_3,
-    "E": MCP4461WiperIdx.MCP4461_WIPER_4,
-    "F": MCP4461WiperIdx.MCP4461_WIPER_5,
-    "G": MCP4461WiperIdx.MCP4461_WIPER_6,
-    "H": MCP4461WiperIdx.MCP4461_WIPER_7,
+    "A": Mcp4461WiperIdx.MCP4461_WIPER_0,
+    "B": Mcp4461WiperIdx.MCP4461_WIPER_1,
+    "C": Mcp4461WiperIdx.MCP4461_WIPER_2,
+    "D": Mcp4461WiperIdx.MCP4461_WIPER_3,
+    "E": Mcp4461WiperIdx.MCP4461_WIPER_4,
+    "F": Mcp4461WiperIdx.MCP4461_WIPER_5,
+    "G": Mcp4461WiperIdx.MCP4461_WIPER_6,
+    "H": Mcp4461WiperIdx.MCP4461_WIPER_7,
 }
 
 CONF_ENABLE = "enable"
