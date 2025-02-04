@@ -18,9 +18,10 @@ class Mcp4461Wiper : public output::FloatOutput {
         terminal_a_(terminal_a),
         terminal_b_(terminal_b),
         terminal_w_(terminal_w) {
+    uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     // update wiper connection state
-    if (!enable && wiper < 4) {
-      parent->reg_[wiper].enabled = false;
+    if (!enable && wiper_idx < 4) {
+      parent->reg_[wiper_idx].enabled = false;
       parent->disable_terminal(wiper, 'h');
     }
     if (!terminal_a && wiper < 4)
