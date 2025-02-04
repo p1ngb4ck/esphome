@@ -35,7 +35,7 @@ void Mcp4461Component::dump_config() {
     // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
     // so also invalid for nonvolatile. For these, only print current level.
     if (i < 4) {
-      ESP_LOGCONFIG(TAG, "  ├── Status: %s", i, ONOFF(this->reg_[i].enabled));
+      ESP_LOGCONFIG(TAG, "  ├── Status: %s", ONOFF(this->reg_[i].enabled));
       ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
       ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
       ESP_LOGCONFIG(TAG, "  ├── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
