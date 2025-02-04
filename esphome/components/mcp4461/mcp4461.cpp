@@ -100,16 +100,16 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
   }
   switch (wiper) {
     case 0:
-      addr = std::to_underlying(Mcp4461Addresses::MCP4461_VW0);
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW0);
       break;
     case 1:
-      addr = std::to_underlying(Mcp4461Addresses::MCP4461_VW1);
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW1);
       break;
     case 2:
-      addr = std::to_underlying(Mcp4461Addresses::MCP4461_VW2);
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW2);
       break;
     case 3:
-      addr = std::to_underlying(Mcp4461Addresses::MCP4461_VW3);
+      addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW3);
       break;
     default:
       ESP_LOGE(TAG, "unknown wiper specified");
