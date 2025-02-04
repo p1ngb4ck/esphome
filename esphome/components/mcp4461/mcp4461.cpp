@@ -31,7 +31,7 @@ void Mcp4461Component::dump_config() {
   ESP_LOGCONFIG(TAG, "mcp4461:");
   LOG_I2C_DEVICE(this);
   for (uint8_t i = 0; i < 8; ++i) {
-    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "] level: %" PRIu16, this->reg_[i].state);
+    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "] level: %" PRIu16, i, this->reg_[i].state);
     // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
     // so also invalid for nonvolatile. For these, only print current level.
     if (i < 4) {
