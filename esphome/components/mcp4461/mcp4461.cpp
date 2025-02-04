@@ -123,7 +123,7 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
 
 uint16_t Mcp4461Component::get_wiper_level(Mcp4461WiperIdx wiper) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
-  if (!this->reg_[wiper_idx].enabled) {
+  if (!(this->reg_[wiper_idx].enabled)) {
     ESP_LOGW(TAG, "reading from disabled volatile wiper %" PRIu8 ", returning 0", wiper_idx);
     return static_cast<uint16_t>(0);
   }
