@@ -83,7 +83,7 @@ uint16_t Mcp4461Component::get_status_register() {
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
-    ESP_LOGW(TAG, "Error fetching status register value");
+    ESP_LOGE(TAG, "Error fetching status register value");
     return 0;
   }
   return buf;
@@ -112,7 +112,7 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
       addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_VW3);
       break;
     default:
-      ESP_LOGE(TAG, "unknown wiper specified");
+      ESP_LOGW(TAG, "unknown wiper specified");
       return 0;
   }
   if (nonvolatile) {
