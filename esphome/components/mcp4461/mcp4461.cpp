@@ -345,7 +345,7 @@ void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
 
 uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   uint8_t reg = 0;
-  reg |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
+  reg |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
@@ -364,7 +364,7 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
   if (value > 256) {
     addr = 1;
   }
-  addr |= static_cast<uint8_t>(MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
+  addr |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1 + (static_cast<uint8_t>(location) * 0x10));
   this->mcp4461_write_(addr, value, true);
 }
 
