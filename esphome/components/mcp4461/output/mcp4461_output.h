@@ -24,11 +24,11 @@ class Mcp4461Wiper : public output::FloatOutput {
       parent->reg_[wiper_idx].enabled = false;
       parent->disable_terminal(wiper, 'h');
     }
-    if (!terminal_a && wiper < 4)
+    if (!terminal_a && wiper_idx < 4)
       parent->disable_terminal(wiper, 'a');
-    if (!terminal_b && wiper < 4)
+    if (!terminal_b && wiper_idx < 4)
       parent->disable_terminal(wiper, 'b');
-    if (!terminal_w && wiper < 4)
+    if (!terminal_w && wiper_idx < 4)
       parent->disable_terminal(wiper, 'w');
   }
   uint16_t get_wiper_level();
