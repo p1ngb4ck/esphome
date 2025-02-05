@@ -54,7 +54,7 @@ void Mcp4461Component::dump_config() {
   // get_status_register() will automatically check, if D8 bit (locked to 1) is 1 and bail out using error-routine otherwise
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
-  ESP_LOGCONFIG(TAG, "MCP4461 status register: , D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WP: %" PRIu8 ",
+  ESP_LOGCONFIG(TAG, "MCP4461 status register: , D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WP: %" PRIu8 "",
     ((status_register_value >> 7) & 0x01),
     ((status_register_value >> 6) & 0x01),
     ((status_register_value >> 5) & 0x01),
