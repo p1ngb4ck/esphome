@@ -60,7 +60,7 @@ void Mcp4461Component::dump_config() {
   // from datasheet:
   // (1) means, bit is hard-locked to value 1
   // Bit 0 is WP status (=>pin)
-  // Bit 1 is named "R-1"-pin in datasheet an declared "reserved" and forced to 1
+  // Bit 1 is named "R-1"-pin in datasheet an declared "reserved" and forced/locked to 1
   // Bit 2 is WiperLock-Status resistor-network 0
   // Bit 3 is WiperLock-Status resistor-network 1
   // Bit 4 is EEPROM-Write-Active-Status bit
