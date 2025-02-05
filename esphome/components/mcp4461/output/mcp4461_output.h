@@ -11,14 +11,13 @@ namespace mcp4461 {
 class Mcp4461Wiper : public output::FloatOutput {
  public:
   Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
-               bool terminal_w, float initial_value)
+               bool terminal_w)
       : parent_(parent),
         wiper_(wiper),
         enable_(enable),
         terminal_a_(terminal_a),
         terminal_b_(terminal_b),
-        terminal_w_(terminal_w),
-        initial_value_(initial_value) {
+        terminal_w_(terminal_w) {
     uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     // update wiper connection state
     if (!(this->enable_) && wiper_idx < 4) {
@@ -40,7 +39,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   void decrease_wiper();
   void enable_terminal(char terminal);
   void disable_terminal(char terminal);
-  void set_initial_value(float initial_value) { this->initial_value_ = initial_value; }
+  void set_initial_value(float initial_value);
 
  protected:
   void write_state(float state) override;
