@@ -43,7 +43,7 @@ void Mcp4461Component::dump_config() {
     // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
     // so also invalid for nonvolatile. For these, only print current level.
     // reworked to be a one-line intentionally, as output would not be in order
-    if (i < 3) {
+    if (i < 4) {
       ESP_LOGCONFIG(TAG, "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s",
         i,
         this->reg_[i].state,
