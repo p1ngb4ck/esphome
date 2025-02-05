@@ -47,7 +47,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   Mcp4461WiperIdx wiper_;
   bool enable_;
   uint16_t state_;
-  uint16_t initial_value_;
+  optional<uint16_t> initial_value_;
   bool terminal_a_;
   bool terminal_b_;
   bool terminal_w_;
