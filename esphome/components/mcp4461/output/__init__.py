@@ -35,7 +35,7 @@ CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
         cv.Optional(CONF_TERMINAL_A, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_B, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_W, default=True): cv.boolean,
-        cv.Optional(CONF_INITIAL_VALUE): cv.float_range(min=0.000, max=0.256)
+        cv.Optional(CONF_INITIAL_VALUE): cv.float_range(min=0.000, max=0.256),
     }
 )
 
