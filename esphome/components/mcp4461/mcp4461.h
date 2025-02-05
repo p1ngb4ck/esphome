@@ -68,7 +68,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
   void loop() override;
 
-  uint16_t get_status_register();
+  uint8_t get_status_register();
   uint16_t get_wiper_level(Mcp4461WiperIdx wiper);
   void set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value);
   void update_wiper_level(Mcp4461WiperIdx wiper);
