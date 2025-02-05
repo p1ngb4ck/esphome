@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import output
-from esphome.const import CONF_CHANNEL, CONF_ID
+from esphome.const import CONF_CHANNEL, CONF_ID, CONF_INITIAL_VALUE
 from .. import Mcp4461Component, CONF_MCP4461_ID, mcp4461_ns
 
 DEPENDENCIES = ["mcp4461"]
@@ -24,6 +24,7 @@ CONF_ENABLE = "enable"
 CONF_TERMINAL_A = "terminal_a"
 CONF_TERMINAL_B = "terminal_b"
 CONF_TERMINAL_W = "terminal_w"
+CONF_INITIAL_VALUE = "initial_value"
 
 CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
     {
@@ -34,6 +35,7 @@ CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
         cv.Optional(CONF_TERMINAL_A, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_B, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_W, default=True): cv.boolean,
+        cv.Optional(CONF_INITIAL_VALUE): cv.float_range(min=0.000, max=0.256)
     }
 )
 
@@ -48,5 +50,6 @@ async def to_code(config):
         config[CONF_TERMINAL_A],
         config[CONF_TERMINAL_B],
         config[CONF_TERMINAL_W],
+        config[CONF_INITIAL_VALUE],
     )
     await output.register_output(var, config)
