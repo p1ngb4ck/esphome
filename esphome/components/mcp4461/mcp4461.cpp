@@ -169,7 +169,7 @@ void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
   }
   if (!(this->reg_[wiper_idx].enabled)) {
     ESP_LOGW(TAG, "writing to disabled volatile wiper %" PRIu8 " is prohibited", wiper_idx);
-    return static_cast<uint16_t>(0);
+    return;
   }
   ESP_LOGV(TAG, "Setting MCP4461 wiper %" PRIu8 " to %" PRIu16 "!", wiper_idx, value);
   this->reg_[wiper_idx].state = value;
