@@ -96,10 +96,10 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   WiperState reg_[8];
   void begin_();
   bool update_{false};
-  bool wiper_0_enabled_{true};
-  bool wiper_1_enabled_{true};
-  bool wiper_2_enabled_{true};
-  bool wiper_3_enabled_{true};
+  bool disable_wiper_0{false};
+  bool disable_wiper_1{false};
+  bool disable_wiper_2{false};
+  bool disable_wiper_3{false};
 };
 }  // namespace mcp4461
 }  // namespace esphome
