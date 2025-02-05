@@ -17,7 +17,8 @@ class Mcp4461Wiper : public output::FloatOutput {
         enable_(enable),
         terminal_a_(terminal_a),
         terminal_b_(terminal_b),
-        terminal_w_(terminal_w) {
+        terminal_w_(terminal_w),
+        initial_value_(initial_value) {
     uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     // update wiper connection state
     if (!(this->enable_) && wiper_idx < 4) {
@@ -30,9 +31,8 @@ class Mcp4461Wiper : public output::FloatOutput {
       parent->disable_terminal(wiper, 'b');
     if (!terminal_w && wiper_idx < 4)
       parent->disable_terminal(wiper, 'w');
-    if (initial_value != 1.0 && initial_value >= 0.000 && initial_value <= 0.256) {
+    if (this->initial_value_ >= 0.000 && this->initial_value_ <= 0.256) {
       // Use the value
-      this->initial_value_ = initial_value;
       ESP_LOGCONFIG(TAG, "Setting initial value %.3f", this->initial_value_);
       this->_parent->set_wiper_level(wiper, this->initial_value_);
     } else {
