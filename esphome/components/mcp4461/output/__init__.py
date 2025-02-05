@@ -52,4 +52,3 @@ async def to_code(config):
         config[CONF_TERMINAL_W],
     )
     await output.register_output(var, config)
-    cg.add(var.set_initial_value(CONF_INITIAL_VALUE))
