@@ -24,7 +24,6 @@ CONF_ENABLE = "enable"
 CONF_TERMINAL_A = "terminal_a"
 CONF_TERMINAL_B = "terminal_b"
 CONF_TERMINAL_W = "terminal_w"
-CONF_INITIAL_VALUE = "initial_value"
 
 CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
     {
@@ -50,6 +49,6 @@ async def to_code(config):
         config[CONF_TERMINAL_A],
         config[CONF_TERMINAL_B],
         config[CONF_TERMINAL_W],
-        config[CONF_INITIAL_VALUE],
     )
     await output.register_output(var, config)
+    var.set_initial_value(config[CONF_INITIAL_VALUE])
