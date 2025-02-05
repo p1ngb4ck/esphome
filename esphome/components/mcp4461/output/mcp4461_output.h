@@ -11,7 +11,7 @@ namespace mcp4461 {
 class Mcp4461Wiper : public output::FloatOutput {
  public:
   Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
-               bool terminal_w, float initial_value = 1.0)
+               bool terminal_w, float initial_value)
       : parent_(parent),
         wiper_(wiper),
         enable_(enable),
