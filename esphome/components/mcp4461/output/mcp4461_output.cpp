@@ -25,6 +25,17 @@ void Mcp4461Wiper::write_state(float state) {
   this->parent_->set_wiper_level(this->wiper_, taps);
 }
 
+void Mcp4461Wiper::set_initial_value(float initial_value) {
+  if (this->initial_value_ >= 0.000 && this->initial_value_ <= 0.256) {
+      this->initial_value_ = initial_value;
+      // Use the value
+      ESP_LOGCONFIG(TAG, "Setting initial value %.3f", this->initial_value_);
+      this->_parent->set_wiper_level(wiper, this->initial_value_);
+    } else {
+      ESP_LOGCONFIG(TAG, "No (valid) initial value set, retaining previous wiper level.");
+    }
+}
+
 uint16_t Mcp4461Wiper::get_wiper_level() { return this->parent_->get_wiper_level(this->wiper_); }
 
 void Mcp4461Wiper::save_level() {
