@@ -24,10 +24,13 @@ void Mcp4461Component::begin_() {
     if (this->reg_[i].enabled) {
       this->reg_[i].state = this->read_wiper_level_(i);
     } else {
-      this->reg_[i].state = 0;
-      Mcp4461WiperIdx wiper_idx;
-      wiper_idx = static_cast<Mcp4461WiperIdx>(i);
-      this->disable_wiper(wiper_idx);
+      // only volatile wipers can be disabled
+      if (i < 4) {
+        this->reg_[i].state = 0;
+        Mcp4461WiperIdx wiper_idx;
+        wiper_idx = static_cast<Mcp4461WiperIdx>(i);
+        this->disable_wiper(wiper_idx);
+      }
     }
   }
 }
@@ -41,10 +44,10 @@ void Mcp4461Component::dump_config() {
     // so also invalid for nonvolatile. For these, only print current level.
     if (i < 4) {
       ESP_LOGCONFIG(TAG, "  ├── Status: %s", ONOFF(this->reg_[i].enabled));
+      ESP_LOGCONFIG(TAG, "  ├── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
       ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
       ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
-      ESP_LOGCONFIG(TAG, "  ├── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
-      ESP_LOGCONFIG(TAG, "  └── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
+      ESP_LOGCONFIG(TAG, "  └── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
     }
   }
   if (this->is_failed()) {
