@@ -11,7 +11,7 @@ struct WiperState {
   bool terminal_b = true;
   bool terminal_w = true;
   bool terminal_hw = true;
-  uint16_t state;
+  uint16_t state = 0;
   bool enabled = true;
 };
 
