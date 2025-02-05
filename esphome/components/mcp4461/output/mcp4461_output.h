@@ -39,6 +39,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   void decrease_wiper();
   void enable_terminal(char terminal);
   void disable_terminal(char terminal);
+  void set_initial_value(float initial_value) { this->initial_value_ = initial_value; }
 
  protected:
   void write_state(float state) override;
@@ -46,6 +47,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   Mcp4461WiperIdx wiper_;
   bool enable_;
   uint16_t state_;
+  optional<float> initial_value_;
   bool terminal_a_;
   bool terminal_b_;
   bool terminal_w_;
