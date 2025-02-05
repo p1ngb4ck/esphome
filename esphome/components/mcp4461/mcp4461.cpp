@@ -38,16 +38,52 @@ void Mcp4461Component::begin_() {
 void Mcp4461Component::dump_config() {
   ESP_LOGCONFIG(TAG, "mcp4461:");
   LOG_I2C_DEVICE(this);
+  // log current device status register at start
+  // from datasheet:
+  // (1) means, bit is hard-locked to value 1
+  // Bit 0 is WP status (=>pin)
+  // Bit 1 is named "R-1"-pin in datasheet an declared "reserved" and forced to 1
+  // Bit 2 is WiperLock-Status resistor-network 0
+  // Bit 3 is WiperLock-Status resistor-network 1
+  // Bit 4 is EEPROM-Write-Active-Status bit
+  // Bit 5 is WiperLock-Status resistor-network 2
+  // Bit 6 is WiperLock-Status resistor-network 3
+  // Bit 7+8 are referenced in datasheet as D7 + D8 and both locked to 1
+  // Default status register reading should be 0x182h or 386 decimal
+  // "Default" means  without any WiperLocks or WriteProtection enabled and EEPRom not active writing
+  // get_status_register() will automatically check, if D8 bit (locked to 1) is 1 and bail out using error-routine otherwise
+  uint8_t status_register_value;
+  status_register_value = this->get_status_register();
+  ESP_LOGCONFIG(TAG, "MCP4461 status register: , "D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WP: %" PRIu8 ",
+    ((status_register_value >> 7) & 0x01),
+    ((status_register_value >> 6) & 0x01),
+    ((status_register_value >> 5) & 0x01),
+    ((status_register_value >> 4) & 0x01),
+    ((status_register_value >> 3) & 0x01),
+    ((status_register_value >> 2) & 0x01),
+    ((status_register_value >> 1) & 0x01),
+    ((status_register_value >> 0) & 0x01)
+  );
   for (uint8_t i = 0; i < 8; ++i) {
-    ESP_LOGCONFIG(TAG, "Wiper [%" PRIu8 "] level: %" PRIu16, i, this->reg_[i].state);
     // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
     // so also invalid for nonvolatile. For these, only print current level.
+    // reworked to be a one-line intentionally, as output would not be in order
     if (i < 4) {
-      ESP_LOGCONFIG(TAG, "  ├── Status: %s", ONOFF(this->reg_[i].enabled));
-      ESP_LOGCONFIG(TAG, "  ├── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
-      ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
-      ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
-      ESP_LOGCONFIG(TAG, "  └── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
+      ESP_LOGCONFIG(TAG, "Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s",
+        i,
+        this->reg_[i].state,
+        ONOFF(this->reg_[i].terminal_hw),
+        ONOFF(this->reg_[i].terminal_a),
+        ONOFF(this->reg_[i].terminal_b),
+        ONOFF(this->reg_[i].terminal_w),
+        ONOFF(this->reg_[i].enabled));
+      // ESP_LOGCONFIG(TAG, "  ├── Status: %s", ONOFF(this->reg_[i].enabled));
+      // ESP_LOGCONFIG(TAG, "  ├── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
+      // ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
+      // ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
+      // ESP_LOGCONFIG(TAG, "  └── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
+    } else {
+        ESP_LOGCONFIG(TAG, "Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
     }
   }
   if (this->is_failed()) {
@@ -84,7 +120,7 @@ void Mcp4461Component::loop() {
   }
 }
 
-uint16_t Mcp4461Component::get_status_register() {
+uint8_t Mcp4461Component::get_status_register() {
   uint8_t reg = 0;
   reg |= static_cast<uint8_t>(Mcp4461Addresses::MCP4461_STATUS);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
@@ -94,7 +130,13 @@ uint16_t Mcp4461Component::get_status_register() {
     ESP_LOGE(TAG, "Error fetching status register value");
     return 0;
   }
-  return buf;
+  uint8_t msb = buf >> 8;
+  if (msb != 1) {
+    // D8 bit is hardlocked to 1 -> a status msb of 0 indicates device/communication issues, therefore mark component failed
+    this->mark_failed();
+    return 0;
+  }
+  return static_cast<uint8_t>(buf & 0x00ff);
 }
 
 bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
