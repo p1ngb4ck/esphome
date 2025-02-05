@@ -9,16 +9,6 @@ namespace mcp4461 {
 
 static const char *const TAG = "mcp4461.output";
 
-void Mcp4461Wiper::setup() {
-  if (this->initial_value_.has_value()) {
-      // Use the value
-      ESP_LOGCONFIG(TAG, "Setting initial value %.3f", %this->initial_value_);
-      this->_parent->set_wiper_level(wiper, this->initial_value_);
-    } else {
-      ESP_LOGCONFIG(TAG, "No initial value set, retaining previous wiper level.");
-    }
-}
-
 void Mcp4461Wiper::write_state(float state) {
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   ESP_LOGV(TAG, "Got value %02f from frontend", state);
