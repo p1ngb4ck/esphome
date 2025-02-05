@@ -129,12 +129,12 @@ uint8_t Mcp4461Component::get_status_register() {
   uint8_t msb = buf >> 8;
   uint8_t lsb;
   lsb = static_cast<uint8_t>(buf & 0x00ff);
-  if (msb != 1 || ((lsb >> 7) & 0x01)) != 1 || ((lsb >> 1) & 0x01) != 1) {
+  if (msb != 1 || ((lsb >> 7) & 0x01) != 1 || ((lsb >> 1) & 0x01) != 1) {
     // D8, D7 and R1 bits are hardlocked to 1 -> a status msb bit 0 (bit 9 of status register) of 0 or lsb bit 1/7 = 0 indicate device/communication issues, therefore mark component failed
     this->mark_failed();
     return 0;
   }
-  return ;
+  return lsb;
 }
 
 bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
