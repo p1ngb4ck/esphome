@@ -56,11 +56,11 @@ class Mcp4461Wiper;
 class Mcp4461Component : public Component, public i2c::I2CDevice {
  public:
   Mcp4461Component(bool disable_wiper_0, bool disable_wiper_1, bool disable_wiper_2, bool disable_wiper_3)
-      : wiper_0_enabled_(false), wiper_1_enabled_(false), wiper_2_enabled_(false), wiper_3_enabled_(false) {
-    this->reg_[0].enabled = this->wiper_0_enabled_;
-    this->reg_[1].enabled = this->wiper_1_enabled_;
-    this->reg_[2].enabled = this->wiper_2_enabled_;
-    this->reg_[3].enabled = this->wiper_3_enabled_;
+      : wiper_0_disabled_(disable_wiper_0), wiper_1_disabled_(disable_wiper_1), wiper_2_disabled_(disable_wiper_2), wiper_3_disabled_(disable_wiper_3) {
+    this->reg_[0].enabled = !wiper_0_disabled_;
+    this->reg_[1].enabled = !wiper_1_disabled_;
+    this->reg_[2].enabled = !wiper_2_disabled_;
+    this->reg_[3].enabled = !wiper_3_disabled_;
   }
 
   void setup() override;
