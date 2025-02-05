@@ -30,6 +30,14 @@ class Mcp4461Wiper : public output::FloatOutput {
       parent->disable_terminal(wiper, 'b');
     if (!terminal_w && wiper_idx < 4)
       parent->disable_terminal(wiper, 'w');
+    if (initial_value != 1.0 && initial_value >= 0.000 && initial_value <= 0.256) {
+      // Use the value
+      this->initial_value_ = initial_value;
+      ESP_LOGCONFIG(TAG, "Setting initial value %.3f", this->initial_value_);
+      this->_parent->set_wiper_level(wiper, this->initial_value_);
+    } else {
+      ESP_LOGCONFIG(TAG, "No (valid) initial value set, retaining previous wiper level.");
+    }
   }
   uint16_t get_wiper_level();
   void save_level();
