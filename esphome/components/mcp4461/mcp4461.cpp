@@ -38,6 +38,24 @@ void Mcp4461Component::begin_() {
 void Mcp4461Component::dump_config() {
   ESP_LOGCONFIG(TAG, "mcp4461:");
   LOG_I2C_DEVICE(this);
+  // log wiper status
+  for (uint8_t i = 0; i < 8; ++i) {
+    // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
+    // so also invalid for nonvolatile. For these, only print current level.
+    // reworked to be a one-line intentionally, as output would not be in order
+    if (i < 3) {
+      ESP_LOGCONFIG(TAG, "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s",
+        i,
+        this->reg_[i].state,
+        ONOFF(this->reg_[i].terminal_hw),
+        ONOFF(this->reg_[i].terminal_a),
+        ONOFF(this->reg_[i].terminal_b),
+        ONOFF(this->reg_[i].terminal_w),
+        ONOFF(this->reg_[i].enabled));
+    } else {
+        ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
+    }
+  }
   // log current device status register at start
   // from datasheet:
   // (1) means, bit is hard-locked to value 1
@@ -54,7 +72,7 @@ void Mcp4461Component::dump_config() {
   // get_status_register() will automatically check, if D8 bit (locked to 1) is 1 and bail out using error-routine otherwise
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
-  ESP_LOGCONFIG(TAG, "MCP4461 status register: , D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
+  ESP_LOGCONFIG(TAG, "  └── Status register: , D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
     ((status_register_value >> 7) & 0x01),
     ((status_register_value >> 6) & 0x01),
     ((status_register_value >> 5) & 0x01),
@@ -64,28 +82,6 @@ void Mcp4461Component::dump_config() {
     ((status_register_value >> 1) & 0x01),
     ((status_register_value >> 0) & 0x01)
   );
-  for (uint8_t i = 0; i < 8; ++i) {
-    // terminals only valid for volatile wipers 0-3 - enable/disable is terminal hw
-    // so also invalid for nonvolatile. For these, only print current level.
-    // reworked to be a one-line intentionally, as output would not be in order
-    if (i < 4) {
-      ESP_LOGCONFIG(TAG, "Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s",
-        i,
-        this->reg_[i].state,
-        ONOFF(this->reg_[i].terminal_hw),
-        ONOFF(this->reg_[i].terminal_a),
-        ONOFF(this->reg_[i].terminal_b),
-        ONOFF(this->reg_[i].terminal_w),
-        ONOFF(this->reg_[i].enabled));
-      // ESP_LOGCONFIG(TAG, "  ├── Status: %s", ONOFF(this->reg_[i].enabled));
-      // ESP_LOGCONFIG(TAG, "  ├── Terminal HW: %s", ONOFF(this->reg_[i].terminal_hw));
-      // ESP_LOGCONFIG(TAG, "  ├── Terminal A: %s", ONOFF(this->reg_[i].terminal_a));
-      // ESP_LOGCONFIG(TAG, "  ├── Terminal B: %s", ONOFF(this->reg_[i].terminal_b));
-      // ESP_LOGCONFIG(TAG, "  └── Terminal W: %s", ONOFF(this->reg_[i].terminal_w));
-    } else {
-        ESP_LOGCONFIG(TAG, "Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
-    }
-  }
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Communication with mcp4461 failed!");
   }
