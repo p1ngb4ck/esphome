@@ -69,7 +69,7 @@ void Mcp4461Component::dump_config() {
   // Bit 7+8 are referenced in datasheet as D7 + D8 and both locked to 1
   // Default status register reading should be 0x182h or 386 decimal
   // "Default" means  without any WiperLocks or WriteProtection enabled and EEPRom not active writing
-  // get_status_register() will automatically check, if D8 bit (locked to 1) is 1 and bail out using error-routine otherwise
+  // get_status_register() will automatically check, if D8, D7 & R1 bits (locked to 1) are 1 and bail out using error-routine otherwise
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
   ESP_LOGCONFIG(TAG, "  └── Status register: , D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
