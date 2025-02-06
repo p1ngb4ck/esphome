@@ -102,6 +102,9 @@ void Mcp4461Component::dump_config() {
 }
 
 void Mcp4461Component::loop() {
+  if (status_has_warning()) {
+    this->get_status_register();
+  }
   if (this->update_) {
     uint8_t i;
     for (i = 0; i < 8; i++) {
