@@ -465,7 +465,7 @@ bool Mcp4461Component::is_eeprom_busy_() {
     return false;
 }
 
-void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile) {
+bool Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile) {
   uint8_t reg = 0;
   if (data > 0xFF) {
     reg = 1;
@@ -484,7 +484,8 @@ void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
       return;
     }
     this->previous_write_exec_time_ = millis();
-    this->write_byte(reg, value_byte);
+    auto err = this->write_byte(reg, value_byte);
+    return err;
   }
 }
 }  // namespace mcp4461
