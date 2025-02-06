@@ -81,7 +81,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void disable_terminal(Mcp4461WiperIdx, char terminal);
   void update_terminal_register(Mcp4461TerminalIdx terminal_connector);
   uint8_t get_terminal_register(Mcp4461TerminalIdx terminal_connector);
-  void set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
+  bool set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
   void set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
 
@@ -92,7 +92,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   bool is_eeprom_busy_();
   uint8_t get_wiper_address_(uint8_t wiper);
   uint16_t read_wiper_level_(uint8_t wiper);
-  void write_wiper_level_(uint8_t wiper, uint16_t value);
+  bool write_wiper_level_(uint8_t wiper, uint16_t value);
   bool mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
 
