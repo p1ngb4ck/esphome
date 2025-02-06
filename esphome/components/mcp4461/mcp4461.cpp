@@ -412,7 +412,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
   this->reg_[(wiper_index + 1)].terminal_hw = ((terminal_data >> 7) & 0x01);
 }
 
-void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
+bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
     return;
@@ -513,7 +513,7 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   return buf;
 }
 
-void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t value) {
+bool Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t value) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
     return;
