@@ -218,6 +218,10 @@ void Mcp4461Component::update_wiper_level(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  if (this->reg_[wiper_idx].wiper_lock_active) {
+    ESP_LOGW(TAG, "Ignoring request to set the state for wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
+    return;
+  }
   if (value > 0x100) {
     ESP_LOGW(TAG, "ignoring invalid wiper level %" PRIu16 "!");
     return;
@@ -256,6 +260,10 @@ void Mcp4461Component::disable_wiper(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  if (this->reg_[wiper_idx].wiper_lock_active) {
+    ESP_LOGW(TAG, "Ignoring request to increase wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
+    return;
+  }
   ESP_LOGV(TAG, "Increasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
@@ -268,6 +276,10 @@ void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  if (this->reg_[wiper_idx].wiper_lock_active) {
+    ESP_LOGW(TAG, "Ignoring request to decrease wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
+    return;
+  }
   ESP_LOGV(TAG, "Decreasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
   uint8_t addr;
@@ -464,7 +476,11 @@ void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::WRITE);
   if (nonvolatile) {
-    if(this->is_eeprom_busy_()) {
+    if (this->write_protected_) {
+      ESP_LOGW(TAG, "Ignoring write to write protected chip");
+      return;
+    }
+    if (this->is_eeprom_busy_()) {
       return;
     }
     this->previous_write_exec_time_ = millis();
