@@ -8,7 +8,7 @@
 namespace esphome {
 namespace mcp4461 {
 
-class Mcp4461Wiper : public output::FloatOutput {
+class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Component> {
  public:
   Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
                bool terminal_w)
@@ -20,7 +20,7 @@ class Mcp4461Wiper : public output::FloatOutput {
         terminal_w_(terminal_w) {
     uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     // update wiper connection state
-    if (!enable && wiper_idx < 4) {
+    if (!(this->enable_) && wiper_idx < 4) {
       parent->reg_[wiper_idx].enabled = false;
       parent->disable_terminal(wiper, 'h');
     }
@@ -39,6 +39,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   void decrease_wiper();
   void enable_terminal(char terminal);
   void disable_terminal(char terminal);
+  void set_initial_value(float initial_value);
 
  protected:
   void write_state(float state) override;
@@ -46,6 +47,7 @@ class Mcp4461Wiper : public output::FloatOutput {
   Mcp4461WiperIdx wiper_;
   bool enable_;
   uint16_t state_;
+  optional<uint16_t> initial_value_;
   bool terminal_a_;
   bool terminal_b_;
   bool terminal_w_;

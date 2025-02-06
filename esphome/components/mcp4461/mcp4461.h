@@ -11,8 +11,9 @@ struct WiperState {
   bool terminal_b = true;
   bool terminal_w = true;
   bool terminal_hw = true;
-  uint16_t state;
+  uint16_t state = 0;
   bool enabled = true;
+  bool wiper_lock_active = false;
 };
 
 enum class Mcp4461Defaults : uint8_t { WIPER_VALUE = 0x80 };
@@ -56,11 +57,11 @@ class Mcp4461Wiper;
 class Mcp4461Component : public Component, public i2c::I2CDevice {
  public:
   Mcp4461Component(bool disable_wiper_0, bool disable_wiper_1, bool disable_wiper_2, bool disable_wiper_3)
-      : wiper_0_enabled_(false), wiper_1_enabled_(false), wiper_2_enabled_(false), wiper_3_enabled_(false) {
-    this->reg_[0].enabled = this->wiper_0_enabled_;
-    this->reg_[1].enabled = this->wiper_1_enabled_;
-    this->reg_[2].enabled = this->wiper_2_enabled_;
-    this->reg_[3].enabled = this->wiper_3_enabled_;
+      : wiper_0_disabled_(disable_wiper_0), wiper_1_disabled_(disable_wiper_1), wiper_2_disabled_(disable_wiper_2), wiper_3_disabled_(disable_wiper_3) {
+    this->reg_[0].enabled = !wiper_0_disabled_;
+    this->reg_[1].enabled = !wiper_1_disabled_;
+    this->reg_[2].enabled = !wiper_2_disabled_;
+    this->reg_[3].enabled = !wiper_3_disabled_;
   }
 
   void setup() override;
@@ -68,38 +69,42 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
   void loop() override;
 
-  uint16_t get_status_register();
+  uint8_t get_status_register();
   uint16_t get_wiper_level(Mcp4461WiperIdx wiper);
   void set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value);
   void update_wiper_level(Mcp4461WiperIdx wiper);
   void enable_wiper(Mcp4461WiperIdx wiper);
   void disable_wiper(Mcp4461WiperIdx wiper);
-  void increase_wiper(Mcp4461WiperIdx wiper);
-  void decrease_wiper(Mcp4461WiperIdx wiper);
+  bool increase_wiper(Mcp4461WiperIdx wiper);
+  bool decrease_wiper(Mcp4461WiperIdx wiper);
   void enable_terminal(Mcp4461WiperIdx wiper, char terminal);
   void disable_terminal(Mcp4461WiperIdx, char terminal);
   void update_terminal_register(Mcp4461TerminalIdx terminal_connector);
   uint8_t get_terminal_register(Mcp4461TerminalIdx terminal_connector);
-  void set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
+  bool set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
-  void set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
+  bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
 
  protected:
   friend class Mcp4461Wiper;
+  void set_write_protection_status_();
   bool is_writing_();
+  bool is_eeprom_busy_();
   uint8_t get_wiper_address_(uint8_t wiper);
   uint16_t read_wiper_level_(uint8_t wiper);
   void write_wiper_level_(uint8_t wiper, uint16_t value);
-  void mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
+  bool mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
 
   WiperState reg_[8];
   void begin_();
   bool update_{false};
-  bool wiper_0_enabled_{true};
-  bool wiper_1_enabled_{true};
-  bool wiper_2_enabled_{true};
-  bool wiper_3_enabled_{true};
+  uint32_t previous_write_exec_time_;
+  bool write_protected_{false};
+  bool wiper_0_disabled_{false};
+  bool wiper_1_disabled_{false};
+  bool wiper_2_disabled_{false};
+  bool wiper_3_disabled_{false};
 };
 }  // namespace mcp4461
 }  // namespace esphome
