@@ -261,7 +261,7 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
   if (this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile)) {
     this->status_clear_warning();
   } else {
-    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level", (wiper > 3) ? "nonvolatile " : "", wiper);
+    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "", (wiper > 3) ? "nonvolatile " : "", wiper, value);
     this->status_set_warning();
   }
 }
