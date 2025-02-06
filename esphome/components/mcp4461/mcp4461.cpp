@@ -336,12 +336,12 @@ void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::DECREMENT);
-  if (this->write(&this->address_, reg, sizeof(reg))) {
-    this->status_clear_warning();
-    this->reg_[wiper_idx].state--;
-  } else {
+  if (!(this->write(&this->address_, reg, sizeof(reg)))) {
     this->status_set_warning();
+    return false;
   }
+  this->reg_[wiper_idx].state--;
+  return true;
 }
 
 uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector) {
@@ -382,7 +382,6 @@ uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_conn
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (this->read_byte_16(reg, &buf)) {
-    this->status_clear_warning();
     return static_cast<uint8_t>(buf & 0x00ff);
   } else {
     this->status_set_warning();
@@ -429,11 +428,11 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
     ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified", static_cast<uint8_t>(terminal_connector));
     return;
   }
-  if (this->mcp4461_write_(addr, data)) {
-    this->status_clear_warning();
-  } else {
+  if (!(this->mcp4461_write_(addr, data))) {
     this->status_set_warning();
+    return false;
   }
+  return true;
 }
 
 void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
@@ -460,7 +459,6 @@ void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
       this->reg_[wiper_idx].terminal_w = true;
       break;
     default:
-      this->status_set_warning();
       ESP_LOGW(TAG, "Unknown terminal %c specified", terminal);
       return;
   }
@@ -491,7 +489,6 @@ void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
       this->reg_[wiper_idx].terminal_w = false;
       break;
     default:
-      this->status_set_warning();
       ESP_LOGW(TAG, "Unknown terminal %c specified", terminal);
       return;
   }
@@ -531,11 +528,11 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
     addr = 1;
   }
   addr |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
-  if (this->mcp4461_write_(addr, value, true)) {
-    this->status_clear_warning();
-  } else {
+  if (!(this->mcp4461_write_(addr, value, true))) {
     this->status_set_warning();
+    return false;
   }
+  return true;
 }
 
 bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
