@@ -287,16 +287,16 @@ void Mcp4461Component::disable_wiper(Mcp4461WiperIdx wiper) {
 bool Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
-    return;
+    return false;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (!(this->reg_[wiper_idx].enabled)) {
     ESP_LOGW(TAG, "increasing disabled volatile wiper %" PRIu8 " is prohibited", wiper_idx);
-    return;
+    return false;
   }
   if (this->reg_[wiper_idx].wiper_lock_active) {
     ESP_LOGW(TAG, "Ignoring request to increase wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
-    return;
+    return false;
   }
   ESP_LOGV(TAG, "Increasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
@@ -316,16 +316,16 @@ bool Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
 bool Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
-    return;
+    return false;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (!(this->reg_[wiper_idx].enabled)) {
     ESP_LOGW(TAG, "decreasing disabled volatile wiper %" PRIu8 " is prohibited", wiper_idx);
-    return;
+    return false;
   }
   if (this->reg_[wiper_idx].wiper_lock_active) {
     ESP_LOGW(TAG, "Ignoring request to decrease wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
-    return;
+    return false;
   }
   ESP_LOGV(TAG, "Decreasing wiper %" PRIu8 "", wiper_idx);
   uint8_t reg = 0;
@@ -415,7 +415,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
 bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
-    return;
+    return false;
   }
   uint8_t addr;
   if (static_cast<uint8_t>(terminal_connector) == 0) {
@@ -424,7 +424,7 @@ bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
     addr = static_cast<uint8_t>(Mcp4461Addresses::MCP4461_TCON1);
   } else {
     ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified", static_cast<uint8_t>(terminal_connector));
-    return;
+    return false;
   }
   if (!(this->mcp4461_write_(addr, data))) {
     this->status_set_warning();
@@ -516,11 +516,11 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
 bool Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t value) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
-    return;
+    return false;
   }
   uint8_t addr = 0;
   if (value > 511) {
-    return;
+    return false;
   }
   if (value > 256) {
     addr = 1;
