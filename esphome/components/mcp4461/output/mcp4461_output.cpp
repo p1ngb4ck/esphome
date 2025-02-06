@@ -58,7 +58,7 @@ void Mcp4461Wiper::save_level() {
     return;
   }
   uint8_t nonvolatile_wiper_idx = wiper_idx + 4;
-  this->parent_->reg[nonvolatile_wiper_idx].state = this->parent_->reg_[wiper_idx].state;
+  this->parent_->reg_[nonvolatile_wiper_idx].state = this->parent_->reg_[wiper_idx].state;
   Mcp4461WiperIdx nonvolatile_wiper = static_cast<Mcp4461WiperIdx>(nonvolatile_wiper_idx);
   this->parent_->set_wiper_level(nonvolatile_wiper, this->state_);
 }
