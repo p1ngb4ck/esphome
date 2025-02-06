@@ -58,16 +58,11 @@ void Mcp4461Component::dump_config() {
     // so also invalid for nonvolatile. For these, only print current level.
     // reworked to be a one-line intentionally, as output would not be in order
     if (i < 4) {
-      ESP_LOGCONFIG(TAG, "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s",
-        i,
-        this->reg_[i].state,
-        ONOFF(this->reg_[i].terminal_hw),
-        ONOFF(this->reg_[i].terminal_a),
-        ONOFF(this->reg_[i].terminal_b),
-        ONOFF(this->reg_[i].terminal_w),
-        ONOFF(this->reg_[i].enabled));
+      ESP_LOGCONFIG(TAG, "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s", i,
+                         this->reg_[i].state, ONOFF(this->reg_[i].terminal_hw), ONOFF(this->reg_[i].terminal_a),
+                         ONOFF(this->reg_[i].terminal_b), ONOFF(this->reg_[i].terminal_w), ONOFF(this->reg_[i].enabled));
     } else {
-        ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
+      ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
     }
   }
   // log current device status register at start
@@ -83,19 +78,16 @@ void Mcp4461Component::dump_config() {
   // Bit 7+8 are referenced in datasheet as D7 + D8 and both locked to 1
   // Default status register reading should be 0x182h or 386 decimal
   // "Default" means  without any WiperLocks or WriteProtection enabled and EEPRom not active writing
-  // get_status_register() will automatically check, if D8, D7 & R1 bits (locked to 1) are 1 and bail out using error-routine otherwise
+  // get_status_register() will automatically check, if D8, D7 & R1 bits (locked to 1) are 1
+  // and bail out using error-routine otherwise
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
-  ESP_LOGCONFIG(TAG, "  └── Status register: D7: %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
-    ((status_register_value >> 7) & 0x01),
-    ((status_register_value >> 6) & 0x01),
-    ((status_register_value >> 5) & 0x01),
-    ((status_register_value >> 4) & 0x01),
-    ((status_register_value >> 3) & 0x01),
-    ((status_register_value >> 2) & 0x01),
-    ((status_register_value >> 1) & 0x01),
-    ((status_register_value >> 0) & 0x01)
-  );
+  ESP_LOGCONFIG(TAG, "  └── Status register: D7:  %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ",
+                EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
+                ((status_register_value >> 7) & 0x01), ((status_register_value >> 6) & 0x01),
+                ((status_register_value >> 5) & 0x01), ((status_register_value >> 4) & 0x01),
+                ((status_register_value >> 3) & 0x01), ((status_register_value >> 2) & 0x01),
+                ((status_register_value >> 1) & 0x01), ((status_register_value >> 0) & 0x01));
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Communication with mcp4461 failed!");
   }
@@ -151,7 +143,8 @@ uint8_t Mcp4461Component::get_status_register() {
   uint8_t lsb;
   lsb = static_cast<uint8_t>(buf & 0x00ff);
   if (msb != 1 || ((lsb >> 7) & 0x01) != 1 || ((lsb >> 1) & 0x01) != 1) {
-    // D8, D7 and R1 bits are hardlocked to 1 -> a status msb bit 0 (bit 9 of status register) of 0 or lsb bit 1/7 = 0 indicate device/communication issues, therefore mark component failed
+    // D8, D7 and R1 bits are hardlocked to 1 -> a status msb bit 0 (bit 9 of status register) of 0 or lsb bit 1/7 = 0
+    // indicate device/communication issues, therefore mark component failed
     this->mark_failed();
     return 0;
   }
@@ -208,7 +201,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
   reg |= this->get_wiper_address_(wiper);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   if (wiper > 3) {
-    if(this->is_eeprom_busy_()) {
+    if (this->is_eeprom_busy_()) {
       return 0;
     }
   }
@@ -257,7 +250,8 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
     nonvolatile = true;
   }
   if (!(this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile))) {
-    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "", (wiper > 3) ? "nonvolatile " : "", wiper, value);
+    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "",
+             (wiper > 3) ? "nonvolatile " : "", wiper, value);
     this->status_set_warning();
   }
 }
@@ -502,7 +496,7 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   reg |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
-  if(this->is_eeprom_busy_()) {
+  if (this->is_eeprom_busy_()) {
     return 0;
   }
   if (!this->read_byte_16(reg, &buf)) {
@@ -537,15 +531,15 @@ bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_statu
 
 bool Mcp4461Component::is_eeprom_busy_() {
   while (this->is_writing_() && this->previous_write_exec_time_ != 0) {
-      if ((millis() - this->previous_write_exec_time_) > EEPROM_WRITE_TIMEOUT_MS) {
-        this->previous_write_exec_time_ = millis();
-        ESP_LOGE(TAG, "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom", EEPROM_WRITE_TIMEOUT_MS);
-        return true;
-      }
-      ESP_LOGV(TAG, "Waiting while eeprom is busy");
-      yield();
+    if ((millis() - this->previous_write_exec_time_) > EEPROM_WRITE_TIMEOUT_MS) {
+      this->previous_write_exec_time_ = millis();
+      ESP_LOGE(TAG, "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom", EEPROM_WRITE_TIMEOUT_MS);
+      return true;
     }
-    return false;
+    ESP_LOGV(TAG, "Waiting while eeprom is busy");
+    yield();
+  }
+  return false;
 }
 
 bool Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile) {
