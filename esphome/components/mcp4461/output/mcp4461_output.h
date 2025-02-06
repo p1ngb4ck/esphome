@@ -8,7 +8,7 @@
 namespace esphome {
 namespace mcp4461 {
 
-class Mcp4461Wiper : public output::FloatOutput, public Parented<MCP4461> {
+class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Component> {
  public:
   Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
                bool terminal_w)
