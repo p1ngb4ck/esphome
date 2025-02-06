@@ -555,10 +555,10 @@ bool Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
   if (nonvolatile) {
     if (this->write_protected_) {
       ESP_LOGW(TAG, "Ignoring write to write protected chip");
-      return;
+      return false;
     }
     if (this->is_eeprom_busy_()) {
-      return;
+      return false;
     }
     this->previous_write_exec_time_ = millis();
     auto err = this->write_byte(reg, value_byte);
