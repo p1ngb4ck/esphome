@@ -148,7 +148,7 @@ uint8_t Mcp4461Component::get_status_register() {
     this->mark_failed();
     return 0;
   }
-  this->clear_warning_state();
+  this->status_clear_warning();
   return lsb;
 }
 
@@ -202,7 +202,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
     }
   }
   if (this->read_byte_16(reg, &buf)) {
-    this->clear_warning_state();
+    this->status_clear_warning();
   } else {
     this->status_set_warning();
     ESP_LOGW(TAG, "Error fetching %swiper %" PRIu8 " value", (wiper > 3) ? "nonvolatile " : "", wiper);
@@ -244,7 +244,7 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
     nonvolatile = true;
   }
   if (this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile)) {
-    this->clear_warning_state();
+    this->status_clear_warning();
   } else {
     ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level", (wiper > 3) ? "nonvolatile " : "", wiper);
     this->status_set_warning();
@@ -278,7 +278,7 @@ void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::INCREMENT);
   if (this->write(&this->address_, reg, sizeof(reg))) {
-    this->clear_warning_state();
+    this->status_clear_warning();
     this->reg_[wiper_idx].state++;
   } else {
     this->status_set_warning();
@@ -298,7 +298,7 @@ void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::DECREMENT);
   if (this->write(&this->address_, reg, sizeof(reg))) {
-    this->clear_warning_state();
+    this->status_clear_warning();
     this->reg_[wiper_idx].state--;
   } else {
     this->status_set_warning();
@@ -339,7 +339,7 @@ uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_conn
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (this->read_byte_16(reg, &buf)) {
-    this->clear_warning_state();
+    this->status_clear_warning();
     return static_cast<uint8_t>(buf & 0x00ff);
   } else {
     this->status_set_warning();
@@ -383,7 +383,7 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
     return;
   }
   if (this->mcp4461_write_(addr, data)) {
-    this->clear_warning_state();
+    this->status_clear_warning();
   } else {
     this->status_set_warning();
   }
@@ -469,7 +469,7 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
   }
   addr |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
   if (this->mcp4461_write_(addr, value, true)) {
-    this->clear_warning_state();
+    this->status_clear_warning();
   } else {
     this->status_set_warning();
   }
