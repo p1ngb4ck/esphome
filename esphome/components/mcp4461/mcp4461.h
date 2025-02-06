@@ -75,15 +75,15 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void update_wiper_level(Mcp4461WiperIdx wiper);
   void enable_wiper(Mcp4461WiperIdx wiper);
   void disable_wiper(Mcp4461WiperIdx wiper);
-  void increase_wiper(Mcp4461WiperIdx wiper);
-  void decrease_wiper(Mcp4461WiperIdx wiper);
+  bool increase_wiper(Mcp4461WiperIdx wiper);
+  bool decrease_wiper(Mcp4461WiperIdx wiper);
   void enable_terminal(Mcp4461WiperIdx wiper, char terminal);
   void disable_terminal(Mcp4461WiperIdx, char terminal);
   void update_terminal_register(Mcp4461TerminalIdx terminal_connector);
   uint8_t get_terminal_register(Mcp4461TerminalIdx terminal_connector);
   bool set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
-  void set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
+  bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
 
  protected:
   friend class Mcp4461Wiper;
