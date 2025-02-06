@@ -7,7 +7,7 @@ from .. import Mcp4461Component, CONF_MCP4461_ID, mcp4461_ns
 DEPENDENCIES = ["mcp4461"]
 
 Mcp4461Wiper = mcp4461_ns.class_(
-    "Mcp4461Wiper", output.FloatOutput, , cg.Parented.template(Mcp4461Component)
+    "Mcp4461Wiper", output.FloatOutput, cg.Parented.template(Mcp4461Component)
 )
 
 Mcp4461WiperIdx = mcp4461_ns.enum("Mcp4461WiperIdx")
