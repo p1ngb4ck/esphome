@@ -20,6 +20,7 @@ void Mcp4461Component::setup() {
 }
 
 void Mcp4461Component::begin_() {
+  this->previous_write_exec_time_ = 0;
   for (uint8_t i = 0; i < 8; i++) {
     if (this->reg_[i].enabled) {
       this->reg_[i].state = this->read_wiper_level_(i);
@@ -137,8 +138,6 @@ uint8_t Mcp4461Component::get_status_register() {
   return lsb;
 }
 
-bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
-
 uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
   uint8_t addr;
   bool nonvolatile = false;
@@ -184,9 +183,8 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
   reg |= this->get_wiper_address_(wiper);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   if (wiper > 3) {
-    while (this->is_writing_()) {
-      ESP_LOGVV(TAG, "delaying during eeprom write");
-      yield();
+    if(this->is_eeprom_busy_()) {
+      return 0;
     }
   }
   if (!this->read_byte_16(reg, &buf)) {
@@ -404,6 +402,9 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   reg |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
+  if(this->is_eeprom_busy_()) {
+    return 0;
+  }
   if (!this->read_byte_16(reg, &buf)) {
     this->status_set_warning();
     ESP_LOGW(TAG, "Error fetching EEPRom location value");
@@ -424,6 +425,21 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
   this->mcp4461_write_(addr, value, true);
 }
 
+bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
+
+bool Mcp4461Component::is_eeprom_busy_() {
+  while (this->is_writing_() && this->previous_write_exec_time_ != 0) {
+      if ((millis() - this->previous_write_exec_time_) > EEPROM_WRITE_TIMEOUT_MS) {
+        this->previous_write_exec_time_ = millis();
+        ESP_LOGE(TAG, "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom", EEPROM_WRITE_TIMEOUT_MS);
+        return true;
+      }
+      ESP_LOGV(TAG, "Waiting while eeprom busy");
+      yield();
+    }
+    return false;
+}
+
 void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile) {
   uint8_t reg = 0;
   if (data > 0xFF) {
@@ -435,12 +451,12 @@ void Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::WRITE);
   if (nonvolatile) {
-    while (this->is_writing_()) {
-      ESP_LOGV(TAG, "Waiting while eeprom busy");
-      yield();
+    if(this->is_eeprom_busy_()) {
+      return;
     }
+    this->previous_write_exec_time_ = millis();
+    this->write_byte(reg, value_byte);
   }
-  this->write_byte(reg, value_byte);
 }
 }  // namespace mcp4461
 }  // namespace esphome
