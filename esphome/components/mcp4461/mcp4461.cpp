@@ -447,7 +447,11 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
     addr = 1;
   }
   addr |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
-  this->mcp4461_write_(addr, value, true);
+  if (this->mcp4461_write_(addr, value, true)) {
+    this->clear_error_state_();
+  } else {
+    this->set_error_state_();
+  }
 }
 
 bool Mcp4461Component::is_writing_() { return static_cast<bool>((this->get_status_register() >> 4) & 0x01); }
