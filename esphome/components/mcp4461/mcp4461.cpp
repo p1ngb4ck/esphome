@@ -291,6 +291,10 @@ void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  if (!(this->reg_[wiper_idx].enabled)) {
+    ESP_LOGW(TAG, "increasing disabled volatile wiper %" PRIu8 " is prohibited", wiper_idx);
+    return;
+  }
   if (this->reg_[wiper_idx].wiper_lock_active) {
     ESP_LOGW(TAG, "Ignoring request to increase wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
     return;
@@ -315,6 +319,10 @@ void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  if (!(this->reg_[wiper_idx].enabled)) {
+    ESP_LOGW(TAG, "decreasing disabled volatile wiper %" PRIu8 " is prohibited", wiper_idx);
+    return;
+  }
   if (this->reg_[wiper_idx].wiper_lock_active) {
     ESP_LOGW(TAG, "Ignoring request to decrease wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
     return;
