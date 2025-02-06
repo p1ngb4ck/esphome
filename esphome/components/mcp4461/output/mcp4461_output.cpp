@@ -96,8 +96,9 @@ void Mcp4461Wiper::increase_wiper() {
     ESP_LOGW(TAG, "Cannot increase nonvolatile wiper %" PRIu8 " !", wiper_idx);
     return;
   }
-  this->state_ = this->state_ + 1.0;
-  this->parent_->increase_wiper(this->wiper_);
+  if (this->parent_->increase_wiper(this->wiper_)) {
+    this->state_ = this->state_ + 1.0;
+  }
 }
 
 void Mcp4461Wiper::decrease_wiper() {
@@ -110,8 +111,9 @@ void Mcp4461Wiper::decrease_wiper() {
     ESP_LOGW(TAG, "Cannot decrease nonvolatile wiper %" PRIu8 " !", wiper_idx);
     return;
   }
-  this->state_ = this->state_ - 1.0;
-  this->parent_->decrease_wiper(this->wiper_);
+  if (this->parent_->decrease_wiper(this->wiper_)) {
+    this->state_ = this->state_ - 1.0;
+  }
 }
 
 void Mcp4461Wiper::enable_terminal(char terminal) {
