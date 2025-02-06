@@ -136,7 +136,7 @@ uint8_t Mcp4461Component::get_status_register() {
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
   if (!this->read_byte_16(reg, &buf)) {
-    this->status_set_warning();
+    this->mark_failed();
     ESP_LOGE(TAG, "Error fetching status register value");
     return 0;
   }
@@ -148,6 +148,7 @@ uint8_t Mcp4461Component::get_status_register() {
     this->mark_failed();
     return 0;
   }
+  this->clear_warning_state();
   return lsb;
 }
 
@@ -200,7 +201,9 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
       return 0;
     }
   }
-  if (!this->read_byte_16(reg, &buf)) {
+  if (this->read_byte_16(reg, &buf)) {
+    this->clear_warning_state();
+  } else {
     this->status_set_warning();
     ESP_LOGW(TAG, "Error fetching %swiper %" PRIu8 " value", (wiper > 3) ? "nonvolatile " : "", wiper);
     return 0;
@@ -236,12 +239,16 @@ void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
 }
 
 void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
-  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   bool nonvolatile = false;
-  if (wiper_idx > 3) {
+  if (wiper > 3) {
     nonvolatile = true;
   }
-  this->mcp4461_write_(this->get_wiper_address_(wiper_idx), value, nonvolatile);
+  if (this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile)) {
+    this->clear_warning_state();
+  } else {
+    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level", (wiper > 3) ? "nonvolatile " : "", wiper);
+    this->status_set_warning();
+  }
 }
 
 void Mcp4461Component::enable_wiper(Mcp4461WiperIdx wiper) {
@@ -270,8 +277,12 @@ void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::INCREMENT);
-  this->write(&this->address_, reg, sizeof(reg));
-  this->reg_[wiper_idx].state++;
+  if (this->write(&this->address_, reg, sizeof(reg))) {
+    this->clear_warning_state();
+    this->reg_[wiper_idx].state++;
+  } else {
+    this->status_set_warning();
+  }
 }
 
 void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
@@ -286,8 +297,12 @@ void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::DECREMENT);
-  this->write(&this->address_, reg, sizeof(reg));
-  this->reg_[wiper_idx].state--;
+  if (this->write(&this->address_, reg, sizeof(reg))) {
+    this->clear_warning_state();
+    this->reg_[wiper_idx].state--;
+  } else {
+    this->status_set_warning();
+  }
 }
 
 uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector) {
@@ -323,12 +338,14 @@ uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_conn
   }
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
-  if (!this->read_byte_16(reg, &buf)) {
+  if (this->read_byte_16(reg, &buf)) {
+    this->clear_warning_state();
+    return static_cast<uint8_t>(buf & 0x00ff);
+  } else {
     this->status_set_warning();
     ESP_LOGW(TAG, "Error fetching terminal register value");
     return 0;
   }
-  return static_cast<uint8_t>(buf & 0x00ff);
 }
 
 void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_connector) {
@@ -365,7 +382,11 @@ void Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
     ESP_LOGW(TAG, "Invalid terminal connector id %" PRIu8 " specified", static_cast<uint8_t>(terminal_connector));
     return;
   }
-  this->mcp4461_write_(addr, data);
+  if (this->mcp4461_write_(addr, data)) {
+    this->clear_warning_state();
+  } else {
+    this->status_set_warning();
+  }
 }
 
 void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
@@ -448,9 +469,9 @@ void Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
   }
   addr |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
   if (this->mcp4461_write_(addr, value, true)) {
-    this->clear_error_state_();
+    this->clear_warning_state();
   } else {
-    this->set_error_state_();
+    this->status_set_warning();
   }
 }
 
