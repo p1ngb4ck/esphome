@@ -21,7 +21,8 @@ void Mcp4461Component::setup() {
 }
 
 void Mcp4461Component::begin_() {
-  // get WP & WL status 
+  // save WP/WL status
+  this->set_write_protection_status_();
   this->previous_write_exec_time_ = 0;
   for (uint8_t i = 0; i < 8; i++) {
     if (this->reg_[i].enabled) {
@@ -36,6 +37,16 @@ void Mcp4461Component::begin_() {
       }
     }
   }
+}
+
+void Mcp4461Component::set_write_protection_status_() {
+  uint8_t status_register_value;
+  status_register_value = this->get_status_register();
+  this->write_protected_ = static_cast<bool>((status_register_value >> 0) & 0x01);
+  this->reg_[0].wiper_lock_active = static_cast<bool>((status_register_value >> 2) & 0x01);
+  this->reg_[1].wiper_lock_active = static_cast<bool>((status_register_value >> 3) & 0x01);
+  this->reg_[2].wiper_lock_active = static_cast<bool>((status_register_value >> 5) & 0x01);
+  this->reg_[3].wiper_lock_active = static_cast<bool>((status_register_value >> 6) & 0x01);
 }
 
 void Mcp4461Component::dump_config() {
