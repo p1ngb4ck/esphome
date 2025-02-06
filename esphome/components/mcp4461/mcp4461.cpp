@@ -212,9 +212,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
       return 0;
     }
   }
-  if (this->read_byte_16(reg, &buf)) {
-    this->status_clear_warning();
-  } else {
+  if (!(this->read_byte_16(reg, &buf))) {
     this->status_set_warning();
     ESP_LOGW(TAG, "Error fetching %swiper %" PRIu8 " value", (wiper > 3) ? "nonvolatile " : "", wiper);
     return 0;
@@ -258,9 +256,7 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
   if (wiper > 3) {
     nonvolatile = true;
   }
-  if (this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile)) {
-    this->status_clear_warning();
-  } else {
+  if (!(this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile))) {
     ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "", (wiper > 3) ? "nonvolatile " : "", wiper, value);
     this->status_set_warning();
   }
@@ -288,7 +284,7 @@ void Mcp4461Component::disable_wiper(Mcp4461WiperIdx wiper) {
   this->update_ = true;
 }
 
-void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
+bool Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
     return;
@@ -308,15 +304,16 @@ void Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::INCREMENT);
-  if (this->write(&this->address_, reg, sizeof(reg))) {
-    this->status_clear_warning();
-    this->reg_[wiper_idx].state++;
-  } else {
+  auto err = this->write(&this->address_, reg, sizeof(reg));
+  if (err != i2c::ERROR_OK) {
     this->status_set_warning();
+    return false;
   }
+  this->reg_[wiper_idx].state++;
+  return true;
 }
 
-void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
+bool Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
     ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
     return;
@@ -336,7 +333,8 @@ void Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   addr = this->get_wiper_address_(wiper_idx);
   reg |= addr;
   reg |= static_cast<uint8_t>(Mcp4461Commands::DECREMENT);
-  if (!(this->write(&this->address_, reg, sizeof(reg)))) {
+  auto err = this->write(&this->address_, reg, sizeof(reg));
+  if (err != i2c::ERROR_OK) {
     this->status_set_warning();
     return false;
   }
