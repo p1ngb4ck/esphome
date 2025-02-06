@@ -52,7 +52,7 @@ async def to_code(config):
         config[CONF_TERMINAL_B],
         config[CONF_TERMINAL_W],
     )
-    await output.register_output(var, config)
-    await cg.register_parented(var, config[CONF_MCP4461_ID])
     if CONF_INITIAL_VALUE in config:
         cg.add(var.set_initial_value(config[CONF_INITIAL_VALUE]))
+    await output.register_output(var, config)
+    await cg.register_parented(var, config[CONF_MCP4461_ID])
