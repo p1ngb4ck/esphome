@@ -8,6 +8,7 @@ namespace esphome {
 namespace mcp4461 {
 
 static const char *const TAG = "mcp4461";
+constexpr uint8_t EEPROM_WRITE_TIMEOUT_MS = 10;
 
 void Mcp4461Component::setup() {
   ESP_LOGCONFIG(TAG, "Setting up mcp4461 (0x%02" PRIX8 ")...", this->address_);
