@@ -21,6 +21,7 @@ void Mcp4461Component::setup() {
 }
 
 void Mcp4461Component::begin_() {
+  // get WP & WL status 
   this->previous_write_exec_time_ = 0;
   for (uint8_t i = 0; i < 8; i++) {
     if (this->reg_[i].enabled) {
