@@ -13,6 +13,7 @@ struct WiperState {
   bool terminal_hw = true;
   uint16_t state = 0;
   bool enabled = true;
+  bool wiper_lock_active = false;
 };
 
 enum class Mcp4461Defaults : uint8_t { WIPER_VALUE = 0x80 };
