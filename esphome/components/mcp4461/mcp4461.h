@@ -98,6 +98,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void begin_();
   bool update_{false};
   uint32_t previous_write_exec_time_;
+  bool write_protected_{false};
   bool wiper_0_disabled_{false};
   bool wiper_1_disabled_{false};
   bool wiper_2_disabled_{false};
