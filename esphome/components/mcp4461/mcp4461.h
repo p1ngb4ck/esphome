@@ -87,16 +87,17 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
  protected:
   friend class Mcp4461Wiper;
   bool is_writing_();
+  bool is_eeprom_busy_();
   uint8_t get_wiper_address_(uint8_t wiper);
   uint16_t read_wiper_level_(uint8_t wiper);
   void write_wiper_level_(uint8_t wiper, uint16_t value);
   void mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
-  uint32_t previous_write_exec_time_;
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
 
   WiperState reg_[8];
   void begin_();
   bool update_{false};
+  uint32_t previous_write_exec_time_;
   bool wiper_0_disabled_{false};
   bool wiper_1_disabled_{false};
   bool wiper_2_disabled_{false};
