@@ -459,7 +459,7 @@ bool Mcp4461Component::is_eeprom_busy_() {
         ESP_LOGE(TAG, "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom", EEPROM_WRITE_TIMEOUT_MS);
         return true;
       }
-      ESP_LOGV(TAG, "Waiting while eeprom busy");
+      ESP_LOGV(TAG, "Waiting while eeprom is busy");
       yield();
     }
     return false;
