@@ -84,7 +84,8 @@ void Mcp4461Component::dump_config() {
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
   ESP_LOGCONFIG(TAG,
-                "  └── Status register: D7:  %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
+                "  └── Status register: D7:  %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 
+                ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
                 ((status_register_value >> 7) & 0x01), ((status_register_value >> 6) & 0x01),
                 ((status_register_value >> 5) & 0x01), ((status_register_value >> 4) & 0x01),
                 ((status_register_value >> 3) & 0x01), ((status_register_value >> 2) & 0x01),
