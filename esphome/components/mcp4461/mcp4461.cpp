@@ -573,8 +573,7 @@ bool Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
     }
     this->previous_write_exec_time_ = millis();
   }
-  auto err = this->write_byte(reg, value_byte);
-  return err == i2c::ERROR_OK;
+  return this->write_byte(reg, value_byte);
 }
 }  // namespace mcp4461
 }  // namespace esphome
