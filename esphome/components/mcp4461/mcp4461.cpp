@@ -58,9 +58,10 @@ void Mcp4461Component::dump_config() {
     // so also invalid for nonvolatile. For these, only print current level.
     // reworked to be a one-line intentionally, as output would not be in order
     if (i < 4) {
-      ESP_LOGCONFIG(TAG, "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s", i,
-                         this->reg_[i].state, ONOFF(this->reg_[i].terminal_hw), ONOFF(this->reg_[i].terminal_a),
-                         ONOFF(this->reg_[i].terminal_b), ONOFF(this->reg_[i].terminal_w), ONOFF(this->reg_[i].enabled));
+      ESP_LOGCONFIG(TAG,
+                    "  ├── Volatile wiper [%" PRIu8 "] level: %" PRIu16 ", Status: %s, HW: %s, A: %s, B: %s, W: %s", i,
+                    this->reg_[i].state, ONOFF(this->reg_[i].terminal_hw), ONOFF(this->reg_[i].terminal_a),
+                    ONOFF(this->reg_[i].terminal_b), ONOFF(this->reg_[i].terminal_w), ONOFF(this->reg_[i].enabled));
     } else {
       ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
     }
@@ -82,8 +83,8 @@ void Mcp4461Component::dump_config() {
   // and bail out using error-routine otherwise
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
-  ESP_LOGCONFIG(TAG, "  └── Status register: D7:  %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ",
-                EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
+  ESP_LOGCONFIG(TAG,
+                "  └── Status register: D7:  %" PRIu8 ", WL3: %" PRIu8 ", WL2: %" PRIu8 ", EEWA: %" PRIu8 ", WL1: %" PRIu8 ", WL0: %" PRIu8 ", R1: %" PRIu8 ", WP: %" PRIu8 "",
                 ((status_register_value >> 7) & 0x01), ((status_register_value >> 6) & 0x01),
                 ((status_register_value >> 5) & 0x01), ((status_register_value >> 4) & 0x01),
                 ((status_register_value >> 3) & 0x01), ((status_register_value >> 2) & 0x01),
@@ -250,8 +251,8 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
     nonvolatile = true;
   }
   if (!(this->mcp4461_write_(this->get_wiper_address_(wiper), value, nonvolatile))) {
-    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "",
-             (wiper > 3) ? "nonvolatile " : "", wiper, value);
+    ESP_LOGW(TAG, "Error writing %swiper %" PRIu8 " level %" PRIu16 "", (wiper > 3) ? "nonvolatile " : "", wiper,
+             value);
     this->status_set_warning();
   }
 }
@@ -533,7 +534,9 @@ bool Mcp4461Component::is_eeprom_busy_() {
   while (this->is_writing_() && this->previous_write_exec_time_ != 0) {
     if ((millis() - this->previous_write_exec_time_) > EEPROM_WRITE_TIMEOUT_MS) {
       this->previous_write_exec_time_ = millis();
-      ESP_LOGE(TAG, "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom", EEPROM_WRITE_TIMEOUT_MS);
+      ESP_LOGE(TAG,
+               "EEPROM write timeout exceeded (%" PRIu8 " ms), aborting read/write from/to nonvolatile wiper/eeprom",
+               EEPROM_WRITE_TIMEOUT_MS);
       return true;
     }
     ESP_LOGV(TAG, "Waiting while eeprom is busy");
