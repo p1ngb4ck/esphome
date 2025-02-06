@@ -30,7 +30,7 @@ void Mcp4461Wiper::set_initial_value(float initial_value) {
       this->initial_value_ = static_cast<uint16_t>(initial_value * 1000);
       // Use the value
       ESP_LOGCONFIG(TAG, "Setting initial value %" PRIu16 "", *this->initial_value_);
-      this->state_ = this->initial_value_;
+      this->state_ = *this->initial_value_;
       this->parent_->set_wiper_level(this->wiper_, *this->initial_value_);
     } else {
       ESP_LOGCONFIG(TAG, "No (valid) initial value set, retaining previous wiper level.");
