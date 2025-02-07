@@ -78,6 +78,10 @@ void Mcp4461Wiper::enable_wiper() {
 }
 
 void Mcp4461Wiper::disable_wiper() {
+  if (this->parent_->is_failed()) {
+    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    return;
+  }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
     ESP_LOGW(TAG, "Cannot disable nonvolatile wiper %" PRIu8 " !", wiper_idx);
@@ -117,6 +121,10 @@ void Mcp4461Wiper::decrease_wiper() {
 }
 
 void Mcp4461Wiper::enable_terminal(char terminal) {
+  if (this->parent_->is_failed()) {
+    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    return;
+  }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
     ESP_LOGW(TAG, "Cannot get/set terminals nonvolatile wiper %" PRIu8 " !", wiper_idx);
@@ -126,6 +134,10 @@ void Mcp4461Wiper::enable_terminal(char terminal) {
 }
 
 void Mcp4461Wiper::disable_terminal(char terminal) {
+  if (this->parent_->is_failed()) {
+    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    return;
+  }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
     ESP_LOGW(TAG, "Cannot get/set terminals for nonvolatile wiper %" PRIu8 " !", wiper_idx);
