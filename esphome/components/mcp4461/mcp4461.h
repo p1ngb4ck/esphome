@@ -14,7 +14,7 @@ struct WiperState {
   uint16_t state = 0;
   bool enabled = true;
   bool wiper_lock_active = false;
-  optional<uint16_t> initial_value;
+  optional<float> initial_value;
 };
 
 enum class Mcp4461Defaults : uint8_t { WIPER_VALUE = 0x80 };
