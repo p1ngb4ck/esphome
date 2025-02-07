@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "log.h"
+#include "esphome/core/log.h"
 #include "esphome/components/i2c/i2c.h"
 
 namespace esphome {
