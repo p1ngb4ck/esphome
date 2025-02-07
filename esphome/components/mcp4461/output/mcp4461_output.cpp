@@ -11,7 +11,7 @@ static const char *const TAG = "mcp4461.output";
 
 void Mcp4461Wiper::write_state(float state) {
   if (this->parent_->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
