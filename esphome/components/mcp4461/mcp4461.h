@@ -6,6 +6,8 @@
 namespace esphome {
 namespace mcp4461 {
 
+static const LogString *const LOG_PARENT_FAILED_STR = LOG_STR("Parent MCP4461 component has failed! Aborting");
+
 struct WiperState {
   bool terminal_a = true;
   bool terminal_b = true;
