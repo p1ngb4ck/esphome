@@ -29,23 +29,6 @@ void Mcp4461Wiper::write_state(float state) {
   this->parent_->set_wiper_level(this->wiper_, taps);
 }
 
-void Mcp4461Wiper::set_initial_value(float initial_value) {
-  if (this->parent_->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
-    return;
-  }
-  if (initial_value >= 0.000 && initial_value <= 0.256) {
-    float state = initial_value * 1000;
-    this->initial_value_ = static_cast<uint16_t>(state);
-    // Use the value
-    ESP_LOGV(TAG, "Setting initial value %" PRIu16 "", *this->initial_value_);
-    this->state_ = state;
-    this->parent_->set_wiper_level(this->wiper_, *this->initial_value_);
-  } else {
-    ESP_LOGV(TAG, "Invalid initial value set, retaining previous wiper level.");
-  }
-}
-
 uint16_t Mcp4461Wiper::get_wiper_level() { return this->parent_->get_wiper_level(this->wiper_); }
 
 void Mcp4461Wiper::save_level() {
