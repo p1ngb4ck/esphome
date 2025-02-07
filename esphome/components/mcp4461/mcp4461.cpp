@@ -134,7 +134,7 @@ void Mcp4461Component::loop() {
 
 uint8_t Mcp4461Component::get_status_register() {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Returning 0");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return 0;
   }
   uint8_t reg = 0;
@@ -191,7 +191,7 @@ uint8_t Mcp4461Component::get_wiper_address_(uint8_t wiper) {
 
 uint16_t Mcp4461Component::get_wiper_level(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Returning 0");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return 0;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -230,7 +230,7 @@ void Mcp4461Component::update_wiper_level(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting write.");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -265,7 +265,7 @@ void Mcp4461Component::write_wiper_level_(uint8_t wiper, uint16_t value) {
 
 void Mcp4461Component::enable_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -276,7 +276,7 @@ void Mcp4461Component::enable_wiper(Mcp4461WiperIdx wiper) {
 
 void Mcp4461Component::disable_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -287,7 +287,7 @@ void Mcp4461Component::disable_wiper(Mcp4461WiperIdx wiper) {
 
 bool Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return false;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -316,7 +316,7 @@ bool Mcp4461Component::increase_wiper(Mcp4461WiperIdx wiper) {
 
 bool Mcp4461Component::decrease_wiper(Mcp4461WiperIdx wiper) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return false;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -369,7 +369,7 @@ uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx termi
 
 uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_connector) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Returning 0");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return 0;
   }
   uint8_t reg = 0;
@@ -415,7 +415,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
 
 bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return false;
   }
   uint8_t addr;
@@ -436,7 +436,7 @@ bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connect
 
 void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -466,7 +466,7 @@ void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
 
 void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
@@ -496,7 +496,7 @@ void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
 
 uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Returning 0");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return 0;
   }
   uint8_t reg = 0;
@@ -516,7 +516,7 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
 
 bool Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t value) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, "Parent MCP4461 component has failed! Aborting");
+    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
     return false;
   }
   uint8_t addr = 0;
