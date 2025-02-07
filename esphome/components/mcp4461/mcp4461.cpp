@@ -25,6 +25,11 @@ void Mcp4461Component::begin_() {
   this->set_write_protection_status_();
   this->previous_write_exec_time_ = 0;
   for (uint8_t i = 0; i < 8; i++) {
+    if (this->reg_[i].initial_value.has_value()) {
+      uint16_t initial_state;
+      initial_state = static_cast<uint16_t>(this->reg_[i].initial_value * 1000);
+      this->write_wiper_level_(i, initial_state);
+    }
     if (this->reg_[i].enabled) {
       this->reg_[i].state = this->read_wiper_level_(i);
     } else {
