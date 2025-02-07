@@ -43,7 +43,7 @@ void Mcp4461Component::begin_() {
   }
 }
 
-void Mcp4461Wiper::set_initial_value(Mcp4461WiperIdx wiper, float initial_value) {
+void Mcp4461Component::set_initial_value(Mcp4461WiperIdx wiper, float initial_value) {
     uint8_t wiper_id = static_cast<uint8_t>(wiper);
     this->reg_[wiper_id].initial_value = initial_value;    
   }
