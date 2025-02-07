@@ -418,7 +418,7 @@ void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_conn
 
 bool Mcp4461Component::set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data) {
   if (this->is_failed()) {
-    ESP_LOGW(TAG, LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return false;
   }
   uint8_t addr;
