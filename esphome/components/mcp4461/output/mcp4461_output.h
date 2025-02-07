@@ -42,7 +42,6 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
   void decrease_wiper();
   void enable_terminal(char terminal);
   void disable_terminal(char terminal);
-  void set_initial_value(float initial_value);
 
  protected:
   void write_state(float state) override;
