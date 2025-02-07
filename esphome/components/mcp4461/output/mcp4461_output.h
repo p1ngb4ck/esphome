@@ -31,9 +31,6 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
     if (!terminal_w && wiper_idx < 4)
       parent->disable_terminal(wiper, 'w');
   }
-  void Mcp4461Wiper::set_initial_value(float initial_value) {
-    this->parent_->reg_[this->wiper_].initial_value = initial_value;    
-  }
   uint16_t get_wiper_level();
   void save_level();
   void enable_wiper();
