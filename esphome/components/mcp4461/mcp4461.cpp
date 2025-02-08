@@ -47,14 +47,16 @@ static const LogString *mcp4461_get_message_string_(int status) {
   switch (status) {
     case Mcp4461Component::MCP4461_STATUS_I2C_ERROR:
       return LOG_STR("I2C error - communication with MCP4461 failed!");
-    case Mcp4461Component::ENS210_STATUS_CRC_ERROR:
-      return LOG_STR("CRC error");
-    case Mcp4461Component::ENS210_STATUS_INVALID:
-      return LOG_STR("Invalid data");
-    case Mcp4461Component::ENS210_STATUS_OK:
+    case Mcp4461Component::MCP4461_STATUS_REGISTER_INVALID:
+      return LOG_STR("Invalid status register value - bits 1,7 or 8 are 0");
+    case Mcp4461Component::MCP4461_VALUE_INVALID:
+      return LOG_STR("Invalid value for wiper given");
+    case Mcp4461Component:::MCP4461_STATUS_OK:
       return LOG_STR("Status OK");
-    case Mcp4461Component::ENS210_WRONG_CHIP_ID:
-      return LOG_STR("ENS210 has wrong chip ID! Is it a ENS210?");
+    case Mcp4461Component::MCP4461_STATUS_WRITE_PROTECTED:
+      return LOG_STR("MCP4461 is write protected. Setting nonvolatile wipers/eeprom values is prohibited.");
+    case Mcp4461Component::MCP4461_STATUS_WIPER_LOCKED:
+      return LOG_STR("MCP4461 Wiper is locked using WiperLock-technology. All actions on this wiper are prohibited.");
     default:
       return LOG_STR("Unknown");
   }
