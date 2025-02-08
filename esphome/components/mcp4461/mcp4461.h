@@ -107,7 +107,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   WiperState reg_[8];
   void begin_();
   bool update_{false};
-  bool last_write_timed_out_{false};
+  bool last_eeprom_write_timed_out_{false};
   bool write_protected_{false};
   bool wiper_0_disabled_{false};
   bool wiper_1_disabled_{false};
