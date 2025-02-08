@@ -7,8 +7,6 @@
 namespace esphome {
 namespace mcp4461 {
 
-static const LogString *const LOG_PARENT_FAILED_STR = LOG_STR("Parent MCP4461 component has failed! Aborting");
-
 struct WiperState {
   bool terminal_a = true;
   bool terminal_b = true;
@@ -55,6 +53,16 @@ enum class Mcp4461EepromLocation : uint8_t {
 
 enum class Mcp4461TerminalIdx : uint8_t { MCP4461_TERMINAL_0 = 0, MCP4461_TERMINAL_1 = 1 };
 
+enum ErrorCode {
+  MCP4461_STATUS_OK = 0,           // CMD completed successfully
+  MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
+  MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
+  MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
+  MCP4461_STATUS_WRITE_PROTECTED,  // The value was read, but the CRC over the payload (valid and data) does not match
+  MCP4461_STATUS_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
+} error_code_{MCP4461_STATUS_OK};
+
+
 class Mcp4461Wiper;
 
 // Mcp4461Component
@@ -96,10 +104,10 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
  protected:
   friend class Mcp4461Wiper;
   void set_write_protection_status_();
-  bool is_writing_();
-  bool is_eeprom_busy_();
   uint8_t get_wiper_address_(uint8_t wiper);
   uint16_t read_wiper_level_(uint8_t wiper);
+  bool is_writing_();
+  bool is_eeprom_ready_for_writing_(bool wait_if_not_ready);
   void write_wiper_level_(uint8_t wiper, uint16_t value);
   bool mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
@@ -107,7 +115,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   WiperState reg_[8];
   void begin_();
   bool update_{false};
-  uint32_t previous_write_exec_time_;
+  bool last_eeprom_write_timed_out_{false};
   bool write_protected_{false};
   bool wiper_0_disabled_{false};
   bool wiper_1_disabled_{false};
