@@ -212,7 +212,7 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
   reg |= this->get_wiper_address_(wiper);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   if (wiper > 3) {
-    if (this->is_eeprom_busy_()) {
+    if (this->is_eeprom_ready_for_writing_(true)) {
       return 0;
     }
   }
@@ -511,7 +511,7 @@ uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
   reg |= static_cast<uint8_t>(Mcp4461EepromLocation::MCP4461_EEPROM_1) + (static_cast<uint8_t>(location) * 0x10);
   reg |= static_cast<uint8_t>(Mcp4461Commands::READ);
   uint16_t buf;
-  if (this->is_eeprom_busy_()) {
+  if (this->is_eeprom_ready_for_writing_(true)) {
     return 0;
   }
   if (!this->read_byte_16(reg, &buf)) {
@@ -642,7 +642,7 @@ bool Mcp4461Component::mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolat
       ESP_LOGW(TAG, "Ignoring write to write protected chip");
       return false;
     }
-    if (this->is_eeprom_busy_()) {
+    if (this->is_eeprom_ready_for_writing_(true)) {
       return false;
     }
     this->previous_write_exec_time_ = millis();
