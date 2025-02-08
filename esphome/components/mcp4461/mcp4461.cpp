@@ -42,6 +42,24 @@ void Mcp4461Component::begin_() {
   }
 }
 
+// Converts a status to a human readable string
+static const LogString *mcp4461_get_message_string_(int status) {
+  switch (status) {
+    case Mcp4461Component::MCP4461_STATUS_I2C_ERROR:
+      return LOG_STR("I2C error - communication with MCP4461 failed!");
+    case Mcp4461Component::ENS210_STATUS_CRC_ERROR:
+      return LOG_STR("CRC error");
+    case Mcp4461Component::ENS210_STATUS_INVALID:
+      return LOG_STR("Invalid data");
+    case Mcp4461Component::ENS210_STATUS_OK:
+      return LOG_STR("Status OK");
+    case Mcp4461Component::ENS210_WRONG_CHIP_ID:
+      return LOG_STR("ENS210 has wrong chip ID! Is it a ENS210?");
+    default:
+      return LOG_STR("Unknown");
+  }
+}
+
 void Mcp4461Component::set_initial_value(Mcp4461WiperIdx wiper, float initial_value) {
   uint8_t wiper_id = static_cast<uint8_t>(wiper);
   this->reg_[wiper_id].initial_value = initial_value;
