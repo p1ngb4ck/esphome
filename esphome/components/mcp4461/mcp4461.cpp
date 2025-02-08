@@ -257,6 +257,14 @@ uint16_t Mcp4461Component::read_wiper_level_(uint8_t wiper) {
 }
 
 void Mcp4461Component::update_wiper_level(Mcp4461WiperIdx wiper) {
+  if (this->is_failed()) {
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string_(this->error_code_)));
+    return 0;
+  }
+  if (!(this->reg_[wiper_idx].enabled)) {
+    ESP_LOGW(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string_(MCP4461_WIPER_DISABLED)));
+    return;
+  }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   uint16_t data;
   data = this->get_wiper_level(wiper);
@@ -270,10 +278,6 @@ void Mcp4461Component::set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value) {
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
-  if (this->reg_[wiper_idx].wiper_lock_active) {
-    ESP_LOGW(TAG, "Ignoring request to set the state for wiper %" PRIu8 " as it is locked by WiperLock", wiper_idx);
-    return;
-  }
   if (value > 0x100) {
     ESP_LOGW(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string_(MCP4461_VALUE_INVALID)));
     return;
