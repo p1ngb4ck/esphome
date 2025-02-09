@@ -32,7 +32,7 @@ void Mcp4461Component::begin_() {
     if (this->reg_[i].enabled) {
       this->reg_[i].state = this->read_wiper_level_(i);
     } else {
-      // only volatile wipers can be disabled
+      // only volatile wipers can be set disabled on hw level
       if (i < 4) {
         this->reg_[i].state = 0;
         Mcp4461WiperIdx wiper_idx;
