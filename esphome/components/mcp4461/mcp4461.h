@@ -101,7 +101,8 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
     MCP4461_WRITE_PROTECTED,  // The value was read, but the CRC over the payload (valid and data) does not match
     MCP4461_WIPER_ENABLED,    // The wiper is enabled, discard additional enabling actions
     MCP4461_WIPER_DISABLED,   // The wiper is disabled - all actions for this wiper will be aborted/discarded
-    MCP4461_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
+    MCP4461_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be
+                                 aborted/discarded
   } error_code_{MCP4461_STATUS_OK};
 
  protected:
