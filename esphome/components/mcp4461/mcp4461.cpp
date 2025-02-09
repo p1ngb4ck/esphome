@@ -153,10 +153,10 @@ void Mcp4461Component::loop() {
             terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_1;
           }
           uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
-          if (new_terminal_value != this->get_terminal_register(terminal_connector)) {
+          if (new_terminal_value != this->get_terminal_register_(terminal_connector)) {
             ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector),
                      new_terminal_value);
-            this->set_terminal_register(terminal_connector, new_terminal_value);
+            this->set_terminal_register_(terminal_connector, new_terminal_value);
           }
         }
       }
@@ -465,7 +465,7 @@ void Mcp4461Component::update_terminal_register_(Mcp4461TerminalIdx terminal_con
     return;
   }
   uint8_t terminal_data;
-  terminal_data = this->get_terminal_register(terminal_connector);
+  terminal_data = this->get_terminal_register_(terminal_connector);
   if (terminal_data == 0) {
     return;
   }
@@ -533,7 +533,7 @@ void Mcp4461Component::enable_terminal(Mcp4461WiperIdx wiper, char terminal) {
       ESP_LOGW(TAG, "Unknown terminal %c specified", terminal);
       return;
   }
-  this->reg_[wiper_idx].update_terminal = false; = true;
+  this->reg_[wiper_idx].update_terminal = false;
 }
 
 void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
@@ -563,7 +563,7 @@ void Mcp4461Component::disable_terminal(Mcp4461WiperIdx wiper, char terminal) {
       ESP_LOGW(TAG, "Unknown terminal %c specified", terminal);
       return;
   }
-  this->reg_[wiper_idx].update_terminal = false; = true;
+  this->reg_[wiper_idx].update_terminal = false;
 }
 
 uint16_t Mcp4461Component::get_eeprom_value(Mcp4461EepromLocation location) {
