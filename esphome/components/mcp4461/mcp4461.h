@@ -78,6 +78,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
   bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
   void set_initial_value(Mcp4461WiperIdx wiper, float initial_value);
+  void set_terminal_disabled(Mcp4461WiperIdx wiper, char terminal);
 
   enum ErrorCode {
     MCP4461_STATUS_OK = 0,               // CMD completed successfully
