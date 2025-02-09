@@ -104,21 +104,7 @@ void Mcp4461Component::dump_config() {
       ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
     }
   }
-  // log current device status register at start
-  // from datasheet:
-  // (1) means, bit is hard-locked to value 1
-  // Bit 0 is WP status (=>pin)
-  // Bit 1 is named "R-1"-pin in datasheet an declared "reserved" and forced/locked to 1
-  // Bit 2 is WiperLock-Status resistor-network 0
-  // Bit 3 is WiperLock-Status resistor-network 1
-  // Bit 4 is EEPROM-Write-Active-Status bit
-  // Bit 5 is WiperLock-Status resistor-network 2
-  // Bit 6 is WiperLock-Status resistor-network 3
-  // Bit 7+8 are referenced in datasheet as D7 + D8 and both locked to 1
-  // Default status register reading should be 0x182h or 386 decimal
-  // "Default" means  without any WiperLocks or WriteProtection enabled and EEPRom not active writing
-  // get_status_register_() will automatically check, if D8, D7 & R1 bits (locked to 1) are 1
-  // and bail out using error-routine otherwise
+  
   uint8_t status_register_value;
   status_register_value = this->get_status_register_();
   ESP_LOGCONFIG(TAG,
@@ -270,7 +256,7 @@ void Mcp4461Component::update_wiper_level_(Mcp4461WiperIdx wiper) {
     return;
   }
   uint16_t data;
-  data = this->get_wiper_level(wiper);
+  data = this->get_wiper_level_(wiper);
   ESP_LOGV(TAG, "Got value %" PRIu16 " from wiper %" PRIu8, data, wiper_idx);
   this->reg_[wiper_idx].state = data;
 }
