@@ -46,7 +46,7 @@ uint16_t Mcp4461Wiper::update_state() {
   return this->state_;
 }
 
-void Mcp4461Wiper::save_level() {
+/* void Mcp4461Wiper::save_level() {
   if (this->parent_->is_failed()) {
     ESP_LOGE(TAG, "%s", LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_FAILED)));
     return;
@@ -60,7 +60,7 @@ void Mcp4461Wiper::save_level() {
   this->parent_->reg_[nonvolatile_wiper_idx].state = this->parent_->reg_[wiper_idx].state;
   Mcp4461WiperIdx nonvolatile_wiper = static_cast<Mcp4461WiperIdx>(nonvolatile_wiper_idx);
   this->parent_->set_wiper_level_(nonvolatile_wiper, this->state_);
-}
+} */
 
 void Mcp4461Wiper::enable_wiper() {
   if (this->parent_->is_failed()) {
