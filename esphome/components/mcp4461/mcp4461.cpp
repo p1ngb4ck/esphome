@@ -116,7 +116,7 @@ void Mcp4461Component::dump_config() {
       ESP_LOGCONFIG(TAG, "  ├── Nonvolatile wiper [%" PRIu8 "] level: %" PRIu16 "", i, this->reg_[i].state);
     }
   }
-  
+
   uint8_t status_register_value;
   status_register_value = this->get_status_register_();
   ESP_LOGCONFIG(TAG,
