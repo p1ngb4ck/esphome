@@ -433,7 +433,7 @@ uint8_t Mcp4461Component::calc_terminal_connector_byte_(Mcp4461TerminalIdx termi
   return static_cast<uint8_t>(new_value_byte);
 }
 
-uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_connector) {
+uint8_t Mcp4461Component::get_terminal_register_(Mcp4461TerminalIdx terminal_connector) {
   if (this->is_failed()) {
     ESP_LOGE(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string(this->error_code_)));
     return 0;
@@ -456,7 +456,7 @@ uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_conn
   }
 }
 
-void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_connector) {
+void Mcp4461Component::update_terminal_register_(Mcp4461TerminalIdx terminal_connector) {
   if (this->is_failed()) {
     ESP_LOGE(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string(this->error_code_)));
     return;
