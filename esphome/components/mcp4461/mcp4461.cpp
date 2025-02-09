@@ -167,7 +167,7 @@ void Mcp4461Component::loop() {
 uint8_t Mcp4461Component::get_status_register() {
   if (this->is_failed()) {
     ESP_LOGE(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string_(this->error_code_)));
-    return;
+    return 0;
   }
   uint8_t reg = 0;
   reg |= static_cast<uint8_t>(Mcp4461Addresses::MCP4461_STATUS);
