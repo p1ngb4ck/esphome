@@ -66,10 +66,6 @@ void Mcp4461Wiper::enable_wiper() {
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
-  if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot enable nonvolatile wiper %" PRIu8 " !", wiper_idx);
-    return;
-  }
   this->parent_->enable_wiper_(this->wiper_);
 }
 
@@ -79,10 +75,6 @@ void Mcp4461Wiper::disable_wiper() {
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
-  if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot disable nonvolatile wiper %" PRIu8 " !", wiper_idx);
-    return;
-  }
   this->parent_->disable_wiper_(this->wiper_);
 }
 
