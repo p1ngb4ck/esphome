@@ -8,16 +8,16 @@ namespace esphome {
 namespace mcp4461 {
 
 struct WiperState {
-  bool update_level = false;
-  bool update_terminal = false;
+  bool enabled = true;
+  uint16_t state = 0;
+  optional<float> initial_value;
   bool terminal_a = true;
   bool terminal_b = true;
   bool terminal_w = true;
   bool terminal_hw = true;
-  uint16_t state = 0;
-  bool enabled = true;
   bool wiper_lock_active = false;
-  optional<float> initial_value;
+  bool update_level = false;
+  bool update_terminal = false;
 };
 
 // default wiper state is 128 / 0x80h
