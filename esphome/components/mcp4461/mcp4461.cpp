@@ -129,6 +129,9 @@ void Mcp4461Component::loop() {
       }
     }
     this->reg_[i].update_level = false;
+    // can be true only for wipers 0-3
+    // setting changes for terminals of nonvolatile wipers
+    // is prohibited in public methods
     if (this->reg_[i].update_terminal) {
       // set terminal register changes
       Mcp4461TerminalIdx terminal_connector;
