@@ -45,10 +45,10 @@ async def to_code(config):
         config[CONF_ID],
         parent,
         config[CONF_CHANNEL],
-        config[CONF_TERMINAL_A],
-        config[CONF_TERMINAL_B],
-        config[CONF_TERMINAL_W],
     )
+    cg.add(parent.set_initial_terminal_state(config[CONF_CHANNEL], config[CONF_TERMINAL_A]))
+    cg.add(parent.set_initial_terminal_state(config[CONF_CHANNEL], config[CONF_TERMINAL_B]))
+    cg.add(parent.set_initial_terminal_state(config[CONF_CHANNEL], config[CONF_TERMINAL_W]))
     if CONF_INITIAL_VALUE in config:
         cg.add(
             parent.set_initial_value(config[CONF_CHANNEL], config[CONF_INITIAL_VALUE])
