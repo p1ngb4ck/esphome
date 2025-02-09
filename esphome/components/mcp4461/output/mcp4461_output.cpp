@@ -8,6 +8,11 @@ namespace esphome {
 namespace mcp4461 {
 
 static const char *const TAG = "mcp4461.output";
+static const LogString *mcp4461_get_message_string(int status) {
+  switch (status) {
+    
+  }
+}
 static const LogString *const LOG_PARENT_FAILED_STR = LOG_STR("Parent MCP4461 component has failed! Aborting");
 
 void Mcp4461Wiper::write_state(float state) {
