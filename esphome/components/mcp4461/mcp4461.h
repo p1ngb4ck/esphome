@@ -114,9 +114,9 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void write_wiper_level_(uint8_t wiper, uint16_t value);
   bool mcp4461_write_(uint8_t addr, uint16_t data, bool nonvolatile = false);
   uint8_t calc_terminal_connector_byte_(Mcp4461TerminalIdx terminal_connector);
-  void update_terminal_register(Mcp4461TerminalIdx terminal_connector);
-  uint8_t get_terminal_register(Mcp4461TerminalIdx terminal_connector);
-  bool set_terminal_register(Mcp4461TerminalIdx terminal_connector, uint8_t data);
+  void update_terminal_register_(Mcp4461TerminalIdx terminal_connector);
+  uint8_t get_terminal_register_(Mcp4461TerminalIdx terminal_connector);
+  bool set_terminal_register_(Mcp4461TerminalIdx terminal_connector, uint8_t data);
 
   WiperState reg_[8];
   void begin_();
