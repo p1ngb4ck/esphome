@@ -8,7 +8,8 @@ namespace esphome {
 namespace mcp4461 {
 
 struct WiperState {
-  bool update = false;
+  bool update_level = false;
+  bool update_terminal = false;
   bool terminal_a = true;
   bool terminal_b = true;
   bool terminal_w = true;
