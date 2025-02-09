@@ -149,8 +149,7 @@ void Mcp4461Component::loop() {
       Mcp4461TerminalIdx terminal_connector;
       if (i < 2) {
         terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_0;
-      }
-      else {
+      } else {
         terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_1;
       }
       uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
