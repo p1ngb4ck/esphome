@@ -12,7 +12,7 @@ static const LogString *const LOG_PARENT_FAILED_STR = LOG_STR("Parent MCP4461 co
 
 void Mcp4461Wiper::write_state(float state) {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -34,7 +34,7 @@ uint16_t Mcp4461Wiper::get_wiper_level() { return this->parent_->get_wiper_level
 
 void Mcp4461Wiper::save_level() {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -50,7 +50,7 @@ void Mcp4461Wiper::save_level() {
 
 void Mcp4461Wiper::enable_wiper() {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -63,7 +63,7 @@ void Mcp4461Wiper::enable_wiper() {
 
 void Mcp4461Wiper::disable_wiper() {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -76,7 +76,7 @@ void Mcp4461Wiper::disable_wiper() {
 
 void Mcp4461Wiper::increase_wiper() {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -91,7 +91,7 @@ void Mcp4461Wiper::increase_wiper() {
 
 void Mcp4461Wiper::decrease_wiper() {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -106,7 +106,7 @@ void Mcp4461Wiper::decrease_wiper() {
 
 void Mcp4461Wiper::enable_terminal(char terminal) {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
@@ -119,7 +119,7 @@ void Mcp4461Wiper::enable_terminal(char terminal) {
 
 void Mcp4461Wiper::disable_terminal(char terminal) {
   if (this->parent_->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR);
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(LOG_PARENT_FAILED_STR));
     return;
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
