@@ -74,7 +74,7 @@ void Mcp4461Component::set_initial_value(Mcp4461WiperIdx wiper, float initial_va
   this->reg_[wiper_idx].initial_value = initial_value;
 }
 
-void Mcp4461Component::set_terminal_disabled_on_start(Mcp4461WiperIdx wiper, char terminal) {
+void Mcp4461Component::initialize_terminal_disabled(Mcp4461WiperIdx wiper, char terminal) {
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   switch (terminal) {
     case 'a':
