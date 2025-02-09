@@ -95,7 +95,7 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
     MCP4461_STATUS_OK = 0,           // CMD completed successfully
     MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
     MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
-    MCP4461_STATUS_REGISTER_ERROR,
+    MCP4461_STATUS_REGISTER_ERROR,   // Error fetching status register
     MCP4461_PARENT_FAILED,           // Parent component failed
     MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
     MCP4461_WRITE_PROTECTED,         // The value was read, but the CRC over the payload (valid and data) does not match
