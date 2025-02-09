@@ -10,10 +10,7 @@ namespace mcp4461 {
 static const char *const TAG = "mcp4461.output";
 
 void Mcp4461Wiper::write_state(float state) {
-  uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
-  state = state * 1000.0;
-  uint16_t taps = static_cast<uint16_t>(state);
-  if (this->parent_->set_wiper_level_(this->wiper_, taps)( {
+  if (this->parent_->set_wiper_level_(this->wiper_, static_cast<uint16_t>(state * 1000))) {
     this->state_ = state;
   }
 }
