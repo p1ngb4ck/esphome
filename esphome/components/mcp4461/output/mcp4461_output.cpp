@@ -37,7 +37,9 @@ void Mcp4461Wiper::write_state(float state) {
   this->parent_->set_wiper_level_(this->wiper_, taps);
 }
 
-uint16_t Mcp4461Wiper::get_wiper_level() { return this->parent_->get_wiper_level_(this->wiper_); }
+uint16_t Mcp4461Wiper::read_state() { return this->parent_->get_wiper_level_(this->wiper_); }
+
+uint16_t Mcp4461Wiper::update_state() { return this->parent_->update_wiper_level_(this->wiper_); }
 
 void Mcp4461Wiper::save_level() {
   if (this->parent_->is_failed()) {
