@@ -37,7 +37,7 @@ void Mcp4461Component::begin_() {
         this->reg_[i].state = 0;
         Mcp4461WiperIdx wiper_idx;
         wiper_idx = static_cast<Mcp4461WiperIdx>(i);
-        this->disable_wiper(wiper_idx);
+        this->disable_wiper_(wiper_idx);
       }
     }
   }
