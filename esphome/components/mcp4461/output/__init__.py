@@ -22,7 +22,6 @@ CHANNEL_OPTIONS = {
     "H": Mcp4461WiperIdx.MCP4461_WIPER_7,
 }
 
-CONF_ENABLE = "enable"
 CONF_TERMINAL_A = "terminal_a"
 CONF_TERMINAL_B = "terminal_b"
 CONF_TERMINAL_W = "terminal_w"
@@ -32,7 +31,6 @@ CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
         cv.Required(CONF_ID): cv.declare_id(Mcp4461Wiper),
         cv.GenerateID(CONF_MCP4461_ID): cv.use_id(Mcp4461Component),
         cv.Required(CONF_CHANNEL): cv.enum(CHANNEL_OPTIONS, upper=True),
-        cv.Optional(CONF_ENABLE, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_A, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_B, default=True): cv.boolean,
         cv.Optional(CONF_TERMINAL_W, default=True): cv.boolean,
@@ -47,7 +45,6 @@ async def to_code(config):
         config[CONF_ID],
         parent,
         config[CONF_CHANNEL],
-        config[CONF_ENABLE],
         config[CONF_TERMINAL_A],
         config[CONF_TERMINAL_B],
         config[CONF_TERMINAL_W],
