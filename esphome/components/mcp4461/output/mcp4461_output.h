@@ -11,7 +11,7 @@ namespace mcp4461 {
 class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Component> {
  public:
   Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper) : parent_(parent), wiper_(wiper) {}
-  }
+
   uint16_t read_state();
   uint16_t update_state();
   //void save_level();
