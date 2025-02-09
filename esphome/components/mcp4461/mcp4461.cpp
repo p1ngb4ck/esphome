@@ -131,10 +131,11 @@ void Mcp4461Component::loop() {
     this->reg_[i].update_level = false;
     if (this->reg_[i].update_terminal) {
       // set terminal register changes
+      Mcp4461TerminalIdx terminal_connector;
       if (i < 2) {
-        Mcp4461TerminalIdx terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_0;
+        terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_0;
       }
-      if (i > 1) {
+      else {
         terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_1;
       }
       uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
