@@ -134,9 +134,9 @@ void Mcp4461Component::loop() {
   if (status_has_warning()) {
     this->get_status_register();
   }
-  if (this->update_) {
-    uint8_t i;
-    for (i = 0; i < 8; i++) {
+  uint8_t i;
+  for (i = 0; i < 8; i++) {
+    if (this->reg_[i].update) {
       // set wiper i state if changed
       if (this->reg_[i].state != this->read_wiper_level_(i)) {
         this->write_wiper_level_(i, this->reg_[i].state);
@@ -158,7 +158,7 @@ void Mcp4461Component::loop() {
         }
       }
     }
-    this->update_ = false;
+    this->reg_[i].update = false;
   }
 }
 
