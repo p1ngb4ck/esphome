@@ -8,6 +8,7 @@ namespace esphome {
 namespace mcp4461 {
 
 struct WiperState {
+  bool update = false;
   bool terminal_a = true;
   bool terminal_b = true;
   bool terminal_w = true;
@@ -118,7 +119,6 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
 
   WiperState reg_[8];
   void begin_();
-  bool update_{false};
   bool last_eeprom_write_timed_out_{false};
   bool write_protected_{false};
   bool wiper_0_disabled_{false};
