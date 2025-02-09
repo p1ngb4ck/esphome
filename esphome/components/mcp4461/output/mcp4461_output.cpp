@@ -31,14 +31,12 @@ void Mcp4461Wiper::disable_wiper() {
 }
 
 void Mcp4461Wiper::increase_wiper() {
-  if (this->state_ == 0.256) { return; }
   if (this->parent_->increase_wiper_(this->wiper_)) {
     this->state_ = this->state_ + 0.001;
   }
 }
 
 void Mcp4461Wiper::decrease_wiper() {
-  if (this->state_ == 0.000) { return; }
   if (this->parent_->decrease_wiper_(this->wiper_)) {
     this->state_ = this->state_ - 0.001;
   }
