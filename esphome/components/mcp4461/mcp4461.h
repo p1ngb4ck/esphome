@@ -102,8 +102,8 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   uint16_t read_wiper_level_(uint8_t wiper);
   uint8_t get_status_register_();
   uint16_t get_wiper_level_(Mcp4461WiperIdx wiper);
-  void set_wiper_level_(Mcp4461WiperIdx wiper, uint16_t value);
-  void update_wiper_level_(Mcp4461WiperIdx wiper);
+  bool set_wiper_level_(Mcp4461WiperIdx wiper, uint16_t value);
+  bool update_wiper_level_(Mcp4461WiperIdx wiper);
   void enable_wiper_(Mcp4461WiperIdx wiper);
   void disable_wiper_(Mcp4461WiperIdx wiper);
   bool increase_wiper_(Mcp4461WiperIdx wiper);
