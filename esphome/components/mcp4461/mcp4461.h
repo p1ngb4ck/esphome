@@ -20,7 +20,7 @@ struct WiperState {
   optional<float> initial_value;
 };
 
-enum class Mcp4461Defaults : uint8_t { WIPER_VALUE = 0x80 };
+// default wiper state is 128 / 0x80h
 enum class Mcp4461Commands : uint8_t { WRITE = 0x00, INCREMENT = 0x04, DECREMENT = 0x08, READ = 0x0C };
 
 enum class Mcp4461Addresses : uint8_t {
@@ -75,17 +75,6 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
   void loop() override;
-
-  uint8_t get_status_register();
-  uint16_t get_wiper_level(Mcp4461WiperIdx wiper);
-  void set_wiper_level(Mcp4461WiperIdx wiper, uint16_t value);
-  void update_wiper_level(Mcp4461WiperIdx wiper);
-  void enable_wiper(Mcp4461WiperIdx wiper);
-  void disable_wiper(Mcp4461WiperIdx wiper);
-  bool increase_wiper(Mcp4461WiperIdx wiper);
-  bool decrease_wiper(Mcp4461WiperIdx wiper);
-  void enable_terminal(Mcp4461WiperIdx wiper, char terminal);
-  void disable_terminal(Mcp4461WiperIdx, char terminal);
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
   bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
   void set_initial_value(Mcp4461WiperIdx wiper, float initial_value);
@@ -109,6 +98,16 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   void update_write_protection_status_();
   uint8_t get_wiper_address_(uint8_t wiper);
   uint16_t read_wiper_level_(uint8_t wiper);
+  uint8_t get_status_register_();
+  uint16_t get_wiper_level_(Mcp4461WiperIdx wiper);
+  void set_wiper_level_(Mcp4461WiperIdx wiper, uint16_t value);
+  void update_wiper_level_(Mcp4461WiperIdx wiper);
+  void enable_wiper_(Mcp4461WiperIdx wiper);
+  void disable_wiper_(Mcp4461WiperIdx wiper);
+  bool increase_wiper_(Mcp4461WiperIdx wiper);
+  bool decrease_wiper_(Mcp4461WiperIdx wiper);
+  void enable_terminal_(Mcp4461WiperIdx wiper, char terminal);
+  void disable_terminal_(Mcp4461WiperIdx, char terminal);
   bool is_writing_();
   bool is_eeprom_ready_for_writing_(bool wait_if_not_ready);
   void write_wiper_level_(uint8_t wiper, uint16_t value);
