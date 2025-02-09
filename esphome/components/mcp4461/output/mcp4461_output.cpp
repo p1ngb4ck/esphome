@@ -12,6 +12,8 @@ static const LogString *get_wiper_message_string(int status) {
   switch (status) {
     case Mcp4461Component::MCP4461_FAILED:
       return LOG_STR("Parent MCP4461 component failed");
+    case Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE:
+      return LOG_STR("Action prohibited for nonvolatile wiper");
     default:
       return LOG_STR("Unknown error");
   }
@@ -51,7 +53,7 @@ void Mcp4461Wiper::save_level() {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot save level for nonvolatile wiper %" PRIu8 " !", wiper_idx);
+    ESP_LOGW(TAG, LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE)));
     return;
   }
   uint8_t nonvolatile_wiper_idx = wiper_idx + 4;
@@ -85,7 +87,7 @@ void Mcp4461Wiper::increase_wiper() {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot increase nonvolatile wiper %" PRIu8 " !", wiper_idx);
+    ESP_LOGW(TAG, LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE)));
     return;
   }
   if (this->parent_->increase_wiper_(this->wiper_)) {
@@ -100,7 +102,7 @@ void Mcp4461Wiper::decrease_wiper() {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot decrease nonvolatile wiper %" PRIu8 " !", wiper_idx);
+    ESP_LOGW(TAG, LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE)));
     return;
   }
   if (this->parent_->decrease_wiper_(this->wiper_)) {
@@ -115,7 +117,7 @@ void Mcp4461Wiper::enable_terminal(char terminal) {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot get/set terminals nonvolatile wiper %" PRIu8 " !", wiper_idx);
+    ESP_LOGW(TAG, LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE)));
     return;
   }
   this->parent_->enable_terminal_(this->wiper_, terminal);
@@ -128,7 +130,7 @@ void Mcp4461Wiper::disable_terminal(char terminal) {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(this->wiper_);
   if (wiper_idx > 3) {
-    ESP_LOGW(TAG, "Cannot get/set terminals for nonvolatile wiper %" PRIu8 " !", wiper_idx);
+    ESP_LOGW(TAG, LOG_STR_ARG(get_wiper_message_string(Mcp4461Component::MCP4461_PROHIBITED_FOR_NONVOLATILE)));
     return;
   }
   this->parent_->disable_terminal_(this->wiper_, terminal);
