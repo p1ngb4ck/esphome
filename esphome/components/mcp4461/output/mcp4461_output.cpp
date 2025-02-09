@@ -23,11 +23,11 @@ float Mcp4461Wiper::update_state() {
 }
 
 void Mcp4461Wiper::enable_wiper() {
-  this->parent_->enable_wiper_(static_cast<uint8_t>(this->wiper_));
+  this->parent_->enable_wiper_(this->wiper_);
 }
 
 void Mcp4461Wiper::disable_wiper() {
-  this->parent_->disable_wiper_(static_cast<uint8_t>(this->wiper_));
+  this->parent_->disable_wiper_(this->wiper_);
 }
 
 void Mcp4461Wiper::increase_wiper() {
