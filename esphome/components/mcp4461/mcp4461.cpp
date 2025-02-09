@@ -616,20 +616,6 @@ bool Mcp4461Component::set_eeprom_value(Mcp4461EepromLocation location, uint16_t
   return true;
 }
 
-/**
- * @brief Checks if the EEPROM is currently writing.
- *
- * This function reads the MCP4461 status register to determine if an EEPROM write operation is in progress.
- * If the EEPROM is no longer writing, the timeout flag (`last_eeprom_write_timed_out_`)
- * is reset to allow normal operation in future calls of `is_eeprom_ready_for_writing_()`.
- *
- * Behavior:
- * - If the EEPROM is **writing**, the function returns `true`.
- * - If the EEPROM is **not writing**, the function returns `false` and resets `last_eeprom_write_timed_out_`.
- *
- * @return `true` if the EEPROM is currently writing.
- * @return `false` if the EEPROM is not writing (also resets the timeout flag).
- */
 bool Mcp4461Component::is_writing_() {
   /* Read the EEPROM write-active status from the status register */
   bool writing = static_cast<bool>((this->get_status_register_() >> 4) & 0x01);
@@ -643,29 +629,6 @@ bool Mcp4461Component::is_writing_() {
   return writing;
 }
 
-/**
- * @brief Checks if the EEPROM is ready for a new write operation.
- *
- * This function ensures that the EEPROM is not actively writing.
- * It can either return the current status immediately or wait until the EEPROM becomes ready.
- *
- * Behavior:
- * - If `wait_if_not_ready` is `false`, the function returns the current readiness status immediately.
- * - If `wait_if_not_ready` is `true`:
- *   - The function waits up to `EEPROM_WRITE_TIMEOUT_MS` for the EEPROM to become ready.
- *   - If the EEPROM remains busy after the timeout, the `last_eeprom_write_timed_out_` flag is set to `true`,
- *     preventing unnecessary waits in future calls.
- *   - If the EEPROM becomes ready within the timeout, the function returns `true`.
- *
- * @param[in] wait_if_not_ready Specifies whether to wait for EEPROM readiness if it is currently busy.
- *                              - `true` → Waits for completion (up to `EEPROM_WRITE_TIMEOUT_MS`).
- *                              - `false` → Returns the current readiness status without waiting.
- *
- * @return `true` if the EEPROM is ready for a new write.
- * @return `false` if:
- *         - The last write attempt **timed out** (`wait_if_not_ready = true`).
- *         - The EEPROM is still busy (`wait_if_not_ready = false`).
- */
 bool Mcp4461Component::is_eeprom_ready_for_writing_(bool wait_if_not_ready) {
   /* Check initial write status */
   bool ready_for_write = !this->is_writing_();
