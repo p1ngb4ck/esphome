@@ -70,8 +70,20 @@ static const LogString *mcp4461_get_message_string(int status) {
 }
 
 void Mcp4461Component::set_initial_value(Mcp4461WiperIdx wiper, float initial_value) {
-  uint8_t wiper_id = static_cast<uint8_t>(wiper);
-  this->reg_[wiper_id].initial_value = initial_value;
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  this->reg_[wiper_idx].initial_value = initial_value;
+}
+
+void Mcp4461Component::set_terminal_disabled_on_start(Mcp4461WiperIdx wiper, char terminal) {
+  uint8_t wiper_idx = static_cast<uint8_t>(wiper);
+  switch (terminal) {
+    case 'a':
+      this->reg_[wiper_idx].terminal_a = false;
+    case 'b':
+      this->reg_[wiper_idx].terminal_b = false;
+    case 'w':
+      this->reg_[wiper_idx].terminal_w = false;
+  }
 }
 
 void Mcp4461Component::update_write_protection_status_() {
