@@ -52,8 +52,6 @@ static const LogString *mcp4461_get_message_string(int status) {
       return LOG_STR("Status register could not be read");
     case Mcp4461Component::MCP4461_STATUS_REGISTER_INVALID:
       return LOG_STR("Invalid status register value - bits 1,7 or 8 are 0");
-    case Mcp4461Component::MCP4461_PARENT_FAILED:
-      return LOG_STR("Parent component failed");
     case Mcp4461Component::MCP4461_VALUE_INVALID:
       return LOG_STR("Invalid value for wiper given");
     case Mcp4461Component::MCP4461_WRITE_PROTECTED:
