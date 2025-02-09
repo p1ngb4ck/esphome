@@ -19,15 +19,14 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
         terminal_w_(terminal_w) {
     uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     if (wiper_idx < 4) {
-      if (!parent->reg_[wiper_idx].enabled) {
-        parent->disable_terminal(wiper, 'h');
+      if (parent->reg_[wiper_idx].enabled) {
+        if (!terminal_a)
+          parent->disable_terminal_(wiper, 'a');
+        if (!terminal_b)
+          parent->disable_terminal_(wiper, 'b');
+        if (!terminal_w)
+          parent->disable_terminal_(wiper, 'w');
       }
-      if (!terminal_a)
-        parent->disable_terminal_(wiper, 'a');
-      if (!terminal_b)
-        parent->disable_terminal_(wiper, 'b');
-      if (!terminal_w)
-        parent->disable_terminal_(wiper, 'w');
     }
   }
   uint16_t get_wiper_level();
