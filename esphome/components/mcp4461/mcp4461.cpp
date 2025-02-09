@@ -669,13 +669,13 @@ bool Mcp4461Component::is_eeprom_ready_for_writing_(bool wait_if_not_ready) {
 
   /* Timestamp before starting the loop */
   const uint32_t start_millis = millis();
-  
+
   ESP_LOGV(TAG, "Waiting until EEPROM is ready for write, start_millis = %" PRIu32, start_millis);
 
   /* Loop until EEPROM is ready or timeout is reached */
   while (!ready_for_write && ((millis() - start_millis) < EEPROM_WRITE_TIMEOUT_MS)) {
     ready_for_write = !this->is_writing_();
-    
+
     /* If ready, exit early */
     if (ready_for_write) {
       ESP_LOGV(TAG, "EEPROM is ready for new write, elapsed_millis = %" PRIu32, millis() - start_millis);
