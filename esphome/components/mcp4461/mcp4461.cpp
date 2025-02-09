@@ -22,7 +22,7 @@ void Mcp4461Component::setup() {
 
 void Mcp4461Component::begin_() {
   // save WP/WL status
-  this->set_write_protection_status_();
+  this->update_write_protection_status_();
   for (uint8_t i = 0; i < 8; i++) {
     if (this->reg_[i].initial_value.has_value()) {
       uint16_t initial_state;
@@ -76,7 +76,7 @@ void Mcp4461Component::set_initial_value(Mcp4461WiperIdx wiper, float initial_va
   this->reg_[wiper_id].initial_value = initial_value;
 }
 
-void Mcp4461Component::set_write_protection_status_() {
+void Mcp4461Component::update_write_protection_status_() {
   uint8_t status_register_value;
   status_register_value = this->get_status_register();
   this->write_protected_ = static_cast<bool>((status_register_value >> 0) & 0x01);
@@ -457,7 +457,7 @@ uint8_t Mcp4461Component::get_terminal_register(Mcp4461TerminalIdx terminal_conn
 
 void Mcp4461Component::update_terminal_register(Mcp4461TerminalIdx terminal_connector) {
   if (this->is_failed()) {
-    ESP_LOGE(TAG, "%s", LOG_STR_ARG(MCP4461_PARENT_FAILED));
+    ESP_LOGE(TAG, "%s", LOG_STR_ARG(mcp4461_get_message_string(this->error_code_)));
     return;
   }
   if ((static_cast<uint8_t>(terminal_connector) != 0 && static_cast<uint8_t>(terminal_connector) != 1)) {
