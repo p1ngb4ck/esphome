@@ -53,16 +53,6 @@ enum class Mcp4461EepromLocation : uint8_t {
 
 enum class Mcp4461TerminalIdx : uint8_t { MCP4461_TERMINAL_0 = 0, MCP4461_TERMINAL_1 = 1 };
 
-enum ErrorCode {
-  MCP4461_STATUS_OK = 0,           // CMD completed successfully
-  MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
-  MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
-  MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
-  MCP4461_STATUS_WRITE_PROTECTED,  // The value was read, but the CRC over the payload (valid and data) does not match
-  MCP4461_STATUS_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
-} error_code_{MCP4461_STATUS_OK};
-
-
 class Mcp4461Wiper;
 
 // Mcp4461Component
@@ -121,6 +111,15 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   bool wiper_1_disabled_{false};
   bool wiper_2_disabled_{false};
   bool wiper_3_disabled_{false};
+
+  enum ErrorCode {
+    MCP4461_STATUS_OK = 0,           // CMD completed successfully
+    MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
+    MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
+    MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
+    MCP4461_WRITE_PROTECTED,  // The value was read, but the CRC over the payload (valid and data) does not match
+    MCP4461_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
+  } error_code_{MCP4461_STATUS_OK};
 };
 }  // namespace mcp4461
 }  // namespace esphome
