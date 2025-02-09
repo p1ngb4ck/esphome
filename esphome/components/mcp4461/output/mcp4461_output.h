@@ -10,18 +10,16 @@ namespace mcp4461 {
 
 class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Component> {
  public:
-  Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool enable, bool terminal_a, bool terminal_b,
+  Mcp4461Wiper(Mcp4461Component *parent, Mcp4461WiperIdx wiper, bool terminal_a, bool terminal_b,
                bool terminal_w)
       : parent_(parent),
         wiper_(wiper),
-        enable_(enable),
         terminal_a_(terminal_a),
         terminal_b_(terminal_b),
         terminal_w_(terminal_w) {
     uint8_t wiper_idx = static_cast<uint8_t>(wiper);
     if (wiper_idx < 4) {
-      if (!enable) {
-        parent->reg_[wiper_idx].enabled = false;
+      if (!parent->reg_[wiper_idx].enabled) {
         parent->disable_terminal(wiper, 'h');
       }
       if (!terminal_a)
@@ -45,7 +43,6 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
   void write_state(float state) override;
   Mcp4461Component *parent_;
   Mcp4461WiperIdx wiper_;
-  bool enable_;
   uint16_t state_;
   optional<uint16_t> initial_value_;
   bool terminal_a_;
