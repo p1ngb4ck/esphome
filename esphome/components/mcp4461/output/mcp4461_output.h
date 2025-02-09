@@ -30,7 +30,7 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
     }
   }
   uint16_t read_state();
-  uint16_t update_state();
+  void update_state();
   void save_level();
   void enable_wiper();
   void disable_wiper();
