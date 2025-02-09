@@ -53,16 +53,6 @@ enum class Mcp4461EepromLocation : uint8_t {
 
 enum class Mcp4461TerminalIdx : uint8_t { MCP4461_TERMINAL_0 = 0, MCP4461_TERMINAL_1 = 1 };
 
-enum ErrorCode {
-  MCP4461_STATUS_OK = 0,           // CMD completed successfully
-  MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
-  MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
-  MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
-  MCP4461_STATUS_WRITE_PROTECTED,  // The value was read, but the CRC over the payload (valid and data) does not match
-  MCP4461_STATUS_WIPER_LOCKED,     // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
-} error_code_{MCP4461_STATUS_OK};
-
-
 class Mcp4461Wiper;
 
 // Mcp4461Component
@@ -100,6 +90,19 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   uint16_t get_eeprom_value(Mcp4461EepromLocation location);
   bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
   void set_initial_value(Mcp4461WiperIdx wiper, float initial_value);
+
+  enum ErrorCode {
+    MCP4461_STATUS_OK = 0,           // CMD completed successfully
+    MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
+    MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
+    MCP4461_STATUS_REGISTER_ERROR,   // Error fetching status register
+    MCP4461_PARENT_FAILED,           // Parent component failed
+    MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
+    MCP4461_WRITE_PROTECTED,         // The value was read, but the CRC over the payload (valid and data) does not match
+    MCP4461_WIPER_ENABLED,           // The wiper is enabled, discard additional enabling actions
+    MCP4461_WIPER_DISABLED,          // The wiper is disabled - all actions for this wiper will be aborted/discarded
+    MCP4461_WIPER_LOCKED,            // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
+  } error_code_{MCP4461_STATUS_OK};
 
  protected:
   friend class Mcp4461Wiper;
