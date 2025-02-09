@@ -64,7 +64,7 @@ static const LogString *mcp4461_get_message_string_(int status) {
       return LOG_STR("MCP4461 Wiper is disabled. All actions on this wiper are prohibited.");
     case Mcp4461Component::MCP4461_WIPER_LOCKED:
       return LOG_STR("MCP4461 Wiper is locked using WiperLock-technology. All actions on this wiper are prohibited.");
-    case Mcp4461Component:::MCP4461_STATUS_OK:
+    case Mcp4461Component::MCP4461_STATUS_OK:
       return LOG_STR("Status OK");
     default:
       return LOG_STR("Unknown");
