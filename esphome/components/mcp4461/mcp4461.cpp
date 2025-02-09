@@ -312,8 +312,11 @@ void Mcp4461Component::enable_wiper_(Mcp4461WiperIdx wiper) {
     return;
   }
   ESP_LOGV(TAG, "Enabling wiper %" PRIu8, wiper_idx);
-  this->reg_[wiper_idx].terminal_hw = true;
-  this->reg_[wiper_idx].update_level = true;
+  this->reg_[wiper_idx].enabled = true;
+  if (wiper_idx < 4) {
+    this->reg_[wiper_idx].terminal_hw = true;
+    this->reg_[wiper_idx].update_terminal = true;
+  }
 }
 
 void Mcp4461Component::disable_wiper_(Mcp4461WiperIdx wiper) {
@@ -331,8 +334,11 @@ void Mcp4461Component::disable_wiper_(Mcp4461WiperIdx wiper) {
     return;
   }
   ESP_LOGV(TAG, "Disabling wiper %" PRIu8, wiper_idx);
-  this->reg_[wiper_idx].terminal_hw = false;
-  this->reg_[wiper_idx].update_level = true;
+  this->reg_[wiper_idx].enabled = true;
+  if (wiper_idx < 4) {
+    this->reg_[wiper_idx].terminal_hw = true;
+    this->reg_[wiper_idx].update_terminal = true;
+  }
 }
 
 bool Mcp4461Component::increase_wiper_(Mcp4461WiperIdx wiper) {
