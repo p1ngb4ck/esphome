@@ -91,6 +91,18 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   bool set_eeprom_value(Mcp4461EepromLocation location, uint16_t value);
   void set_initial_value(Mcp4461WiperIdx wiper, float initial_value);
 
+  enum ErrorCode {
+    MCP4461_STATUS_OK = 0,           // CMD completed successfully
+    MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
+    MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
+    MCP4461_STATUS_REGISTER_ERROR,
+    MCP4461_PARENT_FAILED,           // Parent component failed
+    MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
+    MCP4461_WRITE_PROTECTED,         // The value was read, but the CRC over the payload (valid and data) does not match
+    MCP4461_WIPER_DISABLED,          // The wiper is disabled - all actions for this wiper will be aborted/discarded
+    MCP4461_WIPER_LOCKED,            // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
+  } error_code_{MCP4461_STATUS_OK};
+
  protected:
   friend class Mcp4461Wiper;
   void set_write_protection_status_();
@@ -111,17 +123,6 @@ class Mcp4461Component : public Component, public i2c::I2CDevice {
   bool wiper_1_disabled_{false};
   bool wiper_2_disabled_{false};
   bool wiper_3_disabled_{false};
-
-  enum ErrorCode {
-    MCP4461_STATUS_OK = 0,           // CMD completed successfully
-    MCP4461_STATUS_I2C_ERROR,        // Unable to communicate with device
-    MCP4461_STATUS_REGISTER_INVALID, // Status register value was invalid
-    MCP4461_PARENT_FAILED,           // Parent component failed
-    MCP4461_VALUE_INVALID,           // Invalid value given for wiper / eeprom
-    MCP4461_WRITE_PROTECTED,         // The value was read, but the CRC over the payload (valid and data) does not match
-    MCP4461_WIPER_DISABLED,          // The wiper is disabled - all actions for this wiper will be aborted/discarded
-    MCP4461_WIPER_LOCKED,            // The wiper is locked using WiperLock-technology - all actions for this wiper will be aborted/discarded
-  } error_code_{MCP4461_STATUS_OK};
 };
 }  // namespace mcp4461
 }  // namespace esphome
