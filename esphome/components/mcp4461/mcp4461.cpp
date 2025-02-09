@@ -130,22 +130,17 @@ void Mcp4461Component::loop() {
     }
     this->reg_[i].update_level = false;
     if (this->reg_[i].update_terminal) {
-      // terminal register changes only applicable to wipers 0-3 !
-      if (i < 4) {
-        // set terminal register changes
-        if (i == 0 || i == 2) {
-          Mcp4461TerminalIdx terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_0;
-          if (i > 0) {
-            terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_1;
-          }
-          uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
-          if (new_terminal_value != this->get_terminal_register_(terminal_connector)) {
-            ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector),
-                     new_terminal_value);
-            this->set_terminal_register_(terminal_connector, new_terminal_value);
-          }
-        }
+      // set terminal register changes
+      if (i < 2) {
+        Mcp4461TerminalIdx terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_0;
       }
+      if (i > 1) {
+        terminal_connector = Mcp4461TerminalIdx::MCP4461_TERMINAL_1;
+      }
+      uint8_t new_terminal_value = this->calc_terminal_connector_byte_(terminal_connector);
+      ESP_LOGV(TAG, "updating terminal %" PRIu8 " to new value %" PRIu8, static_cast<uint8_t>(terminal_connector),
+               new_terminal_value);
+      this->set_terminal_register_(terminal_connector, new_terminal_value);
     }
     this->reg_[i].update_terminal = false;
   }
@@ -505,6 +500,7 @@ void Mcp4461Component::enable_terminal_(Mcp4461WiperIdx wiper, char terminal) {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (wiper_idx > 3) {
+    ESP_LOGV(TAG, "Cannot enable/disable terminals of nonvolatile wiper %" PRIu8 "", terminal, wiper_idx);
     return;
   }
   ESP_LOGV(TAG, "Enabling terminal %c of wiper %" PRIu8 "", terminal, wiper_idx);
@@ -535,6 +531,7 @@ void Mcp4461Component::disable_terminal_(Mcp4461WiperIdx wiper, char terminal) {
   }
   uint8_t wiper_idx = static_cast<uint8_t>(wiper);
   if (wiper_idx > 3) {
+    ESP_LOGV(TAG, "Cannot enable/disable terminals of nonvolatile wiper %" PRIu8 "", terminal, wiper_idx);
     return;
   }
   ESP_LOGV(TAG, "Disabling terminal %c of wiper %" PRIu8 "", terminal, wiper_idx);
