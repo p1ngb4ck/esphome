@@ -15,20 +15,18 @@ void Mcp4461Wiper::write_state(float state) {
   }
 }
 
-float Mcp4461Wiper::read_state() { return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 1000.0); }
+float Mcp4461Wiper::read_state() {
+  return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 1000.0);
+}
 
 float Mcp4461Wiper::update_state() {
   this->state_ = this->read_state();
   return this->state_;
 }
 
-void Mcp4461Wiper::enable_wiper() {
-  this->parent_->enable_wiper_(this->wiper_);
-}
+void Mcp4461Wiper::enable_wiper() { this->parent_->enable_wiper_(this->wiper_); }
 
-void Mcp4461Wiper::disable_wiper() {
-  this->parent_->disable_wiper_(this->wiper_);
-}
+void Mcp4461Wiper::disable_wiper() { this->parent_->disable_wiper_(this->wiper_); }
 
 void Mcp4461Wiper::increase_wiper() {
   if (this->parent_->increase_wiper_(this->wiper_)) {
@@ -42,13 +40,9 @@ void Mcp4461Wiper::decrease_wiper() {
   }
 }
 
-void Mcp4461Wiper::enable_terminal(char terminal) {
-  this->parent_->enable_terminal_(this->wiper_, terminal);
-}
+void Mcp4461Wiper::enable_terminal(char terminal) { this->parent_->enable_terminal_(this->wiper_, terminal); }
 
-void Mcp4461Wiper::disable_terminal(char terminal) {
-  this->parent_->disable_terminal_(this->wiper_, terminal);
-}
+void Mcp4461Wiper::disable_terminal(char terminal) { this->parent_->disable_terminal_(this->wiper_, terminal); }
 
 }  // namespace mcp4461
 }  // namespace esphome
