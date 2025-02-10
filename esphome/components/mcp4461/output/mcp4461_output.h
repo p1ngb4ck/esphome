@@ -14,8 +14,6 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
 
   float read_state();
   float update_state();
-  void enable_wiper();
-  void disable_wiper();
   void increase_wiper();
   void decrease_wiper();
   void enable_terminal(char terminal);
@@ -23,6 +21,8 @@ class Mcp4461Wiper : public output::FloatOutput, public Parented<Mcp4461Componen
 
  protected:
   void write_state(float state) override;
+  void turn_on() override;
+  void turn_off() override;
   Mcp4461Component *parent_;
   Mcp4461WiperIdx wiper_;
   float state_;
