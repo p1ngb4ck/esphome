@@ -24,6 +24,11 @@ float Mcp4461Wiper::update_state() {
   return this->state_;
 }
 
+bool Mcp4461Wiper::set_state() {
+  if (state) { this->turn_on(); }
+  else { this->turn_off(); }
+}
+
 void Mcp4461Wiper::turn_on() { this->parent_->enable_wiper_(this->wiper_); }
 
 void Mcp4461Wiper::turn_off() { this->parent_->disable_wiper_(this->wiper_); }
