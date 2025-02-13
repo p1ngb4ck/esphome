@@ -459,6 +459,27 @@ display:
     reset_pin:
       allow_other_uses: true
       number: ${reset_pin}
+    full_update_every: 30
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+
+  - platform: waveshare_epaper
+    id: epd_gdew042t81
+    model: gdey042t81
+    spi_id: spi_waveshare_epaper
+    cs_pin:
+      allow_other_uses: true
+      number: ${cs_pin}
+    dc_pin:
+      allow_other_uses: true
+      number: ${dc_pin}
+    busy_pin:
+      allow_other_uses: true
+      number: ${busy_pin}
+    reset_pin:
+      allow_other_uses: true
+      number: ${reset_pin}
+    full_update_every: 30
     lambda: |-
       it.rectangle(0, 0, it.get_width(), it.get_height());
 
@@ -485,6 +506,25 @@ display:
   - platform: waveshare_epaper
     id: epd_4_20bv2
     model: 4.20in-bv2
+    spi_id: spi_waveshare_epaper
+    cs_pin:
+      allow_other_uses: true
+      number: ${cs_pin}
+    dc_pin:
+      allow_other_uses: true
+      number: ${dc_pin}
+    busy_pin:
+      allow_other_uses: true
+      number: ${busy_pin}
+    reset_pin:
+      allow_other_uses: true
+      number: ${reset_pin}
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+
+  - platform: waveshare_epaper
+    id: epd_4_20in_bv2_bwr
+    model: 4.20in-bv2-bwr
     spi_id: spi_waveshare_epaper
     cs_pin:
       allow_other_uses: true
@@ -675,6 +715,26 @@ display:
       it.rectangle(0, 0, it.get_width(), it.get_height());
 
   - platform: waveshare_epaper
+    id: epd_7_50inv2p
+    model: 7.50inv2p
+    spi_id: spi_waveshare_epaper
+    cs_pin:
+      allow_other_uses: true
+      number: ${cs_pin}
+    dc_pin:
+      allow_other_uses: true
+      number: ${dc_pin}
+    busy_pin:
+      allow_other_uses: true
+      number: ${busy_pin}
+    reset_pin:
+      allow_other_uses: true
+      number: ${reset_pin}
+    full_update_every: 30
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+
+  - platform: waveshare_epaper
     id: epd_7_50hdb
     model: 7.50in-hd-b
     spi_id: spi_waveshare_epaper
@@ -710,6 +770,25 @@ display:
     reset_pin:
       allow_other_uses: true
       number: ${reset_pin}
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+
+  - platform: waveshare_epaper
+    model: 2.90in-d
+    spi_id: spi_waveshare_epaper
+    cs_pin:
+      allow_other_uses: true
+      number: ${cs_pin}
+    dc_pin:
+      allow_other_uses: true
+      number: ${dc_pin}
+    busy_pin:
+      allow_other_uses: true
+      number: ${busy_pin}
+    reset_pin:
+      allow_other_uses: true
+      number: ${reset_pin}
+    reset_duration: 200ms
     lambda: |-
       it.rectangle(0, 0, it.get_width(), it.get_height());
 
