@@ -64,33 +64,34 @@ void OnlineImage::release() {
   }
 }
 
-bool OnlineImage::resize_(int width_in, int height_in) {
+size_t OnlineImage::resize_(int width_in, int height_in) {
   int width = this->fixed_width_;
   int height = this->fixed_height_;
-  if (this->auto_resize_()) {
+  if (this->is_auto_resize_()) {
     width = width_in;
     height = height_in;
     if (this->width_ != width && this->height_ != height) {
       this->release();
     }
   }
-  if (this->buffer_) {
-    return false;
-  }
   size_t new_size = this->get_buffer_size_(width, height);
+  if (this->buffer_) {
+    // Buffer already allocated => no need to resize
+    return new_size;
+  }
   ESP_LOGD(TAG, "Allocating new buffer of %zu bytes", new_size);
   this->buffer_ = this->allocator_.allocate(new_size);
   if (this->buffer_ == nullptr) {
     ESP_LOGE(TAG, "allocation of %zu bytes failed. Biggest block in heap: %zu Bytes", new_size,
              this->allocator_.get_max_free_block_size());
     this->end_connection_();
-    return false;
+    return 0;
   }
   this->buffer_width_ = width;
   this->buffer_height_ = height;
   this->width_ = width;
   ESP_LOGV(TAG, "New size: (%d, %d)", width, height);
-  return true;
+  return new_size;
 }
 
 void OnlineImage::update() {
@@ -124,7 +125,7 @@ void OnlineImage::update() {
     default:
       accept_mime_type = "image/*";
   }
-  accept_header.value = (accept_mime_type + ",*/*;q=0.8").c_str();
+  accept_header.value = accept_mime_type + ",*/*;q=0.8";
 
   headers.push_back(accept_header);
 
@@ -178,7 +179,12 @@ void OnlineImage::update() {
     this->download_error_callback_.call();
     return;
   }
-  this->decoder_->prepare(total_size);
+  auto prepare_result = this->decoder_->prepare(total_size);
+  if (prepare_result < 0) {
+    this->end_connection_();
+    this->download_error_callback_.call();
+    return;
+  }
   ESP_LOGI(TAG, "Downloading image (Size: %d)", total_size);
   this->start_time_ = ::time(nullptr);
 }
