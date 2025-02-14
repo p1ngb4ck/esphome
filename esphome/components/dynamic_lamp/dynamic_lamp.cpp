@@ -9,8 +9,6 @@ static const char *TAG = "dynamic_lamp";
 void DynamicLamp::setup() {
   uint8_t i = 0;
   bool valid = true;
-  this->save_mode_ = SAVE_MODE_NONE; //Currently only none & fram supported
-
   if(this->save_mode_ == 0) {
    for (i=0; i < 16; i++) {
      this->active_lamps_[i].active = false;
@@ -38,6 +36,10 @@ void DynamicLamp::dump_config(){
       ESP_LOGCONFIG(TAG, "Currently only NONE(0) && FRAM(1) save modes supported, ignoring value %" PRIu8 " and defaulting to NONE!", this->save_mode_);
       this->save_mode_ = 0;
   }
+}
+
+void DynamicLamp::set_save_mode(uint8_t save_mode) {
+  this->save_mode_ = save_mode;
 }
 
 void DynamicLamp::set_lamp_count(uint8_t lamp_count) {

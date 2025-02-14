@@ -36,6 +36,7 @@ class DynamicLamp : public Component {
   void loop() override;
   void dump_config() override;
   void set_lamp_count(uint8_t lamp_count);
+  void set_save_mode(uint8_t save_mode);
 
  protected:
   void restore_lamp_values_(uint8_t lamp_number);
