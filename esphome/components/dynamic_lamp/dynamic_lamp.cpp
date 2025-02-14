@@ -6,6 +6,11 @@
 #include <string_view>
 #include <vector>
 #include <array>
+#include <list>
+#include <optional>
+#include <algorithm>
+#include <cinttypes>
+
 namespace esphome {
 namespace dynamic_lamp {
 
@@ -88,8 +93,9 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::set_available_outputs(std::string output_list) {
+void DynamicLamp::set_available_outputs(std::list<FloatOutput> output_list) {
   uint8_t counter = 0;
+  /*
   std::vector<std::string> v;
  
   char * token = strtok (&output_list[0],",");
@@ -103,6 +109,17 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
     this->available_outputs_[counter] = LinkedOutput{
       true,
       static_cast<std::string>(this->trim_(s)),
+      counter,
+      0, 0, 1.0, false
+    };
+    counter++;
+  }
+  */
+  std::list<FloatOutput>::iterator output_it;
+  for (output_it = data.begin(); output_it != data.end(); ++output_it){
+    this->available_outputs_[counter] = LinkedOutput{
+      true,
+      static_cast<std::string>(this->trim_(output_it.id)),
       counter,
       0, 0, 1.0, false
     };
