@@ -94,7 +94,7 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   for ( std::string s : v )
   {
     std::string id_string;
-    id_string = this->trim_(s.c_str());
+    id_string = static_cast<std::string>(this->trim_(s.c_str()));
     this->available_outputs_[counter] = id_string;
     counter++;
   }
