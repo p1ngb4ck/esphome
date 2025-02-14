@@ -3,7 +3,7 @@
 #include "dynamic_lamp.h"
 #include <string>
 #include <cstring>
-#include <stringview>
+#include <string_view>
 #include <vector>
 
 namespace esphome {
