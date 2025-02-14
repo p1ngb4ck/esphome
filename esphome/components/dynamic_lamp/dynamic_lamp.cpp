@@ -105,7 +105,7 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   }
 }
 
-void add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
+void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
   this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
 }
 
