@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include <boost/algorithm/string/trim.hpp>
 
 namespace esphome {
 namespace dynamic_lamp {
