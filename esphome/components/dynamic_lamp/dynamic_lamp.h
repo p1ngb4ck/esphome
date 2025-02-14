@@ -20,6 +20,7 @@ enum LinkedOutputModeIdx : uint8_t {
 struct LinkedOutput {
   bool active = false;
   std::string output_id;
+  uint8_t output_index;
   uint8_t mode = 0;
   optional<float> min_value;
   optional<float> max_value;

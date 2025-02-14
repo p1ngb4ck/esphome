@@ -100,15 +100,13 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   {
     std::string id_string;
     id_string = static_cast<std::string>(this->trim_(s.c_str()));
-    this->available_outputs_[counter] = static_cast<LinkedOutput>({true, id_string, 0, 0, 1.0, false});
+    this->available_outputs_[counter] = static_cast<LinkedOutput>({true, id_string, counter, 0, 0, 1.0, false});
     counter++;
   }
 }
 
 void add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
-  uint8_t output_index;
-  output_index = this->index_of_(this->available_outputs_, this->available_outputs_ + 16, output);
-  this->active_lamps_[lamp_number].used_outputs[output_index] = true;
+  this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
 }
 
 void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {
@@ -117,15 +115,6 @@ void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t se
 
 void DynamicLamp::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
-}
-
-template <typename Iter>
-size_t DynamicLamp::index_of_(Iter first, Iter last, typename const std::iterator_traits<Iter>::value_type& x)
-{
-    size_t i = 0;
-    while (first != last && *first != x)
-      ++first, ++i;
-    return i;
 }
 
 std::string_view DynamicLamp::ltrim_(std::string_view str)
