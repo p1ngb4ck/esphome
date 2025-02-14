@@ -5,8 +5,7 @@
 #include <cstring>
 #include <string_view>
 #include <vector>
-#include "main.h"
-
+#include <array>
 namespace esphome {
 namespace dynamic_lamp {
 
