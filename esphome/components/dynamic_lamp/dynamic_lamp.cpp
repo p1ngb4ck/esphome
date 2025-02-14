@@ -93,7 +93,7 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::set_available_outputs(std::list<FloatOutput> output_list) {
+void DynamicLamp::set_available_outputs(std::list<*FloatOutput> output_list) {
   uint8_t counter = 0;
   /*
   std::vector<std::string> v;
@@ -115,7 +115,7 @@ void DynamicLamp::set_available_outputs(std::list<FloatOutput> output_list) {
     counter++;
   }
   */
-  std::list<FloatOutput>::iterator output_it;
+  std::list<*FloatOutput>::iterator output_it;
   for (output_it = data.begin(); output_it != data.end(); ++output_it){
     this->available_outputs_[counter] = LinkedOutput{
       true,

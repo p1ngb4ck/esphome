@@ -38,7 +38,7 @@ class DynamicLamp : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  void set_available_outputs(std::list output_list);
+  void set_available_outputs(std::list<*FloatOutput> output_list);
   void set_save_mode(uint8_t save_mode);
 
  protected:
