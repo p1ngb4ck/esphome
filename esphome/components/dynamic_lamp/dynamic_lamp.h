@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include <list>
 
 namespace esphome {
 namespace dynamic_lamp {
@@ -19,7 +20,7 @@ enum LinkedOutputModeIdx : uint8_t {
 
 struct LinkedOutput {
   bool active = false;
-  char* output_id = "";
+  std::string output_id = "";
   uint8_t mode = 0;
   optional<float> min_value;
   optional<float> max_value;
