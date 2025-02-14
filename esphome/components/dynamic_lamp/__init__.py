@@ -1,6 +1,8 @@
+import voluptuous as vol
+
 import esphome.codegen as cg  # noqa: I001
-import esphome.config_validation as cv
 from esphome.components import output
+import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
 dynamic_lamp_ns = cg.esphome_ns.namespace('dynamic_lamp')
@@ -10,7 +12,7 @@ CONF_SAVE_MODE = 'save_mode'
 CONF_AVAILABLE_OUTPUTS = 'available_outputs'
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(DynamicLamp),
-    cv.Required(CONF_AVAILABLE_OUTPUTS): cv.All(cv.ensure_list, [cv.use_id(output.FloatOutput)]),
+    cv.Required(CONF_AVAILABLE_OUTPUTS): vol.All(cv.ensure_list, [cv.use_id(output.FloatOutput)]),
     cv.Optional(CONF_SAVE_MODE, default=0): cv.int_range(0, 1),
 }).extend(cv.COMPONENT_SCHEMA)
 
