@@ -126,8 +126,8 @@ uint8_t DynamicLamp::add_lamp() {
 
 void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
   this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
-  uint16_t output_level = id(output.output_id).state;
-  ESP_LOGV(TAG, "Added output %s with state %" PRIu16 " to lamp %" PRIu8 "", output.output_id.c_str(), output_level, lamp_number);
+  float output_level = id(output.output_id).state;
+  ESP_LOGV(TAG, "Added output %s with state %f to lamp %" PRIu8 "", output.output_id.c_str(), output_level, lamp_number);
 }
 
 std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
