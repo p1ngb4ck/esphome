@@ -89,6 +89,8 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   }
   for ( std::string s : v )
   {
+    std::string id_string;
+    id_string = std::regex_replace(s, std::regex("^ +| +$|( ) +"), "$1");
     this->available_outputs_[counter] = s.c_str();
     counter++;
   }
