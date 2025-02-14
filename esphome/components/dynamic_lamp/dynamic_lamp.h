@@ -1,8 +1,6 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "esphome/components/output/float_output.h"
-#include "esphome/main.h"
 
 namespace esphome {
 namespace dynamic_lamp {
