@@ -77,13 +77,21 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::set_available_outputs(std::list<std::string> output_list) {
-  uint8_t i = 0;
-  for (std::list<std::string>::iterator it = output_list.begin(); it != output_list.end(); ++it) {
-    this->available_outputs_[i] = *it;
-    i++;
+void DynamicLamp::set_available_outputs(std::string output_list) {
+  int counter = 0; 
+  std::vector<std::string> v;
+ 
+  char * token = strtok (&output_list[0],",");
+  while (token != NULL)
+  {
+    v.push_back(token);
+    token = strtok (NULL, ",");
   }
-    
+  for ( std::string s : v )
+  {
+    this->available_outputs_[counter] = s.c_str();
+    counter++;
+  }
 }
 void DynamicLamp::set_lamp_count(uint8_t lamp_count) {
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include <list>
 
 namespace esphome {
 namespace dynamic_lamp {
@@ -38,7 +37,7 @@ class DynamicLamp : public Component {
   void loop() override;
   void dump_config() override;
   void set_lamp_count(uint8_t lamp_count);
-  void set_available_outputs(std::list<std::string> output_list);
+  void set_available_outputs(std::string output_list);
   void set_save_mode(uint8_t save_mode);
 
  protected:
