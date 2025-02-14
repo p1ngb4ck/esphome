@@ -1,7 +1,10 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "dynamic_lamp.h"
-#include <regex>
+#include <string>
+#include <cstring>
+#include <stringview>
+#include <vector>
 
 namespace esphome {
 namespace dynamic_lamp {
@@ -91,7 +94,7 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   for ( std::string s : v )
   {
     std::string id_string;
-    id_string = boost::algorithm::trim(s.c_str());
+    id_string = this->trim_(s.c_str());
     this->available_outputs_[counter] = id_string;
     counter++;
   }
@@ -106,6 +109,27 @@ void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t se
 
 void DynamicLamp::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
+}
+
+std::string_view DynamicLamp::ltrim_(std::string_view str)
+{
+    const auto pos(str.find_first_not_of(" \t\n\r\f\v"));
+    str.remove_prefix(std::min(pos, str.length()));
+    return str;
+}
+
+std::string_view DynamicLamp::rtrim_(std::string_view str)
+{
+    const auto pos(str.find_last_not_of(" \t\n\r\f\v"));
+    str.remove_suffix(std::min(str.length() - pos - 1, str.length()));
+    return str;
+}
+
+std::string_view DynamicLamp::trim_(std::string_view str)
+{
+    str = ltrim(str);
+    str = rtrim(str);
+    return str;
 }
 
 }  // namespace dynamic_lamp

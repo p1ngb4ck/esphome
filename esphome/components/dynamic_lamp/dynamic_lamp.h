@@ -1,7 +1,6 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include <boost/algorithm/string/trim.hpp>
 
 namespace esphome {
 namespace dynamic_lamp {
@@ -44,6 +43,9 @@ class DynamicLamp : public Component {
  protected:
   void restore_lamp_values_(uint8_t lamp_number);
   void set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value);
+  std::stringview ltrim_(std::string_view str);
+  std::string_view rtrim_(std::string_view str);
+  std::string_view trim_(std::string_view str);
 
   CombinedLamp active_lamps_[16];
   std::string available_outputs_[16] = { "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
