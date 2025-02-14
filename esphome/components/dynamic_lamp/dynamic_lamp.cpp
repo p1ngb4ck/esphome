@@ -127,8 +127,8 @@ std::string_view DynamicLamp::rtrim_(std::string_view str)
 
 std::string_view DynamicLamp::trim_(std::string_view str)
 {
-    str = ltrim(str);
-    str = rtrim(str);
+    str = this->ltrim_(str);
+    str = this->rtrim_(str);
     return str;
 }
 
