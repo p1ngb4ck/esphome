@@ -28,7 +28,7 @@ struct LinkedOutput {
 
 struct CombinedLamp {
   bool active = false;
-  bool[16] used_outputs;
+  bool used_outputs[16];
 };
 
 class DynamicLamp : public Component {
