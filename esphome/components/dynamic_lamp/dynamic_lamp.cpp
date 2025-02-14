@@ -89,7 +89,7 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
 }
 
 void DynamicLamp::set_available_outputs(std::string output_list) {
-  int counter = 0; 
+  uint8_t counter = 0;
   std::vector<std::string> v;
  
   char * token = strtok (&output_list[0],",");
@@ -126,7 +126,7 @@ void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
 std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
   std::array<bool, 16> bool_array;
   for (uint8_t i = 0; i < 16; i++) {
-        bool_array[i] = this->active_lamps[lamp_number].used_outputs[i];  
+        bool_array[i] = this->active_lamps_[lamp_number].used_outputs[i];  
   }
   return bool_array;
 }
