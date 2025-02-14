@@ -23,6 +23,11 @@ void DynamicLamp::setup() {
       this->restore_lamp_values_(i);
     }
   }
+  // for testing only
+  this->add_lamp_output_(0, this->available_outputs_[0]);
+  this->add_lamp_output_(0, this->available_outputs_[1]);
+  this->add_lamp_output_(0, this->available_outputs_[2]);
+  this->add_lamp_output_(0, this->available_outputs_[3]);
 }
 
 void DynamicLamp::loop() {
@@ -100,12 +105,27 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   }
 }
 
+void add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
+  uint8_t output_index;
+  output_index = this->index_of_(this->available_outputs_, this->available_outputs_ + 16, output);
+  this->active_lamps_[lamp_number].used_outputs[output_index] = true;
+}
+
 void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {
 
 }
 
 void DynamicLamp::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
+}
+
+template <typename Iter>
+size_t DynamicLamp::index_of_(Iter first, Iter last, typename const std::iterator_traits<Iter>::value_type& x)
+{
+    size_t i = 0;
+    while (first != last && *first != x)
+      ++first, ++i;
+    return i;
 }
 
 std::string_view DynamicLamp::ltrim_(std::string_view str)

@@ -28,6 +28,7 @@ struct LinkedOutput {
 
 struct CombinedLamp {
   bool active = false;
+  bool[16] used_outputs;
 };
 
 class DynamicLamp : public Component {
@@ -39,8 +40,11 @@ class DynamicLamp : public Component {
   void set_save_mode(uint8_t save_mode);
 
  protected:
+  int[16] get_lamp_outputs_(uint8_t lamp_number);
+  void add_lamp_output_(uint8_t lamp_number, LinkedOutput output);
   void restore_lamp_values_(uint8_t lamp_number);
   void set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value);
+  size_t index_of_(Iter first, Iter last, typename const std::iterator_traits<Iter>::value_type& x)
   std::string_view ltrim_(std::string_view str);
   std::string_view rtrim_(std::string_view str);
   std::string_view trim_(std::string_view str);
