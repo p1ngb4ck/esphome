@@ -100,7 +100,7 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   }
   for ( std::string s : v )
   {
-    this->available_outputs_[counter] = LinkedOutput{true, static_cast<std::string>(this->trim_(s.c_str())), counter, 0, 0, 1.0, false};
+    this->available_outputs_[counter] = LinkedOutput{true, static_cast<std::string>(this->trim_(s)), counter, 0, 0, 1.0, false};
     counter++;
   }
 }
