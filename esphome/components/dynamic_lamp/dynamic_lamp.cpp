@@ -117,7 +117,8 @@ uint8_t DynamicLamp::add_lamp() {
     }
     i++;
   }
-  this->call_error("No more lamps available");
+  this->mark_failed();
+  return 0;
 }
 
 void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
