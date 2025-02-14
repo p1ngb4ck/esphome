@@ -123,8 +123,12 @@ void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
   this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
 }
 
-bool[16] DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
-  return this->active_lamps_[lamp_number].used_outputs;
+std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
+  std::array<bool, 16> bool_array;
+  for (uint8_t i = 0; i < 16; i++) {
+        bool_array[i] = this->used_outputs[i];  
+  }
+  return bool_array;
 }
 
 void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {
