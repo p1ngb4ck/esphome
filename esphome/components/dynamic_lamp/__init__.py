@@ -1,4 +1,4 @@
-import esphome.codegen as cg  # noqa: I001
+import esphome.codegen as cg
 from esphome.components import output
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
