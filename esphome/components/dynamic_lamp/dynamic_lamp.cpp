@@ -41,7 +41,7 @@ void DynamicLamp::loop() {
         if (this->active_lamps_[i].used_outputs[j]) {
           if (this->available_outputs_[j].update_level) {
             // Update level
-            switch (this->active_lamps_[i].used_outputs[j].mode) {
+            switch (this->available_outputs_[j].mode) {
               case MODE_EQUAL:
                 // Equal
                 break;
@@ -102,7 +102,7 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
   {
     std::string id_string;
     id_string = static_cast<std::string>(this->trim_(s.c_str()));
-    this->available_outputs_[counter] = static_cast<LinkedOutput>({true, id_string, counter, 0, 0, 1.0, false});
+    this->available_outputs_[counter] = LinkedOutput{true, id_string.c_str(), counter, 0, 0, 1.0, false};
     counter++;
   }
 }
@@ -126,7 +126,7 @@ void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
 std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
   std::array<bool, 16> bool_array;
   for (uint8_t i = 0; i < 16; i++) {
-        bool_array[i] = this->used_outputs[i];  
+        bool_array[i] = this->active_lamps[lamp_number].used_outputs[i];  
   }
   return bool_array;
 }
