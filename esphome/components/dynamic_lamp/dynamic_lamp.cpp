@@ -1,6 +1,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "dynamic_lamp.h"
+#include <regex>
 
 namespace esphome {
 namespace dynamic_lamp {
