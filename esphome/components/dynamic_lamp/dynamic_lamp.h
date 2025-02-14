@@ -41,6 +41,7 @@ class DynamicLamp : public Component {
   void set_save_mode(uint8_t save_mode);
 
  protected:
+  uint8_t add_lamp();
   bool[16] get_lamp_outputs_(uint8_t lamp_number);
   void add_lamp_output_(uint8_t lamp_number, LinkedOutput output);
   void restore_lamp_values_(uint8_t lamp_number);
@@ -52,6 +53,7 @@ class DynamicLamp : public Component {
   CombinedLamp active_lamps_[16];
   LinkedOutput available_outputs_[16];
   uint8_t save_mode_;
+  uint8_t lamp_count_ = 0;
 };
 
 

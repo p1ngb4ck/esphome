@@ -24,10 +24,12 @@ void DynamicLamp::setup() {
     }
   }
   // for testing only
-  this->add_lamp_output_(0, this->available_outputs_[0]);
-  this->add_lamp_output_(0, this->available_outputs_[1]);
-  this->add_lamp_output_(0, this->available_outputs_[2]);
-  this->add_lamp_output_(0, this->available_outputs_[3]);
+  uint8_t first_lamp;
+  first_lamp = this->add_lamp();
+  this->add_lamp_output_(first_lamp, this->available_outputs_[0]);
+  this->add_lamp_output_(first_lamp, this->available_outputs_[1]);
+  this->add_lamp_output_(first_lamp, this->available_outputs_[2]);
+  this->add_lamp_output_(first_lamp, this->available_outputs_[3]);
 }
 
 void DynamicLamp::loop() {
@@ -36,8 +38,8 @@ void DynamicLamp::loop() {
     if (this->active_lamps_[i].active) {
       uint8_t j = 0;
       for (j = 0; j < 16; j++) {
-        if (this->active_lamps_[i].used_outputs[j].active) {
-          if (this->active_lamps_[i].used_outputs[j].update_level) {
+        if (this->active_lamps_[i].used_outputs[j]) {
+          if (this->available_outputs_[j].update_level) {
             // Update level
             switch (this->active_lamps_[i].used_outputs[j].mode) {
               case MODE_EQUAL:
@@ -102,6 +104,18 @@ void DynamicLamp::set_available_outputs(std::string output_list) {
     id_string = static_cast<std::string>(this->trim_(s.c_str()));
     this->available_outputs_[counter] = static_cast<LinkedOutput>({true, id_string, counter, 0, 0, 1.0, false});
     counter++;
+  }
+}
+
+uint8_t DynamicLamp::add_lamp() {
+  uint8_t i = 0;
+  while (i < 16) {
+    if (!this->active_lamps_[i].active) {
+      this->active_lamps_[i].active = true;
+      this->lamp_count_++;
+      return i;
+    }
+    i++;
   }
 }
 
