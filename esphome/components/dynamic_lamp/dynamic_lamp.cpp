@@ -29,6 +29,7 @@ void DynamicLamp::dump_config(){
   switch(this->save_mode_) {
     case SAVE_MODE_NONE:
       ESP_LOGCONFIG(TAG, "Save mode set to NONE");
+      break;
     case SAVE_MODE_FRAM:
       ESP_LOGCONFIG(TAG, "Save mode set to FRAM");
       break;
