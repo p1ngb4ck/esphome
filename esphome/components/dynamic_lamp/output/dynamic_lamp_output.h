@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../dynamic_lamp.h"
-#include "esphome/components/light/light_output.h"
 
 namespace esphome {
 namespace dynamic_lamp {
