@@ -7,11 +7,13 @@ namespace dynamic_lamp {
 
 static const char *const TAG = "dynamic_lamp.output";
 
-void DynamicLamp::write_state(float state) {
-  if (this->parent_->write_state_(this->lamp_, state)) {
-    this->state_ = state;
+void DynamicLamp::write_state(light::LightState *state) override {
+    float bright;
+    state->current_values_as_brightness(&bright);
+    if (this->parent_->write_state_(this->lamp_, bright)) {
+      this->state_ = state;
+    }
   }
-}
 
 }  // namespace dynamic_lamp
 }  // namespace esphome

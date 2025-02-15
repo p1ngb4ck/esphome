@@ -97,11 +97,14 @@ void DynamicLampComponent::dump_config() {
     case SAVE_MODE_NONE:
       ESP_LOGCONFIG(TAG, "Save mode set to NONE");
       break;
+    case SAVE_MODE_LOCAL:
+      ESP_LOGCONFIG(TAG, "Save mode set to LOCAL");
+      break;
     case SAVE_MODE_FRAM:
       ESP_LOGCONFIG(TAG, "Save mode set to FRAM");
       break;
     default:
-      ESP_LOGCONFIG(TAG, "Currently only NONE(0) && FRAM(1) save modes supported, ignoring value %" PRIu8 " and defaulting to NONE!", this->save_mode_);
+      ESP_LOGCONFIG(TAG, "Currently only NONE(0), LOCAL(1) & FRAM(2) save modes supported, ignoring value %" PRIu8 " and defaulting to NONE!", this->save_mode_);
       this->save_mode_ = 0;
   }
   for (uint8_t i = 0; i < 16; i++) {

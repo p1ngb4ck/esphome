@@ -8,7 +8,8 @@ namespace dynamic_lamp {
 
 enum SupportedSaveModes : uint8_t {
   SAVE_MODE_NONE = 0,
-  SAVE_MODE_FRAM = 1
+  SAVE_MODE_LOCAL = 1,
+  SAVE_MODE_FRAM = 2
 };
 
 enum LinkedOutputModeIdx : uint8_t {
