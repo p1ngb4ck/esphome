@@ -5,7 +5,7 @@
 #include "esphome/components/output/float_output.h"
 
 namespace esphome {
-namespace dnamic_lamp {
+namespace dynamic_lamp {
 
 class DynamicLamp : public output::FloatOutput, public Parented<DynamicLampComponent> {
  public:
