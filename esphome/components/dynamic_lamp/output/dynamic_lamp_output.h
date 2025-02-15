@@ -7,7 +7,7 @@ namespace dynamic_lamp {
 
 class DynamicLamp : public output::FloatOutput, public Parented<DynamicLampComponent> {
  public:
- DynamicLamp(DynamicLampComponent *parent, DynamicLamp lamp) : parent_(parent), lamp_(lamp) {}
+ DynamicLamp(DynamicLampComponent *parent, DynamicLampIdx lamp) : parent_(parent), lamp_(lamp) {}
 
  protected:
   void write_state(float state) override;
