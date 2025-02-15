@@ -4,7 +4,7 @@ namespace esphome {
 namespace dynamic_lamp {
 
 void DynamicLamp::write_state(float state) {
-  if (this->parent_->active_lamps_[this->lamp_].set_level(state))
+  if (this->parent_->write_state_(this->lamp_, state))
   {
     this->state_ = state;
   }
