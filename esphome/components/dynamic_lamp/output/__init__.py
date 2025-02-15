@@ -1,7 +1,8 @@
-import esphome.codegen as cg  # noqa: I001
+import esphome.codegen as cg
 from esphome.components import output
 import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID
+
 from .. import CONF_DYNAMIC_LAMP_ID, DynamicLampComponent, dynamic_lamp_ns
 
 DEPENDENCIES = ["dynamic_lamp"]
