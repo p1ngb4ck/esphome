@@ -5,7 +5,7 @@
 #include "esphome/components/light/light_output.h"
 
 namespace esphome {
-namespace dynamic_lamp_component {
+namespace dynamic_lamp {
 
 enum SupportedSaveModes : uint8_t {
   SAVE_MODE_NONE = 0,
@@ -93,5 +93,5 @@ class DynamicLampComponent : public Component {
 };
 
 
-}  // namespace dynamic_lamp_component
+}  // namespace dynamic_lamp
 }  // namespace esphome

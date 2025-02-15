@@ -1,7 +1,7 @@
 #include "dynamic_lamp_output.h"
 
 namespace esphome {
-namespace dynamic_monochromatic_light {
+namespace dynamic_lamp {
 
 void DynamicLamp::write_state(light::LightState *state) override {
     float bright;
@@ -11,5 +11,5 @@ void DynamicLamp::write_state(light::LightState *state) override {
     }
   }
 
-}  // namespace dynamic_monochromatic_light
+}  // namespace dynamic_lamp
 }  // namespace esphome

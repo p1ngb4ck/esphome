@@ -12,7 +12,7 @@
 #include <cinttypes>
 
 namespace esphome {
-namespace dynamic_lamp_component {
+namespace dynamic_lamp {
 
 static const char *TAG = "dynamic_lamp";
 
@@ -237,5 +237,5 @@ void DynamicLampComponent::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
 }
 
-}  // namespace dynamic_lamp_component
+}  // namespace dynamic_lamp
 }  // namespace esphome
