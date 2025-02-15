@@ -49,34 +49,31 @@ void DynamicLampComponent::loop() {
       for (j = 0; j < 16; j++) {
         if (this->active_lamps_[i].used_outputs[j]) {
           // Update level
+          float new_state;
+          new_state = this->active_lamps_[i].state_;
           switch (this->available_outputs_[j].mode) {
-            float new_state = this->active_lamps_[i].state_;
             case MODE_EQUAL:
-              // Equal
-              if (new_state < this->available_outputs_[j].min_value) {
-                new_state = this->available_outputs_[j].min_value;
+              if (this->available_outputs_[j].min_value && new_state < *this->available_outputs_[j].min_value) {
+                new_state = *this->available_outputs_[j].min_value;
               }
-              else if (new_state > this->available_outputs_[j].max_value) {
-                new_state = this->available_outputs_[j].max_value;
+              else if (this->available_outputs_[j].max_value && new_state > *this->available_outputs_[j].max_value) {
+                new_state = *this->available_outputs_[j].max_value;
               }
               break;
             case MODE_STATIC:
-              // Static
-              new_state = this->available_outputs_[j].mode_value);
+              new_state = this->available_outputs_[j].mode_value;
               break;
             case MODE_PERCENTAGE:
-              // Percent
               new_state = this->active_lamps_[i].state * this->available_outputs_[j].mode_value;
-              if (new_state < this->available_outputs_[j].min_value) {
-                new_state = this->available_outputs_[j].min_value;
+              if (this->available_outputs_[j].min_value && new_state < *this->available_outputs_[j].min_value) {
+                new_state = *this->available_outputs_[j].min_value;
               }
-              else if (new_state > this->available_outputs_[j].max_value) {
-                new_state = this->available_outputs_[j].max_value;
+              else if (this->available_outputs_[j].max_value && new_state > *this->available_outputs_[j].max_value) {
+                new_state = *this->available_outputs_[j].max_value;
               }
               break;
             case MODE_FUNCTION:
               // ToDo - yet to be implemented
-              // Function
               ESP_LOGW(TAG, "Mode %d for output %s is not implemented yet, sorry", this->available_outputs_[j].mode, this->available_outputs_[j].output_id.c_str());
               this->status_set_warning();
               continue;
