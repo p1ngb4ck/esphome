@@ -19,6 +19,6 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     for outputPointer in config.get(config[CONF_AVAILABLE_OUTPUTS]):
-        output_ = yield cg.get_variable(outputPointer)
+        output_ = await cg.get_variable(outputPointer)
         cg.add(var.add_available_output(output_))
     cg.add(var.set_save_mode(config[CONF_SAVE_MODE]))
