@@ -16,11 +16,11 @@ namespace dynamic_lamp {
 
 static const char *TAG = "dynamic_lamp";
 
-void DynamicLamp::setup() {
+void DynamicLampComponent::setup() {
   this->begin();
 }
 
-void DynamicLamp::begin() {
+void DynamicLampComponent::begin() {
   uint8_t i = 0;
   bool valid = true;
   if(this->save_mode_ == 0) {
@@ -41,7 +41,7 @@ void DynamicLamp::begin() {
   */
 }
 
-void DynamicLamp::loop() {
+void DynamicLampComponent::loop() {
   uint8_t i = 0;
   for (i = 0; i < this->lamp_count_; i++) {
     if (this->active_lamps_[i].active) {
@@ -73,7 +73,7 @@ void DynamicLamp::loop() {
   }
 }
 
-void DynamicLamp::dump_config() {
+void DynamicLampComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Dynamic Lamp feature loaded");
   switch(this->save_mode_) {
     case SAVE_MODE_NONE:
@@ -93,11 +93,11 @@ void DynamicLamp::dump_config() {
   }
 }
 
-void DynamicLamp::set_save_mode(uint8_t save_mode) {
+void DynamicLampComponent::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::add_available_output(output::FloatOutput * output, std::string output_id) {
+void DynamicLampComponent::add_available_output(output::FloatOutput * output, std::string output_id) {
   uint8_t counter = 0;
   while (this->available_outputs_[counter].available) {
     counter++;
@@ -113,7 +113,7 @@ void DynamicLamp::add_available_output(output::FloatOutput * output, std::string
   counter++;
 }
 
-void DynamicLamp::add_lamp(std::string name) {
+void DynamicLampComponent::add_lamp(std::string name) {
   if (this->lamp_count_ < 15) {
     this->lamp_count_++;
     this->active_lamps_[this->lamp_count_].active = true;
@@ -128,7 +128,7 @@ void DynamicLamp::add_lamp(std::string name) {
   this->status_set_warning();
 }
 
-void DynamicLamp::remove_lamp(std::string lamp_name) {
+void DynamicLampComponent::remove_lamp(std::string lamp_name) {
   uint8_t i = 0;
   while (i < this->lamp_count_) {
     if (this->active_lamps_[i].name == lamp_name) {
@@ -144,7 +144,7 @@ void DynamicLamp::remove_lamp(std::string lamp_name) {
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
-void DynamicLamp::add_output_to_lamp(std::string lamp_name, LinkedOutput *output) {
+void DynamicLampComponent::add_output_to_lamp(std::string lamp_name, LinkedOutput *output) {
   uint8_t i = 0;
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
@@ -159,7 +159,7 @@ void DynamicLamp::add_output_to_lamp(std::string lamp_name, LinkedOutput *output
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
-void DynamicLamp::remove_output_from_lamp(std::string lamp_name, LinkedOutput *output) {
+void DynamicLampComponent::remove_output_from_lamp(std::string lamp_name, LinkedOutput *output) {
   uint8_t i = 0;
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
@@ -174,7 +174,7 @@ void DynamicLamp::remove_output_from_lamp(std::string lamp_name, LinkedOutput *o
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
-std::array<bool, 16> DynamicLamp::get_lamp_outputs(uint8_t lamp_number) {
+std::array<bool, 16> DynamicLampComponent::get_lamp_outputs(uint8_t lamp_number) {
   std::array<bool, 16> bool_array;
   for (uint8_t i = 0; i < 16; i++) {
         bool_array[i] = this->active_lamps_[lamp_number].used_outputs[i];  
@@ -182,7 +182,7 @@ std::array<bool, 16> DynamicLamp::get_lamp_outputs(uint8_t lamp_number) {
   return bool_array;
 }
 
-std::array<bool, 16> DynamicLamp::get_lamp_outputs_by_name(std::string lamp_name) {
+std::array<bool, 16> DynamicLampComponent::get_lamp_outputs_by_name(std::string lamp_name) {
   uint8_t i = 0;
   std::array<bool, 16> bool_array;
   for (i = 0; i < this->lamp_count_; i++) {
@@ -195,11 +195,15 @@ std::array<bool, 16> DynamicLamp::get_lamp_outputs_by_name(std::string lamp_name
   return bool_array;
 }
 
-void DynamicLamp::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {
+void DynamicLampComponent::set_lamp_level(std::string lamp_name, float state) {
+  
+}
+
+void DynamicLampComponent::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {
 
 }
 
-void DynamicLamp::restore_lamp_values_(uint8_t lamp_number) {
+void DynamicLampComponent::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
 }
 

@@ -3,13 +3,17 @@ from esphome.components import output
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
+CODEOWNERS = ["@p1ngb4ck"]
+MULTI_CONF = False
+
 dynamic_lamp_ns = cg.esphome_ns.namespace('dynamic_lamp')
-DynamicLamp = dynamic_lamp_ns.class_('DynamicLamp', cg.Component)
+DynamicLampComponent = dynamic_lamp_ns.class_('DynamicLampComponent', cg.Component)
+CONF_DYNAMIC_LAMP_ID = "dynamic_lamp_id"
 
 CONF_SAVE_MODE = 'save_mode'
 CONF_AVAILABLE_OUTPUTS = 'available_outputs'
 CONFIG_SCHEMA = cv.Schema({
-    cv.GenerateID(): cv.declare_id(DynamicLamp),
+    cv.GenerateID(): cv.declare_id(DynamicLampComponent),
     cv.Required(CONF_AVAILABLE_OUTPUTS): [cv.use_id(output.FloatOutput)],
     cv.Optional(CONF_SAVE_MODE, default=0): cv.int_range(0, 1),
 }).extend(cv.COMPONENT_SCHEMA)

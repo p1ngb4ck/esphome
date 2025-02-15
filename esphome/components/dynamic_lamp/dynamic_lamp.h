@@ -31,14 +31,36 @@ struct LinkedOutput {
   bool update_level = false;
 };
 
+enum DynamicLampIdx : uint8_t {
+  LAMP_1 = 0,
+  LAMP_2 = 1,
+  LAMP_3 = 2,
+  LAMP_4 = 3,
+  LAMP_5 = 4,
+  LAMP_6 = 5,
+  LAMP_7 = 6,
+  LAMP_8 = 7,
+  LAMP_9 = 8,
+  LAMP_10 = 9,
+  LAMP_11 = 10,
+  LAMP_12 = 11,
+  LAMP_13 = 12,
+  LAMP_14 = 13,
+  LAMP_15 = 14,
+  LAMP_16 = 15,
+};
+
 struct CombinedLamp {
   bool active = false;
   std::string name = "";
   uint8_t lamp_index;
+  float state;
   bool used_outputs[16];
 };
 
-class DynamicLamp : public Component {
+class DynamicLamp;
+
+class DynamicLampComponent : public Component {
  public:
   void setup() override;
   void loop() override;
@@ -54,6 +76,8 @@ class DynamicLamp : public Component {
   std::array<bool, 16> get_lamp_outputs_by_name(std::string lamp_name);
 
  protected:
+  friend class DynamicLamp;
+  void set_lamp_level(std::string lamp_name, float state);
   void restore_lamp_values_(uint8_t lamp_number);
   void set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value);
 
