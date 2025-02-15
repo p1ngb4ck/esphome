@@ -32,6 +32,7 @@ struct LinkedOutput {
 
 struct CombinedLamp {
   bool active = false;
+  std::string name = "";
   bool used_outputs[16];
 };
 
@@ -44,7 +45,8 @@ class DynamicLamp : public Component {
   void set_save_mode(uint8_t save_mode);
 
  protected:
-  uint8_t add_lamp_();
+  void begin();
+  void add_lamp_(std::string name);
   std::array<bool, 16> get_lamp_outputs_(uint8_t lamp_number);
   void add_lamp_output_(uint8_t lamp_number, LinkedOutput output);
   void restore_lamp_values_(uint8_t lamp_number);

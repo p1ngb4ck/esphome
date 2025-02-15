@@ -17,6 +17,10 @@ namespace dynamic_lamp {
 static const char *TAG = "dynamic_lamp";
 
 void DynamicLamp::setup() {
+  this->begin();
+}
+
+void DynamicLamp::begin() {
   uint8_t i = 0;
   bool valid = true;
   if(this->save_mode_ == 0) {
@@ -28,13 +32,11 @@ void DynamicLamp::setup() {
       this->restore_lamp_values_(i);
     }
   }
-  // for testing only
-  uint8_t first_lamp;
-  first_lamp = this->add_lamp_();
-  this->add_lamp_output_(first_lamp, this->available_outputs_[0]);
-  this->add_lamp_output_(first_lamp, this->available_outputs_[1]);
-  this->add_lamp_output_(first_lamp, this->available_outputs_[2]);
-  this->add_lamp_output_(first_lamp, this->available_outputs_[3]);
+  this->add_lamp_("First Lamp");
+  this->add_lamp_output_("First Lamp", this->available_outputs_[0]);
+  this->add_lamp_output_("First Lamp", this->available_outputs_[1]);
+  this->add_lamp_output_("First Lamp", this->available_outputs_[2]);
+  this->add_lamp_output_("First Lamp", this->available_outputs_[3]);
 }
 
 void DynamicLamp::loop() {
@@ -108,23 +110,30 @@ void DynamicLamp::add_available_output(output::FloatOutput * output, std::string
   counter++;
 }
 
-uint8_t DynamicLamp::add_lamp_() {
-  uint8_t i = 0;
-  while (i < 16) {
-    if (!this->active_lamps_[i].active) {
-      this->active_lamps_[i].active = true;
-      this->lamp_count_++;
-      return i;
-    }
-    i++;
+void DynamicLamp::add_lamp_(std::string name) {
+  if (this->lamp_count_ < 15) {
+    this->lamp_count_++;
+    this->active_lamps_[this->lamp_count_].active = true;
+    this->active_lamps_[this->lamp_count_].name = name;
+    return;
   }
-  this->mark_failed();
+  ESP_LOGW(TAG, "No more lamps available, max 16 lamps supported!");
+  this->set_warning_state(true);
   return 0;
 }
 
-void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
-  this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
-  //ESP_LOGV(TAG, "Added output %s to lamp %" PRIu8 "", output.output_id.c_str(), lamp_number);
+void DynamicLamp::add_lamp_output_(std::string lamp_name, LinkedOutput output) {
+  while (i < 16) {
+    if (this->active_lamps_[i].name == lamp_name) {
+      this->add_lamp_output_(i, output);
+      this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
+      ESP_LOGV(TAG, "Added output %s to lamp %" PRIu8 "", output.output_id.c_str(), lamp_number);
+      return;
+    }
+    i++;
+  }
+  this->set_warning_state(true);
+  ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
 std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
