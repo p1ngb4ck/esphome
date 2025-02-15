@@ -129,7 +129,8 @@ void DynamicLamp::add_lamp_output_(std::string lamp_name, LinkedOutput output) {
     if (this->active_lamps_[i].name == lamp_name) {
       this->active_lamps_[i].used_outputs[output.output_index] = true;
       output.in_use = true;
-      ESP_LOGV(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
+      //ESP_LOGV(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
+      ESP_LOGCONFIG(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
       return;
     }
     i++;
