@@ -64,7 +64,7 @@ void DynamicLampComponent::loop() {
               new_state = this->available_outputs_[j].mode_value;
               break;
             case MODE_PERCENTAGE:
-              new_state = this->active_lamps_[i].state * this->available_outputs_[j].mode_value;
+              new_state = this->active_lamps_[i].state_ * this->available_outputs_[j].mode_value;
               if (this->available_outputs_[j].min_value && new_state < *this->available_outputs_[j].min_value) {
                 new_state = *this->available_outputs_[j].min_value;
               }
@@ -217,7 +217,7 @@ void DynamicLampComponent::set_lamp_level(std::string lamp_name, float state) {
   
 }
 
-bool DynamicLampComponent::write_state(uint8_t lamp_number, float state) {
+bool DynamicLampComponent::write_state_(uint8_t lamp_number, float state) {
   if (this->active_lamps_[lamp_number].active) {
     this->active_lamps_[lamp_number].state_ = state;
     this->active_lamps_[lamp_number].update_ = true;
