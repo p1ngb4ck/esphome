@@ -180,26 +180,5 @@ void DynamicLamp::restore_lamp_values_(uint8_t lamp_number) {
   this->active_lamps_[lamp_number].active = false;
 }
 
-std::string_view DynamicLamp::ltrim_(std::string_view str)
-{
-    const auto pos(str.find_first_not_of(" \t\n\r\f\v"));
-    str.remove_prefix(std::min(pos, str.length()));
-    return str;
-}
-
-std::string_view DynamicLamp::rtrim_(std::string_view str)
-{
-    const auto pos(str.find_last_not_of(" \t\n\r\f\v"));
-    str.remove_suffix(std::min(str.length() - pos - 1, str.length()));
-    return str;
-}
-
-std::string_view DynamicLamp::trim_(std::string_view str)
-{
-    str = this->ltrim_(str);
-    str = this->rtrim_(str);
-    return str;
-}
-
 }  // namespace dynamic_lamp
 }  // namespace esphome
