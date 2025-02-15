@@ -93,7 +93,7 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::add_available_output(FloatOutput &output) {
+void DynamicLamp::add_available_output(output::FloatOutput * output) {
   uint8_t counter = 0;
   while (this->available_outputs_[counter].active) {
     counter++;
@@ -106,7 +106,7 @@ void DynamicLamp::add_available_output(FloatOutput &output) {
   counter++;
 }
 
-uint8_t DynamicLamp::add_lamp() {
+uint8_t DynamicLamp::add_lamp_() {
   uint8_t i = 0;
   while (i < 16) {
     if (!this->active_lamps_[i].active) {
