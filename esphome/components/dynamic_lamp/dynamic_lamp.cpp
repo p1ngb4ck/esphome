@@ -85,7 +85,7 @@ void DynamicLamp::dump_config() {
       this->save_mode_ = 0;
   }
   for (uint8_t i = 0; i < 16; i++) {
-    if (this->available_outputs_[i].active) {
+    if (this->available_outputs_[i].available) {
       ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output_id.c_str(), i);
     }
   }
@@ -102,6 +102,7 @@ void DynamicLamp::add_available_output(output::FloatOutput * output, std::string
   }
   this->available_outputs_[counter] = LinkedOutput{
     true,
+    false,
     output_id,
     counter,
     output,
@@ -119,21 +120,21 @@ void DynamicLamp::add_lamp_(std::string name) {
     return;
   }
   ESP_LOGW(TAG, "No more lamps available, max 16 lamps supported!");
-  this->set_warning_state(true);
-  return 0;
+  this->status_set_warning();
 }
 
 void DynamicLamp::add_lamp_output_(std::string lamp_name, LinkedOutput output) {
+  uint8_t i = 0;
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
-      this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
+      this->active_lamps_[i].used_outputs[output.output_index] = true;
       output.in_use = true;
       ESP_LOGV(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
       return;
     }
     i++;
   }
-  this->set_warning_state(true);
+  this->status_set_warning();
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
