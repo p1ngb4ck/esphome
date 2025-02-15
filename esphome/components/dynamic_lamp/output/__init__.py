@@ -7,7 +7,8 @@ from .. import CONF_DYNAMIC_LAMP_ID, DynamicLampComponent, dynamic_lamp_ns
 
 DEPENDENCIES = ["dynamic_lamp"]
 
-DynamicLamp = dynamic_lamp_ns.class_(
+dynamic_monochromatic_ns = cg.esphome_ns.namespace("dynamic_monochromatic")
+DynamicLamp = dynamic_monochromatic_ns.class_(
     "DynamicLamp", light.LightOutput, cg.Parented.template(DynamicLampComponent)
 )
 

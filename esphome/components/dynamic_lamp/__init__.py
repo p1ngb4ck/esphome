@@ -6,7 +6,7 @@ from esphome.const import CONF_ID
 CODEOWNERS = ["@p1ngb4ck"]
 MULTI_CONF = False
 
-dynamic_lamp_ns = cg.esphome_ns.namespace('dynamic_lamp')
+dynamic_lamp_ns = cg.esphome_ns.namespace('dynamic_lamp_component')
 DynamicLampComponent = dynamic_lamp_ns.class_('DynamicLampComponent', cg.Component)
 CONF_DYNAMIC_LAMP_ID = "dynamic_lamp_id"
 
