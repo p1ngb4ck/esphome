@@ -50,7 +50,7 @@ class DynamicLamp : public Component {
   void begin();
   void add_lamp_(std::string name);
   std::array<bool, 16> get_lamp_outputs_(uint8_t lamp_number);
-  void add_lamp_output_(std::string lamp_name, LinkedOutput output);
+  void add_lamp_output_(std::string lamp_name, LinkedOutput &output);
   void restore_lamp_values_(uint8_t lamp_number);
   void set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value);
   std::string_view ltrim_(std::string_view str);
