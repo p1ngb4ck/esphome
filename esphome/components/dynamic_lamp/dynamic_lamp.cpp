@@ -83,7 +83,7 @@ void DynamicLampComponent::loop() {
               this->status_set_warning();
               continue;
           }
-          this->available_outputs_[j].output->write_state(new_state);
+          this->available_outputs_[j].output->set_level(new_state);
         }
       }
       this->active_lamps_[i].update_ = false;
