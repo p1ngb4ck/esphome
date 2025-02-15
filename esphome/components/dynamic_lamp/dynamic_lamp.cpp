@@ -84,7 +84,7 @@ void DynamicLamp::dump_config() {
   }
   for (uint8_t i = 0; i < 16; i++) {
     if (this->available_outputs_[i].active) {
-      ESP_LOGCONFIG(TAG, "Using output with id .. having level %" PRIu16 " as output number %" PRIu8 "", static_cast<uint16_t>(this->available_outputs_[i].output->state * 1000), i);
+      ESP_LOGCONFIG(TAG, "Using output with id .. having level %" PRIu16 " as output number %" PRIu8 "", static_cast<uint16_t>(this->available_outputs_[i].output.state * 1000), i);
     }
   }
 }
