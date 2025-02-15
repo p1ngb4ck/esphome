@@ -30,7 +30,7 @@ void DynamicLamp::setup() {
   }
   // for testing only
   uint8_t first_lamp;
-  first_lamp = this->add_lamp();
+  first_lamp = this->add_lamp_();
   this->add_lamp_output_(first_lamp, this->available_outputs_[0]);
   this->add_lamp_output_(first_lamp, this->available_outputs_[1]);
   this->add_lamp_output_(first_lamp, this->available_outputs_[2]);
@@ -84,7 +84,7 @@ void DynamicLamp::dump_config() {
   }
   for (uint8_t i = 0; i < 16; i++) {
     if (this->available_outputs_[i].active) {
-      ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output_id.c_str(), i);
+      ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output->id.c_str(), i);
     }
   }
 }
