@@ -14,14 +14,16 @@ enum SupportedSaveModes : uint8_t {
 enum LinkedOutputModeIdx : uint8_t {
   MODE_EQUAL = 0,
   MODE_STATIC = 1,
-  MODE_PERCENT = 2,
+  MODE_PERCENTAGE = 2,
   MODE_FUNCTION = 3
 };
 
 struct LinkedOutput {
   bool active = false;
-  output::FloatOutput *output;
+  std::string output_id;
   uint8_t output_index;
+  output::FloatOutput *output;
+  float state;
   uint8_t mode = 0;
   optional<float> min_value;
   optional<float> max_value;
@@ -38,7 +40,7 @@ class DynamicLamp : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  void add_available_output(output::FloatOutput * output);
+  void add_available_output(output::FloatOutput * output, std::string output_id);
   void set_save_mode(uint8_t save_mode);
 
  protected:

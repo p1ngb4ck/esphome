@@ -53,7 +53,7 @@ void DynamicLamp::loop() {
               case MODE_STATIC:
                 // Static
                 break;
-              case MODE_PERCENT:
+              case MODE_PERCENTAGE:
                 // Percent
                 break;
               case MODE_FUNCTION:
@@ -84,8 +84,7 @@ void DynamicLamp::dump_config() {
   }
   for (uint8_t i = 0; i < 16; i++) {
     if (this->available_outputs_[i].active) {
-      ESP_LOGCONFIG(TAG, "Using output with id .. as output number %" PRIu8 "", i);
-      this->available_outputs_[i].output->set_level(0.256f);
+      ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output_id.c_str(), i);
     }
   }
 }
@@ -94,15 +93,16 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::add_available_output(output::FloatOutput * output) {
+void DynamicLamp::add_available_output(output::FloatOutput * output, std::string output_id) {
   uint8_t counter = 0;
   while (this->available_outputs_[counter].active) {
     counter++;
   }
   this->available_outputs_[counter] = LinkedOutput{
     true,
-    output,
+    output_id,
     counter,
+    output,
     0, 0, 1.0, false
   };
   counter++;
