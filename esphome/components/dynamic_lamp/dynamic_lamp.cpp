@@ -92,10 +92,10 @@ void DynamicLamp::dump_config() {
     }
   }
   this->add_lamp("First Lamp");
-  this->add_lamp_output("First Lamp", *this->available_outputs_[0]);
-  this->add_lamp_output("First Lamp", *this->available_outputs_[1]);
-  this->add_lamp_output("First Lamp", *this->available_outputs_[2]);
-  this->add_lamp_output("First Lamp", *this->available_outputs_[3]);
+  this->add_lamp_output("First Lamp", this->available_outputs_[0]);
+  this->add_lamp_output("First Lamp", this->available_outputs_[1]);
+  this->add_lamp_output("First Lamp", this->available_outputs_[2]);
+  this->add_lamp_output("First Lamp", this->available_outputs_[3]);
 }
 
 void DynamicLamp::set_save_mode(uint8_t save_mode) {
@@ -153,9 +153,9 @@ void DynamicLamp::add_lamp_output(std::string lamp_name, LinkedOutput *output) {
   uint8_t i = 0;
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
-      this->active_lamps_[i].used_outputs[output.output_index] = true;
-      output.in_use = true;
-      ESP_LOGV(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
+      this->active_lamps_[i].used_outputs[output->output_index] = true;
+      output->in_use = true;
+      ESP_LOGV(TAG, "Added output %s to lamp %s", output->output_id.c_str(), lamp_name.c_str());
       return;
     }
     i++;
