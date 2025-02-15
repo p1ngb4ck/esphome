@@ -3,7 +3,7 @@
 #include "../dynamic_lamp.h"
 
 namespace esphome {
-namespace dynamic_lamp {
+namespace dynamic_monochromatic_light {
 
 class DynamicLamp : public light::LightOutput, public Parented<DynamicLampComponent> {
  public:
@@ -21,5 +21,5 @@ class DynamicLamp : public light::LightOutput, public Parented<DynamicLampCompon
   float state_;
 };
 
-}  // namespace dynamic_lamp
+}  // namespace dynamic_monochromatic_light
 }  // namespace esphome
