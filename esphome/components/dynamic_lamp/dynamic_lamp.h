@@ -45,12 +45,13 @@ class DynamicLamp : public Component {
   void dump_config() override;
   void add_available_output(output::FloatOutput * output, std::string output_id);
   void set_save_mode(uint8_t save_mode);
+  void add_lamp(std::string name);
+  void remove_lamp(std::string name);
+  void add_lamp_output(std::string lamp_name, LinkedOutput *output);
 
  protected:
   void begin();
-  void add_lamp_(std::string name);
   std::array<bool, 16> get_lamp_outputs_(uint8_t lamp_number);
-  void add_lamp_output_(std::string lamp_name, LinkedOutput &output);
   void restore_lamp_values_(uint8_t lamp_number);
   void set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value);
 

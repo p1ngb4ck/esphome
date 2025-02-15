@@ -91,11 +91,11 @@ void DynamicLamp::dump_config() {
       ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output_id.c_str(), i);
     }
   }
-  this->add_lamp_("First Lamp");
-  this->add_lamp_output_("First Lamp", &this->available_outputs_[0]);
-  this->add_lamp_output_("First Lamp", &this->available_outputs_[1]);
-  this->add_lamp_output_("First Lamp", &this->available_outputs_[2]);
-  this->add_lamp_output_("First Lamp", &this->available_outputs_[3]);
+  this->add_lamp("First Lamp");
+  this->add_lamp_output("First Lamp", *this->available_outputs_[0]);
+  this->add_lamp_output("First Lamp", *this->available_outputs_[1]);
+  this->add_lamp_output("First Lamp", *this->available_outputs_[2]);
+  this->add_lamp_output("First Lamp", *this->available_outputs_[3]);
 }
 
 void DynamicLamp::set_save_mode(uint8_t save_mode) {
@@ -118,7 +118,7 @@ void DynamicLamp::add_available_output(output::FloatOutput * output, std::string
   counter++;
 }
 
-void DynamicLamp::add_lamp_(std::string name) {
+void DynamicLamp::add_lamp(std::string name) {
   if (this->lamp_count_ < 15) {
     this->lamp_count_++;
     this->active_lamps_[this->lamp_count_].active = true;
@@ -133,7 +133,7 @@ void DynamicLamp::add_lamp_(std::string name) {
   this->status_set_warning();
 }
 
-void DynamicLamp::remove_lamp_(std::string name) {
+void DynamicLamp::remove_lamp(std::string name) {
   uint8_t i = 0;
   while (i < this->lamp_count_) {
     if (this->active_lamps_[i].name == name) {
@@ -149,7 +149,7 @@ void DynamicLamp::remove_lamp_(std::string name) {
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
 }
 
-void DynamicLamp::add_lamp_output_(std::string lamp_name, LinkedOutput &output) {
+void DynamicLamp::add_lamp_output(std::string lamp_name, LinkedOutput *output) {
   uint8_t i = 0;
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
