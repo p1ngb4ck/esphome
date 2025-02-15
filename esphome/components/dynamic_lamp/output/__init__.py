@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import light
 import esphome.config_validation as cv
-from esphome.const import CONF_CHANNEL, CONF_ID
+from esphome.const import CONF_CHANNEL, CONF_OUTPUT_ID
 
 from .. import CONF_DYNAMIC_LAMP_ID, DynamicLampComponent, dynamic_lamp_ns
 
@@ -33,7 +33,7 @@ CHANNEL_OPTIONS = {
 
 CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
     {
-        cv.Required(CONF_ID): cv.declare_id(DynamicLamp),
+        cv.Required(CONF_OUTPUT_ID): cv.declare_id(DynamicLamp),
         cv.GenerateID(CONF_DYNAMIC_LAMP_ID): cv.use_id(DynamicLampComponent),
         cv.Required(CONF_CHANNEL): cv.enum(CHANNEL_OPTIONS, upper=True),
     }
@@ -43,7 +43,7 @@ CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
 async def to_code(config):
     parent = await cg.get_variable(config[CONF_DYNAMIC_LAMP_ID])
     var = cg.new_Pvariable(
-        config[CONF_ID],
+        config[CONF_OUTPUT_ID],
         parent,
         config[CONF_CHANNEL],
     )
