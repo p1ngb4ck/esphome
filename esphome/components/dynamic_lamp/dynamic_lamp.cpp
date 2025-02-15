@@ -103,7 +103,7 @@ void DynamicLamp::add_available_output(output::FloatOutput * output) {
     output,
     counter,
     0, 0, 1.0, false
-  }
+  };
   counter++;
 }
 
@@ -123,7 +123,7 @@ uint8_t DynamicLamp::add_lamp_() {
 
 void DynamicLamp::add_lamp_output_(uint8_t lamp_number, LinkedOutput output) {
   this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
-  ESP_LOGV(TAG, "Added output %s to lamp %" PRIu8 "", output.output_id.c_str(), lamp_number);
+  //ESP_LOGV(TAG, "Added output %s to lamp %" PRIu8 "", output.output_id.c_str(), lamp_number);
 }
 
 std::array<bool, 16> DynamicLamp::get_lamp_outputs_(uint8_t lamp_number) {
