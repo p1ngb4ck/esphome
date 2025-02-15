@@ -10,6 +10,7 @@ static const char *const TAG = "dynamic_lamp.output";
 void DynamicLamp::write_state(float state) {
   if (this->parent_->write_state_(this->lamp_, state)) {
     this->state_ = state;
+  }
 }
 
 }  // namespace dynamic_lamp
