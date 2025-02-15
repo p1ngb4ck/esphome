@@ -8,6 +8,7 @@ namespace dynamic_lamp {
 static const char *const TAG = "dynamic_lamp.output";
 
 void DynamicLamp::write_state(float state) {
+  if (this->parent_->write_state(this->lamp_, state)) {
     this->state_ = state;
 }
 

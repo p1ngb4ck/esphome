@@ -44,31 +44,52 @@ void DynamicLampComponent::begin() {
 void DynamicLampComponent::loop() {
   uint8_t i = 0;
   for (i = 0; i < this->lamp_count_; i++) {
-    if (this->active_lamps_[i].active) {
+    if (this->active_lamps_[i].active && this->active_lamps_[i].update_) {
       uint8_t j = 0;
       for (j = 0; j < 16; j++) {
         if (this->active_lamps_[i].used_outputs[j]) {
-          if (this->available_outputs_[j].update_level) {
-            // Update level
-            switch (this->available_outputs_[j].mode) {
-              case MODE_EQUAL:
-                // Equal
-                break;
-              case MODE_STATIC:
-                // Static
-                break;
-              case MODE_PERCENTAGE:
-                // Percent
-                break;
-              case MODE_FUNCTION:
-                // Function
-                break;
-              default:
-                break;
-            }
+          // Update level
+          switch (this->available_outputs_[j].mode) {
+            float new_state = this->active_lamps_[i].state_;
+            case MODE_EQUAL:
+              // Equal
+              if (new_state < this->available_outputs_[j].min_value) {
+                new_state = this->available_outputs_[j].min_value;
+              }
+              else if (new_state > this->available_outputs_[j].max_value) {
+                new_state = this->available_outputs_[j].max_value;
+              }
+              break;
+            case MODE_STATIC:
+              // Static
+              new_state = this->available_outputs_[j].mode_value);
+              break;
+            case MODE_PERCENTAGE:
+              // Percent
+              new_state = this->active_lamps_[i].state * this->available_outputs_[j].mode_value;
+              if (new_state < this->available_outputs_[j].min_value) {
+                new_state = this->available_outputs_[j].min_value;
+              }
+              else if (new_state > this->available_outputs_[j].max_value) {
+                new_state = this->available_outputs_[j].max_value;
+              }
+              break;
+            case MODE_FUNCTION:
+              // ToDo - yet to be implemented
+              // Function
+              ESP_LOGW(TAG, "Mode %d for output %s is not implemented yet, sorry", this->available_outputs_[j].mode, this->available_outputs_[j].output_id.c_str());
+              this->status_set_warning();
+              continue;
+            default:
+              // Unknown
+              ESP_LOGW(TAG, "Unknown mode %d for output %s", this->available_outputs_[j].mode, this->available_outputs_[j].output_id.c_str());
+              this->status_set_warning();
+              continue;
           }
+          this->available_outputs_[j].output->write_state(new_state);
         }
       }
+      this->active_lamps_[i].update_ = false;
     }
   }
 }
@@ -197,6 +218,15 @@ std::array<bool, 16> DynamicLampComponent::get_lamp_outputs_by_name(std::string 
 
 void DynamicLampComponent::set_lamp_level(std::string lamp_name, float state) {
   
+}
+
+bool DynamicLampComponent::write_state(uint8_t lamp_number, float state) {
+  if (this->active_lamps_[lamp_number].active) {
+    this->active_lamps_[lamp_number].state_ = state;
+    this->active_lamps_[lamp_number].update_ = true;
+    return true;
+  }
+  return false;
 }
 
 void DynamicLampComponent::set_lamp_values_(uint8_t lamp_number, bool active, uint16_t selected_outputs, uint8_t mode, uint8_t mode_value) {

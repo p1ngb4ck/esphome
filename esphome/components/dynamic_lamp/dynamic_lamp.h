@@ -26,6 +26,7 @@ struct LinkedOutput {
   output::FloatOutput *output;
   float state;
   uint8_t mode = 0;
+  float mode_value = 0;
   optional<float> min_value;
   optional<float> max_value;
   bool update_level = false;
@@ -52,9 +53,10 @@ enum DynamicLampIdx : uint8_t {
 
 struct CombinedLamp {
   bool active = false;
+  bool update_ = false;
   std::string name = "";
   uint8_t lamp_index;
-  float state;
+  float state_;
   bool used_outputs[16];
 };
 
