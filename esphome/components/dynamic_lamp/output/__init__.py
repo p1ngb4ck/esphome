@@ -1,14 +1,14 @@
 import esphome.codegen as cg
-from esphome.components import light
+from esphome.components import output
 import esphome.config_validation as cv
-from esphome.const import CONF_CHANNEL, CONF_OUTPUT_ID
+from esphome.const import CONF_CHANNEL, CONF_ID
 
 from .. import CONF_DYNAMIC_LAMP_ID, DynamicLampComponent, dynamic_lamp_ns
 
 DEPENDENCIES = ["dynamic_lamp"]
 
 DynamicLamp = dynamic_lamp_ns.class_(
-    "DynamicLamp", light.LightOutput, cg.Parented.template(DynamicLampComponent)
+    "DynamicLamp", output.FloatOutput, cg.Parented.template(DynamicLampComponent)
 )
 
 DynamicLampIdx = dynamic_lamp_ns.enum("DynamicLampIdx")
@@ -31,9 +31,9 @@ CHANNEL_OPTIONS = {
     "P": DynamicLampIdx.LAMP_16,
 }
 
-CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
+CONFIG_SCHEMA = output.FLOAT_OUTPUT_SCHEMA.extend(
     {
-        cv.Required(CONF_OUTPUT_ID): cv.declare_id(DynamicLamp),
+        cv.Required(CONF_ID): cv.declare_id(DynamicLamp),
         cv.GenerateID(CONF_DYNAMIC_LAMP_ID): cv.use_id(DynamicLampComponent),
         cv.Required(CONF_CHANNEL): cv.enum(CHANNEL_OPTIONS, upper=True),
     }
@@ -43,9 +43,9 @@ CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
 async def to_code(config):
     parent = await cg.get_variable(config[CONF_DYNAMIC_LAMP_ID])
     var = cg.new_Pvariable(
-        config[CONF_OUTPUT_ID],
+        config[CONF_ID],
         parent,
         config[CONF_CHANNEL],
     )
-    await light.register_light(var, config)
+    await output.register_output(var, config)
     await cg.register_parented(var, config[CONF_DYNAMIC_LAMP_ID])

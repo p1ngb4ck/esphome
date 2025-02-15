@@ -3,13 +3,12 @@
 namespace esphome {
 namespace dynamic_lamp {
 
-void DynamicLamp::write_state(light::LightState *state) override {
-    float bright;
-    state->current_values_as_brightness(&bright);
-    if (this->parent_->write_state_(this->lamp_, bright)) {
-      this->state_ = state;
-    }
+void DynamicLamp::write_state(float state) {
+  if (this->available_outputs_[this->lamp_].set_level(state))
+  {
+    this->state_ = state;
   }
+}
 
 }  // namespace dynamic_lamp
 }  // namespace esphome
