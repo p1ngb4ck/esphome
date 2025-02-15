@@ -93,38 +93,17 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
   this->save_mode_ = save_mode;
 }
 
-void DynamicLamp::set_available_outputs(std::list<*FloatOutput> output_list) {
+void DynamicLamp::add_available_output(FloatOutput &output) {
   uint8_t counter = 0;
-  /*
-  std::vector<std::string> v;
- 
-  char * token = strtok (&output_list[0],",");
-  while (token != NULL)
-  {
-    v.push_back(token);
-    token = strtok (NULL, ",");
-  }
-  for ( std::string s : v )
-  {
-    this->available_outputs_[counter] = LinkedOutput{
-      true,
-      static_cast<std::string>(this->trim_(s)),
-      counter,
-      0, 0, 1.0, false
-    };
+  while (this->available_outputs_[counter].active) {
     counter++;
   }
-  */
-  std::list<*FloatOutput>::iterator output_it;
-  for (output_it = data.begin(); output_it != data.end(); ++output_it){
-    this->available_outputs_[counter] = LinkedOutput{
-      true,
-      static_cast<std::string>(this->trim_(output_it.id)),
-      counter,
-      0, 0, 1.0, false
-    };
-    counter++;
-  }
+  this->available_outputs_[counter] = LinkedOutput{
+    true,
+    output,
+    counter,
+    0, 0, 1.0, false
+  counter++;
 }
 
 uint8_t DynamicLamp::add_lamp() {

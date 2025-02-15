@@ -20,7 +20,7 @@ enum LinkedOutputModeIdx : uint8_t {
 
 struct LinkedOutput {
   bool active = false;
-  std::string output_id;
+  FloatOutput &output;
   uint8_t output_index;
   uint8_t mode = 0;
   optional<float> min_value;
@@ -38,7 +38,7 @@ class DynamicLamp : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  void set_available_outputs(std::list<*FloatOutput> output_list);
+  void add_available_output(FloatOutput &output);
   void set_save_mode(uint8_t save_mode);
 
  protected:
