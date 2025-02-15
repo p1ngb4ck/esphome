@@ -115,6 +115,7 @@ void DynamicLamp::add_lamp_(std::string name) {
     this->lamp_count_++;
     this->active_lamps_[this->lamp_count_].active = true;
     this->active_lamps_[this->lamp_count_].name = name;
+    this->active_lamps_[this->lamp_count_].lamp_index = this->lamp_count_;
     return;
   }
   ESP_LOGW(TAG, "No more lamps available, max 16 lamps supported!");
