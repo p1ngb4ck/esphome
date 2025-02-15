@@ -92,10 +92,10 @@ void DynamicLamp::dump_config() {
     }
   }
   this->add_lamp("First Lamp");
-  this->add_lamp_output("First Lamp", this->available_outputs_[0]);
-  this->add_lamp_output("First Lamp", this->available_outputs_[1]);
-  this->add_lamp_output("First Lamp", this->available_outputs_[2]);
-  this->add_lamp_output("First Lamp", this->available_outputs_[3]);
+  this->add_lamp_output("First Lamp", &this->available_outputs_[0]);
+  this->add_lamp_output("First Lamp", &this->available_outputs_[1]);
+  this->add_lamp_output("First Lamp", &this->available_outputs_[2]);
+  this->add_lamp_output("First Lamp", &this->available_outputs_[3]);
 }
 
 void DynamicLamp::set_save_mode(uint8_t save_mode) {
@@ -133,10 +133,10 @@ void DynamicLamp::add_lamp(std::string name) {
   this->status_set_warning();
 }
 
-void DynamicLamp::remove_lamp(std::string name) {
+void DynamicLamp::remove_lamp(std::string lamp_name) {
   uint8_t i = 0;
   while (i < this->lamp_count_) {
-    if (this->active_lamps_[i].name == name) {
+    if (this->active_lamps_[i].name == lamp_name) {
       for (uint8_t j = i; j < this->lamp_count_; j++) {
         this->active_lamps_[i].used_outputs[j] = false;
         this->available_outputs_[j].in_use = false;
