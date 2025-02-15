@@ -83,6 +83,7 @@ void DynamicLampComponent::loop() {
               this->status_set_warning();
               continue;
           }
+          ESP_LOGV(TAG, "Setting output %s to level %f", this->available_outputs_[j].output_id.c_str(), state);
           this->available_outputs_[j].output->set_level(new_state);
         }
       }
