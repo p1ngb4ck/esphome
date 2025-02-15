@@ -19,7 +19,8 @@ enum LinkedOutputModeIdx : uint8_t {
 };
 
 struct LinkedOutput {
-  bool active = false;
+  bool available = false;
+  bool in_use = false;
   std::string output_id;
   uint8_t output_index;
   output::FloatOutput *output;

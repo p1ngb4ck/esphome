@@ -97,7 +97,7 @@ void DynamicLamp::set_save_mode(uint8_t save_mode) {
 
 void DynamicLamp::add_available_output(output::FloatOutput * output, std::string output_id) {
   uint8_t counter = 0;
-  while (this->available_outputs_[counter].active) {
+  while (this->available_outputs_[counter].available) {
     counter++;
   }
   this->available_outputs_[counter] = LinkedOutput{
@@ -126,9 +126,9 @@ void DynamicLamp::add_lamp_(std::string name) {
 void DynamicLamp::add_lamp_output_(std::string lamp_name, LinkedOutput output) {
   while (i < 16) {
     if (this->active_lamps_[i].name == lamp_name) {
-      this->add_lamp_output_(i, output);
       this->active_lamps_[lamp_number].used_outputs[output.output_index] = true;
-      ESP_LOGV(TAG, "Added output %s to lamp %" PRIu8 "", output.output_id.c_str(), lamp_number);
+      output.in_use = true;
+      ESP_LOGV(TAG, "Added output %s to lamp %s", output.output_id.c_str(), lamp_name.c_str());
       return;
     }
     i++;
