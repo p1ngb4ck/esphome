@@ -112,6 +112,11 @@ void DynamicLampComponent::dump_config() {
       ESP_LOGCONFIG(TAG, "Using output with id %s as output number %" PRIu8 "", this->available_outputs_[i].output_id.c_str(), i);
     }
   }
+  this->add_lamp_("First Lamp");
+  this->add_lamp_output_("First Lamp", &this->available_outputs_[0]);
+  this->add_lamp_output_("First Lamp", &this->available_outputs_[1]);
+  this->add_lamp_output_("First Lamp", &this->available_outputs_[2]);
+  this->add_lamp_output_("First Lamp", &this->available_outputs_[3]);
 }
 
 void DynamicLampComponent::set_save_mode(uint8_t save_mode) {
