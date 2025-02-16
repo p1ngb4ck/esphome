@@ -17,9 +17,7 @@ void Mcp4461Wiper::write_state(float state) {
   }
 }
 
-float Mcp4461Wiper::read_state() {
-  return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 256.0);
-}
+float Mcp4461Wiper::read_state() { return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 256.0); }
 
 float Mcp4461Wiper::update_state() {
   this->state_ = this->read_state();
@@ -27,8 +25,11 @@ float Mcp4461Wiper::update_state() {
 }
 
 void Mcp4461Wiper::set_state(bool state) {
-  if (state) { this->turn_on(); }
-  else { this->turn_off(); }
+  if (state) {
+    this->turn_on();
+  } else {
+    this->turn_off();
+  }
 }
 
 void Mcp4461Wiper::turn_on() { this->parent_->enable_wiper_(this->wiper_); }
@@ -38,14 +39,16 @@ void Mcp4461Wiper::turn_off() { this->parent_->disable_wiper_(this->wiper_); }
 void Mcp4461Wiper::increase_wiper() {
   if (this->parent_->increase_wiper_(this->wiper_)) {
     this->state_ = this->update_state();
-    ESP_LOGV(TAG, "Increased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(this->state_ * 256));
+    ESP_LOGV(TAG, "Increased wiper %d to %" PRIu16 "", this->wiper_,
+             static_cast<uint16_t>(std::roundf(this->state_ * 256)));
   }
 }
 
 void Mcp4461Wiper::decrease_wiper() {
   if (this->parent_->decrease_wiper_(this->wiper_)) {
     this->state_ = this->update_state();
-    ESP_LOGV(TAG, "Decreased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(this->state_ * 256));
+    ESP_LOGV(TAG, "Decreased wiper %d to %" PRIu16 "", this->wiper_,
+             static_cast<uint16_t>(std::roundf(this->state_ * 256)));
   }
 }
 
