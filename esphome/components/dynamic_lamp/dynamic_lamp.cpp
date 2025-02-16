@@ -115,9 +115,9 @@ void DynamicLampComponent::dump_config() {
   }
   this->add_lamp("First Lamp");
   this->add_output_to_lamp("First Lamp", &this->available_outputs_[0]);
-  //this->add_output_to_lamp("First Lamp", &this->available_outputs_[1]);
-  //this->add_output_to_lamp("First Lamp", &this->available_outputs_[2]);
-  //this->add_output_to_lamp("First Lamp", &this->available_outputs_[3]);
+  this->add_output_to_lamp("First Lamp", &this->available_outputs_[1]);
+  this->add_output_to_lamp("First Lamp", &this->available_outputs_[2]);
+  this->add_output_to_lamp("First Lamp", &this->available_outputs_[3]);
 }
 
 void DynamicLampComponent::set_save_mode(uint8_t save_mode) {
