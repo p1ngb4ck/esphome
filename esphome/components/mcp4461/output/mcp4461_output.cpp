@@ -38,14 +38,14 @@ void Mcp4461Wiper::turn_off() { this->parent_->disable_wiper_(this->wiper_); }
 void Mcp4461Wiper::increase_wiper() {
   if (this->parent_->increase_wiper_(this->wiper_)) {
     this->state_ = this->update_state();
-    ESP_LOGV(TAG, "Increased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(roundf(this->state_ * 256)));
+    ESP_LOGV(TAG, "Increased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(std::roundf(this->state_ * 256)));
   }
 }
 
 void Mcp4461Wiper::decrease_wiper() {
   if (this->parent_->decrease_wiper_(this->wiper_)) {
     this->state_ = this->update_state();
-    ESP_LOGV(TAG, "Decreased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(roundf(this->state_ * 256)));
+    ESP_LOGV(TAG, "Decreased wiper %d to %" PRIu16 "", this->wiper_, static_cast<uint16_t>(std::roundf(this->state_ * 256)));
   }
 }
 
