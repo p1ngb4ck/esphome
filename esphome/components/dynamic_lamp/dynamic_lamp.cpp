@@ -142,13 +142,13 @@ void DynamicLampComponent::add_available_output(output::FloatOutput * output, st
 
 void DynamicLampComponent::add_lamp(std::string name) {
   if (this->lamp_count_ < 15) {
-    this->lamp_count_++;
     this->active_lamps_[this->lamp_count_].active = true;
     this->active_lamps_[this->lamp_count_].name = name;
     this->active_lamps_[this->lamp_count_].lamp_index = this->lamp_count_;
     for (uint8_t i = 0; i < 16; i++) {
       this->active_lamps_[this->lamp_count_].used_outputs[i] = false;
     }
+    this->lamp_count_++;
     return;
   }
   ESP_LOGW(TAG, "No more lamps available, max 16 lamps supported!");
@@ -220,10 +220,6 @@ std::array<bool, 16> DynamicLampComponent::get_lamp_outputs_by_name(std::string 
   this->status_set_warning();
   ESP_LOGW(TAG, "No lamp with name %s defined !", lamp_name.c_str());
   return bool_array;
-}
-
-void DynamicLampComponent::set_lamp_level(std::string lamp_name, float state) {
-  
 }
 
 bool DynamicLampComponent::write_state_(uint8_t lamp_number, float state) {
