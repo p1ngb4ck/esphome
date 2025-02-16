@@ -44,10 +44,10 @@ void DynamicLampComponent::begin() {
 void DynamicLampComponent::loop() {
   uint8_t i = 0;
   for (i = 0; i < this->lamp_count_; i++) {
-    if (this->active_lamps_[i].active && this->active_lamps_[i].update_) {
+    if (this->active_lamps_[i].active == true && this->active_lamps_[i].update_ == true) {
       uint8_t j = 0;
       for (j = 0; j < 16; j++) {
-        if (this->active_lamps_[i].used_outputs[j]) {
+        if (this->active_lamps_[i].used_outputs[j] == true) {
           // Update level
           float new_state;
           new_state = this->active_lamps_[i].state_;
