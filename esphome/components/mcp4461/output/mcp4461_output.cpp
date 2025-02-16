@@ -9,14 +9,16 @@ namespace mcp4461 {
 
 static const char *const TAG = "mcp4461.output";
 
+// floats from other components (like light etc.) are passed as "percentage floats"
+// this function converts them to the 0.0 - 0.256 range used by the MCP4461
 void Mcp4461Wiper::write_state(float state) {
-  if (this->parent_->set_wiper_level_(this->wiper_, static_cast<uint16_t>(state * 1000))) {
+  if (this->parent_->set_wiper_level_(this->wiper_, static_cast<uint16_t>(state * 256))) {
     this->state_ = state;
   }
 }
 
 float Mcp4461Wiper::read_state() {
-  return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 1000.0);
+  return (static_cast<float>(this->parent_->get_wiper_level_(this->wiper_)) / 256.0);
 }
 
 float Mcp4461Wiper::update_state() {
