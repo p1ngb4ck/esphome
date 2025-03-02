@@ -113,7 +113,7 @@ void LD2450Component::setup() {
   this->pref_ = global_preferences->make_preference<float>(this->presence_timeout_number_->get_object_id_hash());
   this->set_presence_timeout();
 #endif
-  this->read_all_info();
+  this->restart_and_read_all_info();
 }
 
 void LD2450Component::dump_config() {
@@ -317,7 +317,7 @@ void LD2450Component::query_zone_info() {
 void LD2450Component::restart_and_read_all_info() {
   this->set_config_mode_(true);
   this->restart_();
-  this->set_timeout(1000, [this]() { this->read_all_info(); });
+  this->set_timeout(1500, [this]() { this->read_all_info(); });
 }
 
 // Send command with values to LD2450
@@ -386,10 +386,11 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
   std::string direction{};
   bool is_moving = false;
 
-#ifdef USE_SENSOR
+#if defined(USE_BINARY_SENSOR) || defined(USE_SENSOR) || defined(USE_TEXT_SENSOR)
   // Loop thru targets
-  // X
   for (index = 0; index < MAX_TARGETS; index++) {
+#ifdef USE_SENSOR
+    // X
     start = TARGET_X + index * 8;
     is_moving = false;
     sensor::Sensor *sx = this->move_x_sensors_[index];
@@ -406,18 +407,6 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
       ty = val;
       sy->publish_state(val);
     }
-    // SPEED
-    start = TARGET_SPEED + index * 8;
-    sensor::Sensor *ss = this->move_speed_sensors_[index];
-    if (ss != nullptr) {
-      val = ld2450::decode_speed(buffer[start], buffer[start + 1]);
-      ts = val;
-      if (val) {
-        is_moving = true;
-        moving_target_count++;
-      }
-      ss->publish_state(val);
-    }
     // RESOLUTION
     start = TARGET_RESOLUTION + index * 8;
     sensor::Sensor *sr = this->move_resolution_sensors_[index];
@@ -425,17 +414,32 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
       val = (buffer[start + 1] << 8) | buffer[start];
       sr->publish_state(val);
     }
+#endif
+    // SPEED
+    start = TARGET_SPEED + index * 8;
+    val = ld2450::decode_speed(buffer[start], buffer[start + 1]);
+    ts = val;
+    if (val) {
+      is_moving = true;
+      moving_target_count++;
+    }
+#ifdef USE_SENSOR
+    sensor::Sensor *ss = this->move_speed_sensors_[index];
+    if (ss != nullptr) {
+      ss->publish_state(val);
+    }
+#endif
     // DISTANCE
+    val = (uint16_t) sqrt(
+        pow(ld2450::decode_coordinate(buffer[TARGET_X + index * 8], buffer[(TARGET_X + index * 8) + 1]), 2) +
+        pow(ld2450::decode_coordinate(buffer[TARGET_Y + index * 8], buffer[(TARGET_Y + index * 8) + 1]), 2));
+    td = val;
+    if (val > 0) {
+      target_count++;
+    }
+#ifdef USE_SENSOR
     sensor::Sensor *sd = this->move_distance_sensors_[index];
     if (sd != nullptr) {
-      val = (uint16_t) sqrt(
-          pow(ld2450::decode_coordinate(buffer[TARGET_X + index * 8], buffer[(TARGET_X + index * 8) + 1]), 2) +
-          pow(ld2450::decode_coordinate(buffer[TARGET_Y + index * 8], buffer[(TARGET_Y + index * 8) + 1]), 2));
-      td = val;
-      if (val > 0) {
-        target_count++;
-      }
-
       sd->publish_state(val);
     }
     // ANGLE
@@ -448,8 +452,8 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
       sa->publish_state(angle);
     }
 #endif
-    // DIRECTION
 #ifdef USE_TEXT_SENSOR
+    // DIRECTION
     direction = get_direction(ts);
     if (td == 0) {
       direction = "NA";
@@ -466,6 +470,9 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
     this->target_info_[index].is_moving = is_moving;
 
   }  // End loop thru targets
+
+  still_target_count = target_count - moving_target_count;
+#endif
 
 #ifdef USE_SENSOR
   // Loop thru zones
@@ -496,7 +503,6 @@ void LD2450Component::handle_periodic_data_(uint8_t *buffer, uint8_t len) {
 
   }  // End loop thru zones
 
-  still_target_count = target_count - moving_target_count;
   // Target Count
   if (this->target_count_sensor_ != nullptr) {
     this->target_count_sensor_->publish_state(target_count);
