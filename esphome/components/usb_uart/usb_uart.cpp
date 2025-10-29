@@ -252,6 +252,7 @@ void USBUartComponent::loop() {
     this->disable_loop();
   }
 }
+
 void USBUartComponent::dump_config() {
   USBClient::dump_config();
   for (auto &channel : this->channels_) {
@@ -269,6 +270,7 @@ void USBUartComponent::dump_config() {
                   YESNO(channel->dummy_receiver_));
   }
 }
+
 void USBUartComponent::start_input(USBUartChannel *channel) {
   if (!channel->initialised_.load())
     return;
@@ -415,8 +417,10 @@ void USBUartTypeCdcAcm::on_connected() {
       break;
     }
     channel->cdc_dev_ = cdc_devs[i++];
+#if !defined(USE_ESP32_VARIANT_P4)
     fix_mps(channel->cdc_dev_.in_ep);
     fix_mps(channel->cdc_dev_.out_ep);
+#endif
     channel->initialised_.store(true);
     // Claim the communication (interrupt) interface so CDC class requests are accepted
     // by the device. Some CDC ACM implementations (e.g. EFR32 NCP) require this before

@@ -27,6 +27,8 @@ static constexpr uint8_t USB_DEVICE_PROTOCOL_IAD = 0x01;
 static constexpr uint8_t USB_VENDOR_IFC = usb_host::USB_TYPE_VENDOR | usb_host::USB_RECIP_INTERFACE;
 static constexpr uint8_t USB_VENDOR_DEV = usb_host::USB_TYPE_VENDOR | usb_host::USB_RECIP_DEVICE;
 
+#define CH9344_TTY_MINORS 256
+
 struct CdcEps {
   const usb_ep_desc_t *notify_ep;
   const usb_ep_desc_t *in_ep;
@@ -65,6 +67,14 @@ enum CH34xChipType : uint8_t {
   CHIP_UNKNOWN = 0xFF,
 };
 
+struct Ch934xEps {
+  const usb_ep_desc_t *in_ep;
+  const usb_ep_desc_t *out_ep;
+  const usb_ep_desc_t *ep_cmd_read;
+  const usb_ep_desc_t *ep_cmd_write;
+  uint8_t data_interface = 0;
+};
+
 enum UARTParityOptions {
   UART_CONFIG_PARITY_NONE = 0,
   UART_CONFIG_PARITY_ODD,
@@ -78,6 +88,44 @@ enum UARTStopBitsOptions {
   UART_CONFIG_STOP_BITS_1_5,
   UART_CONFIG_STOP_BITS_2,
 };
+
+#if defined(USE_UART_DEBUGGER)
+enum CH934X_CHIPTYPE {
+  CHIP_CH9344L = 0,
+  CHIP_CH9344Q,
+  CHIP_CH348L,
+  CHIP_CH348Q,
+};
+
+enum CH34X_CHIPTYPE {
+  CHIP_CH342F = 0x00,
+  CHIP_CH342K,
+  CHIP_CH343GP,
+  CHIP_CH343G_AUTOBAUD,
+  CHIP_CH343K,
+  CHIP_CH343J,
+  CHIP_CH344L,
+  CHIP_CH344L_V2,
+  CHIP_CH344Q,
+  CHIP_CH347TF,
+  CHIP_CH9101UH,
+  CHIP_CH9101RY,
+  CHIP_CH9102F,
+  CHIP_CH9102X,
+  CHIP_CH9103M,
+  CHIP_CH9104L,
+  CHIP_CH340B,
+  CHIP_CH339W,
+  CHIP_CH9111L_M0,
+  CHIP_CH9111L_M1,
+  CHIP_CH9114L,
+  CHIP_CH9114W,
+  CHIP_CH9114F,
+  CHIP_CH346C_M0,
+  CHIP_CH346C_M1,
+  CHIP_CH346C_M2,
+};
+#endif
 
 static const char *const PARITY_NAMES[] = {"NONE", "ODD", "EVEN", "MARK", "SPACE"};
 static const char *const STOP_BITS_NAMES[] = {"1", "1.5", "2"};
@@ -130,6 +178,7 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
   friend class USBUartTypeFT23XX;
+  friend class USBUartTypeCH934X;
 
  public:
   // Number of output chunk slots per channel, derived from buffer_size config.
@@ -257,6 +306,51 @@ class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
   int set_dtr_rts_(USBUartChannel *channel);
 
   uint8_t chip_type_{255};
+};
+
+class USBUartTypeCH934X : public USBUartComponent {
+ public:
+  USBUartTypeCH934X(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
+
+  void on_connected() override;
+  void on_disconnected() override;
+  bool parse_descriptors(usb_device_handle_t dev_hdl);
+  void enable_channels();
+  void loop() override;
+
+ protected:
+  void configure_device_();
+  void configure_channels_after_detection_();
+
+  bool configure_channel_(USBUartChannel *channel);
+  bool set_uart_mode(USBUartChannel *channel);
+  bool configure_uart_parameters_(USBUartChannel *channel);
+
+  void start_rx_reader_();
+  void handle_rx_data_(const uint8_t *data, size_t len);
+
+  void handle_tx_multiplexing_();
+  void send_next_channel_data_(USBUartChannel *channel);
+
+  void start_command_reader_();
+  void handle_command_data_(const uint8_t *data, size_t len);
+
+  uint8_t get_reg_address_(uint8_t portnum);
+
+ private:
+  Ch934xEps uart_host_dev_{};
+  uint16_t pid_ = 0;
+  uint8_t chiptype_ = 0;
+  uint8_t chipversion_ = 0;
+  uint8_t num_ports_ = 0;
+  uint8_t port_offset_ = 0;
+  bool bpackload_ = false;
+
+  std::atomic<bool> rx_running_{false};
+  std::atomic<bool> cmd_running_{false};
+
+  size_t tx_current_channel_index_ = 0;
+  std::atomic<bool> tx_in_progress_{false};
 };
 
 }  // namespace esphome::usb_uart
