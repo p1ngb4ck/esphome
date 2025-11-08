@@ -26,7 +26,7 @@ require_jpeg_decoder()  # Picture viewer only needs JPEG decoder, not encoder
 
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = []
-AUTO_LOAD = ["transcoder"]
+AUTO_LOAD = ["transcoder", "image"]
 
 # Namespaces
 picture_viewer_ns = cg.esphome_ns.namespace("picture_viewer")
