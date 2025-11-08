@@ -8,6 +8,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S3,
     VARIANT_ESP32P4,
     add_idf_component,
+    get_esp32_variant,
 )
 from esphome.const import CONF_ID
 from esphome.core import CORE
@@ -95,25 +96,8 @@ async def to_code(config):
 
     _LOGGER.info("Transcoder requirements: %s", ", ".join(sorted(requirements)))
 
-    # Set global transcoder accessor flag FIRST (before component registration)
-    # Note: global_transcoder is set to 'this' in Transcoder constructor
+    # Set global transcoder accessor flag
     cg.add_define("USE_TRANSCODER")
-
-    # Only configure for ESP32 platforms
-    if not CORE.is_esp32:
-        _LOGGER.info("Transcoder: Non-ESP32 platform, using fallback codecs")
-        # For non-ESP32, only JPEG fallback is available
-        if CODEC_JPEG_DECODER in requirements:
-            cg.add_library("bodmer/JPEGDecoder", "1.8.0")
-            cg.add_define("USE_JPEGDEC")
-        # Create and register component AFTER defines are set
-        var = cg.new_Pvariable(config[CONF_ID])
-        await cg.register_component(var, config)
-        return
-
-    from esphome.components.esp32 import get_esp32_variant
-
-    variant = get_esp32_variant()
 
     # Determine if any JPEG codec is needed
     jpeg_needed = CODEC_JPEG_DECODER in requirements or CODEC_JPEG_ENCODER in requirements
@@ -121,64 +105,79 @@ async def to_code(config):
     # Determine if any H.264 codec is needed
     h264_needed = CODEC_H264_DECODER in requirements or CODEC_H264_ENCODER in requirements
 
-    # ========== JPEG Codec Support ==========
-    if jpeg_needed:
-        if "S2" in variant or "S3" in variant:
-            # ESP32-S2/S3: Use esp_jpeg from ESP Component Registry
-            add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
-            if CODEC_JPEG_DECODER in requirements:
-                cg.add_define("USE_ESP_JPEG_DECODER")
-                cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
-            if CODEC_JPEG_ENCODER in requirements:
-                cg.add_define("USE_ESP_JPEG_ENCODER")
-                cg.add_define("TRANSCODER_ENABLE_JPEG_ENCODER")
-            cg.add_define("TRANSCODER_JPEG_AVAILABLE")
-            _LOGGER.info("Enabled esp_jpeg codec v1.3.1 for %s", variant)
+    # Configure ESP32 platform-specific codecs
+    if CORE.is_esp32:
+        variant = get_esp32_variant()
 
-        elif "P4" in variant:
-            # ESP32-P4: Hardware JPEG codec
-            if CODEC_JPEG_DECODER in requirements:
-                cg.add_define("USE_HARDWARE_JPEG_DECODER")
-                cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
-            if CODEC_JPEG_ENCODER in requirements:
-                cg.add_define("USE_HARDWARE_JPEG_ENCODER")
-                cg.add_define("TRANSCODER_ENABLE_JPEG_ENCODER")
-            cg.add_define("TRANSCODER_JPEG_AVAILABLE")
-            _LOGGER.info("Enabled hardware JPEG codec for %s", variant)
+        # ========== JPEG Codec Support ==========
+        if jpeg_needed:
+            if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
+                # ESP32-S2/S3: Use esp_jpeg from ESP Component Registry
+                add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
+                if CODEC_JPEG_DECODER in requirements:
+                    cg.add_define("USE_ESP_JPEG_DECODER")
+                    cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
+                if CODEC_JPEG_ENCODER in requirements:
+                    cg.add_define("USE_ESP_JPEG_ENCODER")
+                    cg.add_define("TRANSCODER_ENABLE_JPEG_ENCODER")
+                cg.add_define("TRANSCODER_JPEG_AVAILABLE")
+                _LOGGER.info("Enabled esp_jpeg codec v1.3.1 for %s", variant)
 
-        else:
-            # Fallback: JPEGDec library for all other variants
-            if CODEC_JPEG_DECODER in requirements:
-                cg.add_library("bodmer/JPEGDecoder", "1.8.0")
-                cg.add_define("USE_JPEGDEC")
-                cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
-                _LOGGER.info("Using JPEGDec library for %s", variant)
-            if CODEC_JPEG_ENCODER in requirements:
-                _LOGGER.warning("JPEG encoder not available on %s - no fallback library", variant)
+            elif variant == VARIANT_ESP32P4:
+                # ESP32-P4: Hardware JPEG codec
+                if CODEC_JPEG_DECODER in requirements:
+                    cg.add_define("USE_HARDWARE_JPEG_DECODER")
+                    cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
+                if CODEC_JPEG_ENCODER in requirements:
+                    cg.add_define("USE_HARDWARE_JPEG_ENCODER")
+                    cg.add_define("TRANSCODER_ENABLE_JPEG_ENCODER")
+                cg.add_define("TRANSCODER_JPEG_AVAILABLE")
+                _LOGGER.info("Enabled hardware JPEG codec for %s", variant)
 
-    # ========== H.264 Codec Support ==========
-    if h264_needed:
-        if "P4" in variant or "S3" in variant:
-            # ESP32-P4: Hardware H.264 encoder + Software decoder
-            # ESP32-S3: Software H.264 encoder/decoder
-            # Use esp_h264 from ESP Component Registry
-            add_idf_component(name="espressif/esp_h264", ref="1.1.2")
+            else:
+                # Fallback: JPEGDec library for all other ESP32 variants
+                if CODEC_JPEG_DECODER in requirements:
+                    cg.add_library("bodmer/JPEGDecoder", "1.8.0")
+                    cg.add_define("USE_JPEGDEC")
+                    cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
+                    _LOGGER.info("Using JPEGDec library for %s", variant)
+                if CODEC_JPEG_ENCODER in requirements:
+                    _LOGGER.warning("JPEG encoder not available on %s - no fallback library", variant)
 
-            if CODEC_H264_DECODER in requirements:
-                cg.add_define("USE_ESP_H264_DECODER")
-                cg.add_define("TRANSCODER_ENABLE_H264_DECODER")
-            if CODEC_H264_ENCODER in requirements:
-                cg.add_define("USE_ESP_H264_ENCODER")
-                cg.add_define("TRANSCODER_ENABLE_H264_ENCODER")
-            cg.add_define("TRANSCODER_H264_AVAILABLE")
+        # ========== H.264 Codec Support ==========
+        if h264_needed:
+            if variant in (VARIANT_ESP32P4, VARIANT_ESP32S3):
+                # ESP32-P4: Hardware H.264 encoder + Software decoder
+                # ESP32-S3: Software H.264 encoder/decoder
+                add_idf_component(name="espressif/esp_h264", ref="1.1.2")
 
-            hw_type = "Hardware (P4)" if "P4" in variant else "Software (S3)"
-            _LOGGER.info("Enabled esp_h264 codec v1.1.2 for %s - %s", variant, hw_type)
-        else:
-            _LOGGER.error(
-                "H.264 codec requested but only available on ESP32-P4/S3 (current: %s)", variant
-            )
+                if CODEC_H264_DECODER in requirements:
+                    cg.add_define("USE_ESP_H264_DECODER")
+                    cg.add_define("TRANSCODER_ENABLE_H264_DECODER")
+                if CODEC_H264_ENCODER in requirements:
+                    cg.add_define("USE_ESP_H264_ENCODER")
+                    cg.add_define("TRANSCODER_ENABLE_H264_ENCODER")
+                cg.add_define("TRANSCODER_H264_AVAILABLE")
 
-    # Create and register component AFTER all defines are set
+                hw_type = "Hardware (P4)" if variant == VARIANT_ESP32P4 else "Software (S3)"
+                _LOGGER.info("Enabled esp_h264 codec v1.1.2 for %s - %s", variant, hw_type)
+            else:
+                _LOGGER.error(
+                    "H.264 codec requested but only available on ESP32-P4/S3 (current: %s)", variant
+                )
+
+    else:
+        # Non-ESP32 platforms: Use JPEGDec fallback
+        if jpeg_needed and CODEC_JPEG_DECODER in requirements:
+            cg.add_library("bodmer/JPEGDecoder", "1.8.0")
+            cg.add_define("USE_JPEGDEC")
+            cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
+            _LOGGER.info("Using JPEGDec library for non-ESP32 platform")
+        if jpeg_needed and CODEC_JPEG_ENCODER in requirements:
+            _LOGGER.warning("JPEG encoder not available on non-ESP32 platforms")
+        if h264_needed:
+            _LOGGER.error("H.264 codec not available on non-ESP32 platforms")
+
+    # Create and register component
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
