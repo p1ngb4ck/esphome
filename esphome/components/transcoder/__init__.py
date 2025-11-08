@@ -106,12 +106,13 @@ async def to_code(config):
         return
 
     from esphome.components.esp32 import get_esp32_variant, add_idf_component
+    from esphome.components.esp32.const import (
+        VARIANT_ESP32S2,
+        VARIANT_ESP32S3,
+        VARIANT_ESP32P4,
+    )
 
     variant = get_esp32_variant()
-    if not variant:
-        return
-
-    variant_lower = variant.lower().replace("-", "")
 
     # Determine if any JPEG codec is needed
     jpeg_needed = CODEC_JPEG_DECODER in requirements or CODEC_JPEG_ENCODER in requirements
@@ -121,7 +122,7 @@ async def to_code(config):
 
     # ========== JPEG Codec Support ==========
     if jpeg_needed:
-        if variant_lower in ("esp32s2", "esp32s3"):
+        if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
             # ESP32-S2/S3: Use esp_jpeg from ESP Component Registry
             add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
             if CODEC_JPEG_DECODER in requirements:
@@ -133,7 +134,7 @@ async def to_code(config):
             cg.add_define("TRANSCODER_JPEG_AVAILABLE")
             _LOGGER.info("Enabled esp_jpeg codec v1.3.1 for %s", variant)
 
-        elif variant_lower == "esp32p4":
+        elif variant == VARIANT_ESP32P4:
             # ESP32-P4: Hardware JPEG codec
             if CODEC_JPEG_DECODER in requirements:
                 cg.add_define("USE_HARDWARE_JPEG_DECODER")
@@ -145,7 +146,7 @@ async def to_code(config):
             _LOGGER.info("Enabled hardware JPEG codec for %s", variant)
 
         else:
-            # Fallback: JPEGDec library
+            # Fallback: JPEGDec library for all other variants
             if CODEC_JPEG_DECODER in requirements:
                 cg.add_library("bodmer/JPEGDecoder", "1.8.0")
                 cg.add_define("USE_JPEGDEC")
@@ -156,7 +157,7 @@ async def to_code(config):
 
     # ========== H.264 Codec Support ==========
     if h264_needed:
-        if variant_lower in ("esp32p4", "esp32s3"):
+        if variant in (VARIANT_ESP32P4, VARIANT_ESP32S3):
             # ESP32-P4: Hardware H.264 encoder + Software decoder
             # ESP32-S3: Software H.264 encoder/decoder
             # Use esp_h264 from ESP Component Registry
@@ -170,7 +171,7 @@ async def to_code(config):
                 cg.add_define("TRANSCODER_ENABLE_H264_ENCODER")
             cg.add_define("TRANSCODER_H264_AVAILABLE")
 
-            hw_type = "Hardware (P4)" if variant_lower == "esp32p4" else "Software (S3)"
+            hw_type = "Hardware (P4)" if variant == VARIANT_ESP32P4 else "Software (S3)"
             _LOGGER.info("Enabled esp_h264 codec v1.1.2 for %s - %s", variant, hw_type)
         else:
             _LOGGER.error(
