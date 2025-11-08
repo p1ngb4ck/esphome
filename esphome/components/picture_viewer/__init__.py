@@ -115,15 +115,10 @@ async def to_code(config):
     from esphome.core import CORE
     if CORE.is_esp32:
         from esphome.components.esp32 import get_esp32_variant
-        from esphome.components.esp32.const import (
-            VARIANT_ESP32S2,
-            VARIANT_ESP32S3,
-            VARIANT_ESP32P4,
-        )
         variant = get_esp32_variant()
-        if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
+        if "S2" in variant or "S3" in variant:
             cg.add_define("USE_ESP_JPEG_DECODER")
-        elif variant == VARIANT_ESP32P4:
+        elif "P4" in variant:
             cg.add_define("USE_HARDWARE_JPEG_DECODER")
         else:
             # Fallback for all other ESP32 variants
