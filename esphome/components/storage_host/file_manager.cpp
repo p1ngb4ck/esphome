@@ -103,16 +103,18 @@ bool FileManager::is_path_available(const std::string &path) {
     return network_storage != nullptr && network_storage->is_connected();
   }
 
-  // For local paths, check if mount point exists
+  // For local paths, check if mount point exists in StorageHost configuration
   std::string mount_point = this->storage_host_->find_mount_for_path(path);
   if (mount_point.empty()) {
     ESP_LOGD(TAG, "No mount point found for path: %s", path.c_str());
     return false;
   }
 
-  // Try to stat the mount point to verify it's accessible
-  struct stat st;
-  return stat(mount_point.c_str(), &st) == 0;
+  // For virtual mount points (ESP-IDF VFS), stat() may fail even when mount is valid
+  // Instead, try to actually access the path - opendir() will fail if not accessible
+  // This avoids false negatives when mount points are virtual and not stat-able
+  ESP_LOGV(TAG, "Mount point '%s' configured for path '%s', assuming available", mount_point.c_str(), path.c_str());
+  return true;  // Let scan_directory_() handle actual accessibility check via opendir()
 }
 
 bool FileManager::read_file_safe(const std::string &path, std::vector<uint8_t> &data) {
@@ -285,9 +287,42 @@ void FileManager::perform_scan_() {
 }
 
 void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo> &files) {
+  // Check if this is a network path - use StorageHost methods for proper routing
+  if (this->storage_host_ && this->storage_host_->is_network_path(path)) {
+    // Use network storage backend
+    std::vector<NetworkStorage::DirEntry> entries;
+    if (!this->storage_host_->network_list_directory(path, entries)) {
+      ESP_LOGD(TAG, "Failed to list network directory: %s", path.c_str());
+      return;
+    }
+
+    for (const auto &entry : entries) {
+      // Check pattern matching
+      if (!this->matches_pattern_(entry.name)) {
+        continue;
+      }
+
+      // Build FileInfo from network entry
+      FileInfo info;
+      info.path = entry.path;
+      info.filename = entry.name;
+      info.directory = path;
+      info.size = entry.size;
+      info.modified_time = entry.modified_time;
+      info.is_directory = entry.is_directory;
+
+      // Check filters
+      if (this->passes_filters_(info)) {
+        files.push_back(info);
+      }
+    }
+    return;
+  }
+
+  // Local filesystem access - use opendir()
   DIR *dir = opendir(path.c_str());
   if (dir == nullptr) {
-    ESP_LOGD(TAG, "Failed to open directory: %s", path.c_str());
+    ESP_LOGD(TAG, "Failed to open directory: %s (errno: %d)", path.c_str(), errno);
     return;
   }
 
