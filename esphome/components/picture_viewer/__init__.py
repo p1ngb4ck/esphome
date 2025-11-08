@@ -110,10 +110,33 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
+    # Add defines for features used in this component's C++ code
+    # Transcoder is always loaded via AUTO_LOAD
+    cg.add_define("USE_TRANSCODER")
+
+    # Add platform-specific JPEG decoder defines (matches transcoder logic)
+    from esphome.core import CORE
+    if CORE.is_esp32:
+        from esphome.components.esp32 import get_esp32_variant
+        variant = get_esp32_variant()
+        if variant:
+            variant_lower = variant.lower().replace("-", "")
+            if variant_lower in ("esp32s2", "esp32s3"):
+                cg.add_define("USE_ESP_JPEG_DECODER")
+            elif variant_lower == "esp32p4":
+                cg.add_define("USE_HARDWARE_JPEG_DECODER")
+            else:
+                cg.add_define("USE_JPEGDEC")
+    else:
+        # Non-ESP32 platforms use JPEGDec fallback
+        cg.add_define("USE_JPEGDEC")
+
     # Link file manager if provided
     if CONF_FILE_MANAGER_ID in config:
         fm = await cg.get_variable(config[CONF_FILE_MANAGER_ID])
         cg.add(var.set_file_manager(fm))
+        # Add define when storage_host is used
+        cg.add_define("USE_STORAGE_HOST")
 
     # Link LVGL canvas if provided
     if CONF_CANVAS_ID in config:
@@ -122,6 +145,8 @@ async def to_code(config):
         cg.add(var.set_canvas_id(str(config[CONF_CANVAS_ID])))
         # Set the canvas object pointer (canvas is already lv_obj_t*)
         cg.add(var.set_canvas(canvas))
+        # Add define when LVGL is used
+        cg.add_define("USE_LVGL")
 
     # Link display if provided
     if CONF_DISPLAY_ID in config:
