@@ -65,9 +65,13 @@ void PictureViewer::setup() {
     return;
   }
 
-  // Get and log decoder handle to verify it's valid
+  // Log decoder type based on platform
+#ifdef USE_HARDWARE_JPEG_DECODER
   jpeg_decoder_handle_t test_handle = this->transcoder_->get_jpeg_decoder();
-  ESP_LOGI(TAG, "Using transcoder for JPEG decoding (decoder handle: %p)", test_handle);
+  ESP_LOGI(TAG, "Using transcoder hardware JPEG decoder (ESP32-P4, handle: %p)", test_handle);
+#elif defined(USE_ESP_JPEG_DECODER)
+  ESP_LOGI(TAG, "Using transcoder ESP-JPEG decoder (ESP32-S2/S3)");
+#endif
 #else
 #ifdef USE_JPEGDEC
   // Initialize JPEGDec library (fallback when transcoder not available)
