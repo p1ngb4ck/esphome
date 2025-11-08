@@ -78,9 +78,6 @@ def require_h264_encoder():
 
 async def to_code(config):
     """Configure transcoder component based on platform and requirements."""
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
     # Get registered codec requirements
     requirements = CORE.data.get("transcoder_requirements", set())
     if not requirements:
@@ -92,6 +89,10 @@ async def to_code(config):
 
     _LOGGER.info("Transcoder requirements: %s", ", ".join(sorted(requirements)))
 
+    # Set global transcoder accessor flag FIRST (before component registration)
+    # Note: global_transcoder is set to 'this' in Transcoder constructor
+    cg.add_define("USE_TRANSCODER")
+
     # Only configure for ESP32 platforms
     if not CORE.is_esp32:
         _LOGGER.info("Transcoder: Non-ESP32 platform, using fallback codecs")
@@ -99,6 +100,9 @@ async def to_code(config):
         if CODEC_JPEG_DECODER in requirements:
             cg.add_library("bodmer/JPEGDecoder", "1.8.0")
             cg.add_define("USE_JPEGDEC")
+        # Create and register component AFTER defines are set
+        var = cg.new_Pvariable(config[CONF_ID])
+        await cg.register_component(var, config)
         return
 
     from esphome.components.esp32 import get_esp32_variant, add_idf_component
@@ -173,6 +177,6 @@ async def to_code(config):
                 "H.264 codec requested but only available on ESP32-P4/S3 (current: %s)", variant
             )
 
-    # Set global transcoder accessor flag
-    # Note: global_transcoder is set to 'this' in Transcoder constructor
-    cg.add_define("USE_TRANSCODER")
+    # Create and register component AFTER all defines are set
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
