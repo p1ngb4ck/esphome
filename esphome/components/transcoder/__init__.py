@@ -96,6 +96,10 @@ async def to_code(config):
 
     _LOGGER.info("Transcoder requirements: %s", ", ".join(sorted(requirements)))
 
+    # Create and register component FIRST (like old storage_host pattern)
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+
     # Set global transcoder accessor flag
     cg.add_define("USE_TRANSCODER")
 
@@ -177,7 +181,3 @@ async def to_code(config):
             _LOGGER.warning("JPEG encoder not available on non-ESP32 platforms")
         if h264_needed:
             _LOGGER.error("H.264 codec not available on non-ESP32 platforms")
-
-    # Create and register component
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
