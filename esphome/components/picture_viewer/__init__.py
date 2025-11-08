@@ -107,10 +107,7 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     """Generate code for picture_viewer component"""
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
-    # Add defines for features used in this component's C++ code
+    # Set all defines FIRST (before component registration)
     # Transcoder is always loaded via AUTO_LOAD
     cg.add_define("USE_TRANSCODER")
 
@@ -131,12 +128,21 @@ async def to_code(config):
         # Non-ESP32 platforms use JPEGDec fallback
         cg.add_define("USE_JPEGDEC")
 
+    # Add conditional defines based on configuration
+    if CONF_FILE_MANAGER_ID in config:
+        cg.add_define("USE_STORAGE_HOST")
+
+    if CONF_CANVAS_ID in config:
+        cg.add_define("USE_LVGL")
+
+    # Create and register component AFTER all defines are set
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+
     # Link file manager if provided
     if CONF_FILE_MANAGER_ID in config:
         fm = await cg.get_variable(config[CONF_FILE_MANAGER_ID])
         cg.add(var.set_file_manager(fm))
-        # Add define when storage_host is used
-        cg.add_define("USE_STORAGE_HOST")
 
     # Link LVGL canvas if provided
     if CONF_CANVAS_ID in config:
@@ -145,8 +151,6 @@ async def to_code(config):
         cg.add(var.set_canvas_id(str(config[CONF_CANVAS_ID])))
         # Set the canvas object pointer (canvas is already lv_obj_t*)
         cg.add(var.set_canvas(canvas))
-        # Add define when LVGL is used
-        cg.add_define("USE_LVGL")
 
     # Link display if provided
     if CONF_DISPLAY_ID in config:
