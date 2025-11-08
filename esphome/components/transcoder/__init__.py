@@ -10,7 +10,7 @@ from esphome.components.esp32 import (
     add_idf_component,
 )
 from esphome.const import CONF_ID
-from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core import CORE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +82,6 @@ def require_h264_encoder():
     _LOGGER.debug("Transcoder: H.264 encoder required")
 
 
-@coroutine_with_priority(CoroPriority.NETWORK)
 async def to_code(config):
     """Configure transcoder component based on platform and requirements."""
     # Get registered codec requirements
