@@ -107,25 +107,9 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     """Generate code for picture_viewer component"""
-    # Set all defines FIRST (before component registration)
-    # Transcoder is always loaded via AUTO_LOAD
+    # Set defines FIRST (before component registration)
+    # Transcoder is always loaded via AUTO_LOAD and sets decoder defines globally
     cg.add_define("USE_TRANSCODER")
-
-    # Add platform-specific JPEG decoder defines (matches transcoder logic)
-    from esphome.core import CORE
-    if CORE.is_esp32:
-        from esphome.components.esp32 import get_esp32_variant
-        variant = get_esp32_variant()
-        if "S2" in variant or "S3" in variant:
-            cg.add_define("USE_ESP_JPEG_DECODER")
-        elif "P4" in variant:
-            cg.add_define("USE_HARDWARE_JPEG_DECODER")
-        else:
-            # Fallback for all other ESP32 variants
-            cg.add_define("USE_JPEGDEC")
-    else:
-        # Non-ESP32 platforms use JPEGDec fallback
-        cg.add_define("USE_JPEGDEC")
 
     # Add conditional defines based on configuration
     if CONF_FILE_MANAGER_ID in config:
