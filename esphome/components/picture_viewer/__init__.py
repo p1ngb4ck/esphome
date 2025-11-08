@@ -30,8 +30,8 @@ picture_viewer_ns = cg.esphome_ns.namespace("picture_viewer")
 PictureViewer = picture_viewer_ns.class_("PictureViewer", cg.Component)
 
 # Enums
-SlideshowMode = picture_viewer_ns.enum("SlideshowMode")
-ImageFitMode = picture_viewer_ns.enum("ImageFitMode")
+SlideshowMode = picture_viewer_ns.enum("SlideshowMode", is_class=True)
+ImageFitMode = picture_viewer_ns.enum("ImageFitMode", is_class=True)
 IMAGE_FIT_MODES = {
     "SCALE_TO_FIT": ImageFitMode.SCALE_TO_FIT,
     "SCALE_TO_FILL": ImageFitMode.SCALE_TO_FILL,
@@ -86,8 +86,8 @@ async def to_code(config):
         canvas = await cg.get_variable(config[CONF_CANVAS_ID])
         # Store canvas ID for debugging
         cg.add(var.set_canvas_id(str(config[CONF_CANVAS_ID])))
-        # Set the canvas object pointer (canvas.obj is the lv_obj_t*)
-        cg.add(var.set_canvas(canvas.obj))
+        # Set the canvas object pointer (canvas is already lv_obj_t*)
+        cg.add(var.set_canvas(canvas))
 
     # Link display if provided
     if CONF_DISPLAY_ID in config:
