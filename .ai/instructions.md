@@ -175,6 +175,62 @@ This document provides essential context for AI models interacting with this pro
     *   Shows lack of care and attention to detail
     *   Erodes trust when preventable errors occur
 
+### Python Codegen and Defines
+
+**ABSOLUTE RULE: Each component's `__init__.py` must declare ALL defines that component's C++ code uses. Defines from other components DO NOT automatically apply.**
+
+*   **The Problem:**
+    *   Assuming a define is available because another component's `__init__.py` sets it
+    *   Forgetting that ESPHome compiles each component independently
+    *   Writing C++ code with `#ifdef USE_SOME_FEATURE` without ensuring that component's `__init__.py` sets `USE_SOME_FEATURE`
+    *   This causes linker errors during testing when the define is missing
+
+*   **Required behavior:**
+    1.  **CHECK** the component's own `__init__.py` for ALL defines used in that component's C++ code
+    2.  **VERIFY** that `cg.add_define()` is called in that component's `__init__.py` for every `#ifdef`/`#ifndef` in that component's C++ files
+    3.  **DO NOT** assume defines from other components are available
+    4.  **DO NOT** delete working code when investigating define issues
+    5.  **ALWAYS** add missing defines to the component's `__init__.py` instead of removing functionality
+
+*   **Example of what NOT to do:**
+    ```python
+    # Component A's __init__.py
+    cg.add_define("USE_JPEG_DECODER")
+
+    # Component B's C++ code uses USE_JPEG_DECODER
+    #ifdef USE_JPEG_DECODER
+      // code here
+    #endif
+
+    # Component B's __init__.py - MISSING cg.add_define("USE_JPEG_DECODER")
+    # This will cause linker errors!
+    ```
+
+*   **Correct approach:**
+    ```python
+    # Component B's __init__.py - MUST include the define
+    cg.add_define("USE_JPEG_DECODER")
+
+    # Now Component B's C++ code can use it
+    #ifdef USE_JPEG_DECODER
+      // code here
+    #endif
+    ```
+
+*   **When user says "check if __init__.py correctly declares the define":**
+    1.  **READ** the component's `__init__.py`
+    2.  **SEARCH** for all `#ifdef`, `#ifndef`, `#if defined()` in the component's C++ files
+    3.  **VERIFY** each define has a corresponding `cg.add_define()` in that component's `__init__.py`
+    4.  **ADD** any missing `cg.add_define()` calls
+    5.  **DO NOT** delete functionality or remove `#ifdef` blocks
+
+*   **Why this matters:**
+    *   ESPHome's code generation compiles components independently
+    *   Each component must be self-contained with its own defines
+    *   Linker errors waste time and break functionality
+    *   Deleting working code to "fix" define issues destroys the user's work
+    *   This is a fundamental aspect of how ESPHome's Python-to-C++ codegen works
+
 ### Core Principle
 
 **The time waste is not in the user teaching boundaries - it's in the AI violating those boundaries and forcing the user to stop everything to correct violations.**
