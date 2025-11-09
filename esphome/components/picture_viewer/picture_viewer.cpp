@@ -838,11 +838,11 @@ bool PictureViewer::read_file_(const std::string &path, std::vector<uint8_t> &da
 
 uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
 #ifdef ESP32
-  // For large images (>1MB), REQUIRE PSRAM to avoid heap fragmentation
-  if (size > 1024 * 1024) {
+  // For images >64KB, REQUIRE PSRAM to avoid heap fragmentation
+  if (size > 65536) {
     uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
     if (buffer == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM (required for large images)", size);
+      ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM (required for images >64KB)", size);
       return nullptr;
     }
     ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM", size);
