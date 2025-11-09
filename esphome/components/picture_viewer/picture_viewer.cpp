@@ -7,6 +7,7 @@
 
 #ifdef ESP32
 #include "esp_heap_caps.h"
+#include "esp_cache.h"
 #endif
 
 #ifdef USE_HARDWARE_JPEG_DECODER
@@ -840,22 +841,31 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
   uint8_t *buffer = nullptr;
 
 #ifdef USE_ESP32
-  // For images >64KB, REQUIRE PSRAM with DMA capability (ensures cache coherency)
+  // For images >64KB, use cache-aligned PSRAM allocation (matches ESP-IDF JPEG driver approach)
   if (size > 65536) {
-    // Try DMA-capable PSRAM first (automatic cache coherency on ESP32-P4)
-    buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-    if (buffer != nullptr) {
-      ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM (DMA-capable)", size);
-      return buffer;
+    // Get cache alignment requirement for PSRAM
+    size_t cache_align = 0;
+    esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &cache_align);
+
+    if (ret == ESP_OK && cache_align > 0) {
+      // Align size up to cache line boundary (like JPEG decoder output buffers)
+      size_t aligned_size = (size + cache_align - 1) & ~(cache_align - 1);
+
+      // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
+      buffer = static_cast<uint8_t *>(heap_caps_aligned_calloc(cache_align, 1, aligned_size, MALLOC_CAP_SPIRAM));
+      if (buffer != nullptr) {
+        ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, cache_align);
+        return buffer;
+      }
     }
 
-    // Fallback to regular PSRAM if DMA not available
+    // Fallback to regular PSRAM if cache-aligned allocation fails
     buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (buffer == nullptr) {
       ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM (required for images >64KB)", size);
       return nullptr;
     }
-    ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM (non-DMA)", size);
+    ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM (non-aligned fallback)", size);
     return buffer;
   }
 
