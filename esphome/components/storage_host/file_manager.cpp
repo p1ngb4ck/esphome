@@ -440,19 +440,19 @@ void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo>
     // Get file info (pass mount point for VFS routing)
     FileInfo info;
     if (this->get_file_info_(full_path, mount_point, info)) {
-      ESP_LOGI(TAG, "[SIZE TRACE] get_file_info_() returned size=%llu for '%s'", (unsigned long long) info.size,
-               info.filename.c_str());
+      ESP_LOGVV(TAG, "[SIZE TRACE] get_file_info_() returned size=%llu for '%s'", (unsigned long long) info.size,
+                info.filename.c_str());
 
       // Check filters
       if (this->passes_filters_(info)) {
-        ESP_LOGI(TAG, "[SIZE TRACE] Adding to files vector: '%s' with size=%llu", info.filename.c_str(),
-                 (unsigned long long) info.size);
+        ESP_LOGVV(TAG, "[SIZE TRACE] Adding to files vector: '%s' with size=%llu", info.filename.c_str(),
+                  (unsigned long long) info.size);
         files.push_back(info);
       } else {
-        ESP_LOGI(TAG, "[SIZE TRACE] File '%s' filtered out", info.filename.c_str());
+        ESP_LOGVV(TAG, "[SIZE TRACE] File '%s' filtered out", info.filename.c_str());
       }
     } else {
-      ESP_LOGI(TAG, "[SIZE TRACE] get_file_info_() failed for '%s'", filename.c_str());
+      ESP_LOGVV(TAG, "[SIZE TRACE] get_file_info_() failed for '%s'", filename.c_str());
     }
   }
 
@@ -477,7 +477,7 @@ bool FileManager::get_file_info_(const std::string &path, const std::string &mou
   long size = ftell(file);
   fclose(file);
 
-  ESP_LOGI(TAG, "[SIZE TRACE] ftell() returned: %ld for path: '%s'", size, path.c_str());
+  ESP_LOGVV(TAG, "[SIZE TRACE] ftell() returned: %ld for path: '%s'", size, path.c_str());
 
   if (size < 0) {
     ESP_LOGD(TAG, "ftell() returned negative size for path: '%s'", path.c_str());
@@ -489,8 +489,8 @@ bool FileManager::get_file_info_(const std::string &path, const std::string &mou
   info.directory = this->get_directory_(path);
   info.size = static_cast<uint64_t>(size);
 
-  ESP_LOGI(TAG, "[SIZE TRACE] After cast, info.size = %llu for file '%s'", (unsigned long long) info.size,
-           info.filename.c_str());
+  ESP_LOGVV(TAG, "[SIZE TRACE] After cast, info.size = %llu for file '%s'", (unsigned long long) info.size,
+            info.filename.c_str());
 
   info.modified_time = 0;     // fopen doesn't give modification time
   info.is_directory = false;  // fopen only works on files
