@@ -529,7 +529,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
   // Decode (with retry on failure due to ESP32-P4 state corruption bug)
   uint32_t actual_output_size = 0;
-  ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+  ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
                              &actual_output_size);
 
   // If decode fails, release decoder and retry once (ESP32-P4 state corruption workaround)
