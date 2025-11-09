@@ -546,7 +546,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     }
 
     // Retry decode
-    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
                                &actual_output_size);
 
     if (ret != ESP_OK) {
