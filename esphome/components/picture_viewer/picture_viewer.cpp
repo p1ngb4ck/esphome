@@ -165,13 +165,17 @@ bool PictureViewer::show_image(size_t index) {
   if (this->current_image_data_ != nullptr) {
     free(this->current_image_data_);
     this->current_image_data_ = nullptr;
+    this->current_image_size_ = 0;
   }
 
   // Allocate new buffer in PSRAM/heap
   this->current_image_size_ = rgb565_data.size();
   this->current_image_data_ = this->allocate_image_buffer_(this->current_image_size_);
   if (this->current_image_data_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate image buffer: %zu bytes", this->current_image_size_);
+    ESP_LOGE(TAG, "Failed to allocate image buffer: %zu bytes (check PSRAM availability)", this->current_image_size_);
+    this->current_image_size_ = 0;
+    this->current_image_width_ = 0;
+    this->current_image_height_ = 0;
     return false;
   }
 
@@ -452,17 +456,9 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     return false;
   }
 
-  ESP_LOGD(TAG, "JPEG dimensions: %dx%d", pic_info.width, pic_info.height);
-  ESP_LOGI(TAG, "[PIC_INFO DEBUG] sizeof(pic_info)=%zu, width=%d, height=%d",
-           sizeof(pic_info), pic_info.width, pic_info.height);
-
-  // Log the raw bytes of pic_info to see all fields
-  const uint32_t *pic_info_raw = reinterpret_cast<const uint32_t *>(&pic_info);
-  ESP_LOGI(TAG, "[PIC_INFO RAW] field[0]=%u, field[1]=%u, field[2]=%u",
-           pic_info_raw[0], pic_info_raw[1], pic_info_raw[2]);
-
   width = pic_info.width;
   height = pic_info.height;
+  ESP_LOGD(TAG, "JPEG dimensions: %dx%d", width, height);
 
   // Calculate buffer sizes
   uint32_t input_size = jpeg_data.size();
@@ -495,8 +491,6 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     return false;
   }
 
-  ESP_LOGD(TAG, "Allocated buffers: input=%zu bytes, output=%zu bytes", input_buffer_size, output_buffer_size);
-
   // Copy input data to aligned buffer
   memcpy(aligned_input, jpeg_data.data(), input_size);
 
@@ -509,39 +503,42 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     return false;
   }
 
-  // Configure decoder - try hardcoded values matching old working code exactly
+  // Configure decoder for RGB565 output
   jpeg_decode_cfg_t decode_cfg = {};
-  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;  // Use constant like old code
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;      // RGB (value 0)
-  // conv_std left as 0 (default) like old code
+  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+  // conv_std defaults to 0 (BT601)
 
-  ESP_LOGI(TAG, "[HARDCODE TEST] Using hardcoded decode_cfg matching old working code");
-
-  // Debug: Log struct size and all parameters
-  ESP_LOGI(TAG, "[DECODE DEBUG] sizeof(jpeg_decode_cfg_t) = %zu bytes", sizeof(jpeg_decode_cfg_t));
-  ESP_LOGI(TAG, "[DECODE DEBUG] Decoder handle: %p", hw_decoder);
-  ESP_LOGI(TAG, "[DECODE DEBUG] Input buffer: %p (size: %u, aligned: %s)", aligned_input, input_size,
-           ((uintptr_t)aligned_input % 16 == 0) ? "YES" : "NO");
-  ESP_LOGI(TAG, "[DECODE DEBUG] Output buffer: %p (size: %u, aligned: %s)", aligned_output, output_size,
-           ((uintptr_t)aligned_output % 16 == 0) ? "YES" : "NO");
-  ESP_LOGI(TAG, "[DECODE DEBUG] decode_cfg fields: output_format=%d, rgb_order=%d, conv_std=%d",
-           decode_cfg.output_format, decode_cfg.rgb_order, decode_cfg.conv_std);
-  ESP_LOGI(TAG, "[DECODE DEBUG] Image dimensions: %dx%d", width, height);
-
-  // Decode
+  // Decode (with retry on failure due to ESP32-P4 state corruption bug)
   uint32_t actual_output_size = 0;
   ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
                              &actual_output_size);
 
+  // If decode fails, release decoder and retry once (ESP32-P4 state corruption workaround)
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Hardware JPEG decode failed: %s (error code: %d)", esp_err_to_name(ret), ret);
-    ESP_LOGE(TAG, "[DECODE DEBUG] Failed with decoder=%p, in=%p, in_size=%u, out=%p, out_size=%zu", hw_decoder,
-             aligned_input, input_size, aligned_output, output_buffer_size);
-    free(aligned_input);
-    free(aligned_output);
-    // Release decoder to work around ESP32-P4 state corruption bug
+    ESP_LOGW(TAG, "Hardware JPEG decode failed: %s, retrying with fresh decoder", esp_err_to_name(ret));
     this->transcoder_->release_jpeg_decoder();
-    return false;
+    hw_decoder = this->transcoder_->get_jpeg_decoder();
+
+    if (hw_decoder == nullptr) {
+      ESP_LOGE(TAG, "Failed to reinitialize JPEG decoder");
+      free(aligned_input);
+      free(aligned_output);
+      return false;
+    }
+
+    // Retry decode
+    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+                               &actual_output_size);
+
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Hardware JPEG decode failed after retry: %s", esp_err_to_name(ret));
+      free(aligned_input);
+      free(aligned_output);
+      this->transcoder_->release_jpeg_decoder();  // Release failed decoder
+      return false;
+    }
+    ESP_LOGI(TAG, "JPEG decode succeeded after decoder reset");
   }
 
   ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", actual_output_size);
@@ -561,10 +558,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   free(aligned_input);
   free(aligned_output);
 
-  // Release decoder to work around ESP32-P4 state corruption bug
-  // This ensures decoder is recreated fresh for next image
-  this->transcoder_->release_jpeg_decoder();
-
+  // Decoder is kept alive for next decode (only released on error)
   ESP_LOGD(TAG, "Decoded JPEG using hardware decoder: %dx%d", width, height);
   return true;
 }
@@ -664,12 +658,23 @@ void PictureViewer::update_canvas_() {
   switch (this->fit_mode_) {
     case ImageFitMode::SCALE_TO_FIT: {
       // Scale to fit, maintain aspect ratio
+      if (this->current_image_width_ <= 0 || this->current_image_height_ <= 0) {
+        ESP_LOGE(TAG, "Invalid image dimensions for scaling");
+        return;
+      }
+
       float scale_x = static_cast<float>(canvas_width) / this->current_image_width_;
       float scale_y = static_cast<float>(canvas_height) / this->current_image_height_;
       float scale = std::min(scale_x, scale_y);
 
       draw_width = static_cast<int>(this->current_image_width_ * scale);
       draw_height = static_cast<int>(this->current_image_height_ * scale);
+
+      // Validate dimensions
+      if (draw_width <= 0 || draw_height <= 0 || draw_width > canvas_width * 2 || draw_height > canvas_height * 2) {
+        ESP_LOGE(TAG, "Invalid scaled dimensions: %dx%d", draw_width, draw_height);
+        return;
+      }
 
       // Center in canvas
       draw_x = (canvas_width - draw_width) / 2;
@@ -833,16 +838,28 @@ bool PictureViewer::read_file_(const std::string &path, std::vector<uint8_t> &da
 
 uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
 #ifdef ESP32
-  // Try to allocate in PSRAM first
+  // For large images (>1MB), REQUIRE PSRAM to avoid heap fragmentation
+  if (size > 1024 * 1024) {
+    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
+    if (buffer == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM (required for large images)", size);
+      return nullptr;
+    }
+    ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM", size);
+    return buffer;
+  }
+
+  // For smaller images, try PSRAM first, then fallback to heap
   uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
   if (buffer != nullptr) {
     ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM", size);
     return buffer;
   }
-  ESP_LOGD(TAG, "PSRAM allocation failed, falling back to heap");
+
+  ESP_LOGD(TAG, "PSRAM allocation failed, using heap for %zu bytes", size);
 #endif
 
-  // Fallback to regular heap
+  // Fallback to regular heap for smaller allocations
   uint8_t *buffer = static_cast<uint8_t *>(malloc(size));
   if (buffer != nullptr) {
     ESP_LOGD(TAG, "Allocated %zu bytes in heap", size);
