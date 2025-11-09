@@ -30,8 +30,8 @@ class PictureViewer;
 // Directory configuration with per-directory JPEG decoder settings
 struct DirectoryConfig {
   std::string path;
-  int jpeg_rgb_order{0};        // Default: RGB (JPEG_DEC_RGB_ELEMENT_ORDER_RGB)
-  int jpeg_color_space{0};      // Default: BT601
+  int jpeg_rgb_order{0};                    // Default: RGB (JPEG_DEC_RGB_ELEMENT_ORDER_RGB)
+  int jpeg_color_space{0};                  // Default: BT601
   uint32_t jpeg_output_format{0x02000002};  // Default: RGB565
 };
 
@@ -193,7 +193,7 @@ class PictureViewer : public Component {
 #endif
 
 #ifdef USE_LVGL
-  std::string canvas_id_;  // LVGL canvas widget ID (for debugging)
+  std::string canvas_id_;      // LVGL canvas widget ID (for debugging)
   lv_obj_t *canvas_{nullptr};  // LVGL canvas object pointer
   display::Display *display_{nullptr};
 #endif
@@ -230,6 +230,13 @@ class PictureViewer : public Component {
   size_t next_image_size_{0};
   int next_image_index_{-1};  // Index of pre-loaded image
 
+  // Canvas buffer management (adopted from LVGL canvas - not owned by us)
+  uint16_t *canvas_buffer_{nullptr};  // Points to canvas's buffer (owned by LVGL)
+  int canvas_buffer_width_{0};
+  int canvas_buffer_height_{0};
+  size_t canvas_buffer_pixels_{0};
+  bool canvas_buffer_ready_{false};
+
   // =====================================================
   // Internal Methods
   // =====================================================
@@ -250,7 +257,7 @@ class PictureViewer : public Component {
   /// Decode JPEG using hardware decoder (ESP32-P4)
 #ifdef USE_HARDWARE_JPEG_DECODER
   bool decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data, int &width,
-                              int &height, int target_width = 0, int target_height = 0);
+                             int &height, int target_width = 0, int target_height = 0);
 #endif
 
   /// Decode JPEG using JPEGDec library (fallback)
@@ -266,6 +273,12 @@ class PictureViewer : public Component {
   /// Resize RGB565 image
   void resize_image_(const std::vector<uint8_t> &src_data, int src_width, int src_height,
                      std::vector<uint8_t> &dst_data, int dst_width, int dst_height);
+
+  /// Ensure canvas buffer is properly initialized and adopted from LVGL
+  void ensure_canvas_buffer_();
+
+  /// Write RGB565 image data directly to canvas buffer (with scaling/positioning)
+  void write_to_canvas_buffer_(const uint8_t *rgb565_data, int img_width, int img_height);
 
   /// Update canvas with current image
   void update_canvas_();

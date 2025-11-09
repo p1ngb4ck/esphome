@@ -116,8 +116,8 @@ void PictureViewer::dump_config() {
   ESP_LOGCONFIG(TAG, "  Directories: %zu", this->directories_.size());
   for (size_t i = 0; i < this->directories_.size(); i++) {
     const auto &dir = this->directories_[i];
-    ESP_LOGCONFIG(TAG, "    [%zu] %s (RGB:%d, CS:%d, Fmt:0x%08x)%s",
-                  i, dir.path.c_str(), dir.jpeg_rgb_order, dir.jpeg_color_space, dir.jpeg_output_format,
+    ESP_LOGCONFIG(TAG, "    [%zu] %s (RGB:%d, CS:%d, Fmt:0x%08x)%s", i, dir.path.c_str(), dir.jpeg_rgb_order,
+                  dir.jpeg_color_space, dir.jpeg_output_format,
                   (i == this->current_directory_index_) ? " <- CURRENT" : "");
   }
   ESP_LOGCONFIG(TAG, "  Image Count: %zu", this->images_.size());
@@ -345,8 +345,7 @@ void PictureViewer::scan_directory_(const std::vector<storage_host::FileInfo> &f
 
     if (lower_filename.ends_with(".jpg") || lower_filename.ends_with(".jpeg")) {
       jpeg_count++;
-      ESP_LOGD(TAG, "  Found JPEG: %s (size: %llu bytes)", file.filename.c_str(),
-               (unsigned long long)file.size);
+      ESP_LOGD(TAG, "  Found JPEG: %s (size: %llu bytes)", file.filename.c_str(), (unsigned long long) file.size);
       ImageEntry entry;
       entry.path = file.path;
       entry.filename = file.filename;
@@ -380,7 +379,7 @@ void PictureViewer::on_directory_changed_(const storage_host::DirectoryChangeInf
 }
 
 bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
-                                int target_width, int target_height) {
+                               int target_width, int target_height) {
   // Read JPEG file
   std::vector<uint8_t> jpeg_data;
   if (!this->read_file_(path, jpeg_data)) {
@@ -403,17 +402,16 @@ bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rg
 
 #ifdef USE_ESP_JPEG_DECODER
 bool PictureViewer::decode_jpeg_esp_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data,
-                                      int &width, int &height, int target_width, int target_height) {
-  esp_jpeg_image_cfg_t jpeg_cfg = {
-      .indata = jpeg_data.data(),
-      .indata_size = static_cast<int>(jpeg_data.size()),
-      .outbuf = nullptr,
-      .outbuf_size = 0,
-      .out_format = JPEG_IMAGE_FORMAT_RGB565,
-      .out_scale = JPEG_IMAGE_SCALE_0,
-      .flags = {
-          .swap_color_bytes = 0,
-      }};
+                                     int &width, int &height, int target_width, int target_height) {
+  esp_jpeg_image_cfg_t jpeg_cfg = {.indata = jpeg_data.data(),
+                                   .indata_size = static_cast<int>(jpeg_data.size()),
+                                   .outbuf = nullptr,
+                                   .outbuf_size = 0,
+                                   .out_format = JPEG_IMAGE_FORMAT_RGB565,
+                                   .out_scale = JPEG_IMAGE_SCALE_0,
+                                   .flags = {
+                                       .swap_color_bytes = 0,
+                                   }};
 
   esp_jpeg_image_output_t outimg = {};
   esp_err_t ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
@@ -440,7 +438,7 @@ bool PictureViewer::decode_jpeg_esp_(const std::vector<uint8_t> &jpeg_data, std:
 
 #ifdef USE_HARDWARE_JPEG_DECODER
 bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data,
-                                           int &width, int &height, int target_width, int target_height) {
+                                          int &width, int &height, int target_width, int target_height) {
   if (this->transcoder_ == nullptr || !this->transcoder_->is_jpeg_decoder_available()) {
     ESP_LOGE(TAG, "Hardware JPEG decoder not available in transcoder");
     return false;
@@ -567,7 +565,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
 #ifdef USE_JPEGDEC
 bool PictureViewer::decode_jpeg_jpegdec_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data,
-                                          int &width, int &height, int target_width, int target_height) {
+                                         int &width, int &height, int target_width, int target_height) {
   if (this->jpeg_decoder_ == nullptr) {
     ESP_LOGE(TAG, "JPEGDec decoder not initialized");
     return false;
@@ -616,7 +614,7 @@ int PictureViewer::jpeg_decode_callback_(JPEGDRAW *draw) {
 #endif
 
 void PictureViewer::resize_image_(const std::vector<uint8_t> &src_data, int src_width, int src_height,
-                                   std::vector<uint8_t> &dst_data, int dst_width, int dst_height) {
+                                  std::vector<uint8_t> &dst_data, int dst_width, int dst_height) {
   // Simple nearest-neighbor scaling for RGB565
   dst_data.resize(dst_width * dst_height * 2);
 
@@ -644,112 +642,15 @@ void PictureViewer::update_canvas_() {
     return;
   }
 
-  // Get canvas dimensions
-  lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
-  lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
-
-  ESP_LOGD(TAG, "Canvas: %dx%d, Image: %dx%d, Fit mode: %d", canvas_width, canvas_height, this->current_image_width_,
-           this->current_image_height_, static_cast<int>(this->fit_mode_));
-
-  // Calculate drawing dimensions and position based on fit mode
-  int draw_x = 0, draw_y = 0;
-  int draw_width = this->current_image_width_;
-  int draw_height = this->current_image_height_;
-
-  switch (this->fit_mode_) {
-    case ImageFitMode::SCALE_TO_FIT: {
-      // Scale to fit, maintain aspect ratio
-      if (this->current_image_width_ <= 0 || this->current_image_height_ <= 0) {
-        ESP_LOGE(TAG, "Invalid image dimensions for scaling");
-        return;
-      }
-
-      float scale_x = static_cast<float>(canvas_width) / this->current_image_width_;
-      float scale_y = static_cast<float>(canvas_height) / this->current_image_height_;
-      float scale = std::min(scale_x, scale_y);
-
-      draw_width = static_cast<int>(this->current_image_width_ * scale);
-      draw_height = static_cast<int>(this->current_image_height_ * scale);
-
-      // Validate dimensions
-      if (draw_width <= 0 || draw_height <= 0 || draw_width > canvas_width * 2 || draw_height > canvas_height * 2) {
-        ESP_LOGE(TAG, "Invalid scaled dimensions: %dx%d", draw_width, draw_height);
-        return;
-      }
-
-      // Center in canvas
-      draw_x = (canvas_width - draw_width) / 2;
-      draw_y = (canvas_height - draw_height) / 2;
-
-      // Clear canvas with black background
-      lv_canvas_fill_bg(this->canvas_, lv_color_black(), LV_OPA_COVER);
-      break;
-    }
-
-    case ImageFitMode::SCALE_TO_FILL: {
-      // Scale to fill, maintain aspect ratio, may crop
-      float scale_x = static_cast<float>(canvas_width) / this->current_image_width_;
-      float scale_y = static_cast<float>(canvas_height) / this->current_image_height_;
-      float scale = std::max(scale_x, scale_y);
-
-      draw_width = static_cast<int>(this->current_image_width_ * scale);
-      draw_height = static_cast<int>(this->current_image_height_ * scale);
-
-      // Center in canvas (may be cropped)
-      draw_x = (canvas_width - draw_width) / 2;
-      draw_y = (canvas_height - draw_height) / 2;
-      break;
-    }
-
-    case ImageFitMode::STRETCH: {
-      // Stretch to fill canvas, ignore aspect ratio
-      draw_width = canvas_width;
-      draw_height = canvas_height;
-      draw_x = 0;
-      draw_y = 0;
-      break;
-    }
-
-    case ImageFitMode::CENTER: {
-      // Center without scaling
-      draw_x = (canvas_width - this->current_image_width_) / 2;
-      draw_y = (canvas_height - this->current_image_height_) / 2;
-
-      // Clear canvas with black background
-      lv_canvas_fill_bg(this->canvas_, lv_color_black(), LV_OPA_COVER);
-      break;
-    }
+  // Ensure canvas buffer is ready (adopts LVGL's buffer)
+  this->ensure_canvas_buffer_();
+  if (!this->canvas_buffer_ready_) {
+    ESP_LOGE(TAG, "Canvas buffer not ready, cannot update");
+    return;
   }
 
-  // Need to scale/copy the image data to canvas if dimensions don't match
-  if (draw_width == this->current_image_width_ && draw_height == this->current_image_height_) {
-    // Direct copy - no scaling needed
-    lv_img_dsc_t img_dsc;
-    img_dsc.header.always_zero = 0;
-    img_dsc.header.w = this->current_image_width_;
-    img_dsc.header.h = this->current_image_height_;
-    img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;  // RGB565
-    img_dsc.data_size = this->current_image_size_;
-    img_dsc.data = this->current_image_data_;
-
-    lv_canvas_draw_img(this->canvas_, draw_x, draw_y, &img_dsc, nullptr);
-  } else {
-    // Need to scale the image
-    std::vector<uint8_t> scaled_data;
-    this->resize_image_(std::vector<uint8_t>(this->current_image_data_,
-                                              this->current_image_data_ + this->current_image_size_),
-                        this->current_image_width_, this->current_image_height_, scaled_data, draw_width, draw_height);
-
-    lv_img_dsc_t img_dsc;
-    img_dsc.header.always_zero = 0;
-    img_dsc.header.w = draw_width;
-    img_dsc.header.h = draw_height;
-    img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;  // RGB565
-    img_dsc.data_size = scaled_data.size();
-    img_dsc.data = scaled_data.data();
-
-    lv_canvas_draw_img(this->canvas_, draw_x, draw_y, &img_dsc, nullptr);
-  }
+  // Write image data directly to canvas buffer (handles scaling/positioning)
+  this->write_to_canvas_buffer_(this->current_image_data_, this->current_image_width_, this->current_image_height_);
 
   // Invalidate canvas to trigger redraw
   lv_obj_invalidate(this->canvas_);
@@ -783,6 +684,188 @@ bool PictureViewer::generate_thumbnail_(ImageEntry &entry) {
   entry.thumbnail_loaded = true;
 
   return true;
+}
+
+void PictureViewer::ensure_canvas_buffer_() {
+#ifdef USE_LVGL
+  if (this->canvas_ == nullptr) {
+    this->canvas_buffer_ready_ = false;
+    return;
+  }
+
+  // Get the canvas's image descriptor (contains the buffer LVGL owns)
+  auto *img_dsc = (lv_img_dsc_t *) lv_canvas_get_img(this->canvas_);
+  if (img_dsc == nullptr || img_dsc->data == nullptr) {
+    // Canvas buffer not yet initialized by LVGL
+    ESP_LOGD(TAG, "Canvas buffer not yet initialized by LVGL");
+    this->canvas_buffer_ready_ = false;
+    return;
+  }
+
+  // Validate canvas dimensions
+  if (img_dsc->header.w <= 0 || img_dsc->header.h <= 0) {
+    ESP_LOGD(TAG, "Invalid canvas dimensions: %dx%d", img_dsc->header.w, img_dsc->header.h);
+    this->canvas_buffer_ready_ = false;
+    return;
+  }
+
+  // Validate color format (we expect RGB565 / LV_IMG_CF_TRUE_COLOR)
+  if (img_dsc->header.cf != LV_IMG_CF_TRUE_COLOR) {
+    ESP_LOGE(TAG, "Canvas color format is not TRUE_COLOR (RGB565), got format: %d", img_dsc->header.cf);
+    this->canvas_buffer_ready_ = false;
+    return;
+  }
+
+  const int buf_width = img_dsc->header.w;
+  const int buf_height = img_dsc->header.h;
+  const size_t buf_pixels = (size_t) buf_width * (size_t) buf_height;
+
+  // Log only when buffer changes
+  if (this->canvas_buffer_ != (uint16_t *) img_dsc->data || this->canvas_buffer_pixels_ != buf_pixels) {
+    ESP_LOGI(TAG, "Adopting canvas buffer: canvas=%p img_dsc=%p buffer=%p %dx%d (%zu pixels, format=%d)",
+             (void *) this->canvas_, (void *) img_dsc, (void *) img_dsc->data, buf_width, buf_height, buf_pixels,
+             img_dsc->header.cf);
+  }
+
+  // Adopt the canvas's buffer (we don't own it - LVGL does)
+  this->canvas_buffer_ = (uint16_t *) img_dsc->data;
+  this->canvas_buffer_width_ = buf_width;
+  this->canvas_buffer_height_ = buf_height;
+  this->canvas_buffer_pixels_ = buf_pixels;
+  this->canvas_buffer_ready_ = true;
+#endif
+}
+
+void PictureViewer::write_to_canvas_buffer_(const uint8_t *rgb565_data, int img_width, int img_height) {
+#ifdef USE_LVGL
+  if (!this->canvas_buffer_ready_ || this->canvas_buffer_ == nullptr) {
+    ESP_LOGW(TAG, "Canvas buffer not ready for writing");
+    return;
+  }
+
+  if (rgb565_data == nullptr || img_width <= 0 || img_height <= 0) {
+    ESP_LOGW(TAG, "Invalid image data for canvas write");
+    return;
+  }
+
+  const int canvas_w = this->canvas_buffer_width_;
+  const int canvas_h = this->canvas_buffer_height_;
+
+  // Calculate drawing dimensions and position based on fit mode
+  int draw_x = 0, draw_y = 0;
+  int draw_width = img_width;
+  int draw_height = img_height;
+
+  switch (this->fit_mode_) {
+    case ImageFitMode::SCALE_TO_FIT: {
+      // Scale to fit, maintain aspect ratio
+      float scale_x = static_cast<float>(canvas_w) / img_width;
+      float scale_y = static_cast<float>(canvas_h) / img_height;
+      float scale = std::min(scale_x, scale_y);
+
+      draw_width = static_cast<int>(img_width * scale);
+      draw_height = static_cast<int>(img_height * scale);
+
+      // Center in canvas
+      draw_x = (canvas_w - draw_width) / 2;
+      draw_y = (canvas_h - draw_height) / 2;
+
+      // Clear canvas with black background
+      std::memset(this->canvas_buffer_, 0, this->canvas_buffer_pixels_ * sizeof(uint16_t));
+      break;
+    }
+
+    case ImageFitMode::SCALE_TO_FILL: {
+      // Scale to fill, maintain aspect ratio, may crop
+      float scale_x = static_cast<float>(canvas_w) / img_width;
+      float scale_y = static_cast<float>(canvas_h) / img_height;
+      float scale = std::max(scale_x, scale_y);
+
+      draw_width = static_cast<int>(img_width * scale);
+      draw_height = static_cast<int>(img_height * scale);
+
+      // Center in canvas (may be cropped)
+      draw_x = (canvas_w - draw_width) / 2;
+      draw_y = (canvas_h - draw_height) / 2;
+      break;
+    }
+
+    case ImageFitMode::STRETCH: {
+      // Stretch to fill canvas, ignore aspect ratio
+      draw_width = canvas_w;
+      draw_height = canvas_h;
+      draw_x = 0;
+      draw_y = 0;
+      break;
+    }
+
+    case ImageFitMode::CENTER: {
+      // Center without scaling
+      draw_x = (canvas_w - img_width) / 2;
+      draw_y = (canvas_h - img_height) / 2;
+
+      // Clear canvas with black background
+      std::memset(this->canvas_buffer_, 0, this->canvas_buffer_pixels_ * sizeof(uint16_t));
+      break;
+    }
+  }
+
+  ESP_LOGD(TAG, "Writing to canvas: canvas=%dx%d, image=%dx%d, draw=%dx%d at (%d,%d), fit_mode=%d", canvas_w, canvas_h,
+           img_width, img_height, draw_width, draw_height, draw_x, draw_y, static_cast<int>(this->fit_mode_));
+
+  // Write image data to canvas buffer
+  if (draw_width == img_width && draw_height == img_height) {
+    // No scaling needed - direct copy with clipping
+    const uint16_t *src_pixels = reinterpret_cast<const uint16_t *>(rgb565_data);
+
+    for (int y = 0; y < img_height; y++) {
+      int canvas_y = draw_y + y;
+      if (canvas_y < 0 || canvas_y >= canvas_h)
+        continue;  // Skip rows outside canvas
+
+      for (int x = 0; x < img_width; x++) {
+        int canvas_x = draw_x + x;
+        if (canvas_x < 0 || canvas_x >= canvas_w)
+          continue;  // Skip pixels outside canvas
+
+        size_t src_idx = y * img_width + x;
+        size_t dst_idx = canvas_y * canvas_w + canvas_x;
+        this->canvas_buffer_[dst_idx] = src_pixels[src_idx];
+      }
+    }
+  } else {
+    // Scaling needed - use bilinear interpolation
+    const uint16_t *src_pixels = reinterpret_cast<const uint16_t *>(rgb565_data);
+    const float x_ratio = static_cast<float>(img_width) / draw_width;
+    const float y_ratio = static_cast<float>(img_height) / draw_height;
+
+    for (int y = 0; y < draw_height; y++) {
+      int canvas_y = draw_y + y;
+      if (canvas_y < 0 || canvas_y >= canvas_h)
+        continue;
+
+      for (int x = 0; x < draw_width; x++) {
+        int canvas_x = draw_x + x;
+        if (canvas_x < 0 || canvas_x >= canvas_w)
+          continue;
+
+        // Simple nearest-neighbor scaling (fast)
+        int src_x = static_cast<int>(x * x_ratio);
+        int src_y = static_cast<int>(y * y_ratio);
+
+        // Clamp to source bounds
+        src_x = std::min(src_x, img_width - 1);
+        src_y = std::min(src_y, img_height - 1);
+
+        size_t src_idx = src_y * img_width + src_x;
+        size_t dst_idx = canvas_y * canvas_w + canvas_x;
+        this->canvas_buffer_[dst_idx] = src_pixels[src_idx];
+      }
+    }
+  }
+
+  ESP_LOGD(TAG, "Canvas buffer write completed");
+#endif
 }
 
 void PictureViewer::update_canvas_dimensions_() {
@@ -897,9 +980,9 @@ bool PictureViewer::set_current_directory(size_t index) {
     return true;
   }
 
-  ESP_LOGI(TAG, "Switching from directory %zu (%s) to %zu (%s)",
-           this->current_directory_index_, this->directories_[this->current_directory_index_].path.c_str(),
-           index, this->directories_[index].path.c_str());
+  ESP_LOGI(TAG, "Switching from directory %zu (%s) to %zu (%s)", this->current_directory_index_,
+           this->directories_[this->current_directory_index_].path.c_str(), index,
+           this->directories_[index].path.c_str());
 
   this->current_directory_index_ = index;
   this->refresh_images();  // Reload images from new directory
