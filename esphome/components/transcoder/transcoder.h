@@ -78,6 +78,13 @@ class Transcoder : public Component {
   jpeg_decoder_handle_t get_jpeg_decoder();
 
   /**
+   * @brief Release hardware JPEG decoder (ESP32-P4)
+   * Deletes decoder to work around ESP32-P4 state corruption bug
+   * Must be called after each decode operation
+   */
+  void release_jpeg_decoder();
+
+  /**
    * @brief Check if JPEG decoder is available
    * Triggers lazy initialization if not already done
    */

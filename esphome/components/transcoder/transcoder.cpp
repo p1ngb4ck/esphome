@@ -117,6 +117,14 @@ jpeg_decoder_handle_t Transcoder::get_jpeg_decoder() {
   ESP_LOGI(TAG, "Hardware JPEG decoder initialized successfully (handle: %p)", this->jpeg_decoder_);
   return this->jpeg_decoder_;
 }
+
+void Transcoder::release_jpeg_decoder() {
+  if (this->jpeg_decoder_ != nullptr) {
+    jpeg_del_decoder_engine(this->jpeg_decoder_);
+    this->jpeg_decoder_ = nullptr;
+    ESP_LOGD(TAG, "Hardware JPEG decoder released (workaround for ESP32-P4 state corruption bug)");
+  }
+}
 #endif
 
 void Transcoder::dump_config() {
