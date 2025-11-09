@@ -837,10 +837,12 @@ bool PictureViewer::read_file_(const std::string &path, std::vector<uint8_t> &da
 }
 
 uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
+  uint8_t *buffer = nullptr;
+
 #ifdef USE_ESP32
   // For images >64KB, REQUIRE PSRAM to avoid heap fragmentation
   if (size > 65536) {
-    uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (buffer == nullptr) {
       ESP_LOGE(TAG, "Failed to allocate %zu bytes in PSRAM (required for images >64KB)", size);
       return nullptr;
@@ -850,7 +852,7 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
   }
 
   // For smaller images, try PSRAM first, then fallback to heap
-  uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (buffer != nullptr) {
     ESP_LOGD(TAG, "Allocated %zu bytes in PSRAM", size);
     return buffer;
@@ -860,7 +862,7 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
 #endif
 
   // Fallback to regular heap for smaller allocations
-  uint8_t *buffer = static_cast<uint8_t *>(malloc(size));
+  buffer = static_cast<uint8_t *>(malloc(size));
   if (buffer != nullptr) {
     ESP_LOGD(TAG, "Allocated %zu bytes in heap", size);
   }
