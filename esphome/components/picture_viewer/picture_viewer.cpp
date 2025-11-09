@@ -479,16 +479,15 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   size_t input_buffer_size = 0;
   size_t output_buffer_size = 0;
 
-  // Allocate aligned buffers (hardware requires 16-byte alignment)
-  uint8_t *aligned_input = (uint8_t *) heap_caps_aligned_alloc(16, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_input = (uint8_t *) jpeg_alloc_decoder_mem(input_size, &input_alloc_cfg, &input_buffer_size);
   if (!aligned_input) {
-    ESP_LOGE(TAG, "Failed to allocate aligned input buffer (%u bytes)", input_size);
+    ESP_LOGE(TAG, "Failed to allocate input buffer (%u bytes)", input_size);
     return false;
   }
 
-  uint8_t *aligned_output = (uint8_t *) heap_caps_aligned_alloc(16, output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_output = (uint8_t *) jpeg_alloc_decoder_mem(output_size, &output_alloc_cfg, &output_buffer_size);
   if (!aligned_output) {
-    ESP_LOGE(TAG, "Failed to allocate aligned output buffer (%u bytes)", output_size);
+    ESP_LOGE(TAG, "Failed to allocate output buffer (%u bytes)", output_size);
     free(aligned_input);
     return false;
   }
@@ -845,18 +844,21 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
   // For images >64KB, use cache-aligned PSRAM allocation (matches ESP-IDF JPEG driver approach)
   if (size > 65536) {
     // Get cache alignment requirement for PSRAM
-    size_t cache_align = 64;
+    size_t cache_align = 0;
+    esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &cache_align);
 
-    // Align size up to cache line boundary (like JPEG decoder output buffers)
-    size_t aligned_size = (size + cache_align - 1) & ~(cache_align - 1);
+    if (ret == ESP_OK && cache_align > 0) {
+      // Align size up to cache line boundary (like JPEG decoder output buffers)
+      size_t aligned_size = (size + cache_align - 1) & ~(cache_align - 1);
 
-    // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
-    buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (buffer != nullptr) {
-      ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, cache_align);
-      return buffer;
+      // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
+      buffer = static_cast<uint8_t *>(heap_caps_aligned_calloc(cache_align, 1, aligned_size, MALLOC_CAP_SPIRAM));
+      if (buffer != nullptr) {
+        ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, cache_align);
+        return buffer;
+      }
     }
-  
+
     // Fallback to regular PSRAM if cache-aligned allocation fails
     buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (buffer == nullptr) {
