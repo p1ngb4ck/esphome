@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <functional>
 
 namespace esphome {
 namespace picture_viewer {
@@ -61,6 +62,26 @@ enum class ImageFitMode {
   CENTER,         // Center image, no scaling
 };
 
+// Thumbnail configuration
+struct ThumbnailConfig {
+  bool enabled{true};
+  int width{200};
+  int height{150};
+  size_t max_count{20};        // Maximum number of thumbnails in memory
+  size_t max_memory{2097152};  // Maximum memory budget (default: 2MB)
+  bool lazy_load{true};        // Load thumbnails on-demand
+  size_t preload_count{10};    // Number of thumbnails to preload initially
+};
+
+// Thumbnail cache entry with LRU tracking
+struct ThumbnailCacheEntry {
+  int image_index{-1};           // Index of image this thumbnail belongs to
+  std::vector<uint8_t> data;     // RGB565 thumbnail data
+  uint32_t last_access_time{0};  // Last access timestamp (millis)
+  size_t memory_usage{0};        // Memory used by this entry
+  bool loaded{false};            // Whether thumbnail is loaded
+};
+
 // =====================================================
 // PictureViewer Component
 // =====================================================
@@ -95,9 +116,22 @@ class PictureViewer : public Component {
 #endif
 
   void set_slideshow_interval(uint32_t interval_ms) { this->slideshow_interval_ms_ = interval_ms; }
-  void set_thumbnail_width(int width) { this->thumbnail_width_ = width; }
-  void set_thumbnail_height(int height) { this->thumbnail_height_ = height; }
-  void set_enable_thumbnails(bool enable) { this->enable_thumbnails_ = enable; }
+  void set_thumbnail_width(int width) {
+    this->thumbnail_width_ = width;
+    this->thumbnail_config_.width = width;
+  }
+  void set_thumbnail_height(int height) {
+    this->thumbnail_height_ = height;
+    this->thumbnail_config_.height = height;
+  }
+  void set_enable_thumbnails(bool enable) {
+    this->enable_thumbnails_ = enable;
+    this->thumbnail_config_.enabled = enable;
+  }
+  void set_thumbnail_max_count(size_t count) { this->thumbnail_config_.max_count = count; }
+  void set_thumbnail_max_memory(size_t bytes) { this->thumbnail_config_.max_memory = bytes; }
+  void set_thumbnail_lazy_load(bool lazy) { this->thumbnail_config_.lazy_load = lazy; }
+  void set_thumbnail_preload_count(size_t count) { this->thumbnail_config_.preload_count = count; }
   void set_fit_mode(ImageFitMode mode) { this->fit_mode_ = mode; }
 
   // Directory configuration
@@ -182,6 +216,34 @@ class PictureViewer : public Component {
   void set_fullscreen(bool fullscreen);
   bool is_fullscreen() const { return this->fullscreen_; }
 
+  // =====================================================
+  // Thumbnail API
+  // =====================================================
+
+  /// Get thumbnail data for a specific image index
+  /// Returns pointer to RGB565 thumbnail data, or nullptr if not available
+  /// Updates width and height parameters with thumbnail dimensions
+  const uint8_t *get_thumbnail_data(size_t index, int &width, int &height);
+
+  /// Get total number of thumbnails that can be generated
+  size_t get_thumbnail_count() const { return this->images_.size(); }
+
+  /// Request thumbnail to be loaded (for lazy loading)
+  /// Returns true if thumbnail is already loaded, false if it needs to be generated
+  bool request_thumbnail(size_t index);
+
+  /// Configure thumbnail system at runtime
+  void set_thumbnail_config(const ThumbnailConfig &config) { this->thumbnail_config_ = config; }
+
+  /// Get current thumbnail configuration
+  const ThumbnailConfig &get_thumbnail_config() const { return this->thumbnail_config_; }
+
+  /// Set callback for thumbnail ready notifications
+  /// Callback receives image index when thumbnail is loaded
+  void set_thumbnail_ready_callback(std::function<void(size_t)> callback) {
+    this->thumbnail_ready_callback_ = callback;
+  }
+
  protected:
   // Configuration
 #ifdef USE_STORAGE_HOST
@@ -237,6 +299,12 @@ class PictureViewer : public Component {
   size_t canvas_buffer_pixels_{0};
   bool canvas_buffer_ready_{false};
 
+  // Thumbnail management
+  ThumbnailConfig thumbnail_config_;
+  std::vector<ThumbnailCacheEntry> thumbnail_cache_;
+  size_t current_memory_usage_{0};                        // Total memory used by thumbnails in cache
+  std::function<void(size_t)> thumbnail_ready_callback_;  // Called when thumbnail is loaded
+
   // =====================================================
   // Internal Methods
   // =====================================================
@@ -285,6 +353,19 @@ class PictureViewer : public Component {
 
   /// Generate thumbnail for image
   bool generate_thumbnail_(ImageEntry &entry);
+
+  /// Thumbnail management internal methods
+  /// Load thumbnail for specific image index into cache
+  bool load_thumbnail_(size_t image_index);
+
+  /// Evict oldest (least recently used) thumbnail from cache
+  void evict_oldest_thumbnail_();
+
+  /// Update LRU timestamp for a cache entry
+  void update_lru_timestamp_(size_t cache_index);
+
+  /// Find thumbnail in cache by image index (returns cache index or -1 if not found)
+  int find_thumbnail_in_cache_(size_t image_index) const;
 
   /// Get canvas dimensions
   void update_canvas_dimensions_();

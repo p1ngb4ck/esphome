@@ -686,6 +686,145 @@ bool PictureViewer::generate_thumbnail_(ImageEntry &entry) {
   return true;
 }
 
+// =====================================================
+// Thumbnail Management Implementation
+// =====================================================
+
+const uint8_t *PictureViewer::get_thumbnail_data(size_t index, int &width, int &height) {
+  if (index >= this->images_.size()) {
+    return nullptr;
+  }
+
+  // Check if thumbnail is in cache
+  int cache_idx = this->find_thumbnail_in_cache_(index);
+  if (cache_idx >= 0) {
+    // Found in cache - update LRU and return data
+    this->update_lru_timestamp_(cache_idx);
+    auto &entry = this->thumbnail_cache_[cache_idx];
+    width = this->thumbnail_config_.width;
+    height = this->thumbnail_config_.height;
+    return entry.data.data();
+  }
+
+  // Not in cache - return nullptr (caller should use request_thumbnail for lazy loading)
+  return nullptr;
+}
+
+bool PictureViewer::request_thumbnail(size_t index) {
+  if (index >= this->images_.size()) {
+    return false;
+  }
+
+  // Check if already in cache
+  int cache_idx = this->find_thumbnail_in_cache_(index);
+  if (cache_idx >= 0) {
+    // Already loaded - update LRU timestamp and return true
+    this->update_lru_timestamp_(cache_idx);
+    return true;
+  }
+
+  // Not in cache - load it (lazy loading)
+  return this->load_thumbnail_(index);
+}
+
+bool PictureViewer::load_thumbnail_(size_t image_index) {
+  if (image_index >= this->images_.size()) {
+    return false;
+  }
+
+  auto &image = this->images_[image_index];
+
+  // Decode thumbnail
+  std::vector<uint8_t> rgb565_data;
+  int width, height;
+  if (!this->load_jpeg_(image.path, rgb565_data, width, height, this->thumbnail_config_.width,
+                        this->thumbnail_config_.height)) {
+    ESP_LOGW(TAG, "Failed to load thumbnail for image %zu: %s", image_index, image.filename.c_str());
+    return false;
+  }
+
+  // Calculate memory usage for this thumbnail
+  size_t memory_usage = rgb565_data.size();
+
+  // Check if we need to evict thumbnails to stay within memory budget
+  while (this->current_memory_usage_ + memory_usage > this->thumbnail_config_.max_memory &&
+         !this->thumbnail_cache_.empty()) {
+    this->evict_oldest_thumbnail_();
+  }
+
+  // Check if we've hit the max count limit
+  while (this->thumbnail_cache_.size() >= this->thumbnail_config_.max_count && !this->thumbnail_cache_.empty()) {
+    this->evict_oldest_thumbnail_();
+  }
+
+  // Add to cache
+  ThumbnailCacheEntry entry;
+  entry.image_index = image_index;
+  entry.data = std::move(rgb565_data);
+  entry.memory_usage = memory_usage;
+  entry.loaded = true;
+  entry.last_access_time = millis();
+
+  this->thumbnail_cache_.push_back(std::move(entry));
+  this->current_memory_usage_ += memory_usage;
+
+  ESP_LOGD(TAG, "Loaded thumbnail %zu (%s) - Cache: %zu/%zu entries, Memory: %zu/%zu bytes", image_index,
+           image.filename.c_str(), this->thumbnail_cache_.size(), this->thumbnail_config_.max_count,
+           this->current_memory_usage_, this->thumbnail_config_.max_memory);
+
+  // Notify callback that thumbnail is ready
+  if (this->thumbnail_ready_callback_) {
+    this->thumbnail_ready_callback_(image_index);
+  }
+
+  return true;
+}
+
+void PictureViewer::evict_oldest_thumbnail_() {
+  if (this->thumbnail_cache_.empty()) {
+    return;
+  }
+
+  // Find entry with oldest (smallest) last_access_time
+  size_t oldest_idx = 0;
+  uint32_t oldest_time = this->thumbnail_cache_[0].last_access_time;
+
+  for (size_t i = 1; i < this->thumbnail_cache_.size(); i++) {
+    if (this->thumbnail_cache_[i].last_access_time < oldest_time) {
+      oldest_time = this->thumbnail_cache_[i].last_access_time;
+      oldest_idx = i;
+    }
+  }
+
+  // Update memory usage
+  this->current_memory_usage_ -= this->thumbnail_cache_[oldest_idx].memory_usage;
+
+  ESP_LOGD(TAG, "Evicting thumbnail for image %d (LRU) - Cache: %zu entries, Memory: %zu bytes",
+           this->thumbnail_cache_[oldest_idx].image_index, this->thumbnail_cache_.size() - 1,
+           this->current_memory_usage_);
+
+  // Remove from cache (swap with last and pop)
+  if (oldest_idx < this->thumbnail_cache_.size() - 1) {
+    this->thumbnail_cache_[oldest_idx] = std::move(this->thumbnail_cache_.back());
+  }
+  this->thumbnail_cache_.pop_back();
+}
+
+void PictureViewer::update_lru_timestamp_(size_t cache_index) {
+  if (cache_index < this->thumbnail_cache_.size()) {
+    this->thumbnail_cache_[cache_index].last_access_time = millis();
+  }
+}
+
+int PictureViewer::find_thumbnail_in_cache_(size_t image_index) const {
+  for (size_t i = 0; i < this->thumbnail_cache_.size(); i++) {
+    if (this->thumbnail_cache_[i].image_index == static_cast<int>(image_index)) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;  // Not found
+}
+
 void PictureViewer::ensure_canvas_buffer_() {
 #ifdef USE_LVGL
   if (this->canvas_ == nullptr) {

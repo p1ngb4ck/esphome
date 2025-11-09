@@ -3,26 +3,20 @@ from __future__ import annotations
 import logging
 
 import esphome.codegen as cg
-from esphome import automation
+from esphome.components.transcoder import require_jpeg_decoder
 import esphome.config_validation as cv
-from esphome.const import (
-    CONF_ID,
-)
+from esphome.const import CONF_ID
 
 _LOGGER = logging.getLogger(__name__)
 
 # Import LVGL canvas type for proper widget ID validation
 try:
     from esphome.components.lvgl.widgets.canvas import lv_canvas_t
+
     LVGL_AVAILABLE = True
 except ImportError:
     LVGL_AVAILABLE = False
     lv_canvas_t = None
-
-# Register codec requirements with transcoder
-from esphome.components.transcoder import require_jpeg_decoder
-
-require_jpeg_decoder()  # Picture viewer only needs JPEG decoder, not encoder
 
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = []
@@ -58,7 +52,7 @@ JPEG_COLOR_SPACE = {
 JPEG_OUTPUT_FORMAT = {
     "RGB888": 0x02000000,  # COLOR_TYPE_ID(COLOR_SPACE_RGB, COLOR_PIXEL_RGB888)
     "RGB565": 0x02000002,  # COLOR_TYPE_ID(COLOR_SPACE_RGB, COLOR_PIXEL_RGB565)
-    "GRAY": 0x03000000,    # COLOR_TYPE_ID(COLOR_SPACE_GRAY, COLOR_PIXEL_GRAY8)
+    "GRAY": 0x03000000,  # COLOR_TYPE_ID(COLOR_SPACE_GRAY, COLOR_PIXEL_GRAY8)
 }
 
 # Configuration keys
@@ -71,33 +65,57 @@ CONF_SLIDESHOW_INTERVAL = "slideshow_interval"
 CONF_ENABLE_THUMBNAILS = "enable_thumbnails"
 CONF_THUMBNAIL_WIDTH = "thumbnail_width"
 CONF_THUMBNAIL_HEIGHT = "thumbnail_height"
+CONF_THUMBNAIL_MAX_COUNT = "thumbnail_max_count"
+CONF_THUMBNAIL_MAX_MEMORY = "thumbnail_max_memory"
+CONF_THUMBNAIL_LAZY_LOAD = "thumbnail_lazy_load"
+CONF_THUMBNAIL_PRELOAD_COUNT = "thumbnail_preload_count"
 CONF_FIT_MODE = "fit_mode"
 CONF_JPEG_RGB_ORDER = "jpeg_rgb_order"
 CONF_JPEG_COLOR_SPACE = "jpeg_color_space"
 CONF_JPEG_OUTPUT_FORMAT = "jpeg_output_format"
 
 # Directory configuration schema
-DIRECTORY_SCHEMA = cv.Schema({
-    cv.Required(CONF_PATH): cv.string,
-    cv.Optional(CONF_JPEG_RGB_ORDER, default="RGB"): cv.enum(JPEG_RGB_ORDER, upper=True),
-    cv.Optional(CONF_JPEG_COLOR_SPACE, default="BT601"): cv.enum(JPEG_COLOR_SPACE, upper=True),
-    cv.Optional(CONF_JPEG_OUTPUT_FORMAT, default="RGB565"): cv.enum(JPEG_OUTPUT_FORMAT, upper=True),
-})
+DIRECTORY_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_PATH): cv.string,
+        cv.Optional(CONF_JPEG_RGB_ORDER, default="RGB"): cv.enum(
+            JPEG_RGB_ORDER, upper=True
+        ),
+        cv.Optional(CONF_JPEG_COLOR_SPACE, default="BT601"): cv.enum(
+            JPEG_COLOR_SPACE, upper=True
+        ),
+        cv.Optional(CONF_JPEG_OUTPUT_FORMAT, default="RGB565"): cv.enum(
+            JPEG_OUTPUT_FORMAT, upper=True
+        ),
+    }
+)
 
 # Component configuration
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(PictureViewer),
         cv.Optional(CONF_FILE_MANAGER_ID): cv.use_id(cg.Component),  # FileManager
-        cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t) if LVGL_AVAILABLE else cv.invalid("LVGL not available"),  # LVGL Canvas widget
+        cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t)
+        if LVGL_AVAILABLE
+        else cv.invalid("LVGL not available"),  # LVGL Canvas widget
         cv.Optional(CONF_DISPLAY_ID): cv.use_id(cg.Component),  # Display
-        cv.Required(CONF_DIRECTORIES): cv.All(cv.ensure_list(DIRECTORY_SCHEMA), cv.Length(min=1)),
+        cv.Required(CONF_DIRECTORIES): cv.All(
+            cv.ensure_list(DIRECTORY_SCHEMA), cv.Length(min=1)
+        ),
         cv.Optional(
             CONF_SLIDESHOW_INTERVAL, default="5s"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ENABLE_THUMBNAILS, default=True): cv.boolean,
         cv.Optional(CONF_THUMBNAIL_WIDTH, default=120): cv.int_range(min=32, max=320),
         cv.Optional(CONF_THUMBNAIL_HEIGHT, default=90): cv.int_range(min=32, max=240),
+        cv.Optional(CONF_THUMBNAIL_MAX_COUNT, default=20): cv.int_range(min=1, max=100),
+        cv.Optional(CONF_THUMBNAIL_MAX_MEMORY, default=2097152): cv.int_range(
+            min=65536
+        ),  # Min 64KB
+        cv.Optional(CONF_THUMBNAIL_LAZY_LOAD, default=True): cv.boolean,
+        cv.Optional(CONF_THUMBNAIL_PRELOAD_COUNT, default=10): cv.int_range(
+            min=0, max=50
+        ),
         cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(
             IMAGE_FIT_MODES, upper=True
         ),
@@ -107,8 +125,12 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     """Generate code for picture_viewer component"""
+    # Ensure the JPG decoder requirement is asserted during code generation
+    require_jpeg_decoder()  # Picture viewer only needs JPEG decoder, not encoder
+
     # Set defines FIRST (before component registration)
     # Transcoder is always loaded via AUTO_LOAD and sets decoder defines globally
+    cg.add_define("USE_TRANSCODER")
     cg.add_define("USE_TRANSCODER")
 
     # Add conditional defines based on configuration
@@ -145,6 +167,10 @@ async def to_code(config):
     cg.add(var.set_enable_thumbnails(config[CONF_ENABLE_THUMBNAILS]))
     cg.add(var.set_thumbnail_width(config[CONF_THUMBNAIL_WIDTH]))
     cg.add(var.set_thumbnail_height(config[CONF_THUMBNAIL_HEIGHT]))
+    cg.add(var.set_thumbnail_max_count(config[CONF_THUMBNAIL_MAX_COUNT]))
+    cg.add(var.set_thumbnail_max_memory(config[CONF_THUMBNAIL_MAX_MEMORY]))
+    cg.add(var.set_thumbnail_lazy_load(config[CONF_THUMBNAIL_LAZY_LOAD]))
+    cg.add(var.set_thumbnail_preload_count(config[CONF_THUMBNAIL_PRELOAD_COUNT]))
     cg.add(var.set_fit_mode(config[CONF_FIT_MODE]))
 
     # Add directories with per-directory JPEG decoder configuration
@@ -160,7 +186,9 @@ async def to_code(config):
 
     # Link to transcoder component (handles all decoder initialization)
     # The transcoder dependency ensures it's initialized before picture_viewer
-    cg.add(var.set_transcoder(cg.RawExpression("esphome::transcoder::global_transcoder")))
+    cg.add(
+        var.set_transcoder(cg.RawExpression("esphome::transcoder::global_transcoder"))
+    )
 
     _LOGGER.info("Picture viewer configured to use transcoder component")
 
