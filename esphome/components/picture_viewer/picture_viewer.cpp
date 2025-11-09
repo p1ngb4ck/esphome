@@ -844,7 +844,7 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
   // For images >64KB, use cache-aligned PSRAM allocation (matches ESP-IDF JPEG driver approach)
   if (size > 65536) {
     // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
-    buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT););
+    buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT););
     if (buffer != nullptr) {
       ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, cache_align);
       return buffer;
