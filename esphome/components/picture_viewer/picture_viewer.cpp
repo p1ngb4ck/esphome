@@ -463,7 +463,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
   // Calculate buffer sizes
   uint32_t input_size = jpeg_data.size();
-  uint32_t output_size = width * height * 3;  // RGB565 = 2 bytes per pixel
+  uint32_t output_size = width * height * 2;  // RGB565 = 2 bytes per pixel
 
   ESP_LOGD(TAG, "Buffer sizes: input=%u, output=%u", input_size, output_size);
 
