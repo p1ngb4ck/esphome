@@ -509,18 +509,36 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
   // conv_std defaults to 0 (BT601)
 
-  // Decode
+  // Decode (with retry on failure due to ESP32-P4 state corruption bug)
   uint32_t actual_output_size = 0;
   ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
                              &actual_output_size);
 
+  // If decode fails, release decoder and retry once (ESP32-P4 state corruption workaround)
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Hardware JPEG decode failed: %s", esp_err_to_name(ret));
-    free(aligned_input);
-    free(aligned_output);
-    // Release decoder on error and retry once (workaround for ESP32-P4 state corruption bug)
+    ESP_LOGW(TAG, "Hardware JPEG decode failed: %s, retrying with fresh decoder", esp_err_to_name(ret));
     this->transcoder_->release_jpeg_decoder();
-    return false;
+    hw_decoder = this->transcoder_->get_jpeg_decoder();
+
+    if (hw_decoder == nullptr) {
+      ESP_LOGE(TAG, "Failed to reinitialize JPEG decoder");
+      free(aligned_input);
+      free(aligned_output);
+      return false;
+    }
+
+    // Retry decode
+    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+                               &actual_output_size);
+
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Hardware JPEG decode failed after retry: %s", esp_err_to_name(ret));
+      free(aligned_input);
+      free(aligned_output);
+      this->transcoder_->release_jpeg_decoder();  // Release failed decoder
+      return false;
+    }
+    ESP_LOGI(TAG, "JPEG decode succeeded after decoder reset");
   }
 
   ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", actual_output_size);
@@ -540,10 +558,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   free(aligned_input);
   free(aligned_output);
 
-  // Release decoder to work around ESP32-P4 state corruption bug
-  // This ensures decoder is recreated fresh for next image
-  this->transcoder_->release_jpeg_decoder();
-
+  // Decoder is kept alive for next decode (only released on error)
   ESP_LOGD(TAG, "Decoded JPEG using hardware decoder: %dx%d", width, height);
   return true;
 }
