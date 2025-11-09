@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import logging
 
-import esphome.codegen as cg
 from esphome import automation
+import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import (
-    CONF_ID,
-    CONF_TRIGGER_ID,
-)
+from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 _LOGGER = logging.getLogger(__name__)
 
