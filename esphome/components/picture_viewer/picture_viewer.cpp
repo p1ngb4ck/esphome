@@ -463,11 +463,10 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
   // Calculate buffer sizes
   uint32_t input_size = jpeg_data.size();
-  uint32_t output_size = width * height * 2;
+  uint32_t output_size = width * height * 3;  // RGB565 = 2 bytes per pixel
 
   ESP_LOGD(TAG, "Buffer sizes: input=%u, output=%u", input_size, output_size);
 
-  /*
   // Allocate buffers using ESP-IDF JPEG decoder memory allocator
   // This ensures proper cache-line alignment for DMA operations
   jpeg_decode_memory_alloc_cfg_t input_alloc_cfg = {
@@ -477,38 +476,23 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
       .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
   };
 
-  
   size_t input_buffer_size = 0;
   size_t output_buffer_size = 0;
 
-  uint8_t *aligned_input = (uint8_t *) jpeg_alloc_decoder_mem(input_size, &input_alloc_cfg, &input_buffer_size);
-  if (!aligned_input) {
-    ESP_LOGE(TAG, "Failed to allocate input buffer (%u bytes)", input_size);
-    return false;
-  }
-
-  uint8_t *aligned_output = (uint8_t *) jpeg_alloc_decoder_mem(output_size, &output_alloc_cfg, &output_buffer_size);
-  if (!aligned_output) {
-    ESP_LOGE(TAG, "Failed to allocate output buffer (%u bytes)", output_size);
-    free(aligned_input);
-    return false;
-  }
-  */
-
   // Allocate aligned buffers (hardware requires 16-byte alignment)
-  uint8_t *aligned_input = (uint8_t *) heap_caps_aligned_alloc(16, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_input = (uint8_t *) heap_caps_aligned_alloc(64, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!aligned_input) {
     ESP_LOGE(TAG, "Failed to allocate aligned input buffer (%u bytes)", input_size);
     return false;
   }
 
-  uint8_t *aligned_output = (uint8_t *) heap_caps_aligned_alloc(16, output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_output = (uint8_t *) heap_caps_aligned_alloc(64, output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!aligned_output) {
     ESP_LOGE(TAG, "Failed to allocate aligned output buffer (%u bytes)", output_size);
     free(aligned_input);
     return false;
   }
-  
+
   // Copy input data to aligned buffer
   memcpy(aligned_input, jpeg_data.data(), input_size);
 
@@ -528,8 +512,9 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   // conv_std defaults to 0 (BT601)
 
   // Decode (with retry on failure due to ESP32-P4 state corruption bug)
-  ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
-                             &output_size);
+  uint32_t actual_output_size = 0;
+  ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+                             &actual_output_size);
 
   // If decode fails, release decoder and retry once (ESP32-P4 state corruption workaround)
   if (ret != ESP_OK) {
@@ -545,8 +530,8 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     }
 
     // Retry decode
-    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
-                               &output_size);
+    ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_buffer_size,
+                               &actual_output_size);
 
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Hardware JPEG decode failed after retry: %s", esp_err_to_name(ret));
@@ -558,18 +543,18 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     ESP_LOGI(TAG, "JPEG decode succeeded after decoder reset");
   }
 
-  ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", output_size);
+  ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", actual_output_size);
 
   // Byte-swap RGB565 for correct endianness
   uint16_t *pixels = (uint16_t *) aligned_output;
-  size_t pixel_count = output_size / 2;
+  size_t pixel_count = actual_output_size / 2;
   for (size_t i = 0; i < pixel_count; i++) {
     pixels[i] = (pixels[i] << 8) | (pixels[i] >> 8);
   }
 
   // Copy to output vector
-  rgb565_data.resize(output_size);
-  memcpy(rgb565_data.data(), aligned_output, output_size);
+  rgb565_data.resize(actual_output_size);
+  memcpy(rgb565_data.data(), aligned_output, actual_output_size);
 
   // Free aligned buffers
   free(aligned_input);
@@ -859,12 +844,19 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
 #ifdef USE_ESP32
   // For images >64KB, use cache-aligned PSRAM allocation (matches ESP-IDF JPEG driver approach)
   if (size > 65536) {
-    size_t aligned_size = (size + 16 - 1) & ~(16 - 1);
-    // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
-    buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (buffer != nullptr) {
-      ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, 16);
-      return buffer;
+    // Get cache alignment requirement for PSRAM
+    size_t cache_align = 16;
+
+    if (ret == ESP_OK && cache_align > 0) {
+      // Align size up to cache line boundary (like JPEG decoder output buffers)
+      size_t aligned_size = (size + cache_align - 1) & ~(cache_align - 1);
+
+      // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
+      buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT););
+      if (buffer != nullptr) {
+        ESP_LOGD(TAG, "Allocated %zu bytes in cache-aligned PSRAM (align=%zu)", aligned_size, cache_align);
+        return buffer;
+      }
     }
     // Fallback to regular PSRAM if cache-aligned allocation fails
     buffer = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
