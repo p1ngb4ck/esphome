@@ -57,7 +57,6 @@ enum UARTStopBitsOptions {
   UART_CONFIG_STOP_BITS_2,
 };
 
-#if defined(USE_UART_DEBUGGER)
 enum CH934X_CHIPTYPE {
   CHIP_CH9344L = 0,
   CHIP_CH9344Q,
@@ -93,7 +92,6 @@ enum CH34X_CHIPTYPE {
   CHIP_CH346C_M1,
   CHIP_CH346C_M2,
 };
-#endif
 
 static const char *const PARITY_NAMES[] = {"NONE", "ODD", "EVEN", "MARK", "SPACE"};
 static const char *const STOP_BITS_NAMES[] = {"1", "1.5", "2"};
