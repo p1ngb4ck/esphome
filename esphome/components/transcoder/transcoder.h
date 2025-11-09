@@ -79,8 +79,15 @@ class Transcoder : public Component {
 
   /**
    * @brief Check if JPEG decoder is available
+   * Triggers lazy initialization if not already done
    */
-  bool is_jpeg_decoder_available() { return this->jpeg_decoder_ != nullptr; }
+  bool is_jpeg_decoder_available() {
+    // Trigger lazy init if needed
+    if (this->jpeg_decoder_ == nullptr) {
+      this->get_jpeg_decoder();
+    }
+    return this->jpeg_decoder_ != nullptr;
+  }
 
 #elif defined(USE_ESP_JPEG_DECODER)
   /**
