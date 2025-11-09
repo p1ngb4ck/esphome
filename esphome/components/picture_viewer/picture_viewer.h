@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 
 #ifdef USE_LVGL
