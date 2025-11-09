@@ -525,6 +525,8 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
              aligned_input, input_size, aligned_output, output_size);
     free(aligned_input);
     free(aligned_output);
+    // Release decoder to work around ESP32-P4 state corruption bug
+    this->transcoder_->release_jpeg_decoder();
     return false;
   }
 
@@ -544,6 +546,10 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   // Free aligned buffers
   free(aligned_input);
   free(aligned_output);
+
+  // Release decoder to work around ESP32-P4 state corruption bug
+  // This ensures decoder is recreated fresh for next image
+  this->transcoder_->release_jpeg_decoder();
 
   ESP_LOGD(TAG, "Decoded JPEG using hardware decoder: %dx%d", width, height);
   return true;
