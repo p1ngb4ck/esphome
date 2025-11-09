@@ -7,6 +7,7 @@
 
 #ifdef ESP32
 #include "esp_heap_caps.h"
+#include "esp_cache.h"
 #endif
 
 #ifdef USE_HARDWARE_JPEG_DECODER
@@ -181,6 +182,16 @@ bool PictureViewer::show_image(size_t index) {
 
   // Copy decoded data to buffer
   std::memcpy(this->current_image_data_, rgb565_data.data(), this->current_image_size_);
+
+#ifdef USE_ESP32
+  // Synchronize cache to PSRAM (ESP32-P4 cache coherency)
+  // This ensures the CPU cache is written back to external PSRAM before GPU/LVGL accesses it
+  esp_err_t sync_ret = esp_cache_msync(this->current_image_data_, this->current_image_size_, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  if (sync_ret != ESP_OK) {
+    ESP_LOGW(TAG, "Cache sync failed: %s (this may cause display issues)", esp_err_to_name(sync_ret));
+  }
+#endif
+
   this->current_image_width_ = width;
   this->current_image_height_ = height;
   this->current_index_ = index;
