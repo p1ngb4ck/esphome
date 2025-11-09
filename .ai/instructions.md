@@ -177,59 +177,61 @@ This document provides essential context for AI models interacting with this pro
 
 ### Python Codegen and Defines
 
-**ABSOLUTE RULE: Each component's `__init__.py` must declare ALL defines that component's C++ code uses. Defines from other components DO NOT automatically apply.**
+**ABSOLUTE RULE: Defines set by `cg.add_define()` are GLOBAL. Any component's C++ code using these defines must include `esphome/core/defines.h` in its header.**
 
 *   **The Problem:**
-    *   Assuming a define is available because another component's `__init__.py` sets it
-    *   Forgetting that ESPHome compiles each component independently
-    *   Writing C++ code with `#ifdef USE_SOME_FEATURE` without ensuring that component's `__init__.py` sets `USE_SOME_FEATURE`
-    *   This causes linker errors during testing when the define is missing
+    *   Writing C++ code with `#ifdef USE_SOME_FEATURE` without including `esphome/core/defines.h`
+    *   Forgetting that C++ code needs the header to see the defines
+    *   This causes compilation errors or incorrect behavior when defines aren't visible
+
+*   **How defines work in ESPHome:**
+    1.  **ANY** component can call `cg.add_define("USE_SOME_FEATURE")` in its `__init__.py`
+    2.  This sets the define **GLOBALLY** for the entire build
+    3.  The define is written to `esphome/core/defines.h` during code generation
+    4.  **ALL** C++ code that uses `#ifdef USE_SOME_FEATURE` must include `esphome/core/defines.h`
 
 *   **Required behavior:**
-    1.  **CHECK** the component's own `__init__.py` for ALL defines used in that component's C++ code
-    2.  **VERIFY** that `cg.add_define()` is called in that component's `__init__.py` for every `#ifdef`/`#ifndef` in that component's C++ files
-    3.  **DO NOT** assume defines from other components are available
+    1.  **CHECK** if the component's C++ header includes `esphome/core/defines.h`
+    2.  **ADD** `#include "esphome/core/defines.h"` if it's missing and the code uses `#ifdef`/`#ifndef`
+    3.  **DO NOT** duplicate `cg.add_define()` calls across components (defines are global!)
     4.  **DO NOT** delete working code when investigating define issues
-    5.  **ALWAYS** add missing defines to the component's `__init__.py` instead of removing functionality
 
 *   **Example of what NOT to do:**
-    ```python
-    # Component A's __init__.py
-    cg.add_define("USE_JPEG_DECODER")
+    ```cpp
+    // Component B's header - MISSING defines.h include!
+    #pragma once
+    #include "esphome/core/component.h"
+    // Missing: #include "esphome/core/defines.h"
 
-    # Component B's C++ code uses USE_JPEG_DECODER
-    #ifdef USE_JPEG_DECODER
-      // code here
+    #ifdef USE_JPEG_DECODER  // Won't work - defines.h not included!
+      void decode_jpeg();
     #endif
-
-    # Component B's __init__.py - MISSING cg.add_define("USE_JPEG_DECODER")
-    # This will cause linker errors!
     ```
 
 *   **Correct approach:**
-    ```python
-    # Component B's __init__.py - MUST include the define
-    cg.add_define("USE_JPEG_DECODER")
+    ```cpp
+    // Component B's header - includes defines.h
+    #pragma once
+    #include "esphome/core/component.h"
+    #include "esphome/core/defines.h"  // Now #ifdef will work!
 
-    # Now Component B's C++ code can use it
     #ifdef USE_JPEG_DECODER
-      // code here
+      void decode_jpeg();
     #endif
     ```
 
-*   **When user says "check if __init__.py correctly declares the define":**
-    1.  **READ** the component's `__init__.py`
-    2.  **SEARCH** for all `#ifdef`, `#ifndef`, `#if defined()` in the component's C++ files
-    3.  **VERIFY** each define has a corresponding `cg.add_define()` in that component's `__init__.py`
-    4.  **ADD** any missing `cg.add_define()` calls
-    5.  **DO NOT** delete functionality or remove `#ifdef` blocks
+*   **When user says "check if defines are working correctly":**
+    1.  **CHECK** if `esphome/core/defines.h` is included in the component's header
+    2.  **VERIFY** that some component's `__init__.py` calls `cg.add_define()` for the needed define
+    3.  **ADD** the `#include "esphome/core/defines.h"` if missing
+    4.  **DO NOT** delete functionality or remove `#ifdef` blocks
 
 *   **Why this matters:**
-    *   ESPHome's code generation compiles components independently
-    *   Each component must be self-contained with its own defines
-    *   Linker errors waste time and break functionality
-    *   Deleting working code to "fix" define issues destroys the user's work
-    *   This is a fundamental aspect of how ESPHome's Python-to-C++ codegen works
+    *   Defines are global and shared across all components
+    *   C++ preprocessor needs the header to see the defines
+    *   Missing the include causes `#ifdef` checks to silently fail
+    *   This leads to wrong code paths being compiled
+    *   Including `defines.h` is essential for any component using conditional compilation
 
 ### Core Principle
 
