@@ -84,8 +84,7 @@ void FileManager::dump_config() {
   ESP_LOGCONFIG(TAG, "    - on_file_added: %s", this->file_added_callbacks_.size() > 0 ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "    - on_file_modified: %s", this->file_modified_callbacks_.size() > 0 ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "    - on_file_deleted: %s", this->file_deleted_callbacks_.size() > 0 ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "    - on_directory_changed: %s",
-                this->directory_changed_callbacks_.size() > 0 ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "    - on_directory_changed: %s", this->directory_changed_callbacks_.size() > 0 ? "yes" : "no");
 }
 
 // =====================================================
@@ -209,10 +208,10 @@ void FileManager::perform_scan_() {
     std::vector<FileInfo> current_files;
     this->scan_directory_(this->watch_directory_, current_files);
 
-    ESP_LOGI(TAG, "[SIZE TRACE] scan_directory_() returned %zu files", current_files.size());
+    ESP_LOGVV(TAG, "[SIZE TRACE] scan_directory_() returned %zu files", current_files.size());
     for (const auto &file : current_files) {
-      ESP_LOGI(TAG, "[SIZE TRACE]   File in current_files: '%s' size=%llu",
-               file.filename.c_str(), (unsigned long long)file.size);
+      ESP_LOGVV(TAG, "[SIZE TRACE]   File in current_files: '%s' size=%llu", file.filename.c_str(),
+                (unsigned long long) file.size);
     }
 
     // Detect changes
@@ -225,8 +224,8 @@ void FileManager::perform_scan_() {
     for (const auto &file : current_files) {
       current_map[file.path] = file;
       change_info.total_size += file.size;
-      ESP_LOGI(TAG, "[SIZE TRACE] Added to current_map: '%s' size=%llu, total_size=%zu",
-               file.filename.c_str(), (unsigned long long)file.size, change_info.total_size);
+      ESP_LOGVV(TAG, "[SIZE TRACE] Added to current_map: '%s' size=%llu, total_size=%zu", file.filename.c_str(),
+                (unsigned long long) file.size, change_info.total_size);
     }
 
     // Detect added and modified files
@@ -236,13 +235,13 @@ void FileManager::perform_scan_() {
       if (it == this->directory_state_.end()) {
         // File added
         if (this->initial_scan_done_) {
-          ESP_LOGD(TAG, "File added: %s", info.filename.c_str());
+          ESP_LOGV(TAG, "File added: %s", info.filename.c_str());
           change_info.added.push_back(info);
         }
       } else {
         // Check if modified
         if (this->file_modified_(it->second, info)) {
-          ESP_LOGD(TAG, "File modified: %s", info.filename.c_str());
+          ESP_LOGV(TAG, "File modified: %s", info.filename.c_str());
           change_info.modified.push_back(info);
         }
       }
@@ -253,7 +252,7 @@ void FileManager::perform_scan_() {
       if (current_map.find(path) == current_map.end()) {
         // File deleted
         if (this->initial_scan_done_) {
-          ESP_LOGD(TAG, "File deleted: %s", info.filename.c_str());
+          ESP_LOGV(TAG, "File deleted: %s", info.filename.c_str());
           change_info.deleted.push_back(info);
         }
       }
@@ -263,10 +262,10 @@ void FileManager::perform_scan_() {
     this->directory_state_ = current_map;
     change_info.files = current_files;
 
-    ESP_LOGI(TAG, "[SIZE TRACE] directory_state_ updated with %zu files", this->directory_state_.size());
+    ESP_LOGVV(TAG, "[SIZE TRACE] directory_state_ updated with %zu files", this->directory_state_.size());
     for (const auto &[path, info] : this->directory_state_) {
-      ESP_LOGI(TAG, "[SIZE TRACE]   directory_state_['%s'] size=%llu",
-               info.filename.c_str(), (unsigned long long)info.size);
+      ESP_LOGVV(TAG, "[SIZE TRACE]   directory_state_['%s'] size=%llu", info.filename.c_str(),
+                (unsigned long long) info.size);
     }
 
     // Fire individual file callbacks AFTER state is updated
@@ -297,14 +296,14 @@ void FileManager::perform_scan_() {
     bool has_changes = (!change_info.added.empty() || !change_info.modified.empty() || !change_info.deleted.empty());
     if (!this->initial_scan_done_) {
       // First scan - notify with initial file list (even if empty)
-      ESP_LOGD(TAG, "Initial directory scan complete: %s (%zu files)", this->watch_directory_.c_str(),
-               change_info.file_count);
+      ESP_LOGVV(TAG, "Initial directory scan complete: %s (%zu files)", this->watch_directory_.c_str(),
+                change_info.file_count);
 
-      ESP_LOGI(TAG, "[SIZE TRACE] Firing directory_changed callbacks with change_info.files (%zu files):",
-               change_info.files.size());
+      ESP_LOGVV(TAG, "[SIZE TRACE] Firing directory_changed callbacks with change_info.files (%zu files):",
+                change_info.files.size());
       for (const auto &file : change_info.files) {
-        ESP_LOGI(TAG, "[SIZE TRACE]   change_info.files: '%s' size=%llu",
-                 file.filename.c_str(), (unsigned long long)file.size);
+        ESP_LOGVV(TAG, "[SIZE TRACE]   change_info.files: '%s' size=%llu", file.filename.c_str(),
+                  (unsigned long long) file.size);
       }
 
       this->directory_changed_callbacks_.call(change_info);
@@ -316,11 +315,11 @@ void FileManager::perform_scan_() {
       ESP_LOGD(TAG, "Directory changed: %s (added: %zu, modified: %zu, deleted: %zu)", this->watch_directory_.c_str(),
                change_info.added.size(), change_info.modified.size(), change_info.deleted.size());
 
-      ESP_LOGI(TAG, "[SIZE TRACE] Firing directory_changed callbacks with change_info.files (%zu files):",
-               change_info.files.size());
+      ESP_LOGVV(TAG, "[SIZE TRACE] Firing directory_changed callbacks with change_info.files (%zu files):",
+                change_info.files.size());
       for (const auto &file : change_info.files) {
-        ESP_LOGI(TAG, "[SIZE TRACE]   change_info.files: '%s' size=%llu",
-                 file.filename.c_str(), (unsigned long long)file.size);
+        ESP_LOGVV(TAG, "[SIZE TRACE]   change_info.files: '%s' size=%llu", file.filename.c_str(),
+                  (unsigned long long) file.size);
       }
 
       this->directory_changed_callbacks_.call(change_info);
@@ -441,13 +440,13 @@ void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo>
     // Get file info (pass mount point for VFS routing)
     FileInfo info;
     if (this->get_file_info_(full_path, mount_point, info)) {
-      ESP_LOGI(TAG, "[SIZE TRACE] get_file_info_() returned size=%llu for '%s'",
-               (unsigned long long)info.size, info.filename.c_str());
+      ESP_LOGI(TAG, "[SIZE TRACE] get_file_info_() returned size=%llu for '%s'", (unsigned long long) info.size,
+               info.filename.c_str());
 
       // Check filters
       if (this->passes_filters_(info)) {
-        ESP_LOGI(TAG, "[SIZE TRACE] Adding to files vector: '%s' with size=%llu",
-                 info.filename.c_str(), (unsigned long long)info.size);
+        ESP_LOGI(TAG, "[SIZE TRACE] Adding to files vector: '%s' with size=%llu", info.filename.c_str(),
+                 (unsigned long long) info.size);
         files.push_back(info);
       } else {
         ESP_LOGI(TAG, "[SIZE TRACE] File '%s' filtered out", info.filename.c_str());
@@ -464,8 +463,7 @@ bool FileManager::get_file_info_(const std::string &path, const std::string &mou
   // Use fopen/fseek/ftell for file size - works reliably through VFS layer
   FILE *file = fopen(path.c_str(), "rb");
   if (file == nullptr) {
-    ESP_LOGD(TAG, "fopen() failed for path: '%s' (mount: '%s', errno: %d)",
-             path.c_str(), mount_point.c_str(), errno);
+    ESP_LOGD(TAG, "fopen() failed for path: '%s' (mount: '%s', errno: %d)", path.c_str(), mount_point.c_str(), errno);
     return false;
   }
 
@@ -491,14 +489,14 @@ bool FileManager::get_file_info_(const std::string &path, const std::string &mou
   info.directory = this->get_directory_(path);
   info.size = static_cast<uint64_t>(size);
 
-  ESP_LOGI(TAG, "[SIZE TRACE] After cast, info.size = %llu for file '%s'",
-           (unsigned long long)info.size, info.filename.c_str());
+  ESP_LOGI(TAG, "[SIZE TRACE] After cast, info.size = %llu for file '%s'", (unsigned long long) info.size,
+           info.filename.c_str());
 
-  info.modified_time = 0;  // fopen doesn't give modification time
+  info.modified_time = 0;     // fopen doesn't give modification time
   info.is_directory = false;  // fopen only works on files
 
-  ESP_LOGV(TAG, "File size for '%s': %llu bytes (mount='%s')",
-           path.c_str(), (unsigned long long)info.size, mount_point.c_str());
+  ESP_LOGV(TAG, "File size for '%s': %llu bytes (mount='%s')", path.c_str(), (unsigned long long) info.size,
+           mount_point.c_str());
 
   return true;
 }
