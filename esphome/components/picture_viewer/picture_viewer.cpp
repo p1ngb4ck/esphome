@@ -480,13 +480,13 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   size_t output_buffer_size = 0;
 
   // Allocate aligned buffers (hardware requires 16-byte alignment)
-  uint8_t *aligned_input = (uint8_t *) heap_caps_aligned_alloc(64, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_input = (uint8_t *) heap_caps_aligned_alloc(16, input_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!aligned_input) {
     ESP_LOGE(TAG, "Failed to allocate aligned input buffer (%u bytes)", input_size);
     return false;
   }
 
-  uint8_t *aligned_output = (uint8_t *) heap_caps_aligned_alloc(64, output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *aligned_output = (uint8_t *) heap_caps_aligned_alloc(16, output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!aligned_output) {
     ESP_LOGE(TAG, "Failed to allocate aligned output buffer (%u bytes)", output_size);
     free(aligned_input);
