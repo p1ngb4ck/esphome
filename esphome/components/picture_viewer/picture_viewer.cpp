@@ -528,9 +528,8 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
   // conv_std defaults to 0 (BT601)
 
   // Decode (with retry on failure due to ESP32-P4 state corruption bug)
-  uint32_t actual_output_size = 0;
   ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
-                             &actual_output_size);
+                             &output_size);
 
   // If decode fails, release decoder and retry once (ESP32-P4 state corruption workaround)
   if (ret != ESP_OK) {
@@ -547,7 +546,7 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
     // Retry decode
     ret = jpeg_decoder_process(hw_decoder, &decode_cfg, aligned_input, input_size, aligned_output, output_size,
-                               &actual_output_size);
+                               &output_size);
 
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Hardware JPEG decode failed after retry: %s", esp_err_to_name(ret));
@@ -559,18 +558,18 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
     ESP_LOGI(TAG, "JPEG decode succeeded after decoder reset");
   }
 
-  ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", actual_output_size);
+  ESP_LOGD(TAG, "Hardware decode completed, output size: %u bytes", output_size);
 
   // Byte-swap RGB565 for correct endianness
   uint16_t *pixels = (uint16_t *) aligned_output;
-  size_t pixel_count = actual_output_size / 2;
+  size_t pixel_count = output_size / 2;
   for (size_t i = 0; i < pixel_count; i++) {
     pixels[i] = (pixels[i] << 8) | (pixels[i] >> 8);
   }
 
   // Copy to output vector
-  rgb565_data.resize(actual_output_size);
-  memcpy(rgb565_data.data(), aligned_output, actual_output_size);
+  rgb565_data.resize(output_size);
+  memcpy(rgb565_data.data(), aligned_output, output_size);
 
   // Free aligned buffers
   free(aligned_input);
