@@ -843,6 +843,7 @@ uint8_t *PictureViewer::allocate_image_buffer_(size_t size) {
 #ifdef USE_ESP32
   // For images >64KB, use cache-aligned PSRAM allocation (matches ESP-IDF JPEG driver approach)
   if (size > 65536) {
+    size_t aligned_size = (size + 16 - 1) & ~(16 - 1);
     // Allocate cache-aligned PSRAM (matches jpeg_alloc_decoder_mem for output buffers)
     buffer = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (buffer != nullptr) {
