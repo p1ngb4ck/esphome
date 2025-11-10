@@ -345,6 +345,9 @@ class PictureViewer : public Component {
   /// Ensure canvas buffer is properly initialized and adopted from LVGL
   void ensure_canvas_buffer_();
 
+  /// Resize canvas buffer to match current canvas dimensions
+  void resize_canvas_buffer_();
+
   /// Write RGB565 image data directly to canvas buffer (with scaling/positioning)
   void write_to_canvas_buffer_(const uint8_t *rgb565_data, int img_width, int img_height);
 

@@ -304,8 +304,9 @@ void PictureViewer::set_fullscreen(bool fullscreen) {
   ESP_LOGI(TAG, "Setting fullscreen: %s", fullscreen ? "true" : "false");
   this->fullscreen_ = fullscreen;
 
-  // Update canvas dimensions BEFORE reloading image
+  // Update canvas dimensions and resize buffer BEFORE reloading image
   this->update_canvas_dimensions_();
+  this->resize_canvas_buffer_();
 
   // Reload current image with new dimensions
   if (this->current_index_ >= 0) {
@@ -875,6 +876,68 @@ void PictureViewer::ensure_canvas_buffer_() {
   this->canvas_buffer_height_ = buf_height;
   this->canvas_buffer_pixels_ = buf_pixels;
   this->canvas_buffer_ready_ = true;
+#endif
+}
+
+void PictureViewer::resize_canvas_buffer_() {
+#ifdef USE_LVGL
+  if (this->canvas_ == nullptr) {
+    ESP_LOGW(TAG, "Canvas not set, cannot resize buffer");
+    return;
+  }
+
+  // Get current canvas dimensions
+  const int new_width = lv_obj_get_width(this->canvas_);
+  const int new_height = lv_obj_get_height(this->canvas_);
+
+  if (new_width <= 0 || new_height <= 0) {
+    ESP_LOGE(TAG, "Invalid canvas dimensions for resize: %dx%d", new_width, new_height);
+    return;
+  }
+
+  // Check if buffer size actually changed
+  if (this->canvas_buffer_ready_ && this->canvas_buffer_width_ == new_width &&
+      this->canvas_buffer_height_ == new_height) {
+    ESP_LOGD(TAG, "Canvas buffer already correct size: %dx%d", new_width, new_height);
+    return;
+  }
+
+  ESP_LOGI(TAG, "Resizing canvas buffer: %dx%d -> %dx%d", this->canvas_buffer_width_, this->canvas_buffer_height_,
+           new_width, new_height);
+
+  // Calculate buffer size (RGB565 = 2 bytes per pixel)
+  const size_t buffer_size = (size_t) new_width * (size_t) new_height * sizeof(uint16_t);
+
+  // Allocate new buffer in PSRAM if available, otherwise in regular heap
+  void *new_buffer = nullptr;
+#ifdef CONFIG_SPIRAM
+  new_buffer = heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+  if (new_buffer != nullptr) {
+    ESP_LOGD(TAG, "Allocated canvas buffer in PSRAM: %zu bytes", buffer_size);
+  } else {
+    ESP_LOGW(TAG, "PSRAM allocation failed, trying regular heap");
+  }
+#endif
+
+  if (new_buffer == nullptr) {
+    new_buffer = malloc(buffer_size);
+    if (new_buffer == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate canvas buffer: %zu bytes", buffer_size);
+      return;
+    }
+    ESP_LOGD(TAG, "Allocated canvas buffer in heap: %zu bytes", buffer_size);
+  }
+
+  // Clear buffer to black
+  memset(new_buffer, 0, buffer_size);
+
+  // Set the new buffer on the canvas (LVGL will free the old buffer)
+  lv_canvas_set_buffer(this->canvas_, new_buffer, new_width, new_height, LV_IMG_CF_TRUE_COLOR);
+
+  // Re-adopt the buffer (updates our internal pointers)
+  this->ensure_canvas_buffer_();
+
+  ESP_LOGI(TAG, "Canvas buffer resized successfully to %dx%d", new_width, new_height);
 #endif
 }
 
