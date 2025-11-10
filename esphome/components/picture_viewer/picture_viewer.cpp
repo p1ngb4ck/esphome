@@ -304,6 +304,9 @@ void PictureViewer::set_fullscreen(bool fullscreen) {
   ESP_LOGI(TAG, "Setting fullscreen: %s", fullscreen ? "true" : "false");
   this->fullscreen_ = fullscreen;
 
+  // Update canvas dimensions BEFORE reloading image
+  this->update_canvas_dimensions_();
+
   // Reload current image with new dimensions
   if (this->current_index_ >= 0) {
     this->show_image(this->current_index_);
