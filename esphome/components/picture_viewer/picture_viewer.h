@@ -80,6 +80,9 @@ struct ThumbnailCacheEntry {
   uint32_t last_access_time{0};  // Last access timestamp (millis)
   size_t memory_usage{0};        // Memory used by this entry
   bool loaded{false};            // Whether thumbnail is loaded
+#ifdef USE_LVGL
+  lv_obj_t *thumb_btn_{nullptr};  // LVGL thumbnail button object pointer
+#endif
 };
 
 // =====================================================
@@ -224,6 +227,18 @@ class PictureViewer : public Component {
   /// Returns pointer to RGB565 thumbnail data, or nullptr if not available
   /// Updates width and height parameters with thumbnail dimensions
   const uint8_t *get_thumbnail_data(size_t index, int &width, int &height);
+
+  /// Get the pointer to a LVGL thumbnail button object for a specific image index
+  /// Returns nullptr if not available
+#ifdef USE_LVGL
+  lv_obj_t *get_thumbnail_button(size_t index);
+  void set_thumbnail_button(size_t index, lv_obj_t *btn) {
+    int cache_index = this->find_thumbnail_in_cache_(index);
+    if (cache_index >= 0) {
+      this->thumbnail_cache_[cache_index].thumb_btn_ = btn;
+    }
+  }
+#endif
 
   /// Get total number of thumbnails that can be generated
   size_t get_thumbnail_count() const { return this->images_.size(); }
