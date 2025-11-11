@@ -139,14 +139,22 @@ void PictureViewer::setup() {
 }
 
 void PictureViewer::loop() {
+  uint32_t now = millis();
+
   // Handle slideshow
   if (this->slideshow_mode_ == SlideshowMode::PLAYING) {
-    uint32_t now = millis();
     if (now - this->last_slideshow_time_ >= this->slideshow_interval_ms_) {
       this->next_image();
       this->last_slideshow_time_ = now;
     }
   }
+
+#ifdef USE_LVGL
+  // Handle overlay timeout
+  if (this->overlay_visible_ && (now - this->overlay_show_time_ >= this->overlay_duration_ms_)) {
+    this->hide_overlay_icon_();
+  }
+#endif
 }
 
 void PictureViewer::dump_config() {
@@ -295,8 +303,14 @@ void PictureViewer::pause_slideshow() {
 void PictureViewer::toggle_slideshow() {
   if (this->slideshow_mode_ == SlideshowMode::PLAYING) {
     this->pause_slideshow();
+#ifdef USE_LVGL
+    this->show_overlay_icon_(false);  // Show pause icon
+#endif
   } else {
     this->start_slideshow();
+#ifdef USE_LVGL
+    this->show_overlay_icon_(true);  // Show play icon
+#endif
   }
 }
 
@@ -540,6 +554,15 @@ void PictureViewer::create_thumbnail_widgets_() {
   } else {
     lv_obj_set_scroll_dir(this->thumbnail_container_, LV_DIR_VER);
   }
+
+  // Add scroll event handler for smart thumbnail preloading
+  lv_obj_add_event_cb(
+      this->thumbnail_container_,
+      [](lv_event_t *e) {
+        auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+        viewer->on_thumbnail_scroll_(e);
+      },
+      LV_EVENT_SCROLL, this);
 
   const int thumb_w = this->thumbnail_config_.width;
   const int thumb_h = this->thumbnail_config_.height;
@@ -936,6 +959,127 @@ void PictureViewer::update_canvas_() {
   ESP_LOGD(TAG, "Canvas updated successfully");
 #endif
 }
+
+#ifdef USE_LVGL
+void PictureViewer::show_overlay_icon_(bool is_playing) {
+  if (this->canvas_ == nullptr) {
+    return;
+  }
+
+  this->overlay_visible_ = true;
+  this->overlay_is_playing_ = is_playing;
+  this->overlay_show_time_ = millis();
+
+  // Draw the icon centered on canvas
+  int center_x = this->canvas_width_ / 2;
+  int center_y = this->canvas_height_ / 2;
+
+  if (is_playing) {
+    this->draw_play_icon_(center_x, center_y, this->overlay_icon_size_, this->overlay_icon_color_);
+  } else {
+    this->draw_pause_icon_(center_x, center_y, this->overlay_icon_size_, this->overlay_icon_color_);
+  }
+
+  lv_obj_invalidate(this->canvas_);
+}
+
+void PictureViewer::hide_overlay_icon_() {
+  if (!this->overlay_visible_) {
+    return;
+  }
+
+  this->overlay_visible_ = false;
+
+  // Redraw the current image to remove overlay
+  if (this->current_image_data_ != nullptr) {
+    this->write_to_canvas_buffer_(this->current_image_data_, this->current_image_width_, this->current_image_height_);
+    lv_obj_invalidate(this->canvas_);
+  }
+}
+
+void PictureViewer::draw_play_icon_(int center_x, int center_y, int size, uint32_t color) {
+  if (this->canvas_buffer_ == nullptr) {
+    return;
+  }
+
+  // Convert RGB888 to RGB565
+  uint16_t color565 = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
+
+  // Draw triangle pointing right
+  int half_size = size / 2;
+  int triangle_height = (int) (half_size * 1.732f);  // height = side * sqrt(3)
+
+  // Triangle vertices (pointing right)
+  int x1 = center_x - half_size / 2;
+  int y1 = center_y - triangle_height / 2;
+  int x2 = center_x - half_size / 2;
+  int y2 = center_y + triangle_height / 2;
+  int x3 = center_x + half_size;
+  int y3 = center_y;
+
+  // Fill triangle using scanline algorithm
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+
+    // Calculate x range for this scanline
+    float t = (float) (y - y1) / (y2 - y1);
+    int x_left = x1;
+    int x_right = (int) (x1 + t * (x3 - x1));
+
+    for (int x = x_left; x <= x_right; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+}
+
+void PictureViewer::draw_pause_icon_(int center_x, int center_y, int size, uint32_t color) {
+  if (this->canvas_buffer_ == nullptr) {
+    return;
+  }
+
+  // Convert RGB888 to RGB565
+  uint16_t color565 = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
+
+  // Draw two vertical rectangles
+  int half_size = size / 2;
+  int rect_width = size / 5;
+  int rect_height = size;
+  int gap = size / 6;
+
+  // Left rectangle
+  int left_x1 = center_x - gap / 2 - rect_width;
+  int left_x2 = center_x - gap / 2;
+  int y1 = center_y - rect_height / 2;
+  int y2 = center_y + rect_height / 2;
+
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+    for (int x = left_x1; x <= left_x2; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+
+  // Right rectangle
+  int right_x1 = center_x + gap / 2;
+  int right_x2 = center_x + gap / 2 + rect_width;
+
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+    for (int x = right_x1; x <= right_x2; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+}
+#endif
 
 bool PictureViewer::generate_thumbnail_(ImageEntry &entry) {
   if (!this->enable_thumbnails_) {
@@ -1481,6 +1625,242 @@ bool PictureViewer::set_current_directory(size_t index) {
   this->refresh_images();  // Reload images from new directory
   return true;
 }
+
+// =====================================================
+// Overlay Icon Methods
+// =====================================================
+
+#ifdef USE_LVGL
+void PictureViewer::show_overlay_icon_(bool is_playing) {
+  if (this->canvas_ == nullptr || this->canvas_buffer_ == nullptr) {
+    return;
+  }
+
+  this->overlay_visible_ = true;
+  this->overlay_is_playing_ = is_playing;
+  this->overlay_show_time_ = millis();
+
+  // Draw the icon centered on canvas
+  int center_x = this->canvas_width_ / 2;
+  int center_y = this->canvas_height_ / 2;
+
+  if (is_playing) {
+    this->draw_play_icon_(center_x, center_y, this->overlay_icon_size_, this->overlay_icon_color_);
+  } else {
+    this->draw_pause_icon_(center_x, center_y, this->overlay_icon_size_, this->overlay_icon_color_);
+  }
+
+  lv_obj_invalidate(this->canvas_);
+}
+
+void PictureViewer::hide_overlay_icon_() {
+  if (!this->overlay_visible_) {
+    return;
+  }
+
+  this->overlay_visible_ = false;
+
+  // Redraw the current image to remove overlay
+  if (this->current_image_data_ != nullptr) {
+    this->write_to_canvas_buffer_(this->current_image_data_, this->current_image_width_, this->current_image_height_);
+    lv_obj_invalidate(this->canvas_);
+  }
+}
+
+void PictureViewer::draw_play_icon_(int center_x, int center_y, int size, uint32_t color) {
+  if (this->canvas_buffer_ == nullptr) {
+    return;
+  }
+
+  // Convert RGB888 to RGB565
+  uint16_t color565 = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
+
+  // Draw triangle pointing right
+  int half_size = size / 2;
+  int triangle_height = (int) (half_size * 1.732f);  // height = side * sqrt(3)
+
+  // Triangle vertices (pointing right)
+  int x1 = center_x - half_size / 2;
+  int y1 = center_y - triangle_height / 2;
+  int x2 = center_x - half_size / 2;
+  int y2 = center_y + triangle_height / 2;
+  int x3 = center_x + half_size;
+  int y3 = center_y;
+
+  // Fill triangle using scanline algorithm
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+
+    // Calculate x range for this scanline
+    float t = (float) (y - y1) / (y2 - y1);
+    int x_left = x1;
+    int x_right = (int) (x1 + t * (x3 - x1));
+
+    for (int x = x_left; x <= x_right; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+}
+
+void PictureViewer::draw_pause_icon_(int center_x, int center_y, int size, uint32_t color) {
+  if (this->canvas_buffer_ == nullptr) {
+    return;
+  }
+
+  // Convert RGB888 to RGB565
+  uint16_t color565 = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
+
+  // Draw two vertical rectangles
+  int rect_width = size / 5;
+  int rect_height = size;
+  int gap = size / 6;
+
+  // Left rectangle
+  int left_x1 = center_x - gap / 2 - rect_width;
+  int left_x2 = center_x - gap / 2;
+  int y1 = center_y - rect_height / 2;
+  int y2 = center_y + rect_height / 2;
+
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+    for (int x = left_x1; x <= left_x2; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+
+  // Right rectangle
+  int right_x1 = center_x + gap / 2;
+  int right_x2 = center_x + gap / 2 + rect_width;
+
+  for (int y = y1; y <= y2; y++) {
+    if (y < 0 || y >= this->canvas_height_)
+      continue;
+    for (int x = right_x1; x <= right_x2; x++) {
+      if (x >= 0 && x < this->canvas_width_) {
+        this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
+      }
+    }
+  }
+}
+
+// =====================================================
+// Scroll Tracking and Smart Thumbnail Preloading
+// =====================================================
+
+void PictureViewer::on_thumbnail_scroll_(lv_event_t *event) {
+  if (this->thumbnail_container_ == nullptr) {
+    return;
+  }
+
+  uint32_t now = millis();
+  int32_t scroll_pos;
+
+  // Get scroll position based on layout
+  if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
+    scroll_pos = lv_obj_get_scroll_x(this->thumbnail_container_);
+  } else {
+    scroll_pos = lv_obj_get_scroll_y(this->thumbnail_container_);
+  }
+
+  // Calculate scroll velocity
+  if (this->last_scroll_time_ > 0) {
+    uint32_t time_diff = now - this->last_scroll_time_;
+    if (time_diff > 0) {
+      int32_t pos_diff = scroll_pos - this->last_scroll_pos_;
+      this->scroll_velocity_ = (float) pos_diff / (float) time_diff;
+    }
+  }
+
+  this->last_scroll_pos_ = scroll_pos;
+  this->last_scroll_time_ = now;
+
+  // Trigger smart preloading
+  this->preload_thumbnails_for_viewport_();
+}
+
+void PictureViewer::preload_thumbnails_for_viewport_() {
+  if (this->thumbnail_container_ == nullptr || this->images_.empty()) {
+    return;
+  }
+
+  // Determine which thumbnails are visible and which to preload
+  const int thumb_size = (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL)
+                             ? this->thumbnail_config_.width
+                             : this->thumbnail_config_.height;
+  const int container_size = (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL)
+                                 ? lv_obj_get_width(this->thumbnail_container_)
+                                 : lv_obj_get_height(this->thumbnail_container_);
+
+  int32_t scroll_pos = (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL)
+                           ? lv_obj_get_scroll_x(this->thumbnail_container_)
+                           : lv_obj_get_scroll_y(this->thumbnail_container_);
+
+  // Calculate visible range
+  int first_visible = std::max(0, (int) (scroll_pos / (thumb_size + this->thumbnail_config_.spacing)));
+  int last_visible =
+      std::min((int) this->images_.size() - 1,
+               (int) ((scroll_pos + container_size) / (thumb_size + this->thumbnail_config_.spacing)) + 1);
+
+  // Determine preload direction based on velocity
+  bool scrolling_forward = this->scroll_velocity_ > 0.1f;
+  bool scrolling_backward = this->scroll_velocity_ < -0.1f;
+
+  // Preload 2-3 thumbnails in scroll direction
+  int preload_count = 3;
+
+  if (scrolling_forward) {
+    // Preload ahead
+    for (int i = last_visible + 1; i < std::min(last_visible + preload_count + 1, (int) this->images_.size()); i++) {
+      this->request_thumbnail(i);
+    }
+  } else if (scrolling_backward) {
+    // Preload behind
+    for (int i = first_visible - 1; i >= std::max(first_visible - preload_count, 0); i--) {
+      this->request_thumbnail(i);
+    }
+  }
+
+  // Preload currently visible thumbnails
+  for (int i = first_visible; i <= last_visible; i++) {
+    this->request_thumbnail(i);
+  }
+
+  // Evict thumbnails that are far from viewport (with hysteresis)
+  const int hysteresis = 3;  // Keep 3 thumbnails behind viewport
+  for (size_t i = 0; i < this->thumbnail_cache_.size(); i++) {
+    auto &cache_entry = this->thumbnail_cache_[i];
+    if (!cache_entry.loaded || cache_entry.image_index < 0) {
+      continue;
+    }
+
+    int distance_from_viewport;
+    if (cache_entry.image_index < first_visible) {
+      distance_from_viewport = first_visible - cache_entry.image_index;
+    } else if (cache_entry.image_index > last_visible) {
+      distance_from_viewport = cache_entry.image_index - last_visible;
+    } else {
+      distance_from_viewport = 0;  // In viewport
+    }
+
+    // Evict if far away (but keep hysteresis behind)
+    bool is_behind_viewport = cache_entry.image_index < first_visible;
+    int eviction_threshold = is_behind_viewport ? hysteresis : preload_count;
+
+    if (distance_from_viewport > eviction_threshold) {
+      // Mark for eviction (will be reused by next load_thumbnail_ call)
+      cache_entry.loaded = false;
+      cache_entry.image_index = -1;
+      ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", cache_entry.image_index, distance_from_viewport);
+    }
+  }
+}
+#endif
 
 // =====================================================
 // Actions

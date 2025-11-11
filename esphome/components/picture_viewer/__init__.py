@@ -84,6 +84,9 @@ CONF_FIT_MODE = "fit_mode"
 CONF_JPEG_RGB_ORDER = "jpeg_rgb_order"
 CONF_JPEG_COLOR_SPACE = "jpeg_color_space"
 CONF_JPEG_OUTPUT_FORMAT = "jpeg_output_format"
+CONF_OVERLAY_ICON_SIZE = "overlay_icon_size"
+CONF_OVERLAY_ICON_COLOR = "overlay_icon_color"
+CONF_OVERLAY_DURATION = "overlay_duration"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(
@@ -184,6 +187,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(
                 IMAGE_FIT_MODES, upper=True
             ),
+            cv.Optional(CONF_OVERLAY_ICON_SIZE, default=128): cv.int_range(
+                min=32, max=256
+            ),
+            cv.Optional(CONF_OVERLAY_ICON_COLOR, default=0xFFFFFF): cv.hex_uint32_t,
+            cv.Optional(CONF_OVERLAY_DURATION, default=1500): cv.int_range(
+                min=500, max=5000
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_buffer_sizes,
@@ -251,6 +261,9 @@ async def to_code(config):
     cg.add(var.set_thumbnail_spacing(config[CONF_THUMBNAIL_SPACING]))
     cg.add(var.set_thumbnail_grid_columns(config[CONF_THUMBNAIL_GRID_COLUMNS]))
     cg.add(var.set_fit_mode(config[CONF_FIT_MODE]))
+    cg.add(var.set_overlay_icon_size(config[CONF_OVERLAY_ICON_SIZE]))
+    cg.add(var.set_overlay_icon_color(config[CONF_OVERLAY_ICON_COLOR]))
+    cg.add(var.set_overlay_duration(config[CONF_OVERLAY_DURATION]))
 
     # Add directories with per-directory JPEG decoder configuration
     for dir_config in config[CONF_DIRECTORIES]:

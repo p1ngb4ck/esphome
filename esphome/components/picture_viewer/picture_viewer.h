@@ -151,6 +151,9 @@ class PictureViewer : public Component {
   void set_thumbnail_spacing(int spacing) { this->thumbnail_config_.spacing = spacing; }
   void set_thumbnail_grid_columns(int columns) { this->thumbnail_config_.grid_columns = columns; }
   void set_fit_mode(ImageFitMode mode) { this->fit_mode_ = mode; }
+  void set_overlay_icon_size(int size) { this->overlay_icon_size_ = size; }
+  void set_overlay_icon_color(uint32_t color) { this->overlay_icon_color_ = color; }
+  void set_overlay_duration(uint32_t duration_ms) { this->overlay_duration_ms_ = duration_ms; }
 
 #ifdef USE_LVGL
   void set_thumbnail_container(lv_obj_t *container) { this->thumbnail_container_ = container; }
@@ -304,6 +307,11 @@ class PictureViewer : public Component {
   bool enable_thumbnails_{true};
   ImageFitMode fit_mode_{ImageFitMode::SCALE_TO_FIT};  // Default: scale to fit
 
+  // Overlay icon configuration
+  int overlay_icon_size_{128};             // Size of play/pause icon in pixels
+  uint32_t overlay_icon_color_{0xFFFFFF};  // RGB color (white default)
+  uint32_t overlay_duration_ms_{1500};     // Duration to show overlay (1.5s default)
+
   // State
   std::vector<ImageEntry> images_;
   int current_index_{-1};
@@ -312,6 +320,16 @@ class PictureViewer : public Component {
   bool fullscreen_{false};
   int canvas_width_{0};
   int canvas_height_{0};
+
+  // Overlay state
+  bool overlay_visible_{false};
+  uint32_t overlay_show_time_{0};
+  bool overlay_is_playing_{true};  // true = play icon, false = pause icon
+
+  // Scroll tracking for smart thumbnail preloading
+  int32_t last_scroll_pos_{0};
+  uint32_t last_scroll_time_{0};
+  float scroll_velocity_{0.0f};  // pixels per millisecond
 
   // Current displayed image (allocated in PSRAM if available)
   uint8_t *current_image_data_{nullptr};  // RGB565 data in PSRAM
@@ -436,7 +454,25 @@ class PictureViewer : public Component {
 
   /// Highlight active thumbnail and unhighlight others
   void update_thumbnail_highlighting_(int active_image_index);
+
+  /// Handle scroll events for smart thumbnail preloading
+  void on_thumbnail_scroll_(lv_event_t *event);
+
+  /// Preload thumbnails based on scroll position and velocity
+  void preload_thumbnails_for_viewport_();
 #endif
+
+  /// Show play/pause overlay icon
+  void show_overlay_icon_(bool is_playing);
+
+  /// Hide overlay icon
+  void hide_overlay_icon_();
+
+  /// Draw play icon (triangle) on canvas
+  void draw_play_icon_(int center_x, int center_y, int size, uint32_t color);
+
+  /// Draw pause icon (two rectangles) on canvas
+  void draw_pause_icon_(int center_x, int center_y, int size, uint32_t color);
 
   /// Get canvas dimensions
   void update_canvas_dimensions_();
