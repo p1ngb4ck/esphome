@@ -38,6 +38,13 @@ IMAGE_FIT_MODES = {
     "CENTER": ImageFitMode.CENTER,
 }
 
+ThumbnailLayout = picture_viewer_ns.enum("ThumbnailLayout", is_class=True)
+THUMBNAIL_LAYOUTS = {
+    "HORIZONTAL": ThumbnailLayout.HORIZONTAL,
+    "VERTICAL": ThumbnailLayout.VERTICAL,
+    "GRID": ThumbnailLayout.GRID,
+}
+
 # JPEG decoder configuration enums
 JPEG_RGB_ORDER = {
     "RGB": 0,  # JPEG_DEC_RGB_ELEMENT_ORDER_RGB
@@ -66,9 +73,13 @@ CONF_ENABLE_THUMBNAILS = "enable_thumbnails"
 CONF_THUMBNAIL_WIDTH = "thumbnail_width"
 CONF_THUMBNAIL_HEIGHT = "thumbnail_height"
 CONF_THUMBNAIL_MAX_COUNT = "thumbnail_max_count"
-CONF_THUMBNAIL_MAX_MEMORY = "thumbnail_max_memory"
+CONF_THUMBNAIL_DECODE_WORK_BUFFER_SIZE = "thumbnail_decode_work_buffer_size"
 CONF_THUMBNAIL_LAZY_LOAD = "thumbnail_lazy_load"
 CONF_THUMBNAIL_PRELOAD_COUNT = "thumbnail_preload_count"
+CONF_THUMBNAIL_LAYOUT = "thumbnail_layout"
+CONF_THUMBNAIL_SPACING = "thumbnail_spacing"
+CONF_THUMBNAIL_GRID_COLUMNS = "thumbnail_grid_columns"
+CONF_THUMBNAIL_CONTAINER_ID = "thumbnail_container_id"
 CONF_FIT_MODE = "fit_mode"
 CONF_JPEG_RGB_ORDER = "jpeg_rgb_order"
 CONF_JPEG_COLOR_SPACE = "jpeg_color_space"
@@ -90,37 +101,93 @@ DIRECTORY_SCHEMA = cv.Schema(
     }
 )
 
+
+def validate_buffer_sizes(config):
+    """Validate that buffer sizes fit within reasonable memory limits"""
+    # Calculate thumbnail buffer array size
+    thumb_width = config[CONF_THUMBNAIL_WIDTH]
+    thumb_height = config[CONF_THUMBNAIL_HEIGHT]
+    max_count = config[CONF_THUMBNAIL_MAX_COUNT]
+    bytes_per_pixel = 2  # RGB565
+
+    thumbnail_buffer_size = thumb_width * thumb_height * bytes_per_pixel * max_count
+    work_buffer_size = config[CONF_THUMBNAIL_DECODE_WORK_BUFFER_SIZE]
+
+    total_memory = thumbnail_buffer_size + work_buffer_size
+
+    # Warn if total memory exceeds 4MB (reasonable PSRAM limit for thumbnails)
+    if total_memory > 4 * 1024 * 1024:
+        _LOGGER.warning(
+            f"Thumbnail buffers require {total_memory / (1024 * 1024):.2f}MB "
+            f"({thumbnail_buffer_size / (1024 * 1024):.2f}MB for {max_count} thumbnails + "
+            f"{work_buffer_size / (1024 * 1024):.2f}MB work buffer). "
+            f"Ensure your device has sufficient PSRAM."
+        )
+
+    # Error if work buffer is smaller than a single thumbnail
+    min_work_buffer = thumb_width * thumb_height * bytes_per_pixel
+    if work_buffer_size < min_work_buffer:
+        raise cv.Invalid(
+            f"Work buffer size ({work_buffer_size} bytes) is too small for "
+            f"thumbnail size {thumb_width}x{thumb_height} "
+            f"(requires at least {min_work_buffer} bytes)"
+        )
+
+    return config
+
+
 # Component configuration
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(PictureViewer),
-        cv.Optional(CONF_FILE_MANAGER_ID): cv.use_id(cg.Component),  # FileManager
-        cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t)
-        if LVGL_AVAILABLE
-        else cv.invalid("LVGL not available"),  # LVGL Canvas widget
-        cv.Optional(CONF_DISPLAY_ID): cv.use_id(cg.Component),  # Display
-        cv.Required(CONF_DIRECTORIES): cv.All(
-            cv.ensure_list(DIRECTORY_SCHEMA), cv.Length(min=1)
-        ),
-        cv.Optional(
-            CONF_SLIDESHOW_INTERVAL, default="5s"
-        ): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_ENABLE_THUMBNAILS, default=True): cv.boolean,
-        cv.Optional(CONF_THUMBNAIL_WIDTH, default=120): cv.int_range(min=32, max=320),
-        cv.Optional(CONF_THUMBNAIL_HEIGHT, default=90): cv.int_range(min=32, max=240),
-        cv.Optional(CONF_THUMBNAIL_MAX_COUNT, default=20): cv.int_range(min=1, max=100),
-        cv.Optional(CONF_THUMBNAIL_MAX_MEMORY, default=2097152): cv.int_range(
-            min=65536
-        ),  # Min 64KB
-        cv.Optional(CONF_THUMBNAIL_LAZY_LOAD, default=True): cv.boolean,
-        cv.Optional(CONF_THUMBNAIL_PRELOAD_COUNT, default=10): cv.int_range(
-            min=0, max=50
-        ),
-        cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(
-            IMAGE_FIT_MODES, upper=True
-        ),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(PictureViewer),
+            cv.Optional(CONF_FILE_MANAGER_ID): cv.use_id(cg.Component),  # FileManager
+            cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t)
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),  # LVGL Canvas widget
+            cv.Optional(CONF_DISPLAY_ID): cv.use_id(cg.Component),  # Display
+            cv.Required(CONF_DIRECTORIES): cv.All(
+                cv.ensure_list(DIRECTORY_SCHEMA), cv.Length(min=1)
+            ),
+            cv.Optional(
+                CONF_SLIDESHOW_INTERVAL, default="5s"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ENABLE_THUMBNAILS, default=True): cv.boolean,
+            cv.Optional(CONF_THUMBNAIL_WIDTH, default=120): cv.int_range(
+                min=32, max=320
+            ),
+            cv.Optional(CONF_THUMBNAIL_HEIGHT, default=90): cv.int_range(
+                min=32, max=240
+            ),
+            cv.Optional(CONF_THUMBNAIL_MAX_COUNT, default=10): cv.int_range(
+                min=1, max=50
+            ),
+            cv.Optional(
+                CONF_THUMBNAIL_DECODE_WORK_BUFFER_SIZE, default=2097152
+            ): cv.int_range(
+                min=262144  # Min 256KB for JPEG decode
+            ),
+            cv.Optional(CONF_THUMBNAIL_LAZY_LOAD, default=True): cv.boolean,
+            cv.Optional(CONF_THUMBNAIL_PRELOAD_COUNT, default=5): cv.int_range(
+                min=0, max=50
+            ),
+            cv.Optional(CONF_THUMBNAIL_LAYOUT, default="HORIZONTAL"): cv.enum(
+                THUMBNAIL_LAYOUTS, upper=True
+            ),
+            cv.Optional(CONF_THUMBNAIL_SPACING, default=5): cv.int_range(min=0, max=50),
+            cv.Optional(CONF_THUMBNAIL_GRID_COLUMNS, default=3): cv.int_range(
+                min=1, max=10
+            ),
+            cv.Optional(CONF_THUMBNAIL_CONTAINER_ID): cv.use_id(cg.Component)
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),
+            cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(
+                IMAGE_FIT_MODES, upper=True
+            ),
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+    validate_buffer_sizes,
+)
 
 
 async def to_code(config):
@@ -162,15 +229,27 @@ async def to_code(config):
         display = await cg.get_variable(config[CONF_DISPLAY_ID])
         cg.add(var.set_display(display))
 
+    # Link thumbnail container if provided
+    if CONF_THUMBNAIL_CONTAINER_ID in config:
+        container = await cg.get_variable(config[CONF_THUMBNAIL_CONTAINER_ID])
+        cg.add(var.set_thumbnail_container(container))
+
     # Configuration
     cg.add(var.set_slideshow_interval(config[CONF_SLIDESHOW_INTERVAL]))
     cg.add(var.set_enable_thumbnails(config[CONF_ENABLE_THUMBNAILS]))
     cg.add(var.set_thumbnail_width(config[CONF_THUMBNAIL_WIDTH]))
     cg.add(var.set_thumbnail_height(config[CONF_THUMBNAIL_HEIGHT]))
     cg.add(var.set_thumbnail_max_count(config[CONF_THUMBNAIL_MAX_COUNT]))
-    cg.add(var.set_thumbnail_max_memory(config[CONF_THUMBNAIL_MAX_MEMORY]))
+    cg.add(
+        var.set_thumbnail_decode_work_buffer_size(
+            config[CONF_THUMBNAIL_DECODE_WORK_BUFFER_SIZE]
+        )
+    )
     cg.add(var.set_thumbnail_lazy_load(config[CONF_THUMBNAIL_LAZY_LOAD]))
     cg.add(var.set_thumbnail_preload_count(config[CONF_THUMBNAIL_PRELOAD_COUNT]))
+    cg.add(var.set_thumbnail_layout(config[CONF_THUMBNAIL_LAYOUT]))
+    cg.add(var.set_thumbnail_spacing(config[CONF_THUMBNAIL_SPACING]))
+    cg.add(var.set_thumbnail_grid_columns(config[CONF_THUMBNAIL_GRID_COLUMNS]))
     cg.add(var.set_fit_mode(config[CONF_FIT_MODE]))
 
     # Add directories with per-directory JPEG decoder configuration

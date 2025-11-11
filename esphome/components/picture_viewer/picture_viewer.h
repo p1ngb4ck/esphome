@@ -62,26 +62,38 @@ enum class ImageFitMode {
   CENTER,         // Center image, no scaling
 };
 
+// Thumbnail layout mode for dynamic LVGL generation
+enum class ThumbnailLayout {
+  HORIZONTAL,  // Horizontal strip/ribbon
+  VERTICAL,    // Vertical strip/ribbon
+  GRID,        // Grid layout with wrapping
+};
+
 // Thumbnail configuration
 struct ThumbnailConfig {
   bool enabled{true};
-  int width{200};
-  int height{150};
-  size_t max_count{20};        // Maximum number of thumbnails in memory
-  size_t max_memory{2097152};  // Maximum memory budget (default: 2MB)
-  bool lazy_load{true};        // Load thumbnails on-demand
-  size_t preload_count{10};    // Number of thumbnails to preload initially
+  int width{120};                           // Thumbnail width in pixels
+  int height{90};                           // Thumbnail height in pixels
+  size_t max_count{10};                     // Maximum number of thumbnails in memory
+  size_t decode_work_buffer_size{2097152};  // 2MB work buffer for JPEG decode (reused)
+  bool lazy_load{true};                     // Load thumbnails on-demand
+  size_t preload_count{5};                  // Number of thumbnails to preload initially
+
+  // LVGL dynamic generation options
+  ThumbnailLayout layout{ThumbnailLayout::HORIZONTAL};  // Layout mode
+  int spacing{5};                                       // Pixels between thumbnails
+  int grid_columns{3};                                  // Columns for GRID layout
 };
 
 // Thumbnail cache entry with LRU tracking
 struct ThumbnailCacheEntry {
   int image_index{-1};           // Index of image this thumbnail belongs to
-  std::vector<uint8_t> data;     // RGB565 thumbnail data
+  uint8_t *data{nullptr};        // Points into thumbnail_buffer_array_ (not owned)
   uint32_t last_access_time{0};  // Last access timestamp (millis)
-  size_t memory_usage{0};        // Memory used by this entry
   bool loaded{false};            // Whether thumbnail is loaded
 #ifdef USE_LVGL
-  lv_obj_t *thumb_btn_{nullptr};  // LVGL thumbnail button object pointer
+  lv_obj_t *thumb_btn_{nullptr};     // LVGL thumbnail button object pointer
+  lv_obj_t *thumb_canvas_{nullptr};  // LVGL canvas widget pointer
 #endif
 };
 
@@ -132,10 +144,17 @@ class PictureViewer : public Component {
     this->thumbnail_config_.enabled = enable;
   }
   void set_thumbnail_max_count(size_t count) { this->thumbnail_config_.max_count = count; }
-  void set_thumbnail_max_memory(size_t bytes) { this->thumbnail_config_.max_memory = bytes; }
+  void set_thumbnail_decode_work_buffer_size(size_t bytes) { this->thumbnail_config_.decode_work_buffer_size = bytes; }
   void set_thumbnail_lazy_load(bool lazy) { this->thumbnail_config_.lazy_load = lazy; }
   void set_thumbnail_preload_count(size_t count) { this->thumbnail_config_.preload_count = count; }
+  void set_thumbnail_layout(ThumbnailLayout layout) { this->thumbnail_config_.layout = layout; }
+  void set_thumbnail_spacing(int spacing) { this->thumbnail_config_.spacing = spacing; }
+  void set_thumbnail_grid_columns(int columns) { this->thumbnail_config_.grid_columns = columns; }
   void set_fit_mode(ImageFitMode mode) { this->fit_mode_ = mode; }
+
+#ifdef USE_LVGL
+  void set_thumbnail_container(lv_obj_t *container) { this->thumbnail_container_ = container; }
+#endif
 
   // Directory configuration
   void add_directory(const std::string &path, int rgb_order, int color_space, uint32_t output_format) {
@@ -317,8 +336,19 @@ class PictureViewer : public Component {
   // Thumbnail management
   ThumbnailConfig thumbnail_config_;
   std::vector<ThumbnailCacheEntry> thumbnail_cache_;
-  size_t current_memory_usage_{0};                        // Total memory used by thumbnails in cache
   std::function<void(size_t)> thumbnail_ready_callback_;  // Called when thumbnail is loaded
+
+  // Work buffer for JPEG decoding (reused for every decode operation)
+  uint8_t *decode_work_buffer_{nullptr};
+  size_t decode_work_buffer_size_{0};
+
+  // Thumbnail buffer array (single PSRAM allocation for all thumbnails)
+  uint8_t *thumbnail_buffer_array_{nullptr};
+  size_t thumbnail_buffer_size_per_slot_{0};  // Size per thumbnail: width * height * 2 (RGB565)
+
+#ifdef USE_LVGL
+  lv_obj_t *thumbnail_container_{nullptr};  // Parent container for dynamic thumbnail widgets
+#endif
 
   // =====================================================
   // Internal Methods
@@ -384,6 +414,29 @@ class PictureViewer : public Component {
 
   /// Find thumbnail in cache by image index (returns cache index or -1 if not found)
   int find_thumbnail_in_cache_(size_t image_index) const;
+
+  /// Allocate work buffer for JPEG decoding
+  bool allocate_work_buffer_();
+
+  /// Allocate thumbnail buffer array
+  bool allocate_thumbnail_buffer_array_();
+
+  /// Free work buffer
+  void free_work_buffer_();
+
+  /// Free thumbnail buffer array
+  void free_thumbnail_buffer_array_();
+
+#ifdef USE_LVGL
+  /// Create dynamic LVGL thumbnail widgets
+  void create_thumbnail_widgets_();
+
+  /// Update thumbnail widget at cache index with image data
+  void update_thumbnail_widget_(size_t cache_index);
+
+  /// Highlight active thumbnail and unhighlight others
+  void update_thumbnail_highlighting_(int active_image_index);
+#endif
 
   /// Get canvas dimensions
   void update_canvas_dimensions_();

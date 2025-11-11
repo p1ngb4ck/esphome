@@ -38,6 +38,12 @@ PictureViewer::~PictureViewer() {
     this->next_image_data_ = nullptr;
   }
 
+  // Free work buffer
+  this->free_work_buffer_();
+
+  // Free thumbnail buffer array
+  this->free_thumbnail_buffer_array_();
+
   // Note: Don't delete transcoder's decoder - transcoder owns it
 
 #ifdef USE_JPEGDEC
@@ -87,6 +93,38 @@ void PictureViewer::setup() {
     this->file_manager_->add_on_directory_changed_callback(
         [this](const storage_host::DirectoryChangeInfo &info) { this->on_directory_changed_(info); });
     ESP_LOGI(TAG, "Registered directory change callback with file_manager");
+  }
+#endif
+
+  // Allocate work buffer for JPEG decoding
+  if (!this->allocate_work_buffer_()) {
+    ESP_LOGE(TAG, "Failed to allocate work buffer");
+    this->mark_failed();
+    return;
+  }
+
+  // Allocate thumbnail buffer array
+  if (!this->allocate_thumbnail_buffer_array_()) {
+    ESP_LOGE(TAG, "Failed to allocate thumbnail buffer array");
+    this->mark_failed();
+    return;
+  }
+
+  // Initialize thumbnail cache with pointers into buffer array
+  if (this->thumbnail_config_.enabled && this->thumbnail_buffer_array_ != nullptr) {
+    this->thumbnail_cache_.resize(this->thumbnail_config_.max_count);
+    for (size_t i = 0; i < this->thumbnail_config_.max_count; i++) {
+      this->thumbnail_cache_[i].data = this->thumbnail_buffer_array_ + (i * this->thumbnail_buffer_size_per_slot_);
+      this->thumbnail_cache_[i].image_index = -1;
+      this->thumbnail_cache_[i].loaded = false;
+    }
+    ESP_LOGI(TAG, "Initialized thumbnail cache with %zu slots", this->thumbnail_config_.max_count);
+  }
+
+#ifdef USE_LVGL
+  // Create dynamic thumbnail widgets if container is provided
+  if (this->thumbnail_container_ != nullptr && this->thumbnail_config_.enabled) {
+    this->create_thumbnail_widgets_();
   }
 #endif
 
@@ -381,6 +419,232 @@ void PictureViewer::on_directory_changed_(const storage_host::DirectoryChangeInf
   ESP_LOGI(TAG, "After directory change: %zu images found", this->images_.size());
 #endif
 }
+
+// =====================================================
+// Buffer Management
+// =====================================================
+
+bool PictureViewer::allocate_work_buffer_() {
+  // Calculate work buffer size from config
+  this->decode_work_buffer_size_ = this->thumbnail_config_.decode_work_buffer_size;
+
+  ESP_LOGI(TAG, "Allocating work buffer: %zu bytes", this->decode_work_buffer_size_);
+
+  // Allocate in PSRAM if available
+#ifdef CONFIG_SPIRAM
+  this->decode_work_buffer_ = (uint8_t *) heap_caps_malloc(this->decode_work_buffer_size_, MALLOC_CAP_SPIRAM);
+  if (this->decode_work_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Work buffer allocated in PSRAM");
+    return true;
+  }
+  ESP_LOGW(TAG, "PSRAM allocation failed for work buffer, trying heap");
+#endif
+
+  // Fallback to regular heap
+  this->decode_work_buffer_ = (uint8_t *) malloc(this->decode_work_buffer_size_);
+  if (this->decode_work_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate work buffer: %zu bytes", this->decode_work_buffer_size_);
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Work buffer allocated in heap");
+  return true;
+}
+
+void PictureViewer::free_work_buffer_() {
+  if (this->decode_work_buffer_ != nullptr) {
+    free(this->decode_work_buffer_);
+    this->decode_work_buffer_ = nullptr;
+    this->decode_work_buffer_size_ = 0;
+    ESP_LOGD(TAG, "Work buffer freed");
+  }
+}
+
+bool PictureViewer::allocate_thumbnail_buffer_array_() {
+  if (!this->thumbnail_config_.enabled) {
+    ESP_LOGD(TAG, "Thumbnails disabled, skipping buffer allocation");
+    return true;
+  }
+
+  // Calculate buffer size per thumbnail slot
+  this->thumbnail_buffer_size_per_slot_ =
+      (size_t) this->thumbnail_config_.width * (size_t) this->thumbnail_config_.height * 2;  // RGB565 = 2 bytes/pixel
+
+  const size_t total_size = this->thumbnail_buffer_size_per_slot_ * this->thumbnail_config_.max_count;
+
+  ESP_LOGI(TAG, "Allocating thumbnail buffer array: %zu thumbnails × %zu bytes = %zu bytes (%.2f MB)",
+           this->thumbnail_config_.max_count, this->thumbnail_buffer_size_per_slot_, total_size,
+           total_size / (1024.0 * 1024.0));
+
+  // Allocate in PSRAM if available
+#ifdef CONFIG_SPIRAM
+  this->thumbnail_buffer_array_ = (uint8_t *) heap_caps_malloc(total_size, MALLOC_CAP_SPIRAM);
+  if (this->thumbnail_buffer_array_ != nullptr) {
+    ESP_LOGI(TAG, "Thumbnail buffer array allocated in PSRAM");
+    memset(this->thumbnail_buffer_array_, 0, total_size);  // Clear to black
+    return true;
+  }
+  ESP_LOGW(TAG, "PSRAM allocation failed for thumbnail buffer array, trying heap");
+#endif
+
+  // Fallback to regular heap
+  this->thumbnail_buffer_array_ = (uint8_t *) malloc(total_size);
+  if (this->thumbnail_buffer_array_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate thumbnail buffer array: %zu bytes", total_size);
+    return false;
+  }
+
+  memset(this->thumbnail_buffer_array_, 0, total_size);  // Clear to black
+  ESP_LOGI(TAG, "Thumbnail buffer array allocated in heap");
+  return true;
+}
+
+void PictureViewer::free_thumbnail_buffer_array_() {
+  if (this->thumbnail_buffer_array_ != nullptr) {
+    free(this->thumbnail_buffer_array_);
+    this->thumbnail_buffer_array_ = nullptr;
+    this->thumbnail_buffer_size_per_slot_ = 0;
+    ESP_LOGD(TAG, "Thumbnail buffer array freed");
+  }
+}
+
+#ifdef USE_LVGL
+// =====================================================
+// LVGL Widget Generation
+// =====================================================
+
+void PictureViewer::create_thumbnail_widgets_() {
+  if (this->thumbnail_container_ == nullptr) {
+    ESP_LOGW(TAG, "Thumbnail container not set, skipping widget creation");
+    return;
+  }
+
+  ESP_LOGI(TAG, "Creating %zu thumbnail widgets with %s layout", this->thumbnail_config_.max_count,
+           this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL ? "HORIZONTAL"
+           : this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL ? "VERTICAL"
+                                                                         : "GRID");
+
+  // Configure container layout
+  lv_obj_set_flex_flow(this->thumbnail_container_,
+                       this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL ? LV_FLEX_FLOW_ROW
+                       : this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL ? LV_FLEX_FLOW_COLUMN
+                                                                                     : LV_FLEX_FLOW_ROW_WRAP);
+
+  lv_obj_set_flex_align(this->thumbnail_container_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  // Set container scroll direction based on layout
+  if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
+    lv_obj_set_scroll_dir(this->thumbnail_container_, LV_DIR_HOR);
+  } else if (this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL) {
+    lv_obj_set_scroll_dir(this->thumbnail_container_, LV_DIR_VER);
+  } else {
+    lv_obj_set_scroll_dir(this->thumbnail_container_, LV_DIR_VER);
+  }
+
+  const int thumb_w = this->thumbnail_config_.width;
+  const int thumb_h = this->thumbnail_config_.height;
+  const int spacing = this->thumbnail_config_.spacing;
+
+  // Create thumbnail widgets
+  for (size_t i = 0; i < this->thumbnail_config_.max_count; i++) {
+    // Create button container
+    lv_obj_t *btn = lv_obj_create(this->thumbnail_container_);
+    lv_obj_set_size(btn, thumb_w, thumb_h);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_radius(btn, 2, 0);
+
+    // Set margin for spacing
+    if (i > 0) {
+      if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
+        lv_obj_set_style_pad_left(btn, spacing, 0);
+      } else if (this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL) {
+        lv_obj_set_style_pad_top(btn, spacing, 0);
+      } else {
+        // Grid layout - add spacing
+        lv_obj_set_style_pad_left(btn, spacing, 0);
+        lv_obj_set_style_pad_top(btn, spacing, 0);
+      }
+    }
+
+    // Create canvas inside button
+    lv_obj_t *canvas = lv_canvas_create(btn);
+    lv_obj_center(canvas);
+
+    // Set canvas buffer to point into thumbnail buffer array
+    if (this->thumbnail_cache_[i].data != nullptr) {
+      lv_canvas_set_buffer(canvas, this->thumbnail_cache_[i].data, thumb_w, thumb_h, LV_IMG_CF_TRUE_COLOR);
+    }
+
+    // Store references in cache
+    this->thumbnail_cache_[i].thumb_btn_ = btn;
+    this->thumbnail_cache_[i].thumb_canvas_ = canvas;
+
+    // Add click handler - capture index by value
+    const size_t thumbnail_index = i;
+    lv_obj_add_event_cb(
+        btn,
+        [](lv_event_t *e) {
+          auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+          auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
+
+          // Get the image index from the thumbnail cache
+          if (index < viewer->thumbnail_cache_.size()) {
+            int image_index = viewer->thumbnail_cache_[index].image_index;
+            if (image_index >= 0) {
+              ESP_LOGI(TAG, "Thumbnail %zu clicked, showing image %d", index, image_index);
+              viewer->show_image(image_index);
+              viewer->update_thumbnail_highlighting_(image_index);
+            }
+          }
+        },
+        LV_EVENT_CLICKED, this);
+
+    // Store thumbnail index in button user data
+    lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
+  }
+
+  ESP_LOGI(TAG, "Created %zu thumbnail widgets", this->thumbnail_config_.max_count);
+}
+
+void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
+  if (cache_index >= this->thumbnail_cache_.size()) {
+    return;
+  }
+
+  auto &entry = this->thumbnail_cache_[cache_index];
+  if (entry.thumb_canvas_ == nullptr || !entry.loaded) {
+    return;
+  }
+
+  // Canvas buffer already points to the right location in thumbnail_buffer_array_
+  // Just invalidate to trigger redraw
+  lv_obj_invalidate(entry.thumb_canvas_);
+  lv_obj_invalidate(entry.thumb_btn_);
+}
+
+void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
+  // Find which cache entry contains the active image
+  for (size_t i = 0; i < this->thumbnail_cache_.size(); i++) {
+    if (this->thumbnail_cache_[i].thumb_btn_ == nullptr) {
+      continue;
+    }
+
+    if (this->thumbnail_cache_[i].image_index == active_image_index) {
+      // Highlight this thumbnail
+      lv_obj_set_style_border_color(this->thumbnail_cache_[i].thumb_btn_, lv_color_hex(0x00FF00), 0);
+      lv_obj_set_style_border_width(this->thumbnail_cache_[i].thumb_btn_, 3, 0);
+    } else {
+      // Remove highlight
+      lv_obj_set_style_border_color(this->thumbnail_cache_[i].thumb_btn_, lv_color_hex(0x808080), 0);
+      lv_obj_set_style_border_width(this->thumbnail_cache_[i].thumb_btn_, 1, 0);
+    }
+  }
+}
+
+#endif  // USE_LVGL
 
 bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                                int target_width, int target_height) {
@@ -712,13 +976,13 @@ const uint8_t *PictureViewer::get_thumbnail_data(size_t index, int &width, int &
 
   // Check if thumbnail is in cache
   int cache_idx = this->find_thumbnail_in_cache_(index);
-  if (cache_idx >= 0) {
+  if (cache_idx >= 0 && this->thumbnail_cache_[cache_idx].loaded) {
     // Found in cache - update LRU and return data
     this->update_lru_timestamp_(cache_idx);
     auto &entry = this->thumbnail_cache_[cache_idx];
     width = this->thumbnail_config_.width;
     height = this->thumbnail_config_.height;
-    return entry.data.data();
+    return entry.data;  // Now a raw pointer, not std::vector
   }
 
   // Not in cache - return nullptr (caller should use request_thumbnail for lazy loading)
@@ -747,9 +1011,22 @@ bool PictureViewer::load_thumbnail_(size_t image_index) {
     return false;
   }
 
+  if (this->thumbnail_buffer_array_ == nullptr) {
+    ESP_LOGW(TAG, "Thumbnail buffer array not allocated");
+    return false;
+  }
+
+  // Check if already loaded
+  int existing_slot = this->find_thumbnail_in_cache_(image_index);
+  if (existing_slot >= 0) {
+    this->update_lru_timestamp_(existing_slot);
+    ESP_LOGD(TAG, "Thumbnail %zu already in cache slot %d", image_index, existing_slot);
+    return true;
+  }
+
   auto &image = this->images_[image_index];
 
-  // Decode thumbnail
+  // Decode thumbnail directly into work buffer
   std::vector<uint8_t> rgb565_data;
   int width, height;
   if (!this->load_jpeg_(image.path, rgb565_data, width, height, this->thumbnail_config_.width,
@@ -758,34 +1035,58 @@ bool PictureViewer::load_thumbnail_(size_t image_index) {
     return false;
   }
 
-  // Calculate memory usage for this thumbnail
-  size_t memory_usage = rgb565_data.size();
+  // Find or allocate a cache slot (using LRU if all slots are full)
+  int cache_slot = -1;
 
-  // Check if we need to evict thumbnails to stay within memory budget
-  while (this->current_memory_usage_ + memory_usage > this->thumbnail_config_.max_memory &&
-         !this->thumbnail_cache_.empty()) {
-    this->evict_oldest_thumbnail_();
+  // First, try to find an empty slot
+  for (size_t i = 0; i < this->thumbnail_cache_.size(); i++) {
+    if (!this->thumbnail_cache_[i].loaded) {
+      cache_slot = i;
+      break;
+    }
   }
 
-  // Check if we've hit the max count limit
-  while (this->thumbnail_cache_.size() >= this->thumbnail_config_.max_count && !this->thumbnail_cache_.empty()) {
-    this->evict_oldest_thumbnail_();
+  // If no empty slot, evict the LRU slot
+  if (cache_slot == -1) {
+    cache_slot = 0;
+    uint32_t oldest_time = this->thumbnail_cache_[0].last_access_time;
+    for (size_t i = 1; i < this->thumbnail_cache_.size(); i++) {
+      if (this->thumbnail_cache_[i].last_access_time < oldest_time) {
+        oldest_time = this->thumbnail_cache_[i].last_access_time;
+        cache_slot = i;
+      }
+    }
+    ESP_LOGD(TAG, "Evicting thumbnail for image %d from slot %d (LRU)", this->thumbnail_cache_[cache_slot].image_index,
+             cache_slot);
   }
 
-  // Add to cache
-  ThumbnailCacheEntry entry;
+  // Copy RGB565 data directly to the cache slot's buffer
+  auto &entry = this->thumbnail_cache_[cache_slot];
+  const size_t expected_size = this->thumbnail_buffer_size_per_slot_;
+  const size_t actual_size = rgb565_data.size();
+
+  if (actual_size > expected_size) {
+    ESP_LOGW(TAG, "Thumbnail data size (%zu) exceeds slot size (%zu), truncating", actual_size, expected_size);
+    memcpy(entry.data, rgb565_data.data(), expected_size);
+  } else {
+    memcpy(entry.data, rgb565_data.data(), actual_size);
+    // Fill remaining space with black if thumbnail is smaller
+    if (actual_size < expected_size) {
+      memset(entry.data + actual_size, 0, expected_size - actual_size);
+    }
+  }
+
+  // Update cache entry metadata
   entry.image_index = image_index;
-  entry.data = std::move(rgb565_data);
-  entry.memory_usage = memory_usage;
   entry.loaded = true;
   entry.last_access_time = millis();
 
-  this->thumbnail_cache_.push_back(std::move(entry));
-  this->current_memory_usage_ += memory_usage;
+  ESP_LOGD(TAG, "Loaded thumbnail %zu (%s) into slot %d", image_index, image.filename.c_str(), cache_slot);
 
-  ESP_LOGD(TAG, "Loaded thumbnail %zu (%s) - Cache: %zu/%zu entries, Memory: %zu/%zu bytes", image_index,
-           image.filename.c_str(), this->thumbnail_cache_.size(), this->thumbnail_config_.max_count,
-           this->current_memory_usage_, this->thumbnail_config_.max_memory);
+#ifdef USE_LVGL
+  // Update the LVGL widget if it exists
+  this->update_thumbnail_widget_(cache_slot);
+#endif
 
   // Notify callback that thumbnail is ready
   if (this->thumbnail_ready_callback_) {
@@ -796,33 +1097,9 @@ bool PictureViewer::load_thumbnail_(size_t image_index) {
 }
 
 void PictureViewer::evict_oldest_thumbnail_() {
-  if (this->thumbnail_cache_.empty()) {
-    return;
-  }
-
-  // Find entry with oldest (smallest) last_access_time
-  size_t oldest_idx = 0;
-  uint32_t oldest_time = this->thumbnail_cache_[0].last_access_time;
-
-  for (size_t i = 1; i < this->thumbnail_cache_.size(); i++) {
-    if (this->thumbnail_cache_[i].last_access_time < oldest_time) {
-      oldest_time = this->thumbnail_cache_[i].last_access_time;
-      oldest_idx = i;
-    }
-  }
-
-  // Update memory usage
-  this->current_memory_usage_ -= this->thumbnail_cache_[oldest_idx].memory_usage;
-
-  ESP_LOGD(TAG, "Evicting thumbnail for image %d (LRU) - Cache: %zu entries, Memory: %zu bytes",
-           this->thumbnail_cache_[oldest_idx].image_index, this->thumbnail_cache_.size() - 1,
-           this->current_memory_usage_);
-
-  // Remove from cache (swap with last and pop)
-  if (oldest_idx < this->thumbnail_cache_.size() - 1) {
-    this->thumbnail_cache_[oldest_idx] = std::move(this->thumbnail_cache_.back());
-  }
-  this->thumbnail_cache_.pop_back();
+  // NOTE: With fixed buffer array architecture, eviction is handled inline in load_thumbnail_()
+  // This method is kept for API compatibility but does nothing
+  // LRU slot selection happens automatically when all slots are full
 }
 
 void PictureViewer::update_lru_timestamp_(size_t cache_index) {
