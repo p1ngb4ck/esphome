@@ -683,6 +683,7 @@ bool PictureViewer::generate_thumbnail_(ImageEntry &entry) {
     entry.thumbnail_data = std::move(rgb565_data);
   }
 
+  entry.size = entry.thumbnail_data.size();
   entry.width = width;
   entry.height = height;
   entry.thumbnail_loaded = true;
