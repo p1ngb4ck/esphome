@@ -563,6 +563,16 @@ bool PictureViewer::decode_jpeg_hardware_(const std::vector<uint8_t> &jpeg_data,
 
   // Decoder is kept alive for next decode (only released on error)
   ESP_LOGD(TAG, "Decoded JPEG using hardware decoder: %dx%d", width, height);
+
+  if (target_width > 0 && target_height > 0 && (width != target_width || height != target_height)) {
+    // Resize to target dimensions
+    std::vector<uint8_t> resized_data;
+    this->resize_image_(rgb565_data, width, height, resized_data, target_width, target_height);
+    rgb565_data = std::move(resized_data);
+    width = target_width;
+    height = target_height;
+    ESP_LOGD(TAG, "Resized image to: %dx%d", width, height);
+  }
   return true;
 }
 #endif
