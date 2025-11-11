@@ -181,7 +181,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_THUMBNAIL_GRID_COLUMNS, default=3): cv.int_range(
                 min=1, max=10
             ),
-            cv.Optional(CONF_THUMBNAIL_CONTAINER_ID): cv.use_id(cg.Component)
+            cv.Optional(CONF_THUMBNAIL_CONTAINER_ID): cv.use_id(
+                cg.global_ns.class_("lv_obj_t")
+            )
             if LVGL_AVAILABLE
             else cv.invalid("LVGL not available"),
             cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(
