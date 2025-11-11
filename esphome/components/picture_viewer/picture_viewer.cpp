@@ -749,7 +749,8 @@ bool PictureViewer::load_thumbnail_(size_t image_index) {
   }
 
   // Calculate memory usage for this thumbnail
-  size_t memory_usage = rgb565_data.size();
+  size_t memory_usage =
+      this->thumbnail_config_.width * this->thumbnail_config_.height * 2;  // RGB565 = 2 bytes per pixel
 
   // Check if we need to evict thumbnails to stay within memory budget
   while (this->current_memory_usage_ + memory_usage > this->thumbnail_config_.max_memory &&
