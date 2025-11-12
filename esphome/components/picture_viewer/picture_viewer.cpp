@@ -1017,6 +1017,14 @@ void PictureViewer::create_thumbnail_widgets_() {
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
   }
 
+  // Set transparent background on thumbnail container and its parents
+  lv_obj_set_style_bg_opa(this->thumbnail_container_, LV_OPA_TRANSP, 0);
+  lv_obj_t *parent = lv_obj_get_parent(this->thumbnail_container_);
+  if (parent != nullptr) {
+    lv_obj_set_style_bg_opa(parent, LV_OPA_TRANSP, 0);
+    ESP_LOGD(TAG, "Set transparent background on thumbnail container and parent");
+  }
+
   // If slide mode is enabled, start with thumbnails hidden (in background)
   if (this->thumbnail_slide_enabled_) {
     lv_obj_move_background(this->thumbnail_container_);
