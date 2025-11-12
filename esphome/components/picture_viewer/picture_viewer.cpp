@@ -2217,21 +2217,6 @@ void PictureViewer::slide_thumbnails(bool show) {
     return;
   }
 
-#ifdef USE_ESP_IDF
-  // Wait for preload to complete if sliding in (delay up to 3 seconds)
-  if (show && !this->preload_complete_) {
-    ESP_LOGI(TAG, "Waiting for thumbnail preload to complete...");
-    int wait_count = 0;
-    while (!this->preload_complete_ && wait_count < 60) {
-      vTaskDelay(pdMS_TO_TICKS(50));  // Wait 50ms
-      wait_count++;
-    }
-    if (!this->preload_complete_) {
-      ESP_LOGW(TAG, "Preload still not complete after 3s, showing thumbnails anyway");
-    }
-  }
-#endif
-
   // Use z-order instead of positioning: move to foreground (show) or background (hide)
   // This is more performant and avoids positioning issues with different layouts/styles
   // Move the parent container (thumbnail_strip) instead of just the thumbnail list
