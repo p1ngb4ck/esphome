@@ -2071,12 +2071,25 @@ void PictureViewer::slide_thumbnails(bool show) {
 
   // Use z-order instead of positioning: move to foreground (show) or background (hide)
   // This is more performant and avoids positioning issues with different layouts/styles
+  // Move the parent container (thumbnail_strip) instead of just the thumbnail list
+  lv_obj_t *parent = lv_obj_get_parent(this->thumbnail_container_);
+
   if (show) {
-    lv_obj_move_foreground(this->thumbnail_container_);
-    ESP_LOGD(TAG, "Thumbnails slid IN (moved to foreground)");
+    if (parent != nullptr) {
+      lv_obj_move_foreground(parent);
+      ESP_LOGD(TAG, "Thumbnails slid IN (moved parent to foreground)");
+    } else {
+      lv_obj_move_foreground(this->thumbnail_container_);
+      ESP_LOGD(TAG, "Thumbnails slid IN (moved container to foreground)");
+    }
   } else {
-    lv_obj_move_background(this->thumbnail_container_);
-    ESP_LOGD(TAG, "Thumbnails slid OUT (moved to background)");
+    if (parent != nullptr) {
+      lv_obj_move_background(parent);
+      ESP_LOGD(TAG, "Thumbnails slid OUT (moved parent to background)");
+    } else {
+      lv_obj_move_background(this->thumbnail_container_);
+      ESP_LOGD(TAG, "Thumbnails slid OUT (moved container to background)");
+    }
   }
 
   // Mark container as needing redraw
