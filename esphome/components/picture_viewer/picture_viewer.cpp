@@ -1019,10 +1019,57 @@ void PictureViewer::create_thumbnail_widgets_() {
 
   // Set transparent background on thumbnail container and its parents
   lv_obj_set_style_bg_opa(this->thumbnail_container_, LV_OPA_TRANSP, 0);
+  // Also set zero padding on container itself
+  lv_obj_set_style_pad_all(this->thumbnail_container_, 0, 0);
   lv_obj_t *parent = lv_obj_get_parent(this->thumbnail_container_);
   if (parent != nullptr) {
     lv_obj_set_style_bg_opa(parent, LV_OPA_TRANSP, 0);
-    ESP_LOGD(TAG, "Set transparent background on thumbnail container and parent");
+    lv_obj_set_style_pad_all(parent, 0, 0);
+    ESP_LOGD(TAG, "Set transparent background and zero padding on thumbnail container and parent");
+
+    // Add gesture handler to parent container for slide-out detection
+    if (this->thumbnail_slide_enabled_) {
+      lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);  // Make it receive touch events
+      lv_obj_add_event_cb(
+          parent,
+          [](lv_event_t *e) {
+            auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+            lv_indev_t *indev = lv_indev_get_act();
+            if (indev == nullptr)
+              return;
+
+            lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+            if (dir == LV_DIR_NONE)
+              return;
+
+            // Only handle slide-out gesture when thumbnails are visible
+            if (!viewer->thumbnails_visible_)
+              return;
+
+            bool should_slide_out = false;
+            switch (viewer->thumbnail_slide_edge_) {
+              case ThumbnailSlideEdge::RIGHT:
+                should_slide_out = (dir == LV_DIR_RIGHT);
+                break;
+              case ThumbnailSlideEdge::LEFT:
+                should_slide_out = (dir == LV_DIR_LEFT);
+                break;
+              case ThumbnailSlideEdge::TOP:
+                should_slide_out = (dir == LV_DIR_TOP);
+                break;
+              case ThumbnailSlideEdge::BOTTOM:
+                should_slide_out = (dir == LV_DIR_BOTTOM);
+                break;
+            }
+
+            if (should_slide_out) {
+              ESP_LOGD(TAG, "Thumbnail container swipe detected - sliding OUT");
+              viewer->slide_thumbnails(false);
+            }
+          },
+          LV_EVENT_GESTURE, this);
+      ESP_LOGD(TAG, "Added gesture handler to thumbnail parent container");
+    }
   }
 
   // If slide mode is enabled, start with thumbnails hidden (in background)
@@ -1037,8 +1084,16 @@ void PictureViewer::create_thumbnail_widgets_() {
     ESP_LOGI(TAG, "Thumbnails visible (moved to foreground)");
   }
 
+  // Hide thumbnail widgets that exceed the number of images
+  for (size_t i = this->images_.size(); i < this->thumbnail_config_.max_count; i++) {
+    if (i < this->thumbnail_cache_.size() && this->thumbnail_cache_[i].thumb_button_ != nullptr) {
+      lv_obj_add_flag(this->thumbnail_cache_[i].thumb_button_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
   lv_refr_now(NULL);
-  ESP_LOGI(TAG, "Created %zu thumbnail widgets", this->thumbnail_config_.max_count);
+  ESP_LOGI(TAG, "Created %zu thumbnail widgets (%zu visible)", this->thumbnail_config_.max_count,
+           std::min(this->images_.size(), this->thumbnail_config_.max_count));
 }
 
 void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
@@ -2189,7 +2244,9 @@ void PictureViewer::preload_thumbnails_for_viewport_() {
 
   // Preload currently visible thumbnails
   for (int i = first_visible; i <= last_visible; i++) {
-    this->request_thumbnail(i);
+    if (i >= 0 && i < (int) this->images_.size()) {
+      this->request_thumbnail(i);
+    }
   }
 
   // Evict thumbnails that are far from viewport (with hysteresis)
