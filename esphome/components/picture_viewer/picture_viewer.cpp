@@ -2264,12 +2264,12 @@ void PictureViewer::slide_thumbnails(bool show) {
         // Debug: Log first widget details
         if (i == 0) {
           lv_obj_t *btn = this->thumbnail_cache_[i].thumb_btn_;
-          ESP_LOGD(TAG, "Widget 0: size=%dx%d at (%d,%d), flags=0x%x", lv_obj_get_width(btn), lv_obj_get_height(btn),
-                   lv_obj_get_x(btn), lv_obj_get_y(btn), lv_obj_get_flags(btn));
+          ESP_LOGD(TAG, "Widget 0: size=%dx%d at (%d,%d)", lv_obj_get_width(btn), lv_obj_get_height(btn),
+                   lv_obj_get_x(btn), lv_obj_get_y(btn));
           if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
             lv_obj_t *canvas = this->thumbnail_cache_[i].thumb_canvas_;
-            ESP_LOGD(TAG, "Canvas 0: size=%dx%d at (%d,%d), flags=0x%x", lv_obj_get_width(canvas),
-                     lv_obj_get_height(canvas), lv_obj_get_x(canvas), lv_obj_get_y(canvas), lv_obj_get_flags(canvas));
+            ESP_LOGD(TAG, "Canvas 0: size=%dx%d at (%d,%d)", lv_obj_get_width(canvas), lv_obj_get_height(canvas),
+                     lv_obj_get_x(canvas), lv_obj_get_y(canvas));
           }
         }
 
