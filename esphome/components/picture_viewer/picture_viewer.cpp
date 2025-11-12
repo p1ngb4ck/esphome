@@ -478,11 +478,20 @@ void PictureViewer::start_slideshow() {
 }
 
 void PictureViewer::stop_slideshow() {
-  ESP_LOGI(TAG, "Stopping slideshow");
+  // Check if slideshow was actually playing before stopping
+  bool was_playing = (this->slideshow_mode_ == SlideshowMode::PLAYING);
+
+  if (was_playing) {
+    ESP_LOGI(TAG, "Stopping slideshow");
+  }
+
   this->slideshow_mode_ = SlideshowMode::STOPPED;
 
 #ifdef USE_LVGL
-  this->show_overlay_icon_(false);  // Show pause icon
+  // Only show overlay if slideshow was actually playing
+  if (was_playing) {
+    this->show_overlay_icon_(false);  // Show pause icon
+  }
 #endif
 }
 
