@@ -137,6 +137,15 @@ void PictureViewer::setup() {
     lv_obj_set_style_border_width(this->canvas_, 0, 0);
     lv_obj_set_style_radius(this->canvas_, 0, 0);
 
+    // Also check and clean the canvas parent container
+    lv_obj_t *parent = lv_obj_get_parent(this->canvas_);
+    if (parent != nullptr) {
+      lv_obj_set_style_pad_all(parent, 0, 0);
+      lv_obj_set_style_border_width(parent, 0, 0);
+      lv_obj_set_style_radius(parent, 0, 0);
+      ESP_LOGD(TAG, "Cleaned canvas parent container styles");
+    }
+
     // Add gesture event handler for swipe detection (ALWAYS stops slideshow)
     lv_obj_add_event_cb(
         this->canvas_,
@@ -162,12 +171,12 @@ void PictureViewer::setup() {
         },
         LV_EVENT_GESTURE, this);
 
-    // Configure long press time threshold (must be set BEFORE adding the event handler)
-    // LVGL v9 uses indev long press time, not object-specific setting
+    // Set long press time on the input device (LVGL 8.4.0)
+    // In LVGL 8.4.0, the driver settings are embedded in the indev structure
     lv_indev_t *indev = lv_indev_get_act();
     if (indev != nullptr) {
-      lv_indev_set_long_press_time(indev, this->long_press_time_ms_);
-      ESP_LOGD(TAG, "Set long press time to %ums on input device", this->long_press_time_ms_);
+      indev->driver.long_press_time = this->long_press_time_ms_;
+      ESP_LOGI(TAG, "Set LVGL long press time to %ums", this->long_press_time_ms_);
     }
 
     // Add long press event handler to toggle slideshow (only if no recent gesture)
