@@ -119,6 +119,15 @@ void PictureViewer::setup() {
       this->thumbnail_cache_[i].loaded = false;
     }
     ESP_LOGI(TAG, "Initialized thumbnail cache with %zu slots", this->thumbnail_config_.max_count);
+
+#ifdef USE_ESP_IDF
+    // If images were already loaded (race condition: file_manager called update_directory_files_ before setup),
+    // start preload task now that buffer is allocated
+    if (!this->images_.empty()) {
+      ESP_LOGI(TAG, "Images already loaded (%zu) - starting preload task now", this->images_.size());
+      this->start_preload_task_();
+    }
+#endif
   }
 
 #ifdef USE_LVGL
@@ -2613,6 +2622,12 @@ void PictureViewer::preload_task_func_(void *param) {
 }
 
 void PictureViewer::start_preload_task_() {
+  // Check if buffer is allocated before starting preload
+  if (this->thumbnail_buffer_array_ == nullptr) {
+    ESP_LOGW(TAG, "Thumbnail buffer not allocated yet - skipping preload task start");
+    return;
+  }
+
   // Stop existing task if running
   this->stop_preload_task_();
 
