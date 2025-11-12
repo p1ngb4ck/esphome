@@ -391,6 +391,14 @@ void PictureViewer::loop() {
   if (this->overlay_visible_ && (now - this->overlay_show_time_ >= this->overlay_duration_ms_)) {
     this->hide_overlay_icon_();
   }
+
+  // Handle thumbnail auto-hide timeout
+  if (this->thumbnail_auto_hide_timeout_ > 0 && this->thumbnails_visible_ && this->thumbnail_slide_enabled_) {
+    if (now - this->last_thumbnail_interaction_time_ >= this->thumbnail_auto_hide_timeout_) {
+      ESP_LOGD(TAG, "Auto-hiding thumbnails after %u ms of inactivity", this->thumbnail_auto_hide_timeout_);
+      this->slide_thumbnails(false);
+    }
+  }
 #endif
 }
 
@@ -1053,6 +1061,23 @@ void PictureViewer::create_thumbnail_widgets_() {
     this->thumbnail_cache_[i].thumb_canvas_ = canvas;
     this->thumbnail_cache_[i].thumb_label_ = label;
 
+    // If thumbnail was already loaded (race condition: preload finished before widgets created),
+    // unhide the widget and update it now
+    if (this->thumbnail_cache_[i].loaded && this->thumbnail_cache_[i].image_index >= 0) {
+      lv_obj_clear_flag(btn, LV_OBJ_FLAG_HIDDEN);
+      lv_canvas_set_buffer(canvas, this->thumbnail_cache_[i].data, this->thumbnail_config_.width,
+                           this->thumbnail_config_.height, LV_IMG_CF_TRUE_COLOR);
+
+      // Update label if configured
+      if (label != nullptr && !this->thumbnail_label_pattern_.empty()) {
+        std::string label_text = this->format_thumbnail_label_(this->thumbnail_cache_[i].image_index);
+        lv_label_set_text(label, label_text.c_str());
+      }
+
+      ESP_LOGD(TAG, "Widget %zu created for already-loaded thumbnail (image %d)", i,
+               this->thumbnail_cache_[i].image_index);
+    }
+
     // Add click handler - capture index by value
     const size_t thumbnail_index = i;
     lv_obj_add_event_cb(
@@ -1064,6 +1089,9 @@ void PictureViewer::create_thumbnail_widgets_() {
           // Handle CLICKED events - select the image
           if (code == LV_EVENT_CLICKED) {
             auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
+
+            // Reset interaction timer on click
+            viewer->last_thumbnail_interaction_time_ = millis();
 
             // Get the image index from the thumbnail cache
             if (index < viewer->thumbnail_cache_.size()) {
@@ -2234,6 +2262,8 @@ void PictureViewer::slide_thumbnails(bool show) {
   lv_obj_t *parent = lv_obj_get_parent(this->thumbnail_container_);
 
   if (show) {
+    // Reset interaction timer when showing thumbnails
+    this->last_thumbnail_interaction_time_ = millis();
     if (parent != nullptr) {
       lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(parent);
@@ -2330,6 +2360,10 @@ void PictureViewer::on_thumbnail_scroll_(lv_event_t *event) {
   }
 
   uint32_t now = millis();
+
+  // Reset interaction timer on scroll
+  this->last_thumbnail_interaction_time_ = now;
+
   int32_t scroll_pos;
 
   // Get scroll position based on layout

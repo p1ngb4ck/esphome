@@ -176,6 +176,7 @@ class PictureViewer : public Component {
   void set_long_press_time(uint32_t time_ms) { this->long_press_time_ms_ = time_ms; }
   void set_thumbnail_slide_edge(ThumbnailSlideEdge edge) { this->thumbnail_slide_edge_ = edge; }
   void set_thumbnail_slide_enabled(bool enabled) { this->thumbnail_slide_enabled_ = enabled; }
+  void set_thumbnail_auto_hide_timeout(uint32_t timeout_ms) { this->thumbnail_auto_hide_timeout_ = timeout_ms; }
 
 #ifdef USE_LVGL
   void set_thumbnail_container(lv_obj_t *container) { this->thumbnail_container_ = container; }
@@ -373,6 +374,8 @@ class PictureViewer : public Component {
   ThumbnailSlideEdge thumbnail_slide_edge_{ThumbnailSlideEdge::RIGHT};  // Edge to slide from (default: RIGHT)
   bool thumbnail_slide_enabled_{false};                                 // Enable slide in/out on edge swipe
   bool thumbnails_visible_{false};                                      // Current visibility state
+  uint32_t thumbnail_auto_hide_timeout_{10000};                         // Auto-hide timeout in ms (0 = disabled)
+  uint32_t last_thumbnail_interaction_time_{0};                         // Last time user interacted with thumbnails
 
   // State
   std::vector<ImageEntry> images_;

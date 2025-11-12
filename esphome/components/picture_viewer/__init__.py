@@ -111,6 +111,7 @@ CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
 CONF_LONG_PRESS_TIME = "long_press_time"
 CONF_THUMBNAIL_SLIDE_EDGE = "thumbnail_slide_edge"
 CONF_THUMBNAIL_SLIDE_ENABLED = "thumbnail_slide_enabled"
+CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT = "thumbnail_auto_hide_timeout"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(
@@ -251,6 +252,9 @@ CONFIG_SCHEMA = cv.All(
                 THUMBNAIL_SLIDE_EDGES, upper=True
             ),
             cv.Optional(CONF_THUMBNAIL_SLIDE_ENABLED, default=False): cv.boolean,
+            cv.Optional(
+                CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT, default="10s"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_ON_THUMBNAIL_CLICK): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -368,6 +372,9 @@ async def to_code(config):
     cg.add(var.set_long_press_time(config[CONF_LONG_PRESS_TIME]))
     cg.add(var.set_thumbnail_slide_edge(config[CONF_THUMBNAIL_SLIDE_EDGE]))
     cg.add(var.set_thumbnail_slide_enabled(config[CONF_THUMBNAIL_SLIDE_ENABLED]))
+    cg.add(
+        var.set_thumbnail_auto_hide_timeout(config[CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT])
+    )
 
     # Add directories with per-directory JPEG decoder configuration
     for dir_config in config[CONF_DIRECTORIES]:
