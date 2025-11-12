@@ -392,6 +392,10 @@ class PictureViewer : public Component {
   bool gesture_detected_{false};
   uint32_t last_gesture_time_{0};
 
+  // Gesture start position for edge swipe detection
+  lv_coord_t gesture_start_x_{0};
+  lv_coord_t gesture_start_y_{0};
+
   // Scroll tracking for smart thumbnail preloading
   int32_t last_scroll_pos_{0};
   uint32_t last_scroll_time_{0};

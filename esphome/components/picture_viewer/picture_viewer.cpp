@@ -146,6 +146,22 @@ void PictureViewer::setup() {
       ESP_LOGD(TAG, "Cleaned canvas parent container styles");
     }
 
+    // Add pressed event handler to capture gesture start position
+    lv_obj_add_event_cb(
+        this->canvas_,
+        [](lv_event_t *e) {
+          auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+          lv_indev_t *indev = lv_indev_get_act();
+          if (indev == nullptr)
+            return;
+
+          lv_point_t point;
+          lv_indev_get_point(indev, &point);
+          viewer->gesture_start_x_ = point.x;
+          viewer->gesture_start_y_ = point.y;
+        },
+        LV_EVENT_PRESSED, this);
+
     // Add gesture event handler for swipe detection
     lv_obj_add_event_cb(
         this->canvas_,
@@ -165,8 +181,9 @@ void PictureViewer::setup() {
 
           // Check if this is an edge swipe for thumbnail slide
           if (viewer->thumbnail_slide_enabled_ && viewer->thumbnail_container_ != nullptr) {
-            lv_point_t point;
-            lv_indev_get_point(indev, &point);
+            // Use gesture START position to determine if swipe began in edge area
+            lv_coord_t start_x = viewer->gesture_start_x_;
+            lv_coord_t start_y = viewer->gesture_start_y_;
 
             lv_coord_t screen_width = lv_obj_get_width(lv_scr_act());
             lv_coord_t screen_height = lv_obj_get_height(lv_scr_act());
@@ -178,25 +195,29 @@ void PictureViewer::setup() {
 
             switch (viewer->thumbnail_slide_edge_) {
               case ThumbnailSlideEdge::RIGHT:
-                is_edge_swipe = (point.x > screen_width - edge_threshold_h);
+                // Check if gesture STARTED in right edge area
+                is_edge_swipe = (start_x > screen_width - edge_threshold_h);
                 should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT);
                 if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT))
                   is_edge_swipe = true;  // Slide out
                 break;
               case ThumbnailSlideEdge::LEFT:
-                is_edge_swipe = (point.x < edge_threshold_h);
+                // Check if gesture STARTED in left edge area
+                is_edge_swipe = (start_x < edge_threshold_h);
                 should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT);
                 if (viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT))
                   is_edge_swipe = true;  // Slide out
                 break;
               case ThumbnailSlideEdge::TOP:
-                is_edge_swipe = (point.y < edge_threshold_v);
+                // Check if gesture STARTED in top edge area
+                is_edge_swipe = (start_y < edge_threshold_v);
                 should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM);
                 if (viewer->thumbnails_visible_ && (dir == LV_DIR_TOP))
                   is_edge_swipe = true;  // Slide out
                 break;
               case ThumbnailSlideEdge::BOTTOM:
-                is_edge_swipe = (point.y > screen_height - edge_threshold_v);
+                // Check if gesture STARTED in bottom edge area
+                is_edge_swipe = (start_y > screen_height - edge_threshold_v);
                 should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_TOP);
                 if (viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM))
                   is_edge_swipe = true;  // Slide out
@@ -204,7 +225,8 @@ void PictureViewer::setup() {
             }
 
             if (is_edge_swipe) {
-              ESP_LOGD(TAG, "Edge swipe detected - sliding thumbnails %s", should_slide_in ? "IN" : "OUT");
+              ESP_LOGD(TAG, "Edge swipe detected (started at %d,%d) - sliding thumbnails %s", start_x, start_y,
+                       should_slide_in ? "IN" : "OUT");
               viewer->slide_thumbnails(!viewer->thumbnails_visible_);
               return;  // Don't process as image navigation
             }
