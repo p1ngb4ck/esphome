@@ -373,6 +373,10 @@ class PictureViewer : public Component {
   uint32_t overlay_show_time_{0};
   bool overlay_is_playing_{true};  // true = play icon, false = pause icon
 
+  // Gesture state to prevent long press from firing after gestures
+  bool gesture_detected_{false};
+  uint32_t last_gesture_time_{0};
+
   // Scroll tracking for smart thumbnail preloading
   int32_t last_scroll_pos_{0};
   uint32_t last_scroll_time_{0};

@@ -51,6 +51,14 @@ THUMBNAIL_LAYOUTS = {
     "GRID": ThumbnailLayout.GRID,
 }
 
+ThumbnailSlideEdge = picture_viewer_ns.enum("ThumbnailSlideEdge", is_class=True)
+THUMBNAIL_SLIDE_EDGES = {
+    "LEFT": ThumbnailSlideEdge.LEFT,
+    "RIGHT": ThumbnailSlideEdge.RIGHT,
+    "TOP": ThumbnailSlideEdge.TOP,
+    "BOTTOM": ThumbnailSlideEdge.BOTTOM,
+}
+
 # JPEG decoder configuration enums
 JPEG_RGB_ORDER = {
     "RGB": 0,  # JPEG_DEC_RGB_ELEMENT_ORDER_RGB
@@ -101,6 +109,8 @@ CONF_THUMBNAIL_LABEL_STYLE_ID = "thumbnail_label_style_id"
 CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
 CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
 CONF_LONG_PRESS_TIME = "long_press_time"
+CONF_THUMBNAIL_SLIDE_EDGE = "thumbnail_slide_edge"
+CONF_THUMBNAIL_SLIDE_ENABLED = "thumbnail_slide_enabled"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(

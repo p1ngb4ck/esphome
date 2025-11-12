@@ -144,23 +144,46 @@ void PictureViewer::setup() {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
           lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
 
-          if (dir == LV_DIR_LEFT) {
-            ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
-            viewer->stop_slideshow();  // Always stop, never toggle
-            viewer->next_image();
-          } else if (dir == LV_DIR_RIGHT) {
-            ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
-            viewer->stop_slideshow();  // Always stop, never toggle
-            viewer->previous_image();
+          if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+            // Mark that a gesture was detected to prevent long press from firing
+            viewer->gesture_detected_ = true;
+            viewer->last_gesture_time_ = millis();
+
+            if (dir == LV_DIR_LEFT) {
+              ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
+              viewer->stop_slideshow();  // Always stop, never toggle
+              viewer->next_image();
+            } else {
+              ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
+              viewer->stop_slideshow();  // Always stop, never toggle
+              viewer->previous_image();
+            }
           }
         },
         LV_EVENT_GESTURE, this);
 
-    // Add long press event handler to toggle slideshow (separate from swipes)
+    // Configure long press time threshold (must be set BEFORE adding the event handler)
+    // LVGL v9 uses indev long press time, not object-specific setting
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev != nullptr) {
+      lv_indev_set_long_press_time(indev, this->long_press_time_ms_);
+      ESP_LOGD(TAG, "Set long press time to %ums on input device", this->long_press_time_ms_);
+    }
+
+    // Add long press event handler to toggle slideshow (only if no recent gesture)
     lv_obj_add_event_cb(
         this->canvas_,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+
+          // Ignore long press if a gesture was detected recently (within 500ms)
+          uint32_t now = millis();
+          if (viewer->gesture_detected_ && (now - viewer->last_gesture_time_ < 500)) {
+            ESP_LOGD(TAG, "Ignoring long press - recent gesture detected");
+            viewer->gesture_detected_ = false;  // Reset flag
+            return;
+          }
+
           ESP_LOGI(TAG, "Canvas long press - toggling slideshow");
 
           // Toggle slideshow state
@@ -171,9 +194,6 @@ void PictureViewer::setup() {
           }
         },
         LV_EVENT_LONG_PRESSED, this);
-
-    // Configure long press time threshold
-    lv_obj_set_style_anim_time(this->canvas_, this->long_press_time_ms_, LV_PART_MAIN);
 
     // Stop event bubbling to prevent parent page from scrolling
     lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_GESTURE_BUBBLE);
