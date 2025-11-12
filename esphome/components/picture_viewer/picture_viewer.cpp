@@ -129,13 +129,15 @@ void PictureViewer::setup() {
 
   // Configure canvas to handle swipe gestures and prevent page scrolling
   if (this->canvas_ != nullptr) {
-    // Set long press time threshold (must be set before adding event handlers)
-    lv_obj_set_style_anim_time(this->canvas_, this->long_press_time_ms_, LV_PART_MAIN);
-
     // Make canvas clickable so it receives touch events
     lv_obj_add_flag(this->canvas_, LV_OBJ_FLAG_CLICKABLE);
 
-    // Add gesture event handler for swipe detection
+    // Set clean default styles on canvas (remove any borders/padding)
+    lv_obj_set_style_pad_all(this->canvas_, 0, 0);
+    lv_obj_set_style_border_width(this->canvas_, 0, 0);
+    lv_obj_set_style_radius(this->canvas_, 0, 0);
+
+    // Add gesture event handler for swipe detection (ALWAYS stops slideshow)
     lv_obj_add_event_cb(
         this->canvas_,
         [](lv_event_t *e) {
@@ -143,29 +145,23 @@ void PictureViewer::setup() {
           lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
 
           if (dir == LV_DIR_LEFT) {
-            ESP_LOGD(TAG, "Canvas swipe left detected");
-            // Stop slideshow on any swipe
-            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
-              viewer->stop_slideshow();
-            }
+            ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
+            viewer->stop_slideshow();  // Always stop, never toggle
             viewer->next_image();
           } else if (dir == LV_DIR_RIGHT) {
-            ESP_LOGD(TAG, "Canvas swipe right detected");
-            // Stop slideshow on any swipe
-            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
-              viewer->stop_slideshow();
-            }
+            ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
+            viewer->stop_slideshow();  // Always stop, never toggle
             viewer->previous_image();
           }
         },
         LV_EVENT_GESTURE, this);
 
-    // Add long press event handler to toggle slideshow
+    // Add long press event handler to toggle slideshow (separate from swipes)
     lv_obj_add_event_cb(
         this->canvas_,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
-          ESP_LOGI(TAG, "Canvas long press detected - toggling slideshow");
+          ESP_LOGI(TAG, "Canvas long press - toggling slideshow");
 
           // Toggle slideshow state
           if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
@@ -176,11 +172,15 @@ void PictureViewer::setup() {
         },
         LV_EVENT_LONG_PRESSED, this);
 
+    // Configure long press time threshold
+    lv_obj_set_style_anim_time(this->canvas_, this->long_press_time_ms_, LV_PART_MAIN);
+
     // Stop event bubbling to prevent parent page from scrolling
     lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_SCROLLABLE);
 
-    ESP_LOGI(TAG, "Canvas configured: clickable=true, long_press_time=%ums", this->long_press_time_ms_);
+    ESP_LOGI(TAG, "Canvas configured: clickable=true, long_press_time=%ums, clean_borders=true",
+             this->long_press_time_ms_);
   }
 #endif
 
