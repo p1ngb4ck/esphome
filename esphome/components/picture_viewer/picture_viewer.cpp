@@ -206,11 +206,19 @@ void PictureViewer::setup() {
 
             lv_coord_t screen_width = lv_obj_get_width(lv_scr_act());
             lv_coord_t screen_height = lv_obj_get_height(lv_scr_act());
-            lv_coord_t edge_threshold_h = screen_width / 10;   // 10% from edge
-            lv_coord_t edge_threshold_v = screen_height / 10;  // 10% from edge
 
-            ESP_LOGD(TAG, "Gesture detected: start=(%d,%d) dir=%d edge_threshold=%d visible=%d", start_x, start_y, dir,
-                     edge_threshold_h, viewer->thumbnails_visible_);
+            // Calculate edge threshold based on thumbnail bar size
+            // In VERTICAL layout: use thumbnail width (bar is on left/right edge)
+            // In HORIZONTAL layout: use thumbnail height (bar is on top/bottom edge)
+            lv_coord_t edge_threshold_h = (viewer->thumbnail_config_.layout == ThumbnailLayout::VERTICAL)
+                                              ? viewer->thumbnail_config_.width
+                                              : screen_width / 10;  // fallback for horizontal
+            lv_coord_t edge_threshold_v = (viewer->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL)
+                                              ? viewer->thumbnail_config_.height
+                                              : screen_height / 10;  // fallback for vertical
+
+            ESP_LOGD(TAG, "Gesture detected: start=(%d,%d) dir=%d threshold_h=%d threshold_v=%d visible=%d", start_x,
+                     start_y, dir, edge_threshold_h, edge_threshold_v, viewer->thumbnails_visible_);
 
             bool is_edge_swipe = false;
             bool started_in_edge = false;
