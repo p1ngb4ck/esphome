@@ -191,42 +191,49 @@ void PictureViewer::setup() {
             lv_coord_t edge_threshold_v = screen_height / 10;  // 10% from edge
 
             bool is_edge_swipe = false;
-            bool should_slide_in = false;
+            bool started_in_edge = false;
 
             switch (viewer->thumbnail_slide_edge_) {
               case ThumbnailSlideEdge::RIGHT:
                 // Check if gesture STARTED in right edge area
-                is_edge_swipe = (start_x > screen_width - edge_threshold_h);
-                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT);
-                if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT))
-                  is_edge_swipe = true;  // Slide out
+                started_in_edge = (start_x > screen_width - edge_threshold_h);
+                // Slide in: started in edge AND not visible AND swipe left (inward from right edge)
+                // Slide out: visible AND swipe right (outward toward right edge)
+                if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT)) {
+                  is_edge_swipe = true;
+                } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT)) {
+                  is_edge_swipe = true;  // Slide out (can start anywhere)
+                }
                 break;
               case ThumbnailSlideEdge::LEFT:
-                // Check if gesture STARTED in left edge area
-                is_edge_swipe = (start_x < edge_threshold_h);
-                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT);
-                if (viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT))
+                started_in_edge = (start_x < edge_threshold_h);
+                if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT)) {
+                  is_edge_swipe = true;
+                } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT)) {
                   is_edge_swipe = true;  // Slide out
+                }
                 break;
               case ThumbnailSlideEdge::TOP:
-                // Check if gesture STARTED in top edge area
-                is_edge_swipe = (start_y < edge_threshold_v);
-                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM);
-                if (viewer->thumbnails_visible_ && (dir == LV_DIR_TOP))
+                started_in_edge = (start_y < edge_threshold_v);
+                if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM)) {
+                  is_edge_swipe = true;
+                } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_TOP)) {
                   is_edge_swipe = true;  // Slide out
+                }
                 break;
               case ThumbnailSlideEdge::BOTTOM:
-                // Check if gesture STARTED in bottom edge area
-                is_edge_swipe = (start_y > screen_height - edge_threshold_v);
-                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_TOP);
-                if (viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM))
+                started_in_edge = (start_y > screen_height - edge_threshold_v);
+                if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_TOP)) {
+                  is_edge_swipe = true;
+                } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM)) {
                   is_edge_swipe = true;  // Slide out
+                }
                 break;
             }
 
             if (is_edge_swipe) {
               ESP_LOGD(TAG, "Edge swipe detected (started at %d,%d) - sliding thumbnails %s", start_x, start_y,
-                       should_slide_in ? "IN" : "OUT");
+                       viewer->thumbnails_visible_ ? "OUT" : "IN");
               viewer->slide_thumbnails(!viewer->thumbnails_visible_);
               return;  // Don't process as image navigation
             }
@@ -665,6 +672,20 @@ void PictureViewer::update_directory_files_(const std::string &directory_path,
 
         ESP_LOGI(TAG, "After directory update: %zu images found", this->images_.size());
 
+#ifdef USE_LVGL
+        // Hide thumbnail widgets that exceed the number of images
+        // (Do this AFTER images are loaded, not during setup when images_.size() is 0)
+        if (this->thumbnail_config_.enabled && this->thumbnail_container_ != nullptr) {
+          for (size_t i = this->images_.size(); i < this->thumbnail_config_.max_count; i++) {
+            if (i < this->thumbnail_cache_.size() && this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
+              lv_obj_add_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
+            }
+          }
+          ESP_LOGD(TAG, "Hidden %zu unused thumbnail widgets",
+                   this->thumbnail_config_.max_count - this->images_.size());
+        }
+#endif
+
 #ifdef USE_ESP_IDF
         // Start background preloading task for thumbnails
         if (this->thumbnail_config_.enabled && !this->images_.empty()) {
@@ -1091,12 +1112,8 @@ void PictureViewer::create_thumbnail_widgets_() {
     ESP_LOGI(TAG, "Thumbnails visible (moved to foreground)");
   }
 
-  // Hide thumbnail widgets that exceed the number of images
-  for (size_t i = this->images_.size(); i < this->thumbnail_config_.max_count; i++) {
-    if (i < this->thumbnail_cache_.size() && this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
-      lv_obj_add_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
-    }
-  }
+  // Note: Widget hiding based on image count happens in update_directory_files_()
+  // after images are loaded, not here during setup when images_.size() is 0
 
   lv_refr_now(NULL);
   ESP_LOGI(TAG, "Created %zu thumbnail widgets (%zu visible)", this->thumbnail_config_.max_count,
