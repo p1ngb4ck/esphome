@@ -234,21 +234,31 @@ void PictureViewer::setup() {
 
           // Regular swipe for image navigation (ALWAYS stops slideshow)
           if (dir == LV_DIR_LEFT) {
-            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+            bool was_playing = (viewer->get_slideshow_mode() == SlideshowMode::PLAYING);
+            if (was_playing) {
               ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
             } else {
               ESP_LOGD(TAG, "Canvas swipe left - next image");
             }
             viewer->stop_slideshow();  // Always stop, never toggle
             viewer->next_image();
+            // Show pause overlay AFTER image changes (if slideshow was playing)
+            if (was_playing) {
+              viewer->show_overlay_icon_(false);
+            }
           } else if (dir == LV_DIR_RIGHT) {
-            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+            bool was_playing = (viewer->get_slideshow_mode() == SlideshowMode::PLAYING);
+            if (was_playing) {
               ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
             } else {
               ESP_LOGD(TAG, "Canvas swipe right - previous image");
             }
             viewer->stop_slideshow();  // Always stop, never toggle
             viewer->previous_image();
+            // Show pause overlay AFTER image changes (if slideshow was playing)
+            if (was_playing) {
+              viewer->show_overlay_icon_(false);
+            }
           }
         },
         LV_EVENT_GESTURE, this);
