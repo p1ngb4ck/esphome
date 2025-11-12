@@ -126,6 +126,46 @@ void PictureViewer::setup() {
   if (this->thumbnail_container_ != nullptr && this->thumbnail_config_.enabled) {
     this->create_thumbnail_widgets_();
   }
+
+  // Configure canvas to handle swipe gestures and prevent page scrolling
+  if (this->canvas_ != nullptr) {
+    // Add gesture event handler for swipe detection
+    lv_obj_add_event_cb(
+        this->canvas_,
+        [](lv_event_t *e) {
+          auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+          lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+
+          if (dir == LV_DIR_LEFT) {
+            ESP_LOGD(TAG, "Canvas swipe left detected");
+            viewer->next_image();
+          } else if (dir == LV_DIR_RIGHT) {
+            ESP_LOGD(TAG, "Canvas swipe right detected");
+            viewer->previous_image();
+          }
+        },
+        LV_EVENT_GESTURE, this);
+
+    // Add long press event handler to toggle slideshow
+    lv_obj_add_event_cb(
+        this->canvas_,
+        [](lv_event_t *e) {
+          auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+          ESP_LOGI(TAG, "Canvas long press detected - toggling slideshow");
+
+          // Toggle slideshow state
+          if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+            viewer->stop_slideshow();
+          } else {
+            viewer->start_slideshow();
+          }
+        },
+        LV_EVENT_LONG_PRESSED, this);
+
+    // Stop event bubbling to prevent parent page from scrolling
+    lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_SCROLLABLE);
+  }
 #endif
 
   // Initial image list will be provided by file_manager via update_directory_files_()
@@ -676,8 +716,9 @@ void PictureViewer::create_thumbnail_widgets_() {
 
   lv_obj_set_flex_align(this->thumbnail_container_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-  // Disable scrollable on container (clean default - user can enable via custom style)
-  lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_SCROLLABLE);
+  // Enable scrolling but hide scrollbars
+  lv_obj_add_flag(this->thumbnail_container_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(this->thumbnail_container_, LV_SCROLLBAR_MODE_OFF);
 
   // Set container scroll direction based on layout
   if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
@@ -812,10 +853,16 @@ void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
     lv_label_set_text(entry.thumb_label_, label_text.c_str());
   }
 
-  // Canvas buffer already points to the right location in thumbnail_buffer_array_
-  // Just invalidate to trigger redraw
+  // Re-set canvas buffer to ensure LVGL recognizes the updated data
+  lv_canvas_set_buffer(entry.thumb_canvas_, entry.data, this->thumbnail_config_.width, this->thumbnail_config_.height,
+                       LV_IMG_CF_TRUE_COLOR);
+
+  // Invalidate to trigger redraw
   lv_obj_invalidate(entry.thumb_canvas_);
   lv_obj_invalidate(entry.thumb_btn_);
+
+  // Force full LVGL refresh to ensure thumbnail displays immediately
+  lv_refr_now(NULL);
 }
 
 void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
