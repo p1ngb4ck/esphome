@@ -144,6 +144,25 @@ void PictureViewer::setup() {
       lv_obj_set_style_border_width(parent, 0, 0);
       lv_obj_set_style_radius(parent, 0, 0);
       ESP_LOGD(TAG, "Cleaned canvas parent container styles");
+
+      // Add event handler to detect when parent page becomes hidden (page change)
+      // This automatically stops slideshow when user navigates away
+      lv_obj_add_event_cb(
+          parent,
+          [](lv_event_t *e) {
+            auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
+            lv_event_code_t code = lv_event_get_code(e);
+
+            // LV_EVENT_SCREEN_UNLOAD_START fires when page is about to be hidden
+            if (code == LV_EVENT_SCREEN_UNLOAD_START) {
+              if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+                ESP_LOGI(TAG, "Parent page hidden - stopping slideshow");
+                viewer->stop_slideshow();
+              }
+            }
+          },
+          LV_EVENT_ALL, this);
+      ESP_LOGD(TAG, "Added page visibility event handler to stop slideshow on page change");
     }
 
     // Add pressed event handler to capture gesture start position
