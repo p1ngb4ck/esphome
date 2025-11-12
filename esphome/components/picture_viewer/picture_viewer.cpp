@@ -1016,6 +1016,9 @@ void PictureViewer::create_thumbnail_widgets_() {
       }
     }
 
+    // Hide thumbnail by default - will be shown when image is loaded
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
+
     // Create canvas inside button
     lv_obj_t *canvas = lv_canvas_create(btn);
     lv_obj_center(canvas);
@@ -1188,6 +1191,11 @@ void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
   auto &entry = this->thumbnail_cache_[cache_index];
   if (entry.thumb_canvas_ == nullptr || !entry.loaded) {
     return;
+  }
+
+  // Show thumbnail now that image data is loaded
+  if (entry.thumb_btn_ != nullptr) {
+    lv_obj_clear_flag(entry.thumb_btn_, LV_OBJ_FLAG_HIDDEN);
   }
 
   // Update label text if label exists and pattern is configured
