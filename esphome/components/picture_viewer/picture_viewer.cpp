@@ -1017,31 +1017,16 @@ void PictureViewer::create_thumbnail_widgets_() {
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
   }
 
-  // Position container off-screen if slide mode is enabled
+  // If slide mode is enabled, start with thumbnails hidden (in background)
   if (this->thumbnail_slide_enabled_) {
-    lv_coord_t screen_width = lv_obj_get_width(lv_obj_get_parent(this->thumbnail_container_));
-    lv_coord_t screen_height = lv_obj_get_height(lv_obj_get_parent(this->thumbnail_container_));
-    lv_coord_t container_width = lv_obj_get_width(this->thumbnail_container_);
-    lv_coord_t container_height = lv_obj_get_height(this->thumbnail_container_);
-
-    switch (this->thumbnail_slide_edge_) {
-      case ThumbnailSlideEdge::RIGHT:
-        lv_obj_set_pos(this->thumbnail_container_, screen_width, 0);  // Off-screen to the right
-        break;
-      case ThumbnailSlideEdge::LEFT:
-        lv_obj_set_pos(this->thumbnail_container_, -container_width, 0);  // Off-screen to the left
-        break;
-      case ThumbnailSlideEdge::TOP:
-        lv_obj_set_pos(this->thumbnail_container_, 0, -container_height);  // Off-screen above
-        break;
-      case ThumbnailSlideEdge::BOTTOM:
-        lv_obj_set_pos(this->thumbnail_container_, 0, screen_height);  // Off-screen below
-        break;
-    }
+    lv_obj_move_background(this->thumbnail_container_);
     this->thumbnails_visible_ = false;
-    ESP_LOGI(TAG, "Thumbnails positioned off-screen (edge: %d)", static_cast<int>(this->thumbnail_slide_edge_));
+    ESP_LOGI(TAG, "Thumbnails hidden initially (moved to background)");
   } else {
+    // If slide mode disabled, keep thumbnails visible (in foreground)
+    lv_obj_move_foreground(this->thumbnail_container_);
     this->thumbnails_visible_ = true;
+    ESP_LOGI(TAG, "Thumbnails visible (moved to foreground)");
   }
 
   lv_refr_now(NULL);
@@ -2093,6 +2078,9 @@ void PictureViewer::slide_thumbnails(bool show) {
     lv_obj_move_background(this->thumbnail_container_);
     ESP_LOGD(TAG, "Thumbnails slid OUT (moved to background)");
   }
+
+  // Mark container as needing redraw
+  lv_obj_invalidate(this->thumbnail_container_);
 
   this->thumbnails_visible_ = show;
 #endif
