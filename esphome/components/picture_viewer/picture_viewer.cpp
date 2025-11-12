@@ -833,7 +833,7 @@ void PictureViewer::create_thumbnail_widgets_() {
     // Store thumbnail index in button user data
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
   }
-
+  lv_refr_now(NULL);
   ESP_LOGI(TAG, "Created %zu thumbnail widgets", this->thumbnail_config_.max_count);
 }
 
@@ -860,9 +860,6 @@ void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
   // Invalidate to trigger redraw
   lv_obj_invalidate(entry.thumb_canvas_);
   lv_obj_invalidate(entry.thumb_btn_);
-
-  // Force full LVGL refresh to ensure thumbnail displays immediately
-  lv_refr_now(NULL);
 }
 
 void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
