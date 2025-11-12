@@ -2265,7 +2265,8 @@ void PictureViewer::slide_thumbnails(bool show) {
              lv_obj_get_y(this->thumbnail_container_));
 
     for (size_t i = 0; i < visible_count; i++) {
-      if (this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
+      // Only unhide and resize widgets that have loaded image data
+      if (this->thumbnail_cache_[i].thumb_btn_ != nullptr && this->thumbnail_cache_[i].loaded) {
         lv_obj_clear_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_size(this->thumbnail_cache_[i].thumb_btn_, thumb_w, thumb_h);
 
