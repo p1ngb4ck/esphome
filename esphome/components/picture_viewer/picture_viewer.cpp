@@ -198,9 +198,6 @@ void PictureViewer::setup() {
           viewer->gesture_detected_ = true;
           viewer->last_gesture_time_ = millis();
 
-          ESP_LOGD(TAG, "Gesture on canvas: dir=%d, slide_enabled=%d, container=%p", dir,
-                   viewer->thumbnail_slide_enabled_, viewer->thumbnail_container_);
-
           // Check if this is an edge swipe for thumbnail slide
           if (viewer->thumbnail_slide_enabled_ && viewer->thumbnail_container_ != nullptr) {
             // Use gesture START position to determine if swipe began in edge area
@@ -209,19 +206,8 @@ void PictureViewer::setup() {
 
             lv_coord_t screen_width = lv_obj_get_width(lv_scr_act());
             lv_coord_t screen_height = lv_obj_get_height(lv_scr_act());
-
-            // Calculate edge threshold based on thumbnail bar size
-            // In VERTICAL layout: use thumbnail width (bar is on left/right edge)
-            // In HORIZONTAL layout: use thumbnail height (bar is on top/bottom edge)
-            lv_coord_t edge_threshold_h = (viewer->thumbnail_config_.layout == ThumbnailLayout::VERTICAL)
-                                              ? viewer->thumbnail_config_.width
-                                              : screen_width / 10;  // fallback for horizontal
-            lv_coord_t edge_threshold_v = (viewer->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL)
-                                              ? viewer->thumbnail_config_.height
-                                              : screen_height / 10;  // fallback for vertical
-
-            ESP_LOGD(TAG, "Gesture detected: start=(%d,%d) dir=%d threshold_h=%d threshold_v=%d visible=%d", start_x,
-                     start_y, dir, edge_threshold_h, edge_threshold_v, viewer->thumbnails_visible_);
+            lv_coord_t edge_threshold_h = screen_width / 10;   // 10% from edge
+            lv_coord_t edge_threshold_v = screen_height / 10;  // 10% from edge
 
             bool is_edge_swipe = false;
             bool started_in_edge = false;
@@ -230,16 +216,12 @@ void PictureViewer::setup() {
               case ThumbnailSlideEdge::RIGHT:
                 // Check if gesture STARTED in right edge area
                 started_in_edge = (start_x > screen_width - edge_threshold_h);
-                ESP_LOGD(TAG, "RIGHT edge check: start_x=%d > threshold=%d = %d", start_x,
-                         screen_width - edge_threshold_h, started_in_edge);
                 // Slide in: started in edge AND not visible AND swipe left (inward from right edge)
                 // Slide out: visible AND swipe right (outward toward right edge)
                 if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT)) {
                   is_edge_swipe = true;
-                  ESP_LOGD(TAG, "Matched slide-IN condition");
                 } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT)) {
                   is_edge_swipe = true;  // Slide out (can start anywhere)
-                  ESP_LOGD(TAG, "Matched slide-OUT condition");
                 }
                 break;
               case ThumbnailSlideEdge::LEFT:
@@ -408,8 +390,6 @@ void PictureViewer::dump_config() {
   ESP_LOGCONFIG(TAG, "  Thumbnails: %s", this->enable_thumbnails_ ? "enabled" : "disabled");
   if (this->enable_thumbnails_) {
     ESP_LOGCONFIG(TAG, "  Thumbnail Size: %dx%d", this->thumbnail_width_, this->thumbnail_height_);
-    ESP_LOGCONFIG(TAG, "  Thumbnail Slide: %s (edge: %d)", this->thumbnail_slide_enabled_ ? "enabled" : "disabled",
-                  (int) this->thumbnail_slide_edge_);
   }
 #ifdef USE_ESP_JPEG_DECODER
   ESP_LOGCONFIG(TAG, "  Decoder: esp_jpeg (ESP32-S2/S3)");
@@ -1056,42 +1036,29 @@ void PictureViewer::create_thumbnail_widgets_() {
         btn,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
-          lv_event_code_t code = lv_event_get_code(e);
+          auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
 
-          // Handle CLICKED events - select the image
-          if (code == LV_EVENT_CLICKED) {
-            auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
+          // Get the image index from the thumbnail cache
+          if (index < viewer->thumbnail_cache_.size()) {
+            int image_index = viewer->thumbnail_cache_[index].image_index;
+            if (image_index >= 0) {
+              ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
 
-            // Get the image index from the thumbnail cache
-            if (index < viewer->thumbnail_cache_.size()) {
-              int image_index = viewer->thumbnail_cache_[index].image_index;
-              if (image_index >= 0) {
-                ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
+              // Fire automation triggers
+              for (auto *trigger : viewer->thumbnail_click_triggers_) {
+                trigger->trigger(static_cast<size_t>(image_index));
+              }
+              viewer->thumbnail_click_callbacks_.call(static_cast<size_t>(image_index));
 
-                // Fire automation triggers
-                for (auto *trigger : viewer->thumbnail_click_triggers_) {
-                  trigger->trigger(static_cast<size_t>(image_index));
-                }
-                viewer->thumbnail_click_callbacks_.call(static_cast<size_t>(image_index));
-
-                // Default behavior: show image (only if no automation is configured)
-                if (viewer->thumbnail_click_triggers_.empty()) {
-                  viewer->show_image(image_index);
-                  viewer->update_thumbnail_highlighting_(image_index);
-                }
+              // Default behavior: show image (only if no automation is configured)
+              if (viewer->thumbnail_click_triggers_.empty()) {
+                viewer->show_image(image_index);
+                viewer->update_thumbnail_highlighting_(image_index);
               }
             }
           }
-          // Handle GESTURE events - manually bubble to parent for slide-out
-          else if (code == LV_EVENT_GESTURE && viewer->thumbnail_slide_enabled_ && viewer->thumbnails_visible_) {
-            lv_obj_t *parent = lv_obj_get_parent(viewer->thumbnail_container_);
-            if (parent != nullptr) {
-              // Manually send gesture event to parent
-              lv_event_send(parent, LV_EVENT_GESTURE, nullptr);
-            }
-          }
         },
-        LV_EVENT_ALL, this);
+        LV_EVENT_CLICKED, this);
 
     // Store thumbnail index in button user data
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
@@ -1152,30 +1119,22 @@ void PictureViewer::create_thumbnail_widgets_() {
     }
   }
 
-  // TESTING: Start with thumbnails visible to verify rendering
-  this->thumbnails_visible_ = true;
-
-  // Keep parent in foreground and visible for testing
-  if (parent != nullptr) {
-    lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(parent);
-    if (this->thumbnail_slide_enabled_) {
-      lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
-    }
-    ESP_LOGD(TAG, "TESTING: Thumbnail parent container visible by default");
+  // If slide mode is enabled, start with thumbnails hidden (in background)
+  if (this->thumbnail_slide_enabled_) {
+    lv_obj_move_background(this->thumbnail_container_);
+    this->thumbnails_visible_ = false;
+    ESP_LOGI(TAG, "Thumbnails hidden initially (moved to background)");
   } else {
-    lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
+    // If slide mode disabled, keep thumbnails visible (in foreground)
     lv_obj_move_foreground(this->thumbnail_container_);
-    ESP_LOGD(TAG, "TESTING: Thumbnail container visible by default");
+    this->thumbnails_visible_ = true;
+    ESP_LOGI(TAG, "Thumbnails visible (moved to foreground)");
   }
-
-  ESP_LOGI(TAG, "TESTING: Thumbnails visible by default for debugging");
 
   // Note: Widget hiding based on image count happens in update_directory_files_()
   // after images are loaded, not here during setup when images_.size() is 0
 
-  // Only invalidate the container, don't force full refresh
-  lv_obj_invalidate(this->thumbnail_container_);
+  lv_refr_now(NULL);
   ESP_LOGI(TAG, "Created %zu thumbnail widgets (%zu visible)", this->thumbnail_config_.max_count,
            std::min(this->images_.size(), this->thumbnail_config_.max_count));
 }
@@ -2223,87 +2182,29 @@ void PictureViewer::slide_thumbnails(bool show) {
 
   if (show) {
     if (parent != nullptr) {
-      lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(parent);
-      // Force layout recalculation after unhiding (flex layout needs update)
-      lv_obj_update_layout(parent);
-      // Add clickable flag when showing (to receive gesture events for slide-out)
-      if (this->thumbnail_slide_enabled_) {
-        lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
-        ESP_LOGD(TAG, "Added clickable flag on thumbnail parent (visible state)");
-      }
-      ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved parent to foreground)");
+      ESP_LOGD(TAG, "Thumbnails slid IN (moved parent to foreground)");
     } else {
-      lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(this->thumbnail_container_);
-      // Force layout recalculation after unhiding (flex layout needs update)
-      lv_obj_update_layout(this->thumbnail_container_);
-      ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved container to foreground)");
+      ESP_LOGD(TAG, "Thumbnails slid IN (moved container to foreground)");
     }
-
-    // Explicitly clear HIDDEN flag from valid thumbnail button widgets and restore their size
-    // (Only unused widgets beyond images_.size() should remain hidden)
-    const int thumb_w = this->thumbnail_config_.width;
-    const int thumb_h = this->thumbnail_config_.height;
-    size_t visible_count = std::min(this->images_.size(), this->thumbnail_cache_.size());
-
-    // Debug: Log container size and position
-    if (parent != nullptr) {
-      ESP_LOGD(TAG, "Parent container size: %dx%d at (%d,%d)", lv_obj_get_width(parent), lv_obj_get_height(parent),
-               lv_obj_get_x(parent), lv_obj_get_y(parent));
-    }
-    ESP_LOGD(TAG, "Thumbnail container size: %dx%d at (%d,%d)", lv_obj_get_width(this->thumbnail_container_),
-             lv_obj_get_height(this->thumbnail_container_), lv_obj_get_x(this->thumbnail_container_),
-             lv_obj_get_y(this->thumbnail_container_));
-
-    for (size_t i = 0; i < visible_count; i++) {
-      if (this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
-        lv_obj_clear_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_size(this->thumbnail_cache_[i].thumb_btn_, thumb_w, thumb_h);
-
-        // Debug: Log first widget details
-        if (i == 0) {
-          lv_obj_t *btn = this->thumbnail_cache_[i].thumb_btn_;
-          ESP_LOGD(TAG, "Widget 0: size=%dx%d at (%d,%d)", lv_obj_get_width(btn), lv_obj_get_height(btn),
-                   lv_obj_get_x(btn), lv_obj_get_y(btn));
-          if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
-            lv_obj_t *canvas = this->thumbnail_cache_[i].thumb_canvas_;
-            ESP_LOGD(TAG, "Canvas 0: size=%dx%d at (%d,%d)", lv_obj_get_width(canvas), lv_obj_get_height(canvas),
-                     lv_obj_get_x(canvas), lv_obj_get_y(canvas));
-          }
-        }
-
-        // Also ensure canvas inside button is properly centered and sized
-        if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
-          lv_obj_center(this->thumbnail_cache_[i].thumb_canvas_);
-          lv_obj_invalidate(this->thumbnail_cache_[i].thumb_canvas_);
-        }
-
-        lv_obj_invalidate(this->thumbnail_cache_[i].thumb_btn_);
-      }
-    }
-    ESP_LOGD(TAG, "Cleared HIDDEN flag and restored size for %zu valid thumbnail widgets", visible_count);
   } else {
     if (parent != nullptr) {
-      lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_background(parent);
-      // Clear clickable flag when hiding (to prevent blocking canvas touch events)
-      if (this->thumbnail_slide_enabled_) {
-        lv_obj_clear_flag(parent, LV_OBJ_FLAG_CLICKABLE);
-        ESP_LOGD(TAG, "Cleared clickable flag on thumbnail parent (hidden state)");
-      }
-      ESP_LOGD(TAG, "Thumbnails slid OUT (hidden, moved parent to background)");
+      ESP_LOGD(TAG, "Thumbnails slid OUT (moved parent to background)");
     } else {
-      lv_obj_add_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_background(this->thumbnail_container_);
-      ESP_LOGD(TAG, "Thumbnails slid OUT (hidden, moved container to background)");
+      ESP_LOGD(TAG, "Thumbnails slid OUT (moved container to background)");
     }
   }
 
-  this->thumbnails_visible_ = show;
+  // Mark container as needing redraw
+  lv_obj_invalidate(this->thumbnail_container_);
 
-  // Force immediate refresh after all flag/style changes are complete
+  // Force immediate screen refresh to make z-order change visible
   lv_refr_now(NULL);
+
+  this->thumbnails_visible_ = show;
 #endif
 }
 
@@ -2413,14 +2314,15 @@ void PictureViewer::preload_thumbnails_for_viewport_() {
     int eviction_threshold = is_behind_viewport ? hysteresis : preload_count;
 
     if (distance_from_viewport > eviction_threshold) {
-      // Store index before clearing (for logging)
-      int evicted_index = cache_entry.image_index;
       // Mark for eviction (will be reused by next load_thumbnail_ call)
       cache_entry.loaded = false;
       cache_entry.image_index = -1;
-      ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", evicted_index, distance_from_viewport);
+      ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", cache_entry.image_index, distance_from_viewport);
     }
   }
+
+  // Force LVGL refresh after all thumbnails in viewport are loaded
+  lv_refr_now(NULL);
 }
 #endif
 
@@ -2533,9 +2435,6 @@ void PictureViewer::preload_task_func_(void *param) {
 
   ESP_LOGI(TAG, "Thumbnail preload task completed - preloaded ~30 thumbnails");
 
-  // Mark preload as complete
-  viewer->preload_complete_ = true;
-
   // Task self-deletes
   viewer->preload_task_handle_ = nullptr;
   vTaskDelete(NULL);
@@ -2544,9 +2443,6 @@ void PictureViewer::preload_task_func_(void *param) {
 void PictureViewer::start_preload_task_() {
   // Stop existing task if running
   this->stop_preload_task_();
-
-  // Reset preload flag
-  this->preload_complete_ = false;
 
   // Create new preload task with lower priority to not interfere with main loop
   // Use core 0 (opposite of LVGL which typically runs on core 1)

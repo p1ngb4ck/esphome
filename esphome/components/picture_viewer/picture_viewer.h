@@ -404,7 +404,6 @@ class PictureViewer : public Component {
 #ifdef USE_ESP_IDF
   // FreeRTOS task for background thumbnail preloading
   TaskHandle_t preload_task_handle_{nullptr};
-  bool preload_complete_{false};  // Track if initial preload finished
   static void preload_task_func_(void *param);
   void start_preload_task_();
   void stop_preload_task_();
