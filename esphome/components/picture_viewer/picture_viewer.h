@@ -94,6 +94,7 @@ struct ThumbnailCacheEntry {
 #ifdef USE_LVGL
   lv_obj_t *thumb_btn_{nullptr};     // LVGL thumbnail button object pointer
   lv_obj_t *thumb_canvas_{nullptr};  // LVGL canvas widget pointer
+  lv_obj_t *thumb_label_{nullptr};   // LVGL label widget pointer (optional)
 #endif
 };
 
@@ -154,9 +155,15 @@ class PictureViewer : public Component {
   void set_overlay_icon_size(int size) { this->overlay_icon_size_ = size; }
   void set_overlay_icon_color(uint32_t color) { this->overlay_icon_color_ = color; }
   void set_overlay_duration(uint32_t duration_ms) { this->overlay_duration_ms_ = duration_ms; }
+  void set_default_image_index(int index) { this->default_image_index_ = index; }
 
 #ifdef USE_LVGL
   void set_thumbnail_container(lv_obj_t *container) { this->thumbnail_container_ = container; }
+  void set_thumbnail_style(lv_style_t *style) { this->thumbnail_style_ = style; }
+  void set_thumbnail_active_style(lv_style_t *style) { this->thumbnail_active_style_ = style; }
+  void set_thumbnail_container_style(lv_style_t *style) { this->thumbnail_container_style_ = style; }
+  void set_thumbnail_label_pattern(const std::string &pattern) { this->thumbnail_label_pattern_ = pattern; }
+  void set_thumbnail_label_style(lv_style_t *style) { this->thumbnail_label_style_ = style; }
 #endif
 
   // Directory configuration
@@ -182,6 +189,20 @@ class PictureViewer : public Component {
 
   // Get directory count
   size_t get_directory_count() const { return this->directories_.size(); }
+
+#ifdef USE_STORAGE_HOST
+  // =====================================================
+  // FileManager Integration
+  // =====================================================
+
+  /// Called by file_manager to provide updated file list for a directory
+  /// This is the main entry point for file_manager to push directory updates
+  /// @param directory_path The directory path (must match one of the configured directories)
+  /// @param files The complete file list for that directory
+  void update_directory_files(const std::string &directory_path, const std::vector<storage_host::FileInfo> &files) {
+    this->update_directory_files_(directory_path, files);
+  }
+#endif
 
   // Get current directory index
   size_t get_current_directory_index() const { return this->current_directory_index_; }
@@ -311,6 +332,7 @@ class PictureViewer : public Component {
   int overlay_icon_size_{128};             // Size of play/pause icon in pixels
   uint32_t overlay_icon_color_{0xFFFFFF};  // RGB color (white default)
   uint32_t overlay_duration_ms_{1500};     // Duration to show overlay (1.5s default)
+  int default_image_index_{0};             // Default image to show on startup (0=first, -1=disabled)
 
   // State
   std::vector<ImageEntry> images_;
@@ -365,7 +387,20 @@ class PictureViewer : public Component {
   size_t thumbnail_buffer_size_per_slot_{0};  // Size per thumbnail: width * height * 2 (RGB565)
 
 #ifdef USE_LVGL
-  lv_obj_t *thumbnail_container_{nullptr};  // Parent container for dynamic thumbnail widgets
+  lv_obj_t *thumbnail_container_{nullptr};          // Parent container for dynamic thumbnail widgets
+  lv_style_t *thumbnail_style_{nullptr};            // User-provided style for thumbnails
+  lv_style_t *thumbnail_active_style_{nullptr};     // User-provided style for active thumbnail
+  lv_style_t *thumbnail_container_style_{nullptr};  // User-provided style for container
+  lv_style_t *thumbnail_label_style_{nullptr};      // User-provided style for thumbnail labels
+
+  // Thumbnail label configuration
+  std::string thumbnail_label_pattern_;  // Label text pattern (e.g., "{index}", "{filename}")
+
+  // Default styles (created if user doesn't provide custom styles)
+  lv_style_t default_thumbnail_style_;
+  lv_style_t default_thumbnail_active_style_;
+  lv_style_t default_container_style_;
+  bool default_styles_initialized_{false};
 #endif
 
   // =====================================================
@@ -460,6 +495,18 @@ class PictureViewer : public Component {
 
   /// Preload thumbnails based on scroll position and velocity
   void preload_thumbnails_for_viewport_();
+
+  /// Initialize default thumbnail styles if user didn't provide any
+  void init_default_thumbnail_styles_();
+
+  /// Apply thumbnail style (default or user-provided)
+  void apply_thumbnail_style_(lv_obj_t *obj, bool is_active);
+
+  /// Apply container style (default or user-provided)
+  void apply_container_style_(lv_obj_t *obj);
+
+  /// Format label text from pattern (e.g., "{index}" -> "1", "{filename}" -> "photo.jpg")
+  std::string format_thumbnail_label_(size_t image_index);
 #endif
 
   /// Show play/pause overlay icon
@@ -493,7 +540,9 @@ class PictureViewer : public Component {
   void swap_to_preloaded_image_();
 
   /// FileManager callback - called when directory changes
-  void on_directory_changed_(const storage_host::DirectoryChangeInfo &info);
+  /// @param directory_path The directory path that changed
+  /// @param files The updated file list for that directory
+  void update_directory_files_(const std::string &directory_path, const std::vector<storage_host::FileInfo> &files);
 };
 
 }  // namespace picture_viewer

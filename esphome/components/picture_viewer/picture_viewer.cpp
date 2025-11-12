@@ -87,12 +87,12 @@ void PictureViewer::setup() {
 #endif
 #endif
 
-  // Register callback with file_manager if available
+  // NOTE: File monitoring is now handled by file_manager
+  // file_manager will call update_directory_files_() when directories change
+  // No callback registration needed here - file_manager pushes updates directly
 #ifdef USE_STORAGE_HOST
   if (this->file_manager_ != nullptr) {
-    this->file_manager_->add_on_directory_changed_callback(
-        [this](const storage_host::DirectoryChangeInfo &info) { this->on_directory_changed_(info); });
-    ESP_LOGI(TAG, "Registered directory change callback with file_manager");
+    ESP_LOGI(TAG, "File manager available - will receive directory updates via update_directory_files_()");
   }
 #endif
 
@@ -128,9 +128,14 @@ void PictureViewer::setup() {
   }
 #endif
 
-  // Scan directory for images if directories are configured
+  // Initial image list will be provided by file_manager via update_directory_files_()
+  // file_manager should call update_directory_files_() for each configured directory after setup
   if (!this->directories_.empty()) {
-    this->refresh_images();
+    ESP_LOGI(TAG, "Configured %zu directories - waiting for file_manager to provide initial file lists",
+             this->directories_.size());
+    for (const auto &dir : this->directories_) {
+      ESP_LOGI(TAG, "  - Directory: %s", dir.path.c_str());
+    }
   } else {
     ESP_LOGW(TAG, "No directories configured");
   }
@@ -321,25 +326,18 @@ void PictureViewer::refresh_images() {
     return;
   }
 
-  ESP_LOGI(TAG, "Refreshing image list from: %s", current_dir->path.c_str());
+  ESP_LOGI(TAG, "Requesting file list refresh from file_manager for: %s", current_dir->path.c_str());
 
-  // Clear existing images
-  this->images_.clear();
-  this->current_index_ = -1;
-
-  // Get files from file_manager and scan
+  // Request file_manager to send us the current file list for this directory
+  // file_manager will call update_directory_files_() with the current file list
 #ifdef USE_STORAGE_HOST
   if (this->file_manager_ != nullptr) {
-    const auto &directory_state = this->file_manager_->get_directory_state();
-    // Convert map values to vector
-    std::vector<storage_host::FileInfo> files;
-    files.reserve(directory_state.size());
-    for (const auto &[path, file] : directory_state) {
-      files.push_back(file);
-    }
-    this->scan_directory_(files);
+    // TODO: file_manager should have a method like:
+    // this->file_manager_->request_directory_update(current_dir->path);
+    // For now, log that we're waiting for file_manager to push updates
+    ESP_LOGI(TAG, "Waiting for file_manager to push file list for directory: %s", current_dir->path.c_str());
   } else {
-    ESP_LOGW(TAG, "No file_manager available");
+    ESP_LOGW(TAG, "No file_manager available - cannot refresh images");
   }
 #else
   ESP_LOGW(TAG, "Storage host support not available");
@@ -416,21 +414,54 @@ void PictureViewer::scan_directory_(const std::vector<storage_host::FileInfo> &f
   // Sort by filename
   std::sort(this->images_.begin(), this->images_.end(),
             [](const ImageEntry &a, const ImageEntry &b) { return a.filename < b.filename; });
+
+  // Show default image if configured and images are available
+  if (this->default_image_index_ >= 0 && !this->images_.empty()) {
+    size_t index_to_show = static_cast<size_t>(this->default_image_index_);
+    if (index_to_show < this->images_.size()) {
+      ESP_LOGI(TAG, "Showing default image at index %zu", index_to_show);
+      this->show_image(index_to_show);
+    } else {
+      ESP_LOGW(TAG, "Default image index %zu out of range (only %zu images)", index_to_show, this->images_.size());
+    }
+  }
 #endif
 }
 
-void PictureViewer::on_directory_changed_(const storage_host::DirectoryChangeInfo &info) {
+void PictureViewer::update_directory_files_(const std::string &directory_path,
+                                            const std::vector<storage_host::FileInfo> &files) {
 #ifdef USE_STORAGE_HOST
-  ESP_LOGI(TAG, "Directory changed callback: %s (%zu files)", info.path.c_str(), info.files.size());
+  ESP_LOGI(TAG, "Received file list update for directory: %s (%zu files)", directory_path.c_str(), files.size());
 
-  // Clear existing images
-  this->images_.clear();
-  this->current_index_ = -1;
+  // Find which configured directory this update is for
+  bool found_directory = false;
+  for (size_t i = 0; i < this->directories_.size(); i++) {
+    if (this->directories_[i].path == directory_path) {
+      found_directory = true;
 
-  // Scan the new file list
-  this->scan_directory_(info.files);
+      // Update to this directory if it matches
+      if (i == this->current_directory_index_) {
+        ESP_LOGI(TAG, "Updating current directory images");
 
-  ESP_LOGI(TAG, "After directory change: %zu images found", this->images_.size());
+        // Clear existing images
+        this->images_.clear();
+        this->current_index_ = -1;
+
+        // Scan the new file list
+        this->scan_directory_(files);
+
+        ESP_LOGI(TAG, "After directory update: %zu images found", this->images_.size());
+      } else {
+        ESP_LOGD(TAG, "Update is for directory index %zu, but current is %zu - ignoring", i,
+                 this->current_directory_index_);
+      }
+      break;
+    }
+  }
+
+  if (!found_directory) {
+    ESP_LOGW(TAG, "Received file list for unrecognized directory: %s", directory_path.c_str());
+  }
 #endif
 }
 
@@ -527,6 +558,102 @@ void PictureViewer::free_thumbnail_buffer_array_() {
 // LVGL Widget Generation
 // =====================================================
 
+void PictureViewer::init_default_thumbnail_styles_() {
+  if (this->default_styles_initialized_) {
+    return;
+  }
+
+  // Initialize default thumbnail style - clean, no borders, no padding
+  lv_style_init(&this->default_thumbnail_style_);
+  lv_style_set_pad_all(&this->default_thumbnail_style_, 0);
+  lv_style_set_border_width(&this->default_thumbnail_style_, 0);
+  lv_style_set_radius(&this->default_thumbnail_style_, 0);
+
+  // Initialize default active thumbnail style - subtle highlight
+  lv_style_init(&this->default_thumbnail_active_style_);
+  lv_style_set_pad_all(&this->default_thumbnail_active_style_, 0);
+  lv_style_set_border_width(&this->default_thumbnail_active_style_, 2);
+  lv_style_set_border_color(&this->default_thumbnail_active_style_, lv_color_hex(0x00FF00));
+  lv_style_set_radius(&this->default_thumbnail_active_style_, 0);
+
+  // Initialize default container style - clean, scrollable OFF
+  lv_style_init(&this->default_container_style_);
+  lv_style_set_pad_all(&this->default_container_style_, 0);
+  lv_style_set_border_width(&this->default_container_style_, 0);
+  lv_style_set_radius(&this->default_container_style_, 0);
+
+  this->default_styles_initialized_ = true;
+  ESP_LOGD(TAG, "Initialized default thumbnail styles");
+}
+
+void PictureViewer::apply_thumbnail_style_(lv_obj_t *obj, bool is_active) {
+  if (is_active) {
+    if (this->thumbnail_active_style_ != nullptr) {
+      lv_obj_add_style(obj, this->thumbnail_active_style_, 0);
+    } else {
+      this->init_default_thumbnail_styles_();
+      lv_obj_add_style(obj, &this->default_thumbnail_active_style_, 0);
+    }
+  } else {
+    if (this->thumbnail_style_ != nullptr) {
+      lv_obj_add_style(obj, this->thumbnail_style_, 0);
+    } else {
+      this->init_default_thumbnail_styles_();
+      lv_obj_add_style(obj, &this->default_thumbnail_style_, 0);
+    }
+  }
+}
+
+void PictureViewer::apply_container_style_(lv_obj_t *obj) {
+  if (this->thumbnail_container_style_ != nullptr) {
+    lv_obj_add_style(obj, this->thumbnail_container_style_, 0);
+  } else {
+    this->init_default_thumbnail_styles_();
+    lv_obj_add_style(obj, &this->default_container_style_, 0);
+  }
+}
+
+std::string PictureViewer::format_thumbnail_label_(size_t image_index) {
+  if (image_index >= this->images_.size()) {
+    return "";
+  }
+
+  std::string result = this->thumbnail_label_pattern_;
+  const auto &image = this->images_[image_index];
+
+  // Replace {index} with 1-based index
+  size_t pos = 0;
+  while ((pos = result.find("{index}", pos)) != std::string::npos) {
+    result.replace(pos, 7, std::to_string(image_index + 1));
+    pos += std::to_string(image_index + 1).length();
+  }
+
+  // Replace {filename} with full filename
+  pos = 0;
+  while ((pos = result.find("{filename}", pos)) != std::string::npos) {
+    // Extract filename from path
+    size_t last_slash = image.path.find_last_of("/\\");
+    std::string filename = (last_slash != std::string::npos) ? image.path.substr(last_slash + 1) : image.path;
+    result.replace(pos, 10, filename);
+    pos += filename.length();
+  }
+
+  // Replace {name} with filename without extension
+  pos = 0;
+  while ((pos = result.find("{name}", pos)) != std::string::npos) {
+    // Extract filename from path
+    size_t last_slash = image.path.find_last_of("/\\");
+    std::string filename = (last_slash != std::string::npos) ? image.path.substr(last_slash + 1) : image.path;
+    // Remove extension
+    size_t last_dot = filename.find_last_of(".");
+    std::string name = (last_dot != std::string::npos) ? filename.substr(0, last_dot) : filename;
+    result.replace(pos, 6, name);
+    pos += name.length();
+  }
+
+  return result;
+}
+
 void PictureViewer::create_thumbnail_widgets_() {
   if (this->thumbnail_container_ == nullptr) {
     ESP_LOGW(TAG, "Thumbnail container not set, skipping widget creation");
@@ -538,6 +665,9 @@ void PictureViewer::create_thumbnail_widgets_() {
            : this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL ? "VERTICAL"
                                                                          : "GRID");
 
+  // Apply container style (default or user-provided)
+  this->apply_container_style_(this->thumbnail_container_);
+
   // Configure container layout
   lv_obj_set_flex_flow(this->thumbnail_container_,
                        this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL ? LV_FLEX_FLOW_ROW
@@ -545,6 +675,9 @@ void PictureViewer::create_thumbnail_widgets_() {
                                                                                      : LV_FLEX_FLOW_ROW_WRAP);
 
   lv_obj_set_flex_align(this->thumbnail_container_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  // Disable scrollable on container (clean default - user can enable via custom style)
+  lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_SCROLLABLE);
 
   // Set container scroll direction based on layout
   if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
@@ -575,9 +708,9 @@ void PictureViewer::create_thumbnail_widgets_() {
     lv_obj_set_size(btn, thumb_w, thumb_h);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_radius(btn, 2, 0);
+
+    // Apply thumbnail style (default or user-provided)
+    this->apply_thumbnail_style_(btn, false);  // Start as non-active
 
     // Set margin for spacing
     if (i > 0) {
@@ -596,14 +729,35 @@ void PictureViewer::create_thumbnail_widgets_() {
     lv_obj_t *canvas = lv_canvas_create(btn);
     lv_obj_center(canvas);
 
+    // Make canvas non-clickable so clicks reach the button
+    lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+
     // Set canvas buffer to point into thumbnail buffer array
     if (this->thumbnail_cache_[i].data != nullptr) {
       lv_canvas_set_buffer(canvas, this->thumbnail_cache_[i].data, thumb_w, thumb_h, LV_IMG_CF_TRUE_COLOR);
     }
 
+    // Create optional label if pattern is configured
+    lv_obj_t *label = nullptr;
+    if (!this->thumbnail_label_pattern_.empty()) {
+      label = lv_label_create(btn);
+      lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, 0);  // Position at bottom center
+
+      // Make label non-clickable so clicks reach the button
+      lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+
+      // Apply label style if provided
+      if (this->thumbnail_label_style_ != nullptr) {
+        lv_obj_add_style(label, this->thumbnail_label_style_, 0);
+      }
+
+      // Label text will be set when thumbnail is loaded
+    }
+
     // Store references in cache
     this->thumbnail_cache_[i].thumb_btn_ = btn;
     this->thumbnail_cache_[i].thumb_canvas_ = canvas;
+    this->thumbnail_cache_[i].thumb_label_ = label;
 
     // Add click handler - capture index by value
     const size_t thumbnail_index = i;
@@ -642,6 +796,12 @@ void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
     return;
   }
 
+  // Update label text if label exists and pattern is configured
+  if (entry.thumb_label_ != nullptr && !this->thumbnail_label_pattern_.empty() && entry.image_index >= 0) {
+    std::string label_text = this->format_thumbnail_label_(entry.image_index);
+    lv_label_set_text(entry.thumb_label_, label_text.c_str());
+  }
+
   // Canvas buffer already points to the right location in thumbnail_buffer_array_
   // Just invalidate to trigger redraw
   lv_obj_invalidate(entry.thumb_canvas_);
@@ -655,14 +815,25 @@ void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
       continue;
     }
 
-    if (this->thumbnail_cache_[i].image_index == active_image_index) {
-      // Highlight this thumbnail
-      lv_obj_set_style_border_color(this->thumbnail_cache_[i].thumb_btn_, lv_color_hex(0x00FF00), 0);
-      lv_obj_set_style_border_width(this->thumbnail_cache_[i].thumb_btn_, 3, 0);
-    } else {
-      // Remove highlight
-      lv_obj_set_style_border_color(this->thumbnail_cache_[i].thumb_btn_, lv_color_hex(0x808080), 0);
-      lv_obj_set_style_border_width(this->thumbnail_cache_[i].thumb_btn_, 1, 0);
+    bool is_active = (this->thumbnail_cache_[i].image_index == active_image_index);
+
+    // Remove all existing styles first
+    lv_obj_remove_style_all(this->thumbnail_cache_[i].thumb_btn_);
+
+    // Re-apply appropriate style (active or inactive)
+    this->apply_thumbnail_style_(this->thumbnail_cache_[i].thumb_btn_, is_active);
+
+    // Reapply spacing if needed (styles cleared spacing)
+    if (i > 0) {
+      int spacing = this->thumbnail_config_.spacing;
+      if (this->thumbnail_config_.layout == ThumbnailLayout::HORIZONTAL) {
+        lv_obj_set_style_pad_left(this->thumbnail_cache_[i].thumb_btn_, spacing, 0);
+      } else if (this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL) {
+        lv_obj_set_style_pad_top(this->thumbnail_cache_[i].thumb_btn_, spacing, 0);
+      } else {
+        lv_obj_set_style_pad_left(this->thumbnail_cache_[i].thumb_btn_, spacing, 0);
+        lv_obj_set_style_pad_top(this->thumbnail_cache_[i].thumb_btn_, spacing, 0);
+      }
     }
   }
 }

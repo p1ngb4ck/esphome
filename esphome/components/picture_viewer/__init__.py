@@ -87,6 +87,12 @@ CONF_JPEG_OUTPUT_FORMAT = "jpeg_output_format"
 CONF_OVERLAY_ICON_SIZE = "overlay_icon_size"
 CONF_OVERLAY_ICON_COLOR = "overlay_icon_color"
 CONF_OVERLAY_DURATION = "overlay_duration"
+CONF_THUMBNAIL_STYLE_ID = "thumbnail_style_id"
+CONF_THUMBNAIL_ACTIVE_STYLE_ID = "thumbnail_active_style_id"
+CONF_THUMBNAIL_CONTAINER_STYLE_ID = "thumbnail_container_style_id"
+CONF_THUMBNAIL_LABEL_PATTERN = "thumbnail_label_pattern"
+CONF_THUMBNAIL_LABEL_STYLE_ID = "thumbnail_label_style_id"
+CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(
@@ -196,6 +202,30 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_OVERLAY_DURATION, default=1500): cv.int_range(
                 min=500, max=5000
             ),
+            cv.Optional(CONF_THUMBNAIL_STYLE_ID): cv.use_id(
+                cg.global_ns.class_("lv_style_t")
+            )
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),
+            cv.Optional(CONF_THUMBNAIL_ACTIVE_STYLE_ID): cv.use_id(
+                cg.global_ns.class_("lv_style_t")
+            )
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),
+            cv.Optional(CONF_THUMBNAIL_CONTAINER_STYLE_ID): cv.use_id(
+                cg.global_ns.class_("lv_style_t")
+            )
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),
+            cv.Optional(CONF_THUMBNAIL_LABEL_PATTERN): cv.string,
+            cv.Optional(CONF_THUMBNAIL_LABEL_STYLE_ID): cv.use_id(
+                cg.global_ns.class_("lv_style_t")
+            )
+            if LVGL_AVAILABLE
+            else cv.invalid("LVGL not available"),
+            cv.Optional(CONF_DEFAULT_IMAGE_INDEX): cv.Any(
+                cv.int_range(min=0), cv.one_of("off", "OFF", lower=True)
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_buffer_sizes,
@@ -245,6 +275,37 @@ async def to_code(config):
     if CONF_THUMBNAIL_CONTAINER_ID in config:
         container = await cg.get_variable(config[CONF_THUMBNAIL_CONTAINER_ID])
         cg.add(var.set_thumbnail_container(container))
+
+    # Link thumbnail styles if provided
+    if CONF_THUMBNAIL_STYLE_ID in config:
+        style = await cg.get_variable(config[CONF_THUMBNAIL_STYLE_ID])
+        cg.add(var.set_thumbnail_style(style))
+
+    if CONF_THUMBNAIL_ACTIVE_STYLE_ID in config:
+        active_style = await cg.get_variable(config[CONF_THUMBNAIL_ACTIVE_STYLE_ID])
+        cg.add(var.set_thumbnail_active_style(active_style))
+
+    if CONF_THUMBNAIL_CONTAINER_STYLE_ID in config:
+        container_style = await cg.get_variable(
+            config[CONF_THUMBNAIL_CONTAINER_STYLE_ID]
+        )
+        cg.add(var.set_thumbnail_container_style(container_style))
+
+    # Link thumbnail label configuration if provided
+    if CONF_THUMBNAIL_LABEL_PATTERN in config:
+        cg.add(var.set_thumbnail_label_pattern(config[CONF_THUMBNAIL_LABEL_PATTERN]))
+
+    if CONF_THUMBNAIL_LABEL_STYLE_ID in config:
+        label_style = await cg.get_variable(config[CONF_THUMBNAIL_LABEL_STYLE_ID])
+        cg.add(var.set_thumbnail_label_style(label_style))
+
+    # Default image index configuration
+    if CONF_DEFAULT_IMAGE_INDEX in config:
+        default_index = config[CONF_DEFAULT_IMAGE_INDEX]
+        if isinstance(default_index, str) and default_index.lower() == "off":
+            cg.add(var.set_default_image_index(-1))  # -1 means disabled
+        else:
+            cg.add(var.set_default_image_index(default_index))
 
     # Configuration
     cg.add(var.set_slideshow_interval(config[CONF_SLIDESHOW_INTERVAL]))
