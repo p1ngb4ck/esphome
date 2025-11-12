@@ -209,6 +209,9 @@ void PictureViewer::setup() {
             lv_coord_t edge_threshold_h = screen_width / 10;   // 10% from edge
             lv_coord_t edge_threshold_v = screen_height / 10;  // 10% from edge
 
+            ESP_LOGD(TAG, "Gesture detected: start=(%d,%d) dir=%d edge_threshold=%d visible=%d", start_x, start_y, dir,
+                     edge_threshold_h, viewer->thumbnails_visible_);
+
             bool is_edge_swipe = false;
             bool started_in_edge = false;
 
@@ -216,12 +219,16 @@ void PictureViewer::setup() {
               case ThumbnailSlideEdge::RIGHT:
                 // Check if gesture STARTED in right edge area
                 started_in_edge = (start_x > screen_width - edge_threshold_h);
+                ESP_LOGD(TAG, "RIGHT edge check: start_x=%d > threshold=%d = %d", start_x,
+                         screen_width - edge_threshold_h, started_in_edge);
                 // Slide in: started in edge AND not visible AND swipe left (inward from right edge)
                 // Slide out: visible AND swipe right (outward toward right edge)
                 if (started_in_edge && !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT)) {
                   is_edge_swipe = true;
+                  ESP_LOGD(TAG, "Matched slide-IN condition");
                 } else if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT)) {
                   is_edge_swipe = true;  // Slide out (can start anywhere)
+                  ESP_LOGD(TAG, "Matched slide-OUT condition");
                 }
                 break;
               case ThumbnailSlideEdge::LEFT:
