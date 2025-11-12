@@ -198,6 +198,9 @@ void PictureViewer::setup() {
           viewer->gesture_detected_ = true;
           viewer->last_gesture_time_ = millis();
 
+          ESP_LOGD(TAG, "Gesture on canvas: dir=%d, slide_enabled=%d, container=%p", dir,
+                   viewer->thumbnail_slide_enabled_, viewer->thumbnail_container_);
+
           // Check if this is an edge swipe for thumbnail slide
           if (viewer->thumbnail_slide_enabled_ && viewer->thumbnail_container_ != nullptr) {
             // Use gesture START position to determine if swipe began in edge area
