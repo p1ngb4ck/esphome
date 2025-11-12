@@ -521,6 +521,14 @@ void PictureViewer::scan_directory_(const std::vector<storage_host::FileInfo> &f
       ESP_LOGW(TAG, "Default image index %zu out of range (only %zu images)", index_to_show, this->images_.size());
     }
   }
+
+#ifdef USE_LVGL
+  // Preload initial thumbnails after images are loaded
+  if (this->thumbnail_config_.enabled && !this->images_.empty()) {
+    ESP_LOGI(TAG, "Preloading initial thumbnails for %zu images", this->images_.size());
+    this->preload_thumbnails_for_viewport_();
+  }
+#endif
 #endif
 }
 
