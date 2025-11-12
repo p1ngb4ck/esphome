@@ -78,6 +78,14 @@ enum class ThumbnailLayout {
   GRID,        // Grid layout with wrapping
 };
 
+// Thumbnail slide edge for edge swipe gesture
+enum class ThumbnailSlideEdge {
+  LEFT,
+  RIGHT,
+  TOP,
+  BOTTOM,
+};
+
 // Thumbnail configuration
 struct ThumbnailConfig {
   bool enabled{true};
@@ -166,6 +174,8 @@ class PictureViewer : public Component {
   void set_overlay_duration(uint32_t duration_ms) { this->overlay_duration_ms_ = duration_ms; }
   void set_default_image_index(int index) { this->default_image_index_ = index; }
   void set_long_press_time(uint32_t time_ms) { this->long_press_time_ms_ = time_ms; }
+  void set_thumbnail_slide_edge(ThumbnailSlideEdge edge) { this->thumbnail_slide_edge_ = edge; }
+  void set_thumbnail_slide_enabled(bool enabled) { this->thumbnail_slide_enabled_ = enabled; }
 
 #ifdef USE_LVGL
   void set_thumbnail_container(lv_obj_t *container) { this->thumbnail_container_ = container; }
@@ -358,6 +368,11 @@ class PictureViewer : public Component {
   uint32_t overlay_duration_ms_{1500};     // Duration to show overlay (1.5s default)
   int default_image_index_{0};             // Default image to show on startup (0=first, -1=disabled)
   uint32_t long_press_time_ms_{1000};      // Long press threshold in milliseconds (1s default)
+
+  // Thumbnail slide configuration
+  ThumbnailSlideEdge thumbnail_slide_edge_{ThumbnailSlideEdge::RIGHT};  // Edge to slide from (default: RIGHT)
+  bool thumbnail_slide_enabled_{false};                                 // Enable slide in/out on edge swipe
+  bool thumbnails_visible_{false};                                      // Current visibility state
 
   // State
   std::vector<ImageEntry> images_;
@@ -553,6 +568,9 @@ class PictureViewer : public Component {
 
   /// Draw pause icon (two rectangles) on canvas
   void draw_pause_icon_(int center_x, int center_y, int size, uint32_t color);
+
+  /// Slide thumbnails in or out
+  void slide_thumbnails(bool show);
 
   /// Get canvas dimensions
   void update_canvas_dimensions_();

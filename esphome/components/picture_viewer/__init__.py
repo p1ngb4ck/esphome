@@ -247,6 +247,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_LONG_PRESS_TIME, default="1000ms"
             ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_THUMBNAIL_SLIDE_EDGE, default="RIGHT"): cv.enum(
+                THUMBNAIL_SLIDE_EDGES, upper=True
+            ),
+            cv.Optional(CONF_THUMBNAIL_SLIDE_ENABLED, default=False): cv.boolean,
             cv.Optional(CONF_ON_THUMBNAIL_CLICK): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -362,6 +366,8 @@ async def to_code(config):
     cg.add(var.set_overlay_icon_color(config[CONF_OVERLAY_ICON_COLOR]))
     cg.add(var.set_overlay_duration(config[CONF_OVERLAY_DURATION]))
     cg.add(var.set_long_press_time(config[CONF_LONG_PRESS_TIME]))
+    cg.add(var.set_thumbnail_slide_edge(config[CONF_THUMBNAIL_SLIDE_EDGE]))
+    cg.add(var.set_thumbnail_slide_enabled(config[CONF_THUMBNAIL_SLIDE_ENABLED]))
 
     # Add directories with per-directory JPEG decoder configuration
     for dir_config in config[CONF_DIRECTORIES]:

@@ -146,27 +146,87 @@ void PictureViewer::setup() {
       ESP_LOGD(TAG, "Cleaned canvas parent container styles");
     }
 
-    // Add gesture event handler for swipe detection (ALWAYS stops slideshow)
+    // Add gesture event handler for swipe detection
     lv_obj_add_event_cb(
         this->canvas_,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
-          lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+          lv_indev_t *indev = lv_indev_get_act();
+          if (indev == nullptr)
+            return;
 
-          if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
-            // Mark that a gesture was detected to prevent long press from firing
-            viewer->gesture_detected_ = true;
-            viewer->last_gesture_time_ = millis();
+          lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+          if (dir == LV_DIR_NONE)
+            return;
 
-            if (dir == LV_DIR_LEFT) {
-              ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
-              viewer->stop_slideshow();  // Always stop, never toggle
-              viewer->next_image();
-            } else {
-              ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
-              viewer->stop_slideshow();  // Always stop, never toggle
-              viewer->previous_image();
+          // Mark that a gesture was detected to prevent long press from firing
+          viewer->gesture_detected_ = true;
+          viewer->last_gesture_time_ = millis();
+
+          // Check if this is an edge swipe for thumbnail slide
+          if (viewer->thumbnail_slide_enabled_ && viewer->thumbnail_container_ != nullptr) {
+            lv_point_t point;
+            lv_indev_get_point(indev, &point);
+
+            lv_coord_t screen_width = lv_obj_get_width(lv_scr_act());
+            lv_coord_t screen_height = lv_obj_get_height(lv_scr_act());
+            lv_coord_t edge_threshold_h = screen_width / 10;   // 10% from edge
+            lv_coord_t edge_threshold_v = screen_height / 10;  // 10% from edge
+
+            bool is_edge_swipe = false;
+            bool should_slide_in = false;
+
+            switch (viewer->thumbnail_slide_edge_) {
+              case ThumbnailSlideEdge::RIGHT:
+                is_edge_swipe = (point.x > screen_width - edge_threshold_h);
+                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT);
+                if (viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT))
+                  is_edge_swipe = true;  // Slide out
+                break;
+              case ThumbnailSlideEdge::LEFT:
+                is_edge_swipe = (point.x < edge_threshold_h);
+                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_RIGHT);
+                if (viewer->thumbnails_visible_ && (dir == LV_DIR_LEFT))
+                  is_edge_swipe = true;  // Slide out
+                break;
+              case ThumbnailSlideEdge::TOP:
+                is_edge_swipe = (point.y < edge_threshold_v);
+                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM);
+                if (viewer->thumbnails_visible_ && (dir == LV_DIR_TOP))
+                  is_edge_swipe = true;  // Slide out
+                break;
+              case ThumbnailSlideEdge::BOTTOM:
+                is_edge_swipe = (point.y > screen_height - edge_threshold_v);
+                should_slide_in = !viewer->thumbnails_visible_ && (dir == LV_DIR_TOP);
+                if (viewer->thumbnails_visible_ && (dir == LV_DIR_BOTTOM))
+                  is_edge_swipe = true;  // Slide out
+                break;
             }
+
+            if (is_edge_swipe) {
+              ESP_LOGD(TAG, "Edge swipe detected - sliding thumbnails %s", should_slide_in ? "IN" : "OUT");
+              viewer->slide_thumbnails(!viewer->thumbnails_visible_);
+              return;  // Don't process as image navigation
+            }
+          }
+
+          // Regular swipe for image navigation (ALWAYS stops slideshow)
+          if (dir == LV_DIR_LEFT) {
+            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+              ESP_LOGD(TAG, "Canvas swipe left - stopping slideshow and next image");
+            } else {
+              ESP_LOGD(TAG, "Canvas swipe left - next image");
+            }
+            viewer->stop_slideshow();  // Always stop, never toggle
+            viewer->next_image();
+          } else if (dir == LV_DIR_RIGHT) {
+            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+              ESP_LOGD(TAG, "Canvas swipe right - stopping slideshow and previous image");
+            } else {
+              ESP_LOGD(TAG, "Canvas swipe right - previous image");
+            }
+            viewer->stop_slideshow();  // Always stop, never toggle
+            viewer->previous_image();
           }
         },
         LV_EVENT_GESTURE, this);
@@ -389,11 +449,19 @@ void PictureViewer::start_slideshow() {
   if (this->current_index_ < 0) {
     this->show_image(0);
   }
+
+#ifdef USE_LVGL
+  this->show_overlay_icon_(true);  // Show play icon
+#endif
 }
 
 void PictureViewer::stop_slideshow() {
   ESP_LOGI(TAG, "Stopping slideshow");
   this->slideshow_mode_ = SlideshowMode::STOPPED;
+
+#ifdef USE_LVGL
+  this->show_overlay_icon_(false);  // Show pause icon
+#endif
 }
 
 void PictureViewer::pause_slideshow() {
@@ -907,6 +975,34 @@ void PictureViewer::create_thumbnail_widgets_() {
     // Store thumbnail index in button user data
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
   }
+
+  // Position container off-screen if slide mode is enabled
+  if (this->thumbnail_slide_enabled_) {
+    lv_coord_t screen_width = lv_obj_get_width(lv_obj_get_parent(this->thumbnail_container_));
+    lv_coord_t screen_height = lv_obj_get_height(lv_obj_get_parent(this->thumbnail_container_));
+    lv_coord_t container_width = lv_obj_get_width(this->thumbnail_container_);
+    lv_coord_t container_height = lv_obj_get_height(this->thumbnail_container_);
+
+    switch (this->thumbnail_slide_edge_) {
+      case ThumbnailSlideEdge::RIGHT:
+        lv_obj_set_pos(this->thumbnail_container_, screen_width, 0);  // Off-screen to the right
+        break;
+      case ThumbnailSlideEdge::LEFT:
+        lv_obj_set_pos(this->thumbnail_container_, -container_width, 0);  // Off-screen to the left
+        break;
+      case ThumbnailSlideEdge::TOP:
+        lv_obj_set_pos(this->thumbnail_container_, 0, -container_height);  // Off-screen above
+        break;
+      case ThumbnailSlideEdge::BOTTOM:
+        lv_obj_set_pos(this->thumbnail_container_, 0, screen_height);  // Off-screen below
+        break;
+    }
+    this->thumbnails_visible_ = false;
+    ESP_LOGI(TAG, "Thumbnails positioned off-screen (edge: %d)", static_cast<int>(this->thumbnail_slide_edge_));
+  } else {
+    this->thumbnails_visible_ = true;
+  }
+
   lv_refr_now(NULL);
   ESP_LOGI(TAG, "Created %zu thumbnail widgets", this->thumbnail_config_.max_count);
 }
@@ -1939,6 +2035,54 @@ void PictureViewer::draw_pause_icon_(int center_x, int center_y, int size, uint3
       }
     }
   }
+}
+
+void PictureViewer::slide_thumbnails(bool show) {
+#ifdef USE_LVGL
+  if (this->thumbnail_container_ == nullptr) {
+    return;
+  }
+
+  lv_coord_t screen_width = lv_obj_get_width(lv_obj_get_parent(this->thumbnail_container_));
+  lv_coord_t screen_height = lv_obj_get_height(lv_obj_get_parent(this->thumbnail_container_));
+  lv_coord_t container_width = lv_obj_get_width(this->thumbnail_container_);
+  lv_coord_t container_height = lv_obj_get_height(this->thumbnail_container_);
+
+  lv_coord_t target_x = 0;
+  lv_coord_t target_y = 0;
+
+  if (show) {
+    // Slide in - position at edge
+    target_x = 0;
+    target_y = 0;
+  } else {
+    // Slide out - position off-screen based on configured edge
+    switch (this->thumbnail_slide_edge_) {
+      case ThumbnailSlideEdge::RIGHT:
+        target_x = screen_width;
+        target_y = 0;
+        break;
+      case ThumbnailSlideEdge::LEFT:
+        target_x = -container_width;
+        target_y = 0;
+        break;
+      case ThumbnailSlideEdge::TOP:
+        target_x = 0;
+        target_y = -container_height;
+        break;
+      case ThumbnailSlideEdge::BOTTOM:
+        target_x = 0;
+        target_y = screen_height;
+        break;
+    }
+  }
+
+  // Move container to target position
+  lv_obj_set_pos(this->thumbnail_container_, target_x, target_y);
+  this->thumbnails_visible_ = show;
+
+  ESP_LOGD(TAG, "Thumbnails slid %s to position (%d, %d)", show ? "IN" : "OUT", target_x, target_y);
+#endif
 }
 
 // =====================================================
