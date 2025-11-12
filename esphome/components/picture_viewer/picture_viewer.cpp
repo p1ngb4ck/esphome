@@ -996,6 +996,9 @@ void PictureViewer::create_thumbnail_widgets_() {
       }
     }
 
+    // Allow gestures to bubble up to parent for slide-out detection
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
     // Create canvas inside button
     lv_obj_t *canvas = lv_canvas_create(btn);
     lv_obj_center(canvas);

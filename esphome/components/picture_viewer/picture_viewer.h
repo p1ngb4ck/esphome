@@ -128,7 +128,8 @@ class PictureViewer : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::LATE; }
+  // Use DATA priority to ensure PSRAM is initialized before buffer allocation
+  float get_setup_priority() const override { return setup_priority::DATA; }
 
   // =====================================================
   // Configuration
