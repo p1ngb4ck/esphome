@@ -2226,6 +2226,8 @@ void PictureViewer::slide_thumbnails(bool show) {
     if (parent != nullptr) {
       lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(parent);
+      // Force layout recalculation after unhiding (flex layout needs update)
+      lv_obj_update_layout(parent);
       // Add clickable flag when showing (to receive gesture events for slide-out)
       if (this->thumbnail_slide_enabled_) {
         lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
@@ -2235,6 +2237,8 @@ void PictureViewer::slide_thumbnails(bool show) {
     } else {
       lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(this->thumbnail_container_);
+      // Force layout recalculation after unhiding (flex layout needs update)
+      lv_obj_update_layout(this->thumbnail_container_);
       ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved container to foreground)");
     }
   } else {
