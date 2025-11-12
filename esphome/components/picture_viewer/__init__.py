@@ -100,6 +100,7 @@ CONF_THUMBNAIL_LABEL_PATTERN = "thumbnail_label_pattern"
 CONF_THUMBNAIL_LABEL_STYLE_ID = "thumbnail_label_style_id"
 CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
 CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
+CONF_LONG_PRESS_TIME = "long_press_time"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(
@@ -233,6 +234,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DEFAULT_IMAGE_INDEX): cv.Any(
                 cv.int_range(min=0), cv.one_of("off", "OFF", lower=True)
             ),
+            cv.Optional(
+                CONF_LONG_PRESS_TIME, default="1000ms"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_ON_THUMBNAIL_CLICK): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -347,6 +351,7 @@ async def to_code(config):
     cg.add(var.set_overlay_icon_size(config[CONF_OVERLAY_ICON_SIZE]))
     cg.add(var.set_overlay_icon_color(config[CONF_OVERLAY_ICON_COLOR]))
     cg.add(var.set_overlay_duration(config[CONF_OVERLAY_DURATION]))
+    cg.add(var.set_long_press_time(config[CONF_LONG_PRESS_TIME]))
 
     # Add directories with per-directory JPEG decoder configuration
     for dir_config in config[CONF_DIRECTORIES]:

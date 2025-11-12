@@ -129,6 +129,12 @@ void PictureViewer::setup() {
 
   // Configure canvas to handle swipe gestures and prevent page scrolling
   if (this->canvas_ != nullptr) {
+    // Set long press time threshold (must be set before adding event handlers)
+    lv_obj_set_style_anim_time(this->canvas_, this->long_press_time_ms_, LV_PART_MAIN);
+
+    // Make canvas clickable so it receives touch events
+    lv_obj_add_flag(this->canvas_, LV_OBJ_FLAG_CLICKABLE);
+
     // Add gesture event handler for swipe detection
     lv_obj_add_event_cb(
         this->canvas_,
@@ -138,9 +144,17 @@ void PictureViewer::setup() {
 
           if (dir == LV_DIR_LEFT) {
             ESP_LOGD(TAG, "Canvas swipe left detected");
+            // Stop slideshow on any swipe
+            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+              viewer->stop_slideshow();
+            }
             viewer->next_image();
           } else if (dir == LV_DIR_RIGHT) {
             ESP_LOGD(TAG, "Canvas swipe right detected");
+            // Stop slideshow on any swipe
+            if (viewer->get_slideshow_mode() == SlideshowMode::PLAYING) {
+              viewer->stop_slideshow();
+            }
             viewer->previous_image();
           }
         },
@@ -165,6 +179,8 @@ void PictureViewer::setup() {
     // Stop event bubbling to prevent parent page from scrolling
     lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_clear_flag(this->canvas_, LV_OBJ_FLAG_SCROLLABLE);
+
+    ESP_LOGI(TAG, "Canvas configured: clickable=true, long_press_time=%ums", this->long_press_time_ms_);
   }
 #endif
 
@@ -705,6 +721,11 @@ void PictureViewer::create_thumbnail_widgets_() {
            : this->thumbnail_config_.layout == ThumbnailLayout::VERTICAL ? "VERTICAL"
                                                                          : "GRID");
 
+  // Explicitly set clean default properties on container (overrides LVGL defaults)
+  lv_obj_set_style_pad_all(this->thumbnail_container_, 0, 0);
+  lv_obj_set_style_border_width(this->thumbnail_container_, 0, 0);
+  lv_obj_set_style_radius(this->thumbnail_container_, 0, 0);
+
   // Apply container style (default or user-provided)
   this->apply_container_style_(this->thumbnail_container_);
 
@@ -749,6 +770,11 @@ void PictureViewer::create_thumbnail_widgets_() {
     lv_obj_set_size(btn, thumb_w, thumb_h);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+
+    // Explicitly set clean default properties (overrides LVGL defaults)
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_radius(btn, 0, 0);
 
     // Apply thumbnail style (default or user-provided)
     this->apply_thumbnail_style_(btn, false);  // Start as non-active
@@ -857,7 +883,7 @@ void PictureViewer::update_thumbnail_widget_(size_t cache_index) {
   lv_canvas_set_buffer(entry.thumb_canvas_, entry.data, this->thumbnail_config_.width, this->thumbnail_config_.height,
                        LV_IMG_CF_TRUE_COLOR);
 
-  // Invalidate to trigger redraw
+  // Invalidate to trigger redraw (actual refresh happens when all thumbnails are loaded)
   lv_obj_invalidate(entry.thumb_canvas_);
   lv_obj_invalidate(entry.thumb_btn_);
 }
@@ -1977,6 +2003,9 @@ void PictureViewer::preload_thumbnails_for_viewport_() {
       ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", cache_entry.image_index, distance_from_viewport);
     }
   }
+
+  // Force LVGL refresh after all thumbnails in viewport are loaded
+  lv_refr_now(NULL);
 }
 #endif
 
