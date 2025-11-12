@@ -179,13 +179,24 @@ void PictureViewer::setup() {
       ESP_LOGI(TAG, "Set LVGL long press time to %ums", this->long_press_time_ms_);
     }
 
-    // Add long press event handler to toggle slideshow (only if no recent gesture)
+    // Add long press event handler to toggle slideshow (only if NOT dragging/gesturing)
     lv_obj_add_event_cb(
         this->canvas_,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
 
-          // Ignore long press if a gesture was detected recently (within 500ms)
+          // Check if user is currently dragging/gesturing
+          lv_indev_t *indev = lv_indev_get_act();
+          if (indev != nullptr) {
+            // Get the gesture direction - if any gesture is active, ignore long press
+            lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+            if (dir != LV_DIR_NONE) {
+              ESP_LOGD(TAG, "Ignoring long press - gesture in progress (dir=%d)", dir);
+              return;
+            }
+          }
+
+          // Also check recent gesture flag (within 500ms)
           uint32_t now = millis();
           if (viewer->gesture_detected_ && (now - viewer->last_gesture_time_ < 500)) {
             ESP_LOGD(TAG, "Ignoring long press - recent gesture detected");
