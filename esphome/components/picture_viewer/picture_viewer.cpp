@@ -2241,6 +2241,27 @@ void PictureViewer::slide_thumbnails(bool show) {
       lv_obj_update_layout(this->thumbnail_container_);
       ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved container to foreground)");
     }
+
+    // Explicitly clear HIDDEN flag from valid thumbnail button widgets and restore their size
+    // (Only unused widgets beyond images_.size() should remain hidden)
+    const int thumb_w = this->thumbnail_config_.width;
+    const int thumb_h = this->thumbnail_config_.height;
+    size_t visible_count = std::min(this->images_.size(), this->thumbnail_cache_.size());
+    for (size_t i = 0; i < visible_count; i++) {
+      if (this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
+        lv_obj_clear_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(this->thumbnail_cache_[i].thumb_btn_, thumb_w, thumb_h);
+
+        // Also ensure canvas inside button is properly centered and sized
+        if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
+          lv_obj_center(this->thumbnail_cache_[i].thumb_canvas_);
+          lv_obj_invalidate(this->thumbnail_cache_[i].thumb_canvas_);
+        }
+
+        lv_obj_invalidate(this->thumbnail_cache_[i].thumb_btn_);
+      }
+    }
+    ESP_LOGD(TAG, "Cleared HIDDEN flag and restored size for %zu valid thumbnail widgets", visible_count);
   } else {
     if (parent != nullptr) {
       lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
