@@ -172,10 +172,10 @@ void PictureViewer::setup() {
         LV_EVENT_GESTURE, this);
 
     // Set long press time on the input device (LVGL 8.4.0)
-    // In LVGL 8.4.0, the driver settings are embedded in the indev structure
+    // In LVGL 8.4.0, driver is a pointer in the indev structure
     lv_indev_t *indev = lv_indev_get_act();
-    if (indev != nullptr) {
-      indev->driver.long_press_time = this->long_press_time_ms_;
+    if (indev != nullptr && indev->driver != nullptr) {
+      indev->driver->long_press_time = this->long_press_time_ms_;
       ESP_LOGI(TAG, "Set LVGL long press time to %ums", this->long_press_time_ms_);
     }
 
