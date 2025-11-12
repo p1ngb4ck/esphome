@@ -1228,6 +1228,10 @@ void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
     // Re-apply appropriate style (active or inactive)
     this->apply_thumbnail_style_(this->thumbnail_cache_[i].thumb_btn_, is_active);
 
+    // Restore widget size (removed by lv_obj_remove_style_all)
+    lv_obj_set_size(this->thumbnail_cache_[i].thumb_btn_, this->thumbnail_config_.width,
+                    this->thumbnail_config_.height);
+
     // Reapply spacing if needed (styles cleared spacing)
     if (i > 0) {
       int spacing = this->thumbnail_config_.spacing;
