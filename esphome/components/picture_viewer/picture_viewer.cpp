@@ -741,6 +741,14 @@ void PictureViewer::update_directory_files_(const std::string &directory_path,
         this->images_.clear();
         this->current_index_ = -1;
 
+        // Clear thumbnail cache so old thumbnails don't show for new files
+        for (auto &entry : this->thumbnail_cache_) {
+          entry.image_index = -1;
+          entry.loaded = false;
+          // Keep buffer and widgets allocated, just mark as unloaded
+        }
+        ESP_LOGD(TAG, "Cleared thumbnail cache for directory update");
+
         // Scan the new file list
         this->scan_directory_(files);
 
