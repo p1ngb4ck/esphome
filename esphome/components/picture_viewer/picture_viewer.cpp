@@ -276,6 +276,24 @@ void PictureViewer::setup() {
             }
           }
 
+          // Handle vertical swipes for directory switching (if multiple directories configured)
+          if (viewer->directories_.size() > 1) {
+            if (dir == LV_DIR_TOP) {
+              // Swipe up -> next directory (with wraparound)
+              size_t next_dir = (viewer->current_directory_index_ + 1) % viewer->directories_.size();
+              ESP_LOGI(TAG, "Canvas swipe up - switching to next directory %zu", next_dir);
+              viewer->set_current_directory(next_dir);
+              return;  // Don't process as image navigation
+            } else if (dir == LV_DIR_BOTTOM) {
+              // Swipe down -> previous directory (with wraparound)
+              size_t prev_dir = (viewer->current_directory_index_ == 0) ? viewer->directories_.size() - 1
+                                                                        : viewer->current_directory_index_ - 1;
+              ESP_LOGI(TAG, "Canvas swipe down - switching to previous directory %zu", prev_dir);
+              viewer->set_current_directory(prev_dir);
+              return;  // Don't process as image navigation
+            }
+          }
+
           // Regular swipe for image navigation (ALWAYS stops slideshow)
           if (dir == LV_DIR_LEFT) {
             bool was_playing = (viewer->get_slideshow_mode() == SlideshowMode::PLAYING);
@@ -739,6 +757,12 @@ void PictureViewer::update_directory_files_(const std::string &directory_path,
           this->start_preload_task_();
         }
 #endif
+
+        // Show first image from new directory if images are available
+        if (!this->images_.empty() && this->current_index_ == -1) {
+          ESP_LOGI(TAG, "Showing first image from directory %zu", i);
+          this->show_image(0);
+        }
       } else {
         ESP_LOGD(TAG, "Update is for directory index %zu, but current is %zu - ignoring", i,
                  this->current_directory_index_);
