@@ -1152,18 +1152,25 @@ void PictureViewer::create_thumbnail_widgets_() {
     }
   }
 
-  // Always start with thumbnails hidden (moved to background)
+  // Always start with thumbnails hidden
   // This gives time for preloading before user sees them
-  lv_obj_move_background(this->thumbnail_container_);
   this->thumbnails_visible_ = false;
 
-  // Clear clickable flag on parent when hidden to prevent blocking canvas touch events
-  if (parent != nullptr && this->thumbnail_slide_enabled_) {
-    lv_obj_clear_flag(parent, LV_OBJ_FLAG_CLICKABLE);
-    ESP_LOGD(TAG, "Cleared clickable flag on thumbnail parent (hidden state)");
+  // Hide parent container to prevent blocking canvas touch events
+  if (parent != nullptr) {
+    lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_background(parent);
+    if (this->thumbnail_slide_enabled_) {
+      lv_obj_clear_flag(parent, LV_OBJ_FLAG_CLICKABLE);
+    }
+    ESP_LOGD(TAG, "Hidden thumbnail parent container");
+  } else {
+    lv_obj_add_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_background(this->thumbnail_container_);
+    ESP_LOGD(TAG, "Hidden thumbnail container");
   }
 
-  ESP_LOGI(TAG, "Thumbnails hidden initially (moved to background) - will slide in after preload");
+  ESP_LOGI(TAG, "Thumbnails hidden initially - will slide in after preload");
 
   // Note: Widget hiding based on image count happens in update_directory_files_()
   // after images are loaded, not here during setup when images_.size() is 0
@@ -2232,29 +2239,33 @@ void PictureViewer::slide_thumbnails(bool show) {
 
   if (show) {
     if (parent != nullptr) {
+      lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(parent);
       // Add clickable flag when showing (to receive gesture events for slide-out)
       if (this->thumbnail_slide_enabled_) {
         lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
         ESP_LOGD(TAG, "Added clickable flag on thumbnail parent (visible state)");
       }
-      ESP_LOGD(TAG, "Thumbnails slid IN (moved parent to foreground)");
+      ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved parent to foreground)");
     } else {
+      lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(this->thumbnail_container_);
-      ESP_LOGD(TAG, "Thumbnails slid IN (moved container to foreground)");
+      ESP_LOGD(TAG, "Thumbnails slid IN (unhidden, moved container to foreground)");
     }
   } else {
     if (parent != nullptr) {
+      lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_background(parent);
       // Clear clickable flag when hiding (to prevent blocking canvas touch events)
       if (this->thumbnail_slide_enabled_) {
         lv_obj_clear_flag(parent, LV_OBJ_FLAG_CLICKABLE);
         ESP_LOGD(TAG, "Cleared clickable flag on thumbnail parent (hidden state)");
       }
-      ESP_LOGD(TAG, "Thumbnails slid OUT (moved parent to background)");
+      ESP_LOGD(TAG, "Thumbnails slid OUT (hidden, moved parent to background)");
     } else {
+      lv_obj_add_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_background(this->thumbnail_container_);
-      ESP_LOGD(TAG, "Thumbnails slid OUT (moved container to background)");
+      ESP_LOGD(TAG, "Thumbnails slid OUT (hidden, moved container to background)");
     }
   }
 
