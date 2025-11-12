@@ -1140,6 +1140,13 @@ void PictureViewer::create_thumbnail_widgets_() {
               if (image_index >= 0) {
                 ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
 
+                // Stop slideshow if playing (user is manually selecting an image)
+                bool was_playing = (viewer->get_slideshow_mode() == SlideshowMode::PLAYING);
+                if (was_playing) {
+                  viewer->stop_slideshow();
+                  ESP_LOGD(TAG, "Stopped slideshow due to thumbnail click");
+                }
+
                 // Fire automation triggers
                 for (auto *trigger : viewer->thumbnail_click_triggers_) {
                   trigger->trigger(static_cast<size_t>(image_index));
@@ -1150,6 +1157,11 @@ void PictureViewer::create_thumbnail_widgets_() {
                 if (viewer->thumbnail_click_triggers_.empty()) {
                   viewer->show_image(image_index);
                   viewer->update_thumbnail_highlighting_(image_index);
+                }
+
+                // Show pause overlay if slideshow was playing
+                if (was_playing) {
+                  viewer->show_overlay_icon_(false);  // Show pause icon
                 }
               }
             }
