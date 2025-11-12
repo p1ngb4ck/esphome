@@ -2269,15 +2269,10 @@ void PictureViewer::slide_thumbnails(bool show) {
     }
   }
 
-  // Only invalidate the container - LVGL will refresh on next cycle
-  // This is more performant than forcing immediate refresh
-  if (parent != nullptr) {
-    lv_obj_invalidate(parent);
-  } else {
-    lv_obj_invalidate(this->thumbnail_container_);
-  }
-
   this->thumbnails_visible_ = show;
+
+  // Force immediate refresh after all flag/style changes are complete
+  lv_refr_now(NULL);
 #endif
 }
 
