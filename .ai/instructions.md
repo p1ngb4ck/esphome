@@ -416,8 +416,7 @@ Respect these constraints to avoid wasting the user's time and destroying their 
 
     *   **C++ Class Pattern:**
         ```cpp
-        namespace esphome {
-        namespace my_component {
+        namespace esphome::my_component {
 
         class MyComponent : public Component {
          public:
@@ -433,8 +432,7 @@ Respect these constraints to avoid wasting the user's time and destroying their 
           int param_{0};
         };
 
-        }  // namespace my_component
-        }  // namespace esphome
+        }  // namespace esphome::my_component
         ```
 
     *   **Common Component Examples:**
