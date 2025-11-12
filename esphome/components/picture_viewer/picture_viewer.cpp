@@ -1119,22 +1119,17 @@ void PictureViewer::create_thumbnail_widgets_() {
     }
   }
 
-  // If slide mode is enabled, start with thumbnails hidden (in background)
-  if (this->thumbnail_slide_enabled_) {
-    lv_obj_move_background(this->thumbnail_container_);
-    this->thumbnails_visible_ = false;
-    ESP_LOGI(TAG, "Thumbnails hidden initially (moved to background)");
-  } else {
-    // If slide mode disabled, keep thumbnails visible (in foreground)
-    lv_obj_move_foreground(this->thumbnail_container_);
-    this->thumbnails_visible_ = true;
-    ESP_LOGI(TAG, "Thumbnails visible (moved to foreground)");
-  }
+  // Always start with thumbnails hidden (moved to background)
+  // This gives time for preloading before user sees them
+  lv_obj_move_background(this->thumbnail_container_);
+  this->thumbnails_visible_ = false;
+  ESP_LOGI(TAG, "Thumbnails hidden initially (moved to background) - will slide in after preload");
 
   // Note: Widget hiding based on image count happens in update_directory_files_()
   // after images are loaded, not here during setup when images_.size() is 0
 
-  lv_refr_now(NULL);
+  // Only invalidate the container, don't force full refresh
+  lv_obj_invalidate(this->thumbnail_container_);
   ESP_LOGI(TAG, "Created %zu thumbnail widgets (%zu visible)", this->thumbnail_config_.max_count,
            std::min(this->images_.size(), this->thumbnail_config_.max_count));
 }
@@ -2175,6 +2170,21 @@ void PictureViewer::slide_thumbnails(bool show) {
     return;
   }
 
+#ifdef USE_ESP_IDF
+  // Wait for preload to complete if sliding in (delay up to 3 seconds)
+  if (show && !this->preload_complete_) {
+    ESP_LOGI(TAG, "Waiting for thumbnail preload to complete...");
+    int wait_count = 0;
+    while (!this->preload_complete_ && wait_count < 60) {
+      vTaskDelay(pdMS_TO_TICKS(50));  // Wait 50ms
+      wait_count++;
+    }
+    if (!this->preload_complete_) {
+      ESP_LOGW(TAG, "Preload still not complete after 3s, showing thumbnails anyway");
+    }
+  }
+#endif
+
   // Use z-order instead of positioning: move to foreground (show) or background (hide)
   // This is more performant and avoids positioning issues with different layouts/styles
   // Move the parent container (thumbnail_strip) instead of just the thumbnail list
@@ -2198,11 +2208,13 @@ void PictureViewer::slide_thumbnails(bool show) {
     }
   }
 
-  // Mark container as needing redraw
-  lv_obj_invalidate(this->thumbnail_container_);
-
-  // Force immediate screen refresh to make z-order change visible
-  lv_refr_now(NULL);
+  // Only invalidate the container - LVGL will refresh on next cycle
+  // This is more performant than forcing immediate refresh
+  if (parent != nullptr) {
+    lv_obj_invalidate(parent);
+  } else {
+    lv_obj_invalidate(this->thumbnail_container_);
+  }
 
   this->thumbnails_visible_ = show;
 #endif
@@ -2314,15 +2326,14 @@ void PictureViewer::preload_thumbnails_for_viewport_() {
     int eviction_threshold = is_behind_viewport ? hysteresis : preload_count;
 
     if (distance_from_viewport > eviction_threshold) {
+      // Store index before clearing (for logging)
+      int evicted_index = cache_entry.image_index;
       // Mark for eviction (will be reused by next load_thumbnail_ call)
       cache_entry.loaded = false;
       cache_entry.image_index = -1;
-      ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", cache_entry.image_index, distance_from_viewport);
+      ESP_LOGD(TAG, "Evicting thumbnail %d (distance: %d)", evicted_index, distance_from_viewport);
     }
   }
-
-  // Force LVGL refresh after all thumbnails in viewport are loaded
-  lv_refr_now(NULL);
 }
 #endif
 
@@ -2435,6 +2446,9 @@ void PictureViewer::preload_task_func_(void *param) {
 
   ESP_LOGI(TAG, "Thumbnail preload task completed - preloaded ~30 thumbnails");
 
+  // Mark preload as complete
+  viewer->preload_complete_ = true;
+
   // Task self-deletes
   viewer->preload_task_handle_ = nullptr;
   vTaskDelete(NULL);
@@ -2443,6 +2457,9 @@ void PictureViewer::preload_task_func_(void *param) {
 void PictureViewer::start_preload_task_() {
   // Stop existing task if running
   this->stop_preload_task_();
+
+  // Reset preload flag
+  this->preload_complete_ = false;
 
   // Create new preload task with lower priority to not interfere with main loop
   // Use core 0 (opposite of LVGL which typically runs on core 1)
