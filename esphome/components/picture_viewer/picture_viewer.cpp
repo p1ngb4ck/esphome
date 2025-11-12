@@ -2246,10 +2246,32 @@ void PictureViewer::slide_thumbnails(bool show) {
     const int thumb_w = this->thumbnail_config_.width;
     const int thumb_h = this->thumbnail_config_.height;
     size_t visible_count = std::min(this->images_.size(), this->thumbnail_cache_.size());
+
+    // Debug: Log container size and position
+    if (parent != nullptr) {
+      ESP_LOGD(TAG, "Parent container size: %dx%d at (%d,%d)", lv_obj_get_width(parent), lv_obj_get_height(parent),
+               lv_obj_get_x(parent), lv_obj_get_y(parent));
+    }
+    ESP_LOGD(TAG, "Thumbnail container size: %dx%d at (%d,%d)", lv_obj_get_width(this->thumbnail_container_),
+             lv_obj_get_height(this->thumbnail_container_), lv_obj_get_x(this->thumbnail_container_),
+             lv_obj_get_y(this->thumbnail_container_));
+
     for (size_t i = 0; i < visible_count; i++) {
       if (this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
         lv_obj_clear_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_size(this->thumbnail_cache_[i].thumb_btn_, thumb_w, thumb_h);
+
+        // Debug: Log first widget details
+        if (i == 0) {
+          lv_obj_t *btn = this->thumbnail_cache_[i].thumb_btn_;
+          ESP_LOGD(TAG, "Widget 0: size=%dx%d at (%d,%d), flags=0x%x", lv_obj_get_width(btn), lv_obj_get_height(btn),
+                   lv_obj_get_x(btn), lv_obj_get_y(btn), lv_obj_get_flags(btn));
+          if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
+            lv_obj_t *canvas = this->thumbnail_cache_[i].thumb_canvas_;
+            ESP_LOGD(TAG, "Canvas 0: size=%dx%d at (%d,%d), flags=0x%x", lv_obj_get_width(canvas),
+                     lv_obj_get_height(canvas), lv_obj_get_x(canvas), lv_obj_get_y(canvas), lv_obj_get_flags(canvas));
+          }
+        }
 
         // Also ensure canvas inside button is properly centered and sized
         if (this->thumbnail_cache_[i].thumb_canvas_ != nullptr) {
