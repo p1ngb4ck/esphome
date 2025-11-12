@@ -28,6 +28,15 @@ namespace picture_viewer {
 // Forward declarations
 class PictureViewer;
 
+// Thumbnail click trigger
+class ThumbnailClickTrigger : public Trigger<size_t> {
+ public:
+  explicit ThumbnailClickTrigger(PictureViewer *parent) : parent_(parent) {}
+
+ protected:
+  PictureViewer *parent_;
+};
+
 // Directory configuration with per-directory JPEG decoder settings
 struct DirectoryConfig {
   std::string path;
@@ -302,6 +311,20 @@ class PictureViewer : public Component {
     this->thumbnail_ready_callback_ = callback;
   }
 
+  // =====================================================
+  // Thumbnail Click Automation
+  // =====================================================
+
+  /// Register thumbnail click trigger
+  void add_on_thumbnail_click_callback(ThumbnailClickTrigger *trigger) {
+    this->thumbnail_click_triggers_.push_back(trigger);
+  }
+
+  /// Register thumbnail click lambda callback
+  void add_on_thumbnail_click_callback(std::function<void(size_t)> &&callback) {
+    this->thumbnail_click_callbacks_.add(std::move(callback));
+  }
+
  protected:
   // Configuration
 #ifdef USE_STORAGE_HOST
@@ -377,6 +400,10 @@ class PictureViewer : public Component {
   ThumbnailConfig thumbnail_config_;
   std::vector<ThumbnailCacheEntry> thumbnail_cache_;
   std::function<void(size_t)> thumbnail_ready_callback_;  // Called when thumbnail is loaded
+
+  // Thumbnail click automation
+  std::vector<ThumbnailClickTrigger *> thumbnail_click_triggers_;
+  CallbackManager<void(size_t)> thumbnail_click_callbacks_;
 
   // Work buffer for JPEG decoding (reused for every decode operation)
   uint8_t *decode_work_buffer_{nullptr};

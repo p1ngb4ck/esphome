@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components.transcoder import require_jpeg_decoder
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,11 @@ picture_viewer_ns = cg.esphome_ns.namespace("picture_viewer")
 
 # Classes
 PictureViewer = picture_viewer_ns.class_("PictureViewer", cg.Component)
+
+# Triggers
+ThumbnailClickTrigger = picture_viewer_ns.class_(
+    "ThumbnailClickTrigger", automation.Trigger.template(cg.size_t)
+)
 
 # Enums
 SlideshowMode = picture_viewer_ns.enum("SlideshowMode", is_class=True)
@@ -93,6 +99,7 @@ CONF_THUMBNAIL_CONTAINER_STYLE_ID = "thumbnail_container_style_id"
 CONF_THUMBNAIL_LABEL_PATTERN = "thumbnail_label_pattern"
 CONF_THUMBNAIL_LABEL_STYLE_ID = "thumbnail_label_style_id"
 CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
+CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
 
 # Directory configuration schema
 DIRECTORY_SCHEMA = cv.Schema(
@@ -226,6 +233,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DEFAULT_IMAGE_INDEX): cv.Any(
                 cv.int_range(min=0), cv.one_of("off", "OFF", lower=True)
             ),
+            cv.Optional(CONF_ON_THUMBNAIL_CLICK): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        ThumbnailClickTrigger
+                    ),
+                }
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_buffer_sizes,
@@ -306,6 +320,12 @@ async def to_code(config):
             cg.add(var.set_default_image_index(-1))  # -1 means disabled
         else:
             cg.add(var.set_default_image_index(default_index))
+
+    # Thumbnail click automation
+    for conf in config.get(CONF_ON_THUMBNAIL_CLICK, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [(cg.size_t, "x")], conf)
+        cg.add(var.add_on_thumbnail_click_callback(trigger))
 
     # Configuration
     cg.add(var.set_slideshow_interval(config[CONF_SLIDESHOW_INTERVAL]))

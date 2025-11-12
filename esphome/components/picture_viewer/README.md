@@ -45,28 +45,266 @@ external_components:
 
 ## Configuration
 
-### Basic Example
+### Basic Example (Single Directory with Initial File List)
+
+This example shows how file_manager sends the complete file list to picture_viewer after initial scan. The callback fires **once per directory** with all matching files.
 
 ```yaml
+# Configure storage
 storage_host:
   id: storage
+  sd_card:
+    cs_pin: GPIO10
+    spi_id: spi_bus
+
+  # File manager monitors directory and sends file list to picture_viewer
   file_managers:
     - id: photo_monitor
       watch_directory: /sd/photos
+      scan_interval: 5s
       patterns:
         - "*.jpg"
         - "*.jpeg"
 
+      # Initial scan callback - fires ONCE per directory with complete file list
+      on_directory_changed:
+        - lambda: |-
+            // Send complete file list to picture_viewer (once per directory)
+            id(viewer)->update_directory_files(x.path, x.files);
+
+# Picture viewer displays images from monitored directory
+picture_viewer:
+  id: viewer
+  canvas_id: photo_canvas
+  display_id: main_display
+
+  # Directory configuration with JPEG decoder settings
+  directories:
+    - path: /sd/photos
+      jpeg_rgb_order: RGB      # RGB or BGR
+      jpeg_color_space: BT601  # BT601 or BT709
+      jpeg_output_format: RGB565  # RGB565, RGB888, or GRAY
+
+  # Slideshow and display settings
+  slideshow_interval: 5s
+  default_image_index: 0  # Show first image on startup (or "off" to disable)
+  fit_mode: SCALE_TO_FIT  # SCALE_TO_FIT, SCALE_TO_FILL, STRETCH, or CENTER
+
+  # Thumbnail configuration (optional)
+  enable_thumbnails: true
+  thumbnail_width: 120
+  thumbnail_height: 90
+  thumbnail_max_count: 10
+  thumbnail_layout: HORIZONTAL  # HORIZONTAL, VERTICAL, or GRID
+  thumbnail_container_id: thumb_list  # LVGL container widget
+```
+
+### Dynamic File Change Detection
+
+This example shows how to handle real-time file changes (add/remove files while running). The callback triggers on any directory change and sends the updated file list.
+
+```yaml
+storage_host:
+  id: storage
+  sd_card:
+    cs_pin: GPIO10
+    spi_id: spi_bus
+
+  # File manager with change detection
+  file_managers:
+    - id: photo_monitor
+      watch_directory: /sd/photos
+      scan_interval: 2s  # Scan more frequently for quicker updates
+      patterns: ["*.jpg", "*.jpeg"]
+
+      # Fires on directory changes (files added, modified, or deleted)
+      on_directory_changed:
+        - lambda: |-
+            // Log changes for debugging
+            ESP_LOGI("FileManager", "Directory changed: %zu files total", x.files.size());
+            if (!x.added.empty()) {
+              ESP_LOGI("FileManager", "  Added: %zu files", x.added.size());
+            }
+            if (!x.deleted.empty()) {
+              ESP_LOGI("FileManager", "  Deleted: %zu files", x.deleted.size());
+            }
+
+            // Send updated complete file list to picture_viewer
+            id(viewer)->update_directory_files(x.path, x.files);
+
+picture_viewer:
+  id: viewer
+  canvas_id: photo_canvas
+
+  directories:
+    - path: /sd/photos
+      jpeg_rgb_order: RGB
+      jpeg_color_space: BT601
+      jpeg_output_format: RGB565
+
+  slideshow_interval: 5s
+  default_image_index: 0
+```
+
+### Multiple Directories Example
+
+This example shows monitoring multiple directories with per-directory JPEG decoder settings.
+
+```yaml
+storage_host:
+  id: storage
+  sd_card:
+    cs_pin: GPIO10
+    spi_id: spi_bus
+
+  # Monitor multiple directories
+  file_managers:
+    - id: photo_monitor
+      watch_directory: /sd/photos
+      scan_interval: 5s
+      patterns: ["*.jpg", "*.jpeg"]
+      on_directory_changed:
+        - lambda: |-
+            id(viewer)->update_directory_files(x.path, x.files);
+
+    - id: vacation_monitor
+      watch_directory: /sd/vacation
+      scan_interval: 5s
+      patterns: ["*.jpg"]
+      on_directory_changed:
+        - lambda: |-
+            id(viewer)->update_directory_files(x.path, x.files);
+
+    - id: family_monitor
+      watch_directory: /sd/family
+      scan_interval: 5s
+      patterns: ["*.jpg", "*.jpeg"]
+      on_directory_changed:
+        - lambda: |-
+            id(viewer)->update_directory_files(x.path, x.files);
+
+# Picture viewer with per-directory JPEG settings
+picture_viewer:
+  id: viewer
+  canvas_id: photo_canvas
+
+  # Each directory can have different JPEG decoder settings
+  directories:
+    - path: /sd/photos
+      jpeg_rgb_order: RGB
+      jpeg_color_space: BT601
+      jpeg_output_format: RGB565
+
+    - path: /sd/vacation
+      jpeg_rgb_order: BGR
+      jpeg_color_space: BT709
+      jpeg_output_format: RGB888
+
+    - path: /sd/family
+      jpeg_rgb_order: RGB
+      jpeg_color_space: BT601
+      jpeg_output_format: RGB565
+
+  slideshow_interval: 5s
+
+# Switch between directories at runtime
+button:
+  - platform: gpio
+    pin: GPIO5
+    on_press:
+      - lambda: |-
+          // Cycle through directories
+          size_t current = id(viewer)->get_current_directory_index();
+          size_t count = id(viewer)->get_directory_count();
+          id(viewer)->set_current_directory((current + 1) % count);
+```
+
+### Advanced LVGL Integration with Thumbnails
+
+```yaml
+# Picture viewer with custom LVGL styles and thumbnail labels
 picture_viewer:
   id: viewer
   file_manager_id: photo_monitor
   canvas_id: photo_canvas
-  display_id: main_display
-  watch_directory: /sd/photos
-  slideshow_interval: 5s
-  enable_thumbnails: true
-  thumbnail_width: 120
-  thumbnail_height: 90
+  thumbnail_container_id: thumb_list
+
+  directories:
+    - path: /sd/photos
+
+  # Custom LVGL styles (optional)
+  thumbnail_style_id: my_thumb_style
+  thumbnail_active_style_id: my_active_thumb_style
+  thumbnail_container_style_id: my_container_style
+
+  # Thumbnail labels (optional)
+  thumbnail_label_pattern: "{index}"  # Options: {index}, {filename}, {name}
+  thumbnail_label_style_id: my_label_style
+
+  # Overlay icons for slideshow feedback
+  overlay_icon_size: 128
+  overlay_icon_color: 0xFFFFFF
+  overlay_duration: 1500
+
+# Define custom LVGL styles
+lvgl:
+  styles:
+    - id: my_thumb_style
+      pad_all: 0
+      border_width: 0
+      radius: 0
+
+    - id: my_active_thumb_style
+      pad_all: 0
+      border_width: 2
+      border_color: 0x00FF00
+      radius: 0
+
+    - id: my_label_style
+      text_color: 0xFFFFFF
+      text_font: montserrat_12
+```
+
+### Custom Thumbnail Click Actions
+
+By default, clicking a thumbnail shows that image in the main canvas. You can override this behavior with custom automation.
+
+**IMPORTANT:** When you add `on_thumbnail_click` automation, the default behavior (showing the image) is **disabled**. You must explicitly call `show_image()` if you want that functionality.
+
+```yaml
+picture_viewer:
+  id: viewer
+  canvas_id: photo_canvas
+
+  directories:
+    - path: /sd/photos
+
+  # Custom thumbnail click behavior
+  on_thumbnail_click:
+    - logger.log:
+        format: "Thumbnail clicked: image index %d"
+        args: ['x']
+
+    # You MUST call show_image() if you want the default behavior
+    - lambda: |-
+        id(viewer)->show_image(x);
+
+    # Example: Also trigger other actions
+    - light.turn_on: status_led
+
+# Alternative: Log only, don't show image
+picture_viewer:
+  id: viewer2
+  canvas_id: photo_canvas2
+
+  directories:
+    - path: /sd/photos
+
+  on_thumbnail_click:
+    # Image NOT shown - full custom control
+    - logger.log:
+        format: "Just logging, not showing image %d"
+        args: ['x']
 ```
 
 ### Complete Example

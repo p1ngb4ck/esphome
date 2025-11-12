@@ -771,9 +771,19 @@ void PictureViewer::create_thumbnail_widgets_() {
           if (index < viewer->thumbnail_cache_.size()) {
             int image_index = viewer->thumbnail_cache_[index].image_index;
             if (image_index >= 0) {
-              ESP_LOGI(TAG, "Thumbnail %zu clicked, showing image %d", index, image_index);
-              viewer->show_image(image_index);
-              viewer->update_thumbnail_highlighting_(image_index);
+              ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
+
+              // Fire automation triggers
+              for (auto *trigger : viewer->thumbnail_click_triggers_) {
+                trigger->trigger(static_cast<size_t>(image_index));
+              }
+              viewer->thumbnail_click_callbacks_.call(static_cast<size_t>(image_index));
+
+              // Default behavior: show image (only if no automation is configured)
+              if (viewer->thumbnail_click_triggers_.empty()) {
+                viewer->show_image(image_index);
+                viewer->update_thumbnail_highlighting_(image_index);
+              }
             }
           }
         },
@@ -1725,16 +1735,17 @@ void PictureViewer::draw_play_icon_(int center_x, int center_y, int size, uint32
   // Convert RGB888 to RGB565
   uint16_t color565 = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
 
-  // Draw triangle pointing right
-  int half_size = size / 2;
-  int triangle_height = (int) (half_size * 1.732f);  // height = side * sqrt(3)
+  // Draw filled right-pointing triangle (taller than wide)
+  // Triangle is roughly 0.75 width to height ratio
+  int height = size;
+  int width = (int) (size * 0.75f);
 
   // Triangle vertices (pointing right)
-  int x1 = center_x - half_size / 2;
-  int y1 = center_y - triangle_height / 2;
-  int x2 = center_x - half_size / 2;
-  int y2 = center_y + triangle_height / 2;
-  int x3 = center_x + half_size;
+  int x1 = center_x - width / 2;  // Left vertex (top)
+  int y1 = center_y - height / 2;
+  int x2 = center_x - width / 2;  // Left vertex (bottom)
+  int y2 = center_y + height / 2;
+  int x3 = center_x + width / 2;  // Right vertex (tip)
   int y3 = center_y;
 
   // Fill triangle using scanline algorithm
@@ -1743,10 +1754,23 @@ void PictureViewer::draw_play_icon_(int center_x, int center_y, int size, uint32
       continue;
 
     // Calculate x range for this scanline
-    float t = (float) (y - y1) / (y2 - y1);
-    int x_left = x1;
-    int x_right = (int) (x1 + t * (x3 - x1));
+    // Interpolate between left edge and right tip
+    float t = (float) (y - y1) / (float) (y2 - y1);
 
+    // Left edge stays at x1, right edge goes from x1 to x3 and back
+    int x_left = x1;
+    int x_right;
+    if (y <= y3) {
+      // Upper half: interpolate from (x1,y1) to (x3,y3)
+      float t_upper = (float) (y - y1) / (float) (y3 - y1);
+      x_right = (int) (x1 + t_upper * (x3 - x1));
+    } else {
+      // Lower half: interpolate from (x3,y3) to (x2,y2)
+      float t_lower = (float) (y - y3) / (float) (y2 - y3);
+      x_right = (int) (x3 - t_lower * (x3 - x2));
+    }
+
+    // Draw scanline
     for (int x = x_left; x <= x_right; x++) {
       if (x >= 0 && x < this->canvas_width_) {
         this->canvas_buffer_[y * this->canvas_width_ + x] = color565;
