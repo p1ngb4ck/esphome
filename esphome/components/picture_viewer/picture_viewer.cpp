@@ -2082,6 +2082,9 @@ void PictureViewer::slide_thumbnails(bool show) {
   // Mark container as needing redraw
   lv_obj_invalidate(this->thumbnail_container_);
 
+  // Force immediate screen refresh to make z-order change visible
+  lv_refr_now(NULL);
+
   this->thumbnails_visible_ = show;
 #endif
 }
