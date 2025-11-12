@@ -401,6 +401,14 @@ class PictureViewer : public Component {
   uint32_t last_scroll_time_{0};
   float scroll_velocity_{0.0f};  // pixels per millisecond
 
+#ifdef USE_ESP_IDF
+  // FreeRTOS task for background thumbnail preloading
+  TaskHandle_t preload_task_handle_{nullptr};
+  static void preload_task_func_(void *param);
+  void start_preload_task_();
+  void stop_preload_task_();
+#endif
+
   // Current displayed image (allocated in PSRAM if available)
   uint8_t *current_image_data_{nullptr};  // RGB565 data in PSRAM
   int current_image_width_{0};

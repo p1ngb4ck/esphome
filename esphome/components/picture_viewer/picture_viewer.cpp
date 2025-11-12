@@ -664,6 +664,13 @@ void PictureViewer::update_directory_files_(const std::string &directory_path,
         this->scan_directory_(files);
 
         ESP_LOGI(TAG, "After directory update: %zu images found", this->images_.size());
+
+#ifdef USE_ESP_IDF
+        // Start background preloading task for thumbnails
+        if (this->thumbnail_config_.enabled && !this->images_.empty()) {
+          this->start_preload_task_();
+        }
+#endif
       } else {
         ESP_LOGD(TAG, "Update is for directory index %zu, but current is %zu - ignoring", i,
                  this->current_directory_index_);
@@ -1086,8 +1093,8 @@ void PictureViewer::create_thumbnail_widgets_() {
 
   // Hide thumbnail widgets that exceed the number of images
   for (size_t i = this->images_.size(); i < this->thumbnail_config_.max_count; i++) {
-    if (i < this->thumbnail_cache_.size() && this->thumbnail_cache_[i].thumb_button_ != nullptr) {
-      lv_obj_add_flag(this->thumbnail_cache_[i].thumb_button_, LV_OBJ_FLAG_HIDDEN);
+    if (i < this->thumbnail_cache_.size() && this->thumbnail_cache_[i].thumb_btn_ != nullptr) {
+      lv_obj_add_flag(this->thumbnail_cache_[i].thumb_btn_, LV_OBJ_FLAG_HIDDEN);
     }
   }
 
@@ -2356,6 +2363,75 @@ template<typename... Ts> class StopSlideshowAction : public Action<Ts...> {
  protected:
   PictureViewer *parent_;
 };
+
+// =====================================================
+// Background Thumbnail Preloading Task
+// =====================================================
+
+#ifdef USE_ESP_IDF
+void PictureViewer::preload_task_func_(void *param) {
+  auto *viewer = static_cast<PictureViewer *>(param);
+
+  ESP_LOGI(TAG, "Thumbnail preload task started");
+
+  // Preload thumbnails aggressively at boot
+  // Start from current image and expand outward
+  size_t current_idx = (viewer->current_index_ >= 0) ? viewer->current_index_ : 0;
+  size_t total_images = viewer->images_.size();
+
+  // Preload current image thumbnail first
+  if (current_idx < total_images) {
+    viewer->request_thumbnail(current_idx);
+    vTaskDelay(pdMS_TO_TICKS(50));  // Small delay between loads
+  }
+
+  // Preload forward from current (next 10-15 images)
+  for (size_t i = 1; i <= 15 && (current_idx + i) < total_images; i++) {
+    viewer->request_thumbnail(current_idx + i);
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  // Preload backward from current (previous 10-15 images)
+  for (size_t i = 1; i <= 15 && current_idx >= i; i++) {
+    viewer->request_thumbnail(current_idx - i);
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  ESP_LOGI(TAG, "Thumbnail preload task completed - preloaded ~30 thumbnails");
+
+  // Task self-deletes
+  viewer->preload_task_handle_ = nullptr;
+  vTaskDelete(NULL);
+}
+
+void PictureViewer::start_preload_task_() {
+  // Stop existing task if running
+  this->stop_preload_task_();
+
+  // Create new preload task with lower priority to not interfere with main loop
+  // Use core 0 (opposite of LVGL which typically runs on core 1)
+  xTaskCreatePinnedToCore(preload_task_func_, "thumb_preload", 4096,  // 4KB stack
+                          this,                                       // parameter
+                          1,                                          // priority (low)
+                          &this->preload_task_handle_,                // handle
+                          0                                           // core 0
+  );
+
+  if (this->preload_task_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create thumbnail preload task");
+  } else {
+    ESP_LOGI(TAG, "Thumbnail preload task created");
+  }
+}
+
+void PictureViewer::stop_preload_task_() {
+  if (this->preload_task_handle_ != nullptr) {
+    ESP_LOGD(TAG, "Stopping thumbnail preload task");
+    vTaskDelete(this->preload_task_handle_);
+    this->preload_task_handle_ = nullptr;
+  }
+}
+#endif  // USE_ESP_IDF
 
 }  // namespace picture_viewer
 }  // namespace esphome
