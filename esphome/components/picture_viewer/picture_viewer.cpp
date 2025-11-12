@@ -397,6 +397,8 @@ void PictureViewer::dump_config() {
   ESP_LOGCONFIG(TAG, "  Thumbnails: %s", this->enable_thumbnails_ ? "enabled" : "disabled");
   if (this->enable_thumbnails_) {
     ESP_LOGCONFIG(TAG, "  Thumbnail Size: %dx%d", this->thumbnail_width_, this->thumbnail_height_);
+    ESP_LOGCONFIG(TAG, "  Thumbnail Slide: %s (edge: %d)", this->thumbnail_slide_enabled_ ? "enabled" : "disabled",
+                  (int) this->thumbnail_slide_edge_);
   }
 #ifdef USE_ESP_JPEG_DECODER
   ESP_LOGCONFIG(TAG, "  Decoder: esp_jpeg (ESP32-S2/S3)");
@@ -1003,9 +1005,6 @@ void PictureViewer::create_thumbnail_widgets_() {
       }
     }
 
-    // Allow gestures to bubble up to parent for slide-out detection
-    lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
-
     // Create canvas inside button
     lv_obj_t *canvas = lv_canvas_create(btn);
     lv_obj_center(canvas);
@@ -1046,29 +1045,42 @@ void PictureViewer::create_thumbnail_widgets_() {
         btn,
         [](lv_event_t *e) {
           auto *viewer = static_cast<PictureViewer *>(lv_event_get_user_data(e));
-          auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
+          lv_event_code_t code = lv_event_get_code(e);
 
-          // Get the image index from the thumbnail cache
-          if (index < viewer->thumbnail_cache_.size()) {
-            int image_index = viewer->thumbnail_cache_[index].image_index;
-            if (image_index >= 0) {
-              ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
+          // Handle CLICKED events - select the image
+          if (code == LV_EVENT_CLICKED) {
+            auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_target(e)));
 
-              // Fire automation triggers
-              for (auto *trigger : viewer->thumbnail_click_triggers_) {
-                trigger->trigger(static_cast<size_t>(image_index));
-              }
-              viewer->thumbnail_click_callbacks_.call(static_cast<size_t>(image_index));
+            // Get the image index from the thumbnail cache
+            if (index < viewer->thumbnail_cache_.size()) {
+              int image_index = viewer->thumbnail_cache_[index].image_index;
+              if (image_index >= 0) {
+                ESP_LOGI(TAG, "Thumbnail %zu clicked (image index %d)", index, image_index);
 
-              // Default behavior: show image (only if no automation is configured)
-              if (viewer->thumbnail_click_triggers_.empty()) {
-                viewer->show_image(image_index);
-                viewer->update_thumbnail_highlighting_(image_index);
+                // Fire automation triggers
+                for (auto *trigger : viewer->thumbnail_click_triggers_) {
+                  trigger->trigger(static_cast<size_t>(image_index));
+                }
+                viewer->thumbnail_click_callbacks_.call(static_cast<size_t>(image_index));
+
+                // Default behavior: show image (only if no automation is configured)
+                if (viewer->thumbnail_click_triggers_.empty()) {
+                  viewer->show_image(image_index);
+                  viewer->update_thumbnail_highlighting_(image_index);
+                }
               }
             }
           }
+          // Handle GESTURE events - manually bubble to parent for slide-out
+          else if (code == LV_EVENT_GESTURE && viewer->thumbnail_slide_enabled_ && viewer->thumbnails_visible_) {
+            lv_obj_t *parent = lv_obj_get_parent(viewer->thumbnail_container_);
+            if (parent != nullptr) {
+              // Manually send gesture event to parent
+              lv_event_send(parent, LV_EVENT_GESTURE, nullptr);
+            }
+          }
         },
-        LV_EVENT_CLICKED, this);
+        LV_EVENT_ALL, this);
 
     // Store thumbnail index in button user data
     lv_obj_set_user_data(btn, reinterpret_cast<void *>(thumbnail_index));
