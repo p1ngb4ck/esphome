@@ -1152,25 +1152,24 @@ void PictureViewer::create_thumbnail_widgets_() {
     }
   }
 
-  // Always start with thumbnails hidden
-  // This gives time for preloading before user sees them
-  this->thumbnails_visible_ = false;
+  // TESTING: Start with thumbnails visible to verify rendering
+  this->thumbnails_visible_ = true;
 
-  // Hide parent container to prevent blocking canvas touch events
+  // Keep parent in foreground and visible for testing
   if (parent != nullptr) {
-    lv_obj_add_flag(parent, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_background(parent);
+    lv_obj_clear_flag(parent, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(parent);
     if (this->thumbnail_slide_enabled_) {
-      lv_obj_clear_flag(parent, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
     }
-    ESP_LOGD(TAG, "Hidden thumbnail parent container");
+    ESP_LOGD(TAG, "TESTING: Thumbnail parent container visible by default");
   } else {
-    lv_obj_add_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_background(this->thumbnail_container_);
-    ESP_LOGD(TAG, "Hidden thumbnail container");
+    lv_obj_clear_flag(this->thumbnail_container_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->thumbnail_container_);
+    ESP_LOGD(TAG, "TESTING: Thumbnail container visible by default");
   }
 
-  ESP_LOGI(TAG, "Thumbnails hidden initially - will slide in after preload");
+  ESP_LOGI(TAG, "TESTING: Thumbnails visible by default for debugging");
 
   // Note: Widget hiding based on image count happens in update_directory_files_()
   // after images are loaded, not here during setup when images_.size() is 0
