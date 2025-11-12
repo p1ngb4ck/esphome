@@ -2084,45 +2084,17 @@ void PictureViewer::slide_thumbnails(bool show) {
     return;
   }
 
-  lv_coord_t screen_width = lv_obj_get_width(lv_obj_get_parent(this->thumbnail_container_));
-  lv_coord_t screen_height = lv_obj_get_height(lv_obj_get_parent(this->thumbnail_container_));
-  lv_coord_t container_width = lv_obj_get_width(this->thumbnail_container_);
-  lv_coord_t container_height = lv_obj_get_height(this->thumbnail_container_);
-
-  lv_coord_t target_x = 0;
-  lv_coord_t target_y = 0;
-
+  // Use z-order instead of positioning: move to foreground (show) or background (hide)
+  // This is more performant and avoids positioning issues with different layouts/styles
   if (show) {
-    // Slide in - position at edge
-    target_x = 0;
-    target_y = 0;
+    lv_obj_move_foreground(this->thumbnail_container_);
+    ESP_LOGD(TAG, "Thumbnails slid IN (moved to foreground)");
   } else {
-    // Slide out - position off-screen based on configured edge
-    switch (this->thumbnail_slide_edge_) {
-      case ThumbnailSlideEdge::RIGHT:
-        target_x = screen_width;
-        target_y = 0;
-        break;
-      case ThumbnailSlideEdge::LEFT:
-        target_x = -container_width;
-        target_y = 0;
-        break;
-      case ThumbnailSlideEdge::TOP:
-        target_x = 0;
-        target_y = -container_height;
-        break;
-      case ThumbnailSlideEdge::BOTTOM:
-        target_x = 0;
-        target_y = screen_height;
-        break;
-    }
+    lv_obj_move_background(this->thumbnail_container_);
+    ESP_LOGD(TAG, "Thumbnails slid OUT (moved to background)");
   }
 
-  // Move container to target position
-  lv_obj_set_pos(this->thumbnail_container_, target_x, target_y);
   this->thumbnails_visible_ = show;
-
-  ESP_LOGD(TAG, "Thumbnails slid %s to position (%d, %d)", show ? "IN" : "OUT", target_x, target_y);
 #endif
 }
 
