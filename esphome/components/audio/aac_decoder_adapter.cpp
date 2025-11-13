@@ -3,6 +3,7 @@
 #ifdef USE_ESP32
 #ifdef USE_AUDIO_AAC_SUPPORT
 
+#include "esphome/core/defines.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 

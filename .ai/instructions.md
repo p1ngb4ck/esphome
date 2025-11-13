@@ -177,12 +177,13 @@ This document provides essential context for AI models interacting with this pro
 
 ### Python Codegen and Defines
 
-**ABSOLUTE RULE: Defines set by `cg.add_define()` are GLOBAL. Any component's C++ code using these defines must include `esphome/core/defines.h` in its header.**
+**ABSOLUTE RULE: Defines set by `cg.add_define()` are GLOBAL. Any component's C++ code using these defines must include `esphome/core/defines.h` in BOTH the header (.h) AND implementation (.cpp) files.**
 
 *   **The Problem:**
     *   Writing C++ code with `#ifdef USE_SOME_FEATURE` without including `esphome/core/defines.h`
     *   Forgetting that C++ code needs the header to see the defines
-    *   This causes compilation errors or incorrect behavior when defines aren't visible
+    *   This causes **linker errors for undefined references** when the `#ifdef` guards prevent code from being compiled
+    *   Even if the file compiles, the implementation is empty because the guards evaluated to false
 
 *   **How defines work in ESPHome:**
     1.  **ANY** component can call `cg.add_define("USE_SOME_FEATURE")` in its `__init__.py`
@@ -191,10 +192,11 @@ This document provides essential context for AI models interacting with this pro
     4.  **ALL** C++ code that uses `#ifdef USE_SOME_FEATURE` must include `esphome/core/defines.h`
 
 *   **Required behavior:**
-    1.  **CHECK** if the component's C++ header includes `esphome/core/defines.h`
-    2.  **ADD** `#include "esphome/core/defines.h"` if it's missing and the code uses `#ifdef`/`#ifndef`
-    3.  **DO NOT** duplicate `cg.add_define()` calls across components (defines are global!)
-    4.  **DO NOT** delete working code when investigating define issues
+    1.  **CHECK** if the component's C++ header (.h) includes `esphome/core/defines.h` - add it BEFORE any `#ifdef` checks
+    2.  **CHECK** if the component's C++ implementation (.cpp) includes `esphome/core/defines.h` - add it AFTER including the header
+    3.  **ADD** `#include "esphome/core/defines.h"` if it's missing and the code uses `#ifdef`/`#ifndef`
+    4.  **DO NOT** duplicate `cg.add_define()` calls across components (defines are global!)
+    5.  **DO NOT** delete working code when investigating define issues
 
 *   **Example of what NOT to do:**
     ```cpp
@@ -226,12 +228,18 @@ This document provides essential context for AI models interacting with this pro
     3.  **ADD** the `#include "esphome/core/defines.h"` if missing
     4.  **DO NOT** delete functionality or remove `#ifdef` blocks
 
+*   **Symptoms of missing defines.h include:**
+    *   **Linker errors** like `undefined reference to 'ClassName::method()'` even though the file compiled
+    *   The `.cpp` file compiles but produces an empty object file because `#ifdef` guards excluded all code
+    *   Code that should be conditionally compiled is missing from the final binary
+
 *   **Why this matters:**
     *   Defines are global and shared across all components
     *   C++ preprocessor needs the header to see the defines
-    *   Missing the include causes `#ifdef` checks to silently fail
-    *   This leads to wrong code paths being compiled
+    *   Missing the include causes `#ifdef` checks to silently fail (evaluate to false)
+    *   This leads to wrong code paths being compiled OR code being excluded entirely
     *   Including `defines.h` is essential for any component using conditional compilation
+    *   **Both .h and .cpp files need the include** - the header for declarations, the implementation for definitions
 
 ### Core Principle
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
 #ifdef USE_ESP32
 #ifdef USE_AUDIO_AAC_SUPPORT
 
