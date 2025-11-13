@@ -7,97 +7,35 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
-// Include esp_audio_codec headers here (not in .h to avoid compilation issues)
-extern "C" {
-#include <esp_audio_dec.h>
-#include <audio_element.h>
-#include <audio_pipeline.h>
-}
-
 namespace esphome {
 namespace audio {
 namespace esp_audio_codec_adapter {
 
 static const char *const TAG = "aac_decoder_adapter";
 
-static const size_t INPUT_RINGBUF_SIZE = 8192;
-static const size_t OUTPUT_RINGBUF_SIZE = 8192;
-
 AACDecoder::AACDecoder() {
-  // Create ring buffers for audio_element communication
-  this->input_rb_ = rb_create(INPUT_RINGBUF_SIZE, 1);
-  this->output_rb_ = rb_create(OUTPUT_RINGBUF_SIZE, 1);
+  // Configure AAC decoder using esp_audio_codec API
+  esp_audio_dec_cfg_t config = {};
+  config.type = ESP_AUDIO_TYPE_AAC;
+  config.cfg = nullptr;  // Use default AAC configuration
+  config.cfg_sz = 0;
 
-  if (!this->input_rb_ || !this->output_rb_) {
-    ESP_LOGE(TAG, "Failed to create ring buffers");
+  esp_audio_err_t err = esp_audio_dec_open(&config, &this->decoder_);
+
+  if (err != ESP_AUDIO_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to open AAC decoder: %d", err);
+    this->decoder_ = nullptr;
     return;
   }
-
-  // Create audio pipeline
-  audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
-  this->pipeline_ = audio_pipeline_init(&pipeline_cfg);
-
-  if (!this->pipeline_) {
-    ESP_LOGE(TAG, "Failed to create audio pipeline");
-    return;
-  }
-
-  // Configure AAC decoder
-  aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
-  aac_cfg.out_rb_size = OUTPUT_RINGBUF_SIZE;
-  aac_cfg.task_stack = 8 * 1024;  // Increase stack size for AAC decoding
-
-  this->decoder_ = aac_decoder_init(&aac_cfg);
-
-  if (!this->decoder_) {
-    ESP_LOGE(TAG, "Failed to create AAC decoder");
-    return;
-  }
-
-  // Set ring buffers
-  audio_element_set_input_ringbuf(this->decoder_, this->input_rb_);
-  audio_element_set_output_ringbuf(this->decoder_, this->output_rb_);
-
-  // Register decoder in pipeline
-  audio_pipeline_register(this->pipeline_, this->decoder_, "aac");
-
-  // Link elements (single element pipeline)
-  audio_pipeline_link(this->pipeline_, (const char *[]){"aac"}, 1);
-
-  // Start pipeline
-  audio_pipeline_run(this->pipeline_);
 
   this->initialized_ = true;
   ESP_LOGI(TAG, "AAC decoder adapter initialized");
 }
 
 AACDecoder::~AACDecoder() {
-  if (this->pipeline_) {
-    audio_pipeline_stop(this->pipeline_);
-    audio_pipeline_wait_for_stop(this->pipeline_);
-    audio_pipeline_terminate(this->pipeline_);
-
-    if (this->decoder_) {
-      audio_pipeline_unregister(this->pipeline_, this->decoder_);
-    }
-
-    audio_pipeline_deinit(this->pipeline_);
-    this->pipeline_ = nullptr;
-  }
-
   if (this->decoder_) {
-    audio_element_deinit(this->decoder_);
+    esp_audio_dec_close(this->decoder_);
     this->decoder_ = nullptr;
-  }
-
-  if (this->input_rb_) {
-    rb_destroy(this->input_rb_);
-    this->input_rb_ = nullptr;
-  }
-
-  if (this->output_rb_) {
-    rb_destroy(this->output_rb_);
-    this->output_rb_ = nullptr;
   }
 }
 
@@ -108,34 +46,35 @@ AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len,
     return result;
   }
 
-  // Write input data to ring buffer
-  int bytes_written = rb_write(this->input_rb_, (char *) input, input_len, pdMS_TO_TICKS(10));
+  // Prepare input data structure
+  esp_audio_dec_in_raw_t raw_input = {};
+  raw_input.buffer = const_cast<uint8_t *>(input);
+  raw_input.len = input_len;
+  raw_input.consumed = 0;
 
-  if (bytes_written <= 0) {
-    result.status = AAC_DECODER_OUT_OF_DATA;
-    return result;
-  }
+  // Prepare output data structure
+  // AAC typical max frame size: 1024 samples * 2 channels * 2 bytes = 4096 bytes
+  esp_audio_dec_out_frame_t frame_output = {};
+  frame_output.buffer = reinterpret_cast<uint8_t *>(output);
+  frame_output.len = 0;
+  frame_output.needed = 4096;  // Max buffer size available
 
-  result.bytes_consumed = bytes_written;
+  // Decode the frame
+  esp_audio_err_t err = esp_audio_dec_process(this->decoder_, &raw_input, &frame_output);
 
-  // Give decoder time to process
-  delay(5);
+  if (err == ESP_AUDIO_ERR_OK || err == ESP_AUDIO_ERR_CONTINUE) {
+    result.bytes_consumed = raw_input.consumed;
+    result.output_samples = frame_output.len / sizeof(int16_t);
 
-  // Read decoded PCM data from output ring buffer
-  int bytes_read = rb_read(this->output_rb_, (char *) output, OUTPUT_RINGBUF_SIZE, pdMS_TO_TICKS(10));
-
-  if (bytes_read > 0) {
-    result.output_samples = bytes_read / sizeof(int16_t);
-
-    // Try to get audio info from the decoder element
-    audio_element_info_t info = {};
-    if (audio_element_getinfo(this->decoder_, &info) == ESP_OK) {
-      result.sample_rate = info.sample_rates;
-      result.channels = info.channels;
+    // Get decoder info (sample rate, channels)
+    esp_audio_dec_info_t info = {};
+    if (esp_audio_dec_get_info(this->decoder_, &info) == ESP_AUDIO_ERR_OK) {
+      result.sample_rate = info.sample_rate;
+      result.channels = info.channel;
 
       // Cache for future calls
-      this->last_sample_rate_ = info.sample_rates;
-      this->last_channels_ = info.channels;
+      this->last_sample_rate_ = info.sample_rate;
+      this->last_channels_ = info.channel;
     } else {
       // Use cached values
       result.sample_rate = this->last_sample_rate_;
@@ -143,8 +82,9 @@ AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len,
     }
 
     result.status = AAC_DECODER_SUCCESS;
-  } else if (bytes_read == 0) {
+  } else if (err == ESP_AUDIO_ERR_DATA_LACK) {
     result.status = AAC_DECODER_OUT_OF_DATA;
+    result.bytes_consumed = raw_input.consumed;
   } else {
     result.status = AAC_DECODER_ERROR;
   }

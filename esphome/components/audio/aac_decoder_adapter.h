@@ -8,11 +8,11 @@
 #include <cstdint>
 #include <cstddef>
 
-// Forward declarations to avoid including esp_audio_codec headers here
-// Headers are included in .cpp file only to avoid compilation issues
-typedef void *audio_element_handle_t;
-typedef void *audio_pipeline_handle_t;
-typedef void *ringbuf_handle_t;
+// Include esp_audio_codec decoder API
+extern "C" {
+#include <decoder/esp_audio_dec.h>
+#include <esp_audio_types.h>
+}
 
 namespace esphome {
 namespace audio {
@@ -58,11 +58,7 @@ class AACDecoder {
   AACDecodeResult decode_frame(const uint8_t *input, size_t input_len, int16_t *output);
 
  protected:
-  audio_element_handle_t decoder_{nullptr};
-  audio_pipeline_handle_t pipeline_{nullptr};
-  ringbuf_handle_t input_rb_{nullptr};
-  ringbuf_handle_t output_rb_{nullptr};
-
+  esp_audio_dec_handle_t decoder_{nullptr};
   bool initialized_{false};
   int last_sample_rate_{0};
   int last_channels_{0};
