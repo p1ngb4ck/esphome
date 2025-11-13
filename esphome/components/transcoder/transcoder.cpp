@@ -52,8 +52,8 @@ void Transcoder::setup() {
   // ESP32-P4: Hardware encoder + Software decoder
   // ESP32-S3: Software encoder/decoder
   // Using esp_h264 v1.1.2 from ESP Component Registry
-  esp_h264_dec_config_t dec_config = {};
-  dec_config.pic_num = 3;  // Number of reference pictures
+  esp_h264_dec_cfg_t dec_config = {};
+  dec_config.pic_num = 3;    // Number of reference pictures
   dec_config.timeout = 200;  // Match JPEG timeout
 
   ret = esp_h264_dec_open(&dec_config, &this->h264_decoder_);
@@ -132,8 +132,7 @@ void Transcoder::dump_config() {
 
   // Report JPEG Decoder status (only if enabled)
 #ifdef TRANSCODER_ENABLE_JPEG_DECODER
-  ESP_LOGCONFIG(TAG, "  JPEG Decoder: %s",
-                this->is_jpeg_decoder_available() ? "Available" : "Not available");
+  ESP_LOGCONFIG(TAG, "  JPEG Decoder: %s", this->is_jpeg_decoder_available() ? "Available" : "Not available");
 #ifdef USE_HARDWARE_JPEG_DECODER
   ESP_LOGCONFIG(TAG, "    Type: Hardware (ESP32-P4)");
   if (this->jpeg_decoder_) {
@@ -148,8 +147,7 @@ void Transcoder::dump_config() {
 
   // Report JPEG Encoder status (only if enabled)
 #ifdef TRANSCODER_ENABLE_JPEG_ENCODER
-  ESP_LOGCONFIG(TAG, "  JPEG Encoder: %s",
-                this->is_jpeg_encoder_available() ? "Available" : "Not available");
+  ESP_LOGCONFIG(TAG, "  JPEG Encoder: %s", this->is_jpeg_encoder_available() ? "Available" : "Not available");
 #ifdef USE_HARDWARE_JPEG_ENCODER
   ESP_LOGCONFIG(TAG, "    Type: Hardware (ESP32-P4)");
   if (this->jpeg_encoder_) {
@@ -160,8 +158,7 @@ void Transcoder::dump_config() {
 
   // Report H.264 Decoder status (only if enabled)
 #ifdef TRANSCODER_ENABLE_H264_DECODER
-  ESP_LOGCONFIG(TAG, "  H.264 Decoder: %s",
-                this->is_h264_decoder_available() ? "Available" : "Not available");
+  ESP_LOGCONFIG(TAG, "  H.264 Decoder: %s", this->is_h264_decoder_available() ? "Available" : "Not available");
 #ifdef USE_ESP_H264_DECODER
   ESP_LOGCONFIG(TAG, "    Type: esp_h264 v1.1.2 (ESP32-P4/S3)");
   if (this->h264_decoder_) {
@@ -172,8 +169,7 @@ void Transcoder::dump_config() {
 
   // Report H.264 Encoder status (only if enabled)
 #ifdef TRANSCODER_ENABLE_H264_ENCODER
-  ESP_LOGCONFIG(TAG, "  H.264 Encoder: %s",
-                this->is_h264_encoder_available() ? "Available" : "Not available");
+  ESP_LOGCONFIG(TAG, "  H.264 Encoder: %s", this->is_h264_encoder_available() ? "Available" : "Not available");
 #ifdef USE_ESP_H264_ENCODER
   ESP_LOGCONFIG(TAG, "    Type: esp_h264 v1.1.2 (ESP32-P4/S3)");
   if (this->h264_encoder_) {
