@@ -443,7 +443,8 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
     return true;  // Skip unknown tracks
   }
 
-  uint64_t stbl_end = ftell(this->file_) + size - 8;
+  uint64_t stbl_start = ftell(this->file_) - 8;  // Include header
+  uint64_t stbl_end = stbl_start + size;
 
   std::vector<uint32_t> sample_sizes;
   std::vector<uint64_t> chunk_offsets;
@@ -451,7 +452,11 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
   std::vector<uint32_t> sample_durations;
   uint32_t timescale = 1000;  // Default if not found
 
-  // First pass: collect all sample table data
+  // Cache stsc box location for second pass if needed
+  uint64_t stsc_offset = 0;
+  uint32_t stsc_size = 0;
+
+  // First pass: collect all sample table data and cache stsc location
   while (ftell(this->file_) < static_cast<long>(stbl_end)) {
     uint32_t box_size, box_type;
     uint64_t box_start = ftell(this->file_);
@@ -487,12 +492,15 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
         break;
 
       case BOX_TYPE_STSC:
-        // Parse stsc after we have chunk_offsets and sample_sizes
+        // Try to parse stsc if we already have dependencies
         if (!chunk_offsets.empty() && !sample_sizes.empty()) {
           if (!this->parse_stsc_box(box_size, sample_offsets, chunk_offsets, sample_sizes)) {
             return false;
           }
         } else {
+          // Cache location for second pass
+          stsc_offset = box_start;
+          stsc_size = box_size;
           fseek(this->file_, box_start + box_size, SEEK_SET);
         }
         break;
@@ -509,11 +517,13 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
     }
   }
 
-  // Second pass: if we didn't parse stsc yet, do it now
-  if (sample_offsets.empty() && !chunk_offsets.empty() && !sample_sizes.empty()) {
-    // Need to re-parse stbl to find stsc
-    // This is a simplified implementation - in production code we'd cache the stsc offset
-    ESP_LOGW(TAG, "stsc box needs second pass - this is inefficient");
+  // Second pass: parse stsc if we skipped it earlier
+  if (sample_offsets.empty() && stsc_offset != 0 && !chunk_offsets.empty() && !sample_sizes.empty()) {
+    ESP_LOGD(TAG, "Parsing stsc in second pass (box order dependency)");
+    fseek(this->file_, stsc_offset + 8, SEEK_SET);  // Skip to box content (after header)
+    if (!this->parse_stsc_box(stsc_size, sample_offsets, chunk_offsets, sample_sizes)) {
+      return false;
+    }
   }
 
   // Store track information
