@@ -56,15 +56,16 @@ AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len,
   // AAC typical max frame size: 1024 samples * 2 channels * 2 bytes = 4096 bytes
   esp_audio_dec_out_frame_t frame_output = {};
   frame_output.buffer = reinterpret_cast<uint8_t *>(output);
-  frame_output.len = 0;
-  frame_output.needed = 4096;  // Max buffer size available
+  frame_output.len = 4096;  // Max buffer size available
+  frame_output.decoded_size = 0;
+  frame_output.needed_size = 0;
 
   // Decode the frame
   esp_audio_err_t err = esp_audio_dec_process(this->decoder_, &raw_input, &frame_output);
 
   if (err == ESP_AUDIO_ERR_OK || err == ESP_AUDIO_ERR_CONTINUE) {
     result.bytes_consumed = raw_input.consumed;
-    result.output_samples = frame_output.len / sizeof(int16_t);
+    result.output_samples = frame_output.decoded_size / sizeof(int16_t);
 
     // Get decoder info (sample rate, channels)
     esp_audio_dec_info_t info = {};
