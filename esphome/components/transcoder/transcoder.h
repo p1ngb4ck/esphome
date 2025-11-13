@@ -31,11 +31,19 @@
 #include "hal/color_types.h"
 #endif
 
-#if defined(USE_ESP_H264_DECODER) || defined(USE_ESP_H264_ENCODER)
-// ESP32-P4: Hardware H.264 encoder + Software decoder
-// ESP32-S3: Software H.264 encoder/decoder
+#ifdef USE_ESP_H264_DECODER
+// ESP32-P4/S3: Software H.264 decoder (TinyH264)
 // Use esp_h264 from ESP Component Registry
 #include "esp_h264_dec.h"
+#include "esp_h264_dec_sw.h"
+#include "esp_h264_dec_param.h"
+#include "esp_h264_types.h"
+#endif
+
+#ifdef USE_ESP_H264_ENCODER
+// ESP32-P4: Hardware H.264 encoder
+// ESP32-S3: Software H.264 encoder
+// Use esp_h264 from ESP Component Registry
 #include "esp_h264_enc_single.h"
 #include "esp_h264_types.h"
 #endif

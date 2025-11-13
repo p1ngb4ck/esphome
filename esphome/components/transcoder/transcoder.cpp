@@ -49,19 +49,24 @@ void Transcoder::setup() {
   // Initialize H.264 Decoder (only if requested by components)
 #ifdef TRANSCODER_ENABLE_H264_DECODER
 #ifdef USE_ESP_H264_DECODER
-  // ESP32-P4: Hardware encoder + Software decoder
-  // ESP32-S3: Software encoder/decoder
+  // ESP32-P4/S3: Software H.264 decoder (TinyH264)
   // Using esp_h264 v1.1.2 from ESP Component Registry
-  esp_h264_dec_cfg_t dec_config = {};
-  dec_config.pic_num = 3;    // Number of reference pictures
-  dec_config.timeout = 200;  // Match JPEG timeout
+  esp_h264_dec_cfg_sw_t dec_config = {};
+  dec_config.pic_type = ESP_H264_RAW_FMT_I420;
 
-  ret = esp_h264_dec_open(&dec_config, &this->h264_decoder_);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create H.264 decoder: %s", esp_err_to_name(ret));
+  esp_h264_err_t h264_ret = esp_h264_dec_sw_new(&dec_config, &this->h264_decoder_);
+  if (h264_ret != ESP_H264_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to create H.264 decoder: %d", h264_ret);
     // Don't mark as failed - decoder is optional
   } else {
-    ESP_LOGI(TAG, "H.264 decoder initialized");
+    h264_ret = esp_h264_dec_open(this->h264_decoder_);
+    if (h264_ret != ESP_H264_ERR_OK) {
+      ESP_LOGE(TAG, "Failed to open H.264 decoder: %d", h264_ret);
+      esp_h264_dec_del(this->h264_decoder_);
+      this->h264_decoder_ = nullptr;
+    } else {
+      ESP_LOGI(TAG, "H.264 decoder initialized (software TinyH264)");
+    }
   }
 #endif
 #endif
