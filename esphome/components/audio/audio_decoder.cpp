@@ -64,7 +64,7 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
   switch (this->audio_file_type_) {
 #ifdef USE_AUDIO_AAC_SUPPORT
     case AudioFileType::AAC:
-      this->aac_decoder_ = make_unique<esp_audio_libs::aac_decoder::AACDecoder>();
+      this->aac_decoder_ = make_unique<esp_audio_codec_adapter::AACDecoder>();
 
       // AAC typically has 1024 samples per frame
       this->free_buffer_required_ = 1024 * sizeof(int16_t) * 2;  // samples * size per sample * channels
@@ -248,7 +248,7 @@ FileDecoderState AudioDecoder::decode_aac_() {
   auto result = this->aac_decoder_->decode_frame(buffer_start, buffer_length,
                                                  (int16_t *) this->output_transfer_buffer_->get_buffer_end());
 
-  if (result.status == esp_audio_libs::aac_decoder::AAC_DECODER_SUCCESS) {
+  if (result.status == esp_audio_codec_adapter::AAC_DECODER_SUCCESS) {
     // Update buffers
     this->input_transfer_buffer_->decrease_buffer_length(result.bytes_consumed);
     this->output_transfer_buffer_->increase_buffer_length(result.output_samples * sizeof(int16_t));
@@ -260,10 +260,10 @@ FileDecoderState AudioDecoder::decode_aac_() {
     }
 
     return FileDecoderState::MORE_TO_PROCESS;
-  } else if (result.status == esp_audio_libs::aac_decoder::AAC_DECODER_OUT_OF_DATA) {
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_OUT_OF_DATA) {
     // Need more data
     return FileDecoderState::IDLE;
-  } else if (result.status == esp_audio_libs::aac_decoder::AAC_DECODER_SYNC_ERROR) {
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_SYNC_ERROR) {
     // Recoverable sync error, skip some data and try again
     this->input_transfer_buffer_->decrease_buffer_length(std::min(buffer_length, (size_t) 1));
     return FileDecoderState::POTENTIALLY_FAILED;

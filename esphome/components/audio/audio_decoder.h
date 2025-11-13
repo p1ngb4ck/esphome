@@ -15,10 +15,12 @@
 
 #include "esp_err.h"
 
-// esp-audio-libs
+// Audio codec libraries
 #ifdef USE_AUDIO_AAC_SUPPORT
-#include <aac_decoder.h>
+// AAC comes from esp_audio_codec (via adapter for API compatibility)
+#include "aac_decoder_adapter.h"
 #endif
+// esp-audio-libs (MP3, FLAC, WAV)
 #ifdef USE_AUDIO_FLAC_SUPPORT
 #include <flac_decoder.h>
 #endif
@@ -106,7 +108,7 @@ class AudioDecoder {
   std::unique_ptr<esp_audio_libs::wav_decoder::WAVDecoder> wav_decoder_;
 #ifdef USE_AUDIO_AAC_SUPPORT
   FileDecoderState decode_aac_();
-  std::unique_ptr<esp_audio_libs::aac_decoder::AACDecoder> aac_decoder_;
+  std::unique_ptr<esp_audio_codec_adapter::AACDecoder> aac_decoder_;
 #endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FileDecoderState decode_flac_();
