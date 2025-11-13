@@ -9,7 +9,7 @@
 
 // Include esp_audio_codec headers here (not in .h to avoid compilation issues)
 extern "C" {
-#include <aac_decoder.h>
+#include <esp_audio_dec.h>
 #include <audio_element.h>
 #include <audio_pipeline.h>
 }
