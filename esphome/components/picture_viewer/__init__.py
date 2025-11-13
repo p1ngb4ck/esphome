@@ -146,10 +146,13 @@ def validate_buffer_sizes(config):
     # Warn if total memory exceeds 4MB (reasonable PSRAM limit for thumbnails)
     if total_memory > 4 * 1024 * 1024:
         _LOGGER.warning(
-            f"Thumbnail buffers require {total_memory / (1024 * 1024):.2f}MB "
-            f"({thumbnail_buffer_size / (1024 * 1024):.2f}MB for {max_count} thumbnails + "
-            f"{work_buffer_size / (1024 * 1024):.2f}MB work buffer). "
-            f"Ensure your device has sufficient PSRAM."
+            "Thumbnail buffers require %.2fMB "
+            "(%.2fMB for %d thumbnails + %.2fMB work buffer). "
+            "Ensure your device has sufficient PSRAM.",
+            total_memory / (1024 * 1024),
+            thumbnail_buffer_size / (1024 * 1024),
+            max_count,
+            work_buffer_size / (1024 * 1024),
         )
 
     # Error if work buffer is smaller than a single thumbnail

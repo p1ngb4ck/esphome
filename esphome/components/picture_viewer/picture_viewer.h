@@ -470,10 +470,10 @@ class PictureViewer : public Component {
   // =====================================================
   // Internal Methods
   // =====================================================
-
+#ifdef USE_STORAGE_HOST
   /// Scan directory for images from provided file list
   void scan_directory_(const std::vector<storage_host::FileInfo> &files);
-
+#endif
   /// Load JPEG file and decode
   bool load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                   int target_width = 0, int target_height = 0);
@@ -609,7 +609,9 @@ class PictureViewer : public Component {
   /// FileManager callback - called when directory changes
   /// @param directory_path The directory path that changed
   /// @param files The updated file list for that directory
+#ifdef USE_STORAGE_HOST
   void update_directory_files_(const std::string &directory_path, const std::vector<storage_host::FileInfo> &files);
+#endif
 };
 
 }  // namespace picture_viewer
