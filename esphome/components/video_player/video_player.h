@@ -21,14 +21,9 @@
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/components/audio/audio_decoder.h"
 
-// Forward declarations for common types (defined in both demuxers)
-struct VideoTrackInfo;
-struct AudioTrackInfo;
-struct Sample;
-
-#ifdef USE_MP4_CONTAINER
+// Common types used by all demuxers (currently defined in mp4_demuxer.h)
+// Include unconditionally since video_player.cpp accesses these struct members
 #include "mp4_demuxer.h"
-#endif
 
 #ifdef USE_MKV_CONTAINER
 #include "mkv_demuxer.h"
@@ -36,6 +31,7 @@ struct Sample;
 
 #ifdef USE_ESP_H264_DECODER
 #include "esp_h264_dec.h"
+#include "esp_h264_dec_sw.h"
 #include "esp_h264_dec_param.h"
 #include "esp_h264_types.h"
 #endif

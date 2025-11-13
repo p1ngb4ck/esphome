@@ -164,9 +164,9 @@ async def to_code(config):
 
             add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
         elif codec == "mp3":
-            cg.add_define("USE_AUDIO_MP3_SUPPORT")
+            cg.add_define("USE_AUDIO_MP3_SUPPORT", True)
         elif codec == "flac":
-            cg.add_define("USE_AUDIO_FLAC_SUPPORT")
+            cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
 
     # Link to LVGL canvas (optional for audio-only)
     if CONF_CANVAS in config:

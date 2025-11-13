@@ -585,7 +585,7 @@ bool VideoPlayer::init_audio_decoder_() {
            audio->channels, audio->bits_per_sample);
 
   // Create ring buffer for audio data (64KB buffer)
-  this->audio_input_ring_buffer_ = std::make_shared<RingBuffer>(64 * 1024);
+  this->audio_input_ring_buffer_ = RingBuffer::create(64 * 1024);
 
   // Create AudioDecoder (32KB input buffer, 32KB output buffer)
   this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(32 * 1024, 32 * 1024);
