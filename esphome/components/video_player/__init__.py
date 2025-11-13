@@ -60,6 +60,20 @@ CONF_AUDIO_CODECS = "audio_codecs"
 CONTAINER_TYPES = ["mp4", "mkv"]
 AUDIO_CODEC_TYPES = ["aac", "mp3", "flac"]
 
+
+def _set_audio_codec_defines(value):
+    """Set audio codec defines immediately during config processing."""
+    for codec in value:
+        if codec == "aac":
+            cg.add_define("USE_AAC_DECODER")
+            cg.add_define("USE_AUDIO_AAC_SUPPORT", True)
+        elif codec == "mp3":
+            cg.add_define("USE_AUDIO_MP3_SUPPORT", True)
+        elif codec == "flac":
+            cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
+    return value
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(VideoPlayer),
@@ -75,8 +89,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_CONTAINERS, default=["mp4"]): cv.ensure_list(
             cv.one_of(*CONTAINER_TYPES, lower=True)
         ),
-        cv.Optional(CONF_AUDIO_CODECS, default=["mp3", "flac"]): cv.ensure_list(
-            cv.one_of(*AUDIO_CODEC_TYPES, lower=True)
+        cv.Optional(CONF_AUDIO_CODECS, default=["mp3", "flac"]): cv.All(
+            cv.ensure_list(cv.one_of(*AUDIO_CODEC_TYPES, lower=True)),
+            _set_audio_codec_defines,
         ),
         cv.Optional(CONF_VIDEO_FILE): cv.string,
         cv.Optional(CONF_AUTO_PLAY, default=False): cv.boolean,
