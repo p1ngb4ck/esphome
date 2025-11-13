@@ -166,6 +166,3 @@ def final_validate_audio_schema(
 
 async def to_code(config):
     cg.add_library("esphome/esp-audio-libs", "2.0.1")
-
-    # Note: esp_audio_codec component for AAC support is registered by components
-    # that need it (e.g., video_player with AAC codec enabled)
