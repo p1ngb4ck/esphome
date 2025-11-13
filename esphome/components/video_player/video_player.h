@@ -20,7 +20,19 @@
 #include "esphome/components/lvgl/lvgl_esphome.h"
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/components/audio/audio_decoder.h"
+
+// Forward declarations for common types (defined in both demuxers)
+struct VideoTrackInfo;
+struct AudioTrackInfo;
+struct Sample;
+
+#ifdef USE_MP4_CONTAINER
 #include "mp4_demuxer.h"
+#endif
+
+#ifdef USE_MKV_CONTAINER
+#include "mkv_demuxer.h"
+#endif
 
 #ifdef USE_ESP_H264_DECODER
 #include "esp_h264_dec.h"
@@ -142,6 +154,20 @@ class VideoPlayer : public Component {
   bool init_decoder_();
   void cleanup_decoder_();
 
+  // Demuxer helpers (handle both MP4 and MKV)
+  bool demuxer_is_open_() const;
+  void demuxer_close_();
+  void demuxer_reset_();
+  bool demuxer_seek_video_(uint64_t timestamp_ms);
+  bool has_video_() const;
+  bool has_audio_() const;
+  const VideoTrackInfo *get_video_track_() const;
+  const AudioTrackInfo *get_audio_track_() const;
+  bool get_next_video_sample_(Sample &sample, uint8_t *data, size_t max_size);
+  bool get_next_audio_sample_(Sample &sample, uint8_t *data, size_t max_size);
+  uint64_t get_video_duration_ms_() const;
+  uint64_t get_audio_duration_ms_() const;
+
   // Frame processing
   void process_video_frame_();
   bool decode_frame_(const uint8_t *h264_data, size_t h264_size, uint8_t *yuv_output, size_t yuv_size);
@@ -168,26 +194,36 @@ class VideoPlayer : public Component {
   uint32_t current_position_ms_{0};
   uint32_t last_frame_time_{0};
 
-  // MP4 demuxer
-  std::unique_ptr<MP4Demuxer> demuxer_;
+  // Container demuxers (only one active at a time)
+#ifdef USE_MP4_CONTAINER
+  std::unique_ptr<MP4Demuxer> mp4_demuxer_;
+#endif
+#ifdef USE_MKV_CONTAINER
+  std::unique_ptr<MKVDemuxer> mkv_demuxer_;
+#endif
+
+  // Active demuxer pointer (points to whichever is loaded)
+  // We need a way to access common interface - for now use void* and cast
+  void *active_demuxer_{nullptr};
+  enum class DemuxerType { NONE, MP4, MKV } active_demuxer_type_{DemuxerType::NONE};
 
   // H264 decoder
 #ifdef USE_ESP_H264_DECODER
   esp_h264_dec_handle_t decoder_{nullptr};
 #endif
 
-  // Frame buffers
-  std::vector<uint8_t> h264_frame_buffer_;  // Buffer for compressed H264 frame
-  std::vector<uint8_t> yuv_frame_buffer_;   // Buffer for decoded YUV420 frame
-  uint16_t *rgb_frame_buffer_{nullptr};     // Buffer for RGB565 frame (PSRAM allocated)
-  size_t rgb_frame_buffer_size_{0};         // Size of RGB buffer in uint16_t elements
+  // Frame buffers (PSRam allocated - ESP32-P4 has 32MB PSRam @ 200MHz, only 512KB internal SRAM)
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> h264_frame_buffer_;  // Buffer for compressed H264 frame
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> yuv_frame_buffer_;   // Buffer for decoded YUV420 frame
+  uint16_t *rgb_frame_buffer_{nullptr};                                    // Buffer for RGB565 frame (PSRAM allocated)
+  size_t rgb_frame_buffer_size_{0};                                        // Size of RGB buffer in uint16_t elements
 
-  // Audio decoder and buffers
+  // Audio decoder and buffers (PSRam allocated)
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;
-  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Raw FLAC data from MP4
-  std::vector<uint8_t> audio_sample_buffer_;             // Buffer for single audio sample
-  uint64_t audio_start_time_ms_{0};                      // When audio playback started (for A/V sync)
-  uint64_t video_start_time_ms_{0};                      // When video playback started (for A/V sync)
+  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;                      // Raw FLAC data from MP4
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> audio_sample_buffer_;  // Buffer for single audio sample
+  uint64_t audio_start_time_ms_{0};  // When audio playback started (for A/V sync)
+  uint64_t video_start_time_ms_{0};  // When video playback started (for A/V sync)
 
   // Automation callbacks
   CallbackManager<void()> playback_started_callback_;

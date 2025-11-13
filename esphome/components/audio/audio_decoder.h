@@ -16,6 +16,9 @@
 #include "esp_err.h"
 
 // esp-audio-libs
+#ifdef USE_AUDIO_AAC_SUPPORT
+#include <aac_decoder.h>
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
 #include <flac_decoder.h>
 #endif
@@ -101,6 +104,10 @@ class AudioDecoder {
 
  protected:
   std::unique_ptr<esp_audio_libs::wav_decoder::WAVDecoder> wav_decoder_;
+#ifdef USE_AUDIO_AAC_SUPPORT
+  FileDecoderState decode_aac_();
+  std::unique_ptr<esp_audio_libs::aac_decoder::AACDecoder> aac_decoder_;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FileDecoderState decode_flac_();
   std::unique_ptr<esp_audio_libs::flac::FLACDecoder> flac_decoder_;

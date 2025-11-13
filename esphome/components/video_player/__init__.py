@@ -53,15 +53,30 @@ CONF_ON_PLAYBACK_STOPPED = "on_playback_stopped"
 CONF_ON_PLAYBACK_FINISHED = "on_playback_finished"
 
 CONF_SPEAKER = "speaker"
+CONF_CONTAINERS = "containers"
+CONF_AUDIO_CODECS = "audio_codecs"
+
+# Container and codec types
+CONTAINER_TYPES = ["mp4", "mkv"]
+AUDIO_CODEC_TYPES = ["aac", "mp3", "flac"]
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(VideoPlayer),
-        cv.Required(CONF_CANVAS): cv.use_id(lv_canvas_t),
+        cv.Optional(CONF_CANVAS): cv.use_id(
+            lv_canvas_t
+        ),  # Now optional for audio-only playback
         cv.Optional(CONF_SPEAKER): cv.use_id(
             cg.ComponentPtr.template(
                 cg.esphome_ns.namespace("speaker").class_("Speaker")
             )
+        ),
+        # Container and codec selection
+        cv.Optional(CONF_CONTAINERS, default=["mp4"]): cv.ensure_list(
+            cv.one_of(*CONTAINER_TYPES, lower=True)
+        ),
+        cv.Optional(CONF_AUDIO_CODECS, default=["mp3", "flac"]): cv.ensure_list(
+            cv.one_of(*AUDIO_CODEC_TYPES, lower=True)
         ),
         cv.Optional(CONF_VIDEO_FILE): cv.string,
         cv.Optional(CONF_AUTO_PLAY, default=False): cv.boolean,
@@ -104,13 +119,25 @@ def validate_video_player(config):
     if not CORE.is_esp32:
         raise cv.Invalid("video_player only supports ESP32 platform")
 
+    import logging
+
     from esphome.components.esp32 import get_esp32_variant
+
+    _LOGGER = logging.getLogger(__name__)
 
     variant = get_esp32_variant()
     if "P4" not in variant:
         raise cv.Invalid(
             f"video_player requires ESP32-P4 for hardware H264 decoder (current: {variant})"
         )
+
+    # Canvas required only if video playback needed (not audio-only)
+    if CONF_CANVAS not in config and CONF_VIDEO_FILE in config:
+        _LOGGER.warning("Canvas not configured - only audio playback will be available")
+
+    # Speaker required when audio codecs are configured
+    if config[CONF_AUDIO_CODECS] and CONF_SPEAKER not in config:
+        raise cv.Invalid("Speaker required when audio codecs are configured")
 
     return config
 
@@ -123,9 +150,28 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    # Link to LVGL canvas
-    canvas = await cg.get_variable(config[CONF_CANVAS])
-    cg.add(var.set_canvas(canvas))
+    # Generate container defines
+    for container in config[CONF_CONTAINERS]:
+        cg.add_define(f"USE_{container.upper()}_CONTAINER")
+
+    # Generate audio codec defines and add dependencies
+    for codec in config[CONF_AUDIO_CODECS]:
+        if codec == "aac":
+            cg.add_define("USE_AAC_DECODER")
+            cg.add_define("USE_AUDIO_AAC_SUPPORT")
+            # Add esp_audio_codec component for AAC support
+            from esphome.components.esp32 import add_idf_component
+
+            add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
+        elif codec == "mp3":
+            cg.add_define("USE_AUDIO_MP3_SUPPORT")
+        elif codec == "flac":
+            cg.add_define("USE_AUDIO_FLAC_SUPPORT")
+
+    # Link to LVGL canvas (optional for audio-only)
+    if CONF_CANVAS in config:
+        canvas = await cg.get_variable(config[CONF_CANVAS])
+        cg.add(var.set_canvas(canvas))
 
     # Link to speaker (optional for audio playback)
     if CONF_SPEAKER in config:

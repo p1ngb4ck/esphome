@@ -48,6 +48,19 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.1.1
+  espressif/esp_h264:
+    component_hash: 7599170f185871bfde69aa0213dfc7f12d45e7dedfd85247be08d6decd34e476
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s3
+    - esp32p4
+    version: 1.1.2
   espressif/esp_hosted:
     component_hash: 66b48cdc7f5a515c175fec253b40d4432ed3678c0a6323b1482131d8cd184d98
     dependencies:
@@ -65,7 +78,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.3.1
   espressif/esp_serial_slave_link:
@@ -150,7 +163,7 @@ dependencies:
       type: service
     version: 1.8.2
   espressif/tinyusb:
-    component_hash: aec03a6402b66695719fa1121b7d9eee8031922df5c8a3f4b54a51874f65bbd6
+    component_hash: 7fa5016d792d8e4025a8352b4fd4af7c124947647037e9d2449c9e0b47fdf663
     dependencies:
     - name: idf
       require: private
@@ -163,7 +176,7 @@ dependencies:
     - esp32s3
     - esp32p4
     - esp32h4
-    version: 0.18.0~5
+    version: 0.18.0~6
   espressif/wifi_remote_over_eppp:
     component_hash: 25f08971c3f85316515a2e15f57a67efecd75d040a45dc143f1010627d750654
     dependencies:
@@ -193,12 +206,14 @@ direct_dependencies:
 - espressif/eppp_link
 - espressif/esp-tflite-micro
 - espressif/esp32-camera
+- espressif/esp_h264
 - espressif/esp_hosted
+- espressif/esp_jpeg
 - espressif/esp_tinyusb
 - espressif/esp_wifi_remote
 - espressif/lan867x
 - espressif/mdns
 - zorxx/multipart-parser
-manifest_hash: 5d74293d56f337a482e8b8abad0f1a6ac819e3f50733bbf12515a5cb9254eeb1
+manifest_hash: 7e464a263449439427c412cd48c2fa9b577026d9f6025201c105939c763dd28b
 target: esp32p4
 version: 2.0.0

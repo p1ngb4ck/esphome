@@ -38,18 +38,15 @@ VideoPlayer::~VideoPlayer() {
 void VideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up video player...");
 
+  // Canvas is now optional (for audio-only playback)
   if (this->canvas_ == nullptr) {
-    ESP_LOGE(TAG, "Canvas not configured");
-    this->mark_failed();
-    return;
+    ESP_LOGW(TAG, "Canvas not configured - audio-only playback mode");
+  } else {
+    // Allocate video frame buffers only if canvas exists
+    this->h264_frame_buffer_.resize(MAX_H264_FRAME_SIZE);
+    this->yuv_frame_buffer_.resize(MAX_YUV_FRAME_SIZE);
+    ESP_LOGCONFIG(TAG, "Video frame buffers allocated");
   }
-
-  // Allocate frame buffers
-  this->h264_frame_buffer_.resize(MAX_H264_FRAME_SIZE);
-  this->yuv_frame_buffer_.resize(MAX_YUV_FRAME_SIZE);
-
-  // RGB buffer will be allocated when video is loaded (we need video dimensions)
-  ESP_LOGCONFIG(TAG, "Frame buffers allocated");
 
   // Auto-play if configured
   if (this->auto_play_ && !this->video_file_.empty()) {
@@ -65,8 +62,10 @@ void VideoPlayer::loop() {
   // Process audio (if enabled)
   this->process_audio_();
 
-  // Process next video frame
-  this->process_video_frame_();
+  // Process next video frame (only if video track exists)
+  if (this->demuxer_is_open_() && this->has_video_()) {
+    this->process_video_frame_();
+  }
 }
 
 void VideoPlayer::dump_config() {
@@ -75,8 +74,8 @@ void VideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "  Auto-play: %s", YESNO(this->auto_play_));
   ESP_LOGCONFIG(TAG, "  Loop: %s", YESNO(this->loop_));
 
-  if (this->demuxer_ && this->demuxer_->is_open()) {
-    const VideoTrackInfo *video = this->demuxer_->get_video_track();
+  if (this->demuxer_is_open_() && this->demuxer_is_open_()) {
+    const VideoTrackInfo *video = this->get_video_track_();
     if (video != nullptr) {
       ESP_LOGCONFIG(TAG, "  Resolution: %ux%u", video->width, video->height);
       ESP_LOGCONFIG(TAG, "  Duration: %.2f seconds", static_cast<float>(this->get_duration_ms()) / 1000.0f);
@@ -97,7 +96,7 @@ void VideoPlayer::play(const std::string &file) {
   }
 
   // If no video loaded, try configured file
-  if (!this->demuxer_ || !this->demuxer_->is_open()) {
+  if (!this->demuxer_is_open_()) {
     if (this->video_file_.empty()) {
       ESP_LOGE(TAG, "No video file configured");
       return;
@@ -119,7 +118,7 @@ void VideoPlayer::play(const std::string &file) {
 #endif
 
   // Initialize audio decoder if audio track exists and speaker configured
-  if (this->demuxer_->has_audio() && this->speaker_ != nullptr && !this->audio_decoder_) {
+  if (this->has_audio_() && this->speaker_ != nullptr && !this->audio_decoder_) {
     if (!this->init_audio_decoder_()) {
       ESP_LOGW(TAG, "Failed to initialize audio decoder - continuing without audio");
     }
@@ -130,7 +129,7 @@ void VideoPlayer::play(const std::string &file) {
     ESP_LOGI(TAG, "Resuming playback");
   } else {
     ESP_LOGI(TAG, "Starting playback");
-    this->demuxer_->reset();
+    this->demuxer_reset_();
     this->current_position_ms_ = 0;
     this->video_start_time_ms_ = millis();
     this->audio_start_time_ms_ = millis();
@@ -160,27 +159,27 @@ void VideoPlayer::stop() {
   this->state_ = PlaybackState::STOPPED;
   this->current_position_ms_ = 0;
 
-  if (this->demuxer_) {
-    this->demuxer_->reset();
+  if (this->demuxer_is_open_()) {
+    this->demuxer_reset_();
   }
 
   this->playback_stopped_callback_.call();
 }
 
 void VideoPlayer::seek(uint32_t position_ms) {
-  if (!this->demuxer_ || !this->demuxer_->is_open()) {
+  if (!this->demuxer_is_open_()) {
     ESP_LOGW(TAG, "Cannot seek: no video loaded");
     return;
   }
 
   ESP_LOGI(TAG, "Seeking to position %u ms", position_ms);
-  this->demuxer_->seek_video(position_ms);
+  this->demuxer_seek_video_(position_ms);
   this->current_position_ms_ = position_ms;
 }
 
 uint32_t VideoPlayer::get_duration_ms() const {
-  if (this->demuxer_ && this->demuxer_->is_open()) {
-    return this->demuxer_->get_video_duration_ms();
+  if (this->demuxer_is_open_() && this->demuxer_is_open_()) {
+    return this->get_video_duration_ms_();
   }
   return 0;
 }
@@ -191,52 +190,102 @@ bool VideoPlayer::load_video_(const std::string &file) {
   // Unload any existing video
   this->unload_video_();
 
-  ESP_LOGI(TAG, "Loading video: %s", file.c_str());
+  ESP_LOGI(TAG, "Loading media file: %s", file.c_str());
 
-  // Create and open demuxer
-  this->demuxer_ = std::make_unique<MP4Demuxer>();
-  if (!this->demuxer_->open(file)) {
-    ESP_LOGE(TAG, "Failed to open MP4 file: %s", file.c_str());
-    this->demuxer_.reset();
+  // Detect container from file extension
+  std::string ext = file.substr(file.find_last_of(".") + 1);
+  std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+#ifdef USE_MP4_CONTAINER
+  if (ext == "mp4" || ext == "m4a" || ext == "m4v") {
+    this->mp4_demuxer_ = std::make_unique<MP4Demuxer>();
+    if (!this->mp4_demuxer_->open(file)) {
+      ESP_LOGE(TAG, "Failed to open MP4 file: %s", file.c_str());
+      this->mp4_demuxer_.reset();
+      return false;
+    }
+    this->active_demuxer_ = this->mp4_demuxer_.get();
+    this->active_demuxer_type_ = DemuxerType::MP4;
+    ESP_LOGI(TAG, "Loaded MP4 container");
+  } else
+#endif
+#ifdef USE_MKV_CONTAINER
+      if (ext == "mkv" || ext == "mka" || ext == "webm") {
+    this->mkv_demuxer_ = std::make_unique<MKVDemuxer>();
+    if (!this->mkv_demuxer_->open(file)) {
+      ESP_LOGE(TAG, "Failed to open MKV file: %s", file.c_str());
+      this->mkv_demuxer_.reset();
+      return false;
+    }
+    this->active_demuxer_ = this->mkv_demuxer_.get();
+    this->active_demuxer_type_ = DemuxerType::MKV;
+    ESP_LOGI(TAG, "Loaded MKV container");
+  } else
+#endif
+  {
+    ESP_LOGE(TAG, "Unsupported file format: %s (extension: .%s)", file.c_str(), ext.c_str());
     return false;
   }
 
-  // Verify video track exists
-  if (!this->demuxer_->has_video()) {
-    ESP_LOGE(TAG, "No video track found in file");
-    this->demuxer_.reset();
+  // Check if file has at least video or audio
+  if (!this->has_video_() && !this->has_audio_()) {
+    ESP_LOGE(TAG, "File has neither video nor audio tracks");
+    this->unload_video_();
     return false;
   }
 
-  const VideoTrackInfo *video = this->demuxer_->get_video_track();
-  ESP_LOGI(TAG, "Video loaded: %ux%u, %u frames, %.2f seconds", video->width, video->height, video->sample_count,
-           static_cast<float>(this->demuxer_->get_video_duration_ms()) / 1000.0f);
+  // Handle video track if present
+  if (this->has_video_()) {
+    const VideoTrackInfo *video = this->get_video_track_();
+    ESP_LOGI(TAG, "Video track: %ux%u, %u frames, %.2f seconds", video->width, video->height, video->sample_count,
+             static_cast<float>(this->get_video_duration_ms_()) / 1000.0f);
 
-  // Allocate RGB frame buffer from PSRAM based on video dimensions
-  size_t rgb_size = video->width * video->height;
-  if (this->rgb_frame_buffer_ != nullptr) {
-    free(this->rgb_frame_buffer_);
-  }
+    // Allocate RGB frame buffer from PSRAM based on video dimensions
+    if (this->canvas_ != nullptr) {
+      size_t rgb_size = video->width * video->height;
+      if (this->rgb_frame_buffer_ != nullptr) {
+        free(this->rgb_frame_buffer_);
+      }
 
 #ifdef ESP32
-  this->rgb_frame_buffer_ = (uint16_t *) heap_caps_malloc(rgb_size * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-  if (this->rgb_frame_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate RGB buffer from PSRAM, trying internal RAM");
-    this->rgb_frame_buffer_ = (uint16_t *) malloc(rgb_size * sizeof(uint16_t));
-  }
+      this->rgb_frame_buffer_ = (uint16_t *) heap_caps_malloc(rgb_size * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+      if (this->rgb_frame_buffer_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate RGB buffer from PSRAM, trying internal RAM");
+        this->rgb_frame_buffer_ = (uint16_t *) malloc(rgb_size * sizeof(uint16_t));
+      }
 #else
-  this->rgb_frame_buffer_ = (uint16_t *) malloc(rgb_size * sizeof(uint16_t));
+      this->rgb_frame_buffer_ = (uint16_t *) malloc(rgb_size * sizeof(uint16_t));
 #endif
 
-  if (this->rgb_frame_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate RGB buffer (%zu bytes)", rgb_size * sizeof(uint16_t));
-    this->demuxer_.reset();
-    return false;
+      if (this->rgb_frame_buffer_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate RGB buffer (%zu bytes)", rgb_size * sizeof(uint16_t));
+        this->unload_video_();
+        return false;
+      }
+
+      this->rgb_frame_buffer_size_ = rgb_size;
+      ESP_LOGI(TAG, "Allocated RGB buffer: %zu bytes from %s", rgb_size * sizeof(uint16_t),
+               heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "internal RAM");
+    } else {
+      ESP_LOGW(TAG, "Video track present but canvas not configured - video will not be rendered");
+    }
+  } else {
+    ESP_LOGI(TAG, "Audio-only file (no video track)");
   }
 
-  this->rgb_frame_buffer_size_ = rgb_size;
-  ESP_LOGI(TAG, "Allocated RGB buffer: %zu bytes from %s", rgb_size * sizeof(uint16_t),
-           heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "internal RAM");
+  // Handle audio track if present
+  if (this->has_audio_()) {
+    const AudioTrackInfo *audio = this->get_audio_track_();
+    const char *codec_name = "unknown";
+    if (audio->codec_type == AudioCodecType::AAC)
+      codec_name = "AAC";
+    else if (audio->codec_type == AudioCodecType::MP3)
+      codec_name = "MP3";
+    else if (audio->codec_type == AudioCodecType::FLAC)
+      codec_name = "FLAC";
+
+    ESP_LOGI(TAG, "Audio track: %s, %u Hz, %u channels", codec_name, audio->sample_rate, audio->channels);
+  }
 
   return true;
 }
@@ -245,15 +294,21 @@ void VideoPlayer::unload_video_() {
   this->stop();
   this->cleanup_decoder_();
 
-  if (this->demuxer_) {
-    this->demuxer_->close();
-    this->demuxer_.reset();
+  if (this->demuxer_is_open_()) {
+    this->demuxer_close_();
+    this->unload_video_();
   }
 }
 
 // ========== Decoder Management ==========
 
 bool VideoPlayer::init_decoder_() {
+  // Skip decoder initialization if no video track (audio-only playback)
+  if (!this->demuxer_is_open_() || !this->has_video_()) {
+    ESP_LOGD(TAG, "No video track - skipping H264 decoder initialization");
+    return true;  // Not an error - just audio-only mode
+  }
+
 #ifdef USE_ESP_H264_DECODER
   ESP_LOGI(TAG, "Initializing H264 decoder...");
 
@@ -296,12 +351,12 @@ void VideoPlayer::cleanup_decoder_() {
 // ========== Frame Processing ==========
 
 void VideoPlayer::process_video_frame_() {
-  if (!this->demuxer_ || !this->demuxer_->is_open()) {
+  if (!this->demuxer_is_open_()) {
     this->stop();
     return;
   }
 
-  const VideoTrackInfo *video = this->demuxer_->get_video_track();
+  const VideoTrackInfo *video = this->get_video_track_();
   if (video == nullptr) {
     this->stop();
     return;
@@ -309,14 +364,13 @@ void VideoPlayer::process_video_frame_() {
 
   // Get next video sample (H264 frame)
   Sample sample;
-  if (!this->demuxer_->get_next_video_sample(sample, this->h264_frame_buffer_.data(),
-                                             this->h264_frame_buffer_.size())) {
+  if (!this->get_next_video_sample_(sample, this->h264_frame_buffer_.data(), this->h264_frame_buffer_.size())) {
     // End of video
     ESP_LOGI(TAG, "Reached end of video");
 
     if (this->loop_) {
       ESP_LOGI(TAG, "Looping video");
-      this->demuxer_->reset();
+      this->demuxer_reset_();
       this->current_position_ms_ = 0;
       this->video_start_time_ms_ = millis();
       this->audio_start_time_ms_ = millis();
@@ -477,21 +531,60 @@ void VideoPlayer::yuv_i420_to_rgb565_(const uint8_t *yuv, uint16_t *rgb, uint16_
 // ========== Audio Processing ==========
 
 bool VideoPlayer::init_audio_decoder_() {
-  if (!this->demuxer_->has_audio() || this->speaker_ == nullptr) {
+  if (!this->has_audio_() || this->speaker_ == nullptr) {
     ESP_LOGD(TAG, "No audio track or speaker not configured - skipping audio");
     return false;
   }
 
-  const AudioTrackInfo *audio = this->demuxer_->get_audio_track();
+  const AudioTrackInfo *audio = this->get_audio_track_();
   if (audio == nullptr) {
     ESP_LOGE(TAG, "Audio track info not available");
     return false;
   }
 
-  ESP_LOGI(TAG, "Initializing audio decoder: %u Hz, %u channels, %u bits", audio->sample_rate, audio->channels,
-           audio->bits_per_sample);
+  // Determine AudioFileType from detected codec
+  audio::AudioFileType file_type = audio::AudioFileType::NONE;
+  const char *codec_name = "unknown";
 
-  // Create ring buffer for FLAC data (64KB buffer)
+  switch (audio->codec_type) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioCodecType::AAC:
+      file_type = audio::AudioFileType::AAC;
+      codec_name = "AAC";
+      ESP_LOGI(TAG, "Using AAC decoder");
+      break;
+#endif
+
+#ifdef USE_AUDIO_MP3_SUPPORT
+    case AudioCodecType::MP3:
+      file_type = audio::AudioFileType::MP3;
+      codec_name = "MP3";
+      ESP_LOGI(TAG, "Using MP3 decoder");
+      break;
+#endif
+
+#ifdef USE_AUDIO_FLAC_SUPPORT
+    case AudioCodecType::FLAC:
+      file_type = audio::AudioFileType::FLAC;
+      codec_name = "FLAC";
+      ESP_LOGI(TAG, "Using FLAC decoder");
+      break;
+#endif
+
+    default:
+      ESP_LOGE(TAG, "Unknown or unsupported audio codec type");
+      return false;
+  }
+
+  if (file_type == audio::AudioFileType::NONE) {
+    ESP_LOGE(TAG, "Audio codec %s detected but corresponding decoder not enabled in configuration", codec_name);
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Initializing %s audio decoder: %u Hz, %u channels, %u bits", codec_name, audio->sample_rate,
+           audio->channels, audio->bits_per_sample);
+
+  // Create ring buffer for audio data (64KB buffer)
   this->audio_input_ring_buffer_ = std::make_shared<RingBuffer>(64 * 1024);
 
   // Create AudioDecoder (32KB input buffer, 32KB output buffer)
@@ -516,10 +609,10 @@ bool VideoPlayer::init_audio_decoder_() {
     return false;
   }
 
-  // Start decoder for FLAC format
-  err = this->audio_decoder_->start(audio::AudioFileType::FLAC);
+  // Start decoder with detected codec type
+  err = this->audio_decoder_->start(file_type);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start audio decoder: %d", err);
+    ESP_LOGE(TAG, "Failed to start %s audio decoder: %d", codec_name, err);
     this->audio_decoder_.reset();
     this->audio_input_ring_buffer_.reset();
     return false;
@@ -543,7 +636,7 @@ void VideoPlayer::cleanup_audio_decoder_() {
 }
 
 void VideoPlayer::process_audio_() {
-  if (!this->audio_decoder_ || !this->demuxer_->has_audio()) {
+  if (!this->audio_decoder_ || !this->has_audio_()) {
     return;
   }
 
@@ -562,7 +655,7 @@ void VideoPlayer::process_audio_() {
 }
 
 void VideoPlayer::feed_audio_sample_() {
-  if (!this->audio_input_ring_buffer_ || !this->demuxer_) {
+  if (!this->audio_input_ring_buffer_ || !this->demuxer_is_open_()) {
     return;
   }
 
@@ -574,16 +667,211 @@ void VideoPlayer::feed_audio_sample_() {
 
   // Get next audio sample from MP4
   Sample sample;
-  if (!this->demuxer_->get_next_audio_sample(sample, this->audio_sample_buffer_.data(),
-                                             this->audio_sample_buffer_.size())) {
+  if (!this->get_next_audio_sample_(sample, this->audio_sample_buffer_.data(), this->audio_sample_buffer_.size())) {
     // End of audio track
     return;
   }
 
-  // Write FLAC sample to ring buffer
+  // Write audio sample to ring buffer
   size_t written = this->audio_input_ring_buffer_->write(this->audio_sample_buffer_.data(), sample.size);
   if (written < sample.size) {
     ESP_LOGW(TAG, "Audio ring buffer overflow: wrote %zu/%u bytes", written, sample.size);
+  }
+}
+
+// ========== Demuxer Helper Methods ==========
+
+bool VideoPlayer::demuxer_is_open_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->is_open();
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->is_open();
+#endif
+    default:
+      return false;
+  }
+}
+
+void VideoPlayer::demuxer_close_() {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      if (this->mp4_demuxer_) {
+        this->mp4_demuxer_->close();
+        this->mp4_demuxer_.reset();
+      }
+      break;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      if (this->mkv_demuxer_) {
+        this->mkv_demuxer_->close();
+        this->mkv_demuxer_.reset();
+      }
+      break;
+#endif
+    default:
+      break;
+  }
+  this->active_demuxer_ = nullptr;
+  this->active_demuxer_type_ = DemuxerType::NONE;
+}
+
+void VideoPlayer::demuxer_reset_() {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      if (this->mp4_demuxer_)
+        this->mp4_demuxer_->reset();
+      break;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      if (this->mkv_demuxer_)
+        this->mkv_demuxer_->reset();
+      break;
+#endif
+    default:
+      break;
+  }
+}
+
+bool VideoPlayer::demuxer_seek_video_(uint64_t timestamp_ms) {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->seek_video(timestamp_ms);
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->seek_video(timestamp_ms);
+#endif
+    default:
+      return false;
+  }
+}
+
+bool VideoPlayer::has_video_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->has_video();
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->has_video();
+#endif
+    default:
+      return false;
+  }
+}
+
+bool VideoPlayer::has_audio_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->has_audio();
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->has_audio();
+#endif
+    default:
+      return false;
+  }
+}
+
+const VideoTrackInfo *VideoPlayer::get_video_track_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ ? this->mp4_demuxer_->get_video_track() : nullptr;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ ? this->mkv_demuxer_->get_video_track() : nullptr;
+#endif
+    default:
+      return nullptr;
+  }
+}
+
+const AudioTrackInfo *VideoPlayer::get_audio_track_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ ? this->mp4_demuxer_->get_audio_track() : nullptr;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ ? this->mkv_demuxer_->get_audio_track() : nullptr;
+#endif
+    default:
+      return nullptr;
+  }
+}
+
+bool VideoPlayer::get_next_video_sample_(Sample &sample, uint8_t *data, size_t max_size) {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->get_next_video_sample(sample, data, max_size);
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->get_next_video_sample(sample, data, max_size);
+#endif
+    default:
+      return false;
+  }
+}
+
+bool VideoPlayer::get_next_audio_sample_(Sample &sample, uint8_t *data, size_t max_size) {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ && this->mp4_demuxer_->get_next_audio_sample(sample, data, max_size);
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ && this->mkv_demuxer_->get_next_audio_sample(sample, data, max_size);
+#endif
+    default:
+      return false;
+  }
+}
+
+uint64_t VideoPlayer::get_video_duration_ms_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ ? this->mp4_demuxer_->get_video_duration_ms() : 0;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ ? this->mkv_demuxer_->get_video_duration_ms() : 0;
+#endif
+    default:
+      return 0;
+  }
+}
+
+uint64_t VideoPlayer::get_audio_duration_ms_() const {
+  switch (this->active_demuxer_type_) {
+#ifdef USE_MP4_CONTAINER
+    case DemuxerType::MP4:
+      return this->mp4_demuxer_ ? this->mp4_demuxer_->get_audio_duration_ms() : 0;
+#endif
+#ifdef USE_MKV_CONTAINER
+    case DemuxerType::MKV:
+      return this->mkv_demuxer_ ? this->mkv_demuxer_->get_audio_duration_ms() : 0;
+#endif
+    default:
+      return 0;
   }
 }
 

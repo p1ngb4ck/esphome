@@ -48,6 +48,7 @@ constexpr uint32_t BOX_TYPE_CO64 = 0x636F3634;  // 'co64' - chunk offsets (64-bi
 constexpr uint32_t BOX_TYPE_MDAT = 0x6D646174;  // 'mdat'
 constexpr uint32_t BOX_TYPE_AVC1 = 0x61766331;  // 'avc1' - H264
 constexpr uint32_t BOX_TYPE_MP4A = 0x6D703461;  // 'mp4a' - AAC audio
+constexpr uint32_t BOX_TYPE_MP3 = 0x2E6D7033;   // '.mp3' - MP3 audio
 constexpr uint32_t BOX_TYPE_FLAC = 0x664C6143;  // 'fLaC' - FLAC audio
 
 // Handler types
@@ -61,6 +62,16 @@ enum class TrackType {
   UNKNOWN,
   VIDEO,
   AUDIO,
+};
+
+/**
+ * @brief Audio codec type enumeration
+ */
+enum class AudioCodecType : uint8_t {
+  UNKNOWN = 0,
+  AAC,
+  MP3,
+  FLAC,
 };
 
 /**
@@ -83,15 +94,16 @@ struct VideoTrackInfo {
  */
 struct AudioTrackInfo {
   uint32_t track_id{0};
-  uint32_t timescale{0};                   // Time units per second
-  uint64_t duration{0};                    // Duration in timescale units
-  uint16_t sample_rate{0};                 // Audio sample rate (Hz)
-  uint16_t channels{0};                    // Number of audio channels
-  uint16_t bits_per_sample{0};             // Bits per sample
-  uint32_t sample_count{0};                // Total number of audio samples
-  std::vector<uint32_t> sample_sizes;      // Size of each audio sample
-  std::vector<uint64_t> sample_offsets;    // File offset of each sample
-  std::vector<uint32_t> sample_durations;  // Duration of each sample in timescale units
+  uint32_t timescale{0};                               // Time units per second
+  uint64_t duration{0};                                // Duration in timescale units
+  uint16_t sample_rate{0};                             // Audio sample rate (Hz)
+  uint16_t channels{0};                                // Number of audio channels
+  uint16_t bits_per_sample{0};                         // Bits per sample
+  AudioCodecType codec_type{AudioCodecType::UNKNOWN};  // Detected audio codec
+  uint32_t sample_count{0};                            // Total number of audio samples
+  std::vector<uint32_t> sample_sizes;                  // Size of each audio sample
+  std::vector<uint64_t> sample_offsets;                // File offset of each sample
+  std::vector<uint32_t> sample_durations;              // Duration of each sample in timescale units
 };
 
 /**

@@ -620,11 +620,18 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
     this->audio_track_.bits_per_sample = bits_per_sample;
     this->audio_track_.sample_rate = sample_rate;
 
-    if (entry_type == BOX_TYPE_FLAC) {
-      ESP_LOGI(TAG, "stsd: FLAC audio %u Hz, %u channels, %u bits", sample_rate, channels, bits_per_sample);
-    } else if (entry_type == BOX_TYPE_MP4A) {
-      ESP_LOGI(TAG, "stsd: AAC audio %u Hz, %u channels, %u bits", sample_rate, channels, bits_per_sample);
+    // Detect codec type from box type
+    if (entry_type == BOX_TYPE_MP4A) {
+      this->audio_track_.codec_type = AudioCodecType::AAC;
+      ESP_LOGI(TAG, "stsd: AAC audio detected - %u Hz, %u channels, %u bits", sample_rate, channels, bits_per_sample);
+    } else if (entry_type == BOX_TYPE_MP3) {
+      this->audio_track_.codec_type = AudioCodecType::MP3;
+      ESP_LOGI(TAG, "stsd: MP3 audio detected - %u Hz, %u channels, %u bits", sample_rate, channels, bits_per_sample);
+    } else if (entry_type == BOX_TYPE_FLAC) {
+      this->audio_track_.codec_type = AudioCodecType::FLAC;
+      ESP_LOGI(TAG, "stsd: FLAC audio detected - %u Hz, %u channels, %u bits", sample_rate, channels, bits_per_sample);
     } else {
+      this->audio_track_.codec_type = AudioCodecType::UNKNOWN;
       ESP_LOGW(TAG, "stsd: Unknown audio codec 0x%08X (%u Hz, %u channels)", entry_type, sample_rate, channels);
     }
   }
