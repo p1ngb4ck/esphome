@@ -165,4 +165,13 @@ def final_validate_audio_schema(
 
 
 async def to_code(config):
+    from esphome.core import CORE
+
     cg.add_library("esphome/esp-audio-libs", "2.0.1")
+
+    # Add ESP-IDF managed component for AAC decoder support (ESP-IDF only)
+    # The component is small and only used if USE_AUDIO_AAC_SUPPORT is defined
+    if CORE.using_esp_idf:
+        from esphome.components.esp32 import add_idf_component
+
+        add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
