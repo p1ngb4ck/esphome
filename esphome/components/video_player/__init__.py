@@ -14,7 +14,7 @@ transcoder.require_h264_decoder()
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["lvgl", "transcoder"]
-AUTO_LOAD = []
+AUTO_LOAD = ["audio"]
 
 # ESP32-P4 only (hardware H264 decoder)
 CONFLICTS_WITH = []
