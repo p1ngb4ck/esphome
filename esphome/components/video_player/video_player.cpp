@@ -547,12 +547,15 @@ bool VideoPlayer::init_audio_decoder_() {
   const char *codec_name = "unknown";
 
   switch (audio->codec_type) {
-#ifdef USE_AUDIO_AAC_SUPPORT
     case AudioCodecType::AAC:
+#ifdef USE_AUDIO_AAC_SUPPORT
       file_type = audio::AudioFileType::AAC;
       codec_name = "AAC";
       ESP_LOGI(TAG, "Using AAC decoder");
       break;
+#else
+      ESP_LOGE(TAG, "AAC audio detected but AAC decoder not enabled. Add 'aac' to audio_codecs configuration.");
+      return false;
 #endif
 
 #ifdef USE_AUDIO_MP3_SUPPORT
