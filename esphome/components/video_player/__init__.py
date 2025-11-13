@@ -158,7 +158,7 @@ async def to_code(config):
     for codec in config[CONF_AUDIO_CODECS]:
         if codec == "aac":
             cg.add_define("USE_AAC_DECODER")
-            cg.add_define("USE_AUDIO_AAC_SUPPORT")
+            cg.add_define("USE_AUDIO_AAC_SUPPORT", True)
             # Add esp_audio_codec component for AAC support
             from esphome.components.esp32 import add_idf_component
 
