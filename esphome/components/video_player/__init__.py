@@ -165,13 +165,22 @@ async def to_code(config):
     for container in config[CONF_CONTAINERS]:
         cg.add_define(f"USE_{container.upper()}_CONTAINER")
 
-    # Add ESP-IDF components for audio codecs (defines already added in validation)
+    # Add audio codec defines and ESP-IDF components
+    # Note: Defines are also added during validation, but we add them here too
+    # to ensure they're in the generated defines.h during compilation
     for codec in config[CONF_AUDIO_CODECS]:
         if codec == "aac":
-            # Add esp_audio_codec component for AAC support
-            from esphome.components.esp32 import add_idf_component
+            cg.add_define("USE_AAC_DECODER")
+            cg.add_define("USE_AUDIO_AAC_SUPPORT", True)
+            # Add esp_audio_codec component for AAC support (ESP-IDF only)
+            if CORE.using_esp_idf:
+                from esphome.components.esp32 import add_idf_component
 
-            add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
+                add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
+        elif codec == "mp3":
+            cg.add_define("USE_AUDIO_MP3_SUPPORT", True)
+        elif codec == "flac":
+            cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
 
     # Link to LVGL canvas (optional for audio-only)
     if CONF_CANVAS in config:
