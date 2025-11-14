@@ -480,18 +480,38 @@ void VideoPlayer::process_video_frame_() {
     return;
   }
 
-  // Log first frame conversion for debugging
+  // Log first frame conversion for debugging (show all NALU types)
   static bool first_frame_logged = false;
   if (!first_frame_logged) {
-    // Peek at first NALU type for debugging
-    uint8_t first_nalu_type = 0;
-    if (sample.size >= 5) {  // Need at least length field (4 bytes) + 1 NALU byte
-      first_nalu_type = this->h264_frame_buffer_.data()[4] & 0x1F;  // Skip 4-byte length, get type
+    // Scan all NALUs in first frame to see what we have
+    size_t scan_pos = 0;
+    uint8_t nalu_count = 0;
+    char nalu_types_str[64] = {0};
+    size_t str_pos = 0;
+
+    while (scan_pos < sample.size && nalu_count < 10) {
+      if (scan_pos + video->nalu_length_size > sample.size)
+        break;
+
+      uint32_t nalu_len = 0;
+      for (uint8_t i = 0; i < video->nalu_length_size; i++) {
+        nalu_len = (nalu_len << 8) | this->h264_frame_buffer_.data()[scan_pos + i];
+      }
+      scan_pos += video->nalu_length_size;
+
+      if (nalu_len == 0 || scan_pos + nalu_len > sample.size)
+        break;
+
+      uint8_t nalu_type = this->h264_frame_buffer_.data()[scan_pos] & 0x1F;
+      str_pos += snprintf(nalu_types_str + str_pos, sizeof(nalu_types_str) - str_pos, "%s%u", nalu_count > 0 ? "," : "",
+                          nalu_type);
+      nalu_count++;
+      scan_pos += nalu_len;
     }
+
     ESP_LOGI(TAG,
-             "First frame: AVCC size=%u, Annex-B size=%zu, NALU length size=%u, first NALU type=%u (expected 5 for "
-             "IDR, 7 for SPS)",
-             sample.size, annexb_size, video->nalu_length_size, first_nalu_type);
+             "First frame: AVCC size=%u, Annex-B size=%zu, NALUs=[%s] (5=IDR, 6=SEI, 7=SPS, 8=PPS, 9=AUD, 1=non-IDR)",
+             sample.size, annexb_size, nalu_types_str);
     first_frame_logged = true;
   }
 
@@ -1008,6 +1028,9 @@ size_t VideoPlayer::convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avc
   // H.264 frames can have multiple NALUs (e.g., SEI + IDR, or AUD + SEI + IDR)
   bool has_idr = false;
   size_t scan_pos = 0;
+  uint8_t nalu_count = 0;
+  uint8_t nalu_types[8] = {0};  // Track up to 8 NALU types for debugging
+
   while (scan_pos < avcc_size) {
     // Read NALU length
     if (scan_pos + nalu_length_size > avcc_size) {
@@ -1026,9 +1049,15 @@ size_t VideoPlayer::convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avc
 
     // Check NALU type (bits 0-4 of first byte)
     uint8_t nalu_type = avcc_data[scan_pos] & 0x1F;
+
+    // Track NALU types for debugging (up to 8)
+    if (nalu_count < 8) {
+      nalu_types[nalu_count++] = nalu_type;
+    }
+
     if (nalu_type == 5) {  // IDR slice
       has_idr = true;
-      break;  // Found IDR, no need to scan further
+      // Continue scanning to record all NALU types for debugging
     }
 
     scan_pos += nalu_length;
