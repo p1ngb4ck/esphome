@@ -11,6 +11,9 @@ namespace video_player {
 
 static const char *const TAG = "mp4_demuxer";
 
+// Forward declaration for static task wrapper
+static void mp4_refill_task_wrapper(void *param);
+
 // Helper to convert big-endian to native
 static inline uint32_t be32_to_cpu(const uint8_t *data) {
   return (static_cast<uint32_t>(data[0]) << 24) | (static_cast<uint32_t>(data[1]) << 16) |
@@ -130,10 +133,16 @@ bool MP4Demuxer::open(const std::string &file_path) {
              static_cast<float>(this->get_audio_duration_ms()) / 1000.0f);
   }
 
+  // Start async buffer refill task
+  this->start_refill_task_();
+
   return true;
 }
 
 void MP4Demuxer::close() {
+  // Stop async refill task first
+  this->stop_refill_task_();
+
   if (this->file_ != nullptr) {
     fclose(this->file_);
     this->file_ = nullptr;
@@ -144,47 +153,193 @@ void MP4Demuxer::close() {
   this->audio_track_ = AudioTrackInfo{};
   this->current_video_sample_ = 0;
   this->current_audio_sample_ = 0;
-  this->readahead_buffer_.clear();
-  this->readahead_buffer_valid_size_ = 0;
+
+  // Clear both buffers
+  this->buffers_[0].data.clear();
+  this->buffers_[0].valid_size = 0;
+  this->buffers_[0].is_ready = false;
+  this->buffers_[1].data.clear();
+  this->buffers_[1].valid_size = 0;
+  this->buffers_[1].is_ready = false;
+  this->active_buffer_idx_ = 0;
 }
 
-bool MP4Demuxer::refill_readahead_buffer_(uint64_t target_offset) {
-  if (this->file_ == nullptr) {
-    return false;
+// ========== Async Buffer Refill Implementation ==========
+
+void MP4Demuxer::start_refill_task_() {
+#ifdef USE_ESP32
+  if (this->refill_task_running_) {
+    return;  // Already running
   }
 
-  // Allocate buffer on first use
-  if (this->readahead_buffer_.empty()) {
-    this->readahead_buffer_.resize(this->readahead_buffer_capacity_);
-    // Check if allocation succeeded by verifying size
-    if (this->readahead_buffer_.size() != this->readahead_buffer_capacity_) {
-      ESP_LOGE(TAG, "Failed to allocate readahead buffer (%zu bytes)", this->readahead_buffer_capacity_);
-      this->readahead_buffer_.clear();
-      return false;
+  // Create mutex and semaphore
+  this->buffer_mutex_ = xSemaphoreCreateMutex();
+  this->refill_semaphore_ = xSemaphoreCreateBinary();
+
+  if (this->buffer_mutex_ == nullptr || this->refill_semaphore_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create synchronization primitives");
+    return;
+  }
+
+  // Allocate both buffers
+  for (int i = 0; i < 2; i++) {
+    this->buffers_[i].data.resize(this->readahead_buffer_capacity_);
+    if (this->buffers_[i].data.size() != this->readahead_buffer_capacity_) {
+      ESP_LOGE(TAG, "Failed to allocate readahead buffer #%d (%zu bytes)", i, this->readahead_buffer_capacity_);
+      this->buffers_[i].data.clear();
+      return;
     }
-    ESP_LOGI(TAG, "Allocated %zu byte readahead buffer in PSRAM", this->readahead_buffer_capacity_);
+  }
+  ESP_LOGI(TAG, "Allocated 2x %zu byte readahead buffers in PSRAM", this->readahead_buffer_capacity_);
+
+  // Create refill task (priority 1, stack 4KB, pinned to core 0)
+  // this->stop_refill_task_ = false;
+  this->refill_task_running_ = false;
+
+  BaseType_t result = xTaskCreatePinnedToCore(mp4_refill_task_wrapper,     // Task function (static wrapper)
+                                              "mp4_refill",                // Task name
+                                              4096,                        // Stack size
+                                              this,                        // Parameter (this pointer)
+                                              1,                           // Priority (low)
+                                              &this->refill_task_handle_,  // Task handle
+                                              0                            // Core 0
+  );
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create refill task");
+    vSemaphoreDelete(this->buffer_mutex_);
+    vSemaphoreDelete(this->refill_semaphore_);
+    this->buffer_mutex_ = nullptr;
+    this->refill_semaphore_ = nullptr;
+    return;
   }
 
-  // Seek to target offset and read as much as possible
-  if (fseek(this->file_, target_offset, SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek to offset %llu for readahead buffer", static_cast<unsigned long long>(target_offset));
+  ESP_LOGI(TAG, "Started async buffer refill task");
+#endif
+}
+
+void MP4Demuxer::stop_refill_task_() {
+#ifdef USE_ESP32
+  if (!this->refill_task_running_ && this->refill_task_handle_ == nullptr) {
+    return;  // Not running
+  }
+
+  // Signal task to stop
+  stop_refill_task_();
+
+  // Wake up task if it's waiting
+  if (this->refill_semaphore_ != nullptr) {
+    xSemaphoreGive(this->refill_semaphore_);
+  }
+
+  // Wait for task to finish (with timeout)
+  for (int i = 0; i < 50 && this->refill_task_running_; i++) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  // Delete task if still exists
+  if (this->refill_task_handle_ != nullptr) {
+    vTaskDelete(this->refill_task_handle_);
+    this->refill_task_handle_ = nullptr;
+  }
+
+  // Clean up synchronization primitives
+  if (this->buffer_mutex_ != nullptr) {
+    vSemaphoreDelete(this->buffer_mutex_);
+    this->buffer_mutex_ = nullptr;
+  }
+  if (this->refill_semaphore_ != nullptr) {
+    vSemaphoreDelete(this->refill_semaphore_);
+    this->refill_semaphore_ = nullptr;
+  }
+
+  ESP_LOGD(TAG, "Stopped async buffer refill task");
+#endif
+}
+
+void MP4Demuxer::refill_task_func_(void *param) {
+#ifdef USE_ESP32
+  MP4Demuxer *demuxer = static_cast<MP4Demuxer *>(param);
+  if (demuxer == nullptr) {
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  demuxer->refill_task_running_ = true;
+  ESP_LOGD(TAG, "Refill task started");
+  /*
+  while (!demuxer->stop_refill_task_) {
+    // Wait for signal to refill (with timeout to check stop flag periodically)
+    if (xSemaphoreTake(demuxer->refill_semaphore_, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (demuxer->stop_refill_task_) {
+        break;
+      }
+
+      // Get the inactive buffer index (the one not currently being read from)
+      uint8_t refill_idx = (demuxer->active_buffer_idx_ + 1) % 2;
+      uint64_t target_offset = demuxer->next_refill_offset_;
+
+      // Perform the slow USB read (this is okay to block here - we're in background task)
+      if (demuxer->file_ != nullptr && fseek(demuxer->file_, target_offset, SEEK_SET) == 0) {
+        size_t bytes_to_read = demuxer->readahead_buffer_capacity_;
+        if (target_offset + bytes_to_read > demuxer->file_size_) {
+          bytes_to_read = demuxer->file_size_ - target_offset;
+        }
+
+        size_t bytes_read = fread(demuxer->buffers_[refill_idx].data.data(), 1, bytes_to_read, demuxer->file_);
+
+        // Update buffer metadata under mutex protection
+        if (xSemaphoreTake(demuxer->buffer_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+          demuxer->buffers_[refill_idx].start_offset = target_offset;
+          demuxer->buffers_[refill_idx].valid_size = bytes_read;
+          demuxer->buffers_[refill_idx].is_ready = (bytes_read > 0);
+          xSemaphoreGive(demuxer->buffer_mutex_);
+
+          ESP_LOGD(TAG, "Background refill complete: buffer=%d, offset=%llu, size=%zu",
+                   refill_idx, static_cast<unsigned long long>(target_offset), bytes_read);
+        }
+      }
+    }
+  }*/
+
+  demuxer->refill_task_running_ = false;
+  ESP_LOGD(TAG, "Refill task stopped");
+  vTaskDelete(nullptr);  // Delete self
+#endif
+}
+
+bool MP4Demuxer::try_swap_buffers_(uint64_t target_offset) {
+#ifdef USE_ESP32
+  if (this->buffer_mutex_ == nullptr) {
     return false;
   }
 
-  size_t bytes_to_read = this->readahead_buffer_capacity_;
-  // Don't read past end of file
-  if (target_offset + bytes_to_read > this->file_size_) {
-    bytes_to_read = this->file_size_ - target_offset;
+  bool swapped = false;
+
+  // Check if inactive buffer has the data we need
+  if (xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+    uint8_t inactive_idx = (this->active_buffer_idx_ + 1) % 2;
+    ReadaheadBuffer &inactive_buf = this->buffers_[inactive_idx];
+
+    if (inactive_buf.is_ready) {
+      uint64_t buffer_end = inactive_buf.start_offset + inactive_buf.valid_size;
+      // Check if target is in this buffer (with some lookahead margin)
+      if (target_offset >= inactive_buf.start_offset && target_offset < buffer_end) {
+        // Swap to this buffer
+        this->active_buffer_idx_ = inactive_idx;
+        swapped = true;
+        ESP_LOGD(TAG, "Swapped to buffer %d (offset=%llu, size=%zu)", inactive_idx,
+                 static_cast<unsigned long long>(inactive_buf.start_offset), inactive_buf.valid_size);
+      }
+    }
+
+    xSemaphoreGive(this->buffer_mutex_);
   }
 
-  size_t bytes_read = fread(this->readahead_buffer_.data(), 1, bytes_to_read, this->file_);
-  this->readahead_buffer_start_offset_ = target_offset;
-  this->readahead_buffer_valid_size_ = bytes_read;
-
-  ESP_LOGD(TAG, "Refilled readahead buffer: offset=%llu, size=%zu", static_cast<unsigned long long>(target_offset),
-           bytes_read);
-
-  return bytes_read > 0;
+  return swapped;
+#else
+  return false;
+#endif
 }
 
 bool MP4Demuxer::get_next_video_sample(Sample &sample, uint8_t *data, size_t max_size) {
@@ -210,37 +365,112 @@ bool MP4Demuxer::get_next_video_sample(Sample &sample, uint8_t *data, size_t max
     return false;
   }
 
-  // Check if sample is in readahead buffer
-  bool in_buffer = false;
-  if (this->readahead_buffer_valid_size_ > 0) {
-    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
-    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
-      // Sample is fully contained in buffer
-      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
-      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
-      in_buffer = true;
+  // Try to use active buffer first (fast path)
+  bool got_data = false;
+
+#ifdef USE_ESP32
+  if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+    ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+    if (active_buf.is_ready) {
+      uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+      if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+        // Sample is in active buffer - copy it (fast memcpy from PSRAM)
+        size_t buffer_pos = sample.offset - active_buf.start_offset;
+        memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+        got_data = true;
+      }
+    }
+    xSemaphoreGive(this->buffer_mutex_);
+  }
+
+  // If not in active buffer, try to swap to background buffer
+  if (!got_data) {
+    if (this->try_swap_buffers_(sample.offset)) {
+      // Buffer swapped - try again with new active buffer
+      if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+        ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+        if (active_buf.is_ready) {
+          uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+          if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+            size_t buffer_pos = sample.offset - active_buf.start_offset;
+            memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+            got_data = true;
+          }
+        }
+        xSemaphoreGive(this->buffer_mutex_);
+      }
     }
   }
 
-  // If not in buffer, refill and try again
-  if (!in_buffer) {
-    if (!this->refill_readahead_buffer_(sample.offset)) {
-      ESP_LOGE(TAG, "Failed to refill readahead buffer for video sample %u", idx);
-      return false;
+  // If still no data, trigger background refill and wait briefly
+  if (!got_data) {
+    ESP_LOGW(TAG, "Video sample %u not in buffer - triggering refill (offset=%llu)", idx,
+             static_cast<unsigned long long>(sample.offset));
+
+    // Set next refill offset and signal task
+    this->next_refill_offset_ = sample.offset;
+    if (this->refill_semaphore_ != nullptr) {
+      xSemaphoreGive(this->refill_semaphore_);
     }
 
-    // Check if sample is now in buffer
-    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
-    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
-      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
-      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
-    } else {
-      ESP_LOGE(TAG, "Video sample %u not in buffer after refill (offset=%llu, size=%u, buf_start=%llu, buf_size=%zu)",
-               idx, static_cast<unsigned long long>(sample.offset), sample.size,
-               static_cast<unsigned long long>(this->readahead_buffer_start_offset_),
-               this->readahead_buffer_valid_size_);
-      return false;
+    // Wait a bit for refill (max 100ms to avoid blocking too long)
+    for (int wait_ms = 0; wait_ms < 100 && !got_data; wait_ms += 5) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+
+      // Check if data is ready now
+      if (this->try_swap_buffers_(sample.offset)) {
+        if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+          ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+          if (active_buf.is_ready) {
+            uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+            if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+              size_t buffer_pos = sample.offset - active_buf.start_offset;
+              memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+              got_data = true;
+            }
+          }
+          xSemaphoreGive(this->buffer_mutex_);
+        }
+      }
     }
+  }
+#else
+  // Fallback for non-ESP32: direct file read (should not happen)
+  if (!got_data && this->file_ != nullptr) {
+    if (fseek(this->file_, sample.offset, SEEK_SET) == 0) {
+      if (fread(data, 1, sample.size, this->file_) == sample.size) {
+        got_data = true;
+      }
+    }
+  }
+#endif
+
+  if (!got_data) {
+    ESP_LOGE(TAG, "Failed to get video sample %u", idx);
+    return false;
+  }
+
+  // Trigger prefetch for next sample
+  if (idx + 1 < this->video_track_.sample_count) {
+    uint64_t next_offset = this->video_track_.sample_offsets[idx + 1];
+    // Check if next sample will need a buffer refill
+    bool need_prefetch = true;
+
+#ifdef USE_ESP32
+    if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+      ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+      uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+      if (next_offset >= active_buf.start_offset && next_offset < buffer_end) {
+        need_prefetch = false;  // Next sample is already in buffer
+      }
+      xSemaphoreGive(this->buffer_mutex_);
+    }
+
+    if (need_prefetch && this->refill_semaphore_ != nullptr) {
+      this->next_refill_offset_ = next_offset;
+      xSemaphoreGive(this->refill_semaphore_);
+    }
+#endif
   }
 
   this->current_video_sample_++;
@@ -270,37 +500,83 @@ bool MP4Demuxer::get_next_audio_sample(Sample &sample, uint8_t *data, size_t max
     return false;
   }
 
-  // Check if sample is in readahead buffer
-  bool in_buffer = false;
-  if (this->readahead_buffer_valid_size_ > 0) {
-    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
-    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
-      // Sample is fully contained in buffer
-      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
-      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
-      in_buffer = true;
+  // Audio samples use the same async buffer system as video
+  // Try to use active buffer first (fast path)
+  bool got_data = false;
+
+#ifdef USE_ESP32
+  if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+    ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+    if (active_buf.is_ready) {
+      uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+      if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+        size_t buffer_pos = sample.offset - active_buf.start_offset;
+        memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+        got_data = true;
+      }
+    }
+    xSemaphoreGive(this->buffer_mutex_);
+  }
+
+  // If not in active buffer, try to swap to background buffer
+  if (!got_data) {
+    if (this->try_swap_buffers_(sample.offset)) {
+      if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+        ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+        if (active_buf.is_ready) {
+          uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+          if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+            size_t buffer_pos = sample.offset - active_buf.start_offset;
+            memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+            got_data = true;
+          }
+        }
+        xSemaphoreGive(this->buffer_mutex_);
+      }
     }
   }
 
-  // If not in buffer, refill and try again
-  if (!in_buffer) {
-    if (!this->refill_readahead_buffer_(sample.offset)) {
-      ESP_LOGE(TAG, "Failed to refill readahead buffer for audio sample %u", idx);
-      return false;
+  // If still no data, trigger background refill (but don't wait as long for audio - it's smaller)
+  if (!got_data) {
+    this->next_refill_offset_ = sample.offset;
+    if (this->refill_semaphore_ != nullptr) {
+      xSemaphoreGive(this->refill_semaphore_);
     }
 
-    // Check if sample is now in buffer
-    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
-    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
-      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
-      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
-    } else {
-      ESP_LOGE(TAG, "Audio sample %u not in buffer after refill (offset=%llu, size=%u, buf_start=%llu, buf_size=%zu)",
-               idx, static_cast<unsigned long long>(sample.offset), sample.size,
-               static_cast<unsigned long long>(this->readahead_buffer_start_offset_),
-               this->readahead_buffer_valid_size_);
-      return false;
+    // Wait briefly for refill (max 20ms for audio)
+    for (int wait_ms = 0; wait_ms < 20 && !got_data; wait_ms += 5) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+
+      if (this->try_swap_buffers_(sample.offset)) {
+        if (this->buffer_mutex_ != nullptr && xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+          ReadaheadBuffer &active_buf = this->buffers_[this->active_buffer_idx_];
+          if (active_buf.is_ready) {
+            uint64_t buffer_end = active_buf.start_offset + active_buf.valid_size;
+            if (sample.offset >= active_buf.start_offset && sample.offset + sample.size <= buffer_end) {
+              size_t buffer_pos = sample.offset - active_buf.start_offset;
+              memcpy(data, active_buf.data.data() + buffer_pos, sample.size);
+              got_data = true;
+            }
+          }
+          xSemaphoreGive(this->buffer_mutex_);
+        }
+      }
     }
+  }
+#else
+  // Fallback for non-ESP32: direct file read
+  if (!got_data && this->file_ != nullptr) {
+    if (fseek(this->file_, sample.offset, SEEK_SET) == 0) {
+      if (fread(data, 1, sample.size, this->file_) == sample.size) {
+        got_data = true;
+      }
+    }
+  }
+#endif
+
+  if (!got_data) {
+    ESP_LOGE(TAG, "Failed to get audio sample %u", idx);
+    return false;
   }
 
   this->current_audio_sample_++;
@@ -1011,6 +1287,9 @@ bool MP4Demuxer::parse_stts_box(uint32_t size, std::vector<uint32_t> &sample_dur
   ESP_LOGD(TAG, "stts: %zu sample durations", sample_durations.size());
   return true;
 }
+
+// Static wrapper function for RTOS task
+static void mp4_refill_task_wrapper(void *param) { MP4Demuxer::refill_task_func_(param); }
 
 }  // namespace video_player
 }  // namespace esphome

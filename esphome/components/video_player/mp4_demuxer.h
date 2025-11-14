@@ -26,6 +26,12 @@
 #include <string>
 #include <vector>
 
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#endif
+
 namespace esphome {
 namespace video_player {
 
@@ -229,6 +235,12 @@ class MP4Demuxer {
     return (this->audio_track_.duration * 1000) / this->audio_track_.timescale;
   }
 
+  /**
+   * @brief RTOS task function for async buffer refill (public for wrapper access)
+   * @param param Pointer to MP4Demuxer instance
+   */
+  static void refill_task_func_(void *param);
+
  protected:
   // Box parsing helpers
   bool read_u32(uint32_t &value);
@@ -261,12 +273,28 @@ class MP4Demuxer {
   uint64_t file_size_{0};
   uint64_t mdat_offset_{0};  // Offset where mdat box starts
 
-  // Readahead buffer (PSRAM) to minimize USB seek/read latency
-  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> readahead_buffer_;  // Allocated in PSRAM
-  uint64_t readahead_buffer_start_offset_{0};                             // File offset where buffer starts
-  size_t readahead_buffer_valid_size_{0};                                 // How much of the buffer contains valid data
-  size_t readahead_buffer_capacity_{4 * 1024 * 1024};                     // 4MB default capacity
-  bool refill_readahead_buffer_(uint64_t target_offset);
+  // Readahead buffer (PSRAM) to minimize USB seek/read latency - double-buffered for async refill
+  struct ReadaheadBuffer {
+    std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> data;  // Allocated in PSRAM
+    uint64_t start_offset{0};                                  // File offset where buffer starts
+    size_t valid_size{0};                                      // How much of the buffer contains valid data
+    bool is_ready{false};                                      // True when buffer has been filled and is ready to use
+  };
+  ReadaheadBuffer buffers_[2];                         // Double buffer (one for reading, one for background refill)
+  uint8_t active_buffer_idx_{0};                       // Index of buffer currently being read from (0 or 1)
+  size_t readahead_buffer_capacity_{4 * 1024 * 1024};  // 4MB default capacity per buffer
+
+  // Async buffer refill task
+  TaskHandle_t refill_task_handle_{nullptr};
+  SemaphoreHandle_t buffer_mutex_{nullptr};      // Protects buffer swap operations
+  SemaphoreHandle_t refill_semaphore_{nullptr};  // Signals refill task to start work
+  volatile bool refill_task_running_{false};
+  volatile bool stop_refill_task_{false};
+  volatile uint64_t next_refill_offset_{0};  // Offset to refill for next buffer
+
+  void start_refill_task_();
+  void stop_refill_task_();
+  bool try_swap_buffers_(uint64_t target_offset);  // Try to swap to background buffer if it has the data we need
 
   // Track information
   bool has_video_{false};
