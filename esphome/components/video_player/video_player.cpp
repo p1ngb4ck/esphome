@@ -524,6 +524,16 @@ bool VideoPlayer::decode_frame_(const uint8_t *h264_data, size_t h264_size, uint
     return false;
   }
 
+  // CRITICAL: Flush CPU cache to ensure decoder can see PSRAM data
+  // ESP32-P4 requires explicit cache sync for external memory
+#ifdef USE_ESP32
+  // Flush data cache for the input buffer range to ensure decoder sees our writes
+  esp_err_t cache_ret = esp_cache_msync((void *) h264_data, h264_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+  if (cache_ret != ESP_OK) {
+    ESP_LOGW(TAG, "Cache flush failed: %s", esp_err_to_name(cache_ret));
+  }
+#endif
+
   esp_h264_dec_in_frame_t in_frame = {};
   in_frame.raw_data.buffer = const_cast<uint8_t *>(h264_data);
   in_frame.raw_data.len = h264_size;
