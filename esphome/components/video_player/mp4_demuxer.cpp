@@ -607,7 +607,7 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
     // Video sample description (VisualSampleEntry)
     if (entry_type == BOX_TYPE_AVC1) {
       // H.264/AVC1 format
-      // Skip: reserved(6) + data_reference_index(2) + pre_defined(16) + width(2) + height(2) + ...
+      // Skip: reserved(6) + data_reference_index(2) + pre_defined(16)
       this->skip_bytes(6 + 2 + 16);  // reserved + data_reference_index + pre_defined fields
 
       uint16_t width, height;
@@ -619,6 +619,97 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
       this->video_track_.height = height;
 
       ESP_LOGD(TAG, "stsd: H.264 video %ux%u", width, height);
+
+      // Skip: horiz_resolution(4) + vert_resolution(4) + reserved(4) + frame_count(2) +
+      //       compressor_name(32) + depth(2) + pre_defined(2) = 50 bytes
+      this->skip_bytes(50);
+
+      // Now we should be at the avcC box (if present)
+      // The avcC box contains SPS/PPS and NALU length size
+      uint64_t entry_start = ftell(this->file_) - 8 - 24 - 4 - 50;  // Calculate entry start
+      uint64_t entry_end = entry_start + entry_size;
+
+      // Look for avcC box within the avc1 entry
+      while (ftell(this->file_) < static_cast<long>(entry_end - 8)) {
+        uint32_t avcc_size, avcc_type;
+        if (!this->read_box_header(avcc_size, avcc_type)) {
+          break;
+        }
+
+        if (avcc_type == 0x61766343) {  // 'avcC'
+          ESP_LOGD(TAG, "stsd: Found avcC box, size=%u", avcc_size);
+
+          // Parse avcC box to extract SPS/PPS
+          uint8_t config_version;
+          if (!this->read_u8(config_version)) {
+            break;
+          }
+
+          // Skip: profile(1) + profile_compat(1) + level(1) = 3 bytes
+          this->skip_bytes(3);
+
+          // Read NALU length size
+          uint8_t length_size_minus_one;
+          if (!this->read_u8(length_size_minus_one)) {
+            break;
+          }
+          this->video_track_.nalu_length_size = (length_size_minus_one & 0x03) + 1;
+
+          // Read number of SPS
+          uint8_t num_sps;
+          if (!this->read_u8(num_sps)) {
+            break;
+          }
+          num_sps &= 0x1F;  // Lower 5 bits
+
+          ESP_LOGD(TAG, "stsd: avcC - NALU length size=%u, num_sps=%u", this->video_track_.nalu_length_size, num_sps);
+
+          // Read SPS data (usually just one)
+          for (uint8_t i = 0; i < num_sps; i++) {
+            uint16_t sps_length;
+            if (!this->read_u16(sps_length)) {
+              break;
+            }
+
+            size_t old_size = this->video_track_.sps_data.size();
+            this->video_track_.sps_data.resize(old_size + sps_length);
+            if (fread(&this->video_track_.sps_data[old_size], 1, sps_length, this->file_) != sps_length) {
+              ESP_LOGE(TAG, "Failed to read SPS data");
+              break;
+            }
+            ESP_LOGD(TAG, "stsd: Read SPS #%u, length=%u", i, sps_length);
+          }
+
+          // Read number of PPS
+          uint8_t num_pps;
+          if (!this->read_u8(num_pps)) {
+            break;
+          }
+
+          ESP_LOGD(TAG, "stsd: num_pps=%u", num_pps);
+
+          // Read PPS data (usually just one)
+          for (uint8_t i = 0; i < num_pps; i++) {
+            uint16_t pps_length;
+            if (!this->read_u16(pps_length)) {
+              break;
+            }
+
+            size_t old_size = this->video_track_.pps_data.size();
+            this->video_track_.pps_data.resize(old_size + pps_length);
+            if (fread(&this->video_track_.pps_data[old_size], 1, pps_length, this->file_) != pps_length) {
+              ESP_LOGE(TAG, "Failed to read PPS data");
+              break;
+            }
+            ESP_LOGD(TAG, "stsd: Read PPS #%u, length=%u", i, pps_length);
+          }
+
+          break;  // Found and parsed avcC
+        } else {
+          // Skip this box
+          fseek(this->file_, ftell(this->file_) + avcc_size - 8, SEEK_SET);
+        }
+      }
     }
 
   } else if (track_type == TrackType::AUDIO) {

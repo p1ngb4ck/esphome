@@ -87,6 +87,9 @@ struct VideoTrackInfo {
   std::vector<uint32_t> sample_sizes;      // Size of each frame in bytes
   std::vector<uint64_t> sample_offsets;    // File offset of each frame
   std::vector<uint32_t> sample_durations;  // Duration of each frame in timescale units
+  uint8_t nalu_length_size{4};             // Size of NALU length field (usually 4 bytes)
+  std::vector<uint8_t> sps_data;           // H264 SPS (Sequence Parameter Set)
+  std::vector<uint8_t> pps_data;           // H264 PPS (Picture Parameter Set)
 };
 
 /**

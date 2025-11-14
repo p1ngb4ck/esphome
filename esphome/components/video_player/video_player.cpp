@@ -44,6 +44,7 @@ void VideoPlayer::setup() {
   } else {
     // Allocate video frame buffers only if canvas exists
     this->h264_frame_buffer_.resize(MAX_H264_FRAME_SIZE);
+    this->annexb_frame_buffer_.resize(MAX_H264_FRAME_SIZE + 1024);  // Extra space for start codes
     this->yuv_frame_buffer_.resize(MAX_YUV_FRAME_SIZE);
     ESP_LOGCONFIG(TAG, "Video frame buffers allocated");
   }
@@ -330,6 +331,50 @@ bool VideoPlayer::init_decoder_() {
     return false;
   }
 
+  // Feed SPS/PPS to decoder (required for MP4 files)
+  const VideoTrackInfo *video = this->get_video_track_();
+  if (video != nullptr && (!video->sps_data.empty() || !video->pps_data.empty())) {
+    ESP_LOGI(TAG, "Feeding SPS/PPS to decoder (SPS: %zu bytes, PPS: %zu bytes)", video->sps_data.size(),
+             video->pps_data.size());
+
+    // Convert SPS/PPS to Annex-B format (add start codes)
+    std::vector<uint8_t> config_data;
+    config_data.reserve(video->sps_data.size() + video->pps_data.size() + 8);
+
+    // Add SPS with start code
+    if (!video->sps_data.empty()) {
+      config_data.push_back(0x00);
+      config_data.push_back(0x00);
+      config_data.push_back(0x00);
+      config_data.push_back(0x01);
+      config_data.insert(config_data.end(), video->sps_data.begin(), video->sps_data.end());
+    }
+
+    // Add PPS with start code
+    if (!video->pps_data.empty()) {
+      config_data.push_back(0x00);
+      config_data.push_back(0x00);
+      config_data.push_back(0x00);
+      config_data.push_back(0x01);
+      config_data.insert(config_data.end(), video->pps_data.begin(), video->pps_data.end());
+    }
+
+    // Feed to decoder
+    esp_h264_dec_in_frame_t in_frame = {};
+    in_frame.raw_data.buffer = config_data.data();
+    in_frame.raw_data.len = config_data.size();
+
+    esp_h264_dec_out_frame_t out_frame = {};
+
+    ret = esp_h264_dec_process(this->decoder_, &in_frame, &out_frame);
+    if (ret != ESP_H264_ERR_OK) {
+      ESP_LOGW(TAG, "Warning: Failed to feed SPS/PPS to decoder: %d (will try to continue)", ret);
+      // Don't fail initialization - some decoders might get SPS/PPS from first frame
+    } else {
+      ESP_LOGI(TAG, "SPS/PPS fed to decoder successfully");
+    }
+  }
+
   ESP_LOGI(TAG, "H264 decoder initialized successfully");
   return true;
 #else
@@ -403,8 +448,17 @@ void VideoPlayer::process_video_frame_() {
     return;  // Drop frame and get next one
   }
 
+  // Convert AVCC format to Annex-B format (MP4 uses AVCC, decoder expects Annex-B)
+  size_t annexb_size =
+      this->convert_avcc_to_annexb_(this->h264_frame_buffer_.data(), sample.size, this->annexb_frame_buffer_.data(),
+                                    this->annexb_frame_buffer_.size(), video->nalu_length_size);
+  if (annexb_size == 0) {
+    ESP_LOGW(TAG, "Failed to convert AVCC to Annex-B format");
+    return;
+  }
+
   // Decode H264 frame to YUV
-  if (!this->decode_frame_(this->h264_frame_buffer_.data(), sample.size, this->yuv_frame_buffer_.data(),
+  if (!this->decode_frame_(this->annexb_frame_buffer_.data(), annexb_size, this->yuv_frame_buffer_.data(),
                            this->yuv_frame_buffer_.size())) {
     ESP_LOGW(TAG, "Failed to decode frame at position %u ms", sample.timestamp_ms);
     return;
@@ -876,6 +930,66 @@ uint64_t VideoPlayer::get_audio_duration_ms_() const {
     default:
       return 0;
   }
+}
+
+// ========== AVCC to Annex-B Conversion ==========
+
+size_t VideoPlayer::convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avcc_size, uint8_t *annexb_data,
+                                            size_t max_size, uint8_t nalu_length_size) {
+  // Convert MP4/AVCC format (length-prefixed NALUs) to Annex-B format (start code prefixed)
+  // AVCC format: [length][NALU data][length][NALU data]...
+  // Annex-B format: [0x00 0x00 0x00 0x01][NALU data][0x00 0x00 0x00 0x01][NALU data]...
+
+  if (avcc_data == nullptr || annexb_data == nullptr || avcc_size == 0 || max_size == 0) {
+    return 0;
+  }
+
+  size_t read_pos = 0;
+  size_t write_pos = 0;
+
+  while (read_pos < avcc_size) {
+    // Read NALU length (big-endian, size specified by nalu_length_size)
+    if (read_pos + nalu_length_size > avcc_size) {
+      ESP_LOGE(TAG, "AVCC: incomplete NALU length field at offset %zu", read_pos);
+      return 0;
+    }
+
+    uint32_t nalu_length = 0;
+    for (uint8_t i = 0; i < nalu_length_size; i++) {
+      nalu_length = (nalu_length << 8) | avcc_data[read_pos + i];
+    }
+    read_pos += nalu_length_size;
+
+    // Validate NALU length
+    if (nalu_length == 0) {
+      ESP_LOGE(TAG, "AVCC: zero NALU length at offset %zu", read_pos - nalu_length_size);
+      return 0;
+    }
+
+    if (read_pos + nalu_length > avcc_size) {
+      ESP_LOGE(TAG, "AVCC: NALU length %u exceeds remaining data (%zu bytes)", nalu_length, avcc_size - read_pos);
+      return 0;
+    }
+
+    // Check if we have space for start code (4 bytes) + NALU data
+    if (write_pos + 4 + nalu_length > max_size) {
+      ESP_LOGE(TAG, "AVCC: output buffer too small (need %zu, have %zu)", write_pos + 4 + nalu_length, max_size);
+      return 0;
+    }
+
+    // Write Annex-B start code (0x00 0x00 0x00 0x01)
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x01;
+
+    // Copy NALU data
+    memcpy(annexb_data + write_pos, avcc_data + read_pos, nalu_length);
+    write_pos += nalu_length;
+    read_pos += nalu_length;
+  }
+
+  return write_pos;
 }
 
 }  // namespace video_player

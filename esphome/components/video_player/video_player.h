@@ -168,6 +168,8 @@ class VideoPlayer : public Component {
   void process_video_frame_();
   bool decode_frame_(const uint8_t *h264_data, size_t h264_size, uint8_t *yuv_output, size_t yuv_size);
   void render_frame_(const uint8_t *yuv_data, uint16_t width, uint16_t height);
+  size_t convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avcc_size, uint8_t *annexb_data, size_t max_size,
+                                 uint8_t nalu_length_size);
 
   // Audio processing
   bool init_audio_decoder_();
@@ -209,10 +211,11 @@ class VideoPlayer : public Component {
 #endif
 
   // Frame buffers (PSRam allocated - ESP32-P4 has 32MB PSRam @ 200MHz, only 512KB internal SRAM)
-  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> h264_frame_buffer_;  // Buffer for compressed H264 frame
-  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> yuv_frame_buffer_;   // Buffer for decoded YUV420 frame
-  uint16_t *rgb_frame_buffer_{nullptr};                                    // Buffer for RGB565 frame (PSRAM allocated)
-  size_t rgb_frame_buffer_size_{0};                                        // Size of RGB buffer in uint16_t elements
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> h264_frame_buffer_;    // Buffer for compressed H264 frame (AVCC)
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> annexb_frame_buffer_;  // Buffer for Annex-B converted (PSRAM)
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> yuv_frame_buffer_;     // Buffer for decoded YUV420 frame
+  uint16_t *rgb_frame_buffer_{nullptr};  // Buffer for RGB565 frame (PSRAM allocated)
+  size_t rgb_frame_buffer_size_{0};      // Size of RGB buffer in uint16_t elements
 
   // Audio decoder and buffers (PSRam allocated)
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;
