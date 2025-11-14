@@ -577,6 +577,10 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
   // stsd format:
   // version(1) + flags(3) + entry_count(4) + [sample_description_entries...]
 
+  // Remember where this box started (after the header which was already read)
+  uint64_t box_start = ftell(this->file_);
+  uint64_t box_end = box_start + size - 8;  // -8 for the header already read
+
   this->skip_bytes(4);  // version + flags
 
   uint32_t entry_count;
@@ -586,6 +590,8 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
 
   if (entry_count == 0) {
     ESP_LOGW(TAG, "stsd: no sample description entries");
+    // Seek to end of box
+    fseek(this->file_, box_end, SEEK_SET);
     return true;
   }
 
@@ -595,7 +601,7 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
     return false;
   }
 
-  ESP_LOGD(TAG, "stsd: codec type 0x%08X", entry_type);
+  ESP_LOGD(TAG, "stsd: codec type 0x%08X, entry_size=%u", entry_type, entry_size);
 
   if (track_type == TrackType::VIDEO) {
     // Video sample description (VisualSampleEntry)
@@ -655,6 +661,9 @@ bool MP4Demuxer::parse_stsd_box(uint32_t size, TrackType track_type) {
       ESP_LOGW(TAG, "stsd: Unknown audio codec 0x%08X (%u Hz, %u channels)", entry_type, sample_rate, channels);
     }
   }
+
+  // Seek to end of stsd box to ensure we're positioned correctly for next box
+  fseek(this->file_, box_end, SEEK_SET);
 
   return true;
 }
