@@ -144,6 +144,46 @@ void MP4Demuxer::close() {
   this->audio_track_ = AudioTrackInfo{};
   this->current_video_sample_ = 0;
   this->current_audio_sample_ = 0;
+  this->readahead_buffer_.clear();
+  this->readahead_buffer_valid_size_ = 0;
+}
+
+bool MP4Demuxer::refill_readahead_buffer_(uint64_t target_offset) {
+  if (this->file_ == nullptr) {
+    return false;
+  }
+
+  // Allocate buffer on first use
+  if (this->readahead_buffer_.empty()) {
+    try {
+      this->readahead_buffer_.resize(this->readahead_buffer_capacity_);
+      ESP_LOGI(TAG, "Allocated %zu byte readahead buffer in PSRAM", this->readahead_buffer_capacity_);
+    } catch (const std::bad_alloc &e) {
+      ESP_LOGE(TAG, "Failed to allocate readahead buffer: %s", e.what());
+      return false;
+    }
+  }
+
+  // Seek to target offset and read as much as possible
+  if (fseek(this->file_, target_offset, SEEK_SET) != 0) {
+    ESP_LOGE(TAG, "Failed to seek to offset %llu for readahead buffer", static_cast<unsigned long long>(target_offset));
+    return false;
+  }
+
+  size_t bytes_to_read = this->readahead_buffer_capacity_;
+  // Don't read past end of file
+  if (target_offset + bytes_to_read > this->file_size_) {
+    bytes_to_read = this->file_size_ - target_offset;
+  }
+
+  size_t bytes_read = fread(this->readahead_buffer_.data(), 1, bytes_to_read, this->file_);
+  this->readahead_buffer_start_offset_ = target_offset;
+  this->readahead_buffer_valid_size_ = bytes_read;
+
+  ESP_LOGD(TAG, "Refilled readahead buffer: offset=%llu, size=%zu", static_cast<unsigned long long>(target_offset),
+           bytes_read);
+
+  return bytes_read > 0;
 }
 
 bool MP4Demuxer::get_next_video_sample(Sample &sample, uint8_t *data, size_t max_size) {
@@ -169,11 +209,37 @@ bool MP4Demuxer::get_next_video_sample(Sample &sample, uint8_t *data, size_t max
     return false;
   }
 
-  fseek(this->file_, sample.offset, SEEK_SET);
-  size_t read = fread(data, 1, sample.size, this->file_);
-  if (read != sample.size) {
-    ESP_LOGE(TAG, "Failed to read video sample %u (expected %u, got %zu)", idx, sample.size, read);
-    return false;
+  // Check if sample is in readahead buffer
+  bool in_buffer = false;
+  if (this->readahead_buffer_valid_size_ > 0) {
+    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
+    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
+      // Sample is fully contained in buffer
+      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
+      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
+      in_buffer = true;
+    }
+  }
+
+  // If not in buffer, refill and try again
+  if (!in_buffer) {
+    if (!this->refill_readahead_buffer_(sample.offset)) {
+      ESP_LOGE(TAG, "Failed to refill readahead buffer for video sample %u", idx);
+      return false;
+    }
+
+    // Check if sample is now in buffer
+    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
+    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
+      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
+      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
+    } else {
+      ESP_LOGE(TAG, "Video sample %u not in buffer after refill (offset=%llu, size=%u, buf_start=%llu, buf_size=%zu)",
+               idx, static_cast<unsigned long long>(sample.offset), sample.size,
+               static_cast<unsigned long long>(this->readahead_buffer_start_offset_),
+               this->readahead_buffer_valid_size_);
+      return false;
+    }
   }
 
   this->current_video_sample_++;
@@ -203,11 +269,37 @@ bool MP4Demuxer::get_next_audio_sample(Sample &sample, uint8_t *data, size_t max
     return false;
   }
 
-  fseek(this->file_, sample.offset, SEEK_SET);
-  size_t read = fread(data, 1, sample.size, this->file_);
-  if (read != sample.size) {
-    ESP_LOGE(TAG, "Failed to read audio sample %u (expected %u, got %zu)", idx, sample.size, read);
-    return false;
+  // Check if sample is in readahead buffer
+  bool in_buffer = false;
+  if (this->readahead_buffer_valid_size_ > 0) {
+    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
+    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
+      // Sample is fully contained in buffer
+      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
+      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
+      in_buffer = true;
+    }
+  }
+
+  // If not in buffer, refill and try again
+  if (!in_buffer) {
+    if (!this->refill_readahead_buffer_(sample.offset)) {
+      ESP_LOGE(TAG, "Failed to refill readahead buffer for audio sample %u", idx);
+      return false;
+    }
+
+    // Check if sample is now in buffer
+    uint64_t buffer_end = this->readahead_buffer_start_offset_ + this->readahead_buffer_valid_size_;
+    if (sample.offset >= this->readahead_buffer_start_offset_ && sample.offset + sample.size <= buffer_end) {
+      size_t buffer_pos = sample.offset - this->readahead_buffer_start_offset_;
+      memcpy(data, this->readahead_buffer_.data() + buffer_pos, sample.size);
+    } else {
+      ESP_LOGE(TAG, "Audio sample %u not in buffer after refill (offset=%llu, size=%u, buf_start=%llu, buf_size=%zu)",
+               idx, static_cast<unsigned long long>(sample.offset), sample.size,
+               static_cast<unsigned long long>(this->readahead_buffer_start_offset_),
+               this->readahead_buffer_valid_size_);
+      return false;
+    }
   }
 
   this->current_audio_sample_++;

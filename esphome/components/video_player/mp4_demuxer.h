@@ -19,6 +19,7 @@
 #pragma once
 
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include <cstdint>
 #include <memory>
@@ -205,6 +206,12 @@ class MP4Demuxer {
   bool has_audio() const { return this->has_audio_; }
 
   /**
+   * @brief Set readahead buffer size (must be called before open())
+   * @param size Buffer size in bytes (default: 4MB)
+   */
+  void set_readahead_buffer_size(size_t size) { this->readahead_buffer_capacity_ = size; }
+
+  /**
    * @brief Get video duration in milliseconds
    */
   uint64_t get_video_duration_ms() const {
@@ -253,6 +260,13 @@ class MP4Demuxer {
   std::string file_path_;
   uint64_t file_size_{0};
   uint64_t mdat_offset_{0};  // Offset where mdat box starts
+
+  // Readahead buffer (PSRAM) to minimize USB seek/read latency
+  std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> readahead_buffer_;  // Allocated in PSRAM
+  uint64_t readahead_buffer_start_offset_{0};                             // File offset where buffer starts
+  size_t readahead_buffer_valid_size_{0};                                 // How much of the buffer contains valid data
+  size_t readahead_buffer_capacity_{4 * 1024 * 1024};                     // 4MB default capacity
+  bool refill_readahead_buffer_(uint64_t target_offset);
 
   // Track information
   bool has_video_{false};
