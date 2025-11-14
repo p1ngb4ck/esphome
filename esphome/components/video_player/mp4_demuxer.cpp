@@ -11,8 +11,7 @@ namespace video_player {
 
 static const char *const TAG = "mp4_demuxer";
 
-// Forward declaration for static task wrapper
-static void mp4_refill_task_wrapper(void *param);
+// Note: refill_task_func_ is a static member function, no forward declaration needed
 
 // Helper to convert big-endian to native
 static inline uint32_t be32_to_cpu(const uint8_t *data) {
@@ -193,18 +192,17 @@ void MP4Demuxer::start_refill_task_() {
   ESP_LOGI(TAG, "Allocated 2x %zu byte readahead buffers in PSRAM", this->readahead_buffer_capacity_);
 
   // Create refill task (priority 1, stack 4KB, pinned to core 0)
-  // this->stop_refill_task_ = false;
+  this->stop_refill_task_flag_ = false;
   this->refill_task_running_ = false;
 
-  BaseType_t result = xTaskCreatePinnedToCore(mp4_refill_task_wrapper,     // Task function (static wrapper)
-                                              "mp4_refill",                // Task name
-                                              4096,                        // Stack size
-                                              this,                        // Parameter (this pointer)
-                                              1,                           // Priority (low)
-                                              &this->refill_task_handle_,  // Task handle
-                                              0                            // Core 0
+  BaseType_t result = xTaskCreatePinnedToCore(MP4Demuxer::refill_task_func_,  // Task function (static member)
+                                              "mp4_refill",                   // Task name
+                                              4096,                           // Stack size
+                                              this,                           // Parameter (this pointer)
+                                              1,                              // Priority (low)
+                                              &this->refill_task_handle_,     // Task handle
+                                              0                               // Core 0
   );
-
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create refill task");
     vSemaphoreDelete(this->buffer_mutex_);
@@ -225,7 +223,7 @@ void MP4Demuxer::stop_refill_task_() {
   }
 
   // Signal task to stop
-  stop_refill_task_();
+  this->stop_refill_task_flag_ = true;
 
   // Wake up task if it's waiting
   if (this->refill_semaphore_ != nullptr) {
@@ -257,7 +255,7 @@ void MP4Demuxer::stop_refill_task_() {
 #endif
 }
 
-/* void MP4Demuxer::refill_task_func_(void *param) {
+void MP4Demuxer::refill_task_func_(void *param) {
 #ifdef USE_ESP32
   MP4Demuxer *demuxer = static_cast<MP4Demuxer *>(param);
   if (demuxer == nullptr) {
@@ -268,10 +266,10 @@ void MP4Demuxer::stop_refill_task_() {
   demuxer->refill_task_running_ = true;
   ESP_LOGD(TAG, "Refill task started");
 
-  while (!demuxer->stop_refill_task_) {
+  while (!demuxer->stop_refill_task_flag_) {
     // Wait for signal to refill (with timeout to check stop flag periodically)
     if (xSemaphoreTake(demuxer->refill_semaphore_, pdMS_TO_TICKS(100)) == pdTRUE) {
-      if (demuxer->stop_refill_task_) {
+      if (demuxer->stop_refill_task_flag_) {
         break;
       }
 
@@ -295,8 +293,8 @@ void MP4Demuxer::stop_refill_task_() {
           demuxer->buffers_[refill_idx].is_ready = (bytes_read > 0);
           xSemaphoreGive(demuxer->buffer_mutex_);
 
-          ESP_LOGD(TAG, "Background refill complete: buffer=%d, offset=%llu, size=%zu",
-                   refill_idx, static_cast<unsigned long long>(target_offset), bytes_read);
+          ESP_LOGD(TAG, "Background refill complete: buffer=%d, offset=%llu, size=%zu", refill_idx,
+                   static_cast<unsigned long long>(target_offset), bytes_read);
         }
       }
     }
@@ -307,7 +305,7 @@ void MP4Demuxer::stop_refill_task_() {
   vTaskDelete(nullptr);  // Delete self
 #endif
 }
-*/
+
 bool MP4Demuxer::try_swap_buffers_(uint64_t target_offset) {
 #ifdef USE_ESP32
   if (this->buffer_mutex_ == nullptr) {
@@ -1289,7 +1287,5 @@ bool MP4Demuxer::parse_stts_box(uint32_t size, std::vector<uint32_t> &sample_dur
 }
 
 // Static wrapper function for RTOS task
-static void mp4_refill_task_wrapper(void *param) { MP4Demuxer::refill_task_func_(param); }
-
 }  // namespace video_player
 }  // namespace esphome
