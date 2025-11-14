@@ -7,6 +7,11 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
+// ESP-IDF AAC decoder registration (from esp_aac_dec.h in esp_audio_codec component)
+extern "C" {
+extern esp_audio_err_t esp_aac_dec_register();
+}
+
 namespace esphome {
 namespace audio {
 namespace esp_audio_codec_adapter {
@@ -14,6 +19,18 @@ namespace esp_audio_codec_adapter {
 static const char *const TAG = "aac_decoder_adapter";
 
 AACDecoder::AACDecoder() {
+  // Register AAC decoder with esp_audio_codec framework (must be done before first use)
+  static bool registered = false;
+  if (!registered) {
+    esp_audio_err_t reg_err = esp_aac_dec_register();
+    if (reg_err != ESP_AUDIO_ERR_OK) {
+      ESP_LOGE(TAG, "Failed to register AAC decoder: %d", reg_err);
+      return;
+    }
+    ESP_LOGI(TAG, "AAC decoder registered with esp_audio_codec");
+    registered = true;
+  }
+
   // Configure AAC decoder using esp_audio_codec API
   esp_audio_dec_cfg_t config = {};
   config.type = ESP_AUDIO_TYPE_AAC;

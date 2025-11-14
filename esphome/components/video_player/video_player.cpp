@@ -452,10 +452,12 @@ void VideoPlayer::process_video_frame_() {
     ESP_LOGD(TAG, "Timing: frame PTS=%u ms, elapsed=%u ms", frame_pts_ms, elapsed_playback_ms);
   }
 
-  // If frame PTS is ahead of playback time, wait
+  // If frame PTS is ahead of playback time, wait (unless it's the first few frames after timing reset)
   if (frame_pts_ms > elapsed_playback_ms) {
     uint32_t wait_time_ms = frame_pts_ms - elapsed_playback_ms;
-    if (wait_time_ms > 100) {
+    // Be more lenient right after first frame decode to allow playback to start smoothly
+    uint32_t wait_threshold = (call_count <= 15) ? 1000 : 100;  // 1 second grace period for startup
+    if (wait_time_ms > wait_threshold) {
       // If we're very early, skip this loop iteration
       return;
     }
