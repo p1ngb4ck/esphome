@@ -396,13 +396,22 @@ void VideoPlayer::cleanup_decoder_() {
 // ========== Frame Processing ==========
 
 void VideoPlayer::process_video_frame_() {
+  static uint32_t call_count = 0;
+  call_count++;
+
+  if (call_count <= 10) {
+    ESP_LOGD(TAG, "process_video_frame_() call #%u", call_count);
+  }
+
   if (!this->demuxer_is_open_()) {
+    ESP_LOGE(TAG, "Demuxer not open, stopping");
     this->stop();
     return;
   }
 
   const VideoTrackInfo *video = this->get_video_track_();
   if (video == nullptr) {
+    ESP_LOGE(TAG, "Video track is null, stopping");
     this->stop();
     return;
   }
