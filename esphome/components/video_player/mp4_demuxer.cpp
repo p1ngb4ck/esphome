@@ -866,16 +866,16 @@ bool MP4Demuxer::parse_stsc_box(uint32_t size, std::vector<uint64_t> &sample_off
   sample_offsets.reserve(sample_sizes.size());
 
   uint32_t sample_idx = 0;
+  size_t entry_idx = 0;  // Current stsc entry
+
   for (size_t chunk_idx = 0; chunk_idx < chunk_offsets.size(); chunk_idx++) {
-    // Find which stsc entry applies to this chunk
-    uint32_t samples_in_chunk = entries[0].samples_per_chunk;
-    for (size_t i = 0; i < entries.size(); i++) {
-      if (chunk_idx + 1 >= entries[i].first_chunk) {
-        samples_in_chunk = entries[i].samples_per_chunk;
-      } else {
-        break;
-      }
+    // Advance to the correct stsc entry for this chunk
+    // stsc entries use 1-based chunk indexing
+    while (entry_idx + 1 < entries.size() && chunk_idx + 1 >= entries[entry_idx + 1].first_chunk) {
+      entry_idx++;
     }
+
+    uint32_t samples_in_chunk = entries[entry_idx].samples_per_chunk;
 
     // Calculate offset for each sample in this chunk
     uint64_t offset = chunk_offsets[chunk_idx];
