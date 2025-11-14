@@ -446,6 +446,9 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
   uint64_t stbl_start = ftell(this->file_) - 8;  // Include header
   uint64_t stbl_end = stbl_start + size;
 
+  ESP_LOGD(TAG, "Parsing stbl box (size: %u, start: %llu, end: %llu)", size,
+           static_cast<unsigned long long>(stbl_start), static_cast<unsigned long long>(stbl_end));
+
   std::vector<uint32_t> sample_sizes;
   std::vector<uint64_t> chunk_offsets;
   std::vector<uint64_t> sample_offsets;
@@ -464,6 +467,9 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
     if (!this->read_box_header(box_size, box_type)) {
       return false;
     }
+
+    ESP_LOGD(TAG, "  stbl child box: type=0x%08X size=%u at offset %llu", box_type, box_size,
+             static_cast<unsigned long long>(box_start));
 
     switch (box_type) {
       case BOX_TYPE_STSD:
@@ -517,6 +523,9 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
     }
   }
 
+  ESP_LOGD(TAG, "First pass complete: sample_sizes=%zu, chunk_offsets=%zu, sample_offsets=%zu, sample_durations=%zu",
+           sample_sizes.size(), chunk_offsets.size(), sample_offsets.size(), sample_durations.size());
+
   // Second pass: parse stsc if we skipped it earlier
   if (sample_offsets.empty() && stsc_offset != 0 && !chunk_offsets.empty() && !sample_sizes.empty()) {
     ESP_LOGD(TAG, "Parsing stsc in second pass (box order dependency)");
@@ -524,6 +533,7 @@ bool MP4Demuxer::parse_stbl_box(uint32_t size, TrackType track_type) {
     if (!this->parse_stsc_box(stsc_size, sample_offsets, chunk_offsets, sample_sizes)) {
       return false;
     }
+    ESP_LOGD(TAG, "Second pass complete: sample_offsets=%zu", sample_offsets.size());
   }
 
   // Store track information
