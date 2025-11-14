@@ -483,8 +483,15 @@ void VideoPlayer::process_video_frame_() {
   // Log first frame conversion for debugging
   static bool first_frame_logged = false;
   if (!first_frame_logged) {
-    ESP_LOGI(TAG, "First frame: AVCC size=%u, Annex-B size=%zu, NALU length size=%u", sample.size, annexb_size,
-             video->nalu_length_size);
+    // Peek at first NALU type for debugging
+    uint8_t first_nalu_type = 0;
+    if (sample.size >= 5) {  // Need at least length field (4 bytes) + 1 NALU byte
+      first_nalu_type = this->h264_frame_buffer_.data()[4] & 0x1F;  // Skip 4-byte length, get type
+    }
+    ESP_LOGI(TAG,
+             "First frame: AVCC size=%u, Annex-B size=%zu, NALU length size=%u, first NALU type=%u (expected 5 for "
+             "IDR, 7 for SPS)",
+             sample.size, annexb_size, video->nalu_length_size, first_nalu_type);
     first_frame_logged = true;
   }
 
