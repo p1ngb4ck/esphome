@@ -436,10 +436,19 @@ void VideoPlayer::process_video_frame_() {
     }
   }
 
+  if (call_count <= 10) {
+    ESP_LOGD(TAG, "Got sample: offset=%llu, size=%u, timestamp=%llu ms", static_cast<unsigned long long>(sample.offset),
+             sample.size, static_cast<unsigned long long>(sample.timestamp_ms));
+  }
+
   // A/V Synchronization: Check if it's time to display this frame
   uint32_t now = millis();
   uint32_t elapsed_playback_ms = now - this->video_start_time_ms_;
   uint32_t frame_pts_ms = sample.timestamp_ms;
+
+  if (call_count <= 10) {
+    ESP_LOGD(TAG, "Timing: frame PTS=%u ms, elapsed=%u ms", frame_pts_ms, elapsed_playback_ms);
+  }
 
   // If frame PTS is ahead of playback time, wait
   if (frame_pts_ms > elapsed_playback_ms) {
