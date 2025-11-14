@@ -257,7 +257,7 @@ void MP4Demuxer::stop_refill_task_() {
 #endif
 }
 
-void MP4Demuxer::refill_task_func_(void *param) {
+/* void MP4Demuxer::refill_task_func_(void *param) {
 #ifdef USE_ESP32
   MP4Demuxer *demuxer = static_cast<MP4Demuxer *>(param);
   if (demuxer == nullptr) {
@@ -267,7 +267,7 @@ void MP4Demuxer::refill_task_func_(void *param) {
 
   demuxer->refill_task_running_ = true;
   ESP_LOGD(TAG, "Refill task started");
-  /*
+
   while (!demuxer->stop_refill_task_) {
     // Wait for signal to refill (with timeout to check stop flag periodically)
     if (xSemaphoreTake(demuxer->refill_semaphore_, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -300,14 +300,14 @@ void MP4Demuxer::refill_task_func_(void *param) {
         }
       }
     }
-  }*/
+  }
 
   demuxer->refill_task_running_ = false;
   ESP_LOGD(TAG, "Refill task stopped");
   vTaskDelete(nullptr);  // Delete self
 #endif
 }
-
+*/
 bool MP4Demuxer::try_swap_buffers_(uint64_t target_offset) {
 #ifdef USE_ESP32
   if (this->buffer_mutex_ == nullptr) {
