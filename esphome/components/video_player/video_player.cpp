@@ -453,8 +453,16 @@ void VideoPlayer::process_video_frame_() {
       this->convert_avcc_to_annexb_(this->h264_frame_buffer_.data(), sample.size, this->annexb_frame_buffer_.data(),
                                     this->annexb_frame_buffer_.size(), video->nalu_length_size);
   if (annexb_size == 0) {
-    ESP_LOGW(TAG, "Failed to convert AVCC to Annex-B format");
+    ESP_LOGW(TAG, "Failed to convert AVCC to Annex-B format at frame %u", this->current_position_ms_);
     return;
+  }
+
+  // Log first frame conversion for debugging
+  static bool first_frame_logged = false;
+  if (!first_frame_logged) {
+    ESP_LOGI(TAG, "First frame: AVCC size=%u, Annex-B size=%zu, NALU length size=%u", sample.size, annexb_size,
+             video->nalu_length_size);
+    first_frame_logged = true;
   }
 
   // Decode H264 frame to YUV
@@ -475,6 +483,7 @@ void VideoPlayer::process_video_frame_() {
 bool VideoPlayer::decode_frame_(const uint8_t *h264_data, size_t h264_size, uint8_t *yuv_output, size_t yuv_size) {
 #ifdef USE_ESP_H264_DECODER
   if (this->decoder_ == nullptr) {
+    ESP_LOGE(TAG, "Decoder is null");
     return false;
   }
 
@@ -484,12 +493,15 @@ bool VideoPlayer::decode_frame_(const uint8_t *h264_data, size_t h264_size, uint
 
   esp_h264_dec_out_frame_t out_frame = {};
 
+  static uint32_t frame_count = 0;
+  frame_count++;
+
   // Decode frame (may need multiple calls for complete frame)
   while (in_frame.raw_data.len > 0) {
     esp_h264_err_t ret = esp_h264_dec_process(this->decoder_, &in_frame, &out_frame);
 
     if (ret != ESP_H264_ERR_OK) {
-      ESP_LOGW(TAG, "H264 decode error: %d", ret);
+      ESP_LOGW(TAG, "H264 decode error: %d (frame #%u, input size: %zu)", ret, frame_count, h264_size);
       return false;
     }
 
@@ -504,11 +516,16 @@ bool VideoPlayer::decode_frame_(const uint8_t *h264_data, size_t h264_size, uint
         return false;
       }
       memcpy(yuv_output, out_frame.outbuf, out_frame.out_size);
+      if (frame_count <= 5) {
+        ESP_LOGI(TAG, "Decoded frame #%u: input=%zu bytes, output=%u bytes", frame_count, h264_size,
+                 out_frame.out_size);
+      }
       return true;
     }
   }
 
   // No output data (might be SPS/PPS or incomplete frame)
+  ESP_LOGD(TAG, "No output from frame #%u (input: %zu bytes)", frame_count, h264_size);
   return false;
 #else
   return false;
