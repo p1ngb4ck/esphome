@@ -12,6 +12,10 @@
 #include "esp_heap_caps.h"
 #endif
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#include "esp32p4/rom/cache.h"
+#endif
+
 namespace esphome {
 namespace video_player {
 
@@ -525,12 +529,13 @@ bool VideoPlayer::decode_frame_(const uint8_t *h264_data, size_t h264_size, uint
   }
 
   // CRITICAL: Flush CPU cache to ensure decoder can see PSRAM data
-  // ESP32-P4 requires explicit cache sync for external memory
-#ifdef USE_ESP32
-  // Flush data cache for the input buffer range to ensure decoder sees our writes
-  esp_err_t cache_ret = esp_cache_msync((void *) h264_data, h264_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-  if (cache_ret != ESP_OK) {
-    ESP_LOGW(TAG, "Cache flush failed: %s", esp_err_to_name(cache_ret));
+  // ESP32-P4 requires explicit cache sync for external memory (PSRAM)
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+  // Writeback L1 data cache and L2 cache to ensure decoder sees our writes to PSRAM
+  // This is required because ESP32-P4 CPU cache may hold dirty data that hasn't been written to PSRAM yet
+  int cache_ret = Cache_WriteBack_Addr(CACHE_MAP_L1_DCACHE | CACHE_MAP_L2_CACHE, (uint32_t) h264_data, h264_size);
+  if (cache_ret != 0) {
+    ESP_LOGW(TAG, "Cache writeback failed: %d", cache_ret);
   }
 #endif
 
