@@ -136,12 +136,18 @@ bool MP4Demuxer::open(const std::string &file_path) {
   this->start_refill_task_();
 
   // Fill first buffer synchronously so playback can start immediately
-  // Use the first video or audio sample offset (whichever comes first)
-  uint64_t initial_offset = 0;
+  // Use the earliest sample offset (video or audio, whichever comes first in the file)
+  uint64_t initial_offset = UINT64_MAX;
   if (this->has_video_ && this->video_track_.sample_count > 0) {
-    initial_offset = this->video_track_.sample_offsets[0];
-  } else if (this->has_audio_ && this->audio_track_.sample_count > 0) {
-    initial_offset = this->audio_track_.sample_offsets[0];
+    initial_offset = std::min(initial_offset, this->video_track_.sample_offsets[0]);
+  }
+  if (this->has_audio_ && this->audio_track_.sample_count > 0) {
+    initial_offset = std::min(initial_offset, this->audio_track_.sample_offsets[0]);
+  }
+
+  // Sanity check
+  if (initial_offset == UINT64_MAX) {
+    initial_offset = 0;
   }
 
   if (initial_offset > 0 && this->file_ != nullptr) {

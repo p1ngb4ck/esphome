@@ -171,7 +171,8 @@ class VideoPlayer : public Component {
 
   // H264 format conversion (AVCC to Annex-B)
   size_t convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avcc_size, uint8_t *annexb_data, size_t max_size,
-                                 uint8_t nalu_length_size);
+                                 uint8_t nalu_length_size, const std::vector<uint8_t> *sps_data,
+                                 const std::vector<uint8_t> *pps_data);
 
   // Audio processing
   bool init_audio_decoder_();
