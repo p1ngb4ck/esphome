@@ -135,6 +135,40 @@ bool MP4Demuxer::open(const std::string &file_path) {
   // Start async buffer refill task
   this->start_refill_task_();
 
+  // Fill first buffer synchronously so playback can start immediately
+  // Use the first video or audio sample offset (whichever comes first)
+  uint64_t initial_offset = 0;
+  if (this->has_video_ && this->video_track_.sample_count > 0) {
+    initial_offset = this->video_track_.sample_offsets[0];
+  } else if (this->has_audio_ && this->audio_track_.sample_count > 0) {
+    initial_offset = this->audio_track_.sample_offsets[0];
+  }
+
+  if (initial_offset > 0 && this->file_ != nullptr) {
+    if (fseek(this->file_, initial_offset, SEEK_SET) == 0) {
+      size_t bytes_to_read = this->readahead_buffer_capacity_;
+      if (initial_offset + bytes_to_read > this->file_size_) {
+        bytes_to_read = this->file_size_ - initial_offset;
+      }
+
+      size_t bytes_read = fread(this->buffers_[0].data.data(), 1, bytes_to_read, this->file_);
+      this->buffers_[0].start_offset = initial_offset;
+      this->buffers_[0].valid_size = bytes_read;
+      this->buffers_[0].is_ready = (bytes_read > 0);
+
+      ESP_LOGI(TAG, "Initial buffer fill: offset=%llu, size=%zu", static_cast<unsigned long long>(initial_offset),
+               bytes_read);
+
+      // Trigger async refill of buffers 1 and 2
+      this->next_refill_offset_ = initial_offset + bytes_read;
+#ifdef USE_ESP32
+      if (this->refill_semaphore_ != nullptr) {
+        xSemaphoreGive(this->refill_semaphore_);
+      }
+#endif
+    }
+  }
+
   return true;
 }
 
