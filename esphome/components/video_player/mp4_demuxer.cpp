@@ -155,13 +155,14 @@ bool MP4Demuxer::refill_readahead_buffer_(uint64_t target_offset) {
 
   // Allocate buffer on first use
   if (this->readahead_buffer_.empty()) {
-    try {
-      this->readahead_buffer_.resize(this->readahead_buffer_capacity_);
-      ESP_LOGI(TAG, "Allocated %zu byte readahead buffer in PSRAM", this->readahead_buffer_capacity_);
-    } catch (const std::bad_alloc &e) {
-      ESP_LOGE(TAG, "Failed to allocate readahead buffer: %s", e.what());
+    this->readahead_buffer_.resize(this->readahead_buffer_capacity_);
+    // Check if allocation succeeded by verifying size
+    if (this->readahead_buffer_.size() != this->readahead_buffer_capacity_) {
+      ESP_LOGE(TAG, "Failed to allocate readahead buffer (%zu bytes)", this->readahead_buffer_capacity_);
+      this->readahead_buffer_.clear();
       return false;
     }
+    ESP_LOGI(TAG, "Allocated %zu byte readahead buffer in PSRAM", this->readahead_buffer_capacity_);
   }
 
   // Seek to target offset and read as much as possible
