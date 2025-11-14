@@ -280,9 +280,9 @@ class MP4Demuxer {
     size_t valid_size{0};                                      // How much of the buffer contains valid data
     bool is_ready{false};                                      // True when buffer has been filled and is ready to use
   };
-  ReadaheadBuffer buffers_[3];    // Triple buffer (one active, two for prefetch/refill)
-  uint8_t active_buffer_idx_{0};  // Index of buffer currently being read from (0-2)
-  size_t readahead_buffer_capacity_{2 * 1024 * 1024 + 512 * 1024};  // 2.5MB per buffer (7.5MB total)
+  ReadaheadBuffer buffers_[3];                     // Triple buffer (one active, two for prefetch/refill)
+  uint8_t active_buffer_idx_{0};                   // Index of buffer currently being read from (0-2)
+  size_t readahead_buffer_capacity_{1024 * 1024};  // 1MB per buffer (3MB total)
 
   // Async buffer refill task
   TaskHandle_t refill_task_handle_{nullptr};
