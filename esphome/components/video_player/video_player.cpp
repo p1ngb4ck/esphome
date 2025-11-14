@@ -1004,10 +1004,69 @@ size_t VideoPlayer::convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avc
     return 0;
   }
 
-  size_t read_pos = 0;
-  size_t write_pos = 0;
-  bool is_first_nalu = true;
+  // First pass: scan all NALUs to detect if there's an IDR frame (type 5) anywhere in this frame
+  // H.264 frames can have multiple NALUs (e.g., SEI + IDR, or AUD + SEI + IDR)
+  bool has_idr = false;
+  size_t scan_pos = 0;
+  while (scan_pos < avcc_size) {
+    // Read NALU length
+    if (scan_pos + nalu_length_size > avcc_size) {
+      break;
+    }
 
+    uint32_t nalu_length = 0;
+    for (uint8_t i = 0; i < nalu_length_size; i++) {
+      nalu_length = (nalu_length << 8) | avcc_data[scan_pos + i];
+    }
+    scan_pos += nalu_length_size;
+
+    if (nalu_length == 0 || scan_pos + nalu_length > avcc_size) {
+      break;
+    }
+
+    // Check NALU type (bits 0-4 of first byte)
+    uint8_t nalu_type = avcc_data[scan_pos] & 0x1F;
+    if (nalu_type == 5) {  // IDR slice
+      has_idr = true;
+      break;  // Found IDR, no need to scan further
+    }
+
+    scan_pos += nalu_length;
+  }
+
+  size_t write_pos = 0;
+
+  // If frame contains IDR and we have SPS/PPS, prepend them at the very start of the output
+  if (has_idr && sps_data != nullptr && pps_data != nullptr && !sps_data->empty() && !pps_data->empty()) {
+    // Write SPS with start code
+    if (write_pos + 4 + sps_data->size() > max_size) {
+      ESP_LOGE(TAG, "AVCC: output buffer too small for SPS (need %zu, have %zu)", 4 + sps_data->size(),
+               max_size - write_pos);
+      return 0;
+    }
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x01;
+    memcpy(annexb_data + write_pos, sps_data->data(), sps_data->size());
+    write_pos += sps_data->size();
+
+    // Write PPS with start code
+    if (write_pos + 4 + pps_data->size() > max_size) {
+      ESP_LOGE(TAG, "AVCC: output buffer too small for PPS (need %zu, have %zu)", 4 + pps_data->size(),
+               max_size - write_pos);
+      return 0;
+    }
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x00;
+    annexb_data[write_pos++] = 0x01;
+    memcpy(annexb_data + write_pos, pps_data->data(), pps_data->size());
+    write_pos += pps_data->size();
+  }
+
+  // Second pass: convert all NALUs to Annex-B format
+  size_t read_pos = 0;
   while (read_pos < avcc_size) {
     // Read NALU length (big-endian, size specified by nalu_length_size)
     if (read_pos + nalu_length_size > avcc_size) {
@@ -1031,53 +1090,6 @@ size_t VideoPlayer::convert_avcc_to_annexb_(const uint8_t *avcc_data, size_t avc
       ESP_LOGE(TAG, "AVCC: NALU length %u exceeds remaining data (%zu bytes)", nalu_length, avcc_size - read_pos);
       return 0;
     }
-
-    // Get NALU type from first byte (bits 0-4)
-    uint8_t nalu_type = avcc_data[read_pos] & 0x1F;
-
-    // If this is an IDR frame (type 5) and we have SPS/PPS, prepend them
-    if (is_first_nalu && nalu_type == 5 && sps_data != nullptr && pps_data != nullptr && !sps_data->empty() &&
-        !pps_data->empty()) {
-      // Calculate space needed: SPS + PPS + current NALU (each with 4-byte start code)
-      size_t total_needed = (4 + sps_data->size()) + (4 + pps_data->size()) + (4 + nalu_length);
-
-      // Check remaining NALUs in this frame
-      size_t temp_pos = read_pos + nalu_length;
-      while (temp_pos < avcc_size) {
-        if (temp_pos + nalu_length_size > avcc_size)
-          break;
-        uint32_t next_nalu_len = 0;
-        for (uint8_t i = 0; i < nalu_length_size; i++) {
-          next_nalu_len = (next_nalu_len << 8) | avcc_data[temp_pos + i];
-        }
-        total_needed += 4 + next_nalu_len;
-        temp_pos += nalu_length_size + next_nalu_len;
-      }
-
-      if (write_pos + total_needed > max_size) {
-        ESP_LOGE(TAG, "AVCC: output buffer too small for SPS/PPS + frame (need %zu, have %zu)", total_needed,
-                 max_size - write_pos);
-        return 0;
-      }
-
-      // Write SPS with start code
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x01;
-      memcpy(annexb_data + write_pos, sps_data->data(), sps_data->size());
-      write_pos += sps_data->size();
-
-      // Write PPS with start code
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x00;
-      annexb_data[write_pos++] = 0x01;
-      memcpy(annexb_data + write_pos, pps_data->data(), pps_data->size());
-      write_pos += pps_data->size();
-    }
-
-    is_first_nalu = false;
 
     // Check if we have space for start code (4 bytes) + NALU data
     if (write_pos + 4 + nalu_length > max_size) {
