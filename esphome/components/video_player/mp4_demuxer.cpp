@@ -153,13 +153,12 @@ void MP4Demuxer::close() {
   this->current_video_sample_ = 0;
   this->current_audio_sample_ = 0;
 
-  // Clear both buffers
-  this->buffers_[0].data.clear();
-  this->buffers_[0].valid_size = 0;
-  this->buffers_[0].is_ready = false;
-  this->buffers_[1].data.clear();
-  this->buffers_[1].valid_size = 0;
-  this->buffers_[1].is_ready = false;
+  // Clear all buffers
+  for (int i = 0; i < 3; i++) {
+    this->buffers_[i].data.clear();
+    this->buffers_[i].valid_size = 0;
+    this->buffers_[i].is_ready = false;
+  }
   this->active_buffer_idx_ = 0;
 }
 
@@ -180,8 +179,8 @@ void MP4Demuxer::start_refill_task_() {
     return;
   }
 
-  // Allocate both buffers
-  for (int i = 0; i < 2; i++) {
+  // Allocate all three buffers
+  for (int i = 0; i < 3; i++) {
     this->buffers_[i].data.resize(this->readahead_buffer_capacity_);
     if (this->buffers_[i].data.size() != this->readahead_buffer_capacity_) {
       ESP_LOGE(TAG, "Failed to allocate readahead buffer #%d (%zu bytes)", i, this->readahead_buffer_capacity_);
@@ -189,7 +188,7 @@ void MP4Demuxer::start_refill_task_() {
       return;
     }
   }
-  ESP_LOGI(TAG, "Allocated 2x %zu byte readahead buffers in PSRAM", this->readahead_buffer_capacity_);
+  ESP_LOGI(TAG, "Allocated 3x %zu byte readahead buffers in PSRAM", this->readahead_buffer_capacity_);
 
   // Create refill task (priority 1, stack 4KB, pinned to core 0)
   this->stop_refill_task_flag_ = false;
@@ -273,8 +272,21 @@ void MP4Demuxer::refill_task_func_(void *param) {
         break;
       }
 
-      // Get the inactive buffer index (the one not currently being read from)
-      uint8_t refill_idx = (demuxer->active_buffer_idx_ + 1) % 2;
+      // Find an inactive buffer to refill (prefer the one furthest from active)
+      // With triple buffering: if active=0, prefer buffer 2, then 1
+      uint8_t refill_idx = 0;
+      bool found_buffer = false;
+
+      // Try buffers in order of preference (furthest from active first)
+      for (int offset = 2; offset >= 1 && !found_buffer; offset--) {
+        uint8_t candidate_idx = (demuxer->active_buffer_idx_ + offset) % 3;
+        if (!demuxer->buffers_[candidate_idx].is_ready ||
+            demuxer->buffers_[candidate_idx].start_offset != demuxer->next_refill_offset_) {
+          refill_idx = candidate_idx;
+          found_buffer = true;
+        }
+      }
+
       uint64_t target_offset = demuxer->next_refill_offset_;
 
       // Perform the slow USB read (this is okay to block here - we're in background task)
@@ -314,20 +326,23 @@ bool MP4Demuxer::try_swap_buffers_(uint64_t target_offset) {
 
   bool swapped = false;
 
-  // Check if inactive buffer has the data we need
+  // Check all inactive buffers (with triple buffering, we have 2 inactive buffers)
   if (xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
-    uint8_t inactive_idx = (this->active_buffer_idx_ + 1) % 2;
-    ReadaheadBuffer &inactive_buf = this->buffers_[inactive_idx];
+    // Try inactive buffers in order (closest to active first for better cache locality)
+    for (int offset = 1; offset < 3 && !swapped; offset++) {
+      uint8_t candidate_idx = (this->active_buffer_idx_ + offset) % 3;
+      ReadaheadBuffer &candidate_buf = this->buffers_[candidate_idx];
 
-    if (inactive_buf.is_ready) {
-      uint64_t buffer_end = inactive_buf.start_offset + inactive_buf.valid_size;
-      // Check if target is in this buffer (with some lookahead margin)
-      if (target_offset >= inactive_buf.start_offset && target_offset < buffer_end) {
-        // Swap to this buffer
-        this->active_buffer_idx_ = inactive_idx;
-        swapped = true;
-        ESP_LOGD(TAG, "Swapped to buffer %d (offset=%llu, size=%zu)", inactive_idx,
-                 static_cast<unsigned long long>(inactive_buf.start_offset), inactive_buf.valid_size);
+      if (candidate_buf.is_ready) {
+        uint64_t buffer_end = candidate_buf.start_offset + candidate_buf.valid_size;
+        // Check if target is in this buffer
+        if (target_offset >= candidate_buf.start_offset && target_offset < buffer_end) {
+          // Swap to this buffer
+          this->active_buffer_idx_ = candidate_idx;
+          swapped = true;
+          ESP_LOGD(TAG, "Swapped to buffer %d (offset=%llu, size=%zu)", candidate_idx,
+                   static_cast<unsigned long long>(candidate_buf.start_offset), candidate_buf.valid_size);
+        }
       }
     }
 

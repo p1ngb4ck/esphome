@@ -273,15 +273,15 @@ class MP4Demuxer {
   uint64_t file_size_{0};
   uint64_t mdat_offset_{0};  // Offset where mdat box starts
 
-  // Readahead buffer (PSRAM) to minimize USB seek/read latency - double-buffered for async refill
+  // Readahead buffer (PSRAM) to minimize USB seek/read latency - triple-buffered for async refill
   struct ReadaheadBuffer {
     std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> data;  // Allocated in PSRAM
     uint64_t start_offset{0};                                  // File offset where buffer starts
     size_t valid_size{0};                                      // How much of the buffer contains valid data
     bool is_ready{false};                                      // True when buffer has been filled and is ready to use
   };
-  ReadaheadBuffer buffers_[2];                         // Double buffer (one for reading, one for background refill)
-  uint8_t active_buffer_idx_{0};                       // Index of buffer currently being read from (0 or 1)
+  ReadaheadBuffer buffers_[3];                         // Triple buffer (one active, two for prefetch/refill)
+  uint8_t active_buffer_idx_{0};                       // Index of buffer currently being read from (0-2)
   size_t readahead_buffer_capacity_{4 * 1024 * 1024};  // 4MB default capacity per buffer
 
   // Async buffer refill task
