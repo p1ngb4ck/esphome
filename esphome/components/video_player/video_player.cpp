@@ -134,6 +134,7 @@ void VideoPlayer::play(const std::string &file) {
     this->current_position_ms_ = 0;
     this->video_start_time_ms_ = millis();
     this->audio_start_time_ms_ = millis();
+    this->first_frame_decoded_ = false;  // Reset first frame flag
   }
 
   this->state_ = PlaybackState::PLAYING;
@@ -428,6 +429,7 @@ void VideoPlayer::process_video_frame_() {
       this->current_position_ms_ = 0;
       this->video_start_time_ms_ = millis();
       this->audio_start_time_ms_ = millis();
+      this->first_frame_decoded_ = false;  // Reset first frame flag
       return;
     } else {
       this->state_ = PlaybackState::FINISHED;
@@ -488,6 +490,15 @@ void VideoPlayer::process_video_frame_() {
                            this->yuv_frame_buffer_.size())) {
     ESP_LOGW(TAG, "Failed to decode frame at position %u ms", sample.timestamp_ms);
     return;
+  }
+
+  // After first successful decode, reset timing to account for initialization delays
+  if (!this->first_frame_decoded_) {
+    this->first_frame_decoded_ = true;
+    // Adjust start time so that elapsed time matches the frame's PTS
+    // This accounts for the ~2.5s initialization delay (LVGL + buffer allocation)
+    this->video_start_time_ms_ = millis() - frame_pts_ms;
+    ESP_LOGI(TAG, "First frame decoded - reset timing baseline (PTS=%u ms)", frame_pts_ms);
   }
 
   // Render frame to LVGL canvas

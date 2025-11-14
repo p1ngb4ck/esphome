@@ -223,6 +223,7 @@ class VideoPlayer : public Component {
   std::vector<uint8_t, ExternalRAMAllocator<uint8_t>> audio_sample_buffer_;  // Buffer for single audio sample
   uint64_t audio_start_time_ms_{0};  // When audio playback started (for A/V sync)
   uint64_t video_start_time_ms_{0};  // When video playback started (for A/V sync)
+  bool first_frame_decoded_{false};  // Flag to reset timing after first frame decode
 
   // Automation callbacks
   CallbackManager<void()> playback_started_callback_;
