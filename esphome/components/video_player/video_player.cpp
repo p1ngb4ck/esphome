@@ -8,6 +8,10 @@
 #include "esphome/core/application.h"
 #include <algorithm>
 
+#ifdef USE_TRANSCODER
+#include "esphome/components/transcoder/transcoder.h"
+#endif
+
 #ifdef ESP32
 #include "esp_heap_caps.h"
 #endif
@@ -316,23 +320,18 @@ bool VideoPlayer::init_decoder_() {
   }
 
 #ifdef USE_ESP_H264_DECODER
-  ESP_LOGI(TAG, "Initializing H264 decoder...");
+#ifdef USE_TRANSCODER
+  // Use transcoder's shared H.264 decoder instance
+  ESP_LOGI(TAG, "Getting H264 decoder from transcoder...");
 
-  // Configure decoder for I420 output (compatible with our YUV buffer)
-  esp_h264_dec_cfg_sw_t cfg = {};
-  cfg.pic_type = ESP_H264_RAW_FMT_I420;
-
-  esp_h264_err_t ret = esp_h264_dec_sw_new(&cfg, &this->decoder_);
-  if (ret != ESP_H264_ERR_OK) {
-    ESP_LOGE(TAG, "Failed to create H264 decoder: %d", ret);
+  if (transcoder::global_transcoder == nullptr) {
+    ESP_LOGE(TAG, "Transcoder not available");
     return false;
   }
 
-  ret = esp_h264_dec_open(this->decoder_);
-  if (ret != ESP_H264_ERR_OK) {
-    ESP_LOGE(TAG, "Failed to open H264 decoder: %d", ret);
-    esp_h264_dec_del(this->decoder_);
-    this->decoder_ = nullptr;
+  this->decoder_ = transcoder::global_transcoder->get_h264_decoder();
+  if (this->decoder_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to get H264 decoder from transcoder");
     return false;
   }
 
@@ -341,12 +340,16 @@ bool VideoPlayer::init_decoder_() {
   // This is the correct approach for TinyH264 and avoids putting the decoder in a bad state
   const VideoTrackInfo *video = this->get_video_track_();
   if (video != nullptr) {
-    ESP_LOGI(TAG, "H264 decoder initialized (SPS: %zu bytes, PPS: %zu bytes will be prepended to IDR frames)",
+    ESP_LOGI(TAG, "Using transcoder H264 decoder (SPS: %zu bytes, PPS: %zu bytes will be prepended to IDR frames)",
              video->sps_data.size(), video->pps_data.size());
   } else {
-    ESP_LOGI(TAG, "H264 decoder initialized successfully");
+    ESP_LOGI(TAG, "Using transcoder H264 decoder");
   }
   return true;
+#else
+  ESP_LOGE(TAG, "Transcoder component required for H264 decoder");
+  return false;
+#endif
 #else
   ESP_LOGE(TAG, "H264 decoder not available (USE_ESP_H264_DECODER not defined)");
   return false;
@@ -355,10 +358,11 @@ bool VideoPlayer::init_decoder_() {
 
 void VideoPlayer::cleanup_decoder_() {
 #ifdef USE_ESP_H264_DECODER
+  // NOTE: We do NOT delete the decoder - it's owned by the transcoder
+  // Just clear our reference to it
   if (this->decoder_ != nullptr) {
-    esp_h264_dec_close(this->decoder_);
-    esp_h264_dec_del(this->decoder_);
     this->decoder_ = nullptr;
+    ESP_LOGD(TAG, "Released reference to transcoder's H264 decoder");
   }
 #endif
 }
