@@ -509,9 +509,21 @@ void VideoPlayer::process_video_frame_() {
       scan_pos += nalu_len;
     }
 
+    // Dump first 64 bytes of AVCC data to verify data integrity from PSRAM buffer
+    char hex_dump[256] = {0};
+    size_t hex_pos = 0;
+    size_t dump_size = std::min((size_t) 64, (size_t) sample.size);
+    for (size_t i = 0; i < dump_size; i++) {
+      hex_pos += snprintf(hex_dump + hex_pos, sizeof(hex_dump) - hex_pos, "%02X ", this->h264_frame_buffer_.data()[i]);
+      if ((i + 1) % 16 == 0 && i < dump_size - 1) {
+        hex_pos += snprintf(hex_dump + hex_pos, sizeof(hex_dump) - hex_pos, "\n                   ");
+      }
+    }
+
     ESP_LOGI(TAG,
              "First frame: AVCC size=%u, Annex-B size=%zu, NALUs=[%s] (5=IDR, 6=SEI, 7=SPS, 8=PPS, 9=AUD, 1=non-IDR)",
              sample.size, annexb_size, nalu_types_str);
+    ESP_LOGI(TAG, "First 64 bytes: %s", hex_dump);
     first_frame_logged = true;
   }
 
