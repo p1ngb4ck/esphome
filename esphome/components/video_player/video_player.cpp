@@ -332,51 +332,16 @@ bool VideoPlayer::init_decoder_() {
     return false;
   }
 
-  // Feed SPS/PPS to decoder (required for MP4 files)
+  // NOTE: We do NOT feed SPS/PPS during initialization for TinyH264 decoder
+  // Instead, we prepend SPS/PPS to every IDR frame in convert_avcc_to_annexb_()
+  // This is the correct approach for TinyH264 and avoids putting the decoder in a bad state
   const VideoTrackInfo *video = this->get_video_track_();
-  if (video != nullptr && (!video->sps_data.empty() || !video->pps_data.empty())) {
-    ESP_LOGI(TAG, "Feeding SPS/PPS to decoder (SPS: %zu bytes, PPS: %zu bytes)", video->sps_data.size(),
-             video->pps_data.size());
-
-    // Convert SPS/PPS to Annex-B format (add start codes)
-    std::vector<uint8_t> config_data;
-    config_data.reserve(video->sps_data.size() + video->pps_data.size() + 8);
-
-    // Add SPS with start code
-    if (!video->sps_data.empty()) {
-      config_data.push_back(0x00);
-      config_data.push_back(0x00);
-      config_data.push_back(0x00);
-      config_data.push_back(0x01);
-      config_data.insert(config_data.end(), video->sps_data.begin(), video->sps_data.end());
-    }
-
-    // Add PPS with start code
-    if (!video->pps_data.empty()) {
-      config_data.push_back(0x00);
-      config_data.push_back(0x00);
-      config_data.push_back(0x00);
-      config_data.push_back(0x01);
-      config_data.insert(config_data.end(), video->pps_data.begin(), video->pps_data.end());
-    }
-
-    // Feed to decoder
-    esp_h264_dec_in_frame_t in_frame = {};
-    in_frame.raw_data.buffer = config_data.data();
-    in_frame.raw_data.len = config_data.size();
-
-    esp_h264_dec_out_frame_t out_frame = {};
-
-    ret = esp_h264_dec_process(this->decoder_, &in_frame, &out_frame);
-    if (ret != ESP_H264_ERR_OK) {
-      ESP_LOGW(TAG, "Warning: Failed to feed SPS/PPS to decoder: %d (will try to continue)", ret);
-      // Don't fail initialization - some decoders might get SPS/PPS from first frame
-    } else {
-      ESP_LOGI(TAG, "SPS/PPS fed to decoder successfully");
-    }
+  if (video != nullptr) {
+    ESP_LOGI(TAG, "H264 decoder initialized (SPS: %zu bytes, PPS: %zu bytes will be prepended to IDR frames)",
+             video->sps_data.size(), video->pps_data.size());
+  } else {
+    ESP_LOGI(TAG, "H264 decoder initialized successfully");
   }
-
-  ESP_LOGI(TAG, "H264 decoder initialized successfully");
   return true;
 #else
   ESP_LOGE(TAG, "H264 decoder not available (USE_ESP_H264_DECODER not defined)");
