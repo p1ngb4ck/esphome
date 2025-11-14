@@ -289,7 +289,7 @@ class MP4Demuxer {
   SemaphoreHandle_t buffer_mutex_{nullptr};      // Protects buffer swap operations
   SemaphoreHandle_t refill_semaphore_{nullptr};  // Signals refill task to start work
   volatile bool refill_task_running_{false};
-  volatile bool stop_refill_task_{false};
+  // volatile bool stop_refill_task_{false};
   volatile uint64_t next_refill_offset_{0};  // Offset to refill for next buffer
 
   void start_refill_task_();
