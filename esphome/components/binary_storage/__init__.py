@@ -365,7 +365,8 @@ async def to_code(config):
             f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
         )
         mount_var = cg.new_Pvariable(mount_id)
-        await cg.register_component(mount_var, config)
+        # Register as component with empty config (LittleFSMount inherits from Component)
+        await cg.register_component(mount_var, {})
 
         cg.add(mount_var.set_storage_device(var))
         cg.add(mount_var.set_mount_path(mount_path))
