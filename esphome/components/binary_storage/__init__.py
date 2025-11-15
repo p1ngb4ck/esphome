@@ -358,15 +358,15 @@ async def to_code(config):
             # Auto-generate mount path from device id
             mount_path = f"/{config[CONF_ID]}"
 
-        # Create LittleFSMount component using variable + App.register_component
-        from esphome.core import ID
+        # Create LittleFSMount component
+        from esphome.core import CORE, ID
 
         mount_id = ID(
-            f"{config[CONF_ID]}_mount", is_declaration=False, type=LittleFSMount
+            f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
         )
-        rhs = cg.new_Pvariable(mount_id)
-        mount_var = cg.Pvariable(mount_id, rhs)
-        cg.add(cg.App.register_component(mount_var))
+        CORE.component_ids.add(str(mount_id))
+        mount_var = cg.new_Pvariable(mount_id)
+        await cg.register_component(mount_var, {})
 
         cg.add(mount_var.set_storage_device(var))
         cg.add(mount_var.set_mount_path(mount_path))
