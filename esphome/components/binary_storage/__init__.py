@@ -348,7 +348,7 @@ async def to_code(config):
         if not mount_path:
             # Auto-generate mount path from device id
             mount_path = f"/{config[CONF_ID]}"
-        mount_var = cg.new_Pvariable(cg.RawExpression(f"id({config[CONF_ID]}_mount)"))
+        mount_var = cg.new_Pvariable(cg.RawExpression("id({config[CONF_ID]}_mount)"))
         await cg.register_component(mount_var, config)
         cg.add(var.register_with_storage_host(mount_path, LittleFSMount))
 
