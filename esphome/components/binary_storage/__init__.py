@@ -280,7 +280,6 @@ CONFIG_SCHEMA = cv.typed_schema(
         "ONEWIRE": ONEWIRE_EEPROM_SCHEMA,
     },
     key=CONF_TYPE,
-    default_type="EEPROM",
     upper=True,
 )
 
@@ -290,7 +289,7 @@ async def to_code(config):
     from esphome.core import CORE
 
     mode = config.get(CONF_MODE, MODE_RAW)
-    device_type = config.get(CONF_TYPE, "EEPROM").upper()
+    device_type = config[CONF_TYPE].upper()
 
     # Add LittleFS ESP-IDF component (only for ESP-IDF builds)
     # Always add it because littlefs_mount.cpp is compiled even in raw mode
