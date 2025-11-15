@@ -31,7 +31,7 @@ class LittleFSMount : public Component {
   void setup() override;
   void loop() override {}
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA + 1; }
+  float get_setup_priority() const override { return setup_priority::DATA - 100.0f; }
 
   //========================================================================
   // Configuration
@@ -56,7 +56,10 @@ class LittleFSMount : public Component {
    *
    * @param format If true, will format filesystem if mount fails
    */
-  void set_auto_format(bool format) { this->auto_format_ = format; }
+  void set_auto_format(bool format) {
+    ESP_LOGD("littlefs_mount", "set_auto_format called with: %s", format ? "true" : "false");
+    this->auto_format_ = format;
+  }
 
   /**
    * @brief Set custom partition label (optional)

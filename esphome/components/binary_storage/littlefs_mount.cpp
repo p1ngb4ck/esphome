@@ -67,11 +67,25 @@ void LittleFSMount::dump_config() {
 esp_vfs_littlefs_conf_t LittleFSMount::get_littlefs_config_() {
   esp_vfs_littlefs_conf_t conf = {};
 
-  // Use partition label if specified, otherwise use mount path as base_path
+  // Use partition label if specified, otherwise generate from mount path
   conf.base_path = this->mount_path_.c_str();
-  conf.partition_label = this->partition_label_.empty() ? nullptr : this->partition_label_.c_str();
+
+  // If no partition label specified, use the mount path without leading slash as label
+  if (this->partition_label_.empty()) {
+    // Generate partition label from mount path (e.g., "/fram" -> "fram")
+    const char *label = this->mount_path_.c_str();
+    if (label[0] == '/') {
+      label++;  // Skip leading slash
+    }
+    this->partition_label_ = label;
+  }
+
+  conf.partition_label = this->partition_label_.c_str();
   conf.format_if_mount_failed = this->auto_format_;
   conf.dont_mount = false;
+
+  ESP_LOGD(TAG, "LittleFS config: base_path=%s, partition_label=%s, format_if_mount_failed=%s", conf.base_path,
+           conf.partition_label, conf.format_if_mount_failed ? "true" : "false");
 
   // Configure based on device characteristics
   BlockDeviceConfig block_config = this->storage_->get_block_config();
@@ -91,20 +105,6 @@ bool LittleFSMount::mount_() {
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to mount LittleFS: %s (%d)", esp_err_to_name(err), err);
-
-    if (err == ESP_FAIL && this->auto_format_) {
-      ESP_LOGW(TAG, "Attempting to format filesystem...");
-      if (this->format()) {
-        // Retry mount after format
-        err = esp_vfs_littlefs_register(&conf);
-        if (err == ESP_OK) {
-          ESP_LOGI(TAG, "Successfully mounted after format");
-          this->mounted_ = true;
-          return true;
-        }
-      }
-    }
-
     return false;
   }
 
