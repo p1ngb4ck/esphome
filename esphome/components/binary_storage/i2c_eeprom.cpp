@@ -1,6 +1,7 @@
+#include "i2c_eeprom.h"
+
 #ifdef USE_BINARY_STORAGE_I2C
 
-#include "i2c_eeprom.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <cstring>

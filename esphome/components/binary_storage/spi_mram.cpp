@@ -1,6 +1,7 @@
+#include "spi_mram.h"
+
 #ifdef USE_BINARY_STORAGE_SPI
 
-#include "spi_mram.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 

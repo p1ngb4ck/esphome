@@ -1,6 +1,7 @@
+#include "onewire_eeprom.h"
+
 #ifdef USE_BINARY_STORAGE_ONEWIRE
 
-#include "onewire_eeprom.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include <algorithm>

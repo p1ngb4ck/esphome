@@ -1,6 +1,7 @@
+#include "i2c_fram.h"
+
 #ifdef USE_BINARY_STORAGE_I2C
 
-#include "i2c_fram.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <algorithm>

@@ -1,6 +1,7 @@
+#include "spi_flash.h"
+
 #ifdef USE_BINARY_STORAGE_SPI
 
-#include "spi_flash.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <algorithm>
