@@ -46,7 +46,7 @@ void BinaryStorage::register_with_storage_host(const std::string &device_node_pa
 }
 
 uint32_t BinaryStorage::fill(uint8_t value) {
-  const size_t buffer_size = std::min(256u, this->get_page_size() * 4);
+  const size_t buffer_size = std::min(static_cast<uint32_t>(256u), this->get_page_size() * 4);
   uint8_t buffer[buffer_size];
   std::fill(buffer, buffer + buffer_size, value);
 
@@ -54,7 +54,7 @@ uint32_t BinaryStorage::fill(uint8_t value) {
   uint32_t capacity = this->get_capacity();
 
   while (address < capacity) {
-    size_t chunk_size = std::min((size_t)(capacity - address), buffer_size);
+    size_t chunk_size = std::min((size_t) (capacity - address), buffer_size);
     if (!this->write(address, buffer, chunk_size)) {
       ESP_LOGE(TAG, "Fill failed at address 0x%X", address);
       return address;
@@ -87,8 +87,8 @@ BlockDeviceConfig BinaryStorage::get_block_config() const {
   }
 
   config.block_count = capacity / config.block_size;
-  config.read_size = 1;  // Can read single bytes
-  config.prog_size = page_size > 0 ? page_size : 1;  // Program size is page size
+  config.read_size = 1;                                  // Can read single bytes
+  config.prog_size = page_size > 0 ? page_size : 1;      // Program size is page size
   config.lookahead_size = (config.block_count + 7) / 8;  // 1 bit per block
 
   return config;
