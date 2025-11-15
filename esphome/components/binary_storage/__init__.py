@@ -1,22 +1,24 @@
 """Binary Storage Component - Unified interface for FRAM, EEPROM, Flash storage devices."""
+
 from __future__ import annotations
 
+import re
+
+from esphome import automation, pins
 import esphome.codegen as cg
+from esphome.components import esp32, i2c, spi
 import esphome.config_validation as cv
-from esphome.components import i2c, spi, esp32
 from esphome.const import (
+    CONF_ADDRESS,
+    CONF_DATA,
     CONF_ID,
+    CONF_LENGTH,
+    CONF_MODE,
     CONF_MODEL,
+    CONF_PIN,
     CONF_TYPE,
     CONF_VALUE,
-    CONF_ADDRESS,
-    CONF_LENGTH,
-    CONF_DATA,
-    CONF_MODE,
-    CONF_PIN,
 )
-from esphome import automation, pins
-import re
 
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = []
@@ -105,8 +107,8 @@ def validate_bytes(value):
         "b": 1,
         "kb": 1000,
         "kib": 1024,
-        "mb": 1000 ** 2,
-        "mib": 1024 ** 2,
+        "mb": 1000**2,
+        "mib": 1024**2,
     }
 
     suffix = match.group(2)
@@ -171,10 +173,16 @@ SPI_FLASH_SCHEMA = (
             # Device configuration
             cv.Optional(CONF_MODEL, default="W25Q32"): cv.string,
             cv.Optional(CONF_CAPACITY): validate_bytes,
-            cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=256, max=256),  # Standard: 256 bytes
-            cv.Optional(CONF_ERASE_SIZE): cv.one_of(4096, 32768, 65536, int=True),  # 4KB, 32KB, 64KB
+            cv.Optional(CONF_PAGE_SIZE): cv.int_range(
+                min=256, max=256
+            ),  # Standard: 256 bytes
+            cv.Optional(CONF_ERASE_SIZE): cv.one_of(
+                4096, 32768, 65536, int=True
+            ),  # 4KB, 32KB, 64KB
             cv.Optional(CONF_JEDEC_ID): cv.hex_uint32_t,
-            cv.Optional(CONF_QUAD_MODE, default=False): cv.boolean,  # Enable Quad SPI (4x faster reads)
+            cv.Optional(
+                CONF_QUAD_MODE, default=False
+            ): cv.boolean,  # Enable Quad SPI (4x faster reads)
             # Usage mode: how to use this device
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
@@ -236,28 +244,25 @@ SPI_MRAM_SCHEMA = (
 )
 
 # OneWire EEPROM Configuration Schema
-ONEWIRE_EEPROM_SCHEMA = (
-    cv.Schema(
-        {
-            cv.GenerateID(): cv.declare_id(OneWireEEPROM),
-            # Device configuration
-            cv.Required(CONF_PIN): pins.internal_gpio_output_pin_schema,
-            cv.Optional(CONF_MODEL, default="DS2431"): cv.string,
-            cv.Optional(CONF_CAPACITY): validate_bytes,
-            cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=8, max=32),
-            cv.Optional(CONF_ADDRESS): cv.hex_uint64_t,  # ROM ID if multiple devices
-            # Usage mode: how to use this device
-            cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
-            ),
-            # LittleFS configuration (only used if mode is littlefs or both)
-            cv.Optional(CONF_MOUNT_PATH): cv.string,
-            cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
-            cv.Optional(CONF_PARTITION_LABEL): cv.string,
-        }
-    )
-    .extend(cv.COMPONENT_SCHEMA)
-)
+ONEWIRE_EEPROM_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(OneWireEEPROM),
+        # Device configuration
+        cv.Required(CONF_PIN): pins.internal_gpio_output_pin_schema,
+        cv.Optional(CONF_MODEL, default="DS2431"): cv.string,
+        cv.Optional(CONF_CAPACITY): validate_bytes,
+        cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=8, max=32),
+        cv.Optional(CONF_ADDRESS): cv.hex_uint64_t,  # ROM ID if multiple devices
+        # Usage mode: how to use this device
+        cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
+            MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+        ),
+        # LittleFS configuration (only used if mode is littlefs or both)
+        cv.Optional(CONF_MOUNT_PATH): cv.string,
+        cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
+        cv.Optional(CONF_PARTITION_LABEL): cv.string,
+    }
+).extend(cv.COMPONENT_SCHEMA)
 
 # Typed schema for device selection
 CONFIG_SCHEMA = cv.typed_schema(
@@ -343,11 +348,9 @@ async def to_code(config):
         if not mount_path:
             # Auto-generate mount path from device id
             mount_path = f"/{config[CONF_ID]}"
-
-        mount_var = cg.new_Pvariable(
-            cg.RawExpression(f"id({config[CONF_ID]}_mount)"), LittleFSMount
-        )
+        mount_var = cg.new_Pvariable(cg.RawExpression(f"id({config[CONF_ID]}_mount)"))
         await cg.register_component(mount_var, config)
+        cg.add(var.register_with_storage_host(mount_path, LittleFSMount))
 
         cg.add(mount_var.set_storage_device(var))
         cg.add(mount_var.set_mount_path(mount_path))
