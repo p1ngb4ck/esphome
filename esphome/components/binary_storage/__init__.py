@@ -343,14 +343,18 @@ async def to_code(config):
 
     # Setup LittleFS mount if mode requires it
     if mode in [MODE_LITTLEFS, MODE_BOTH]:
-        # Determine mount path (required for littlefs mode)
+        # Determine mount path
         mount_path = config.get(CONF_MOUNT_PATH)
         if not mount_path:
             # Auto-generate mount path from device id
             mount_path = f"/{config[CONF_ID]}"
-        mount_var = cg.new_Pvariable(cg.RawExpression("id({config[CONF_ID]}_mount)"))
+
+        # Create unique ID for mount component
+        mount_id = cg.ID(
+            f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
+        )
+        mount_var = cg.new_Pvariable(mount_id)
         await cg.register_component(mount_var, config)
-        cg.add(var.register_with_storage_host(mount_path, LittleFSMount))
 
         cg.add(mount_var.set_storage_device(var))
         cg.add(mount_var.set_mount_path(mount_path))
@@ -361,25 +365,8 @@ async def to_code(config):
         if CONF_PARTITION_LABEL in config:
             cg.add(mount_var.set_partition_label(config[CONF_PARTITION_LABEL]))
 
-    # Register device node with storage_host if mode is raw or both
-    if mode in [MODE_RAW, MODE_BOTH]:
-        # Auto-generate device node path from device type
-        from esphome.core import CORE
-
-        # Track device counter for automatic /dev naming
-        device_counter_key = f"binary_storage_{device_type.lower()}_counter"
-        device_counter = CORE.data.setdefault(device_counter_key, 0)
-
-        # Generate device node path (e.g., /dev/fram0, /dev/eeprom1)
-        device_node_path = f"/dev/{device_type.lower()}{device_counter}"
-
-        # Register device node with storage_host (soft dependency via C++ check)
-        cg.add(var.register_with_storage_host(device_node_path))
-
-        # Increment counter for next device
-        CORE.data[device_counter_key] = device_counter + 1
-
-    # Register with storage_host via CORE.data
+    # Store device reference in CORE.data for storage_host to access
+    # This allows storage_host to register callbacks with binary_storage devices
     from esphome.core import CORE
 
     if not hasattr(CORE, "data"):
