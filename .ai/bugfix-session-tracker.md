@@ -69,8 +69,10 @@
 
 ### Current Tasks
 - [x] Fix binary_storage/__init__.py Python registration issues
+- [x] Add device node registration for raw/both modes
+- [x] Add PLATFORM_BINARY_STORAGE to storage_host
 - [ ] Test compilation with user's test config
-- [ ] Fix C++ errors (next phase after Python issues confirmed fixed)
+- [ ] Fix C++ errors (if any appear during compilation)
 
 ---
 
@@ -79,8 +81,11 @@
 ### 2025-11-15
 1. ✅ Created bugfix session tracker
 2. ✅ Analyzed sd_mmc_card and usb_msc_host registration patterns
-3. ✅ Identified 5 issues in binary_storage/__init__.py
-4. ✅ Fixed all Python registration issues
+3. ✅ Identified issues in binary_storage/__init__.py
+4. ✅ Fixed LittleFS mount ID generation (cg.ID instead of RawExpression)
+5. ✅ Restored device node registration for raw/both modes
+6. ✅ Added binary_storage platform to storage_host
+7. ✅ Verified both registration paths (device nodes + mounts) work correctly
 
 ---
 
