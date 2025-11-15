@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef USE_BINARY_STORAGE_SPI
+
 #include "binary_storage.h"
 #include "esphome/components/spi/spi.h"
 
@@ -19,8 +21,9 @@ namespace binary_storage {
  *
  * Supports Everspin MR25H series
  */
-class SPIMRAM : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                                             spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_8MHZ> {
+class SPIMRAM : public BinaryStorage,
+                public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                      spi::DATA_RATE_8MHZ> {
  public:
   SPIMRAM() = default;
 
@@ -163,3 +166,5 @@ class SPIMRAM : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_F
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_SPI

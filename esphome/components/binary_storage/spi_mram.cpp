@@ -1,3 +1,5 @@
+#ifdef USE_BINARY_STORAGE_SPI
+
 #include "spi_mram.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -212,3 +214,5 @@ bool SPIMRAM::read_data_(uint32_t address, uint8_t *data, size_t length) {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_SPI

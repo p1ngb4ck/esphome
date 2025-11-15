@@ -1,3 +1,5 @@
+#ifdef USE_BINARY_STORAGE_I2C
+
 #include "i2c_fram.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -239,3 +241,5 @@ bool I2CFram::wakeup(uint32_t trec) {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_I2C

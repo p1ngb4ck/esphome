@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef USE_BINARY_STORAGE_SPI
+
 #include "binary_storage.h"
 #include "esphome/components/spi/spi.h"
 #include "esphome/core/hal.h"
@@ -19,8 +21,9 @@ namespace binary_storage {
  *
  * Supports standard JEDEC-compatible flash chips
  */
-class SPIFlash : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
-                                                              spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_8MHZ> {
+class SPIFlash : public BinaryStorage,
+                 public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                       spi::DATA_RATE_8MHZ> {
  public:
   SPIFlash() = default;
 
@@ -162,10 +165,10 @@ class SPIFlash : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_
 
   std::string model_{"SPI_FLASH"};
   uint32_t capacity_{0};
-  uint32_t page_size_{256};      // Standard page size
-  uint32_t sector_size_{4096};   // Standard sector size (4KB)
+  uint32_t page_size_{256};     // Standard page size
+  uint32_t sector_size_{4096};  // Standard sector size (4KB)
   uint32_t jedec_id_{0};
-  bool quad_mode_{false};        // Quad SPI mode for faster reads
+  bool quad_mode_{false};  // Quad SPI mode for faster reads
 
   //========================================================================
   // SPI Flash Commands (JEDEC standard)
@@ -197,17 +200,17 @@ class SPIFlash : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_
   static constexpr uint8_t CMD_FAST_READ_QUAD_IO = 0xEB;      // Address and data on 4 lines
 
   // Status register 1 bits
-  static constexpr uint8_t STATUS_BUSY = 0x01;      // Write in progress
-  static constexpr uint8_t STATUS_WEL = 0x02;       // Write enable latch
-  static constexpr uint8_t STATUS_BP0 = 0x04;       // Block protect bit 0
-  static constexpr uint8_t STATUS_BP1 = 0x08;       // Block protect bit 1
-  static constexpr uint8_t STATUS_BP2 = 0x10;       // Block protect bit 2
-  static constexpr uint8_t STATUS_TB = 0x20;        // Top/bottom protect
-  static constexpr uint8_t STATUS_SEC = 0x40;       // Sector protect
-  static constexpr uint8_t STATUS_SRP = 0x80;       // Status register protect
+  static constexpr uint8_t STATUS_BUSY = 0x01;  // Write in progress
+  static constexpr uint8_t STATUS_WEL = 0x02;   // Write enable latch
+  static constexpr uint8_t STATUS_BP0 = 0x04;   // Block protect bit 0
+  static constexpr uint8_t STATUS_BP1 = 0x08;   // Block protect bit 1
+  static constexpr uint8_t STATUS_BP2 = 0x10;   // Block protect bit 2
+  static constexpr uint8_t STATUS_TB = 0x20;    // Top/bottom protect
+  static constexpr uint8_t STATUS_SEC = 0x40;   // Sector protect
+  static constexpr uint8_t STATUS_SRP = 0x80;   // Status register protect
 
   // Status register 2 bits (Winbond/Macronix)
-  static constexpr uint8_t STATUS2_QE = 0x02;       // Quad Enable (bit 1 of SR2)
+  static constexpr uint8_t STATUS2_QE = 0x02;  // Quad Enable (bit 1 of SR2)
 
   //========================================================================
   // Internal Helpers
@@ -312,3 +315,5 @@ class SPIFlash : public BinaryStorage, public spi::SPIDevice<spi::BIT_ORDER_MSB_
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_SPI

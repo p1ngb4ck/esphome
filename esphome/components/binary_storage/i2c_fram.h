@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef USE_BINARY_STORAGE_I2C
+
 #include "binary_storage.h"
 #include "esphome/components/i2c/i2c.h"
 
@@ -168,3 +170,5 @@ class I2CFram : public BinaryStorage, public i2c::I2CDevice {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_I2C

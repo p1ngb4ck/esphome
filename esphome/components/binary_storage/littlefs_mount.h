@@ -25,7 +25,7 @@ namespace binary_storage {
 class LittleFSMount : public Component {
  public:
   LittleFSMount() = default;
-  ~LittleFSMount() override;
+  ~LittleFSMount();
 
   // Component lifecycle
   void setup() override;

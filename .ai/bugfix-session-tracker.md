@@ -99,8 +99,10 @@
 - [x] Fix binary_storage/__init__.py Python registration issues
 - [x] Add device node registration for raw/both modes
 - [x] Add PLATFORM_BINARY_STORAGE to storage_host
+- [x] Fix C++ compilation errors (TAG, I2C API, LittleFS, bus headers)
+- [x] Implement conditional bus loading based on device type
 - [ ] Test compilation with user's test config
-- [ ] Fix C++ errors (if any appear during compilation)
+- [ ] Fix any remaining compilation errors
 
 ---
 
@@ -115,11 +117,25 @@
 6. ✅ Added binary_storage platform to storage_host
 7. ✅ Verified both registration paths (device nodes + mounts) work correctly
 
-### 2025-11-15 - C++ Fixes
+### 2025-11-15 - C++ Fixes (Round 1)
 8. ✅ Fixed TAG redefinition (moved from header to .cpp)
 9. ✅ Fixed esp_littlefs.h include (conditional IDF component loading)
 10. ✅ Fixed deprecated I2C API (writev → write) in 6 locations
 11. ✅ Removed unused esp32 import (linter warning)
+
+### 2025-11-15 - C++ Fixes (Round 2) - Conditional Bus Loading
+12. ✅ Removed AUTO_LOAD = ["spi", "i2c"] from __init__.py
+13. ✅ Added conditional defines based on device type:
+    - USE_BINARY_STORAGE_SPI for SPI devices
+    - USE_BINARY_STORAGE_I2C for I2C devices
+    - USE_BINARY_STORAGE_ONEWIRE for OneWire devices
+14. ✅ Wrapped all bus-specific .cpp files with #ifdef guards:
+    - spi_flash.cpp, spi_fram.cpp, spi_mram.cpp → #ifdef USE_BINARY_STORAGE_SPI
+    - i2c_fram.cpp, i2c_eeprom.cpp → #ifdef USE_BINARY_STORAGE_I2C
+    - onewire_eeprom.cpp → #ifdef USE_BINARY_STORAGE_ONEWIRE
+15. ✅ Wrapped all bus-specific .h files with matching guards
+16. ✅ Fixed LittleFSMount destructor (removed override keyword)
+17. ✅ Fixed StorageHost incomplete type (included storage_host.h instead of forward declaration)
 
 ---
 

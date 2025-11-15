@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef USE_BINARY_STORAGE_ONEWIRE
+
 #include "binary_storage.h"
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
@@ -81,7 +83,7 @@ class OneWireEEPROM : public BinaryStorage {
   bool read(uint32_t address, uint8_t *data, size_t length) override;
   bool write(uint32_t address, const uint8_t *data, size_t length) override;
   bool is_ready() override;
-  bool sync() override { return true; }  // No buffering
+  bool sync() override { return true; }                         // No buffering
   bool erase_block(uint32_t address) override { return true; }  // No erase needed
 
   //========================================================================
@@ -117,7 +119,7 @@ class OneWireEEPROM : public BinaryStorage {
   InternalGPIOPin *pin_{nullptr};
   std::string model_{"ONEWIRE_EEPROM"};
   uint32_t capacity_{0};
-  uint32_t page_size_{8};  // Scratchpad size (8 or 32 bytes typically)
+  uint32_t page_size_{8};    // Scratchpad size (8 or 32 bytes typically)
   uint64_t rom_address_{0};  // 64-bit ROM ID
   bool skip_rom_{true};      // Use Skip ROM if only one device on bus
 
@@ -125,18 +127,18 @@ class OneWireEEPROM : public BinaryStorage {
   // OneWire EEPROM Commands (Dallas/Maxim standard)
   //========================================================================
 
-  static constexpr uint8_t CMD_READ_ROM = 0x33;            // Read 64-bit ROM
-  static constexpr uint8_t CMD_SKIP_ROM = 0xCC;            // Skip ROM (single device)
-  static constexpr uint8_t CMD_MATCH_ROM = 0x55;           // Match ROM (multiple devices)
-  static constexpr uint8_t CMD_SEARCH_ROM = 0xF0;          // Search for devices
-  static constexpr uint8_t CMD_READ_MEMORY = 0xF0;         // Read memory
-  static constexpr uint8_t CMD_WRITE_SCRATCHPAD = 0x0F;    // Write to scratchpad
-  static constexpr uint8_t CMD_READ_SCRATCHPAD = 0xAA;     // Read from scratchpad
-  static constexpr uint8_t CMD_COPY_SCRATCHPAD = 0x55;     // Copy scratchpad to memory
+  static constexpr uint8_t CMD_READ_ROM = 0x33;          // Read 64-bit ROM
+  static constexpr uint8_t CMD_SKIP_ROM = 0xCC;          // Skip ROM (single device)
+  static constexpr uint8_t CMD_MATCH_ROM = 0x55;         // Match ROM (multiple devices)
+  static constexpr uint8_t CMD_SEARCH_ROM = 0xF0;        // Search for devices
+  static constexpr uint8_t CMD_READ_MEMORY = 0xF0;       // Read memory
+  static constexpr uint8_t CMD_WRITE_SCRATCHPAD = 0x0F;  // Write to scratchpad
+  static constexpr uint8_t CMD_READ_SCRATCHPAD = 0xAA;   // Read from scratchpad
+  static constexpr uint8_t CMD_COPY_SCRATCHPAD = 0x55;   // Copy scratchpad to memory
 
   // Family codes
-  static constexpr uint8_t FAMILY_DS2431 = 0x2D;  // 1KB EEPROM
-  static constexpr uint8_t FAMILY_DS2433 = 0x23;  // 4KB EEPROM
+  static constexpr uint8_t FAMILY_DS2431 = 0x2D;   // 1KB EEPROM
+  static constexpr uint8_t FAMILY_DS2433 = 0x23;   // 4KB EEPROM
   static constexpr uint8_t FAMILY_DS28E07 = 0x1C;  // 1KB + EEPROM pages
 
   //========================================================================
@@ -250,3 +252,5 @@ class OneWireEEPROM : public BinaryStorage {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_ONEWIRE

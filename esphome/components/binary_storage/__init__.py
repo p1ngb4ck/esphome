@@ -21,8 +21,8 @@ from esphome.const import (
 )
 
 CODEOWNERS = ["@esphome/core"]
-DEPENDENCIES = []
-AUTO_LOAD = []
+DEPENDENCIES = []  # No hard dependencies - components loaded on demand
+AUTO_LOAD = []  # Bus components loaded conditionally based on device type
 MULTI_CONF = True
 
 # Namespace
@@ -307,15 +307,20 @@ async def to_code(config):
     is_onewire = device_type in ["ONEWIRE_EEPROM", "ONEWIRE"]
 
     if is_spi:
+        # SPI device - register and set define for conditional compilation
+        cg.add_define("USE_BINARY_STORAGE_SPI")
         await spi.register_spi_device(var, config)
     elif is_onewire:
-        # Configure OneWire pin
+        # OneWire device - configure pin and set define for conditional compilation
+        cg.add_define("USE_BINARY_STORAGE_ONEWIRE")
         pin = await cg.gpio_pin_expression(config[CONF_PIN])
         cg.add(var.set_pin(pin))
         # Set ROM address if specified
         if CONF_ADDRESS in config:
             cg.add(var.set_address(config[CONF_ADDRESS]))
     else:
+        # I2C device - register and set define for conditional compilation
+        cg.add_define("USE_BINARY_STORAGE_I2C")
         await i2c.register_i2c_device(var, config)
 
     # Set model name

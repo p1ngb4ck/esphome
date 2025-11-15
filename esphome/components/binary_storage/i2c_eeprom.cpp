@@ -1,3 +1,5 @@
+#ifdef USE_BINARY_STORAGE_I2C
+
 #include "i2c_eeprom.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -269,3 +271,5 @@ bool I2CEeprom::sync() {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_I2C

@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef USE_BINARY_STORAGE_I2C
+
 #include "binary_storage.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/core/hal.h"
@@ -84,7 +86,7 @@ class I2CEeprom : public BinaryStorage, public i2c::I2CDevice {
 
   std::string model_{"EEPROM"};
   uint32_t capacity_{0};
-  uint32_t page_size_{32};     // Default 32 bytes
+  uint32_t page_size_{32};       // Default 32 bytes
   uint8_t addressing_bits_{16};  // 9, 11, or 16
 
   //========================================================================
@@ -151,3 +153,5 @@ class I2CEeprom : public BinaryStorage, public i2c::I2CDevice {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_I2C

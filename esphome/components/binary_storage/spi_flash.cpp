@@ -1,3 +1,5 @@
+#ifdef USE_BINARY_STORAGE_SPI
+
 #include "spi_flash.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -454,3 +456,5 @@ void SPIFlash::wake_up() {
 
 }  // namespace binary_storage
 }  // namespace esphome
+
+#endif  // USE_BINARY_STORAGE_SPI

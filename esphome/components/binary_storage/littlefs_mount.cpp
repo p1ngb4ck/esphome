@@ -6,9 +6,7 @@
 
 // Soft dependency on storage_host
 #if defined(USE_STORAGE_HOST)
-namespace storage_host {
-extern class StorageHost *global_storage_host;
-}
+#include "esphome/components/storage_host/storage_host.h"
 #endif  // USE_STORAGE_HOST
 
 namespace esphome {
@@ -54,13 +52,14 @@ void LittleFSMount::dump_config() {
   if (this->mounted_) {
     // Get filesystem info
     size_t total_bytes = 0, used_bytes = 0;
-    esp_err_t err = esp_littlefs_info(this->partition_label_.empty() ? this->mount_path_.c_str() : this->partition_label_.c_str(), &total_bytes, &used_bytes);
+    esp_err_t err =
+        esp_littlefs_info(this->partition_label_.empty() ? this->mount_path_.c_str() : this->partition_label_.c_str(),
+                          &total_bytes, &used_bytes);
     if (err == ESP_OK) {
       ESP_LOGCONFIG(TAG, "  Total: %u bytes (%.1f KB)", total_bytes, total_bytes / 1024.0f);
       ESP_LOGCONFIG(TAG, "  Used: %u bytes (%.1f KB, %.1f%%)", used_bytes, used_bytes / 1024.0f,
                     (used_bytes * 100.0f) / total_bytes);
-      ESP_LOGCONFIG(TAG, "  Free: %u bytes (%.1f KB)", total_bytes - used_bytes,
-                    (total_bytes - used_bytes) / 1024.0f);
+      ESP_LOGCONFIG(TAG, "  Free: %u bytes (%.1f KB)", total_bytes - used_bytes, (total_bytes - used_bytes) / 1024.0f);
     }
   }
 }
