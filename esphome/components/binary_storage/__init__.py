@@ -358,11 +358,8 @@ async def to_code(config):
             # Auto-generate mount path from device id
             mount_path = f"/{config[CONF_ID]}"
 
-        # Create unique ID for mount component
-        mount_id = cg.ID(
-            f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
-        )
-        mount_var = cg.new_Pvariable(mount_id)
+        # Create LittleFSMount component
+        mount_var = cg.new_Pvariable(LittleFSMount)
         await cg.register_component(mount_var, config)
 
         cg.add(mount_var.set_storage_device(var))
