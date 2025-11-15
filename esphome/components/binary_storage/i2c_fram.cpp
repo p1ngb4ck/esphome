@@ -28,7 +28,7 @@ void I2CFram::setup() {
   }
 
   // Verify device is present
-  i2c::ErrorCode err = this->bus_->writev(this->address_, nullptr, 0);
+  i2c::ErrorCode err = this->bus_->write(this->address_, nullptr, 0);
   if (err != i2c::ERROR_OK) {
     ESP_LOGE(TAG, "Device not found at address 0x%02X", this->address_);
     this->mark_failed();
@@ -96,7 +96,7 @@ void I2CFram::write_block_(uint32_t memaddr, uint8_t *obj, uint8_t size) {
   buffer.insert(buffer.end(), obj, obj + size);
 
   // Write to device
-  this->bus_->writev(device_addr, buffer.data(), buffer.size());
+  this->bus_->write(device_addr, buffer.data(), buffer.size());
 }
 
 void I2CFram::read_block_(uint32_t memaddr, uint8_t *obj, uint8_t size) {
@@ -223,7 +223,7 @@ void I2CFram::sleep() {
 
 bool I2CFram::wakeup(uint32_t trec) {
   // Any I2C transaction wakes up FRAM
-  i2c::ErrorCode err = this->bus_->writev(this->address_, nullptr, 0);
+  i2c::ErrorCode err = this->bus_->write(this->address_, nullptr, 0);
   bool awake = (err == i2c::ERROR_OK);
 
   if (trec == 0)
@@ -233,7 +233,7 @@ bool I2CFram::wakeup(uint32_t trec) {
   delayMicroseconds(trec);
 
   // Check recovery OK
-  err = this->bus_->writev(this->address_, nullptr, 0);
+  err = this->bus_->write(this->address_, nullptr, 0);
   return err == i2c::ERROR_OK;
 }
 

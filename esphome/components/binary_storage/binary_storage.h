@@ -9,8 +9,6 @@
 namespace esphome {
 namespace binary_storage {
 
-static const char *const TAG = "binary_storage";
-
 /**
  * @brief Block device operations for LittleFS integration
  *
@@ -19,11 +17,11 @@ static const char *const TAG = "binary_storage";
  * and block-oriented filesystem operations.
  */
 struct BlockDeviceConfig {
-  uint32_t block_size;     ///< Size of each block (typically 256-4096 bytes)
-  uint32_t block_count;    ///< Total number of blocks
-  uint32_t read_size;      ///< Minimum read size (typically 1)
-  uint32_t prog_size;      ///< Minimum program/write size (typically 1 for FRAM, page size for EEPROM/Flash)
-  uint32_t lookahead_size; ///< Size for LittleFS lookahead buffer (typically block_count/8)
+  uint32_t block_size;      ///< Size of each block (typically 256-4096 bytes)
+  uint32_t block_count;     ///< Total number of blocks
+  uint32_t read_size;       ///< Minimum read size (typically 1)
+  uint32_t prog_size;       ///< Minimum program/write size (typically 1 for FRAM, page size for EEPROM/Flash)
+  uint32_t lookahead_size;  ///< Size for LittleFS lookahead buffer (typically block_count/8)
 };
 
 /**
@@ -211,9 +209,7 @@ class BinaryStorage : public Component {
   virtual int block_sync() { return this->sync() ? 0 : -1; }
 
  protected:
-  bool is_valid_address_(uint32_t address, size_t length) const {
-    return (address + length) <= this->get_capacity();
-  }
+  bool is_valid_address_(uint32_t address, size_t length) const { return (address + length) <= this->get_capacity(); }
 };
 
 }  // namespace binary_storage

@@ -6,7 +6,7 @@ import re
 
 from esphome import automation, pins
 import esphome.codegen as cg
-from esphome.components import esp32, i2c, spi
+from esphome.components import i2c, spi
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADDRESS,
@@ -287,12 +287,17 @@ CONFIG_SCHEMA = cv.typed_schema(
 
 async def to_code(config):
     """Configure binary storage device."""
+    from esphome.core import CORE
+
     mode = config.get(CONF_MODE, MODE_RAW)
     device_type = config.get(CONF_TYPE, "EEPROM").upper()
 
-    # Add LittleFS ESP-IDF component if filesystem is enabled
-    if mode in [MODE_LITTLEFS, MODE_BOTH]:
-        esp32.add_idf_component(name="joltwallet/littlefs", ref="1.14.8")
+    # Add LittleFS ESP-IDF component (only for ESP-IDF builds)
+    # Always add it because littlefs_mount.cpp is compiled even in raw mode
+    if CORE.using_esp_idf:
+        from esphome.components.esp32 import add_idf_component
+
+        add_idf_component(name="joltwallet/littlefs", ref="1.14.8")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

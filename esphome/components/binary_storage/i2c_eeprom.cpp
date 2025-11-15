@@ -117,7 +117,7 @@ void I2CEeprom::auto_configure_from_model_() {
 
 bool I2CEeprom::is_ready() {
   // Try to read from device to check if it's present and ready
-  i2c::ErrorCode err = this->bus_->writev(this->address_, nullptr, 0);
+  i2c::ErrorCode err = this->bus_->write(this->address_, nullptr, 0);
   return err == i2c::ERROR_OK;
 }
 
@@ -228,7 +228,7 @@ bool I2CEeprom::write_page_(uint32_t address, const uint8_t *data, size_t length
   write_len += length;
 
   // Write to device
-  i2c::ErrorCode err = this->bus_->writev(device_addr, write_buffer, write_len);
+  i2c::ErrorCode err = this->bus_->write(device_addr, write_buffer, write_len);
   if (err != i2c::ERROR_OK) {
     ESP_LOGE(TAG, "Page write failed at address 0x%04X: %d", address, err);
     return false;

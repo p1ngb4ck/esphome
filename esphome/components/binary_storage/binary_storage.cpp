@@ -12,6 +12,8 @@ extern class StorageHost *global_storage_host;
 namespace esphome {
 namespace binary_storage {
 
+static const char *const TAG = "binary_storage";
+
 void BinaryStorage::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Binary Storage...");
   ESP_LOGCONFIG(TAG, "  Device: %s", this->get_device_name());

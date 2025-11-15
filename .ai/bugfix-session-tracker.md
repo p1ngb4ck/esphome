@@ -63,6 +63,34 @@
 1. ✅ Added `PLATFORM_BINARY_STORAGE = "binary_storage"` (line 60)
 2. ✅ Added to MOUNT_SCHEMA validation list (line 74)
 
+### ✅ FIXED: Issue #3 - C++ Compilation Errors
+**Locations:** Multiple C++ files
+
+**Problems Found:**
+1. TAG redefinition across multiple .cpp files
+2. Missing esp_littlefs.h header (IDF component not loaded)
+3. Deprecated I2C API usage (writev instead of write)
+
+**Fixes Applied:**
+
+**3a. TAG Redefinition**
+- **binary_storage.h:11** - Removed `static const char *const TAG` from header
+- **binary_storage.cpp:15** - Added TAG definition to .cpp file
+- Each component file (i2c_fram, i2c_eeprom, onewire_eeprom) already had their own TAG
+
+**3b. LittleFS Component Loading**
+- **binary_storage/__init__.py:297-299** - Added conditional IDF component loading
+- Only loads for ESP-IDF builds (check `CORE.using_esp_idf`)
+- Imports `add_idf_component` conditionally to avoid unused import warning
+- Always loads component because littlefs_mount.cpp is compiled even for raw mode
+
+**3c. Deprecated I2C API**
+- **i2c_fram.cpp:31, 226, 236** - Changed `writev()` to `write()`
+- **i2c_fram.cpp:99** - Changed `writev()` to `write()`
+- **i2c_eeprom.cpp:120** - Changed `writev()` to `write()`
+- **i2c_eeprom.cpp:231** - Changed `writev()` to `write()`
+- The `write()` method is a convenience wrapper around `write_readv()` (the new API)
+
 ---
 
 ## TODO List
@@ -78,7 +106,7 @@
 
 ## Completed Tasks
 
-### 2025-11-15
+### 2025-11-15 - Python Fixes
 1. ✅ Created bugfix session tracker
 2. ✅ Analyzed sd_mmc_card and usb_msc_host registration patterns
 3. ✅ Identified issues in binary_storage/__init__.py
@@ -86,6 +114,12 @@
 5. ✅ Restored device node registration for raw/both modes
 6. ✅ Added binary_storage platform to storage_host
 7. ✅ Verified both registration paths (device nodes + mounts) work correctly
+
+### 2025-11-15 - C++ Fixes
+8. ✅ Fixed TAG redefinition (moved from header to .cpp)
+9. ✅ Fixed esp_littlefs.h include (conditional IDF component loading)
+10. ✅ Fixed deprecated I2C API (writev → write) in 6 locations
+11. ✅ Removed unused esp32 import (linter warning)
 
 ---
 
