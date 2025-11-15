@@ -374,9 +374,6 @@ async def to_code(config):
         if CONF_AUTO_FORMAT in config:
             cg.add(mount_var.set_auto_format(config[CONF_AUTO_FORMAT]))
 
-        if CONF_PARTITION_LABEL in config:
-            cg.add(mount_var.set_partition_label(config[CONF_PARTITION_LABEL]))
-
     # Register device node with storage_host if mode is raw or both
     if mode in [MODE_RAW, MODE_BOTH]:
         # Auto-generate device node path from device type and id

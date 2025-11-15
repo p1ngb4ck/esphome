@@ -3,6 +3,12 @@
 #include "littlefs_mount.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "lfs.h"
+#include "esp_vfs.h"
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 // Soft dependency on storage_host
 #if defined(USE_STORAGE_HOST)
@@ -14,9 +20,55 @@ namespace binary_storage {
 
 static const char *const TAG = "littlefs_mount";
 
+//========================================================================
+// LittleFS Block Device Callbacks
+//========================================================================
+
+// Context passed to LittleFS callbacks
+struct LittleFSContext {
+  BinaryStorage *storage;
+  BlockDeviceConfig config;
+};
+
+// Read a block
+static int lfs_block_device_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *buffer,
+                                 lfs_size_t size) {
+  auto *ctx = static_cast<LittleFSContext *>(c->context);
+  int result = ctx->storage->block_read(block, off, buffer, size);
+  return result == 0 ? LFS_ERR_OK : LFS_ERR_IO;
+}
+
+// Program (write) a block
+static int lfs_block_device_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, const void *buffer,
+                                 lfs_size_t size) {
+  auto *ctx = static_cast<LittleFSContext *>(c->context);
+  int result = ctx->storage->block_prog(block, off, buffer, size);
+  return result == 0 ? LFS_ERR_OK : LFS_ERR_IO;
+}
+
+// Erase a block
+static int lfs_block_device_erase(const struct lfs_config *c, lfs_block_t block) {
+  auto *ctx = static_cast<LittleFSContext *>(c->context);
+  int result = ctx->storage->block_erase(block);
+  return result == 0 ? LFS_ERR_OK : LFS_ERR_IO;
+}
+
+// Sync the block device
+static int lfs_block_device_sync(const struct lfs_config *c) {
+  auto *ctx = static_cast<LittleFSContext *>(c->context);
+  int result = ctx->storage->block_sync();
+  return result == 0 ? LFS_ERR_OK : LFS_ERR_IO;
+}
+
 LittleFSMount::~LittleFSMount() {
   if (this->mounted_) {
     this->unmount();
+  }
+
+  // Free context
+  if (this->lfs_context_ != nullptr) {
+    delete static_cast<LittleFSContext *>(this->lfs_context_);
+    this->lfs_context_ = nullptr;
   }
 }
 
@@ -32,6 +84,13 @@ void LittleFSMount::setup() {
   ESP_LOGCONFIG(TAG, "  Mount Path: %s", this->mount_path_.c_str());
   ESP_LOGCONFIG(TAG, "  Storage Device: %s", this->storage_->get_device_name());
   ESP_LOGCONFIG(TAG, "  Auto Format: %s", this->auto_format_ ? "YES" : "NO");
+
+  // Initialize LittleFS configuration
+  if (!this->init_lfs_config_()) {
+    ESP_LOGE(TAG, "Failed to initialize LittleFS configuration!");
+    this->mark_failed();
+    return;
+  }
 
   // Attempt to mount
   if (this->mount_()) {
@@ -49,13 +108,12 @@ void LittleFSMount::dump_config() {
   ESP_LOGCONFIG(TAG, "  Device: %s (%s)", this->storage_->get_device_name(), this->storage_->get_device_type());
   ESP_LOGCONFIG(TAG, "  Mounted: %s", this->mounted_ ? "YES" : "NO");
 
-  if (this->mounted_) {
+  if (this->mounted_ && this->lfs_ != nullptr) {
     // Get filesystem info
-    size_t total_bytes = 0, used_bytes = 0;
-    esp_err_t err =
-        esp_littlefs_info(this->partition_label_.empty() ? this->mount_path_.c_str() : this->partition_label_.c_str(),
-                          &total_bytes, &used_bytes);
-    if (err == ESP_OK) {
+    lfs_ssize_t block_count = lfs_fs_size(this->lfs_.get());
+    if (block_count >= 0) {
+      uint32_t total_bytes = this->lfs_cfg_->block_count * this->lfs_cfg_->block_size;
+      uint32_t used_bytes = block_count * this->lfs_cfg_->block_size;
       ESP_LOGCONFIG(TAG, "  Total: %u bytes (%.1f KB)", total_bytes, total_bytes / 1024.0f);
       ESP_LOGCONFIG(TAG, "  Used: %u bytes (%.1f KB, %.1f%%)", used_bytes, used_bytes / 1024.0f,
                     (used_bytes * 100.0f) / total_bytes);
@@ -64,51 +122,91 @@ void LittleFSMount::dump_config() {
   }
 }
 
-esp_vfs_littlefs_conf_t LittleFSMount::get_littlefs_config_() {
-  esp_vfs_littlefs_conf_t conf = {};
+bool LittleFSMount::init_lfs_config_() {
+  ESP_LOGD(TAG, "Initializing LittleFS configuration...");
 
-  // Use partition label if specified, otherwise generate from mount path
-  conf.base_path = this->mount_path_.c_str();
-
-  // If no partition label specified, use the mount path without leading slash as label
-  if (this->partition_label_.empty()) {
-    // Generate partition label from mount path (e.g., "/fram" -> "fram")
-    const char *label = this->mount_path_.c_str();
-    if (label[0] == '/') {
-      label++;  // Skip leading slash
-    }
-    this->partition_label_ = label;
-  }
-
-  conf.partition_label = this->partition_label_.c_str();
-  conf.format_if_mount_failed = this->auto_format_;
-  conf.dont_mount = false;
-
-  ESP_LOGD(TAG, "LittleFS config: base_path=%s, partition_label=%s, format_if_mount_failed=%s", conf.base_path,
-           conf.partition_label, conf.format_if_mount_failed ? "true" : "false");
-
-  // Configure based on device characteristics
+  // Get block device configuration from storage
   BlockDeviceConfig block_config = this->storage_->get_block_config();
 
-  // LittleFS partition configuration (optional, can be auto-detected)
-  // We'll let it auto-configure from the storage device
+  ESP_LOGD(TAG, "Block device config: block_size=%u, block_count=%u, read_size=%u, prog_size=%u",
+           block_config.block_size, block_config.block_count, block_config.read_size, block_config.prog_size);
 
-  return conf;
+  // Allocate LittleFS objects
+  this->lfs_ = std::make_unique<lfs_t>();
+  this->lfs_cfg_ = std::make_unique<lfs_config>();
+
+  // Create context for callbacks
+  auto *ctx = new LittleFSContext();
+  ctx->storage = this->storage_;
+  ctx->config = block_config;
+  this->lfs_context_ = ctx;
+
+  // Configure LittleFS
+  memset(this->lfs_cfg_.get(), 0, sizeof(lfs_config));
+
+  // Block device operations
+  this->lfs_cfg_->read = lfs_block_device_read;
+  this->lfs_cfg_->prog = lfs_block_device_prog;
+  this->lfs_cfg_->erase = lfs_block_device_erase;
+  this->lfs_cfg_->sync = lfs_block_device_sync;
+
+  // Block device configuration
+  this->lfs_cfg_->read_size = block_config.read_size;
+  this->lfs_cfg_->prog_size = block_config.prog_size;
+  this->lfs_cfg_->block_size = block_config.block_size;
+  this->lfs_cfg_->block_count = block_config.block_count;
+  this->lfs_cfg_->lookahead_size = block_config.lookahead_size;
+  this->lfs_cfg_->cache_size = block_config.block_size;  // Cache size = block size
+  this->lfs_cfg_->block_cycles = 500;                    // Wear leveling cycles
+
+  // Allocate buffers
+  this->read_buffer_ = std::make_unique<uint8_t[]>(block_config.block_size);
+  this->prog_buffer_ = std::make_unique<uint8_t[]>(block_config.block_size);
+  this->lookahead_buffer_ = std::make_unique<uint8_t[]>(block_config.lookahead_size);
+
+  this->lfs_cfg_->read_buffer = this->read_buffer_.get();
+  this->lfs_cfg_->prog_buffer = this->prog_buffer_.get();
+  this->lfs_cfg_->lookahead_buffer = this->lookahead_buffer_.get();
+
+  // Context for callbacks
+  this->lfs_cfg_->context = this->lfs_context_;
+
+  return true;
 }
 
 bool LittleFSMount::mount_() {
   ESP_LOGD(TAG, "Mounting LittleFS filesystem...");
 
-  esp_vfs_littlefs_conf_t conf = this->get_littlefs_config_();
+  // Try to mount
+  int err = lfs_mount(this->lfs_.get(), this->lfs_cfg_.get());
 
-  esp_err_t err = esp_vfs_littlefs_register(&conf);
+  if (err != LFS_ERR_OK) {
+    if (this->auto_format_) {
+      ESP_LOGW(TAG, "Mount failed (err=%d), attempting to format...", err);
 
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount LittleFS: %s (%d)", esp_err_to_name(err), err);
-    return false;
+      // Format the filesystem
+      err = lfs_format(this->lfs_.get(), this->lfs_cfg_.get());
+      if (err != LFS_ERR_OK) {
+        ESP_LOGE(TAG, "Format failed (err=%d)", err);
+        return false;
+      }
+
+      ESP_LOGI(TAG, "Format successful, mounting...");
+
+      // Try to mount again
+      err = lfs_mount(this->lfs_.get(), this->lfs_cfg_.get());
+      if (err != LFS_ERR_OK) {
+        ESP_LOGE(TAG, "Mount failed after format (err=%d)", err);
+        return false;
+      }
+    } else {
+      ESP_LOGE(TAG, "Mount failed (err=%d), auto_format disabled", err);
+      return false;
+    }
   }
 
   this->mounted_ = true;
+  ESP_LOGI(TAG, "LittleFS mounted successfully");
   return true;
 }
 
@@ -119,12 +217,10 @@ bool LittleFSMount::unmount() {
 
   ESP_LOGD(TAG, "Unmounting LittleFS from %s...", this->mount_path_.c_str());
 
-  const char *partition = this->partition_label_.empty() ? this->mount_path_.c_str() : this->partition_label_.c_str();
+  int err = lfs_unmount(this->lfs_.get());
 
-  esp_err_t err = esp_vfs_littlefs_unregister(partition);
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to unmount: %s", esp_err_to_name(err));
+  if (err != LFS_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to unmount (err=%d)", err);
     return false;
   }
 
@@ -145,18 +241,16 @@ bool LittleFSMount::remount() {
 bool LittleFSMount::format() {
   ESP_LOGW(TAG, "Formatting LittleFS filesystem - ALL DATA WILL BE LOST!");
 
-  const char *partition = this->partition_label_.empty() ? this->mount_path_.c_str() : this->partition_label_.c_str();
-
   // Unmount first if mounted
   bool was_mounted = this->mounted_;
   if (was_mounted) {
     this->unmount();
   }
 
-  esp_err_t err = esp_littlefs_format(partition);
+  int err = lfs_format(this->lfs_.get(), this->lfs_cfg_.get());
 
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(err));
+  if (err != LFS_ERR_OK) {
+    ESP_LOGE(TAG, "Format failed (err=%d)", err);
     return false;
   }
 

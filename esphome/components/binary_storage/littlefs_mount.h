@@ -4,9 +4,9 @@
 
 #include "binary_storage.h"
 #include "esphome/core/component.h"
-#include "esp_vfs.h"
-#include "esp_littlefs.h"
+#include "lfs.h"
 #include <string>
+#include <memory>
 
 namespace esphome {
 namespace binary_storage {
@@ -61,13 +61,6 @@ class LittleFSMount : public Component {
     this->auto_format_ = format;
   }
 
-  /**
-   * @brief Set custom partition label (optional)
-   *
-   * @param label Partition label for LittleFS
-   */
-  void set_partition_label(const std::string &label) { this->partition_label_ = label; }
-
   //========================================================================
   // Mount Management
   //========================================================================
@@ -116,9 +109,19 @@ class LittleFSMount : public Component {
 
   BinaryStorage *storage_{nullptr};
   std::string mount_path_{"/storage"};
-  std::string partition_label_;
   bool auto_format_{true};
   bool mounted_{false};
+
+  //========================================================================
+  // LittleFS Objects
+  //========================================================================
+
+  std::unique_ptr<lfs_t> lfs_;                   ///< LittleFS filesystem object
+  std::unique_ptr<lfs_config> lfs_cfg_;          ///< LittleFS configuration
+  std::unique_ptr<uint8_t[]> read_buffer_;       ///< Read buffer for LittleFS
+  std::unique_ptr<uint8_t[]> prog_buffer_;       ///< Program buffer for LittleFS
+  std::unique_ptr<uint8_t[]> lookahead_buffer_;  ///< Lookahead buffer for LittleFS
+  void *lfs_context_{nullptr};                   ///< Context for block device callbacks
 
   //========================================================================
   // Internal Helpers
@@ -132,11 +135,11 @@ class LittleFSMount : public Component {
   bool mount_();
 
   /**
-   * @brief Configure LittleFS for the storage device
+   * @brief Initialize LittleFS configuration
    *
-   * @return LittleFS configuration structure
+   * @return true on success
    */
-  esp_vfs_littlefs_conf_t get_littlefs_config_();
+  bool init_lfs_config_();
 
   /**
    * @brief Register with storage_host
