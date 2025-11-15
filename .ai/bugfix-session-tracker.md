@@ -28,25 +28,40 @@
 ## Bugs to Fix
 
 ### ✅ FIXED: Issue #1 - Invalid Python code in binary_storage/__init__.py
-**Location:** `esphome/components/binary_storage/__init__.py:351-378`
+**Location:** `esphome/components/binary_storage/__init__.py:344-394`
 
 **Problems Found:**
 1. Invalid RawExpression with string interpolation (line 351)
-2. Invalid method call `register_with_storage_host(mount_path, LittleFSMount)` (line 353)
-3. Incorrect device node registration pattern (lines 365-380)
-4. Not following storage_host registration pattern from sd_mmc_card/usb_msc_host
+2. Invalid method call `register_with_storage_host(mount_path, LittleFSMount)` with 2 parameters (line 353)
+3. Missing device node registration for `raw` and `both` modes
+4. Not following proper registration patterns
 
 **Root Cause:**
-- Misunderstanding of ESPHome ID generation
-- Mixing mount registration with device node registration
-- Not following established patterns from other storage components
+- Incorrect understanding of how binary_storage registers with storage_host
+- Binary storage has TWO registration mechanisms:
+  - **Device nodes** (`/dev/framX`) - for raw mode, registered from Python
+  - **Mount points** (`/fram`) - for littlefs mode, registered from C++ in LittleFSMount::setup()
+- Previous fix incorrectly removed device node registration
+
+**Complete Fix Applied:**
+1. ✅ Fixed LittleFS mount component ID generation using `cg.ID()` (lines 353-357)
+2. ✅ Removed invalid 2-parameter `register_with_storage_host()` call
+3. ✅ **Restored device node registration for raw/both modes** (lines 368-384)
+   - Auto-generates device node paths like `/dev/fram0`, `/dev/eeprom1`
+   - Calls `var.register_with_storage_host(device_node_path)` with correct 1 parameter
+   - Only executes when mode is `raw` or `both`
+4. ✅ Kept CORE.data storage for storage_host discovery (lines 386-394)
+
+### ✅ FIXED: Issue #2 - Missing binary_storage platform in storage_host
+**Location:** `esphome/components/storage_host/__init__.py:53-77`
+
+**Problem Found:**
+- storage_host didn't include `"binary_storage"` as a valid platform type
+- MOUNT_SCHEMA validation rejected binary_storage mounts
 
 **Fix Applied:**
-- Removed invalid RawExpression, replaced with proper `cg.ID()` generation
-- Removed invalid `register_with_storage_host()` calls
-- Removed device node registration code (not needed - handled in C++)
-- Simplified to only store device in CORE.data for storage_host discovery
-- Now follows exact pattern from sd_mmc_card (lines 86-94)
+1. ✅ Added `PLATFORM_BINARY_STORAGE = "binary_storage"` (line 60)
+2. ✅ Added to MOUNT_SCHEMA validation list (line 74)
 
 ---
 

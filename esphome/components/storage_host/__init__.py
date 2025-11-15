@@ -57,6 +57,7 @@ PLATFORM_SD_MMC = "sd_mmc"
 PLATFORM_SPIFFS = "spiffs"
 PLATFORM_NFS = "nfs"
 PLATFORM_SMB = "smb"
+PLATFORM_BINARY_STORAGE = "binary_storage"
 
 # Single mount configuration
 MOUNT_SCHEMA = cv.Schema(
@@ -70,6 +71,7 @@ MOUNT_SCHEMA = cv.Schema(
             PLATFORM_SPIFFS,
             PLATFORM_NFS,
             PLATFORM_SMB,
+            PLATFORM_BINARY_STORAGE,
         ),
     }
 )
