@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
 #ifdef USE_BINARY_STORAGE_I2C
 
 #include "binary_storage.h"
