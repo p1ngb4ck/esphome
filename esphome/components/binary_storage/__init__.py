@@ -291,12 +291,10 @@ async def to_code(config):
     mode = config.get(CONF_MODE, MODE_RAW)
     device_type = config[CONF_TYPE].upper()
 
-    # Add LittleFS ESP-IDF component (only for ESP-IDF builds)
-    # Always add it because littlefs_mount.cpp is compiled even in raw mode
-    if CORE.using_esp_idf:
-        from esphome.components.esp32 import add_idf_component
-
-        add_idf_component(name="joltwallet/littlefs", ref="1.14.8")
+    # Add LittleFS library
+    # We need the upstream littlefs library to access lfs.h for custom block devices
+    # joltwallet/littlefs only exposes esp_littlefs.h which requires partitions
+    cg.add_library("littlefs-project/littlefs", "2.5.1")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -359,7 +357,7 @@ async def to_code(config):
             mount_path = f"/{config[CONF_ID]}"
 
         # Create LittleFSMount component
-        from esphome.core import CORE, ID
+        from esphome.core import ID
 
         mount_id = ID(
             f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
