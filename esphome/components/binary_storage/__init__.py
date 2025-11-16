@@ -291,11 +291,14 @@ async def to_code(config):
     mode = config.get(CONF_MODE, MODE_RAW)
     device_type = config[CONF_TYPE].upper()
 
-    # Add LittleFS library
+    # Add LittleFS library with srcFilter to exclude test/bench runners
     # We need the upstream littlefs library to access lfs.h for custom block devices
     # joltwallet/littlefs only exposes esp_littlefs.h which requires partitions
+    # Exclude runners/, tests/, bd/, benches/ - these require POSIX headers not on ESP32
     cg.add_library(
-        "littlefs", None, "https://github.com/littlefs-project/littlefs.git#v2.9.3"
+        "littlefs",
+        None,
+        "https://github.com/littlefs-project/littlefs.git#d01280e [srcFilter=+<*.c> -<runners/> -<tests/> -<bd/> -<benches/>]",
     )
 
     var = cg.new_Pvariable(config[CONF_ID])
