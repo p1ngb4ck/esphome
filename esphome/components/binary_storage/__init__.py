@@ -298,7 +298,7 @@ async def to_code(config):
     cg.add_library(
         "littlefs",
         None,
-        "https://github.com/littlefs-project/littlefs.git#d01280e [srcFilter=+<*.c> -<runners/> -<tests/> -<bd/> -<benches/>]",
+        "https://github.com/p1ngb4ck/littlefs.git#c7aa608",
     )
 
     var = cg.new_Pvariable(config[CONF_ID])
