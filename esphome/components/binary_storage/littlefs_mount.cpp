@@ -3,7 +3,7 @@
 #include "littlefs_mount.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
-#include "lfs.h"
+#include "littlefs/lfs.h"
 #include "esp_vfs.h"
 #include <fcntl.h>
 #include <errno.h>

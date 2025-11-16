@@ -4,7 +4,7 @@
 
 #include "binary_storage.h"
 #include "esphome/core/component.h"
-#include "lfs.h"
+#include "littlefs/lfs.h"
 #include <string>
 #include <memory>
 
