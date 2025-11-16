@@ -294,7 +294,9 @@ async def to_code(config):
     # Add LittleFS library
     # We need the upstream littlefs library to access lfs.h for custom block devices
     # joltwallet/littlefs only exposes esp_littlefs.h which requires partitions
-    cg.add_library("littlefs-project/littlefs", "2.5.1")
+    cg.add_library(
+        "littlefs", None, "https://github.com/littlefs-project/littlefs.git#v2.9.3"
+    )
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
