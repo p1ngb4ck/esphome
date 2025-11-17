@@ -41,8 +41,32 @@ RUN python -m pip install --upgrade \
     pip \
     virtualenv \
     setuptools \
-    wheel \
-    && :
+    wheel
+
+RUN pip install uv
+RUN useradd esphome -m
+RUN usermod -aG sudo esphome
+RUN usermod -aG dialout esphome
+RUN usermod -aG plugdev esphome
+RUN usermod -aG users esphome
+RUN echo "esphome ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+RUN mkdir -p /home/esphome/.ccache
+RUN chown -R esphome:esphome /home/esphome/.ccache
+RUN ln -s /opt/esp /home/esphome/.espressif
+RUN chown -R esphome:esphome /home/esphome/.espressif
+RUN chown root:users /opt
+RUN chmod 0770 /opt
+USER esphome
+ENV CCACHE_DIR=/home/esphome/.ccache
+#ENV VIRTUAL_ENV=/home/esphome/.local/esphome-venv
+#RUN uv venv $VIRTUAL_ENV
+#ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Override this set to true in the docker-base image
+ENV UV_SYSTEM_PYTHON=false
+
+WORKDIR /tmp
+
 
 # To build the image for a branch or a tag of IDF, pass --build-arg IDF_CLONE_BRANCH_OR_TAG=name.
 # To build the image with a specific commit ID of IDF, pass --build-arg IDF_CHECKOUT_REF=commit-id.
@@ -69,7 +93,7 @@ RUN echo IDF_CHECKOUT_REF=$IDF_CHECKOUT_REF IDF_CLONE_BRANCH_OR_TAG=$IDF_CLONE_B
 
 # Install all the required tools
 RUN : \
-    && update-ca-certificates --fresh \
+    && sudo update-ca-certificates --fresh \
     && $IDF_PATH/tools/idf_tools.py --non-interactive install required \
     && $IDF_PATH/tools/idf_tools.py --non-interactive install cmake \
     && $IDF_PATH/tools/idf_tools.py --non-interactive install-python-env \
@@ -78,28 +102,9 @@ RUN : \
 
 # Ccache is installed, enable it by default
 ENV IDF_CCACHE_ENABLE=1
-RUN pip install uv
-RUN useradd esphome -m
-RUN usermod -aG sudo esphome
-RUN usermod -aG dialout esphome
-RUN usermod -aG plugdev esphome
-RUN echo "esphome ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-RUN mkdir -p /home/esphome/.ccache
-RUN chown -R esphome:esphome /home/esphome/.ccache
-RUN ln -s /opt/esp /home/esphome/.espressif
-RUN chown -R esphome:esphome /home/esphome/.espressif
-USER esphome
-ENV CCACHE_DIR=/home/esphome/.ccache
-ENV VIRTUAL_ENV=/home/esphome/.local/esphome-venv
-RUN uv venv $VIRTUAL_ENV
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-ENV PATH="$IDF_PATH/tools:$PATH"
-
-# Override this set to true in the docker-base image
-ENV UV_SYSTEM_PYTHON=false
-
-WORKDIR /tmp
-
+ENV PATH="$IDF_TOOLS_PATH:$PATH"
+RUN uv venv /opt/esp/esphome-venv
+ENV PATH="/opt/esp/esphome-venv/bin:$PATH"
 COPY requirements.txt ./
 RUN uv pip install -r requirements.txt
 COPY requirements_dev.txt requirements_test.txt ./
@@ -113,3 +118,4 @@ COPY script/platformio_install_deps.py platformio.ini ./
 RUN ./platformio_install_deps.py platformio.ini --libraries --platforms --tools
 
 WORKDIR /workspaces
+CMD [ "/bin/bash" ]
