@@ -40,7 +40,9 @@
         // cpp
         "ms-vscode.cpptools",
         // editorconfig
-        "editorconfig.editorconfig"
+        "editorconfig.editorconfig",
+        "espressif.esp-idf-extension",
+        "espressif.esp-idf-web"
       ],
       "settings": {
         "python.languageServer": "Pylance",
@@ -83,7 +85,10 @@
         "files.associations": {
           "**/.vscode/*.json": "jsonc"
         },
-        "C_Cpp.clang_format_path": "/usr/bin/clang-format-13"
+        "C_Cpp.clang_format_path": "/usr/bin/clang-format-13",
+        "idf.espIdfPath": "/opt/esp/idf",
+        "idf.toolsPath": "/opt/esp",
+        "idf.gitPath": "/usr/bin/git"
       }
     }
   }
