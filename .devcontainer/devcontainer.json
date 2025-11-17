@@ -14,18 +14,18 @@
   "runArgs": [
     "--privileged",
     "-e",
-    "GIT_EDITOR=code --wait"
-    // uncomment and edit the path in order to pass though local USB serial to the conatiner
-    // , "--device=/dev/ttyACM0"
+    "GIT_EDITOR=code --wait",
+    // uncomment and edit the path in order to pass though local USB serial to the conatiner,
+    "--device=/dev/ttyACM0"
   ],
   "appPort": 6052,
   // if you are using avahi in the host device, uncomment these to allow the
   // devcontainer to find devices via mdns
-  //"mounts": [
-  //  "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
-  //  "type=bind,source=/var/run/dbus,target=/var/run/dbus",
-  //  "type=bind,source=/var/run/avahi-daemon/socket,target=/var/run/avahi-daemon/socket"
-  //],
+  "mounts": [
+    "type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
+    "type=bind,source=/var/run/dbus,target=/var/run/dbus",
+    "type=bind,source=/var/run/avahi-daemon/socket,target=/var/run/avahi-daemon/socket"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -87,7 +87,7 @@
         },
         "C_Cpp.clang_format_path": "/usr/bin/clang-format-13",
         "idf.espIdfPath": "/opt/esp/idf",
-        "idf.toolsPath": "/opt/esp",
+        "idf.toolsPath": "/opt/esp/idf/tools",
         "idf.gitPath": "/usr/bin/git"
       }
     }
