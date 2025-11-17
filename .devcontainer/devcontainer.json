@@ -6,7 +6,10 @@
     "script/devcontainer-post-create"
   ],
   "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "installDirectlyFromGitHubRelease": true,
+      "version": "latest"
+    }
   },
   "runArgs": [
     "--privileged",

@@ -7,11 +7,20 @@ RUN git config --system --add safe.directory "*"
 
 RUN apt update \
     && apt install -y \
-      protobuf-compiler
+    build-essential \
+    sudo \
+    libusb-1.0-0-dev \
+    udev \
+    protobuf-compiler
 
 RUN pip install uv
-
+RUN pip install platformio
+RUN pip install esp-idf
+RUN pip install esptool
+RUN pip install pyserial
 RUN useradd esphome -m
+RUN usermod -aG sudo esphome
+RUN echo "esphome ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 USER esphome
 ENV VIRTUAL_ENV=/home/esphome/.local/esphome-venv
