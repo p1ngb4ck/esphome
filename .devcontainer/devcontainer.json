@@ -67,15 +67,15 @@
 			]
 		}
 	},
-	"mounts": [
-    	"type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
-    	"type=bind,source=/var/run/dbus,target=/var/run/dbus",
-    	"type=bind,source=/var/run/avahi-daemon/socket,target=/var/run/avahi-daemon/socket"
-  	],
+	//"mounts": [
+    //	"type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
+    //	"type=bind,source=/var/run/dbus,target=/var/run/dbus",
+    //	"type=bind,source=/var/run/avahi-daemon/socket,target=/var/run/avahi-daemon/socket"
+  	//],
 	"runArgs": [
 		"--privileged",
     	"-e",
-    	"GIT_EDITOR=code --wait",
-    	"--device=/dev/ttyACM0"
+    	"GIT_EDITOR=code --wait"
+    	//"--device=/dev/ttyACM0"
 	]
 }
