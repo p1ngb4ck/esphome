@@ -191,6 +191,12 @@ static int vfs_lfs_close(void *ctx, int fd) {
     return -1;
   }
 
+  // Sync file before closing to ensure all data is written to storage
+  int sync_err = lfs_file_sync(vfs_ctx->lfs, &vfs_ctx->files[fd]);
+  if (sync_err != LFS_ERR_OK) {
+    ESP_LOGW(TAG, "VFS close: sync failed for fd=%d, err=%d", fd, sync_err);
+  }
+
   int err = lfs_file_close(vfs_ctx->lfs, &vfs_ctx->files[fd]);
   vfs_lfs_free_fd(vfs_ctx, fd);
 

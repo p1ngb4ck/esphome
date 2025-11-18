@@ -89,9 +89,16 @@ BlockDeviceConfig BinaryStorage::get_block_config() const {
   }
 
   config.block_count = capacity / config.block_size;
-  config.read_size = 1;                                  // Can read single bytes
-  config.prog_size = page_size > 0 ? page_size : 1;      // Program size is page size
-  config.lookahead_size = (config.block_count + 7) / 8;  // 1 bit per block
+  config.read_size = 1;                              // Can read single bytes
+  config.prog_size = page_size > 0 ? page_size : 1;  // Program size is page size
+
+  // Calculate lookahead_size: 1 bit per block, but must be multiple of 8
+  // LittleFS requires lookahead_size to be divisible by 8
+  uint32_t lookahead_bytes = (config.block_count + 7) / 8;
+  config.lookahead_size = ((lookahead_bytes + 7) / 8) * 8;  // Round up to multiple of 8
+  if (config.lookahead_size == 0) {
+    config.lookahead_size = 8;  // Minimum size
+  }
 
   return config;
 }
