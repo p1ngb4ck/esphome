@@ -1,7 +1,7 @@
 #pragma once
+#include "esphome/core/defines.h"
 
 #ifdef USE_ESP_IDF
-
 #include "binary_storage.h"
 #include "esphome/core/component.h"
 #include "lfs.h"
