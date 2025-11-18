@@ -87,6 +87,7 @@ CONF_STORAGE_DEVICE = "storage_device"
 CONF_ERASE_SIZE = "erase_size"
 CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
+CONF_MOUNT_ID = "mount_id"
 
 # Storage modes
 MODE_RAW = "raw"
@@ -136,6 +137,7 @@ EEPROM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): cv.string,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_PARTITION_LABEL): cv.string,
+            cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -159,6 +161,7 @@ FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): cv.string,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_PARTITION_LABEL): cv.string,
+            cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -191,6 +194,7 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): cv.string,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_PARTITION_LABEL): cv.string,
+            cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -214,6 +218,7 @@ SPI_FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): cv.string,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_PARTITION_LABEL): cv.string,
+            cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -237,6 +242,7 @@ SPI_MRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): cv.string,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_PARTITION_LABEL): cv.string,
+            cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -261,6 +267,7 @@ ONEWIRE_EEPROM_SCHEMA = cv.Schema(
         cv.Optional(CONF_MOUNT_PATH): cv.string,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
         cv.Optional(CONF_PARTITION_LABEL): cv.string,
+        cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -364,10 +371,14 @@ async def to_code(config):
         # Create LittleFSMount component
         from esphome.core import ID
 
-        mount_id = ID(
-            f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
-        )
-        CORE.component_ids.add(str(mount_id))
+        # Use user-provided mount_id or auto-generate one
+        if CONF_MOUNT_ID in config:
+            mount_id = config[CONF_MOUNT_ID]
+        else:
+            mount_id = ID(
+                f"{config[CONF_ID]}_mount", is_declaration=True, type=LittleFSMount
+            )
+            CORE.component_ids.add(str(mount_id))
         mount_var = cg.new_Pvariable(mount_id)
         await cg.register_component(mount_var, {})
 
