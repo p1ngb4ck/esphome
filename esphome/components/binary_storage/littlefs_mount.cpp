@@ -463,6 +463,37 @@ static struct dirent *vfs_lfs_readdir(void *ctx, DIR *pdir) {
   }
 }
 
+// VFS telldir - get current position in directory stream
+static long vfs_lfs_telldir(void *ctx, DIR *pdir) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+  auto *dir = reinterpret_cast<LfsVfsDir *>(pdir);
+
+  lfs_soff_t pos = lfs_dir_tell(vfs_ctx->lfs, &dir->lfs_dir);
+
+  if (pos < 0) {
+    errno = lfs_errno_remap(pos);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS telldir: position=%ld", (long) pos);
+  return (long) pos;
+}
+
+// VFS seekdir - set position in directory stream
+static void vfs_lfs_seekdir(void *ctx, DIR *pdir, long loc) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+  auto *dir = reinterpret_cast<LfsVfsDir *>(pdir);
+
+  ESP_LOGD(TAG, "VFS seekdir: seeking to position=%ld", loc);
+
+  int err = lfs_dir_seek(vfs_ctx->lfs, &dir->lfs_dir, (lfs_off_t) loc);
+
+  if (err < 0) {
+    ESP_LOGE(TAG, "VFS seekdir: failed with error %d", err);
+    errno = lfs_errno_remap(err);
+  }
+}
+
 // VFS closedir
 static int vfs_lfs_closedir(void *ctx, DIR *pdir) {
   auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
@@ -769,6 +800,8 @@ void LittleFSMount::register_with_vfs_() {
   vfs.rename_p = &vfs_lfs_rename;
   vfs.opendir_p = &vfs_lfs_opendir;
   vfs.readdir_p = &vfs_lfs_readdir;
+  vfs.telldir_p = &vfs_lfs_telldir;
+  vfs.seekdir_p = &vfs_lfs_seekdir;
   vfs.closedir_p = &vfs_lfs_closedir;
   vfs.mkdir_p = &vfs_lfs_mkdir;
   vfs.rmdir_p = &vfs_lfs_rmdir;
