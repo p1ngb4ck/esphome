@@ -96,6 +96,7 @@ void LittleFSMount::setup() {
   if (this->mount_()) {
     ESP_LOGI(TAG, "Successfully mounted LittleFS at %s", this->mount_path_.c_str());
     this->register_with_storage_host_();
+    this->register_with_vfs_();
   } else {
     ESP_LOGE(TAG, "Failed to mount LittleFS!");
     this->mark_failed();
@@ -279,6 +280,63 @@ void LittleFSMount::register_with_storage_host_() {
 #else
   ESP_LOGD(TAG, "storage_host component not compiled, mount registration disabled");
 #endif  // USE_STORAGE_HOST
+}
+
+void LittleFSMount::register_with_vfs_() {
+  esp_vfs_t vfs = {.flags = ESP_VFS_FLAG_DEFAULT,
+                   .write = &lfs_write,
+                   .open = &lfs_open,
+                   .fstat = &lfs_fstat,
+                   .close = &lfs_close,
+                   .read = &lfs_read,
+                   .lseek = &lfs_lseek,
+                   .tell = &lfs_tell,
+                   .mount_pt = this->mount_path_.c_str(),
+                   .fs_data = this->lfs_.get()};
+
+  esp_err_t err = esp_vfs_register(this->mount_path_.c_str(), &vfs, sizeof(vfs));
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to register LittleFS with VFS: %s", esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "LittleFS registered with VFS successfully");
+  }
+}
+
+void LittleFSMount::list_files() const {
+  if (!this->mounted_) {
+    ESP_LOGW(TAG, "Filesystem not mounted, cannot list files");
+    return;
+  }
+
+  ESP_LOGI(TAG, "Listing files in LittleFS at %s:", this->mount_path_.c_str());
+
+  lfs_dir_t dir;
+  int err = lfs_dir_open(this->lfs_.get(), &dir, "/");
+  if (err != LFS_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to open root directory (err=%d)", err);
+    return;
+  }
+
+  struct lfs_info info;
+  while (true) {
+    err = lfs_dir_read(this->lfs_.get(), &dir, &info);
+    if (err < 0) {
+      ESP_LOGE(TAG, "Failed to read directory (err=%d)", err);
+      break;
+    }
+    if (err == 0) {
+      // End of directory
+      break;
+    }
+
+    if (info.type == LFS_TYPE_REG) {
+      ESP_LOGI(TAG, "  File: %s, Size: %u", info.name, info.size);
+    } else if (info.type == LFS_TYPE_DIR) {
+      ESP_LOGI(TAG, "  Directory: %s", info.name);
+    }
+  }
+
+  lfs_dir_close(this->lfs_.get(), &dir);
 }
 
 }  // namespace binary_storage

@@ -33,6 +33,11 @@ class LittleFSMount : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA - 100.0f; }
 
+  /**
+   * @brief list files in the mounted filesystem
+   */
+  void list_files() const;
+
   //========================================================================
   // Configuration
   //========================================================================
@@ -140,6 +145,11 @@ class LittleFSMount : public Component {
    * @return true on success
    */
   bool init_lfs_config_();
+
+  /**
+   * @brief Register with vfs
+   */
+  void register_with_vfs_();
 
   /**
    * @brief Register with storage_host
