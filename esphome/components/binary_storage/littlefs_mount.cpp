@@ -175,7 +175,7 @@ bool LittleFSMount::init_lfs_config_() {
   return true;
 }
 
-bool LittleFSMount::mount_() {
+bool LittleFSMount::mount() {
   ESP_LOGD(TAG, "Mounting LittleFS filesystem...");
 
   // Try to mount

@@ -42,7 +42,6 @@ class LittleFSMount : public Component {
   bool remount();
   void list_files() const;
 
-  // Make mount and unmount public
   bool mount();
   bool unmount();
 
