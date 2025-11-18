@@ -7,9 +7,42 @@
 #include "lfs.h"
 #include <string>
 #include <memory>
+#include <dirent.h>
 
 namespace esphome {
 namespace binary_storage {
+
+// Maximum number of simultaneously open files (kept low for MCU memory constraints)
+static constexpr int LFS_VFS_MAX_FDS = 4;
+
+// Forward declaration
+class LittleFSMount;
+
+/**
+ * @brief VFS context structure for LittleFS
+ *
+ * Holds filesystem state and file descriptor table for VFS operations
+ */
+struct LfsVfsContext {
+  lfs_t *lfs;            ///< LittleFS filesystem object
+  lfs_config *cfg;       ///< LittleFS configuration
+  LittleFSMount *mount;  ///< Parent mount object
+
+  // File descriptor table
+  lfs_file_t files[LFS_VFS_MAX_FDS];  ///< File handles
+  bool fd_used[LFS_VFS_MAX_FDS];      ///< FD in-use flags
+  char *fd_paths[LFS_VFS_MAX_FDS];    ///< Paths for fstat support
+};
+
+/**
+ * @brief Directory handle wrapper for LittleFS
+ */
+struct LfsVfsDir {
+  DIR vfs_dir;           ///< VFS DIR struct (must be first)
+  lfs_dir_t lfs_dir;     ///< LittleFS directory handle
+  struct dirent dirent;  ///< Current directory entry
+  char *path;            ///< Directory path
+};
 
 /**
  * @brief LittleFS mount manager for binary storage devices
@@ -127,6 +160,7 @@ class LittleFSMount : public Component {
   std::unique_ptr<uint8_t[]> prog_buffer_;       ///< Program buffer for LittleFS
   std::unique_ptr<uint8_t[]> lookahead_buffer_;  ///< Lookahead buffer for LittleFS
   void *lfs_context_{nullptr};                   ///< Context for block device callbacks
+  LfsVfsContext *vfs_context_{nullptr};          ///< Context for VFS operations
 
   //========================================================================
   // Internal Helpers

@@ -9,7 +9,8 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include "esphome/components/binary_storage/littlefs_mount.h"
+#include <cstring>
+
 // Soft dependency on storage_host
 #if defined(USE_STORAGE_HOST)
 #include "esphome/components/storage_host/storage_host.h"
@@ -60,15 +61,454 @@ static int lfs_block_device_sync(const struct lfs_config *c) {
   return result == 0 ? LFS_ERR_OK : LFS_ERR_IO;
 }
 
+//========================================================================
+// VFS Wrapper Functions
+//========================================================================
+
+// Map LittleFS errors to errno values
+static int lfs_errno_remap(int lfs_err) {
+  switch (lfs_err) {
+    case LFS_ERR_OK:
+      return 0;
+    case LFS_ERR_IO:
+      return EIO;
+    case LFS_ERR_CORRUPT:
+      return EIO;
+    case LFS_ERR_NOENT:
+      return ENOENT;
+    case LFS_ERR_EXIST:
+      return EEXIST;
+    case LFS_ERR_NOTDIR:
+      return ENOTDIR;
+    case LFS_ERR_ISDIR:
+      return EISDIR;
+    case LFS_ERR_NOTEMPTY:
+      return ENOTEMPTY;
+    case LFS_ERR_BADF:
+      return EBADF;
+    case LFS_ERR_FBIG:
+      return EFBIG;
+    case LFS_ERR_INVAL:
+      return EINVAL;
+    case LFS_ERR_NOSPC:
+      return ENOSPC;
+    case LFS_ERR_NOMEM:
+      return ENOMEM;
+    case LFS_ERR_NOATTR:
+      return ENODATA;
+    case LFS_ERR_NAMETOOLONG:
+      return ENAMETOOLONG;
+    default:
+      return EIO;
+  }
+}
+
+// Convert POSIX open flags to LittleFS flags
+static int posix_flags_to_lfs(int flags) {
+  int lfs_flags = 0;
+
+  // Access mode
+  if ((flags & O_ACCMODE) == O_RDONLY) {
+    lfs_flags |= LFS_O_RDONLY;
+  } else if ((flags & O_ACCMODE) == O_WRONLY) {
+    lfs_flags |= LFS_O_WRONLY;
+  } else if ((flags & O_ACCMODE) == O_RDWR) {
+    lfs_flags |= LFS_O_RDWR;
+  }
+
+  // Creation flags
+  if (flags & O_CREAT) {
+    lfs_flags |= LFS_O_CREAT;
+  }
+  if (flags & O_EXCL) {
+    lfs_flags |= LFS_O_EXCL;
+  }
+  if (flags & O_TRUNC) {
+    lfs_flags |= LFS_O_TRUNC;
+  }
+  if (flags & O_APPEND) {
+    lfs_flags |= LFS_O_APPEND;
+  }
+
+  return lfs_flags;
+}
+
+// Allocate a file descriptor
+static int vfs_lfs_alloc_fd(LfsVfsContext *ctx) {
+  for (int i = 0; i < LFS_VFS_MAX_FDS; i++) {
+    if (!ctx->fd_used[i]) {
+      ctx->fd_used[i] = true;
+      ctx->fd_paths[i] = nullptr;
+      return i;
+    }
+  }
+  return -1;  // No free FD
+}
+
+// Free a file descriptor
+static void vfs_lfs_free_fd(LfsVfsContext *ctx, int fd) {
+  if (fd >= 0 && fd < LFS_VFS_MAX_FDS) {
+    ctx->fd_used[fd] = false;
+    if (ctx->fd_paths[fd]) {
+      free(ctx->fd_paths[fd]);
+      ctx->fd_paths[fd] = nullptr;
+    }
+  }
+}
+
+// VFS open
+static int vfs_lfs_open(void *ctx, const char *path, int flags, int mode) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  int fd = vfs_lfs_alloc_fd(vfs_ctx);
+  if (fd < 0) {
+    errno = ENFILE;
+    return -1;
+  }
+
+  int lfs_flags = posix_flags_to_lfs(flags);
+  int err = lfs_file_open(vfs_ctx->lfs, &vfs_ctx->files[fd], path, lfs_flags);
+
+  if (err != LFS_ERR_OK) {
+    vfs_lfs_free_fd(vfs_ctx, fd);
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  // Store path for fstat support
+  vfs_ctx->fd_paths[fd] = strdup(path);
+
+  ESP_LOGD(TAG, "VFS open: %s -> fd=%d, flags=0x%x", path, fd, flags);
+  return fd;
+}
+
+// VFS close
+static int vfs_lfs_close(void *ctx, int fd) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  int err = lfs_file_close(vfs_ctx->lfs, &vfs_ctx->files[fd]);
+  vfs_lfs_free_fd(vfs_ctx, fd);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS close: fd=%d", fd);
+  return 0;
+}
+
+// VFS read
+static ssize_t vfs_lfs_read(void *ctx, int fd, void *dst, size_t size) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  lfs_ssize_t result = lfs_file_read(vfs_ctx->lfs, &vfs_ctx->files[fd], dst, size);
+
+  if (result < 0) {
+    errno = lfs_errno_remap(result);
+    return -1;
+  }
+
+  return result;
+}
+
+// VFS write
+static ssize_t vfs_lfs_write(void *ctx, int fd, const void *data, size_t size) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  lfs_ssize_t result = lfs_file_write(vfs_ctx->lfs, &vfs_ctx->files[fd], data, size);
+
+  if (result < 0) {
+    errno = lfs_errno_remap(result);
+    return -1;
+  }
+
+  return result;
+}
+
+// VFS lseek
+static off_t vfs_lfs_lseek(void *ctx, int fd, off_t offset, int whence) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  int lfs_whence;
+  switch (whence) {
+    case SEEK_SET:
+      lfs_whence = LFS_SEEK_SET;
+      break;
+    case SEEK_CUR:
+      lfs_whence = LFS_SEEK_CUR;
+      break;
+    case SEEK_END:
+      lfs_whence = LFS_SEEK_END;
+      break;
+    default:
+      errno = EINVAL;
+      return -1;
+  }
+
+  lfs_soff_t result = lfs_file_seek(vfs_ctx->lfs, &vfs_ctx->files[fd], offset, lfs_whence);
+
+  if (result < 0) {
+    errno = lfs_errno_remap(result);
+    return -1;
+  }
+
+  return result;
+}
+
+// VFS fstat (get file stats from open file descriptor)
+static int vfs_lfs_fstat(void *ctx, int fd, struct stat *st) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  memset(st, 0, sizeof(struct stat));
+
+  // Get file size
+  lfs_soff_t size = lfs_file_size(vfs_ctx->lfs, &vfs_ctx->files[fd]);
+  if (size < 0) {
+    errno = lfs_errno_remap(size);
+    return -1;
+  }
+
+  st->st_size = size;
+  st->st_mode = S_IFREG | 0644;  // Regular file with rw-r--r-- permissions
+  st->st_blksize = vfs_ctx->cfg->block_size;
+  st->st_blocks = (size + st->st_blksize - 1) / st->st_blksize;
+
+  return 0;
+}
+
+// VFS stat (get file stats by path)
+static int vfs_lfs_stat(void *ctx, const char *path, struct stat *st) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  struct lfs_info info;
+  int err = lfs_stat(vfs_ctx->lfs, path, &info);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  memset(st, 0, sizeof(struct stat));
+
+  if (info.type == LFS_TYPE_DIR) {
+    st->st_mode = S_IFDIR | 0755;
+  } else {
+    st->st_mode = S_IFREG | 0644;
+    st->st_size = info.size;
+  }
+
+  st->st_blksize = vfs_ctx->cfg->block_size;
+  st->st_blocks = (info.size + st->st_blksize - 1) / st->st_blksize;
+
+  return 0;
+}
+
+// VFS unlink (delete file)
+static int vfs_lfs_unlink(void *ctx, const char *path) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  int err = lfs_remove(vfs_ctx->lfs, path);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS unlink: %s", path);
+  return 0;
+}
+
+// VFS rename
+static int vfs_lfs_rename(void *ctx, const char *src, const char *dst) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  int err = lfs_rename(vfs_ctx->lfs, src, dst);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS rename: %s -> %s", src, dst);
+  return 0;
+}
+
+// VFS mkdir
+static int vfs_lfs_mkdir(void *ctx, const char *name, mode_t mode) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  int err = lfs_mkdir(vfs_ctx->lfs, name);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS mkdir: %s", name);
+  return 0;
+}
+
+// VFS rmdir
+static int vfs_lfs_rmdir(void *ctx, const char *name) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  // LittleFS uses lfs_remove for both files and directories
+  int err = lfs_remove(vfs_ctx->lfs, name);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  ESP_LOGD(TAG, "VFS rmdir: %s", name);
+  return 0;
+}
+
+// VFS opendir
+static DIR *vfs_lfs_opendir(void *ctx, const char *name) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  auto *dir = static_cast<LfsVfsDir *>(malloc(sizeof(LfsVfsDir)));
+  if (!dir) {
+    errno = ENOMEM;
+    return nullptr;
+  }
+
+  memset(dir, 0, sizeof(LfsVfsDir));
+
+  int err = lfs_dir_open(vfs_ctx->lfs, &dir->lfs_dir, name);
+  if (err != LFS_ERR_OK) {
+    free(dir);
+    errno = lfs_errno_remap(err);
+    return nullptr;
+  }
+
+  dir->path = strdup(name);
+  ESP_LOGD(TAG, "VFS opendir: %s", name);
+
+  return reinterpret_cast<DIR *>(dir);
+}
+
+// VFS readdir
+static struct dirent *vfs_lfs_readdir(void *ctx, DIR *pdir) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+  auto *dir = reinterpret_cast<LfsVfsDir *>(pdir);
+
+  struct lfs_info info;
+
+  while (true) {
+    int err = lfs_dir_read(vfs_ctx->lfs, &dir->lfs_dir, &info);
+
+    if (err == 0) {
+      // End of directory
+      return nullptr;
+    }
+
+    if (err < 0) {
+      errno = lfs_errno_remap(err);
+      return nullptr;
+    }
+
+    // Skip "." and ".."
+    if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) {
+      continue;
+    }
+
+    // Fill dirent structure
+    memset(&dir->dirent, 0, sizeof(struct dirent));
+    strncpy(dir->dirent.d_name, info.name, sizeof(dir->dirent.d_name) - 1);
+    dir->dirent.d_type = (info.type == LFS_TYPE_DIR) ? DT_DIR : DT_REG;
+
+    return &dir->dirent;
+  }
+}
+
+// VFS closedir
+static int vfs_lfs_closedir(void *ctx, DIR *pdir) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+  auto *dir = reinterpret_cast<LfsVfsDir *>(pdir);
+
+  int err = lfs_dir_close(vfs_ctx->lfs, &dir->lfs_dir);
+
+  if (dir->path) {
+    free(dir->path);
+  }
+  free(dir);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  return 0;
+}
+
+// VFS fsync
+static int vfs_lfs_fsync(void *ctx, int fd) {
+  auto *vfs_ctx = static_cast<LfsVfsContext *>(ctx);
+
+  if (fd < 0 || fd >= LFS_VFS_MAX_FDS || !vfs_ctx->fd_used[fd]) {
+    errno = EBADF;
+    return -1;
+  }
+
+  int err = lfs_file_sync(vfs_ctx->lfs, &vfs_ctx->files[fd]);
+
+  if (err != LFS_ERR_OK) {
+    errno = lfs_errno_remap(err);
+    return -1;
+  }
+
+  return 0;
+}
+
 LittleFSMount::~LittleFSMount() {
   if (this->mounted_) {
     this->unmount();
   }
 
-  // Free context
+  // Free block device context
   if (this->lfs_context_ != nullptr) {
     delete static_cast<LittleFSContext *>(this->lfs_context_);
     this->lfs_context_ = nullptr;
+  }
+
+  // Free VFS context
+  if (this->vfs_context_ != nullptr) {
+    // Free any remaining fd_paths
+    for (int i = 0; i < LFS_VFS_MAX_FDS; i++) {
+      if (this->vfs_context_->fd_paths[i]) {
+        free(this->vfs_context_->fd_paths[i]);
+      }
+    }
+    delete this->vfs_context_;
+    this->vfs_context_ = nullptr;
   }
 }
 
@@ -283,22 +723,47 @@ void LittleFSMount::register_with_storage_host_() {
 }
 
 void LittleFSMount::register_with_vfs_() {
-  esp_vfs_t vfs = {.flags = ESP_VFS_FLAG_DEFAULT,
-                   .write = &lfs_write,
-                   .open = &lfs_open,
-                   .fstat = &lfs_fstat,
-                   .close = &lfs_close,
-                   .read = &lfs_read,
-                   .lseek = &lfs_lseek,
-                   .tell = &lfs_tell,
-                   .mount_pt = this->mount_path_.c_str(),
-                   .fs_data = this->lfs_.get()};
+  // Create VFS context
+  this->vfs_context_ = new LfsVfsContext();
+  memset(this->vfs_context_, 0, sizeof(LfsVfsContext));
+  this->vfs_context_->lfs = this->lfs_.get();
+  this->vfs_context_->cfg = this->lfs_cfg_.get();
+  this->vfs_context_->mount = this;
 
-  esp_err_t err = esp_vfs_register(this->mount_path_.c_str(), &vfs, sizeof(vfs));
+  // Initialize FD table
+  for (int i = 0; i < LFS_VFS_MAX_FDS; i++) {
+    this->vfs_context_->fd_used[i] = false;
+    this->vfs_context_->fd_paths[i] = nullptr;
+  }
+
+  // Setup VFS structure with context pointer functions
+  esp_vfs_t vfs = {};
+  vfs.flags = ESP_VFS_FLAG_CONTEXT_PTR;
+
+  // File operations
+  vfs.write_p = &vfs_lfs_write;
+  vfs.read_p = &vfs_lfs_read;
+  vfs.open_p = &vfs_lfs_open;
+  vfs.close_p = &vfs_lfs_close;
+  vfs.fstat_p = &vfs_lfs_fstat;
+  vfs.lseek_p = &vfs_lfs_lseek;
+  vfs.fsync_p = &vfs_lfs_fsync;
+
+  // Directory operations
+  vfs.stat_p = &vfs_lfs_stat;
+  vfs.unlink_p = &vfs_lfs_unlink;
+  vfs.rename_p = &vfs_lfs_rename;
+  vfs.opendir_p = &vfs_lfs_opendir;
+  vfs.readdir_p = &vfs_lfs_readdir;
+  vfs.closedir_p = &vfs_lfs_closedir;
+  vfs.mkdir_p = &vfs_lfs_mkdir;
+  vfs.rmdir_p = &vfs_lfs_rmdir;
+
+  esp_err_t err = esp_vfs_register(this->mount_path_.c_str(), &vfs, this->vfs_context_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register LittleFS with VFS: %s", esp_err_to_name(err));
   } else {
-    ESP_LOGI(TAG, "LittleFS registered with VFS successfully");
+    ESP_LOGI(TAG, "LittleFS registered with VFS at %s", this->mount_path_.c_str());
   }
 }
 
