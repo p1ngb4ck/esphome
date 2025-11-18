@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
-
+#include "esphome/components/binary_storage/littlefs_mount.h"
 // Soft dependency on storage_host
 #if defined(USE_STORAGE_HOST)
 #include "esphome/components/storage_host/storage_host.h"
@@ -96,7 +96,44 @@ void LittleFSMount::setup() {
   if (this->mount_()) {
     ESP_LOGI(TAG, "Successfully mounted LittleFS at %s", this->mount_path_.c_str());
     this->register_with_storage_host_();
-    this->register_with_vfs_();
+    this->register_with_vfs_();src/esphome/components/binary_storage/littlefs_mount.cpp: In member function 'void esphome::binary_storage::LittleFSMount::register_with_vfs_()':
+src/esphome/components/binary_storage/littlefs_mount.cpp:287:30: error: 'lfs_write' was not declared in this scope; did you mean 'lwip_write'?
+  287 |                    .write = &lfs_write,
+      |                              ^~~~~~~~~
+      |                              lwip_write
+src/esphome/components/binary_storage/littlefs_mount.cpp:288:29: error: 'lfs_open' was not declared in this scope
+  288 |                    .open = &lfs_open,
+      |                             ^~~~~~~~
+src/esphome/components/binary_storage/littlefs_mount.cpp:289:30: error: 'lfs_fstat' was not declared in this scope; did you mean 'lfs_stat'?
+  289 |                    .fstat = &lfs_fstat,
+      |                              ^~~~~~~~~
+      |                              lfs_stat
+src/esphome/components/binary_storage/littlefs_mount.cpp:290:30: error: 'lfs_close' was not declared in this scope; did you mean 'lwip_close'?
+  290 |                    .close = &lfs_close,
+      |                              ^~~~~~~~~
+      |                              lwip_close
+src/esphome/components/binary_storage/littlefs_mount.cpp:291:29: error: 'lfs_read' was not declared in this scope; did you mean 'lwip_read'?
+  291 |                    .read = &lfs_read,
+      |                             ^~~~~~~~
+      |                             lwip_read
+src/esphome/components/binary_storage/littlefs_mount.cpp:292:30: error: 'lfs_lseek' was not declared in this scope; did you mean 'lfs_free'?
+  292 |                    .lseek = &lfs_lseek,
+      |                              ^~~~~~~~~
+      |                              lfs_free
+src/esphome/components/binary_storage/littlefs_mount.cpp:293:29: error: 'lfs_tell' was not declared in this scope
+  293 |                    .tell = &lfs_tell,
+      |                             ^~~~~~~~
+src/esphome/components/binary_storage/littlefs_mount.cpp:297:69: error: invalid conversion from 'unsigned int' to 'void*' [-fpermissive]
+  297 |   esp_err_t err = esp_vfs_register(this->mount_path_.c_str(), &vfs, sizeof(vfs));
+      |                                                                     ^~~~~~~~~~~
+      |                                                                     |
+      |                                                                     unsigned int
+In file included from src/esphome/components/binary_storage/littlefs_mount.cpp:7:
+/home/esphome/.platformio/packages/framework-espidf/components/vfs/include/esp_vfs.h:280:79: note:   initializing argument 3 of 'esp_err_t esp_vfs_register(const char*, const esp_vfs_t*, void*)'
+  280 | esp_err_t esp_vfs_register(const char* base_path, const esp_vfs_t* vfs, void* ctx);
+      |                                                                         ~~~~~~^~~
+Compiling .pioenvs/esp32-tab10-dev/src/main.cpp.o
+*** [.pioenvs/esp32-tab10-dev/src/esphome/components/binary_storage/littlefs_mount.cpp.o] Error 1
   } else {
     ESP_LOGE(TAG, "Failed to mount LittleFS!");
     this->mark_failed();
