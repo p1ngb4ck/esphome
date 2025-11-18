@@ -431,18 +431,25 @@ static struct dirent *vfs_lfs_readdir(void *ctx, DIR *pdir) {
   while (true) {
     int err = lfs_dir_read(vfs_ctx->lfs, &dir->lfs_dir, &info);
 
+    ESP_LOGD(TAG, "VFS readdir: lfs_dir_read returned %d", err);
+
     if (err == 0) {
       // End of directory
+      ESP_LOGD(TAG, "VFS readdir: end of directory");
       return nullptr;
     }
 
     if (err < 0) {
+      ESP_LOGE(TAG, "VFS readdir: error %d", err);
       errno = lfs_errno_remap(err);
       return nullptr;
     }
 
+    ESP_LOGD(TAG, "VFS readdir: entry name='%s', type=%d, size=%u", info.name, info.type, info.size);
+
     // Skip "." and ".."
     if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) {
+      ESP_LOGD(TAG, "VFS readdir: skipping '%s'", info.name);
       continue;
     }
 
@@ -451,6 +458,7 @@ static struct dirent *vfs_lfs_readdir(void *ctx, DIR *pdir) {
     strncpy(dir->dirent.d_name, info.name, sizeof(dir->dirent.d_name) - 1);
     dir->dirent.d_type = (info.type == LFS_TYPE_DIR) ? DT_DIR : DT_REG;
 
+    ESP_LOGD(TAG, "VFS readdir: returning entry '%s'", dir->dirent.d_name);
     return &dir->dirent;
   }
 }
