@@ -62,6 +62,9 @@ SPIMRAM = binary_storage_ns.class_(
 # OneWire EEPROM class
 OneWireEEPROM = binary_storage_ns.class_("OneWireEEPROM", BinaryStorage)
 
+# Flash Partition class (internal flash LittleFS)
+FlashPartition = binary_storage_ns.class_("FlashPartition", cg.Component)
+
 # LittleFS Mount class
 LittleFSMount = binary_storage_ns.class_("LittleFSMount", cg.Component)
 
@@ -269,6 +272,17 @@ ONEWIRE_EEPROM_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
+# Flash Partition Configuration Schema (internal flash LittleFS)
+FLASH_PARTITION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(FlashPartition),
+        # Partition configuration
+        cv.Required(CONF_PARTITION_LABEL): cv.string,
+        cv.Optional(CONF_MOUNT_PATH, default="/littlefs"): cv.string,
+        cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
+    }
+).extend(cv.COMPONENT_SCHEMA)
+
 # Typed schema for device selection
 CONFIG_SCHEMA = cv.typed_schema(
     {
@@ -283,6 +297,8 @@ CONFIG_SCHEMA = cv.typed_schema(
         "MRAM": SPI_MRAM_SCHEMA,
         "ONEWIRE_EEPROM": ONEWIRE_EEPROM_SCHEMA,
         "ONEWIRE": ONEWIRE_EEPROM_SCHEMA,
+        "FLASH_PARTITION": FLASH_PARTITION_SCHEMA,
+        "PARTITION": FLASH_PARTITION_SCHEMA,
     },
     key=CONF_TYPE,
     upper=True,
@@ -297,6 +313,7 @@ DEVICE_SOURCE_FILES = {
     "spi_fram": ["spi_fram.cpp"],
     "spi_mram": ["spi_mram.cpp"],
     "onewire_eeprom": ["onewire_eeprom.cpp"],
+    "flash_partition": ["flash_partition.cpp"],
 }
 
 # Mapping of config type names to internal device type keys
@@ -312,6 +329,8 @@ TYPE_TO_DEVICE = {
     "MRAM": "spi_mram",
     "ONEWIRE_EEPROM": "onewire_eeprom",
     "ONEWIRE": "onewire_eeprom",
+    "FLASH_PARTITION": "flash_partition",
+    "PARTITION": "flash_partition",
 }
 
 
@@ -349,18 +368,19 @@ async def to_code(config):
     """Configure binary storage device."""
     from esphome.core import CORE
 
-    mode = config.get(CONF_MODE, MODE_RAW)
     device_type = config[CONF_TYPE].upper()
 
+    # Define USE_BINARY_STORAGE for StorageDevice interface
+    cg.add_define("USE_BINARY_STORAGE")
+
     # Add ESPHome's forked esp_littlefs with custom block device support
-    # This fork exposes lfs.h when CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE is enabled
+    # This fork also provides partition-based mounting via esp_vfs_littlefs_register
     cg.add_library(
         "LittleFS library for ESPHome with block device support",
         None,
         "https://github.com/p1ngb4ck/esphome_esp_littlefs.git#main",
     )
     # LittleFS configuration defines (as build flags for external library)
-    cg.add_build_flag("-DCONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
     cg.add_build_flag("-DCONFIG_LITTLEFS_CACHE_SIZE=512")
     cg.add_build_flag("-DCONFIG_LITTLEFS_MAX_PARTITIONS=3")
     cg.add_build_flag("-DCONFIG_LITTLEFS_READ_SIZE=128")
@@ -370,8 +390,26 @@ async def to_code(config):
     cg.add_build_flag("-DCONFIG_LITTLEFS_PAGE_SIZE=256")
     cg.add_build_flag("-DCONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT")
 
-    # Define USE_BINARY_STORAGE for StorageDevice interface
-    cg.add_define("USE_BINARY_STORAGE")
+    # Handle FLASH_PARTITION - uses partition-based mounting
+    if device_type in ["FLASH_PARTITION", "PARTITION"]:
+        cg.add_define("USE_BINARY_STORAGE_FLASH_PARTITION")
+
+        var = cg.new_Pvariable(config[CONF_ID])
+        await cg.register_component(var, config)
+
+        cg.add(var.set_partition_label(config[CONF_PARTITION_LABEL]))
+        cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
+        cg.add(var.set_auto_format(config[CONF_AUTO_FORMAT]))
+
+        # Set storage ID and name
+        cg.add(var.set_storage_id(str(config[CONF_ID])))
+        cg.add(var.set_storage_name(config[CONF_PARTITION_LABEL]))
+
+        return
+
+    # For external memory devices, enable custom block device support
+    mode = config.get(CONF_MODE, MODE_RAW)
+    cg.add_build_flag("-DCONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
