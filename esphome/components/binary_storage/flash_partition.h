@@ -168,9 +168,6 @@ class FlashPartition : public Component
   bool seek_file(void *handle, size_t offset) override;
   size_t tell_file(void *handle) override;
   bool close_file(void *handle) override;
-
-  // Maintenance
-  bool format() override { return this->format(); }
 #endif
 
  protected:

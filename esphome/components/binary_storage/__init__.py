@@ -405,6 +405,11 @@ async def to_code(config):
         cg.add(var.set_storage_id(str(config[CONF_ID])))
         cg.add(var.set_storage_name(config[CONF_PARTITION_LABEL]))
 
+        # Store device reference in CORE.data for storage to access
+        if "binary_storage_devices" not in CORE.data:
+            CORE.data["binary_storage_devices"] = []
+        CORE.data["binary_storage_devices"].append(var)
+
         return
 
     # For external memory devices, enable custom block device support
