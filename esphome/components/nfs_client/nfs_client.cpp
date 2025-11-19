@@ -1,15 +1,14 @@
 #include "nfs_client.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 
 #include <cstring>
 #include <algorithm>
 
-// Forward declare storage for soft dependency
 #if defined(USE_STORAGE)
-namespace storage {
-extern class Storage *global_storage;
-}
+#include "esphome/components/storage/storage.h"
+#include "esphome/components/storage/network_storage.h"
 #endif  // USE_STORAGE
 
 namespace esphome {
@@ -1277,8 +1276,8 @@ bool NFSClient::list_directory(const std::string &path, std::vector<storage::Net
   for (const auto &nfs_entry : nfs_entries) {
     storage::NetworkStorage::DirEntry entry;
     entry.name = nfs_entry.name;
-    entry.size = nfs_entry.size;
-    entry.is_directory = nfs_entry.is_directory;
+    entry.size = nfs_entry.has_attr ? nfs_entry.attr.size : 0;
+    entry.is_directory = nfs_entry.has_attr && (nfs_entry.attr.type == NF3DIR);
     entries.push_back(entry);
   }
 
