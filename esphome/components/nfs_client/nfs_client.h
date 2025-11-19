@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include "core/hal.h"
 
 #ifdef USE_ESP_IDF
 #include "lwip/sockets.h"
@@ -206,13 +207,12 @@ class XDRBuffer {
     this->data_.clear();
     this->position_ = 0;
   }
+  // XDR alignment helper
+  static size_t align_4(size_t size) { return (size + 3) & ~3; }
 
  protected:
   std::vector<uint8_t> data_;
   size_t position_{0};
-
-  // XDR alignment helper
-  static size_t align_4(size_t size) { return (size + 3) & ~3; }
 };
 
 //========================================================================
@@ -351,7 +351,7 @@ class NFSClient : public Component
 {
  public:
   NFSClient() = default;
-  ~NFSClient() override;
+  ~NFSClient();
 
   // Component lifecycle
   void setup() override;

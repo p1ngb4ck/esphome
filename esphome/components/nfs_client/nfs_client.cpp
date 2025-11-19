@@ -8,7 +8,7 @@
 // Forward declare storage for soft dependency
 #if defined(USE_STORAGE)
 namespace storage {
-extern class StorageHost *global_storage;
+extern class Storage *global_storage;
 }
 #endif  // USE_STORAGE
 
