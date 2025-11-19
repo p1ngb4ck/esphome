@@ -3,7 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
-#include "core/hal.h"
+#include "esphome/core/hal.h"
 
 #ifdef USE_ESP_IDF
 #include "lwip/sockets.h"
