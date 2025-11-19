@@ -1,5 +1,5 @@
 #include "http_file_server.h"
-#include "esphome/components/storage_host/storage_host.h"
+#include "esphome/components/storage/storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
@@ -1823,8 +1823,8 @@ void HttpFileServer::handle_directory_listing(AsyncWebServerRequest *request, co
     <tbody>)";
 
   if (is_virtual_root) {
-    // List mount points from storage_host
-    const auto &mounts = this->storage_host_->get_mounts();
+    // List mount points from storage
+    const auto &mounts = this->storage_->get_mounts();
     ESP_LOGI(TAG, "Virtual root - listing %d mount points", mounts.size());
 
     for (const auto &mount : mounts) {
@@ -3010,8 +3010,7 @@ void HttpFileServer::handle_api_upload_chunk(AsyncWebServerRequest *request) {
       fflush(this->upload_file_);
       fclose(this->upload_file_);
       this->upload_file_ = nullptr;
-      ESP_LOGI(TAG, "Completed chunked upload: %s (%zu bytes)", upload_path.c_str(),
-               this->progress_.transferred_bytes);
+      ESP_LOGI(TAG, "Completed chunked upload: %s (%zu bytes)", upload_path.c_str(), this->progress_.transferred_bytes);
     }
 
     // Mark progress as complete

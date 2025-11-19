@@ -11,8 +11,8 @@
 
 // Forward declaration
 namespace esphome {
-namespace storage_host {
-class StorageHost;
+namespace storage {
+class Storage;
 }
 }  // namespace esphome
 
@@ -100,7 +100,7 @@ class HttpFileServer : public Component, public AsyncWebHandler {
   bool isRequestHandlerTrivial() const override { return false; }
 
   // Configuration setters
-  void set_storage_host(storage_host::StorageHost *storage_host) { this->storage_host_ = storage_host; }
+  void set_storage(storage::Storage *storage) { this->storage_ = storage; }
   void set_root_path(const std::string &root_path) { this->root_path_ = root_path; }
   void set_url_prefix(const std::string &url_prefix) { this->url_prefix_ = url_prefix; }
   void set_upload_enabled(bool enabled) { this->upload_enabled_ = enabled; }
@@ -135,8 +135,8 @@ class HttpFileServer : public Component, public AsyncWebHandler {
   // Web server base reference
   web_server_base::WebServerBase *base_;
 
-  // Storage host reference
-  storage_host::StorageHost *storage_host_{nullptr};
+  // Storage reference
+  storage::Storage *storage_{nullptr};
 
   // Storage device references for mount/unmount operations
   // Forward declarations to avoid circular dependencies

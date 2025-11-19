@@ -90,7 +90,7 @@ void PictureViewer::setup() {
   // NOTE: File monitoring is now handled by file_manager
   // file_manager will call update_directory_files_() when directories change
   // No callback registration needed here - file_manager pushes updates directly
-#ifdef USE_STORAGE_HOST
+#ifdef USE_STORAGE
   if (this->file_manager_ != nullptr) {
     ESP_LOGI(TAG, "File manager available - will receive directory updates via update_directory_files_()");
   }
@@ -616,7 +616,7 @@ void PictureViewer::refresh_images() {
 
   // Request file_manager to send us the current file list for this directory
   // file_manager will call update_directory_files_() with the current file list
-#ifdef USE_STORAGE_HOST
+#ifdef USE_STORAGE
   if (this->file_manager_ != nullptr) {
     // TODO: file_manager should have a method like:
     // this->file_manager_->request_directory_update(current_dir->path);
@@ -654,8 +654,8 @@ void PictureViewer::set_fullscreen(bool fullscreen) {
 // Internal Methods
 // =====================================================
 
-void PictureViewer::scan_directory_(const std::vector<storage_host::FileInfo> &files) {
-#ifdef USE_STORAGE_HOST
+void PictureViewer::scan_directory_(const std::vector<storage::FileInfo> &files) {
+#ifdef USE_STORAGE
   const DirectoryConfig *current_dir = this->get_current_directory();
   if (current_dir == nullptr) {
     ESP_LOGW(TAG, "No current directory configured for scanning");
@@ -723,8 +723,8 @@ void PictureViewer::scan_directory_(const std::vector<storage_host::FileInfo> &f
 }
 
 void PictureViewer::update_directory_files_(const std::string &directory_path,
-                                            const std::vector<storage_host::FileInfo> &files) {
-#ifdef USE_STORAGE_HOST
+                                            const std::vector<storage::FileInfo> &files) {
+#ifdef USE_STORAGE
   ESP_LOGI(TAG, "Received file list update for directory: %s (%zu files)", directory_path.c_str(), files.size());
 
   // Find which configured directory this update is for
@@ -2063,7 +2063,7 @@ void PictureViewer::update_canvas_dimensions_() {
 }
 
 bool PictureViewer::read_file_(const std::string &path, std::vector<uint8_t> &data) {
-#ifdef USE_STORAGE_HOST
+#ifdef USE_STORAGE
   if (this->file_manager_ == nullptr) {
     ESP_LOGW(TAG, "File manager not set");
     return false;

@@ -16,9 +16,9 @@
 #include <memory>
 #include <map>
 
-// Optional storage_host integration (soft dependency)
-#if defined(USE_STORAGE_HOST)
-#include "esphome/components/storage_host/network_storage.h"
+// Optional storage integration (soft dependency)
+#if defined(USE_STORAGE)
+#include "esphome/components/storage/network_storage.h"
 #endif
 
 namespace esphome {
@@ -254,8 +254,22 @@ struct NFSFileAttr {
   uint64_t ctime_sec;
   uint32_t ctime_nsec;
 
-  NFSFileAttr() : type(NF3REG), mode(0), nlink(0), uid(0), gid(0), size(0), used(0), fsid(0), fileid(0),
-                  atime_sec(0), atime_nsec(0), mtime_sec(0), mtime_nsec(0), ctime_sec(0), ctime_nsec(0) {}
+  NFSFileAttr()
+      : type(NF3REG),
+        mode(0),
+        nlink(0),
+        uid(0),
+        gid(0),
+        size(0),
+        used(0),
+        fsid(0),
+        fileid(0),
+        atime_sec(0),
+        atime_nsec(0),
+        mtime_sec(0),
+        mtime_nsec(0),
+        ctime_sec(0),
+        ctime_nsec(0) {}
 
   bool decode(XDRBuffer &xdr);
 };
@@ -324,15 +338,15 @@ class RPCClient {
  *   - id: my_nfs
  *     server: 192.168.1.100
  *     export: /volume1/data
- *     mount_path: /nfs/nas  # For storage_host
+ *     mount_path: /nfs/nas  # For storage
  *     uid: 1000  # Optional, default 0
  *     gid: 1000  # Optional, default 0
  * @endcode
  */
 class NFSClient : public Component
-#if defined(USE_STORAGE_HOST)
-                  ,
-                  public storage_host::NetworkStorage
+#if defined(USE_STORAGE)
+    ,
+                  public storage::NetworkStorage
 #endif
 {
  public:
@@ -362,7 +376,7 @@ class NFSClient : public Component
   // Storage Host Integration (soft dependency)
   //========================================================================
 
-  void register_with_storage_host();
+  void register_with_storage();
 
   //========================================================================
   // NFS Operations
@@ -386,7 +400,7 @@ class NFSClient : public Component
   // File info
   bool get_file_attributes(const std::string &path, NFSFileAttr &attr);
 
-#if defined(USE_STORAGE_HOST)
+#if defined(USE_STORAGE)
   //========================================================================
   // NetworkStorage Interface Overrides
   //========================================================================
@@ -402,7 +416,7 @@ class NFSClient : public Component
   bool file_exists(const std::string &path) override;
 
   // Directory operations with NetworkStorage::DirEntry conversion
-  bool list_directory(const std::string &path, std::vector<storage_host::NetworkStorage::DirEntry> &entries) override;
+  bool list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) override;
   bool create_directory(const std::string &path) override;
   bool delete_directory(const std::string &path) override;
 #endif

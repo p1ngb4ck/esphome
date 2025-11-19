@@ -283,7 +283,7 @@ async def to_code(config):
 
     # Add conditional defines based on configuration
     if CONF_FILE_MANAGER_ID in config:
-        cg.add_define("USE_STORAGE_HOST")
+        cg.add_define("USE_STORAGE")
 
     if CONF_CANVAS_ID in config:
         cg.add_define("USE_LVGL")

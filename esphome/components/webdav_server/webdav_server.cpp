@@ -1,5 +1,5 @@
 #include "webdav_server.h"
-#include "esphome/components/storage_host/storage_host.h"
+#include "esphome/components/storage/storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <fstream>
@@ -563,8 +563,8 @@ esp_err_t WebDAVServer::handle_propfind(httpd_req_t *req) {
   struct stat st;
 
   if (is_virtual_root) {
-    // Virtual root - list mount points from storage_host
-    ESP_LOGI(TAG, "Virtual root access - listing mount points from storage_host");
+    // Virtual root - list mount points from storage
+    ESP_LOGI(TAG, "Virtual root access - listing mount points from storage");
     is_directory = true;
     // Set dummy stat data for root directory
     st.st_mode = S_IFDIR | 0755;
@@ -624,8 +624,8 @@ esp_err_t WebDAVServer::handle_propfind(httpd_req_t *req) {
   // If directory and depth > 0, list contents
   if (is_directory && (depth_header == "1" || depth_header == "infinity")) {
     if (is_virtual_root) {
-      // Virtual root - list mount points from storage_host
-      const auto &mounts = server->storage_host_->get_mounts();
+      // Virtual root - list mount points from storage
+      const auto &mounts = server->storage_->get_mounts();
       ESP_LOGI(TAG, "Found %d mount points", mounts.size());
 
       for (const auto &mount : mounts) {

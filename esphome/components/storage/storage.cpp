@@ -1,4 +1,4 @@
-#include "storage_host.h"
+#include "storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"  // For App.feed_wdt()
 #include <sys/stat.h>
@@ -21,19 +21,19 @@
 #endif
 
 namespace esphome {
-namespace storage_host {
+namespace storage {
 
-static const char *const TAG = "storage_host";
+static const char *const TAG = "storage";
 
 // Global accessor for soft dependency pattern
-StorageHost *global_storage_host = nullptr;
+Storage *global_storage = nullptr;
 
 // =====================================================
 // StorageMount Implementation
 // =====================================================
 
 bool StorageMount::is_available() const {
-  if (this->storage_host_ == nullptr) {
+  if (this->storage_ == nullptr) {
     return false;
   }
 
@@ -58,14 +58,14 @@ bool StorageMount::get_stats(uint64_t &total_bytes, uint64_t &free_bytes) const 
 }
 
 // =====================================================
-// StorageHost Implementation
+// Storage Implementation
 // =====================================================
 
-void StorageHost::setup() {
+void Storage::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Storage Host Component...");
 
   // Set global accessor for soft dependency pattern
-  global_storage_host = this;
+  global_storage = this;
 
   ESP_LOGCONFIG(TAG, "  Mounts configured: %zu", this->mounts_.size());
   for (const auto &mount : this->mounts_) {
@@ -78,11 +78,11 @@ void StorageHost::setup() {
   }
 }
 
-void StorageHost::loop() {
+void Storage::loop() {
   // Nothing to do in loop
 }
 
-void StorageHost::dump_config() {
+void Storage::dump_config() {
   ESP_LOGCONFIG(TAG, "Storage Host Component:");
   ESP_LOGCONFIG(TAG, "  Mounts: %zu", this->mounts_.size());
   for (const auto &mount : this->mounts_) {
@@ -99,12 +99,12 @@ void StorageHost::dump_config() {
   }
 }
 
-void StorageHost::register_mount(const std::string &path, const std::string &platform) {
+void Storage::register_mount(const std::string &path, const std::string &platform) {
   this->mounts_.push_back({path, platform});
   ESP_LOGD(TAG, "Registered mount: %s (platform: %s)", path.c_str(), platform.c_str());
 }
 
-std::string StorageHost::find_mount_for_path(const std::string &path) {
+std::string Storage::find_mount_for_path(const std::string &path) {
   // Find the longest matching mount point
   std::string best_mount;
   size_t best_length = 0;
@@ -125,13 +125,13 @@ std::string StorageHost::find_mount_for_path(const std::string &path) {
 // Device Node Management
 // =====================================================
 
-void StorageHost::register_device_node(const std::string &path, binary_storage::BinaryStorage *device,
-                                       const std::string &device_type) {
+void Storage::register_device_node(const std::string &path, binary_storage::BinaryStorage *device,
+                                   const std::string &device_type) {
   this->device_nodes_.push_back({path, device, device_type});
   ESP_LOGD(TAG, "Registered device node: %s (type: %s, device: %p)", path.c_str(), device_type.c_str(), device);
 }
 
-bool StorageHost::is_device_node(const std::string &path) const {
+bool Storage::is_device_node(const std::string &path) const {
   for (const auto &node : this->device_nodes_) {
     if (node.path == path) {
       return true;
@@ -140,7 +140,7 @@ bool StorageHost::is_device_node(const std::string &path) const {
   return false;
 }
 
-DeviceNode *StorageHost::find_device_node(const std::string &path) {
+DeviceNode *Storage::find_device_node(const std::string &path) {
   for (auto &node : this->device_nodes_) {
     if (node.path == path) {
       return &node;
@@ -153,7 +153,7 @@ DeviceNode *StorageHost::find_device_node(const std::string &path) {
 // Network Storage Management
 // =====================================================
 
-void StorageHost::register_network_storage(NetworkStorage *storage) {
+void Storage::register_network_storage(NetworkStorage *storage) {
   if (storage == nullptr) {
     ESP_LOGW(TAG, "Attempted to register null network storage");
     return;
@@ -164,7 +164,7 @@ void StorageHost::register_network_storage(NetworkStorage *storage) {
            storage->get_protocol(), storage->get_mount_path().c_str());
 }
 
-NetworkStorage *StorageHost::find_network_storage_for_path(const std::string &path) {
+NetworkStorage *Storage::find_network_storage_for_path(const std::string &path) {
   // Find the network storage with the longest matching mount path
   NetworkStorage *best_match = nullptr;
   size_t best_length = 0;
@@ -182,7 +182,7 @@ NetworkStorage *StorageHost::find_network_storage_for_path(const std::string &pa
   return best_match;
 }
 
-bool StorageHost::is_network_path(const std::string &path) const {
+bool Storage::is_network_path(const std::string &path) const {
   for (const auto *storage : this->network_storage_) {
     const std::string &mount_path = storage->get_mount_path();
     if (path.compare(0, mount_path.length(), mount_path) == 0) {
@@ -196,7 +196,7 @@ bool StorageHost::is_network_path(const std::string &path) const {
 // Network Storage File Operations
 // =====================================================
 
-bool StorageHost::network_file_exists(const std::string &path) {
+bool Storage::network_file_exists(const std::string &path) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->file_exists(path);
@@ -204,7 +204,7 @@ bool StorageHost::network_file_exists(const std::string &path) {
   return false;
 }
 
-bool StorageHost::network_read_file(const std::string &path, std::vector<uint8_t> &data) {
+bool Storage::network_read_file(const std::string &path, std::vector<uint8_t> &data) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->read_file(path, data);
@@ -213,7 +213,7 @@ bool StorageHost::network_read_file(const std::string &path, std::vector<uint8_t
   return false;
 }
 
-bool StorageHost::network_write_file(const std::string &path, const uint8_t *data, size_t length) {
+bool Storage::network_write_file(const std::string &path, const uint8_t *data, size_t length) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->write_file(path, data, length);
@@ -222,7 +222,7 @@ bool StorageHost::network_write_file(const std::string &path, const uint8_t *dat
   return false;
 }
 
-bool StorageHost::network_delete_file(const std::string &path) {
+bool Storage::network_delete_file(const std::string &path) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->delete_file(path);
@@ -231,7 +231,7 @@ bool StorageHost::network_delete_file(const std::string &path) {
   return false;
 }
 
-bool StorageHost::network_list_directory(const std::string &path, std::vector<NetworkStorage::DirEntry> &entries) {
+bool Storage::network_list_directory(const std::string &path, std::vector<NetworkStorage::DirEntry> &entries) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->list_directory(path, entries);
@@ -240,7 +240,7 @@ bool StorageHost::network_list_directory(const std::string &path, std::vector<Ne
   return false;
 }
 
-bool StorageHost::network_create_directory(const std::string &path) {
+bool Storage::network_create_directory(const std::string &path) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->create_directory(path);
@@ -249,7 +249,7 @@ bool StorageHost::network_create_directory(const std::string &path) {
   return false;
 }
 
-bool StorageHost::network_delete_directory(const std::string &path) {
+bool Storage::network_delete_directory(const std::string &path) {
   NetworkStorage *storage = this->find_network_storage_for_path(path);
   if (storage != nullptr && storage->is_connected()) {
     return storage->delete_directory(path);
@@ -258,12 +258,12 @@ bool StorageHost::network_delete_directory(const std::string &path) {
   return false;
 }
 
-bool StorageHost::file_exists(const std::string &path) {
+bool Storage::file_exists(const std::string &path) {
   struct stat st;
   return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
-std::string StorageHost::read_file(const std::string &path) {
+std::string Storage::read_file(const std::string &path) {
   FILE *file = fopen(path.c_str(), "rb");
 
   if (!file) {
@@ -303,7 +303,7 @@ std::string StorageHost::read_file(const std::string &path) {
   return data;
 }
 
-bool StorageHost::write_file(const std::string &path, const std::string &data) {
+bool Storage::write_file(const std::string &path, const std::string &data) {
   FILE *file = fopen(path.c_str(), "wb");
 
   if (!file) {
@@ -317,7 +317,7 @@ bool StorageHost::write_file(const std::string &path, const std::string &data) {
   return written == data.size();
 }
 
-std::vector<std::string> StorageHost::list_files(const std::string &path) {
+std::vector<std::string> Storage::list_files(const std::string &path) {
   std::vector<std::string> files;
 
   DIR *dir = opendir(path.c_str());
@@ -337,6 +337,108 @@ std::vector<std::string> StorageHost::list_files(const std::string &path) {
   return files;
 }
 
+// =====================================================
+// StorageDevice Registry Implementation
+// =====================================================
 
-}  // namespace storage_host
+void Storage::register_device(StorageDevice *device) {
+  if (device == nullptr) {
+    ESP_LOGW(TAG, "Attempted to register null storage device");
+    return;
+  }
+
+  // Check if already registered
+  for (auto *existing : this->devices_) {
+    if (existing == device) {
+      ESP_LOGW(TAG, "Storage device already registered");
+      return;
+    }
+  }
+
+  this->devices_.push_back(device);
+  StorageInfo info = device->get_info();
+  ESP_LOGD(TAG, "Registered storage device: %s (id: %s, type: %d)", info.name.c_str(), info.id.c_str(),
+           static_cast<int>(info.type));
+
+  // Call callbacks
+  this->on_device_added_callbacks_.call(device);
+}
+
+void Storage::unregister_device(StorageDevice *device) {
+  if (device == nullptr) {
+    return;
+  }
+
+  auto it = std::find(this->devices_.begin(), this->devices_.end(), device);
+  if (it != this->devices_.end()) {
+    StorageInfo info = device->get_info();
+    ESP_LOGD(TAG, "Unregistering storage device: %s", info.id.c_str());
+
+    this->devices_.erase(it);
+
+    // Call callbacks
+    this->on_device_removed_callbacks_.call(device);
+  }
+}
+
+void Storage::notify_device_changed(StorageDevice *device) {
+  if (device == nullptr) {
+    return;
+  }
+
+  // Verify device is registered
+  auto it = std::find(this->devices_.begin(), this->devices_.end(), device);
+  if (it != this->devices_.end()) {
+    this->on_device_changed_callbacks_.call(device);
+  }
+}
+
+std::vector<StorageInfo> Storage::get_available_storages() {
+  std::vector<StorageInfo> result;
+
+  for (auto *device : this->devices_) {
+    if (device->is_available()) {
+      result.push_back(device->get_info());
+    }
+  }
+
+  return result;
+}
+
+StorageDevice *Storage::get_device_by_id(const std::string &id) {
+  for (auto *device : this->devices_) {
+    StorageInfo info = device->get_info();
+    if (info.id == id) {
+      return device;
+    }
+  }
+  return nullptr;
+}
+
+StorageDevice *Storage::get_device_by_mount_path(const std::string &mount_path) {
+  for (auto *device : this->devices_) {
+    if (device->supports_filesystem()) {
+      std::string device_mount = device->get_mount_path();
+      if (device_mount == mount_path) {
+        return device;
+      }
+    }
+  }
+  return nullptr;
+}
+
+std::vector<StorageDevice *> Storage::get_devices_by_type(StorageType type) {
+  std::vector<StorageDevice *> result;
+
+  for (auto *device : this->devices_) {
+    StorageInfo info = device->get_info();
+    if (info.type == type) {
+      result.push_back(device);
+    }
+  }
+
+  return result;
+}
+
+}  // namespace storage
 }  // namespace esphome

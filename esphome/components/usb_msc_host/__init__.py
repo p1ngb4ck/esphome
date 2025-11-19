@@ -113,11 +113,11 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     # Register interface-class based handlers and store them for later use
-    # by storage_host to register mount callbacks
+    # by storage to register mount callbacks
     for device in config.get(CONF_DEVICES) or ():
         device_var = await register_usb_msc_handler(device, var, usb_host_var)
-        # Store device reference in CORE.data for storage_host to access
-        # This allows storage_host to register callbacks with USB MSC devices
+        # Store device reference in CORE.data for storage to access
+        # This allows storage to register callbacks with USB MSC devices
         from esphome.core import CORE
 
         if not hasattr(CORE, "data"):

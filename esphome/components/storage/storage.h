@@ -10,6 +10,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/optional.h"
 #include "network_storage.h"
+#include "storage_device.h"
 
 namespace esphome {
 
@@ -18,10 +19,10 @@ namespace binary_storage {
 class BinaryStorage;
 }
 
-namespace storage_host {
+namespace storage {
 
 // Forward declarations
-class StorageHost;
+class Storage;
 
 // Mount point entry - lightweight alternative to std::map
 struct MountEntry {
@@ -38,11 +39,11 @@ class StorageMount {
 
   void set_path(const std::string &path) { this->path_ = path; }
   void set_platform(const std::string &platform) { this->platform_ = platform; }
-  void set_storage_host(StorageHost *host) { this->storage_host_ = host; }
+  void set_storage(Storage *storage) { this->storage_ = storage; }
 
   const std::string &get_path() const { return this->path_; }
   const std::string &get_platform() const { return this->platform_; }
-  StorageHost *get_storage_host() const { return this->storage_host_; }
+  Storage *get_storage() const { return this->storage_; }
 
   /// Check if this mount point is available (e.g., SD card inserted)
   bool is_available() const;
@@ -53,7 +54,7 @@ class StorageMount {
  protected:
   std::string path_;
   std::string platform_;
-  StorageHost *storage_host_{nullptr};
+  Storage *storage_{nullptr};
 };
 
 // Device node entry - virtual /dev files pointing to binary_storage devices
@@ -73,11 +74,11 @@ static constexpr size_t MAX_DEVICE_NODES = 16;
 static constexpr size_t MAX_NETWORK_STORAGE = 4;
 
 // =====================================================
-// StorageHost - Main Storage Class
+// Storage - Main Storage Class
 // =====================================================
-class StorageHost : public Component {
+class Storage : public Component {
  public:
-  StorageHost() = default;
+  Storage() = default;
 
   void setup() override;
   void loop() override;
@@ -97,10 +98,8 @@ class StorageHost : public Component {
 
   // Device node management (virtual /dev files for binary_storage)
   void register_device_node(const std::string &path, binary_storage::BinaryStorage *device,
-                             const std::string &device_type);
-  const esphome::StaticVector<DeviceNode, MAX_DEVICE_NODES> &get_device_nodes() const {
-    return this->device_nodes_;
-  }
+                            const std::string &device_type);
+  const esphome::StaticVector<DeviceNode, MAX_DEVICE_NODES> &get_device_nodes() const { return this->device_nodes_; }
   bool is_device_node(const std::string &path) const;
   DeviceNode *find_device_node(const std::string &path);
 
@@ -121,14 +120,71 @@ class StorageHost : public Component {
   bool network_create_directory(const std::string &path);
   bool network_delete_directory(const std::string &path);
 
+  //========================================================================
+  // StorageDevice Registry (for unified storage interface)
+  //========================================================================
+
+  /// Register a storage device with the registry
+  void register_device(StorageDevice *device);
+
+  /// Unregister a storage device (e.g., on USB disconnect)
+  void unregister_device(StorageDevice *device);
+
+  /// Notify that a device's status changed (mounted/unmounted)
+  void notify_device_changed(StorageDevice *device);
+
+  //========================================================================
+  // Query Interface (for 3rd party components)
+  //========================================================================
+
+  /// Get list of all currently available storage devices
+  std::vector<StorageInfo> get_available_storages();
+
+  /// Get all storage devices (including unavailable)
+  std::vector<StorageDevice *> get_all_devices() { return this->devices_; }
+
+  /// Find device by unique ID
+  StorageDevice *get_device_by_id(const std::string &id);
+
+  /// Find device by mount path
+  StorageDevice *get_device_by_mount_path(const std::string &mount_path);
+
+  /// Find devices by type
+  std::vector<StorageDevice *> get_devices_by_type(StorageType type);
+
+  //========================================================================
+  // Event Callbacks (for runtime changes)
+  //========================================================================
+
+  /// Add callback for when device becomes available
+  void add_on_device_added_callback(std::function<void(StorageDevice *)> &&callback) {
+    this->on_device_added_callbacks_.add(std::move(callback));
+  }
+
+  /// Add callback for when device is removed
+  void add_on_device_removed_callback(std::function<void(StorageDevice *)> &&callback) {
+    this->on_device_removed_callbacks_.add(std::move(callback));
+  }
+
+  /// Add callback for mount/unmount events
+  void add_on_device_changed_callback(std::function<void(StorageDevice *)> &&callback) {
+    this->on_device_changed_callbacks_.add(std::move(callback));
+  }
+
  protected:
   esphome::StaticVector<MountEntry, MAX_MOUNT_POINTS> mounts_;
   esphome::StaticVector<DeviceNode, MAX_DEVICE_NODES> device_nodes_;
   esphome::StaticVector<NetworkStorage *, MAX_NETWORK_STORAGE> network_storage_;
+
+  // StorageDevice registry
+  std::vector<StorageDevice *> devices_;
+  CallbackManager<void(StorageDevice *)> on_device_added_callbacks_;
+  CallbackManager<void(StorageDevice *)> on_device_removed_callbacks_;
+  CallbackManager<void(StorageDevice *)> on_device_changed_callbacks_;
 };
 
 // Global accessor for soft dependency pattern
-extern StorageHost *global_storage_host;
+extern Storage *global_storage;
 
-}  // namespace storage_host
+}  // namespace storage
 }  // namespace esphome

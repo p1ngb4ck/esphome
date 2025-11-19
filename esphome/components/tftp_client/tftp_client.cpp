@@ -5,12 +5,12 @@
 #include <cstring>
 #include <algorithm>
 
-// Forward declare storage_host for soft dependency
-#if defined(USE_STORAGE_HOST)
-namespace storage_host {
-extern class StorageHost *global_storage_host;
+// Forward declare storage for soft dependency
+#if defined(USE_STORAGE)
+namespace storage {
+extern class StorageHost *global_storage;
 }
-#endif  // USE_STORAGE_HOST
+#endif  // USE_STORAGE
 
 namespace esphome {
 namespace tftp_client {
@@ -167,9 +167,9 @@ void TFTPClient::setup() {
     return;
   }
 
-  // Register with storage_host if configured
+  // Register with storage if configured
   if (!this->mount_path_.empty()) {
-    this->register_with_storage_host();
+    this->register_with_storage();
   }
 
   this->initialized_ = true;
@@ -188,18 +188,18 @@ void TFTPClient::dump_config() {
   ESP_LOGCONFIG(TAG, "  Status: %s", this->initialized_ ? "Ready" : "Failed");
 }
 
-void TFTPClient::register_with_storage_host() {
-#if defined(USE_STORAGE_HOST)
-  // Check if storage_host is available (soft dependency)
-  if (storage_host::global_storage_host != nullptr) {
-    storage_host::global_storage_host->register_mount(this->mount_path_, "tftp");
-    ESP_LOGI(TAG, "Registered TFTP mount with storage_host: %s", this->mount_path_.c_str());
+void TFTPClient::register_with_storage() {
+#if defined(USE_STORAGE)
+  // Check if storage is available (soft dependency)
+  if (storage::global_storage != nullptr) {
+    storage::global_storage->register_mount(this->mount_path_, "tftp");
+    ESP_LOGI(TAG, "Registered TFTP mount with storage: %s", this->mount_path_.c_str());
   } else {
-    ESP_LOGD(TAG, "storage_host not available, skipping mount registration");
+    ESP_LOGD(TAG, "storage not available, skipping mount registration");
   }
 #else
-  ESP_LOGD(TAG, "storage_host component not compiled, mount registration disabled");
-#endif  // USE_STORAGE_HOST
+  ESP_LOGD(TAG, "storage component not compiled, mount registration disabled");
+#endif  // USE_STORAGE
 }
 
 //========================================================================

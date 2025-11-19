@@ -14,31 +14,31 @@ DEPENDENCIES = []
 AUTO_LOAD = []
 
 # Namespaces
-storage_host_ns = cg.esphome_ns.namespace("storage_host")
+storage_ns = cg.esphome_ns.namespace("storage")
 
 # Classes
-StorageHost = storage_host_ns.class_("StorageHost", cg.Component)
-StorageMount = storage_host_ns.class_("StorageMount")
-FileManager = storage_host_ns.class_("FileManager", cg.Component)
+Storage = storage_ns.class_("Storage", cg.Component)
+StorageMount = storage_ns.class_("StorageMount")
+FileManager = storage_ns.class_("FileManager", cg.Component)
 
 # Triggers
-FileAddedTrigger = storage_host_ns.class_("FileAddedTrigger", automation.Trigger)
-FileModifiedTrigger = storage_host_ns.class_("FileModifiedTrigger", automation.Trigger)
-FileDeletedTrigger = storage_host_ns.class_("FileDeletedTrigger", automation.Trigger)
-DirectoryChangedTrigger = storage_host_ns.class_(
+FileAddedTrigger = storage_ns.class_("FileAddedTrigger", automation.Trigger)
+FileModifiedTrigger = storage_ns.class_("FileModifiedTrigger", automation.Trigger)
+FileDeletedTrigger = storage_ns.class_("FileDeletedTrigger", automation.Trigger)
+DirectoryChangedTrigger = storage_ns.class_(
     "DirectoryChangedTrigger", automation.Trigger
 )
 
 # Info structs
-FileInfo = storage_host_ns.struct("FileInfo")
-DirectoryChangeInfo = storage_host_ns.struct("DirectoryChangeInfo")
+FileInfo = storage_ns.struct("FileInfo")
+DirectoryChangeInfo = storage_ns.struct("DirectoryChangeInfo")
 
 # Configuration keys
 CONF_MOUNTS = "mounts"
 CONF_MOUNT_PATH = "path"
 CONF_MOUNT_PLATFORM = "platform"
 CONF_FILE_MANAGERS = "file_managers"
-CONF_STORAGE_HOST_ID = "storage_host_id"
+CONF_STORAGE_ID = "storage_id"
 CONF_WATCH_DIRECTORY = "watch_directory"
 CONF_WATCH_FILE = "watch_file"
 CONF_SCAN_INTERVAL = "scan_interval"
@@ -80,7 +80,7 @@ MOUNT_SCHEMA = cv.Schema(
 FILE_MANAGER_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(FileManager),
-        cv.GenerateID(CONF_STORAGE_HOST_ID): cv.use_id(StorageHost),
+        cv.GenerateID(CONF_STORAGE_ID): cv.use_id(Storage),
         # Watch either a directory or a single file (mutually exclusive)
         cv.Optional(CONF_WATCH_DIRECTORY): cv.string,
         cv.Optional(CONF_WATCH_FILE): cv.string,
@@ -117,10 +117,10 @@ FILE_MANAGER_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-# StorageHost configuration
+# Storage configuration
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.declare_id(StorageHost),
+        cv.GenerateID(): cv.declare_id(Storage),
         cv.Optional(CONF_MOUNTS, default=[]): cv.ensure_list(MOUNT_SCHEMA),
         cv.Optional(CONF_FILE_MANAGERS, default=[]): cv.ensure_list(
             FILE_MANAGER_SCHEMA
@@ -130,11 +130,11 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 async def to_code(config):
-    """Generate code for storage_host component"""
+    """Generate code for storage component"""
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    cg.add_define("USE_STORAGE_HOST")
+    cg.add_define("USE_STORAGE")
 
     # Register each mount
     for mount_config in config.get(CONF_MOUNTS, []):
@@ -145,9 +145,9 @@ async def to_code(config):
         mount_var = cg.new_Pvariable(mount_config[CONF_ID])
         cg.add(mount_var.set_path(mount_path))
         cg.add(mount_var.set_platform(mount_platform))
-        cg.add(mount_var.set_storage_host(var))
+        cg.add(mount_var.set_storage(var))
 
-        # Register with storage_host
+        # Register with storage
         cg.add(var.register_mount(mount_path, mount_platform))
 
     # Register file managers
@@ -161,9 +161,9 @@ async def setup_file_manager(config, parent_storage):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    # Link to parent storage_host component
-    storage = await cg.get_variable(config[CONF_STORAGE_HOST_ID])
-    cg.add(var.set_storage_host(storage))
+    # Link to parent storage component
+    storage = await cg.get_variable(config[CONF_STORAGE_ID])
+    cg.add(var.set_storage(storage))
 
     # Set watch directory or file
     if CONF_WATCH_DIRECTORY in config:

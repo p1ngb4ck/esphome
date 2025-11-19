@@ -1,5 +1,5 @@
 #include "file_manager.h"
-#include "storage_host.h"
+#include "storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
@@ -10,7 +10,7 @@
 #include <algorithm>
 
 namespace esphome {
-namespace storage_host {
+namespace storage {
 
 static const char *const TAG = "file_manager";
 
@@ -21,8 +21,8 @@ static const char *const TAG = "file_manager";
 void FileManager::setup() {
   ESP_LOGCONFIG(TAG, "Setting up FileManager...");
 
-  if (this->storage_host_ == nullptr) {
-    ESP_LOGE(TAG, "StorageHost not set!");
+  if (this->storage_ == nullptr) {
+    ESP_LOGE(TAG, "Storage not set!");
     this->mark_failed();
     return;
   }
@@ -92,18 +92,18 @@ void FileManager::dump_config() {
 // =====================================================
 
 bool FileManager::is_path_available(const std::string &path) {
-  if (this->storage_host_ == nullptr) {
+  if (this->storage_ == nullptr) {
     return false;
   }
 
   // Check if path is on a network storage
-  if (this->storage_host_->is_network_path(path)) {
-    auto *network_storage = this->storage_host_->find_network_storage_for_path(path);
+  if (this->storage_->is_network_path(path)) {
+    auto *network_storage = this->storage_->find_network_storage_for_path(path);
     return network_storage != nullptr && network_storage->is_connected();
   }
 
-  // For local paths, check if mount point exists in StorageHost configuration
-  std::string mount_point = this->storage_host_->find_mount_for_path(path);
+  // For local paths, check if mount point exists in Storage configuration
+  std::string mount_point = this->storage_->find_mount_for_path(path);
   if (mount_point.empty()) {
     ESP_LOGD(TAG, "No mount point found for path: %s", path.c_str());
     return false;
@@ -123,12 +123,12 @@ bool FileManager::read_file_safe(const std::string &path, std::vector<uint8_t> &
   }
 
   // Check if it's a network path
-  if (this->storage_host_->is_network_path(path)) {
-    return this->storage_host_->network_read_file(path, data);
+  if (this->storage_->is_network_path(path)) {
+    return this->storage_->network_read_file(path, data);
   }
 
   // Local file access
-  return this->storage_host_->file_exists(path);
+  return this->storage_->file_exists(path);
 }
 
 bool FileManager::write_file_safe(const std::string &path, const uint8_t *data, size_t length) {
@@ -138,12 +138,12 @@ bool FileManager::write_file_safe(const std::string &path, const uint8_t *data, 
   }
 
   // Check if it's a network path
-  if (this->storage_host_->is_network_path(path)) {
-    return this->storage_host_->network_write_file(path, data, length);
+  if (this->storage_->is_network_path(path)) {
+    return this->storage_->network_write_file(path, data, length);
   }
 
   // Local file access
-  return this->storage_host_->write_file(path, std::string((const char *) data, length));
+  return this->storage_->write_file(path, std::string((const char *) data, length));
 }
 
 bool FileManager::file_exists_safe(const std::string &path) {
@@ -152,12 +152,12 @@ bool FileManager::file_exists_safe(const std::string &path) {
   }
 
   // Check if it's a network path
-  if (this->storage_host_->is_network_path(path)) {
-    return this->storage_host_->network_file_exists(path);
+  if (this->storage_->is_network_path(path)) {
+    return this->storage_->network_file_exists(path);
   }
 
   // Local file access
-  return this->storage_host_->file_exists(path);
+  return this->storage_->file_exists(path);
 }
 
 // =====================================================
@@ -170,7 +170,7 @@ void FileManager::perform_scan_() {
   // Single file watch mode
   if (!this->watch_file_.empty()) {
     // Get mount point for single file
-    std::string mount_point = this->storage_host_ ? this->storage_host_->find_mount_for_path(this->watch_file_) : "";
+    std::string mount_point = this->storage_ ? this->storage_->find_mount_for_path(this->watch_file_) : "";
     FileInfo info;
     bool exists = this->get_file_info_(this->watch_file_, mount_point, info);
 
@@ -333,8 +333,8 @@ void FileManager::perform_scan_() {
 }
 
 void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo> &files) {
-  if (this->storage_host_ == nullptr) {
-    ESP_LOGD(TAG, "StorageHost not available");
+  if (this->storage_ == nullptr) {
+    ESP_LOGD(TAG, "Storage not available");
     return;
   }
 
@@ -342,7 +342,7 @@ void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo>
   bool is_virtual_root = (path.empty() || path == "/");
   if (is_virtual_root) {
     ESP_LOGD(TAG, "Listing mount points from virtual root");
-    const auto &mounts = this->storage_host_->get_mounts();
+    const auto &mounts = this->storage_->get_mounts();
     for (const auto &mount : mounts) {
       FileInfo info;
       info.path = mount.path;
@@ -364,7 +364,7 @@ void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo>
   }
 
   // Parse path to extract mount point
-  std::string mount_point = this->storage_host_->find_mount_for_path(path);
+  std::string mount_point = this->storage_->find_mount_for_path(path);
   if (mount_point.empty()) {
     ESP_LOGD(TAG, "No mount point found for path: %s", path.c_str());
     return;
@@ -372,11 +372,11 @@ void FileManager::scan_directory_(const std::string &path, std::vector<FileInfo>
 
   ESP_LOGV(TAG, "Found mount point '%s' for path '%s'", mount_point.c_str(), path.c_str());
 
-  // Check if this is a network path - use StorageHost methods for proper routing
-  if (this->storage_host_->is_network_path(path)) {
+  // Check if this is a network path - use Storage methods for proper routing
+  if (this->storage_->is_network_path(path)) {
     // Use network storage backend
     std::vector<NetworkStorage::DirEntry> entries;
-    if (!this->storage_host_->network_list_directory(path, entries)) {
+    if (!this->storage_->network_list_directory(path, entries)) {
       ESP_LOGD(TAG, "Failed to list network directory: %s", path.c_str());
       return;
     }
@@ -591,5 +591,5 @@ std::string FileManager::get_directory_(const std::string &path) const {
   return path.substr(0, pos);
 }
 
-}  // namespace storage_host
+}  // namespace storage
 }  // namespace esphome

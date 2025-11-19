@@ -1,12 +1,12 @@
 import esphome.codegen as cg
-from esphome.components import storage_host, web_server_base
+from esphome.components import storage, web_server_base
 from esphome.components.esp32 import add_idf_component
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 from esphome.core import CORE, coroutine_with_priority
 
 CODEOWNERS = ["@esphome/core"]
-DEPENDENCIES = ["storage_host", "web_server_base"]
+DEPENDENCIES = ["storage", "web_server_base"]
 AUTO_LOAD = []
 
 http_file_server_ns = cg.esphome_ns.namespace("http_file_server")
@@ -14,7 +14,7 @@ HttpFileServer = http_file_server_ns.class_("HttpFileServer", cg.Component)
 
 CONF_ROOT_PATH = "root_path"
 CONF_URL_PREFIX = "url_prefix"
-CONF_STORAGE_HOST_ID = "storage_host_id"
+CONF_STORAGE_ID = "storage_id"
 CONF_ENABLE_UPLOAD = "enable_upload"
 CONF_ENABLE_DOWNLOAD = "enable_download"
 CONF_ENABLE_DELETION = "enable_deletion"
@@ -51,9 +51,9 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(web_server_base.CONF_WEB_SERVER_BASE_ID): cv.use_id(
                 web_server_base.WebServerBase
             ),
-            cv.Required(CONF_STORAGE_HOST_ID): cv.use_id(
-                storage_host.StorageHost
-            ),  # Reference to storage_host (REQUIRED)
+            cv.Required(CONF_STORAGE_ID): cv.use_id(
+                storage.Storage
+            ),  # Reference to storage (REQUIRED)
             cv.Optional(CONF_ROOT_PATH, default="/"): cv.string,
             cv.Optional(CONF_URL_PREFIX, default="/files"): cv.string,
             cv.Optional(CONF_ENABLE_UPLOAD, default=False): cv.boolean,
@@ -84,9 +84,9 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID], web_server_base_var)
     await cg.register_component(var, config)
 
-    # Get storage_host instance
-    storage_host_var = await cg.get_variable(config[CONF_STORAGE_HOST_ID])
-    cg.add(var.set_storage_host(storage_host_var))
+    # Get storage instance
+    storage_var = await cg.get_variable(config[CONF_STORAGE_ID])
+    cg.add(var.set_storage(storage_var))
 
     # Set configuration
     root_path = config[CONF_ROOT_PATH]

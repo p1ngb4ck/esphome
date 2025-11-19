@@ -51,20 +51,20 @@ enum TFTPOpcode : uint16_t {
 
 /// TFTP Error Codes
 enum TFTPErrorCode : uint16_t {
-  TFTP_ERROR_NOT_DEFINED = 0,         ///< Not defined
-  TFTP_ERROR_FILE_NOT_FOUND = 1,      ///< File not found
-  TFTP_ERROR_ACCESS_VIOLATION = 2,    ///< Access violation
-  TFTP_ERROR_DISK_FULL = 3,           ///< Disk full
-  TFTP_ERROR_ILLEGAL_OPERATION = 4,   ///< Illegal TFTP operation
-  TFTP_ERROR_UNKNOWN_TRANSFER_ID = 5, ///< Unknown transfer ID
-  TFTP_ERROR_FILE_EXISTS = 6,         ///< File already exists
-  TFTP_ERROR_NO_SUCH_USER = 7,        ///< No such user
+  TFTP_ERROR_NOT_DEFINED = 0,          ///< Not defined
+  TFTP_ERROR_FILE_NOT_FOUND = 1,       ///< File not found
+  TFTP_ERROR_ACCESS_VIOLATION = 2,     ///< Access violation
+  TFTP_ERROR_DISK_FULL = 3,            ///< Disk full
+  TFTP_ERROR_ILLEGAL_OPERATION = 4,    ///< Illegal TFTP operation
+  TFTP_ERROR_UNKNOWN_TRANSFER_ID = 5,  ///< Unknown transfer ID
+  TFTP_ERROR_FILE_EXISTS = 6,          ///< File already exists
+  TFTP_ERROR_NO_SUCH_USER = 7,         ///< No such user
 };
 
 /// TFTP Transfer Mode
 enum TFTPMode {
-  TFTP_MODE_OCTET,   ///< Binary mode (octet)
-  TFTP_MODE_NETASCII ///< ASCII mode (netascii)
+  TFTP_MODE_OCTET,    ///< Binary mode (octet)
+  TFTP_MODE_NETASCII  ///< ASCII mode (netascii)
 };
 
 //========================================================================
@@ -167,7 +167,7 @@ struct TFTPResult {
  * @brief TFTP client for network file access
  *
  * Implements TFTP protocol (RFC 1350) for reading and writing files
- * to/from a remote TFTP server. Integrates with storage_host to provide
+ * to/from a remote TFTP server. Integrates with storage to provide
  * a virtual mount point for TFTP file access.
  *
  * Features:
@@ -183,7 +183,7 @@ struct TFTPResult {
  *   - id: my_tftp
  *     server: 192.168.1.100
  *     port: 69  # Optional, default 69
- *     mount_path: /tftp/server1  # Optional, for storage_host integration
+ *     mount_path: /tftp/server1  # Optional, for storage integration
  * @endcode
  */
 class TFTPClient : public Component {
@@ -212,7 +212,7 @@ class TFTPClient : public Component {
   void set_port(uint16_t port) { this->port_ = port; }
 
   /**
-   * @brief Set mount path for storage_host integration
+   * @brief Set mount path for storage integration
    */
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
 
@@ -226,12 +226,12 @@ class TFTPClient : public Component {
   //========================================================================
 
   /**
-   * @brief Register this TFTP client with storage_host
+   * @brief Register this TFTP client with storage
    *
    * Creates a virtual mount point for TFTP file access.
-   * Only works if storage_host component is present (soft dependency).
+   * Only works if storage component is present (soft dependency).
    */
-  void register_with_storage_host();
+  void register_with_storage();
 
   //========================================================================
   // TFTP File Operations

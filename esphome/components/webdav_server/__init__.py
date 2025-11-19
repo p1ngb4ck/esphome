@@ -1,10 +1,10 @@
 import esphome.codegen as cg
-from esphome.components import storage_host
+from esphome.components import storage
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 
 CODEOWNERS = ["@esphome/core"]
-DEPENDENCIES = ["storage_host", "web_server_base"]
+DEPENDENCIES = ["storage", "web_server_base"]
 AUTO_LOAD = []
 
 webdav_server_ns = cg.esphome_ns.namespace("webdav_server")
@@ -13,14 +13,14 @@ WebDAVServer = webdav_server_ns.class_("WebDAVServer", cg.Component)
 CONF_ROOT_PATH = "root_path"
 CONF_URL_PREFIX = "url_prefix"
 CONF_ENABLE_AUTH = "enable_auth"
-CONF_STORAGE_HOST_ID = "storage_host_id"
+CONF_STORAGE_ID = "storage_id"
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(WebDAVServer),
-        cv.Required(CONF_STORAGE_HOST_ID): cv.use_id(
-            storage_host.StorageHost
-        ),  # Reference to storage_host (REQUIRED)
+        cv.Required(CONF_STORAGE_ID): cv.use_id(
+            storage.Storage
+        ),  # Reference to storage (REQUIRED)
         cv.Optional(CONF_ROOT_PATH, default="/"): cv.string,
         cv.Optional(CONF_URL_PREFIX, default="/webdav"): cv.string,
         cv.Optional(CONF_PORT, default=8081): cv.port,
@@ -37,8 +37,8 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    storage_host_var = await cg.get_variable(config[CONF_STORAGE_HOST_ID])
-    cg.add(var.set_storage_host(storage_host_var))
+    storage_var = await cg.get_variable(config[CONF_STORAGE_ID])
+    cg.add(var.set_storage(storage_var))
 
     root_path = config[CONF_ROOT_PATH]
     url_prefix = config[CONF_URL_PREFIX]

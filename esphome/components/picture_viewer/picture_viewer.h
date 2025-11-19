@@ -9,8 +9,8 @@
 #include "esphome/components/lvgl/lvgl_esphome.h"
 #endif
 
-#ifdef USE_STORAGE_HOST
-#include "esphome/components/storage_host/file_manager.h"
+#ifdef USE_STORAGE
+#include "esphome/components/storage/file_manager.h"
 #endif
 
 #ifdef USE_TRANSCODER
@@ -134,8 +134,8 @@ class PictureViewer : public Component {
   // Configuration
   // =====================================================
 
-#ifdef USE_STORAGE_HOST
-  void set_file_manager(storage_host::FileManager *fm) { this->file_manager_ = fm; }
+#ifdef USE_STORAGE
+  void set_file_manager(storage::FileManager *fm) { this->file_manager_ = fm; }
 #endif
 
 #ifdef USE_TRANSCODER
@@ -211,7 +211,7 @@ class PictureViewer : public Component {
   // Get directory count
   size_t get_directory_count() const { return this->directories_.size(); }
 
-#ifdef USE_STORAGE_HOST
+#ifdef USE_STORAGE
   // =====================================================
   // FileManager Integration
   // =====================================================
@@ -220,7 +220,7 @@ class PictureViewer : public Component {
   /// This is the main entry point for file_manager to push directory updates
   /// @param directory_path The directory path (must match one of the configured directories)
   /// @param files The complete file list for that directory
-  void update_directory_files(const std::string &directory_path, const std::vector<storage_host::FileInfo> &files) {
+  void update_directory_files(const std::string &directory_path, const std::vector<storage::FileInfo> &files) {
     this->update_directory_files_(directory_path, files);
   }
 #endif
@@ -339,8 +339,8 @@ class PictureViewer : public Component {
 
  protected:
   // Configuration
-#ifdef USE_STORAGE_HOST
-  storage_host::FileManager *file_manager_{nullptr};
+#ifdef USE_STORAGE
+  storage::FileManager *file_manager_{nullptr};
 #endif
 
 #ifdef USE_TRANSCODER
@@ -470,9 +470,9 @@ class PictureViewer : public Component {
   // =====================================================
   // Internal Methods
   // =====================================================
-#ifdef USE_STORAGE_HOST
+#ifdef USE_STORAGE
   /// Scan directory for images from provided file list
-  void scan_directory_(const std::vector<storage_host::FileInfo> &files);
+  void scan_directory_(const std::vector<storage::FileInfo> &files);
 #endif
   /// Load JPEG file and decode
   bool load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
@@ -609,8 +609,8 @@ class PictureViewer : public Component {
   /// FileManager callback - called when directory changes
   /// @param directory_path The directory path that changed
   /// @param files The updated file list for that directory
-#ifdef USE_STORAGE_HOST
-  void update_directory_files_(const std::string &directory_path, const std::vector<storage_host::FileInfo> &files);
+#ifdef USE_STORAGE
+  void update_directory_files_(const std::string &directory_path, const std::vector<storage::FileInfo> &files);
 #endif
 };
 

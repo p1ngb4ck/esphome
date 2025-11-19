@@ -11,10 +11,10 @@
 #include <dirent.h>
 #include <cstring>
 
-// Soft dependency on storage_host
-#if defined(USE_STORAGE_HOST)
-#include "esphome/components/storage_host/storage_host.h"
-#endif  // USE_STORAGE_HOST
+// Soft dependency on storage
+#if defined(USE_STORAGE)
+#include "esphome/components/storage/storage.h"
+#endif  // USE_STORAGE
 
 namespace esphome {
 namespace binary_storage {
@@ -580,7 +580,7 @@ void LittleFSMount::setup() {
   // Attempt to mount
   if (this->mount_()) {
     ESP_LOGI(TAG, "Successfully mounted LittleFS at %s", this->mount_path_.c_str());
-    this->register_with_storage_host_();
+    this->register_with_storage_();
     this->register_with_vfs_();
   } else {
     ESP_LOGE(TAG, "Failed to mount LittleFS!");
@@ -750,21 +750,21 @@ bool LittleFSMount::format() {
   return true;
 }
 
-void LittleFSMount::register_with_storage_host_() {
-#if defined(USE_STORAGE_HOST)
-  // Check if storage_host is available via global accessor (soft dependency)
-  if (storage_host::global_storage_host != nullptr) {
-    // Storage host exists, register this mount point
+void LittleFSMount::register_with_storage_() {
+#if defined(USE_STORAGE)
+  // Check if storage is available via global accessor (soft dependency)
+  if (storage::global_storage != nullptr) {
+    // Storage exists, register this mount point
     std::string platform = this->storage_->get_device_type();
-    storage_host::global_storage_host->register_mount(this->mount_path_, platform);
-    ESP_LOGI(TAG, "Registered LittleFS mount with storage_host: %s (platform: %s)", this->mount_path_.c_str(),
+    storage::global_storage->register_mount(this->mount_path_, platform);
+    ESP_LOGI(TAG, "Registered LittleFS mount with storage: %s (platform: %s)", this->mount_path_.c_str(),
              platform.c_str());
   } else {
-    ESP_LOGD(TAG, "storage_host not available, mount will be standalone");
+    ESP_LOGD(TAG, "storage not available, mount will be standalone");
   }
 #else
-  ESP_LOGD(TAG, "storage_host component not compiled, mount registration disabled");
-#endif  // USE_STORAGE_HOST
+  ESP_LOGD(TAG, "storage component not compiled, mount registration disabled");
+#endif  // USE_STORAGE
 }
 
 void LittleFSMount::register_with_vfs_() {

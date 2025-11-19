@@ -53,7 +53,7 @@ struct LfsVfsDir {
  * Features:
  * - Auto-format on first mount (optional)
  * - Custom block device adapter for BinaryStorage
- * - Integrates with storage_host for unified access
+ * - Integrates with storage for unified access
  */
 class LittleFSMount : public Component {
  public:
@@ -186,9 +186,9 @@ class LittleFSMount : public Component {
   void register_with_vfs_();
 
   /**
-   * @brief Register with storage_host
+   * @brief Register with storage
    */
-  void register_with_storage_host_();
+  void register_with_storage_();
 };
 
 }  // namespace binary_storage

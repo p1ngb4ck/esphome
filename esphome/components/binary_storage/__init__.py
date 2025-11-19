@@ -388,7 +388,7 @@ async def to_code(config):
         if CONF_AUTO_FORMAT in config:
             cg.add(mount_var.set_auto_format(config[CONF_AUTO_FORMAT]))
 
-    # Register device node with storage_host if mode is raw or both
+    # Register device node with storage if mode is raw or both
     if mode in [MODE_RAW, MODE_BOTH]:
         # Auto-generate device node path from device type and id
         from esphome.core import CORE
@@ -400,14 +400,14 @@ async def to_code(config):
         # Generate device node path (e.g., /dev/fram0, /dev/eeprom1)
         device_node_path = f"/dev/{device_type.lower()}{device_counter}"
 
-        # Register device node with storage_host (soft dependency via C++ check)
-        cg.add(var.register_with_storage_host(device_node_path))
+        # Register device node with storage (soft dependency via C++ check)
+        cg.add(var.register_with_storage(device_node_path))
 
         # Increment counter for next device
         CORE.data[device_counter_key] = device_counter + 1
 
-    # Store device reference in CORE.data for storage_host to access
-    # This allows storage_host to register callbacks with binary_storage devices
+    # Store device reference in CORE.data for storage to access
+    # This allows storage to register callbacks with binary_storage devices
     from esphome.core import CORE
 
     if not hasattr(CORE, "data"):

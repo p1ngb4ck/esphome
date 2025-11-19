@@ -263,7 +263,7 @@ on_boot:
 
 ## Integration with Storage Host
 
-When used with the `storage_host` component, binary storage devices automatically register:
+When used with the `storage` component, binary storage devices automatically register:
 
 - **Raw mode**: Device nodes like `/dev/fram0`, `/dev/eeprom0`
 - **LittleFS mode**: Mount points like `/fram`, `/data`
@@ -375,6 +375,6 @@ LittleFS mounting requires ESP-IDF framework.
 
 ## See Also
 
-- [storage_host](../storage_host/) - Unified storage management
+- [storage](../storage/) - Unified storage management
 - [I2C Bus](https://esphome.io/components/i2c.html)
 - [SPI Bus](https://esphome.io/components/spi.html)

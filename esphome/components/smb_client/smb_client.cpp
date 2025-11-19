@@ -15,12 +15,12 @@
 #include <MD5.h>
 #endif
 
-// Forward declare storage_host for soft dependency
-#if defined(USE_STORAGE_HOST)
-namespace storage_host {
-extern class StorageHost *global_storage_host;
+// Forward declare storage for soft dependency
+#if defined(USE_STORAGE)
+namespace storage {
+extern class StorageHost *global_storage;
 }
-#endif  // USE_STORAGE_HOST
+#endif  // USE_STORAGE
 
 namespace esphome {
 namespace smb_client {
@@ -277,9 +277,9 @@ void SMBClient::setup() {
   if (this->connect()) {
     ESP_LOGI(TAG, "Successfully connected to SMB share");
 
-    // Register with storage_host if configured
+    // Register with storage if configured
     if (!this->mount_path_.empty()) {
-      this->register_with_storage_host();
+      this->register_with_storage();
     }
   } else {
     ESP_LOGW(TAG, "Failed to connect to SMB share (will retry in loop)");
@@ -310,17 +310,17 @@ void SMBClient::dump_config() {
   }
 }
 
-void SMBClient::register_with_storage_host() {
-#if defined(USE_STORAGE_HOST)
-  if (storage_host::global_storage_host != nullptr) {
-    storage_host::global_storage_host->register_network_storage(this);
-    ESP_LOGI(TAG, "Registered SMB network storage with storage_host: %s", this->mount_path_.c_str());
+void SMBClient::register_with_storage() {
+#if defined(USE_STORAGE)
+  if (storage::global_storage != nullptr) {
+    storage::global_storage->register_network_storage(this);
+    ESP_LOGI(TAG, "Registered SMB network storage with storage: %s", this->mount_path_.c_str());
   } else {
-    ESP_LOGD(TAG, "storage_host not available, skipping network storage registration");
+    ESP_LOGD(TAG, "storage not available, skipping network storage registration");
   }
 #else
-  ESP_LOGD(TAG, "storage_host component not compiled, network storage registration disabled");
-#endif  // USE_STORAGE_HOST
+  ESP_LOGD(TAG, "storage component not compiled, network storage registration disabled");
+#endif  // USE_STORAGE
 }
 
 //========================================================================
@@ -386,7 +386,8 @@ void SMBClient::disconnect() {
 bool SMBClient::connect_socket_() {
 #ifdef USE_ESP_IDF
   // ESP-IDF implementation
-  struct addrinfo hints{}, *result = nullptr;
+  struct addrinfo hints {
+  }, *result = nullptr;
   std::memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -731,13 +732,13 @@ bool SMBClient::smb2_session_setup_() {
 
   // Session setup request body
   this->encode_uint16_(request, 25);
-  request.push_back(0);  // Flags
-  request.push_back(SMB2_NEGOTIATE_SIGNING_ENABLED);  // Security mode
-  this->encode_uint32_(request, 0);  // Capabilities
-  this->encode_uint32_(request, 0);  // Channel
-  this->encode_uint16_(request, SMB2_HEADER_SIZE + 24);  // Security buffer offset
+  request.push_back(0);                                     // Flags
+  request.push_back(SMB2_NEGOTIATE_SIGNING_ENABLED);        // Security mode
+  this->encode_uint32_(request, 0);                         // Capabilities
+  this->encode_uint32_(request, 0);                         // Channel
+  this->encode_uint16_(request, SMB2_HEADER_SIZE + 24);     // Security buffer offset
   this->encode_uint16_(request, ntlm_authenticate.size());  // Security buffer length
-  this->encode_uint64_(request, 0);  // Previous session ID
+  this->encode_uint64_(request, 0);                         // Previous session ID
 
   // Security buffer (NTLM authenticate)
   request.insert(request.end(), ntlm_authenticate.begin(), ntlm_authenticate.end());
@@ -1504,8 +1505,7 @@ std::vector<uint8_t> SMBClient::ntlmv2_hash_(const std::string &username, const 
 std::vector<uint8_t> SMBClient::compute_ntlmv2_response_(const std::vector<uint8_t> &ntlmv2_hash,
                                                          const std::vector<uint8_t> &server_challenge,
                                                          const std::vector<uint8_t> &client_challenge,
-                                                         uint64_t timestamp,
-                                                         const std::vector<uint8_t> &target_info) {
+                                                         uint64_t timestamp, const std::vector<uint8_t> &target_info) {
   // NTLMv2 response = HMAC-MD5(ntlmv2_hash, server_challenge + blob)
   // Blob = 0x01010000 + reserved(4) + timestamp(8) + client_challenge(8) + 0x00000000 + target_info + 0x00000000
 
@@ -1608,8 +1608,7 @@ std::vector<uint8_t> SMBClient::create_ntlm_negotiate_() {
 
   // Flags (4 bytes)
   uint32_t flags = NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_NEGOTIATE_NTLM | NTLMSSP_REQUEST_TARGET |
-                   NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY | NTLMSSP_NEGOTIATE_ALWAYS_SIGN |
-                   NTLMSSP_NEGOTIATE_128;
+                   NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY | NTLMSSP_NEGOTIATE_ALWAYS_SIGN | NTLMSSP_NEGOTIATE_128;
   this->encode_uint32_(message, flags);
 
   // Domain (8 bytes: length, length, offset) - empty
@@ -1719,8 +1718,7 @@ std::vector<uint8_t> SMBClient::create_ntlm_authenticate_(const std::vector<uint
 
   // Flags (4 bytes)
   uint32_t flags = NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_NEGOTIATE_NTLM | NTLMSSP_REQUEST_TARGET |
-                   NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY | NTLMSSP_NEGOTIATE_ALWAYS_SIGN |
-                   NTLMSSP_NEGOTIATE_128;
+                   NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY | NTLMSSP_NEGOTIATE_ALWAYS_SIGN | NTLMSSP_NEGOTIATE_128;
   this->encode_uint32_(message, flags);
 
   // Append payload data
@@ -1973,10 +1971,9 @@ bool SMBClient::delete_directory(const std::string &path) {
   return true;
 }
 
-#if defined(USE_STORAGE_HOST)
+#if defined(USE_STORAGE)
 // NetworkStorage interface override - converts SMB2DirEntry to NetworkStorage::DirEntry
-bool SMBClient::list_directory(const std::string &path,
-                                std::vector<storage_host::NetworkStorage::DirEntry> &entries) {
+bool SMBClient::list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) {
   // Call existing SMB-specific list_directory
   std::vector<SMB2DirEntry> smb_entries;
   if (!this->list_directory(path, smb_entries)) {
@@ -1987,7 +1984,7 @@ bool SMBClient::list_directory(const std::string &path,
   entries.clear();
   entries.reserve(smb_entries.size());
   for (const auto &smb_entry : smb_entries) {
-    storage_host::NetworkStorage::DirEntry entry;
+    storage::NetworkStorage::DirEntry entry;
     entry.name = smb_entry.filename;
     entry.size = smb_entry.file_size;
     entry.is_directory = smb_entry.is_directory();

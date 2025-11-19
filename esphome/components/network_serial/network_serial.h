@@ -27,32 +27,32 @@ static const char *const TAG = "network_serial";
 
 /// Telnet command codes
 enum TelnetCommand : uint8_t {
-  TELNET_SE = 240,     ///< End of subnegotiation parameters
-  TELNET_NOP = 241,    ///< No operation
-  TELNET_DM = 242,     ///< Data mark
-  TELNET_BRK = 243,    ///< Break
-  TELNET_IP = 244,     ///< Interrupt process
-  TELNET_AO = 245,     ///< Abort output
-  TELNET_AYT = 246,    ///< Are you there
-  TELNET_EC = 247,     ///< Erase character
-  TELNET_EL = 248,     ///< Erase line
-  TELNET_GA = 249,     ///< Go ahead
-  TELNET_SB = 250,     ///< Subnegotiation begin
-  TELNET_WILL = 251,   ///< Will (option negotiation)
-  TELNET_WONT = 252,   ///< Won't (option negotiation)
-  TELNET_DO = 253,     ///< Do (option negotiation)
-  TELNET_DONT = 254,   ///< Don't (option negotiation)
-  TELNET_IAC = 255,    ///< Interpret as command
+  TELNET_SE = 240,    ///< End of subnegotiation parameters
+  TELNET_NOP = 241,   ///< No operation
+  TELNET_DM = 242,    ///< Data mark
+  TELNET_BRK = 243,   ///< Break
+  TELNET_IP = 244,    ///< Interrupt process
+  TELNET_AO = 245,    ///< Abort output
+  TELNET_AYT = 246,   ///< Are you there
+  TELNET_EC = 247,    ///< Erase character
+  TELNET_EL = 248,    ///< Erase line
+  TELNET_GA = 249,    ///< Go ahead
+  TELNET_SB = 250,    ///< Subnegotiation begin
+  TELNET_WILL = 251,  ///< Will (option negotiation)
+  TELNET_WONT = 252,  ///< Won't (option negotiation)
+  TELNET_DO = 253,    ///< Do (option negotiation)
+  TELNET_DONT = 254,  ///< Don't (option negotiation)
+  TELNET_IAC = 255,   ///< Interpret as command
 };
 
 /// Telnet option codes
 enum TelnetOption : uint8_t {
-  TELNET_BINARY = 0,          ///< Binary transmission
-  TELNET_ECHO = 1,            ///< Echo
-  TELNET_SUPPRESS_GO_AHEAD = 3, ///< Suppress Go Ahead
-  TELNET_STATUS = 5,          ///< Status
-  TELNET_TIMING_MARK = 6,     ///< Timing mark
-  TELNET_COM_PORT = 44,       ///< Com Port Control (RFC 2217)
+  TELNET_BINARY = 0,             ///< Binary transmission
+  TELNET_ECHO = 1,               ///< Echo
+  TELNET_SUPPRESS_GO_AHEAD = 3,  ///< Suppress Go Ahead
+  TELNET_STATUS = 5,             ///< Status
+  TELNET_TIMING_MARK = 6,        ///< Timing mark
+  TELNET_COM_PORT = 44,          ///< Com Port Control (RFC 2217)
 };
 
 //========================================================================
@@ -61,18 +61,18 @@ enum TelnetOption : uint8_t {
 
 /// RFC 2217 server-to-client commands
 enum RFC2217ServerCommand : uint8_t {
-  RFC2217_SET_BAUDRATE = 1,      ///< Set baud rate
-  RFC2217_SET_DATASIZE = 2,      ///< Set data size (5-8 bits)
-  RFC2217_SET_PARITY = 3,        ///< Set parity
-  RFC2217_SET_STOPSIZE = 4,      ///< Set stop bits
-  RFC2217_SET_CONTROL = 5,       ///< Set control (flow control)
-  RFC2217_NOTIFY_LINESTATE = 6,  ///< Line state notification
-  RFC2217_NOTIFY_MODEMSTATE = 7, ///< Modem state notification
+  RFC2217_SET_BAUDRATE = 1,          ///< Set baud rate
+  RFC2217_SET_DATASIZE = 2,          ///< Set data size (5-8 bits)
+  RFC2217_SET_PARITY = 3,            ///< Set parity
+  RFC2217_SET_STOPSIZE = 4,          ///< Set stop bits
+  RFC2217_SET_CONTROL = 5,           ///< Set control (flow control)
+  RFC2217_NOTIFY_LINESTATE = 6,      ///< Line state notification
+  RFC2217_NOTIFY_MODEMSTATE = 7,     ///< Modem state notification
   RFC2217_FLOWCONTROL_SUSPEND = 8,   ///< Flow control suspend
   RFC2217_FLOWCONTROL_RESUME = 9,    ///< Flow control resume
   RFC2217_SET_LINESTATE_MASK = 10,   ///< Set line state mask
   RFC2217_SET_MODEMSTATE_MASK = 11,  ///< Set modem state mask
-  RFC2217_PURGE_DATA = 12,       ///< Purge data
+  RFC2217_PURGE_DATA = 12,           ///< Purge data
 };
 
 /// RFC 2217 client-to-server commands (add 100 to server command)
@@ -124,14 +124,14 @@ enum FlowControl : uint8_t {
 
 /// Modem state bits
 enum ModemState : uint8_t {
-  MODEM_STATE_DELTA_CTS = (1 << 0),  ///< CTS changed
-  MODEM_STATE_DELTA_DSR = (1 << 1),  ///< DSR changed
-  MODEM_STATE_TRAILING_EDGE_RI = (1 << 2), ///< RI trailing edge
-  MODEM_STATE_DELTA_DCD = (1 << 3),  ///< DCD changed
-  MODEM_STATE_CTS = (1 << 4),        ///< CTS state
-  MODEM_STATE_DSR = (1 << 5),        ///< DSR state
-  MODEM_STATE_RI = (1 << 6),         ///< RI state
-  MODEM_STATE_DCD = (1 << 7),        ///< DCD state
+  MODEM_STATE_DELTA_CTS = (1 << 0),         ///< CTS changed
+  MODEM_STATE_DELTA_DSR = (1 << 1),         ///< DSR changed
+  MODEM_STATE_TRAILING_EDGE_RI = (1 << 2),  ///< RI trailing edge
+  MODEM_STATE_DELTA_DCD = (1 << 3),         ///< DCD changed
+  MODEM_STATE_CTS = (1 << 4),               ///< CTS state
+  MODEM_STATE_DSR = (1 << 5),               ///< DSR state
+  MODEM_STATE_RI = (1 << 6),                ///< RI state
+  MODEM_STATE_DCD = (1 << 7),               ///< DCD state
 };
 
 /// Line state bits
@@ -148,13 +148,13 @@ enum LineState : uint8_t {
 
 /// Control signal bits
 enum ControlSignal : uint8_t {
-  CONTROL_DTR = (1 << 0),       ///< DTR (Data Terminal Ready)
-  CONTROL_RTS = (1 << 1),       ///< RTS (Request To Send)
-  CONTROL_DTR_ON = (1 << 3),    ///< DTR on
-  CONTROL_DTR_OFF = (1 << 4),   ///< DTR off
-  CONTROL_RTS_ON = (1 << 5),    ///< RTS on
-  CONTROL_RTS_OFF = (1 << 6),   ///< RTS off
-  CONTROL_FLOW_CONTROL = (1 << 7), ///< Flow control
+  CONTROL_DTR = (1 << 0),           ///< DTR (Data Terminal Ready)
+  CONTROL_RTS = (1 << 1),           ///< RTS (Request To Send)
+  CONTROL_DTR_ON = (1 << 3),        ///< DTR on
+  CONTROL_DTR_OFF = (1 << 4),       ///< DTR off
+  CONTROL_RTS_ON = (1 << 5),        ///< RTS on
+  CONTROL_RTS_OFF = (1 << 6),       ///< RTS off
+  CONTROL_FLOW_CONTROL = (1 << 7),  ///< Flow control
 };
 
 /// Purge data flags
@@ -215,7 +215,7 @@ struct SerialConfig {
  *     data_bits: 8
  *     parity: NONE
  *     stop_bits: 1
- *     device_node: /dev/ttyNET0  # Optional, for storage_host
+ *     device_node: /dev/ttyNET0  # Optional, for storage
  * @endcode
  */
 class NetworkSerialClient : public Component {
@@ -251,9 +251,9 @@ class NetworkSerialClient : public Component {
   //========================================================================
 
   /**
-   * @brief Register this serial client with storage_host
+   * @brief Register this serial client with storage
    */
-  void register_with_storage_host();
+  void register_with_storage();
 
   //========================================================================
   // Connection Management

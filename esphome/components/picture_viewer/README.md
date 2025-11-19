@@ -51,8 +51,8 @@ This example shows how file_manager sends the complete file list to picture_view
 
 ```yaml
 # Configure storage
-storage_host:
-  id: storage
+storage:
+  id: storage_id
   sd_card:
     cs_pin: GPIO10
     spi_id: spi_bus
@@ -104,8 +104,8 @@ picture_viewer:
 This example shows how to handle real-time file changes (add/remove files while running). The callback triggers on any directory change and sends the updated file list.
 
 ```yaml
-storage_host:
-  id: storage
+storage:
+  id: storage_id
   sd_card:
     cs_pin: GPIO10
     spi_id: spi_bus
@@ -151,8 +151,8 @@ picture_viewer:
 This example shows monitoring multiple directories with per-directory JPEG decoder settings.
 
 ```yaml
-storage_host:
-  id: storage
+storage:
+  id: storage_id
   sd_card:
     cs_pin: GPIO10
     spi_id: spi_bus
@@ -442,14 +442,14 @@ void PictureViewer::setup() {
   // Register callback with FileManager
   if (this->file_manager_ != nullptr) {
     this->file_manager_->add_on_directory_changed_callback(
-      [this](const storage_host::DirectoryChangeInfo &info) {
+      [this](const storage::DirectoryChangeInfo &info) {
         this->on_directory_changed_(info);
       }
     );
   }
 }
 
-void PictureViewer::on_directory_changed_(const storage_host::DirectoryChangeInfo &info) {
+void PictureViewer::on_directory_changed_(const storage::DirectoryChangeInfo &info) {
   ESP_LOGI(TAG, "Directory changed: %zu files", info.file_count);
 
   // Refresh image list

@@ -5,12 +5,12 @@
 #include <cstring>
 #include <algorithm>
 
-// Forward declare storage_host for soft dependency
-#if defined(USE_STORAGE_HOST)
-namespace storage_host {
-extern class StorageHost *global_storage_host;
+// Forward declare storage for soft dependency
+#if defined(USE_STORAGE)
+namespace storage {
+extern class StorageHost *global_storage;
 }
-#endif  // USE_STORAGE_HOST
+#endif  // USE_STORAGE
 
 namespace esphome {
 namespace nfs_client {
@@ -146,13 +146,9 @@ bool XDRBuffer::decode_bool(bool &value) {
 // NFS Structures Implementation
 //========================================================================
 
-void NFSFileHandle::encode(XDRBuffer &xdr) const {
-  xdr.encode_opaque(this->data.data(), this->data.size());
-}
+void NFSFileHandle::encode(XDRBuffer &xdr) const { xdr.encode_opaque(this->data.data(), this->data.size()); }
 
-bool NFSFileHandle::decode(XDRBuffer &xdr) {
-  return xdr.decode_opaque(this->data);
-}
+bool NFSFileHandle::decode(XDRBuffer &xdr) { return xdr.decode_opaque(this->data); }
 
 bool NFSFileAttr::decode(XDRBuffer &xdr) {
   uint32_t type_val;
@@ -173,14 +169,14 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
 //========================================================================
 
 void RPCClient::build_call(XDRBuffer &xdr, uint32_t xid, uint32_t program, uint32_t version, uint32_t procedure,
-                            uint32_t uid, uint32_t gid) {
+                           uint32_t uid, uint32_t gid) {
   // RPC call header
-  xdr.encode_uint32(xid);              // XID
-  xdr.encode_uint32(RPC_CALL);         // Message type
-  xdr.encode_uint32(2);                // RPC version
-  xdr.encode_uint32(program);          // Program
-  xdr.encode_uint32(version);          // Version
-  xdr.encode_uint32(procedure);        // Procedure
+  xdr.encode_uint32(xid);        // XID
+  xdr.encode_uint32(RPC_CALL);   // Message type
+  xdr.encode_uint32(2);          // RPC version
+  xdr.encode_uint32(program);    // Program
+  xdr.encode_uint32(version);    // Version
+  xdr.encode_uint32(procedure);  // Procedure
 
   // Authentication
   if (uid != 0 || gid != 0) {
@@ -239,10 +235,10 @@ void RPCClient::encode_auth_unix_(XDRBuffer &xdr, uint32_t uid, uint32_t gid) {
   // Build AUTH_UNIX structure
   XDRBuffer auth_data;
   auth_data.encode_uint32(static_cast<uint32_t>(millis() / 1000));  // Timestamp
-  auth_data.encode_string("esphome");                                // Machine name
-  auth_data.encode_uint32(uid);                                      // UID
-  auth_data.encode_uint32(gid);                                      // GID
-  auth_data.encode_uint32(0);                                        // No auxiliary GIDs
+  auth_data.encode_string("esphome");                               // Machine name
+  auth_data.encode_uint32(uid);                                     // UID
+  auth_data.encode_uint32(gid);                                     // GID
+  auth_data.encode_uint32(0);                                       // No auxiliary GIDs
 
   // Encode AUTH_UNIX data as opaque
   xdr.encode_opaque(auth_data.data().data(), auth_data.size());
@@ -273,9 +269,9 @@ void NFSClient::setup() {
   if (this->mount()) {
     ESP_LOGI(TAG, "Successfully mounted NFS export");
 
-    // Register with storage_host if configured
+    // Register with storage if configured
     if (!this->mount_path_.empty()) {
-      this->register_with_storage_host();
+      this->register_with_storage();
     }
   } else {
     ESP_LOGW(TAG, "Failed to mount NFS export (will retry in loop)");
@@ -306,17 +302,17 @@ void NFSClient::dump_config() {
   }
 }
 
-void NFSClient::register_with_storage_host() {
-#if defined(USE_STORAGE_HOST)
-  if (storage_host::global_storage_host != nullptr) {
-    storage_host::global_storage_host->register_network_storage(this);
-    ESP_LOGI(TAG, "Registered NFS network storage with storage_host: %s", this->mount_path_.c_str());
+void NFSClient::register_with_storage() {
+#if defined(USE_STORAGE)
+  if (storage::global_storage != nullptr) {
+    storage::global_storage->register_network_storage(this);
+    ESP_LOGI(TAG, "Registered NFS network storage with storage: %s", this->mount_path_.c_str());
   } else {
-    ESP_LOGD(TAG, "storage_host not available, skipping network storage registration");
+    ESP_LOGD(TAG, "storage not available, skipping network storage registration");
   }
 #else
-  ESP_LOGD(TAG, "storage_host component not compiled, network storage registration disabled");
-#endif  // USE_STORAGE_HOST
+  ESP_LOGD(TAG, "storage component not compiled, network storage registration disabled");
+#endif  // USE_STORAGE
 }
 
 //========================================================================
@@ -436,10 +432,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  uint32_t response_length = (static_cast<uint32_t>(response_length_buf[0]) << 24) |
-                             (static_cast<uint32_t>(response_length_buf[1]) << 16) |
-                             (static_cast<uint32_t>(response_length_buf[2]) << 8) |
-                             static_cast<uint32_t>(response_length_buf[3]);
+  uint32_t response_length =
+      (static_cast<uint32_t>(response_length_buf[0]) << 24) | (static_cast<uint32_t>(response_length_buf[1]) << 16) |
+      (static_cast<uint32_t>(response_length_buf[2]) << 8) | static_cast<uint32_t>(response_length_buf[3]);
 
   response_length &= 0x7FFFFFFF;  // Clear high bit
 
@@ -450,8 +445,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 
   // Receive response data
   std::vector<uint8_t> response_data(response_length);
-  if (recv(this->socket_, response_data.data(), response_length, MSG_WAITALL) !=
-      static_cast<int>(response_length)) {
+  if (recv(this->socket_, response_data.data(), response_length, MSG_WAITALL) != static_cast<int>(response_length)) {
     ESP_LOGE(TAG, "Failed to receive RPC response data");
     return false;
   }
@@ -485,10 +479,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   uint8_t response_length_buf[4];
   this->client_->read(response_length_buf, 4);
 
-  uint32_t response_length = (static_cast<uint32_t>(response_length_buf[0]) << 24) |
-                             (static_cast<uint32_t>(response_length_buf[1]) << 16) |
-                             (static_cast<uint32_t>(response_length_buf[2]) << 8) |
-                             static_cast<uint32_t>(response_length_buf[3]);
+  uint32_t response_length =
+      (static_cast<uint32_t>(response_length_buf[0]) << 24) | (static_cast<uint32_t>(response_length_buf[1]) << 16) |
+      (static_cast<uint32_t>(response_length_buf[2]) << 8) | static_cast<uint32_t>(response_length_buf[3]);
 
   response_length &= 0x7FFFFFFF;
 
@@ -900,11 +893,11 @@ bool NFSClient::nfs_create_(const NFSFileHandle &dir_fh, const std::string &name
   request.encode_uint32(0);  // UNCHECKED
 
   // Set attributes
-  request.encode_bool(true);   // mode
+  request.encode_bool(true);  // mode
   request.encode_uint32(mode);
-  request.encode_bool(true);   // uid
+  request.encode_bool(true);  // uid
   request.encode_uint32(this->uid_);
-  request.encode_bool(true);   // gid
+  request.encode_bool(true);  // gid
   request.encode_uint32(this->gid_);
   request.encode_bool(false);  // size
   request.encode_uint32(0);    // atime: don't set
@@ -979,11 +972,11 @@ bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name,
   request.encode_string(name);
 
   // Set attributes
-  request.encode_bool(true);   // mode
+  request.encode_bool(true);              // mode
   request.encode_uint32(mode | 0040000);  // Add directory bit
-  request.encode_bool(true);   // uid
+  request.encode_bool(true);              // uid
   request.encode_uint32(this->uid_);
-  request.encode_bool(true);   // gid
+  request.encode_bool(true);  // gid
   request.encode_uint32(this->gid_);
   request.encode_bool(false);  // size
   request.encode_uint32(0);    // atime
@@ -1269,9 +1262,9 @@ bool NFSClient::get_file_attributes(const std::string &path, NFSFileAttr &attr) 
   return this->resolve_path_(path, fh, attr);
 }
 
-#if defined(USE_STORAGE_HOST)
+#if defined(USE_STORAGE)
 // NetworkStorage interface override - converts NFSDirEntry to NetworkStorage::DirEntry
-bool NFSClient::list_directory(const std::string &path, std::vector<storage_host::NetworkStorage::DirEntry> &entries) {
+bool NFSClient::list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) {
   // Call existing NFS-specific list_directory
   std::vector<NFSDirEntry> nfs_entries;
   if (!this->list_directory(path, nfs_entries)) {
@@ -1282,7 +1275,7 @@ bool NFSClient::list_directory(const std::string &path, std::vector<storage_host
   entries.clear();
   entries.reserve(nfs_entries.size());
   for (const auto &nfs_entry : nfs_entries) {
-    storage_host::NetworkStorage::DirEntry entry;
+    storage::NetworkStorage::DirEntry entry;
     entry.name = nfs_entry.name;
     entry.size = nfs_entry.size;
     entry.is_directory = nfs_entry.is_directory;

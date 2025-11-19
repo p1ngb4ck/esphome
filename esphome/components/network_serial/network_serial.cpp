@@ -5,12 +5,12 @@
 #include <cstring>
 #include <algorithm>
 
-// Forward declare storage_host for soft dependency
-#if defined(USE_STORAGE_HOST)
-namespace storage_host {
-extern class StorageHost *global_storage_host;
+// Forward declare storage for soft dependency
+#if defined(USE_STORAGE)
+namespace storage {
+extern class StorageHost *global_storage;
 }
-#endif  // USE_STORAGE_HOST
+#endif  // USE_STORAGE
 
 namespace esphome {
 namespace network_serial {
@@ -39,9 +39,9 @@ void NetworkSerialClient::setup() {
   this->tx_buffer_.reserve(MAX_BUFFER_SIZE);
   this->telnet_buffer_.reserve(256);
 
-  // Register with storage_host if configured
+  // Register with storage if configured
   if (!this->device_node_.empty()) {
-    this->register_with_storage_host();
+    this->register_with_storage();
   }
 }
 
@@ -100,21 +100,21 @@ void NetworkSerialClient::dump_config() {
   }
 }
 
-void NetworkSerialClient::register_with_storage_host() {
-#if defined(USE_STORAGE_HOST)
-  // Check if storage_host is available (soft dependency)
-  if (storage_host::global_storage_host != nullptr) {
+void NetworkSerialClient::register_with_storage() {
+#if defined(USE_STORAGE)
+  // Check if storage is available (soft dependency)
+  if (storage::global_storage != nullptr) {
     // Register as network_serial type device node
-    // Note: This requires storage_host to support network_serial devices
+    // Note: This requires storage to support network_serial devices
     // For now, we just log the registration
     ESP_LOGI(TAG, "Network serial device node: %s", this->device_node_.c_str());
-    // TODO: Extend storage_host to support network serial devices
+    // TODO: Extend storage to support network serial devices
   } else {
-    ESP_LOGD(TAG, "storage_host not available, skipping device node registration");
+    ESP_LOGD(TAG, "storage not available, skipping device node registration");
   }
 #else
-  ESP_LOGD(TAG, "storage_host component not compiled, device node registration disabled");
-#endif  // USE_STORAGE_HOST
+  ESP_LOGD(TAG, "storage component not compiled, device node registration disabled");
+#endif  // USE_STORAGE
 }
 
 //========================================================================

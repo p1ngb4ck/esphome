@@ -4,9 +4,9 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
-// Forward declaration for storage_host::NetworkStorage (soft dependency)
-#if defined(USE_STORAGE_HOST)
-#include "esphome/components/storage_host/network_storage.h"
+// Forward declaration for storage::NetworkStorage (soft dependency)
+#if defined(USE_STORAGE)
+#include "esphome/components/storage/network_storage.h"
 #endif
 
 #ifdef USE_ESP_IDF
@@ -324,14 +324,14 @@ struct SMB2DirEntry {
  *     share: Public
  *     username: user
  *     password: !secret smb_password
- *     mount_path: /smb/windows  # For storage_host
+ *     mount_path: /smb/windows  # For storage
  *     domain: WORKGROUP  # Optional
  * @endcode
  */
 class SMBClient : public Component
-#if defined(USE_STORAGE_HOST)
-                  ,
-                  public storage_host::NetworkStorage
+#if defined(USE_STORAGE)
+    ,
+                  public storage::NetworkStorage
 #endif
 {
  public:
@@ -362,7 +362,7 @@ class SMBClient : public Component
   // Storage Host Integration (soft dependency)
   //========================================================================
 
-  void register_with_storage_host();
+  void register_with_storage();
 
   //========================================================================
   // Connection Management
@@ -390,10 +390,10 @@ class SMBClient : public Component
   bool delete_directory(const std::string &path);
 
   //========================================================================
-  // NetworkStorage Interface Implementation (when USE_STORAGE_HOST is defined)
+  // NetworkStorage Interface Implementation (when USE_STORAGE is defined)
   //========================================================================
 
-#if defined(USE_STORAGE_HOST)
+#if defined(USE_STORAGE)
   // NetworkStorage interface overrides
   bool is_connected() const override { return this->connected_; }
   const std::string &get_mount_path() const override { return this->mount_path_; }
@@ -406,7 +406,7 @@ class SMBClient : public Component
   bool file_exists(const std::string &path) override;
 
   // Directory operations with NetworkStorage::DirEntry conversion
-  bool list_directory(const std::string &path, std::vector<storage_host::NetworkStorage::DirEntry> &entries) override;
+  bool list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) override;
   bool create_directory(const std::string &path) override;
   bool delete_directory(const std::string &path) override;
 #endif
@@ -475,8 +475,7 @@ class SMBClient : public Component
   bool smb2_close_(const SMB2FileId &file_id);
   bool smb2_read_(const SMB2FileId &file_id, uint64_t offset, uint32_t length, std::vector<uint8_t> &data);
   bool smb2_write_(const SMB2FileId &file_id, uint64_t offset, const uint8_t *data, size_t length);
-  bool smb2_query_directory_(const SMB2FileId &file_id, const std::string &pattern,
-                             std::vector<SMB2DirEntry> &entries);
+  bool smb2_query_directory_(const SMB2FileId &file_id, const std::string &pattern, std::vector<SMB2DirEntry> &entries);
 
   //========================================================================
   // NTLM Authentication
@@ -489,8 +488,8 @@ class SMBClient : public Component
                                     const std::string &domain);
   std::vector<uint8_t> compute_ntlmv2_response_(const std::vector<uint8_t> &ntlmv2_hash,
                                                 const std::vector<uint8_t> &server_challenge,
-                                                const std::vector<uint8_t> &client_challenge,
-                                                uint64_t timestamp, const std::vector<uint8_t> &target_info);
+                                                const std::vector<uint8_t> &client_challenge, uint64_t timestamp,
+                                                const std::vector<uint8_t> &target_info);
 
   //========================================================================
   // Helper Functions

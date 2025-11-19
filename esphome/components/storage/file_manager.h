@@ -10,10 +10,10 @@
 #include "esphome/core/helpers.h"
 
 namespace esphome {
-namespace storage_host {
+namespace storage {
 
 // Forward declarations
-class StorageHost;
+class Storage;
 class FileManager;
 
 // =====================================================
@@ -95,7 +95,7 @@ class FileManager : public Component {
   // Configuration
   // =====================================================
 
-  void set_storage_host(StorageHost *storage) { this->storage_host_ = storage; }
+  void set_storage(Storage *storage) { this->storage_ = storage; }
   void set_watch_directory(const std::string &path) { this->watch_directory_ = path; }
   void set_watch_file(const std::string &path) { this->watch_file_ = path; }
   void set_scan_interval(uint32_t interval_ms) { this->scan_interval_ms_ = interval_ms; }
@@ -157,7 +157,7 @@ class FileManager : public Component {
 
  protected:
   // Configuration
-  StorageHost *storage_host_{nullptr};
+  Storage *storage_{nullptr};
   std::string watch_directory_;
   std::string watch_file_;
   uint32_t scan_interval_ms_{5000};  // Default: scan every 5 seconds
@@ -211,5 +211,5 @@ class FileManager : public Component {
   std::string get_directory_(const std::string &path) const;
 };
 
-}  // namespace storage_host
+}  // namespace storage
 }  // namespace esphome

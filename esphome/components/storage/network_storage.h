@@ -6,13 +6,13 @@
 #include <cstdint>
 
 namespace esphome {
-namespace storage_host {
+namespace storage {
 
 /**
  * @brief Abstract base class for network storage devices (NFS, SMB, etc.)
  *
  * Provides a unified interface for network-based file storage systems.
- * Components implementing this interface can be registered with storage_host
+ * Components implementing this interface can be registered with storage
  * to provide transparent network file access.
  *
  * Features:
@@ -137,5 +137,5 @@ class NetworkStorage {
   }
 };
 
-}  // namespace storage_host
+}  // namespace storage
 }  // namespace esphome

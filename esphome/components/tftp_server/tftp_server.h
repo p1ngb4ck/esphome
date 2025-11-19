@@ -49,10 +49,7 @@ enum TFTPErrorCode : uint16_t {
   TFTP_ERROR_NO_SUCH_USER = 7,
 };
 
-enum TFTPMode {
-  TFTP_MODE_OCTET,
-  TFTP_MODE_NETASCII
-};
+enum TFTPMode { TFTP_MODE_OCTET, TFTP_MODE_NETASCII };
 
 //========================================================================
 // TFTP Packet Helper Functions
@@ -109,16 +106,18 @@ struct TFTPSession {
   // File handle (if using storage)
   void *file_handle;  ///< Platform-specific file handle
 
-  TFTPSession() : client_port(0), mode(TFTP_MODE_OCTET), is_write(false), current_block(0), bytes_transferred(0),
-                  last_activity(0), file_handle(nullptr) {}
+  TFTPSession()
+      : client_port(0),
+        mode(TFTP_MODE_OCTET),
+        is_write(false),
+        current_block(0),
+        bytes_transferred(0),
+        last_activity(0),
+        file_handle(nullptr) {}
 
-  bool is_expired(uint32_t timeout_ms) const {
-    return (millis() - this->last_activity) > timeout_ms;
-  }
+  bool is_expired(uint32_t timeout_ms) const { return (millis() - this->last_activity) > timeout_ms; }
 
-  std::string get_session_key() const {
-    return this->client_addr + ":" + std::to_string(this->client_port);
-  }
+  std::string get_session_key() const { return this->client_addr + ":" + std::to_string(this->client_port); }
 };
 
 //========================================================================
@@ -129,7 +128,7 @@ struct TFTPSession {
  * @brief TFTP Server for serving files over network
  *
  * Implements RFC 1350 TFTP server protocol for serving files from ESP32.
- * Can serve files from LittleFS, SPIFFS, SD card, or storage_host virtual filesystem.
+ * Can serve files from LittleFS, SPIFFS, SD card, or storage virtual filesystem.
  *
  * Features:
  * - Serve files over UDP (TFTP protocol)
