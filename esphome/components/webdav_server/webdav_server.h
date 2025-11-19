@@ -15,7 +15,7 @@
 // Forward declaration
 namespace esphome {
 namespace storage {
-class StorageHost;
+class Storage;
 }
 }  // namespace esphome
 
@@ -85,7 +85,7 @@ class WebDAVServer : public Component {
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   // Configuration setters
-  void set_storage(storage::StorageHost *storage) { this->storage_ = storage; }
+  void set_storage(storage::Storage *storage) { this->storage_ = storage; }
   void set_root_path(const std::string &root_path) { this->root_path_ = root_path; }
   void set_url_prefix(const std::string &url_prefix) { this->url_prefix_ = url_prefix; }
   void set_port(uint16_t port) { this->port_ = port; }
@@ -105,7 +105,7 @@ class WebDAVServer : public Component {
   httpd_handle_t server_{nullptr};
 
   // Storage host reference
-  storage::StorageHost *storage_{nullptr};
+  storage::Storage *storage_{nullptr};
 
   // Configuration
   std::string root_path_{};
