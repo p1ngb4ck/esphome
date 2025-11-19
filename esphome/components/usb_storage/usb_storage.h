@@ -20,6 +20,7 @@
 #include "esp_check.h"
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "esp_timer.h"
 #include "usb/msc_host.h"
 #include "usb/msc_host_vfs.h"
@@ -32,7 +33,6 @@
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <dirent.h>
 #include <functional>
 #include <vector>

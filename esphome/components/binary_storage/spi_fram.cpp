@@ -1,6 +1,7 @@
+#include "esphome/core/defines.h"
 #include "spi_fram.h"
 
-#ifdef USE_BINARY_STORAGE_SPI
+#ifdef USE_BINARY_STORAGE_SPI_FRAM
 
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -236,4 +237,4 @@ bool SPIFram::read_data_(uint32_t address, uint8_t *data, size_t length) {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_SPI
+#endif  // USE_BINARY_STORAGE_SPI_FRAM

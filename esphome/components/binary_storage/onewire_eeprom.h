@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_BINARY_STORAGE_ONEWIRE
+#ifdef USE_BINARY_STORAGE_ONEWIRE_EEPROM
 
 #include "binary_storage.h"
 #include "esphome/core/component.h"
@@ -255,4 +255,4 @@ class OneWireEEPROM : public BinaryStorage {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_ONEWIRE
+#endif  // USE_BINARY_STORAGE_ONEWIRE_EEPROM

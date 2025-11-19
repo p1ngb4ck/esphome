@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_BINARY_STORAGE_SPI
+#ifdef USE_BINARY_STORAGE_SPI_MRAM
 
 #include "binary_storage.h"
 #include "esphome/components/spi/spi.h"
@@ -169,4 +169,4 @@ class SPIMRAM : public BinaryStorage,
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_SPI
+#endif  // USE_BINARY_STORAGE_SPI_MRAM

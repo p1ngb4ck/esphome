@@ -1,6 +1,7 @@
+#include "esphome/core/defines.h"
 #include "onewire_eeprom.h"
 
-#ifdef USE_BINARY_STORAGE_ONEWIRE
+#ifdef USE_BINARY_STORAGE_ONEWIRE_EEPROM
 
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -429,4 +430,4 @@ bool OneWireEEPROM::read_memory_(uint16_t address, uint8_t *data, size_t length)
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_ONEWIRE
+#endif  // USE_BINARY_STORAGE_ONEWIRE_EEPROM

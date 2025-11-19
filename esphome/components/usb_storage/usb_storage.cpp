@@ -540,11 +540,11 @@ storage::StorageInfo USBStorageDevice::get_info() {
 
   // Get space info
   if (this->slot_ >= 0) {
-    struct statvfs stat_buf;
-    if (statvfs(this->mount_path_.c_str(), &stat_buf) == 0) {
-      info.total_bytes = (uint64_t) stat_buf.f_blocks * stat_buf.f_bsize;
-      info.free_bytes = (uint64_t) stat_buf.f_bfree * stat_buf.f_bsize;
-      info.block_size = stat_buf.f_bsize;
+    uint64_t total, free_bytes;
+    if (this->get_space_info(&total, &free_bytes)) {
+      info.total_bytes = total;
+      info.free_bytes = free_bytes;
+      info.block_size = 512;
     } else {
       info.total_bytes = 0;
       info.free_bytes = 0;
@@ -768,12 +768,30 @@ bool USBStorageDevice::get_space_info(uint64_t *total, uint64_t *free) {
   if (this->slot_ < 0)
     return false;
 
-  struct statvfs stat_buf;
-  if (statvfs(this->mount_path_.c_str(), &stat_buf) != 0)
-    return false;
+  FATFS *fs;
+  DWORD fre_clust;
 
-  *total = (uint64_t) stat_buf.f_blocks * stat_buf.f_bsize;
-  *free = (uint64_t) stat_buf.f_bfree * stat_buf.f_bsize;
+  // Get volume information and free clusters
+  // Need to append "/" to mount path for f_getfree
+  std::string path = this->mount_path_;
+  if (path.back() != '/') {
+    path += '/';
+  }
+
+  FRESULT res = f_getfree(path.c_str(), &fre_clust, &fs);
+  if (res != FR_OK) {
+    ESP_LOGW(TAG, "Failed to get filesystem info: %d", res);
+    return false;
+  }
+
+  // Calculate total and free bytes
+  // Cast to uint64_t before multiplication to avoid overflow on large drives
+  DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
+  DWORD fre_sect = fre_clust * fs->csize;
+
+  // Sector size from filesystem
+  *total = (uint64_t) tot_sect * fs->ssize;
+  *free = (uint64_t) fre_sect * fs->ssize;
   return true;
 }
 

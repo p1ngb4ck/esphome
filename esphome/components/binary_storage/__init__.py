@@ -1,5 +1,3 @@
-"""Binary Storage Component - Unified interface for FRAM, EEPROM, Flash storage devices."""
-
 from __future__ import annotations
 
 import re
@@ -321,9 +319,17 @@ async def to_code(config):
         # SPI device - register and set define for conditional compilation
         cg.add_define("USE_BINARY_STORAGE_SPI")
         await spi.register_spi_device(var, config)
+        # Add device-specific define
+        if device_type in ["SPI_FLASH", "FLASH"]:
+            cg.add_define("USE_BINARY_STORAGE_SPI_FLASH")
+        elif device_type == "SPI_FRAM":
+            cg.add_define("USE_BINARY_STORAGE_SPI_FRAM")
+        elif device_type in ["SPI_MRAM", "MRAM"]:
+            cg.add_define("USE_BINARY_STORAGE_SPI_MRAM")
     elif is_onewire:
         # OneWire device - configure pin and set define for conditional compilation
         cg.add_define("USE_BINARY_STORAGE_ONEWIRE")
+        cg.add_define("USE_BINARY_STORAGE_ONEWIRE_EEPROM")
         pin = await cg.gpio_pin_expression(config[CONF_PIN])
         cg.add(var.set_pin(pin))
         # Set ROM address if specified
@@ -333,6 +339,11 @@ async def to_code(config):
         # I2C device - register and set define for conditional compilation
         cg.add_define("USE_BINARY_STORAGE_I2C")
         await i2c.register_i2c_device(var, config)
+        # Add device-specific define
+        if device_type in ["FRAM", "I2C_FRAM"]:
+            cg.add_define("USE_BINARY_STORAGE_I2C_FRAM")
+        elif device_type in ["EEPROM", "I2C_EEPROM"]:
+            cg.add_define("USE_BINARY_STORAGE_I2C_EEPROM")
 
     # Set model name
     if CONF_MODEL in config:
@@ -393,8 +404,6 @@ async def to_code(config):
     # Register device node with storage if mode is raw or both
     if mode in [MODE_RAW, MODE_BOTH]:
         # Auto-generate device node path from device type and id
-        from esphome.core import CORE
-
         # Track device counter for automatic /dev naming
         device_counter_key = f"binary_storage_{device_type.lower()}_counter"
         device_counter = CORE.data.setdefault(device_counter_key, 0)
@@ -410,8 +419,6 @@ async def to_code(config):
 
     # Store device reference in CORE.data for storage to access
     # This allows storage to register callbacks with binary_storage devices
-    from esphome.core import CORE
-
     if not hasattr(CORE, "data"):
         CORE.data = {}
     if "binary_storage_devices" not in CORE.data:

@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_BINARY_STORAGE_I2C
+#ifdef USE_BINARY_STORAGE_I2C_FRAM
 
 #include "binary_storage.h"
 #include "esphome/components/i2c/i2c.h"
@@ -173,4 +173,4 @@ class I2CFram : public BinaryStorage, public i2c::I2CDevice {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_I2C
+#endif  // USE_BINARY_STORAGE_I2C_FRAM

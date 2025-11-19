@@ -8,6 +8,7 @@
 #include <cstdio>
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "freertos/FreeRTOS.h"
@@ -186,11 +187,10 @@ bool SdMmc::update_card_info() {
   // Get card info
   this->total_bytes_ = (uint64_t) card->csd.capacity * card->csd.sector_size;
 
-  // Get filesystem usage using statvfs
-  struct statvfs stat_buf;
-  if (statvfs(this->mount_path_.c_str(), &stat_buf) == 0) {
-    uint64_t free_bytes = (uint64_t) stat_buf.f_bfree * stat_buf.f_bsize;
-    this->used_bytes_ = this->total_bytes_ - free_bytes;
+  // Get filesystem usage using f_getfree
+  uint64_t total, free_bytes;
+  if (this->get_space_info(&total, &free_bytes)) {
+    this->used_bytes_ = total - free_bytes;
   } else {
     this->used_bytes_ = 0;
   }
@@ -199,11 +199,24 @@ bool SdMmc::update_card_info() {
 }
 
 uint64_t SdMmc::get_free_bytes() const {
-  struct statvfs stat_buf;
-  if (statvfs(this->mount_path_.c_str(), &stat_buf) == 0) {
-    return (uint64_t) stat_buf.f_bfree * stat_buf.f_bsize;
+  if (!this->is_mounted_)
+    return 0;
+
+  FATFS *fs;
+  DWORD fre_clust;
+
+  std::string path = this->mount_path_;
+  if (path.back() != '/') {
+    path += '/';
   }
-  return 0;
+
+  FRESULT res = f_getfree(path.c_str(), &fre_clust, &fs);
+  if (res != FR_OK) {
+    return 0;
+  }
+
+  DWORD fre_sect = fre_clust * fs->csize;
+  return (uint64_t) fre_sect * fs->ssize;
 }
 
 std::string SdMmc::build_full_path(const char *path) {
@@ -632,12 +645,30 @@ bool SdMmc::get_space_info(uint64_t *total, uint64_t *free) {
   if (!this->is_mounted_)
     return false;
 
-  struct statvfs stat_buf;
-  if (statvfs(this->mount_path_.c_str(), &stat_buf) != 0)
-    return false;
+  FATFS *fs;
+  DWORD fre_clust;
 
-  *total = (uint64_t) stat_buf.f_blocks * stat_buf.f_bsize;
-  *free = (uint64_t) stat_buf.f_bfree * stat_buf.f_bsize;
+  // Get volume information and free clusters
+  // Need to append "/" to mount path for f_getfree
+  std::string path = this->mount_path_;
+  if (path.back() != '/') {
+    path += '/';
+  }
+
+  FRESULT res = f_getfree(path.c_str(), &fre_clust, &fs);
+  if (res != FR_OK) {
+    ESP_LOGW(TAG, "Failed to get filesystem info: %d", res);
+    return false;
+  }
+
+  // Calculate total and free bytes
+  // Cast to uint64_t before multiplication to avoid overflow on large cards
+  DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
+  DWORD fre_sect = fre_clust * fs->csize;
+
+  // Sector size is typically 512 bytes for SD cards
+  *total = (uint64_t) tot_sect * fs->ssize;
+  *free = (uint64_t) fre_sect * fs->ssize;
   return true;
 }
 
