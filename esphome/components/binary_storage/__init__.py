@@ -303,7 +303,7 @@ async def to_code(config):
     cg.add_library(
         "LittleFS library for ESPHome with block device support",
         None,
-        "https://github.com/p1ngb4ck/esphome_esp_littlefs.git#1.0.0",
+        "https://github.com/p1ngb4ck/esphome_esp_littlefs.git#main",
     )
     cg.add_define("CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
 
