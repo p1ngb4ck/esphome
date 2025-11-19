@@ -289,6 +289,62 @@ CONFIG_SCHEMA = cv.typed_schema(
 )
 
 
+# Mapping of device types to their source files
+DEVICE_SOURCE_FILES = {
+    "i2c_fram": ["i2c_fram.cpp"],
+    "i2c_eeprom": ["i2c_eeprom.cpp"],
+    "spi_flash": ["spi_flash.cpp"],
+    "spi_fram": ["spi_fram.cpp"],
+    "spi_mram": ["spi_mram.cpp"],
+    "onewire_eeprom": ["onewire_eeprom.cpp"],
+}
+
+# Mapping of config type names to internal device type keys
+TYPE_TO_DEVICE = {
+    "EEPROM": "i2c_eeprom",
+    "I2C_EEPROM": "i2c_eeprom",
+    "FRAM": "i2c_fram",
+    "I2C_FRAM": "i2c_fram",
+    "SPI_FLASH": "spi_flash",
+    "FLASH": "spi_flash",
+    "SPI_FRAM": "spi_fram",
+    "SPI_MRAM": "spi_mram",
+    "MRAM": "spi_mram",
+    "ONEWIRE_EEPROM": "onewire_eeprom",
+    "ONEWIRE": "onewire_eeprom",
+}
+
+
+def _final_validate(config):
+    """Track configured device types for source file filtering."""
+    from esphome.core import CORE
+
+    device_type = config[CONF_TYPE].upper()
+    internal_type = TYPE_TO_DEVICE.get(device_type)
+    if internal_type:
+        configured = CORE.data.setdefault("binary_storage_device_types", set())
+        configured.add(internal_type)
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
+
+def FILTER_SOURCE_FILES():
+    """Return list of source files to exclude based on configured device types."""
+    from esphome.core import CORE
+
+    # Get configured device types
+    configured = CORE.data.get("binary_storage_device_types", set())
+
+    # Return files to exclude (all files not in configured types)
+    exclude = []
+    for device_type, files in DEVICE_SOURCE_FILES.items():
+        if device_type not in configured:
+            exclude.extend(files)
+    return exclude
+
+
 async def to_code(config):
     """Configure binary storage device."""
     from esphome.core import CORE
