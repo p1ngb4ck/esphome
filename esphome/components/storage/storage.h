@@ -19,6 +19,21 @@ namespace binary_storage {
 class BinaryStorage;
 }
 
+//  Forward declaration for network_storage (soft dependency)
+namespace network_storage {
+class NetworkStorage;
+}
+
+// Forward declaration for sd_storage (soft dependency)
+namespace sd_storage {
+class SdMmc;
+}
+
+// Forward declaration for usb_storage (soft dependency)
+namespace usb_storage {
+class USBStorageDevice;
+}
+
 namespace storage {
 
 // Forward declarations

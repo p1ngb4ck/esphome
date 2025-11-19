@@ -21,13 +21,21 @@ Storage = storage_ns.class_("Storage", cg.Component)
 StorageMount = storage_ns.class_("StorageMount")
 FileManager = storage_ns.class_("FileManager", cg.Component)
 
-# Triggers
+# Triggers - FileManager triggers
 FileAddedTrigger = storage_ns.class_("FileAddedTrigger", automation.Trigger)
 FileModifiedTrigger = storage_ns.class_("FileModifiedTrigger", automation.Trigger)
 FileDeletedTrigger = storage_ns.class_("FileDeletedTrigger", automation.Trigger)
 DirectoryChangedTrigger = storage_ns.class_(
     "DirectoryChangedTrigger", automation.Trigger
 )
+
+# Triggers - StorageDevice registry triggers
+DeviceAddedTrigger = storage_ns.class_("DeviceAddedTrigger", automation.Trigger)
+DeviceRemovedTrigger = storage_ns.class_("DeviceRemovedTrigger", automation.Trigger)
+DeviceChangedTrigger = storage_ns.class_("DeviceChangedTrigger", automation.Trigger)
+
+# StorageDevice pointer type for trigger parameters
+StorageDevice = storage_ns.class_("StorageDevice")
 
 # Info structs
 FileInfo = storage_ns.struct("FileInfo")
@@ -49,6 +57,9 @@ CONF_ON_FILE_ADDED = "on_file_added"
 CONF_ON_FILE_MODIFIED = "on_file_modified"
 CONF_ON_FILE_DELETED = "on_file_deleted"
 CONF_ON_DIRECTORY_CHANGED = "on_directory_changed"
+CONF_ON_DEVICE_ADDED = "on_device_added"
+CONF_ON_DEVICE_REMOVED = "on_device_removed"
+CONF_ON_DEVICE_CHANGED = "on_device_changed"
 
 # Platform types
 PLATFORM_SD_DIRECT = "sd_direct"
@@ -125,6 +136,22 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_FILE_MANAGERS, default=[]): cv.ensure_list(
             FILE_MANAGER_SCHEMA
         ),
+        # Device registry automation triggers
+        cv.Optional(CONF_ON_DEVICE_ADDED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceAddedTrigger),
+            }
+        ),
+        cv.Optional(CONF_ON_DEVICE_REMOVED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceRemovedTrigger),
+            }
+        ),
+        cv.Optional(CONF_ON_DEVICE_CHANGED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceChangedTrigger),
+            }
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -154,6 +181,25 @@ async def to_code(config):
     if CONF_FILE_MANAGERS in config:
         for fm_config in config[CONF_FILE_MANAGERS]:
             await setup_file_manager(fm_config, var)
+
+    # Device registry automation triggers
+    for conf in config.get(CONF_ON_DEVICE_ADDED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(
+            trigger, [(StorageDevice.operator("ptr"), "device")], conf
+        )
+
+    for conf in config.get(CONF_ON_DEVICE_REMOVED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(
+            trigger, [(StorageDevice.operator("ptr"), "device")], conf
+        )
+
+    for conf in config.get(CONF_ON_DEVICE_CHANGED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(
+            trigger, [(StorageDevice.operator("ptr"), "device")], conf
+        )
 
 
 async def setup_file_manager(config, parent_storage):

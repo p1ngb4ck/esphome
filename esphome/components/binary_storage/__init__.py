@@ -293,20 +293,24 @@ CONFIG_SCHEMA = cv.typed_schema(
 
 async def to_code(config):
     """Configure binary storage device."""
+    from esphome.components.esp32 import add_idf_component
     from esphome.core import CORE
 
     mode = config.get(CONF_MODE, MODE_RAW)
     device_type = config[CONF_TYPE].upper()
 
-    # Add LittleFS library with srcFilter to exclude test/bench runners
-    # We need the upstream littlefs library to access lfs.h for custom block devices
-    # joltwallet/littlefs only exposes esp_littlefs.h which requires partitions
-    # Exclude runners/, tests/, bd/, benches/ - these require POSIX headers not on ESP32
-    cg.add_library(
-        "littlefs",
-        None,
-        "https://github.com/p1ngb4ck/littlefs.git#c7aa608",
+    # Add ESPHome's forked esp_littlefs with custom block device support
+    # This fork exposes lfs.h when CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE is enabled
+    add_idf_component(
+        name="p1ngb4ck/esphome_esp_littlefs",
+        git="https://github.com/p1ngb4ck/esphome_esp_littlefs.git",
+        ref="v1.0.0",
     )
+    # Enable custom block device support to expose lfs.h
+    cg.add_define("CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
+
+    # Define USE_BINARY_STORAGE for StorageDevice interface
+    cg.add_define("USE_BINARY_STORAGE")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

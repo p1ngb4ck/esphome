@@ -9,8 +9,8 @@ CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = ["storage", "web_server_base"]
 AUTO_LOAD = []
 
-http_file_server_ns = cg.esphome_ns.namespace("http_file_server")
-HttpFileServer = http_file_server_ns.class_("HttpFileServer", cg.Component)
+http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")
+HttpFileBrowser = http_file_browser_ns.class_("HttpFileBrowser", cg.Component)
 
 CONF_ROOT_PATH = "root_path"
 CONF_URL_PREFIX = "url_prefix"
@@ -47,7 +47,7 @@ def validate_auth(config):
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(HttpFileServer),
+            cv.GenerateID(): cv.declare_id(HttpFileBrowser),
             cv.GenerateID(web_server_base.CONF_WEB_SERVER_BASE_ID): cv.use_id(
                 web_server_base.WebServerBase
             ),
@@ -70,7 +70,7 @@ CONFIG_SCHEMA = cv.All(
 
 @coroutine_with_priority(45.0)
 async def to_code(config):
-    cg.add_define("USE_HTTP_FILE_SERVER")
+    cg.add_define("USE_HTTP_FILE_BROWSER")
     cg.add_define("USE_WEBSERVER_OTA")  # Enable multipart upload support
     if CORE.is_esp32:
         add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
@@ -80,7 +80,7 @@ async def to_code(config):
         config[web_server_base.CONF_WEB_SERVER_BASE_ID]
     )
 
-    # Create HttpFileServer with web_server_base as constructor parameter
+    # Create HttpFileBrowser with web_server_base as constructor parameter
     var = cg.new_Pvariable(config[CONF_ID], web_server_base_var)
     await cg.register_component(var, config)
 
@@ -104,31 +104,3 @@ async def to_code(config):
     # Optional authentication
     if config.get(CONF_AUTH_ENABLED, False):
         cg.add(var.set_auth(config[CONF_USERNAME], config[CONF_PASSWORD]))
-
-    # Register USB MSC devices for mount/unmount API
-    import logging
-
-    _LOGGER = logging.getLogger(__name__)
-
-    if hasattr(CORE, "data") and "usb_msc_devices" in CORE.data:
-        _LOGGER.info(
-            f"Registering {len(CORE.data['usb_msc_devices'])} USB MSC devices with http_file_server"
-        )
-        # Define USE_USB_MSC_HOST so http_file_server can access device methods
-        cg.add_define("USE_USB_MSC_HOST")
-        for usb_device in CORE.data["usb_msc_devices"]:
-            cg.add(var.register_usb_msc_device(usb_device))
-    else:
-        _LOGGER.info("No USB MSC devices to register with http_file_server")
-
-    # Register SD MMC devices for mount/unmount API
-    if hasattr(CORE, "data") and "sd_mmc_devices" in CORE.data:
-        _LOGGER.info(
-            f"Registering {len(CORE.data['sd_mmc_devices'])} SD MMC devices with http_file_server"
-        )
-        # Define USE_SD_MMC_CARD so http_file_server can access device methods
-        cg.add_define("USE_SD_MMC_CARD")
-        for sd_device in CORE.data["sd_mmc_devices"]:
-            cg.add(var.register_sd_mmc_device(sd_device))
-    else:
-        _LOGGER.info("No SD MMC devices to register with http_file_server")

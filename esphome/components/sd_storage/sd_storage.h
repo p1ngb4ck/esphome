@@ -1,16 +1,21 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/gpio.h"
 #include <string>
 #include <vector>
 #include <functional>
 #include <cstdint>
 
-namespace esphome {
-namespace sd_mmc_card {
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage_device.h"
+#endif
 
-static const char *const TAG = "sd_mmc_card";
+namespace esphome {
+namespace sd_storage {
+
+static const char *const TAG = "sd_storage";
 
 enum class CardType : uint8_t {
   UNKNOWN = 0,
@@ -32,7 +37,11 @@ enum MemoryUnits : short { Byte = 0, KiloByte = 1, MegaByte = 2, GigaByte = 3, T
 // Forward declaration for mount callback
 using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
 
+#ifdef USE_STORAGE
+class SdMmc : public Component, public storage::StorageDevice {
+#else
 class SdMmc : public Component {
+#endif
  public:
   void setup() override;
   void loop() override;
@@ -50,6 +59,7 @@ class SdMmc : public Component {
   void set_power_ctrl_pin(uint8_t pin) { this->power_ctrl_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
+  void set_id(const std::string &id) { this->id_ = id; }
 
   // File operations
   bool write_file(const std::string &path, const std::string &data);
@@ -71,18 +81,65 @@ class SdMmc : public Component {
   bool is_mounted() const { return this->is_mounted_; }
   uint64_t get_total_bytes() const { return this->total_bytes_; }
   uint64_t get_used_bytes() const { return this->used_bytes_; }
+  uint64_t get_free_bytes() const;
 
-  // NEW: Public mount/unmount methods for external control
+  // Public mount/unmount methods for external control
   bool mount_card();
   void unmount_card();
 
-  // NEW: Mount notification system for storage consumers
+  // Mount notification system for storage consumers
   void add_mount_ready_callback(const mount_ready_callback_t &callback) {
     this->mount_ready_callbacks_.push_back(callback);
   }
   const std::string &get_mount_path() const { return this->mount_path_; }
 
- private:
+#ifdef USE_STORAGE
+  //========================================================================
+  // StorageDevice Interface Implementation
+  //========================================================================
+
+  // Device Information (required)
+  storage::StorageInfo get_info() override;
+  bool is_available() override { return this->is_mounted_; }
+
+  // Filesystem Access
+  bool supports_filesystem() override { return true; }
+  std::string get_mount_path() override { return this->mount_path_; }
+
+  // File Operations
+  bool file_exists(const char *path) override;
+  bool get_file_size(const char *path, size_t *size) override;
+  bool read_file(const char *path, uint8_t *data, size_t *length) override;
+  bool write_file(const char *path, const uint8_t *data, size_t length) override;
+  bool append_file(const char *path, const uint8_t *data, size_t length) override;
+  bool delete_file(const char *path) override;
+  bool rename_file(const char *old_path, const char *new_path) override;
+  bool copy_file(const char *src_path, const char *dst_path) override;
+
+  // Directory Operations
+  bool dir_exists(const char *path) override;
+  bool create_dir(const char *path) override;
+  bool delete_dir(const char *path, bool recursive = false) override;
+  bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
+
+  // Space Information
+  bool get_space_info(uint64_t *total, uint64_t *free) override;
+  bool can_write_file(const char *path, size_t size) override;
+
+  // Streaming File Access
+  void *open_file(const char *path, const char *mode) override;
+  size_t read_file_chunk(void *handle, uint8_t *buffer, size_t size) override;
+  size_t write_file_chunk(void *handle, const uint8_t *data, size_t size) override;
+  bool seek_file(void *handle, size_t offset) override;
+  size_t tell_file(void *handle) override;
+  bool close_file(void *handle) override;
+
+  // Maintenance
+  bool format() override;
+  bool sync() override;
+#endif
+
+ protected:
   // Pin configuration
   uint8_t clk_pin_{0};
   uint8_t cmd_pin_{0};
@@ -100,13 +157,17 @@ class SdMmc : public Component {
   uint64_t total_bytes_{0};
   uint64_t used_bytes_{0};
 
-  // NEW: Mount configuration and callbacks
+  // Mount configuration and callbacks
   std::string mount_path_{"/sdcard"};                          // Default mount path
+  std::string id_;                                             // Unique identifier for storage registry
   std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // Callbacks to notify when mount is ready
 
   // Mount management (internal)
   bool update_card_info();
+
+  // Helper to build full path
+  std::string build_full_path(const char *path);
 };
 
-}  // namespace sd_mmc_card
+}  // namespace sd_storage
 }  // namespace esphome

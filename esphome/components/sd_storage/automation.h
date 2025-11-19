@@ -1,10 +1,10 @@
 #pragma once
 
 #include "esphome/core/automation.h"
-#include "sd_mmc_card.h"
+#include "sd_storage.h"
 
 namespace esphome {
-namespace sd_mmc_card {
+namespace sd_storage {
 
 // Triggers
 class CardMountedTrigger : public Trigger<std::string> {
@@ -21,9 +21,9 @@ template<typename... Ts> class MountCardAction : public Action<Ts...> {
 
   void play(Ts... x) override {
     if (this->sd_mmc_->mount_card()) {
-      ESP_LOGI("sd_mmc_card", "Card mounted successfully via automation");
+      ESP_LOGI("sd_storage", "Card mounted successfully via automation");
     } else {
-      ESP_LOGE("sd_mmc_card", "Failed to mount card via automation");
+      ESP_LOGE("sd_storage", "Failed to mount card via automation");
     }
   }
 
@@ -37,7 +37,7 @@ template<typename... Ts> class UnmountCardAction : public Action<Ts...> {
 
   void play(Ts... x) override {
     this->sd_mmc_->unmount_card();
-    ESP_LOGI("sd_mmc_card", "Card unmounted via automation");
+    ESP_LOGI("sd_storage", "Card unmounted via automation");
   }
 
  protected:
@@ -56,16 +56,16 @@ template<typename... Ts> class ListFilesAction : public Action<Ts...> {
       path = this->sd_mmc_->get_mount_path();
     }
 
-    ESP_LOGI("sd_mmc_card", "Listing files in: %s", path.c_str());
+    ESP_LOGI("sd_storage", "Listing files in: %s", path.c_str());
     auto files = this->sd_mmc_->list_directory(path);
     for (const auto &file : files) {
       if (file.is_directory) {
-        ESP_LOGI("sd_mmc_card", "  [DIR]  %s", file.path.c_str());
+        ESP_LOGI("sd_storage", "  [DIR]  %s", file.path.c_str());
       } else {
-        ESP_LOGI("sd_mmc_card", "  [FILE] %s (%u bytes)", file.path.c_str(), file.size);
+        ESP_LOGI("sd_storage", "  [FILE] %s (%u bytes)", file.path.c_str(), file.size);
       }
     }
-    ESP_LOGI("sd_mmc_card", "Total: %zu items", files.size());
+    ESP_LOGI("sd_storage", "Total: %zu items", files.size());
   }
 
  protected:
@@ -83,5 +83,5 @@ template<typename... Ts> class CardMountedCondition : public Condition<Ts...> {
   SdMmc *sd_mmc_;
 };
 
-}  // namespace sd_mmc_card
+}  // namespace sd_storage
 }  // namespace esphome

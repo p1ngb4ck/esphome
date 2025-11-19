@@ -24,38 +24,41 @@ CONF_ON_MOUNTED = "on_mounted"
 
 require_vfs_dir()
 
-usb_msc_host_ns = cg.esphome_ns.namespace("usb_msc_host")
-USBMscHost = usb_msc_host_ns.class_("USBMscHost", cg.Component)
-USBMscDevice = usb_msc_host_ns.class_(
-    "USBMscDevice",
+usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
+USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
+USBStorageDevice = usb_storage_ns.class_(
+    "USBStorageDevice",
     cg.Component,
     usb_host_ns.class_("USBDeviceHandler"),
-    cg.Parented.template(USBMscHost),
+    cg.Parented.template(USBStorageHost),
 )
 
 # Automation classes
-DeviceMountedTrigger = usb_msc_host_ns.class_(
+DeviceMountedTrigger = usb_storage_ns.class_(
     "DeviceMountedTrigger", automation.Trigger.template(cg.std_string)
 )
-RemountDeviceAction = usb_msc_host_ns.class_("RemountDeviceAction", automation.Action)
-UnmountDeviceAction = usb_msc_host_ns.class_("UnmountDeviceAction", automation.Action)
-ListFilesAction = usb_msc_host_ns.class_("ListFilesAction", automation.Action)
-DeviceMountedCondition = usb_msc_host_ns.class_(
+RemountDeviceAction = usb_storage_ns.class_("RemountDeviceAction", automation.Action)
+UnmountDeviceAction = usb_storage_ns.class_("UnmountDeviceAction", automation.Action)
+ListFilesAction = usb_storage_ns.class_("ListFilesAction", automation.Action)
+DeviceMountedCondition = usb_storage_ns.class_(
     "DeviceMountedCondition", automation.Condition
 )
 
 
-async def register_usb_msc_handler(device_config, msc_host, usb_host):
+async def register_usb_storage_handler(device_config, storage_host, usb_host):
     # Interface-class based handler with optional VID/PID filtering
     var = cg.new_Pvariable(device_config[CONF_ID])
     await cg.register_component(var, device_config)
-    cg.add(var.set_parent(msc_host))  # Set USBMscHost as parent
+    cg.add(var.set_parent(storage_host))  # Set USBStorageHost as parent
     cg.add(
         var.set_usb_host(usb_host)
     )  # Set USBHost reference for closing device handles
 
     # Set mount path
     cg.add(var.set_mount_path(device_config[CONF_MOUNT_PATH]))
+
+    # Set ID for storage registry
+    cg.add(var.set_id(str(device_config[CONF_ID])))
 
     # Set VID/PID (0x0000 means wildcard - match any)
     cg.add(var.set_vid(device_config[CONF_VID]))
@@ -77,7 +80,7 @@ async def register_usb_msc_handler(device_config, msc_host, usb_host):
 
 DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     {
-        cv.GenerateID(): cv.declare_id(USBMscDevice),
+        cv.GenerateID(): cv.declare_id(USBStorageDevice),
         cv.Required(CONF_MOUNT_PATH): cv.string,
         cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
         cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
@@ -92,7 +95,7 @@ DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
-            cv.GenerateID(): cv.declare_id(USBMscHost),
+            cv.GenerateID(): cv.declare_id(USBStorageHost),
             cv.GenerateID(CONF_USB_HOST_ID): cv.use_id(USBHost),
             cv.Optional(CONF_DEVICES): cv.ensure_list(DEVICE_SCHEMA),
         }
@@ -108,61 +111,61 @@ async def to_code(config):
     # Get USBHost instance for handler registration
     usb_host_var = await cg.get_variable(config[CONF_USB_HOST_ID])
 
-    # Create USBMscHost
+    # Create USBStorageHost
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
     # Register interface-class based handlers and store them for later use
     # by storage to register mount callbacks
     for device in config.get(CONF_DEVICES) or ():
-        device_var = await register_usb_msc_handler(device, var, usb_host_var)
+        device_var = await register_usb_storage_handler(device, var, usb_host_var)
         # Store device reference in CORE.data for storage to access
-        # This allows storage to register callbacks with USB MSC devices
+        # This allows storage to register callbacks with USB storage devices
         from esphome.core import CORE
 
         if not hasattr(CORE, "data"):
             CORE.data = {}
-        if "usb_msc_devices" not in CORE.data:
-            CORE.data["usb_msc_devices"] = []
-        CORE.data["usb_msc_devices"].append(device_var)
+        if "usb_storage_devices" not in CORE.data:
+            CORE.data["usb_storage_devices"] = []
+        CORE.data["usb_storage_devices"].append(device_var)
 
 
 # Actions
-USB_MSC_ACTION_SCHEMA = automation.maybe_simple_id(
+USB_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
     {
-        cv.Required(CONF_ID): cv.use_id(USBMscDevice),
+        cv.Required(CONF_ID): cv.use_id(USBStorageDevice),
     }
 )
 
 
 @automation.register_action(
-    "usb_msc_host.remount", RemountDeviceAction, USB_MSC_ACTION_SCHEMA
+    "usb_storage.remount", RemountDeviceAction, USB_STORAGE_ACTION_SCHEMA
 )
-async def usb_msc_remount_to_code(config, action_id, template_arg, args):
+async def usb_storage_remount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
 
 
 @automation.register_action(
-    "usb_msc_host.unmount", UnmountDeviceAction, USB_MSC_ACTION_SCHEMA
+    "usb_storage.unmount", UnmountDeviceAction, USB_STORAGE_ACTION_SCHEMA
 )
-async def usb_msc_unmount_to_code(config, action_id, template_arg, args):
+async def usb_storage_unmount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
 
 
 @automation.register_action(
-    "usb_msc_host.list_files", ListFilesAction, USB_MSC_ACTION_SCHEMA
+    "usb_storage.list_files", ListFilesAction, USB_STORAGE_ACTION_SCHEMA
 )
-async def usb_msc_list_files_to_code(config, action_id, template_arg, args):
+async def usb_storage_list_files_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
 
 
 # Conditions
 @automation.register_condition(
-    "usb_msc_host.is_mounted", DeviceMountedCondition, USB_MSC_ACTION_SCHEMA
+    "usb_storage.is_mounted", DeviceMountedCondition, USB_STORAGE_ACTION_SCHEMA
 )
-async def usb_msc_is_mounted_to_code(config, condition_id, template_arg, args):
+async def usb_storage_is_mounted_to_code(config, condition_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(condition_id, template_arg, paren)

@@ -17,12 +17,12 @@ class Storage;
 }  // namespace esphome
 
 namespace esphome {
-namespace http_file_server {
+namespace http_file_browser {
 
-static const char *const TAG = "http_file_server";
+static const char *const TAG = "http_file_browser";
 
 // Forward declaration
-class HttpFileServer;
+class HttpFileBrowser;
 
 // Architecture-specific buffer sizes
 #if defined(USE_ESP32_VARIANT_ESP32P4)
@@ -82,9 +82,9 @@ struct FileInfo {
   time_t modified;
 };
 
-class HttpFileServer : public Component, public AsyncWebHandler {
+class HttpFileBrowser : public Component, public AsyncWebHandler {
  public:
-  HttpFileServer(web_server_base::WebServerBase *base) : base_(base) {}
+  HttpFileBrowser(web_server_base::WebServerBase *base) : base_(base) {}
 
   void setup() override;
   void loop() override;
@@ -119,29 +119,12 @@ class HttpFileServer : public Component, public AsyncWebHandler {
   bool is_download_enabled() const { return this->download_enabled_; }
   bool is_deletion_enabled() const { return this->deletion_enabled_; }
 
-  // Storage device registration for mount/unmount API
-  template<typename T> void register_usb_msc_device(T *device) {
-    ESP_LOGI("http_file_server", "Registering USB MSC device at %p", static_cast<void *>(device));
-    this->usb_msc_devices_.push_back(static_cast<void *>(device));
-    ESP_LOGI("http_file_server", "USB MSC devices vector now has %zu devices", this->usb_msc_devices_.size());
-  }
-  template<typename T> void register_sd_mmc_device(T *device) {
-    ESP_LOGI("http_file_server", "Registering SD MMC device at %p", static_cast<void *>(device));
-    this->sd_mmc_devices_.push_back(static_cast<void *>(device));
-    ESP_LOGI("http_file_server", "SD MMC devices vector now has %zu devices", this->sd_mmc_devices_.size());
-  }
-
  protected:
   // Web server base reference
   web_server_base::WebServerBase *base_;
 
   // Storage reference
   storage::Storage *storage_{nullptr};
-
-  // Storage device references for mount/unmount operations
-  // Forward declarations to avoid circular dependencies
-  std::vector<void *> usb_msc_devices_;  // std::vector<usb_msc_host::USBMscDevice *>
-  std::vector<void *> sd_mmc_devices_;   // std::vector<sd_mmc_card::SdMmc *>
 
   // Configuration
   std::string root_path_{};
@@ -192,7 +175,7 @@ class HttpFileServer : public Component, public AsyncWebHandler {
 
   // Task parameter structures for background operations
   struct CopyTaskParams {
-    HttpFileServer *server;
+    HttpFileBrowser *server;
     std::string source;
     std::string destination;
     off_t file_size;
@@ -200,7 +183,7 @@ class HttpFileServer : public Component, public AsyncWebHandler {
   };
 
   struct MoveTaskParams {
-    HttpFileServer *server;
+    HttpFileBrowser *server;
     std::string source;
     std::string destination;
     off_t file_size;
@@ -289,5 +272,5 @@ class HttpFileServer : public Component, public AsyncWebHandler {
                          bool track_progress = false);
 };
 
-}  // namespace http_file_server
+}  // namespace http_file_browser
 }  // namespace esphome

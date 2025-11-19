@@ -3,8 +3,14 @@
 #if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
 #include "esphome/components/usb_host/usb_host.h"
 #include "esphome/core/component.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage_device.h"
+#endif
+
 #include "esp_log.h"
 #include "freertos/semphr.h"
 #include "usb/usb_host.h"
@@ -25,11 +31,14 @@
 #include <string.h>
 #include <sys/param.h>
 #include <sys/queue.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <dirent.h>
 #include <functional>
 #include <vector>
 
 namespace esphome {
-namespace usb_msc_host {
+namespace usb_storage {
 
 static constexpr const char *MNT_PATH = "/usb";
 static constexpr uint16_t BUFFER_SIZE = 4096;
@@ -47,13 +56,13 @@ typedef struct {
   msc_host_vfs_handle_t vfs_handle;    /*!< VFS handle assigned to the MSC device */
 } msc_dev_entry_t;
 
-static constexpr const char *TAG = "usb_msc_host";
+static constexpr const char *TAG = "usb_storage";
 static constexpr uint8_t SCSI_COMMAND_SET = 0x06;
 static constexpr uint8_t BULK_ONLY_TRANSFER = 0x50;
 
-class USBMscHost : public Component {
+class USBStorageHost : public Component {
   friend class USBHost;
-  friend class USBMscDevice;
+  friend class USBStorageDevice;
 
  public:
   void setup() override;
@@ -72,12 +81,19 @@ class USBMscHost : public Component {
 // Forward declaration for mount callback
 using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
 
-class USBMscDevice : public Component, public usb_host::USBDeviceHandler, public Parented<USBMscHost> {
+#ifdef USE_STORAGE
+class USBStorageDevice : public Component,
+                         public usb_host::USBDeviceHandler,
+                         public Parented<USBStorageHost>,
+                         public storage::StorageDevice {
+#else
+class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, public Parented<USBStorageHost> {
+#endif
   friend class USBHost;
-  friend class USBMscHost;
+  friend class USBStorageHost;
 
  public:
-  USBMscDevice() = default;
+  USBStorageDevice() = default;
   void setup() override;
   void dump_config() override;
 
@@ -85,6 +101,7 @@ class USBMscDevice : public Component, public usb_host::USBDeviceHandler, public
   void set_mount_path(const std::string &mount_path) { this->mount_path_ = mount_path; }
   void set_vid(uint16_t vid) { this->vid_ = vid; }
   void set_pid(uint16_t pid) { this->pid_ = pid; }
+  void set_id(const std::string &id) { this->id_ = id; }
 
   // USBDeviceHandler Interface implementation
   bool matches_device(const usb_config_desc_t *config_desc) override;
@@ -98,30 +115,78 @@ class USBMscDevice : public Component, public usb_host::USBDeviceHandler, public
   void print_device_info();
   uint8_t find_usb_addr_by_handle(msc_host_device_handle_t handle);
 
-  // NEW: Mount notification system for storage consumers
+  // Mount notification system for storage consumers
   void add_mount_ready_callback(const mount_ready_callback_t &callback) {
     this->mount_ready_callbacks_.push_back(callback);
   }
   const std::string &get_mount_path() const { return this->mount_path_; }
   bool is_mounted() const { return this->slot_ >= 0; }
 
-  // NEW: Public mount/unmount methods for external control
-  // Note: mount() is triggered automatically by on_device_connected()
-  // These methods allow manual control if needed
+  // Public mount/unmount methods for external control
   bool remount_device();
   void unmount_device();
+
+#ifdef USE_STORAGE
+  //========================================================================
+  // StorageDevice Interface Implementation
+  //========================================================================
+
+  // Device Information (required)
+  storage::StorageInfo get_info() override;
+  bool is_available() override { return this->slot_ >= 0; }
+
+  // Filesystem Access
+  bool supports_filesystem() override { return true; }
+  std::string get_mount_path() override { return this->mount_path_; }
+
+  // File Operations
+  bool file_exists(const char *path) override;
+  bool get_file_size(const char *path, size_t *size) override;
+  bool read_file(const char *path, uint8_t *data, size_t *length) override;
+  bool write_file(const char *path, const uint8_t *data, size_t length) override;
+  bool append_file(const char *path, const uint8_t *data, size_t length) override;
+  bool delete_file(const char *path) override;
+  bool rename_file(const char *old_path, const char *new_path) override;
+  bool copy_file(const char *src_path, const char *dst_path) override;
+
+  // Directory Operations
+  bool dir_exists(const char *path) override;
+  bool create_dir(const char *path) override;
+  bool delete_dir(const char *path, bool recursive = false) override;
+  bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
+
+  // Space Information
+  bool get_space_info(uint64_t *total, uint64_t *free) override;
+  bool can_write_file(const char *path, size_t size) override;
+
+  // Streaming File Access
+  void *open_file(const char *path, const char *mode) override;
+  size_t read_file_chunk(void *handle, uint8_t *buffer, size_t size) override;
+  size_t write_file_chunk(void *handle, const uint8_t *data, size_t size) override;
+  bool seek_file(void *handle, size_t offset) override;
+  size_t tell_file(void *handle) override;
+  bool close_file(void *handle) override;
+
+  // Maintenance
+  bool format() override;
+  bool sync() override;
+#endif
 
  protected:
   usb_device_handle_t device_handle_{nullptr};
   uint8_t device_addr_{255};
   usb_host::USBHost *usb_host_{nullptr};
   std::string mount_path_;
+  std::string id_;                                             // Unique identifier for storage registry
   uint16_t vid_{0x0000};                                       // 0x0000 = wildcard, match any VID
   uint16_t pid_{0x0000};                                       // 0x0000 = wildcard, match any PID
   int8_t slot_{-1};                                            // Track which slot this device is using
-  std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // NEW: Callbacks to notify when mount is ready
+  std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // Callbacks to notify when mount is ready
+
+  // Helper to build full path
+  std::string build_full_path(const char *path);
 };
 
-}  // namespace usb_msc_host
+}  // namespace usb_storage
 }  // namespace esphome
 #endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4

@@ -104,7 +104,7 @@ class WebDAVServer : public Component {
   // HTTP server handle
   httpd_handle_t server_{nullptr};
 
-  // Storage host reference
+  // Storage reference
   storage::Storage *storage_{nullptr};
 
   // Configuration

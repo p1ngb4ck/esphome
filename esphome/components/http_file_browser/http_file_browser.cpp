@@ -1,15 +1,15 @@
-#include "http_file_server.h"
+#include "http_file_browser.h"
 #include "esphome/components/storage/storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/application.h"
 
 // Storage device headers for mount/unmount
-#ifdef USE_USB_MSC_HOST
-#include "esphome/components/usb_msc_host/usb_msc_host.h"
+#ifdef USE_USB_STORAGE
+#include "esphome/components/usb_storage/usb_storage.h"
 #endif
-#ifdef USE_SD_MMC_CARD
-#include "esphome/components/sd_mmc_card/sd_mmc_card.h"
+#ifdef USE_SD_STORAGE
+#include "esphome/components/sd_storage/sd_storage.h"
 #endif
 
 #include <fstream>
@@ -22,27 +22,27 @@
 #include <cerrno>
 
 namespace esphome {
-namespace http_file_server {
+namespace http_file_browser {
 
-void HttpFileServer::setup() {
-  ESP_LOGI(TAG, "Setting up HTTP File Server with prefix: %s", this->url_prefix_.c_str());
+void HttpFileBrowser::setup() {
+  ESP_LOGI(TAG, "Setting up HTTP File Browser with prefix: %s", this->url_prefix_.c_str());
   ESP_LOGI(TAG, "Root path: %s", this->root_path_.c_str());
   ESP_LOGI(TAG, "Upload: %s, Download: %s, Delete: %s", this->upload_enabled_ ? "YES" : "NO",
            this->download_enabled_ ? "YES" : "NO", this->deletion_enabled_ ? "YES" : "NO");
 
   // Register directly with AsyncWebServer to bypass web_server_base's auth middleware
-  // This allows http_file_server to have its own independent authentication
+  // This allows http_file_browser to have its own independent authentication
   auto server = this->base_->get_server();
   if (server) {
     server->addHandler(this);
-    ESP_LOGI(TAG, "HTTP File Server registered successfully (bypassing base auth)");
+    ESP_LOGI(TAG, "HTTP File Browser registered successfully (bypassing base auth)");
   } else {
     ESP_LOGE(TAG, "Failed to get web server instance");
   }
 }
 
-void HttpFileServer::dump_config() {
-  ESP_LOGCONFIG(TAG, "HTTP File Server:");
+void HttpFileBrowser::dump_config() {
+  ESP_LOGCONFIG(TAG, "HTTP File Browser:");
   ESP_LOGCONFIG(TAG, "  Root path: %s", this->root_path_.c_str());
   ESP_LOGCONFIG(TAG, "  URL prefix: %s", this->url_prefix_.c_str());
   ESP_LOGCONFIG(TAG, "  Auth enabled: %s", this->auth_enabled_ ? "YES" : "NO");
@@ -51,7 +51,7 @@ void HttpFileServer::dump_config() {
   ESP_LOGCONFIG(TAG, "  Deletion enabled: %s", this->deletion_enabled_ ? "YES" : "NO");
 }
 
-void HttpFileServer::loop() {
+void HttpFileBrowser::loop() {
   // Check for deferred mount operations
   if (this->deferred_mount_op_.type != DeferredMountOp::NONE) {
     // Check if it's time to execute the deferred operation
@@ -73,121 +73,96 @@ void HttpFileServer::loop() {
       bool success = false;
       std::string error_msg;
 
-      if (op_type == DeferredMountOp::UNMOUNT) {
-        // Try to find matching USB MSC device and unmount
-#ifdef USE_USB_MSC_HOST
-        for (void *dev_ptr : this->usb_msc_devices_) {
-          auto *device = static_cast<usb_msc_host::USBMscDevice *>(dev_ptr);
-          if (device->get_mount_path() == mount_point) {
+      // Find device via storage registry
+      storage::StorageDevice *storage_device = nullptr;
+      if (this->storage_ != nullptr) {
+        storage_device = this->storage_->get_device_by_mount_path(mount_point);
+      }
+
+      if (storage_device == nullptr) {
+        ESP_LOGW(TAG, "Device not found for mount point %s", mount_point.c_str());
+      } else {
+        auto info = storage_device->get_info();
+
+        if (op_type == DeferredMountOp::UNMOUNT) {
+#ifdef USE_USB_STORAGE
+          if (info.type == storage::StorageType::USB_MSC) {
+            auto *device = static_cast<usb_storage::USBStorageDevice *>(storage_device);
             device->unmount_device();
-            ESP_LOGI(TAG, "Successfully unmounted USB MSC device at %s", mount_point.c_str());
+            ESP_LOGI(TAG, "Successfully unmounted USB storage device at %s", mount_point.c_str());
             success = true;
-            break;
-          }
-        }
-#endif
-
-        // Try SD MMC devices if not found in USB devices
-        if (!success && !this->sd_mmc_devices_.empty()) {
-#ifdef USE_SD_MMC_CARD
-          for (void *dev_ptr : this->sd_mmc_devices_) {
-            auto *device = static_cast<sd_mmc_card::SdMmc *>(dev_ptr);
-            if (device->get_mount_path() == mount_point) {
-              device->unmount_card();
-              ESP_LOGI(TAG, "Successfully unmounted SD MMC device at %s", mount_point.c_str());
-              success = true;
-              break;
-            }
           }
 #endif
-        }
+#ifdef USE_SD_STORAGE
+          if (!success && info.type == storage::StorageType::SD_CARD) {
+            auto *device = static_cast<sd_storage::SdMmc *>(storage_device);
+            device->unmount_card();
+            ESP_LOGI(TAG, "Successfully unmounted SD storage device at %s", mount_point.c_str());
+            success = true;
+          }
+#endif
+          if (!success) {
+            ESP_LOGW(TAG, "Unmount not supported for device type at %s", mount_point.c_str());
+          }
 
-        if (!success) {
-          ESP_LOGW(TAG, "Failed to unmount: device not found for mount point %s", mount_point.c_str());
-        }
-
-      } else if (op_type == DeferredMountOp::MOUNT) {
-        // Try to find matching USB MSC device and mount
-#ifdef USE_USB_MSC_HOST
-        for (void *dev_ptr : this->usb_msc_devices_) {
-          auto *device = static_cast<usb_msc_host::USBMscDevice *>(dev_ptr);
-          if (device->get_mount_path() == mount_point) {
+        } else if (op_type == DeferredMountOp::MOUNT) {
+#ifdef USE_USB_STORAGE
+          if (info.type == storage::StorageType::USB_MSC) {
+            auto *device = static_cast<usb_storage::USBStorageDevice *>(storage_device);
             if (device->remount_device()) {
-              ESP_LOGI(TAG, "Successfully mounted USB MSC device at %s", mount_point.c_str());
+              ESP_LOGI(TAG, "Successfully mounted USB storage device at %s", mount_point.c_str());
               success = true;
             } else {
-              ESP_LOGE(TAG, "Failed to mount USB MSC device at %s", mount_point.c_str());
+              ESP_LOGE(TAG, "Failed to mount USB storage device at %s", mount_point.c_str());
               error_msg = "Mount failed";
             }
-            break;
-          }
-        }
-#endif
-
-        // Try SD MMC devices if not found in USB devices
-        if (!success && !this->sd_mmc_devices_.empty()) {
-#ifdef USE_SD_MMC_CARD
-          for (void *dev_ptr : this->sd_mmc_devices_) {
-            auto *device = static_cast<sd_mmc_card::SdMmc *>(dev_ptr);
-            if (device->get_mount_path() == mount_point) {
-              if (device->mount_card()) {
-                ESP_LOGI(TAG, "Successfully mounted SD MMC device at %s", mount_point.c_str());
-                success = true;
-              } else {
-                ESP_LOGE(TAG, "Failed to mount SD MMC device at %s", mount_point.c_str());
-                error_msg = "Mount failed";
-              }
-              break;
-            }
           }
 #endif
-        }
-
-        if (!success && error_msg.empty()) {
-          ESP_LOGW(TAG, "Failed to mount: device not found for mount point %s", mount_point.c_str());
-        }
-
-      } else if (op_type == DeferredMountOp::REMOUNT) {
-        // Try to find matching USB MSC device and remount
-#ifdef USE_USB_MSC_HOST
-        for (void *dev_ptr : this->usb_msc_devices_) {
-          auto *device = static_cast<usb_msc_host::USBMscDevice *>(dev_ptr);
-          if (device->get_mount_path() == mount_point) {
-            if (device->remount_device()) {
-              ESP_LOGI(TAG, "Successfully remounted USB MSC device at %s", mount_point.c_str());
+#ifdef USE_SD_STORAGE
+          if (!success && error_msg.empty() && info.type == storage::StorageType::SD_CARD) {
+            auto *device = static_cast<sd_storage::SdMmc *>(storage_device);
+            if (device->mount_card()) {
+              ESP_LOGI(TAG, "Successfully mounted SD storage device at %s", mount_point.c_str());
               success = true;
             } else {
-              ESP_LOGE(TAG, "Failed to remount USB MSC device at %s", mount_point.c_str());
+              ESP_LOGE(TAG, "Failed to mount SD storage device at %s", mount_point.c_str());
+              error_msg = "Mount failed";
+            }
+          }
+#endif
+          if (!success && error_msg.empty()) {
+            ESP_LOGW(TAG, "Mount not supported for device type at %s", mount_point.c_str());
+          }
+
+        } else if (op_type == DeferredMountOp::REMOUNT) {
+#ifdef USE_USB_STORAGE
+          if (info.type == storage::StorageType::USB_MSC) {
+            auto *device = static_cast<usb_storage::USBStorageDevice *>(storage_device);
+            if (device->remount_device()) {
+              ESP_LOGI(TAG, "Successfully remounted USB storage device at %s", mount_point.c_str());
+              success = true;
+            } else {
+              ESP_LOGE(TAG, "Failed to remount USB storage device at %s", mount_point.c_str());
               error_msg = "Remount failed";
             }
-            break;
           }
-        }
 #endif
-
-        // Try SD MMC devices if not found in USB devices
-        if (!success && !this->sd_mmc_devices_.empty()) {
-#ifdef USE_SD_MMC_CARD
-          for (void *dev_ptr : this->sd_mmc_devices_) {
-            auto *device = static_cast<sd_mmc_card::SdMmc *>(dev_ptr);
-            if (device->get_mount_path() == mount_point) {
-              // Remount = unmount then mount
-              device->unmount_card();
-              if (device->mount_card()) {
-                ESP_LOGI(TAG, "Successfully remounted SD MMC device at %s", mount_point.c_str());
-                success = true;
-              } else {
-                ESP_LOGE(TAG, "Failed to remount SD MMC device at %s", mount_point.c_str());
-                error_msg = "Remount failed";
-              }
-              break;
+#ifdef USE_SD_STORAGE
+          if (!success && error_msg.empty() && info.type == storage::StorageType::SD_CARD) {
+            auto *device = static_cast<sd_storage::SdMmc *>(storage_device);
+            device->unmount_card();
+            if (device->mount_card()) {
+              ESP_LOGI(TAG, "Successfully remounted SD storage device at %s", mount_point.c_str());
+              success = true;
+            } else {
+              ESP_LOGE(TAG, "Failed to remount SD storage device at %s", mount_point.c_str());
+              error_msg = "Remount failed";
             }
           }
 #endif
-        }
-
-        if (!success && error_msg.empty()) {
-          ESP_LOGW(TAG, "Failed to remount: device not found for mount point %s", mount_point.c_str());
+          if (!success && error_msg.empty()) {
+            ESP_LOGW(TAG, "Remount not supported for device type at %s", mount_point.c_str());
+          }
         }
       }
     }
@@ -195,7 +170,7 @@ void HttpFileServer::loop() {
 }
 
 // AsyncWebHandler interface implementation
-bool HttpFileServer::canHandle(AsyncWebServerRequest *request) const {
+bool HttpFileBrowser::canHandle(AsyncWebServerRequest *request) const {
   // Handle requests that start with our URL prefix
   std::string uri = request->url().c_str();
   const char *method_name = (request->method() == HTTP_GET)      ? "GET"
@@ -221,7 +196,7 @@ bool HttpFileServer::canHandle(AsyncWebServerRequest *request) const {
   return false;
 }
 
-void HttpFileServer::handleRequest(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
   // Check authentication if enabled
   if (this->auth_enabled_) {
     if (!request->authenticate(this->username_.c_str(), this->password_.c_str())) {
@@ -320,8 +295,8 @@ void HttpFileServer::handleRequest(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index,
-                                  uint8_t *data, size_t len, bool final) {
+void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index,
+                                   uint8_t *data, size_t len, bool final) {
   // Only log at milestones to avoid flooding logs with hundreds of tiny chunk calls
   if (index == 0 || final || (index % 1048576 == 0)) {  // Log at start, end, and every 1MB
     ESP_LOGD(TAG, "handleUpload: filename='%s', index=%zu, len=%zu, final=%d", filename.c_str(), index, len, final);
@@ -518,7 +493,8 @@ void HttpFileServer::handleUpload(AsyncWebServerRequest *request, const Platform
   }
 }
 
-void HttpFileServer::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+void HttpFileBrowser::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index,
+                                 size_t total) {
   // Check authentication if enabled
   if (this->auth_enabled_) {
     if (!request->authenticate(this->username_.c_str(), this->password_.c_str())) {
@@ -538,7 +514,7 @@ void HttpFileServer::handleBody(AsyncWebServerRequest *request, uint8_t *data, s
 }
 
 // Helper methods
-std::string HttpFileServer::uri_to_filepath(const std::string &uri) {
+std::string HttpFileBrowser::uri_to_filepath(const std::string &uri) {
   // Decode URL first
   std::string decoded_uri = url_decode(uri);
   ESP_LOGD(TAG, "URI: %s -> Decoded: %s", uri.c_str(), decoded_uri.c_str());
@@ -573,7 +549,7 @@ std::string HttpFileServer::uri_to_filepath(const std::string &uri) {
   return full_path;
 }
 
-std::string HttpFileServer::url_decode(const std::string &src) {
+std::string HttpFileBrowser::url_decode(const std::string &src) {
   std::string result;
   result.reserve(src.length());
 
@@ -602,7 +578,7 @@ std::string HttpFileServer::url_decode(const std::string &src) {
   return result;
 }
 
-esphome::FixedVector<FileInfo> HttpFileServer::list_directory(const std::string &path) {
+esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string &path) {
   esphome::FixedVector<FileInfo> files;
 
   ESP_LOGD(TAG, "Attempting to open directory: %s", path.c_str());
@@ -656,7 +632,7 @@ esphome::FixedVector<FileInfo> HttpFileServer::list_directory(const std::string 
 }
 
 // HTML generation helpers
-std::string HttpFileServer::generate_html_header(const std::string &title) {
+std::string HttpFileBrowser::generate_html_header(const std::string &title) {
   std::string html = R"(<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -848,7 +824,7 @@ std::string HttpFileServer::generate_html_header(const std::string &title) {
   return html;
 }
 
-std::string HttpFileServer::generate_html_footer() {
+std::string HttpFileBrowser::generate_html_footer() {
   return R"HTML(
 </div>
 <div id="progressModal" class="progress-modal">
@@ -1679,7 +1655,7 @@ std::string HttpFileServer::generate_html_footer() {
 )HTML";
 }
 
-std::string HttpFileServer::generate_breadcrumb(const std::string &current_path) {
+std::string HttpFileBrowser::generate_breadcrumb(const std::string &current_path) {
   std::string breadcrumb = R"(<div class="breadcrumb">)";
   breadcrumb += "<span><a href=\"" + this->url_prefix_ + "\">Home</a></span>";
 
@@ -1698,7 +1674,7 @@ std::string HttpFileServer::generate_breadcrumb(const std::string &current_path)
   return breadcrumb;
 }
 
-std::string HttpFileServer::generate_file_row(const FileInfo &info, const std::string &uri_prefix) {
+std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::string &uri_prefix) {
   std::string row = "<tr><td>";
 
   std::string relative_path = Path::remove_root_path(info.path, this->root_path_);
@@ -1787,7 +1763,7 @@ std::string HttpFileServer::generate_file_row(const FileInfo &info, const std::s
 }
 
 // Request handlers
-void HttpFileServer::handle_directory_listing(AsyncWebServerRequest *request, const std::string &filepath) {
+void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, const std::string &filepath) {
   bool is_virtual_root = (this->root_path_ == "/" && filepath == "/");
 
   // Generate HTML
@@ -1862,7 +1838,7 @@ void HttpFileServer::handle_directory_listing(AsyncWebServerRequest *request, co
   request->send(response);
 }
 
-void HttpFileServer::handle_file_download(AsyncWebServerRequest *request, const std::string &filepath) {
+void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const std::string &filepath) {
   if (!this->download_enabled_) {
     request->send(403, "text/plain", "File download is disabled");
     return;
@@ -1944,7 +1920,7 @@ void HttpFileServer::handle_file_download(AsyncWebServerRequest *request, const 
   }
 }
 
-void HttpFileServer::handle_file_upload(AsyncWebServerRequest *request, const std::string &filename) {
+void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const std::string &filename) {
   if (!this->upload_enabled_) {
     request->send(403, "text/plain", "File upload is disabled");
     return;
@@ -2072,7 +2048,7 @@ void HttpFileServer::handle_file_upload(AsyncWebServerRequest *request, const st
 }
 
 // Directory helpers
-bool HttpFileServer::is_directory_empty(const std::string &path) {
+bool HttpFileBrowser::is_directory_empty(const std::string &path) {
   DIR *dir = opendir(path.c_str());
   if (!dir) {
     return true;  // Can't open, treat as empty
@@ -2093,7 +2069,7 @@ bool HttpFileServer::is_directory_empty(const std::string &path) {
   return true;  // No entries found - empty
 }
 
-bool HttpFileServer::is_directory_writable(const std::string &dir_path) {
+bool HttpFileBrowser::is_directory_writable(const std::string &dir_path) {
   // Check if directory exists and is actually a directory
   struct stat dir_stat;
   if (stat(dir_path.c_str(), &dir_stat) != 0) {
@@ -2119,7 +2095,7 @@ bool HttpFileServer::is_directory_writable(const std::string &dir_path) {
   return true;
 }
 
-void HttpFileServer::count_directory_contents(const std::string &path, int &file_count, int &dir_count) {
+void HttpFileBrowser::count_directory_contents(const std::string &path, int &file_count, int &dir_count) {
   DIR *dir = opendir(path.c_str());
   if (!dir) {
     return;
@@ -2148,7 +2124,7 @@ void HttpFileServer::count_directory_contents(const std::string &path, int &file
   closedir(dir);
 }
 
-bool HttpFileServer::recursive_delete_directory(const std::string &path, bool track_progress) {
+bool HttpFileBrowser::recursive_delete_directory(const std::string &path, bool track_progress) {
   DIR *dir = opendir(path.c_str());
   if (!dir) {
     ESP_LOGE(TAG, "Cannot open directory for deletion: %s (errno: %d)", path.c_str(), errno);
@@ -2256,21 +2232,21 @@ bool HttpFileServer::recursive_delete_directory(const std::string &path, bool tr
 }
 
 // Mount status helper
-bool HttpFileServer::is_mount_point_mounted(const std::string &mount_path) {
+bool HttpFileBrowser::is_mount_point_mounted(const std::string &mount_path) {
   // Check USB MSC devices
-#ifdef USE_USB_MSC_HOST
-  for (void *dev_ptr : this->usb_msc_devices_) {
-    auto *device = static_cast<usb_msc_host::USBMscDevice *>(dev_ptr);
+#ifdef USE_USB_STORAGE
+  for (void *dev_ptr : this->usb_storage_devices_) {
+    auto *device = static_cast<usb_storage::USBStorageDevice *>(dev_ptr);
     if (device->get_mount_path() == mount_path) {
       return device->is_mounted();
     }
   }
 #endif
 
-  // Check SD MMC devices
-#ifdef USE_SD_MMC_CARD
-  for (void *dev_ptr : this->sd_mmc_devices_) {
-    auto *device = static_cast<sd_mmc_card::SdMmc *>(dev_ptr);
+  // Check SD storage devices
+#ifdef USE_SD_STORAGE
+  for (void *dev_ptr : this->sd_storage_devices_) {
+    auto *device = static_cast<sd_storage::SdMmc *>(dev_ptr);
     if (device->get_mount_path() == mount_path) {
       return device->is_mounted();
     }
@@ -2282,7 +2258,7 @@ bool HttpFileServer::is_mount_point_mounted(const std::string &mount_path) {
 }
 
 // API handlers
-void HttpFileServer::handle_api_copy(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *source_param = request->getParam("source");
   auto *dest_param = request->getParam("destination");
@@ -2350,7 +2326,7 @@ void HttpFileServer::handle_api_copy(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_move(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *source_param = request->getParam("source");
   auto *dest_param = request->getParam("destination");
@@ -2417,7 +2393,7 @@ void HttpFileServer::handle_api_move(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_rename(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_rename(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *source_param = request->getParam("source");
   auto *name_param = request->getParam("name");
@@ -2454,7 +2430,7 @@ void HttpFileServer::handle_api_rename(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_mkdir(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_mkdir(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *name_param = request->getParam("name");
 
@@ -2480,7 +2456,7 @@ void HttpFileServer::handle_api_mkdir(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_delete(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_delete(AsyncWebServerRequest *request) {
   if (!this->deletion_enabled_) {
     ESP_LOGW(TAG, "Deletion is disabled");
     request->send(403, "application/json", "{\"error\":\"File deletion is disabled\"}");
@@ -2561,7 +2537,7 @@ void HttpFileServer::handle_api_delete(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_mount(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_mount(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *mount_point_param = request->getParam("mount_point");
 
@@ -2584,7 +2560,7 @@ void HttpFileServer::handle_api_mount(AsyncWebServerRequest *request) {
   return;
 }
 
-void HttpFileServer::handle_api_unmount(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_unmount(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *mount_point_param = request->getParam("mount_point");
 
@@ -2607,7 +2583,7 @@ void HttpFileServer::handle_api_unmount(AsyncWebServerRequest *request) {
   // NOTE: The actual unmount happens in loop() - see the loop() method
 }
 
-void HttpFileServer::handle_api_remount(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_remount(AsyncWebServerRequest *request) {
   // Get parameters from POST body
   auto *mount_point_param = request->getParam("mount_point");
 
@@ -2630,7 +2606,7 @@ void HttpFileServer::handle_api_remount(AsyncWebServerRequest *request) {
   return;
 }
 
-void HttpFileServer::handle_api_progress(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_progress(AsyncWebServerRequest *request) {
   // Thread-safe snapshot of progress data
   portENTER_CRITICAL(&this->progress_mutex_);
   bool in_progress = this->progress_.in_progress;
@@ -2754,7 +2730,7 @@ void HttpFileServer::handle_api_progress(AsyncWebServerRequest *request) {
   ESP_LOGD(TAG, "Progress response sent");
 }
 
-void HttpFileServer::handle_api_cancel(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_cancel(AsyncWebServerRequest *request) {
   ESP_LOGI(TAG, "Cancel request received");
 
   // Set cancelled flag (thread-safe)
@@ -2770,7 +2746,7 @@ void HttpFileServer::handle_api_cancel(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_upload_chunk(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   if (!this->upload_enabled_) {
     request->send(403, "application/json", "{\"error\":\"Upload is disabled\"}");
     return;
@@ -3026,7 +3002,7 @@ void HttpFileServer::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileServer::handle_api_exists(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_exists(AsyncWebServerRequest *request) {
   // Get path parameter from query string
   auto *path_param = request->getParam("path");
 
@@ -3046,7 +3022,7 @@ void HttpFileServer::handle_api_exists(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
-void HttpFileServer::handle_api_dirisempty(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_dirisempty(AsyncWebServerRequest *request) {
   // Lightweight check - only checks if directory has any entries, doesn't count them
   auto *path_param = request->getParam("path");
 
@@ -3075,7 +3051,7 @@ void HttpFileServer::handle_api_dirisempty(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
-void HttpFileServer::handle_api_dirinfo(AsyncWebServerRequest *request) {
+void HttpFileBrowser::handle_api_dirinfo(AsyncWebServerRequest *request) {
   // Get path parameter from query string
   auto *path_param = request->getParam("path");
 
@@ -3118,7 +3094,7 @@ void HttpFileServer::handle_api_dirinfo(AsyncWebServerRequest *request) {
 }
 
 // Form data parsing helper
-bool HttpFileServer::parse_json_request(const uint8_t *body, size_t body_len, ApiRequest &req) {
+bool HttpFileBrowser::parse_json_request(const uint8_t *body, size_t body_len, ApiRequest &req) {
   // Parse URL-encoded form data
   // Format: source=/path/to/file&destination=/path/to/dest&name=newname&path=/file&mount_point=/mnt&device=/dev/sda1
   std::string form_data((const char *) body, body_len);
@@ -3177,7 +3153,7 @@ struct FileCloser {
 };
 
 // FreeRTOS task functions for background operations
-void HttpFileServer::copy_task(void *params) {
+void HttpFileBrowser::copy_task(void *params) {
   auto *task_params = static_cast<CopyTaskParams *>(params);
   ESP_LOGI(TAG, "Copy task started for %s -> %s", task_params->source.c_str(), task_params->destination.c_str());
 
@@ -3194,7 +3170,7 @@ void HttpFileServer::copy_task(void *params) {
   vTaskDelete(nullptr);
 }
 
-void HttpFileServer::move_task(void *params) {
+void HttpFileBrowser::move_task(void *params) {
   auto *task_params = static_cast<MoveTaskParams *>(params);
   ESP_LOGI(TAG, "Move task started for %s -> %s", task_params->source.c_str(), task_params->destination.c_str());
 
@@ -3211,7 +3187,7 @@ void HttpFileServer::move_task(void *params) {
   vTaskDelete(nullptr);
 }
 
-void HttpFileServer::download_task(void *params) {
+void HttpFileBrowser::download_task(void *params) {
   auto *task_params = static_cast<DownloadTaskParams *>(params);
   httpd_req_t *req = task_params->req;
 
@@ -3311,8 +3287,8 @@ void HttpFileServer::download_task(void *params) {
 }
 
 // File operation helpers (reused from WebDAV logic)
-bool HttpFileServer::perform_file_copy(const std::string &src_path, const std::string &dst_path, off_t file_size,
-                                       bool track_progress) {
+bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::string &dst_path, off_t file_size,
+                                        bool track_progress) {
   // Initialize progress tracking if requested (only if not already in progress)
   // This allows perform_file_move to set up progress as "move" before calling this function
   if (track_progress) {
@@ -3461,8 +3437,8 @@ bool HttpFileServer::perform_file_copy(const std::string &src_path, const std::s
   }
 }
 
-bool HttpFileServer::perform_file_move(const std::string &src_path, const std::string &dst_path, off_t file_size,
-                                       bool track_progress) {
+bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::string &dst_path, off_t file_size,
+                                        bool track_progress) {
   // Initialize progress tracking if requested
   if (track_progress) {
     portENTER_CRITICAL(&this->progress_mutex_);
@@ -3676,5 +3652,5 @@ std::string Path::mime_type(const std::string &file) {
   return "application/octet-stream";
 }
 
-}  // namespace http_file_server
+}  // namespace http_file_browser
 }  // namespace esphome
