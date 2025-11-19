@@ -303,17 +303,16 @@ async def to_code(config):
         None,
         "https://github.com/p1ngb4ck/esphome_esp_littlefs.git#main",
     )
-    cg.add_define("CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
-
-    # LittleFS configuration defines (required by the library)
-    cg.add_define("CONFIG_LITTLEFS_CACHE_SIZE", 512)
-    cg.add_define("CONFIG_LITTLEFS_MAX_PARTITIONS", 3)
-    cg.add_define("CONFIG_LITTLEFS_READ_SIZE", 128)
-    cg.add_define("CONFIG_LITTLEFS_WRITE_SIZE", 128)
-    cg.add_define("CONFIG_LITTLEFS_LOOKAHEAD_SIZE", 128)
-    cg.add_define("CONFIG_LITTLEFS_BLOCK_CYCLES", 512)
-    cg.add_define("CONFIG_LITTLEFS_PAGE_SIZE", 256)
-    cg.add_define("CONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT")
+    # LittleFS configuration defines (as build flags for external library)
+    cg.add_build_flag("-DCONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_CACHE_SIZE=512")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_MAX_PARTITIONS=3")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_READ_SIZE=128")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_WRITE_SIZE=128")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_LOOKAHEAD_SIZE=128")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_BLOCK_CYCLES=512")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_PAGE_SIZE=256")
+    cg.add_build_flag("-DCONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT")
 
     # Define USE_BINARY_STORAGE for StorageDevice interface
     cg.add_define("USE_BINARY_STORAGE")
