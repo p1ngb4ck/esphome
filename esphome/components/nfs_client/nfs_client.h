@@ -388,15 +388,27 @@ class NFSClient : public Component
   void unmount();
 
   // File operations
+#if defined(USE_STORAGE)
+  bool read_file(const std::string &path, std::vector<uint8_t> &data) override;
+  bool write_file(const std::string &path, const uint8_t *data, size_t length) override;
+  bool delete_file(const std::string &path) override;
+  bool file_exists(const std::string &path) override;
+#else
   bool read_file(const std::string &path, std::vector<uint8_t> &data);
   bool write_file(const std::string &path, const uint8_t *data, size_t length);
   bool delete_file(const std::string &path);
   bool file_exists(const std::string &path);
+#endif
 
   // Directory operations
   bool list_directory(const std::string &path, std::vector<NFSDirEntry> &entries);
+#if defined(USE_STORAGE)
+  bool create_directory(const std::string &path) override;
+  bool delete_directory(const std::string &path) override;
+#else
   bool create_directory(const std::string &path);
   bool delete_directory(const std::string &path);
+#endif
 
   // File info
   bool get_file_attributes(const std::string &path, NFSFileAttr &attr);
@@ -410,16 +422,8 @@ class NFSClient : public Component
   bool is_connected() const override { return this->mounted_; }
   const char *get_protocol() const override { return "nfs"; }
 
-  // File operations (already implemented above, just marked as override)
-  bool read_file(const std::string &path, std::vector<uint8_t> &data) override;
-  bool write_file(const std::string &path, const uint8_t *data, size_t length) override;
-  bool delete_file(const std::string &path) override;
-  bool file_exists(const std::string &path) override;
-
   // Directory operations with NetworkStorage::DirEntry conversion
   bool list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) override;
-  bool create_directory(const std::string &path) override;
-  bool delete_directory(const std::string &path) override;
 #endif
 
  protected:
