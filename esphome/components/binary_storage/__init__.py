@@ -293,7 +293,6 @@ CONFIG_SCHEMA = cv.typed_schema(
 
 async def to_code(config):
     """Configure binary storage device."""
-    from esphome.components.esp32 import add_idf_component
     from esphome.core import CORE
 
     mode = config.get(CONF_MODE, MODE_RAW)
@@ -301,12 +300,11 @@ async def to_code(config):
 
     # Add ESPHome's forked esp_littlefs with custom block device support
     # This fork exposes lfs.h when CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE is enabled
-    add_idf_component(
-        name="p1ngb4ck/esphome_esp_littlefs",
-        git="https://github.com/p1ngb4ck/esphome_esp_littlefs.git",
-        ref="v1.0.0",
+    cg.add_library(
+        "LittleFS library for ESPHome with block device support",
+        None,
+        "https://github.com/p1ngb4ck/esphome_esp_littlefs.git#1.0.0",
     )
-    # Enable custom block device support to expose lfs.h
     cg.add_define("CONFIG_LITTLEFS_CUSTOM_BLOCK_DEVICE")
 
     # Define USE_BINARY_STORAGE for StorageDevice interface
