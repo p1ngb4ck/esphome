@@ -20,6 +20,10 @@
 #include <ctime>
 #include <cstring>
 #include <cerrno>
+#ifdef USE_ESP_IDF
+#include <esp_vfs_fat.h>
+#include <diskio_impl.h>
+#endif
 
 namespace esphome {
 namespace http_file_browser {
@@ -2019,6 +2023,23 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
     } else {
       row += std::to_string(info.size / (1024 * 1024)) + " MB";
     }
+  } else if (info.is_mount_point && info.has_space_info) {
+    // Show space info for mount points
+    uint64_t used = info.total_space - info.free_space;
+    uint64_t total_mb = info.total_space / (1024 * 1024);
+    uint64_t used_mb = used / (1024 * 1024);
+    uint64_t free_mb = info.free_space / (1024 * 1024);
+
+    // Calculate percentage used
+    int percent_used = (info.total_space > 0) ? (used * 100 / info.total_space) : 0;
+
+    // Format: "Used / Total (XX% used)"
+    if (total_mb < 1024) {
+      row += std::to_string(used_mb) + " / " + std::to_string(total_mb) + " MB";
+    } else {
+      row += std::to_string(used_mb / 1024) + " / " + std::to_string(total_mb / 1024) + " GB";
+    }
+    row += " (" + std::to_string(percent_used) + "%)";
   }
 
   row += "</td><td><div class=\"file-actions\">";
@@ -2118,6 +2139,16 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.size = 0;
       info.modified = 0;
 
+      // Try to get space information for mounted devices
+      if (info.mounted) {
+        uint64_t total = 0, free = 0;
+        if (this->get_mount_space_info(mount.path, total, free)) {
+          info.total_space = total;
+          info.free_space = free;
+          info.has_space_info = true;
+        }
+      }
+
       html += this->generate_file_row(info, this->url_prefix_);
     }
 
@@ -2140,6 +2171,10 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.mounted = net_storage->is_connected();  // Use is_connected() for network storage
       info.size = 0;
       info.modified = 0;
+
+      // Network storage currently doesn't provide space info
+      // Could be added to NetworkStorage interface in the future
+      info.has_space_info = false;
 
       html += this->generate_file_row(info, this->url_prefix_);
     }
@@ -2765,6 +2800,29 @@ bool HttpFileBrowser::is_mount_point_mounted(const std::string &mount_path) {
 
   // If no matching device found, assume it's mounted (could be static mount)
   return true;
+}
+
+bool HttpFileBrowser::get_mount_space_info(const std::string &mount_path, uint64_t &total, uint64_t &free) {
+  // Check if storage component has registered devices
+  if (this->storage_ == nullptr) {
+    return false;
+  }
+
+#ifdef USE_ESP_IDF
+  // Try to get FAT filesystem info for SD/USB mounts
+  FATFS *fs;
+  DWORD fre_clust;
+
+  // Get volume label (mount path)
+  if (f_getfree(mount_path.c_str(), &fre_clust, &fs) == FR_OK) {
+    // Calculate total and free space
+    total = static_cast<uint64_t>(fs->n_fatent - 2) * fs->csize * 512;  // 512 bytes per sector (standard)
+    free = static_cast<uint64_t>(fre_clust) * fs->csize * 512;
+    return true;
+  }
+#endif
+
+  return false;
 }
 
 // API handlers

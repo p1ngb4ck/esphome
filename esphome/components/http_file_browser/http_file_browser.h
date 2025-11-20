@@ -13,7 +13,8 @@
 namespace esphome {
 namespace storage {
 class Storage;
-}
+class NetworkStorage;
+}  // namespace storage
 }  // namespace esphome
 
 namespace esphome {
@@ -80,6 +81,10 @@ struct FileInfo {
   bool mounted{true};  // Only relevant for mount points
   size_t size;
   time_t modified;
+  // Space information (only for mount points)
+  uint64_t total_space{0};
+  uint64_t free_space{0};
+  bool has_space_info{false};
 };
 
 class HttpFileBrowser : public Component, public AsyncWebHandler {
@@ -265,6 +270,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
 
   // Mount status helper
   bool is_mount_point_mounted(const std::string &mount_path);
+  bool get_mount_space_info(const std::string &mount_path, uint64_t &total, uint64_t &free);
 
   // JSON parsing helper
   struct ApiRequest {
