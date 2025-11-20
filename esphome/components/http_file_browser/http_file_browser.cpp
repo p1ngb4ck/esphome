@@ -237,9 +237,9 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
   } else if (uri.find(this->url_prefix_ + "/api/remount") == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API REMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_remount(request);
-    //} else if (uri.find(this->url_prefix_ + "/api/fileinfo") == 0 && request->method() == HTTP_GET) {
-    //  this->handle_api_fileinfo(request);
-    //  return;
+  } else if (uri.find(this->url_prefix_ + "/api/fileinfo") == 0 && request->method() == HTTP_GET) {
+    this->handle_api_fileinfo(request);
+    return;
   } else if (uri.find(this->url_prefix_ + "/api/exists") == 0 && request->method() == HTTP_GET) {
     this->handle_api_exists(request);
   } else if (uri.find(this->url_prefix_ + "/api/dirisempty") == 0 && request->method() == HTTP_GET) {
@@ -1681,6 +1681,27 @@ std::string HttpFileBrowser::generate_html_footer() {
                      })
         .catch(error => alert('Error: ' + error));
   }
+  function show_file_info(path) {
+    fetch(API_BASE + '/api/fileinfo?path=' + encodeURIComponent(path))
+        .then(response => response.json())
+        .then(data =>
+                     {
+                       if (data.error) {
+                         alert('Error retrieving file info: ' + data.error);
+                         return;
+                       }
+
+                       let info = 'File Information:\n\n';
+                       info += 'Path: ' + data.path + '\n';
+                       info += 'Size: ' + data.size + ' bytes\n';
+                       info +=
+                           'Modified: ' + new Date(data.modified * 1000).toLocaleString() + '\n';
+                       info += 'Type: ' + (data.is_directory ? 'Directory' : 'File') + '\n';
+
+                       alert(info);
+                     })
+        .catch(error => alert('Error: ' + error));
+  }
   function create_directory() {
     const name = prompt('Enter directory name:');
     if (!name || !name.trim())
@@ -2058,6 +2079,8 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
     row += "<button onclick=\"move_file('" + info.path + "')\">Move</button>";
     // Rename button
     row += "<button onclick=\"rename_file('" + info.path + "')\">Rename</button>";
+    // Info button
+    row += "<button onclick=\"show_file_info('" + info.name + "')\">Info</button>";
     // Delete button
     if (this->deletion_enabled_) {
       row += "<button class=\"delete\" onclick=\"delete_file('" + file_uri + "')\">Delete</button>";
@@ -3845,6 +3868,43 @@ void HttpFileBrowser::move_task(void *params) {
 
   // Delete this task
   vTaskDelete(nullptr);
+}
+
+void HttpFileBrowser::handle_api_fileinfo(void *params) {
+  auto *task_params = static_cast<FileInfoTaskParams *>(params);
+  httpd_req_t *req = task_params->req;
+  ESP_LOGI(TAG, "FileInfo task started for %s", task_params->filepath.c_str());
+  // Get file information
+  struct stat file_stat;
+  if (stat(task_params->filepath.c_str(), &file_stat) != 0) {
+    ESP_LOGE(TAG, "Failed to get file info: %s", task_params->filepath.c_str());
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+    // Notify caller task if it's waiting
+    if (task_params->caller_task) {
+      xTaskNotifyGive(task_params->caller_task);
+    }
+    delete task_params;
+    vTaskDelete(nullptr);
+    return;
+  }
+  // Build JSON response
+  std::string json = "{";
+  json += "\"size\":" + std::to_string(file_stat.st_size);
+  json += ",\"modified\":" + std::to_string(file_stat.st_mtime);
+  json += ",\"is_directory\":" + std::string(S_ISDIR(file_stat.st_mode) ? "true" : "false");
+  json += "}";
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json.c_str(), json.length());
+  ESP_LOGI(TAG, "FileInfo response sent for %s", task_params->filepath.c_str());
+  // Notify caller task if it's waiting
+  if (task_params->caller_task) {
+    xTaskNotifyGive(task_params->caller_task);
+  }
+  // Clean up parameters
+  delete task_params;
+  // Delete this task
+  vTaskDelete(nullptr);
+  return;
 }
 
 void HttpFileBrowser::download_task(void *params) {

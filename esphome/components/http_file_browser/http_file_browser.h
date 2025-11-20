@@ -258,7 +258,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   void handle_api_mount(AsyncWebServerRequest *request);
   void handle_api_unmount(AsyncWebServerRequest *request);
   void handle_api_remount(AsyncWebServerRequest *request);
-  //  void handle_api_fileinfo(AsyncWebServerRequest *request);
+  void handle_api_fileinfo(AsyncWebServerRequest *request);
 
   // Directory helpers
   bool is_directory_empty(const std::string &path);
