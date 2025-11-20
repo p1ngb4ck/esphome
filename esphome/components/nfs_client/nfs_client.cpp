@@ -363,8 +363,19 @@ void NFSClient::loop() {
         this->mount_state_ = MountState::MOUNTED;
         ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
 
-        // Disconnect from MOUNT service - file operations will reconnect to NFS service
-        this->disconnect_();
+        // Close MOUNT service socket - file operations will reconnect to NFS service
+#ifdef USE_ESP_IDF
+        if (this->socket_ >= 0) {
+          close(this->socket_);
+          this->socket_ = -1;
+        }
+#else
+        if (this->client_) {
+          this->client_->stop();
+          this->client_ = nullptr;
+        }
+#endif
+        this->connected_ = false;
 
         // Register with storage if configured
         if (!this->mount_path_.empty()) {
