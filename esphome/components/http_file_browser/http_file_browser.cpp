@@ -3870,7 +3870,15 @@ void HttpFileBrowser::move_task(void *params) {
   vTaskDelete(nullptr);
 }
 
-void HttpFileBrowser::handle_api_fileinfo(void *params) {
+void HttpFileBrowser::handle_api_fileinfo(AsyncWebServerRequest *request) {
+  // Get path parameter from query string
+  auto *path_param = request->getParam("path");
+  if (!path_param) {
+    request->send(400, "application/json", "{\"error\":\"Missing path parameter\"}");
+    return;
+  }
+  std::string filepath = this->uri_to_filepath(path_param->value().c_str());
+  // Prepare task parameters
   auto *task_params = static_cast<FileInfoTaskParams *>(params);
   httpd_req_t *req = task_params->req;
   ESP_LOGI(TAG, "FileInfo task started for %s", task_params->filepath.c_str());
