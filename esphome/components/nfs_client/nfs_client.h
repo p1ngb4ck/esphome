@@ -429,6 +429,17 @@ class NFSClient : public Component
   // File info
   bool get_file_attributes(const std::string &path, NFSFileAttr &attr);
 
+  // Wrapper for NetworkStorage stat
+  bool stat(const std::string &path, struct stat &file_stat) override {
+    NFSFileAttr attr;
+    if (!this->get_file_attributes(path, attr)) {
+      return false;
+    }
+    file_stat.size = attr.size;
+    file_stat.is_directory = (attr.type == NF3DIR);
+    return true;
+  }
+
 #if defined(USE_STORAGE)
   //========================================================================
   // NetworkStorage Interface Overrides

@@ -82,6 +82,13 @@ class NetworkStorage {
    */
   virtual bool file_exists(const std::string &path) = 0;
 
+  struct stat {
+    uint64_t size{0};
+    bool is_directory{false};
+  };
+
+  virtual bool stat(const std::string &path, struct stat &file_stat) = 0;
+
   //========================================================================
   // Directory Operations
   //========================================================================
