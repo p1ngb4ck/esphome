@@ -287,7 +287,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       // Check if accessing the mount point itself
       if (net_storage->get_mount_path() == filepath) {
         // Accessing mount point root - show directory listing
-        this->handle_network_directory_listing(net_storage, filepath);
+        this->handle_network_directory_listing(request, net_storage, filepath);
         return;
       }
 
@@ -300,7 +300,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
 
       // Route to directory listing or file download based on type
       if (net_storage->is_directory(filepath)) {
-        this->handle_network_directory_listing(net_storage, filepath);
+        this->handle_network_directory_listing(request, net_storage, filepath);
       } else {
         this->handle_network_file_download(request, net_storage, filepath);
       }
@@ -352,10 +352,42 @@ bool HttpFileBrowser::get_network_file_stat(storage::NetworkStorage *net_storage
   return net_storage->stat(path, file_stat);
 }
 
-bool HttpFileBrowser::handle_network_directory_listing(storage::NetworkStorage *net_storage, const std::string &path) {
-  // Use network storage API to get file stat
+bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *request,
+                                                       storage::NetworkStorage *net_storage, const std::string &path) {
+  // Get directory entries from network storage
   std::vector<storage::NetworkStorage::DirEntry> entries;
-  return net_storage->list_directory(path, entries);
+  if (!net_storage->list_directory(path, entries)) {
+    ESP_LOGW(TAG, "Failed to list network directory: %s", path.c_str());
+    request->send(500, "text/plain", "Internal Server Error: Failed to list directory");
+    return false;
+  }
+
+  // Generate HTML directory listing
+  std::string html = this->generate_html_header("Index of " + path);
+  html += "<h2>Index of " + path + "</h2>";
+  html += "<table><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead><tbody>";
+
+  // Convert NetworkStorage::DirEntry to FileInfo for consistent display
+  for (const auto &entry : entries) {
+    FileInfo info;
+    info.name = entry.name;
+    info.path = Path::join(path, entry.name);
+    info.is_directory = entry.is_directory;
+    info.size = entry.size;
+    info.modified = 0;  // Network storage doesn't provide modification time in DirEntry
+    html += this->generate_file_row(info, this->url_prefix_);
+  }
+
+  html += "</tbody></table>";
+  html += this->generate_html_footer();
+
+  // Send response
+  AsyncWebServerResponse *response = request->beginResponse(200, "text/html", html);
+  response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  response->addHeader("Pragma", "no-cache");
+  response->addHeader("Expires", "0");
+  request->send(response);
+  return true;
 }
 
 bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *request, storage::NetworkStorage *net_storage,
@@ -3005,16 +3037,31 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
 
   ESP_LOGI(TAG, "API COPY: %s -> %s", source.c_str(), destination.c_str());
 
-  // Check if source exists
-  struct stat src_stat;
-  if (stat(source.c_str(), &src_stat) != 0) {
+  // Check if source exists (supports network storage)
+  bool is_directory = false;
+  if (!this->path_exists(source, is_directory)) {
     request->send(404, "application/json", "{\"error\":\"Source file not found\"}");
     return;
   }
 
-  if (S_ISDIR(src_stat.st_mode)) {
+  if (is_directory) {
     request->send(400, "application/json", "{\"error\":\"Directory copy not supported\"}");
     return;
+  }
+
+  // Get file size for progress tracking
+  off_t file_size = 0;
+  struct stat src_stat;
+
+  // Try local stat first
+  if (stat(source.c_str(), &src_stat) == 0) {
+    file_size = src_stat.st_size;
+  } else if (this->storage_ != nullptr) {
+    // Network storage - try to get size via NetworkStorage::stat
+    auto *net_storage = this->storage_->find_network_storage_for_path(source);
+    if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+      file_size = src_stat.st_size;
+    }
   }
 
   // Check if destination directory is writable (only once at start of operation)
@@ -3039,9 +3086,9 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
   // Create task parameters
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
-  ESP_LOGI(TAG, "Copy: file size %lld bytes, free_heap=%zu", (long long) src_stat.st_size, esp_get_free_heap_size());
+  ESP_LOGI(TAG, "Copy: file size %lld bytes, free_heap=%zu", (long long) file_size, esp_get_free_heap_size());
 
-  auto *task_params = new CopyTaskParams{this, source, destination, src_stat.st_size, track_progress};
+  auto *task_params = new CopyTaskParams{this, source, destination, file_size, track_progress};
 
   // Create FreeRTOS task for background copy (4KB stack, priority 1)
   BaseType_t result = xTaskCreate(copy_task, "http_copy", 4096, task_params, 1, nullptr);
@@ -3073,16 +3120,31 @@ void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
 
   ESP_LOGI(TAG, "API MOVE: %s -> %s", source.c_str(), destination.c_str());
 
-  // Check if source exists
-  struct stat src_stat;
-  if (stat(source.c_str(), &src_stat) != 0) {
+  // Check if source exists (supports network storage)
+  bool is_directory = false;
+  if (!this->path_exists(source, is_directory)) {
     request->send(404, "application/json", "{\"error\":\"Source file not found\"}");
     return;
   }
 
-  if (S_ISDIR(src_stat.st_mode)) {
+  if (is_directory) {
     request->send(400, "application/json", "{\"error\":\"Directory move not supported\"}");
     return;
+  }
+
+  // Get file size for progress tracking
+  off_t file_size = 0;
+  struct stat src_stat;
+
+  // Try local stat first
+  if (stat(source.c_str(), &src_stat) == 0) {
+    file_size = src_stat.st_size;
+  } else if (this->storage_ != nullptr) {
+    // Network storage - try to get size via NetworkStorage::stat
+    auto *net_storage = this->storage_->find_network_storage_for_path(source);
+    if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+      file_size = src_stat.st_size;
+    }
   }
 
   // Check if destination directory is writable (only once at start of operation)
@@ -3108,7 +3170,7 @@ void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
 
-  auto *task_params = new MoveTaskParams{this, source, destination, src_stat.st_size, track_progress};
+  auto *task_params = new MoveTaskParams{this, source, destination, file_size, track_progress};
 
   // Create FreeRTOS task for background move (4KB stack, priority 1)
   BaseType_t result = xTaskCreate(move_task, "http_move", 4096, task_params, 1, nullptr);

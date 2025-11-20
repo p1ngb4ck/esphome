@@ -124,7 +124,8 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool is_download_enabled() const { return this->download_enabled_; }
   bool is_deletion_enabled() const { return this->deletion_enabled_; }
   bool get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path, struct stat &file_stat);
-  bool handle_network_directory_listing(storage::NetworkStorage *net_storage, const std::string &path);
+  bool handle_network_directory_listing(AsyncWebServerRequest *request, storage::NetworkStorage *net_storage,
+                                        const std::string &path);
   bool handle_network_file_download(AsyncWebServerRequest *request, storage::NetworkStorage *net_storage,
                                     const std::string &path);
 
