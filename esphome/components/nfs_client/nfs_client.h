@@ -523,9 +523,11 @@ class NFSClient : public Component
   bool server_addr_resolved_{false};
 #endif
 
-  // Discovered MOUNT port from portmapper
+  // Discovered ports from portmapper
   uint16_t mount_port_{0};
   bool mount_port_discovered_{false};
+  uint16_t nfs_port_{0};
+  bool nfs_port_discovered_{false};
 
   //========================================================================
   // RPC Client

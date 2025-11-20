@@ -359,23 +359,23 @@ void NFSClient::loop() {
     case MountState::MOUNTING:
       // Attempt NFS mount
       if (this->mount_export_(this->export_path_, this->root_fh_)) {
-        this->mounted_ = true;
-        this->mount_state_ = MountState::MOUNTED;
         ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
 
-        // Close MOUNT service socket - file operations will reconnect to NFS service
-#ifdef USE_ESP_IDF
-        if (this->socket_ >= 0) {
-          close(this->socket_);
-          this->socket_ = -1;
+        // Query portmapper for NFS service port
+        if (this->query_portmapper_(NFS_PROGRAM, NFS_VERSION_3, this->nfs_port_)) {
+          this->nfs_port_discovered_ = true;
+          ESP_LOGI(TAG, "NFS service available on port %u", this->nfs_port_);
+        } else {
+          ESP_LOGW(TAG, "Failed to query NFS port, using default %u", this->port_);
+          this->nfs_port_ = this->port_;
+          this->nfs_port_discovered_ = false;
         }
-#else
-        if (this->client_) {
-          this->client_->stop();
-          this->client_ = nullptr;
-        }
-#endif
-        this->connected_ = false;
+
+        // Disconnect from MOUNT service, file operations will connect to NFS service
+        this->disconnect_();
+
+        this->mounted_ = true;
+        this->mount_state_ = MountState::MOUNTED;
 
         // Register with storage if configured
         if (!this->mount_path_.empty()) {
@@ -513,9 +513,12 @@ bool NFSClient::connect_() {
   } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
     target_port = this->mount_port_;
     service_name = "MOUNT service";
+  } else if (this->nfs_port_discovered_) {
+    target_port = this->nfs_port_;
+    service_name = "NFS service (discovered)";
   } else {
     target_port = this->port_;
-    service_name = "NFS server";
+    service_name = "NFS server (default)";
   }
 
   ESP_LOGD(TAG, "Connecting to %s %s:%u...", service_name, this->server_.c_str(), target_port);
