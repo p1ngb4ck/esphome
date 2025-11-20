@@ -1404,12 +1404,22 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // Skip post-op attributes
     bool has_attr;
     NFSFileAttr attr;
-    if (response.decode_bool(has_attr) && has_attr) {
-      attr.decode(response);
+    if (!response.decode_bool(has_attr)) {
+      ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes boolean");
+      return false;
+    }
+    if (has_attr) {
+      if (!attr.decode(response)) {
+        ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes");
+        return false;
+      }
     }
 
     // Decode cookieverf
-    response.decode_opaque(cookieverf);
+    if (!response.decode_opaque(cookieverf)) {
+      ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
+      return false;
+    }
 
     // Decode entries
     bool has_entry;
