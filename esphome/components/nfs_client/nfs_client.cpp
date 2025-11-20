@@ -417,8 +417,9 @@ void NFSClient::loop() {
       if (this->mount_export_(this->export_path_, this->root_fh_)) {
         ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
 
-        // Keep the connection alive - NFS servers multiplex MOUNT and NFS programs on same connection
-        // The file handle from MOUNT is valid for this connection context
+        // RFC 1813: File handles are portable across connections
+        // Close MOUNT connection - NFS operations will use separate connection to NFS port
+        this->close_connection_();
 
         this->mounted_ = true;
         this->mount_state_ = MountState::MOUNTED;
@@ -619,11 +620,8 @@ bool NFSClient::connect_() {
 #endif
 }
 
-void NFSClient::disconnect_() {
-  if (this->mounted_) {
-    this->unmount();
-  }
-
+void NFSClient::close_connection_() {
+  // Close TCP connection without unmounting
 #ifdef USE_ESP_IDF
   if (this->socket_ >= 0) {
     close(this->socket_);
@@ -637,6 +635,13 @@ void NFSClient::disconnect_() {
 #endif
 
   this->connected_ = false;
+}
+
+void NFSClient::disconnect_() {
+  if (this->mounted_) {
+    this->unmount();
+  }
+  this->close_connection_();
 }
 
 bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {

@@ -541,7 +541,8 @@ class NFSClient : public Component
   bool resolve_hostname_();
 #endif
   bool connect_();
-  void disconnect_();
+  void close_connection_();  // Close TCP connection without unmounting
+  void disconnect_();        // Unmount and close connection
   bool send_rpc_(const XDRBuffer &request, XDRBuffer &response);
   bool query_portmapper_(uint32_t program, uint32_t version, uint16_t &port);
 
