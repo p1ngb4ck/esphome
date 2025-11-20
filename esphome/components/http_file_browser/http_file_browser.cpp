@@ -3873,46 +3873,28 @@ void HttpFileBrowser::move_task(void *params) {
 void HttpFileBrowser::handle_api_fileinfo(AsyncWebServerRequest *request) {
   // Get path parameter from query string
   auto *path_param = request->getParam("path");
+
   if (!path_param) {
     request->send(400, "application/json", "{\"error\":\"Missing path parameter\"}");
     return;
   }
+
   std::string filepath = this->uri_to_filepath(path_param->value().c_str());
-  // Prepare task parameters
-  auto *task_params = static_cast<FileInfoTaskParams *>(params);
-  httpd_req_t *req = task_params->req;
-  ESP_LOGI(TAG, "FileInfo task started for %s", task_params->filepath.c_str());
+
   // Get file information
   struct stat file_stat;
-  if (stat(task_params->filepath.c_str(), &file_stat) != 0) {
-    ESP_LOGE(TAG, "Failed to get file info: %s", task_params->filepath.c_str());
-    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
-    // Notify caller task if it's waiting
-    if (task_params->caller_task) {
-      xTaskNotifyGive(task_params->caller_task);
-    }
-    delete task_params;
-    vTaskDelete(nullptr);
+  if (stat(filepath.c_str(), &file_stat) != 0) {
+    request->send(404, "application/json", "{\"error\":\"File not found\"}");
     return;
   }
-  // Build JSON response
+
   std::string json = "{";
   json += "\"size\":" + std::to_string(file_stat.st_size);
-  json += ",\"modified\":" + std::to_string(file_stat.st_mtime);
   json += ",\"is_directory\":" + std::string(S_ISDIR(file_stat.st_mode) ? "true" : "false");
+  json += ",\"last_modified\":" + std::to_string(file_stat.st_mtime);
   json += "}";
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json.c_str(), json.length());
-  ESP_LOGI(TAG, "FileInfo response sent for %s", task_params->filepath.c_str());
-  // Notify caller task if it's waiting
-  if (task_params->caller_task) {
-    xTaskNotifyGive(task_params->caller_task);
-  }
-  // Clean up parameters
-  delete task_params;
-  // Delete this task
-  vTaskDelete(nullptr);
-  return;
+
+  request->send(200, "application/json", json.c_str());
 }
 
 void HttpFileBrowser::download_task(void *params) {
