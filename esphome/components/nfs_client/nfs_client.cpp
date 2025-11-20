@@ -264,30 +264,65 @@ void NFSClient::setup() {
     ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
   }
 
-  // Try to mount
-  if (this->mount()) {
-    ESP_LOGI(TAG, "Successfully mounted NFS export");
-
-    // Register with storage if configured
-    if (!this->mount_path_.empty()) {
-      this->register_with_storage();
-    }
-  } else {
-    ESP_LOGW(TAG, "Failed to mount NFS export (will retry in loop)");
-  }
+  // Don't block in setup() - just set state to start mounting in loop()
+  this->mount_state_ = MountState::IDLE;
+  ESP_LOGI(TAG, "NFS mount will be attempted asynchronously in loop()");
 }
 
 void NFSClient::loop() {
-  // Try to mount if not mounted
-  if (!this->mounted_) {
-    static uint32_t last_mount_attempt = 0;
-    uint32_t now = millis();
-    if (now - last_mount_attempt > 30000) {  // Try every 30 seconds
-      last_mount_attempt = now;
-      if (this->mount()) {
-        ESP_LOGI(TAG, "Successfully mounted NFS export");
+  uint32_t now = millis();
+
+  switch (this->mount_state_) {
+    case MountState::IDLE:
+      // Start mount attempt
+      ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
+      this->mount_state_ = MountState::CONNECTING;
+      this->last_mount_attempt_ = now;
+      break;
+
+    case MountState::CONNECTING:
+      // Attempt connection (non-blocking as much as possible)
+      if (this->connect_()) {
+        ESP_LOGD(TAG, "Connected to NFS server, attempting mount...");
+        this->mount_state_ = MountState::MOUNTING;
+      } else {
+        ESP_LOGW(TAG, "Failed to connect to NFS server, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        this->mount_state_ = MountState::FAILED;
+        this->last_mount_attempt_ = now;
       }
-    }
+      break;
+
+    case MountState::MOUNTING:
+      // Attempt NFS mount
+      if (this->mount_export_(this->export_path_, this->root_fh_)) {
+        this->mounted_ = true;
+        this->mount_state_ = MountState::MOUNTED;
+        ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
+
+        // Register with storage if configured
+        if (!this->mount_path_.empty()) {
+          this->register_with_storage();
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        this->disconnect_();  // Clean up failed connection
+        this->mount_state_ = MountState::FAILED;
+        this->last_mount_attempt_ = now;
+      }
+      break;
+
+    case MountState::MOUNTED:
+      // Already mounted - nothing to do
+      // Could add periodic health check here in the future
+      break;
+
+    case MountState::FAILED:
+      // Wait for retry interval
+      if (now - this->last_mount_attempt_ >= this->mount_retry_interval_) {
+        ESP_LOGI(TAG, "Retrying NFS mount...");
+        this->mount_state_ = MountState::IDLE;
+      }
+      break;
   }
 }
 
@@ -333,19 +368,28 @@ bool NFSClient::connect_() {
     return false;
   }
 
-  // Resolve host address
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(this->port_);
+  // Resolve host address using getaddrinfo (thread-safe, supports IPv4/IPv6)
+  struct addrinfo hints {
+  }, *result = nullptr;
+  hints.ai_family = AF_INET;        // IPv4
+  hints.ai_socktype = SOCK_STREAM;  // TCP
+  hints.ai_protocol = IPPROTO_TCP;
 
-  struct hostent *host = gethostbyname(this->server_.c_str());
-  if (host == nullptr) {
-    ESP_LOGE(TAG, "Failed to resolve host: %s", this->server_.c_str());
+  char port_str[6];
+  snprintf(port_str, sizeof(port_str), "%u", this->port_);
+
+  int ret_dns = getaddrinfo(this->server_.c_str(), port_str, &hints, &result);
+  if (ret_dns != 0 || result == nullptr) {
+    ESP_LOGE(TAG, "Failed to resolve host '%s': %s", this->server_.c_str(),
+             ret_dns == 0 ? "no address" : gai_strerror(ret_dns));
     close(this->socket_);
     this->socket_ = -1;
     return false;
   }
-  memcpy(&server_addr.sin_addr, host->h_addr, sizeof(server_addr.sin_addr));
+
+  struct sockaddr_in server_addr;
+  memcpy(&server_addr, result->ai_addr, sizeof(server_addr));
+  freeaddrinfo(result);
 
   // Connect
   if (::connect(this->socket_, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
@@ -588,22 +632,15 @@ bool NFSClient::unmount_export_(const std::string &export_path) {
 //========================================================================
 
 bool NFSClient::mount() {
-  if (this->mounted_) {
-    return true;
+  // Trigger mount attempt if not already mounted or in progress
+  if (this->mount_state_ == MountState::IDLE || this->mount_state_ == MountState::FAILED) {
+    ESP_LOGI(TAG, "Mount requested, triggering async mount attempt");
+    this->mount_state_ = MountState::IDLE;  // Will start in next loop()
+    return false;                           // Not mounted yet, will happen async
   }
 
-  if (!this->connect_()) {
-    return false;
-  }
-
-  // Mount the export
-  if (!this->mount_export_(this->export_path_, this->root_fh_)) {
-    return false;
-  }
-
-  this->mounted_ = true;
-  ESP_LOGI(TAG, "NFS mount successful: %s", this->export_path_.c_str());
-  return true;
+  // Return current mount status
+  return this->mounted_;
 }
 
 void NFSClient::unmount() {
@@ -611,9 +648,20 @@ void NFSClient::unmount() {
     return;
   }
 
+  ESP_LOGI(TAG, "Unmounting NFS export...");
+
+  // Unregister from storage first
+#if defined(USE_STORAGE)
+  if (storage::global_storage != nullptr && !this->mount_path_.empty()) {
+    // Note: storage doesn't have unregister_network_storage yet, but should
+    ESP_LOGD(TAG, "Should unregister from storage here");
+  }
+#endif
+
   this->unmount_export_(this->export_path_);
   this->root_fh_.data.clear();
   this->mounted_ = false;
+  this->mount_state_ = MountState::FAILED;  // Go to failed state to allow retry
 
   ESP_LOGI(TAG, "NFS unmounted");
 }

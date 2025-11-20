@@ -453,6 +453,23 @@ class NFSClient : public Component
   NFSFileHandle root_fh_;
 
   //========================================================================
+  // Async Mount Management
+  //========================================================================
+
+  enum class MountState : uint8_t {
+    IDLE,        // Not attempted yet
+    CONNECTING,  // Attempting DNS resolution and TCP connection
+    MOUNTING,    // Attempting NFS mount
+    MOUNTED,     // Successfully mounted
+    FAILED,      // Mount failed, waiting to retry
+  };
+
+  MountState mount_state_{MountState::IDLE};
+  uint32_t last_mount_attempt_{0};
+  uint32_t mount_retry_interval_{30000};  // Retry every 30 seconds
+  bool mount_attempted_in_setup_{false};
+
+  //========================================================================
   // RPC Client
   //========================================================================
 
