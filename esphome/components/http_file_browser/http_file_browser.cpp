@@ -259,12 +259,37 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
     std::string filepath = this->uri_to_filepath(uri);
     ESP_LOGD(TAG, "GET request for: %s (mapped to: %s)", uri.c_str(), filepath.c_str());
 
-    struct stat file_stat;
-    bool is_virtual_root = (this->root_path_ == "/" && filepath == "/");
-
-    if (!is_virtual_root && stat(filepath.c_str(), &file_stat) != 0) {
-      request->send(404, "text/plain", "File or directory not found");
+    if (filepath.empty()) {
+      request->send(400, "text/plain", "Bad Request: Invalid file path");
       return;
+    }
+    // Check if this is network storage
+    storage::NetworkStorage *net_storage = nullptr;
+    if (filepath.empty()) {
+      request->send(400, "text/plain", "Bad Request: Invalid file path");
+      return;
+    } else {
+      if (this->storage_ != nullptr) {
+        net_storage = this->storage_->find_network_storage_for_path(filepath);
+      }
+    }
+
+    if (net_storage != nullptr) {
+      // Network storage - use network storage API for directory listing or file download
+      struct stat file_stat;
+      if (this->get_network_file_stat(net_storage, filepath, file_stat) == false) {
+        ESP_LOGW(TAG, "Network storage file stat failed for: %s", filepath.c_str());
+        request->send(404, "text/plain", "Not Found");
+        return;
+      } else {
+        bool is_virtual_root = this->is_network_storage_virtual_root(net_storage, filepath);
+        if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
+          this->handle_network_directory_listing(request, net_storage, filepath);
+        } else {
+          this->handle_network_file_download(request, net_storage, filepath);
+        }
+        return;
+      }
     }
 
     if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
