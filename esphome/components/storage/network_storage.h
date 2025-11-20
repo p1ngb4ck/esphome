@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <sys/stat.h>
 
 namespace esphome {
 namespace storage {
@@ -82,11 +83,12 @@ class NetworkStorage {
    */
   virtual bool file_exists(const std::string &path) = 0;
 
-  struct stat {
-    uint64_t size{0};
-    bool is_directory{false};
-  };
-
+  /**
+   * @brief Get file status information
+   * @param path File path relative to mount point or absolute
+   * @param file_stat Output struct stat with file information
+   * @return true if successful, false on error
+   */
   virtual bool stat(const std::string &path, struct stat &file_stat) = 0;
 
   //========================================================================
