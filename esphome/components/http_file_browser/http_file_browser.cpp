@@ -274,10 +274,9 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
         net_storage = this->storage_->find_network_storage_for_path(filepath);
       }
     }
-
+    struct stat file_stat;
     if (net_storage != nullptr) {
       // Network storage - use network storage API for directory listing or file download
-      struct stat file_stat;
       if (this->get_network_file_stat(net_storage, filepath, file_stat) == false) {
         ESP_LOGW(TAG, "Network storage file stat failed for: %s", filepath.c_str());
         request->send(404, "text/plain", "Not Found");
@@ -292,6 +291,10 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       }
     }
 
+    if (stat(filepath.c_str(), &file_stat) != 0) {
+      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+      return;
+    }
     if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
       this->handle_directory_listing(request, filepath);
     } else {
