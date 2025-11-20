@@ -237,6 +237,9 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
   } else if (uri.find(this->url_prefix_ + "/api/remount") == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API REMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_remount(request);
+  } else if (uri.find(this->url_prefix_ + "/api/fileinfo") == 0 && request->method() == HTTP_GET) {
+    this->handle_api_fileinfo(request);
+    return;
   } else if (uri.find(this->url_prefix_ + "/api/exists") == 0 && request->method() == HTTP_GET) {
     this->handle_api_exists(request);
   } else if (uri.find(this->url_prefix_ + "/api/dirisempty") == 0 && request->method() == HTTP_GET) {
