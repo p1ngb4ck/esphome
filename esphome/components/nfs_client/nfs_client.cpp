@@ -1525,6 +1525,17 @@ bool NFSClient::delete_directory(const std::string &path) {
   return this->nfs_rmdir_(parent_fh, dirname);
 }
 
+bool NFSClient::is_directory(const std::string &path) {
+  NFSFileHandle fh;
+  NFSFileAttr attr;
+
+  if (!this->resolve_path_(path, fh, attr)) {
+    return false;
+  }
+
+  return (attr.type == NF3DIR);
+}
+
 bool NFSClient::get_file_attributes(const std::string &path, NFSFileAttr &attr) {
   NFSFileHandle fh;
   return this->resolve_path_(path, fh, attr);

@@ -440,6 +440,9 @@ class NFSClient : public Component
 
   // Directory operations with NetworkStorage::DirEntry conversion
   bool list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) override;
+
+  // Helper to check if path is a directory
+  bool is_directory(const std::string &path) override;
 #endif
 
  protected:

@@ -282,8 +282,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
         request->send(404, "text/plain", "Not Found");
         return;
       } else {
-        bool is_virtual_root = this->is_network_storage_virtual_root(net_storage, filepath);
-        if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
+        if (net_storage->get_mount_path() == filepath || net_storage->is_directory(filepath)) {
           this->handle_network_directory_listing(request, net_storage, filepath);
         } else {
           this->handle_network_file_download(request, net_storage, filepath);

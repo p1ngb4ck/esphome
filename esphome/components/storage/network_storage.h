@@ -95,6 +95,8 @@ class NetworkStorage {
     bool is_directory{false};
   };
 
+  virtual bool is_directory(const std::string &path) = 0;
+
   /**
    * @brief List directory contents
    * @param path Directory path relative to mount point or absolute
