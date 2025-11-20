@@ -1091,6 +1091,18 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     return false;
   }
 
+  // Decode post_op_attr (attributes_follow boolean + fattr3)
+  bool attributes_follow;
+  if (!response.decode_bool(attributes_follow)) {
+    ESP_LOGW(TAG, "GETATTR: Failed to decode attributes_follow boolean");
+    return false;
+  }
+
+  if (!attributes_follow) {
+    ESP_LOGW(TAG, "GETATTR: Server returned no attributes");
+    return false;
+  }
+
   // Decode attributes
   return attr.decode(response);
 }
