@@ -61,6 +61,18 @@ class NetworkStorage {
   virtual bool read_file(const std::string &path, std::vector<uint8_t> &data) = 0;
 
   /**
+   * @brief Read a chunk of file data at a specific offset
+   * @param path File path relative to mount point or absolute
+   * @param buffer Output buffer for chunk data (must be pre-allocated)
+   * @param offset Byte offset in file to start reading from
+   * @param max_len Maximum number of bytes to read
+   * @param bytes_read Output parameter with actual bytes read (0 on EOF)
+   * @return true if successful, false on error
+   */
+  virtual bool read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len,
+                               size_t &bytes_read) = 0;
+
+  /**
    * @brief Write data to file (overwrites existing file)
    * @param path File path relative to mount point or absolute
    * @param data Data to write

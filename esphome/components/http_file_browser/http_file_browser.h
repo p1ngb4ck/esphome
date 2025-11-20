@@ -277,6 +277,9 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool is_mount_point_mounted(const std::string &mount_path);
   bool get_mount_space_info(const std::string &mount_path, uint64_t &total, uint64_t &free);
 
+  // Path helper
+  static std::string get_filename_from_path(const std::string &path);
+
   // JSON parsing helper
   struct ApiRequest {
     std::string source;

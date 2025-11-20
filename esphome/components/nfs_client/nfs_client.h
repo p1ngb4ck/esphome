@@ -407,11 +407,14 @@ class NFSClient : public Component
   // File operations
 #if defined(USE_STORAGE)
   bool read_file(const std::string &path, std::vector<uint8_t> &data) override;
+  bool read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len,
+                       size_t &bytes_read) override;
   bool write_file(const std::string &path, const uint8_t *data, size_t length) override;
   bool delete_file(const std::string &path) override;
   bool file_exists(const std::string &path) override;
 #else
   bool read_file(const std::string &path, std::vector<uint8_t> &data);
+  bool read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len, size_t &bytes_read);
   bool write_file(const std::string &path, const uint8_t *data, size_t length);
   bool delete_file(const std::string &path);
   bool file_exists(const std::string &path);

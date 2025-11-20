@@ -1435,6 +1435,54 @@ bool NFSClient::read_file(const std::string &path, std::vector<uint8_t> &data) {
   return true;
 }
 
+bool NFSClient::read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len,
+                                size_t &bytes_read) {
+  bytes_read = 0;
+
+  NFSFileHandle fh;
+  NFSFileAttr attr;
+
+  // Resolve path to file handle
+  if (!this->resolve_path_(path, fh, attr)) {
+    ESP_LOGW(TAG, "Failed to resolve path: %s", path.c_str());
+    return false;
+  }
+
+  // Check if it's a regular file
+  if (attr.type != NF3REG) {
+    ESP_LOGW(TAG, "Not a regular file: %s", path.c_str());
+    return false;
+  }
+
+  // Check if offset is beyond file size (EOF)
+  if (offset >= attr.size) {
+    bytes_read = 0;
+    return true;  // EOF, not an error
+  }
+
+  // Calculate actual read size (don't read past EOF)
+  size_t to_read = max_len;
+  if (offset + to_read > attr.size) {
+    to_read = attr.size - offset;
+  }
+
+  // Read chunk into temporary vector
+  std::vector<uint8_t> chunk;
+  if (!this->nfs_read_(fh, offset, to_read, chunk)) {
+    ESP_LOGW(TAG, "Failed to read file chunk at offset %zu", offset);
+    return false;
+  }
+
+  // Copy to output buffer
+  bytes_read = chunk.size();
+  if (bytes_read > 0) {
+    std::memcpy(buffer, chunk.data(), bytes_read);
+  }
+
+  ESP_LOGVV(TAG, "Read file chunk: %s (offset=%zu, bytes_read=%zu)", path.c_str(), offset, bytes_read);
+  return true;
+}
+
 bool NFSClient::write_file(const std::string &path, const uint8_t *data, size_t length) {
   NFSFileHandle parent_fh;
   std::string filename;
