@@ -292,7 +292,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       }
     }
 
-    if (stat(filepath.c_str(), &file_stat) != 0) {
+    if (!is_virtual_root && stat(filepath.c_str(), &file_stat) != 0) {
       request->send(400, "text/plain", "Bad Request: File not found");
       return;
     }
