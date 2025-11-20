@@ -167,20 +167,8 @@ def final_validate_audio_schema(
 
 
 async def to_code(config):
-    import logging
-
-    _LOGGER = logging.getLogger(__name__)
-
-    _LOGGER.warning("=== AUDIO to_code() CALLED ===")
-    _LOGGER.warning(f"Config: {config}")
-    _LOGGER.warning(f"CORE.using_esp_idf: {CORE.using_esp_idf}")
-
     cg.add_library("esphome/esp-audio-libs", "2.0.1")
 
     # Add esp_audio_codec for AAC support (ESP-IDF only)
     if CORE.using_esp_idf:
-        _LOGGER.warning("=== ADDING esp_audio_codec COMPONENT ===")
         add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
-        _LOGGER.warning("=== esp_audio_codec COMPONENT ADDED ===")
-    else:
-        _LOGGER.warning("=== NOT using ESP-IDF, skipping esp_audio_codec ===")
