@@ -380,8 +380,7 @@ bool NFSClient::connect_() {
 
   int ret_dns = getaddrinfo(this->server_.c_str(), port_str, &hints, &result);
   if (ret_dns != 0 || result == nullptr) {
-    ESP_LOGE(TAG, "Failed to resolve host '%s': %s", this->server_.c_str(),
-             ret_dns == 0 ? "no address" : gai_strerror(ret_dns));
+    ESP_LOGE(TAG, "Failed to resolve host '%s': error %d", this->server_.c_str(), ret_dns);
     close(this->socket_);
     this->socket_ = -1;
     return false;
