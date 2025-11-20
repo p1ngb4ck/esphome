@@ -202,26 +202,37 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at fileid");
     return false;
   }
-  if (!xdr.decode_uint64(this->atime_sec)) {
+  // nfstime3 fields: seconds and nseconds are both uint32 (RFC 1813 section 2.2)
+  uint32_t atime_sec_32, mtime_sec_32, ctime_sec_32;
+
+  if (!xdr.decode_uint32(atime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_sec");
     return false;
   }
+  this->atime_sec = atime_sec_32;
+
   if (!xdr.decode_uint32(this->atime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_nsec");
     return false;
   }
-  if (!xdr.decode_uint64(this->mtime_sec)) {
+
+  if (!xdr.decode_uint32(mtime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_sec");
     return false;
   }
+  this->mtime_sec = mtime_sec_32;
+
   if (!xdr.decode_uint32(this->mtime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_nsec");
     return false;
   }
-  if (!xdr.decode_uint64(this->ctime_sec)) {
+
+  if (!xdr.decode_uint32(ctime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_sec");
     return false;
   }
+  this->ctime_sec = ctime_sec_32;
+
   if (!xdr.decode_uint32(this->ctime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%zu, size=%zu", xdr.position(), xdr.size());
     return false;
@@ -261,9 +272,10 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
   ESP_LOGD(TAG, "parse_reply: buffer size=%zu, position=%zu", xdr.size(), xdr.position());
 
   if (!xdr.decode_uint32(xid)) {
-    ESP_LOGE(TAG, "Failed to decode XID");
+    ESP_LOGE(TAG, "Failed to decode XID, position=%zu size=%zu", xdr.position(), xdr.size());
     return false;
   }
+  ESP_LOGD(TAG, "Decoded XID: %u (expected %u)", xid, expected_xid);
   if (xid != expected_xid) {
     ESP_LOGE(TAG, "XID mismatch: expected %u, got %u", expected_xid, xid);
     return false;
@@ -647,7 +659,11 @@ bool NFSClient::connect_() {
   struct timeval tv;
   tv.tv_sec = 5;
   tv.tv_usec = 0;
-  setsockopt(this->socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  if (setsockopt(this->socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+    ESP_LOGW(TAG, "Failed to set receive timeout: errno %d", errno);
+  } else {
+    ESP_LOGD(TAG, "Set socket receive timeout to %d seconds", tv.tv_sec);
+  }
 
   this->connected_ = true;
   return true;
