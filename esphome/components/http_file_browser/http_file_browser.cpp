@@ -1695,7 +1695,7 @@ std::string HttpFileBrowser::generate_html_footer() {
                        info += 'Path: ' + path + '\n';
                        info += 'Size: ' + data.size + ' bytes\n';
                        info +=
-                           'Modified: ' + new Date(data.last_modified).toLocaleString() + '\n';
+                           'Modified: ' + new Date(data.last_modified * 1000).toLocaleString() + '\n';
                        info += 'Type: ' + (data.is_directory ? 'Directory' : 'File') + '\n';
 
                        alert(info);
