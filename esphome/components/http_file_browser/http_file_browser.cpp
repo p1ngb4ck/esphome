@@ -582,6 +582,41 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
   esphome::FixedVector<FileInfo> files;
 
   ESP_LOGD(TAG, "Attempting to open directory: %s", path.c_str());
+
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      ESP_LOGD(TAG, "Path %s is on network storage, using NetworkStorage API", path.c_str());
+
+      // Use NetworkStorage API instead of VFS
+      std::vector<storage::NetworkStorage::DirEntry> entries;
+      if (net_storage->list_directory(path, entries)) {
+        files.init(std::min(entries.size(), MAX_DIR_ENTRIES));
+
+        for (const auto &entry : entries) {
+          if (files.size() >= MAX_DIR_ENTRIES) {
+            ESP_LOGW(TAG, "Directory %s has more than %zu entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
+            break;
+          }
+
+          FileInfo info;
+          info.name = entry.name;
+          info.path = Path::join(path, entry.name);
+          info.is_directory = entry.is_directory;
+          info.size = entry.size;
+          info.modified = 0;  // Network storage doesn't provide mtime yet
+
+          files.push_back(info);
+        }
+      } else {
+        ESP_LOGE(TAG, "Failed to list network storage directory: %s", path.c_str());
+      }
+      return files;
+    }
+  }
+
+  // Use standard VFS opendir for local storage
   DIR *dir = opendir(path.c_str());
 
   if (dir != nullptr) {
@@ -629,6 +664,126 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
     ESP_LOGE(TAG, "Cannot open directory: %s (errno: %d)", path.c_str(), errno);
   }
   return files;
+}
+
+// Network storage aware file operation helpers
+bool HttpFileBrowser::path_exists(const std::string &path, bool &is_directory) {
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      // Use NetworkStorage API
+      if (net_storage->file_exists(path)) {
+        is_directory = false;
+        return true;
+      }
+      // Check if it's a directory by trying to list it
+      std::vector<storage::NetworkStorage::DirEntry> entries;
+      if (net_storage->list_directory(path, entries)) {
+        is_directory = true;
+        return true;
+      }
+      return false;
+    }
+  }
+
+  // Use VFS stat for local storage
+  struct stat st;
+  if (stat(path.c_str(), &st) == 0) {
+    is_directory = S_ISDIR(st.st_mode);
+    return true;
+  }
+  return false;
+}
+
+bool HttpFileBrowser::delete_path(const std::string &path, bool is_directory) {
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      // Use NetworkStorage API
+      if (is_directory) {
+        return net_storage->delete_directory(path);
+      } else {
+        return net_storage->delete_file(path);
+      }
+    }
+  }
+
+  // Use VFS for local storage
+  if (is_directory) {
+    return rmdir(path.c_str()) == 0;
+  } else {
+    return remove(path.c_str()) == 0;
+  }
+}
+
+bool HttpFileBrowser::create_dir(const std::string &path) {
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      // Use NetworkStorage API
+      return net_storage->create_directory(path);
+    }
+  }
+
+  // Use VFS for local storage
+  return mkdir(path.c_str(), 0755) == 0;
+}
+
+bool HttpFileBrowser::read_file_content(const std::string &path, std::vector<uint8_t> &data) {
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      // Use NetworkStorage API
+      return net_storage->read_file(path, data);
+    }
+  }
+
+  // Use VFS for local storage
+  FILE *file = fopen(path.c_str(), "rb");
+  if (!file) {
+    return false;
+  }
+
+  fseek(file, 0, SEEK_END);
+  long size = ftell(file);
+  fseek(file, 0, SEEK_SET);
+
+  if (size < 0) {
+    fclose(file);
+    return false;
+  }
+
+  data.resize(size);
+  size_t read = fread(data.data(), 1, size, file);
+  fclose(file);
+
+  return read == (size_t) size;
+}
+
+bool HttpFileBrowser::write_file_content(const std::string &path, const uint8_t *data, size_t length) {
+  // Check if this path is on network storage
+  if (this->storage_ != nullptr) {
+    auto *net_storage = this->storage_->find_network_storage_for_path(path);
+    if (net_storage != nullptr) {
+      // Use NetworkStorage API
+      return net_storage->write_file(path, data, length);
+    }
+  }
+
+  // Use VFS for local storage
+  FILE *file = fopen(path.c_str(), "wb");
+  if (!file) {
+    return false;
+  }
+
+  size_t written = fwrite(data, 1, length, file);
+  fclose(file);
+
+  return written == length;
 }
 
 // HTML generation helpers
@@ -2470,11 +2625,11 @@ void HttpFileBrowser::handle_api_mkdir(AsyncWebServerRequest *request) {
 
   ESP_LOGI(TAG, "API MKDIR: URI=%s -> Path=%s", dir_uri.c_str(), dir_path.c_str());
 
-  // Create directory
-  if (mkdir(dir_path.c_str(), 0755) == 0) {
+  // Create directory (using helper that supports network storage)
+  if (this->create_dir(dir_path)) {
     request->send(200, "application/json", "{\"success\":true}");
   } else {
-    ESP_LOGE(TAG, "Mkdir failed: %s (errno: %d, %s)", dir_path.c_str(), errno, strerror(errno));
+    ESP_LOGE(TAG, "Mkdir failed: %s", dir_path.c_str());
     request->send(500, "application/json", "{\"error\":\"Mkdir operation failed\"}");
   }
 }
@@ -2502,54 +2657,68 @@ void HttpFileBrowser::handle_api_delete(AsyncWebServerRequest *request) {
 
   ESP_LOGI(TAG, "API DELETE: URI=%s -> Path=%s", path_uri.c_str(), filepath.c_str());
 
-  // Check if path exists
-  struct stat file_stat;
-  if (stat(filepath.c_str(), &file_stat) != 0) {
+  // Check if path exists (using helper that supports network storage)
+  bool is_directory = false;
+  if (!this->path_exists(filepath, is_directory)) {
     request->send(404, "application/json", "{\"error\":\"Path not found\"}");
     return;
   }
 
   bool success = false;
-  if (S_ISDIR(file_stat.st_mode)) {
-    // Count files/directories first
-    int file_count = 0;
-    int dir_count = 0;
-    this->count_directory_contents(filepath, file_count, dir_count);
-    int total_items = file_count + dir_count;
-
-    // Initialize progress tracking for large deletions (>5 items)
-    bool track_progress = (total_items > 5);
-    if (track_progress) {
-      portENTER_CRITICAL(&this->progress_mutex_);
-      this->progress_.operation = "delete";
-      this->progress_.source = filepath;
-      this->progress_.destination = "";
-      this->progress_.current_file = "";
-      this->progress_.total_items = total_items;
-      this->progress_.processed_items = 0;
-      this->progress_.in_progress = true;
-      this->progress_.cancelled = false;
-      this->progress_.start_time = millis();
-      portEXIT_CRITICAL(&this->progress_mutex_);
-      ESP_LOGI(TAG, "Deleting directory recursively: %s (%d files, %d dirs)", filepath.c_str(), file_count, dir_count);
+  if (is_directory) {
+    // Check if this is network storage - recursive deletion not yet supported
+    if (this->storage_ != nullptr && this->storage_->find_network_storage_for_path(filepath) != nullptr) {
+      ESP_LOGI(TAG, "Attempting to delete directory on network storage: %s", filepath.c_str());
+      // NetworkStorage only supports deleting empty directories
+      success = this->delete_path(filepath, true);
+      if (!success) {
+        ESP_LOGW(TAG,
+                 "Directory deletion failed - network storage only supports deleting empty directories. Please delete "
+                 "contents first.");
+      }
     } else {
-      ESP_LOGI(TAG, "Deleting directory recursively: %s", filepath.c_str());
-    }
+      // Local storage - use recursive deletion
+      // Count files/directories first
+      int file_count = 0;
+      int dir_count = 0;
+      this->count_directory_contents(filepath, file_count, dir_count);
+      int total_items = file_count + dir_count;
 
-    // Recursive directory deletion
-    success = this->recursive_delete_directory(filepath, track_progress);
+      // Initialize progress tracking for large deletions (>5 items)
+      bool track_progress = (total_items > 5);
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.operation = "delete";
+        this->progress_.source = filepath;
+        this->progress_.destination = "";
+        this->progress_.current_file = "";
+        this->progress_.total_items = total_items;
+        this->progress_.processed_items = 0;
+        this->progress_.in_progress = true;
+        this->progress_.cancelled = false;
+        this->progress_.start_time = millis();
+        portEXIT_CRITICAL(&this->progress_mutex_);
+        ESP_LOGI(TAG, "Deleting directory recursively: %s (%d files, %d dirs)", filepath.c_str(), file_count,
+                 dir_count);
+      } else {
+        ESP_LOGI(TAG, "Deleting directory recursively: %s", filepath.c_str());
+      }
 
-    // Clear progress tracking
-    if (track_progress) {
-      portENTER_CRITICAL(&this->progress_mutex_);
-      this->progress_.in_progress = false;
-      this->progress_.cancelled = false;  // Reset cancelled flag after handling
-      portEXIT_CRITICAL(&this->progress_mutex_);
+      // Recursive directory deletion
+      success = this->recursive_delete_directory(filepath, track_progress);
+
+      // Clear progress tracking
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;  // Reset cancelled flag after handling
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
     }
   } else {
-    // Single file deletion
+    // Single file deletion (using helper that supports network storage)
     ESP_LOGI(TAG, "Deleting file: %s", filepath.c_str());
-    success = (remove(filepath.c_str()) == 0);
+    success = this->delete_path(filepath, false);
   }
 
   if (success) {

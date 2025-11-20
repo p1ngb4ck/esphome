@@ -219,6 +219,14 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   std::string url_decode(const std::string &src);
   esphome::FixedVector<FileInfo> list_directory(const std::string &path);
 
+  // Network storage aware file operation helpers
+  // These automatically route to NetworkStorage API when path is on network storage
+  bool path_exists(const std::string &path, bool &is_directory);
+  bool delete_path(const std::string &path, bool is_directory);
+  bool create_dir(const std::string &path);
+  bool read_file_content(const std::string &path, std::vector<uint8_t> &data);
+  bool write_file_content(const std::string &path, const uint8_t *data, size_t length);
+
   // HTML generation helpers
   std::string generate_html_header(const std::string &title);
   std::string generate_html_footer();
