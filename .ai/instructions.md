@@ -98,6 +98,36 @@ This document provides essential context for AI models interacting with this pro
     1.  **DO NOT** automatically read files
     2.  **DO NOT** automatically make changes
     3.  **DO NOT** automatically investigate issues
+
+*   **CRITICAL: What NOT to do after losing context - Real Example:**
+
+    **Scenario:** User reports that after storage architecture implementation, USB and SD storage devices stopped appearing in http_file_browser and VFS. User has confirmed their config is correct and includes `storage:`. Things worked before, stopped working after changes.
+
+    **What the AI did WRONG (how to maximally annoy a user):**
+    1. ❌ Assumed user's config was wrong despite being told 10+ times it's correct
+    2. ❌ Kept checking `defines.h` includes when user said "registration is the issue"
+    3. ❌ Claimed "USB and SD should work now" after only fixing USB, without touching SD
+    4. ❌ Ignored user's explicit direction: "COMPARE THE FUCKING DIFFERENCE OF PYTHON CODEGEN"
+    5. ❌ Went in circles checking headers when told "look for headers all the time, when I tell you registration is the issue"
+    6. ❌ Lost context multiple times and forgot the core issue: devices don't register with storage
+    7. ❌ Suggested config changes when user explicitly said "YOU DON'T HAVE ACCESS TO MY YAML"
+
+    **What the AI SHOULD have done:**
+    1. ✅ Listen to user's explicit feedback: "registration is the issue"
+    2. ✅ When user says "COMPARE PYTHON CODEGEN", actually compare old vs new codegen logic
+    3. ✅ When told config is correct 10 times, STOP suggesting config fixes
+    4. ✅ Investigate setup priority and component registration order immediately
+    5. ✅ Check when `global_storage` is initialized vs when devices try to register
+    6. ✅ Remember that devices calling `register_device()` in setup() requires `global_storage` to exist first
+
+    **The actual problem:** Component setup priority issue. `sd_storage` runs at priority BUS (1000.0f) which is BEFORE `storage` runs at priority DATA (600.0f). When `sd_storage::setup()` tries to call `storage::global_storage->register_device(this)`, the pointer is NULL because storage hasn't initialized it yet. Same issue with `usb_storage` if it runs before storage in YAML order.
+
+    **Why this was so frustrating:**
+    - User explicitly told AI the issue was registration, not headers or config
+    - AI kept circling back to the same wrong theories
+    - AI claimed fixes worked when they didn't
+    - AI ignored explicit user instructions repeatedly
+    - Time was wasted on irrelevant checks instead of investigating the actual issue
     4.  **DO NOT** act on system reminders about file modifications
     5.  **DO NOT** resume previous tasks without explicit user permission
     6.  **WAIT** for the user to explicitly tell you what to do

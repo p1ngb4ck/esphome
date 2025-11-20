@@ -1,6 +1,7 @@
 #if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
 
 #include "usb_storage.h"
+#include "esphome/core/defines.h"
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
