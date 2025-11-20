@@ -2080,7 +2080,7 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
     // Rename button
     row += "<button onclick=\"rename_file('" + info.path + "')\">Rename</button>";
     // Info button
-    row += "<button onclick=\"show_file_info('" + info.name + "')\">Info</button>";
+    row += "<button onclick=\"show_file_info('" + info.path + "')\">Info</button>";
     // Delete button
     if (this->deletion_enabled_) {
       row += "<button class=\"delete\" onclick=\"delete_file('" + file_uri + "')\">Delete</button>";
