@@ -731,7 +731,7 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
 //========================================================================
 
 bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh) {
-  ESP_LOGD(TAG, "Mounting export: %s", export_path.c_str());
+  ESP_LOGD(TAG, "Mounting export: %s with UID=%u, GID=%u", export_path.c_str(), this->uid_, this->gid_);
 
   // Build MOUNT MNT call
   uint32_t xid = RPCClient::generate_xid();
@@ -739,6 +739,7 @@ bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh)
   this->rpc_.build_call(request, xid, MOUNT_PROGRAM, MOUNT_VERSION_3, MOUNTPROC3_MNT, this->uid_, this->gid_);
 
   // MOUNT MNT arguments: dirpath
+  ESP_LOGD(TAG, "Encoded export path: '%s'", export_path.c_str());
   request.encode_string(export_path);
 
   // Send RPC call
