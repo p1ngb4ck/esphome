@@ -612,12 +612,18 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 
   if (send(this->socket_, length_buf, 4, 0) != 4) {
     ESP_LOGE(TAG, "Failed to send RPC length");
+    close(this->socket_);
+    this->socket_ = -1;
+    this->connected_ = false;
     return false;
   }
 
   // Send data
   if (send(this->socket_, request.data().data(), request.size(), 0) != static_cast<int>(request.size())) {
     ESP_LOGE(TAG, "Failed to send RPC data");
+    close(this->socket_);
+    this->socket_ = -1;
+    this->connected_ = false;
     return false;
   }
 
@@ -625,6 +631,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   uint8_t response_length_buf[4];
   if (recv(this->socket_, response_length_buf, 4, MSG_WAITALL) != 4) {
     ESP_LOGE(TAG, "Failed to receive RPC response length");
+    close(this->socket_);
+    this->socket_ = -1;
+    this->connected_ = false;
     return false;
   }
 
@@ -636,6 +645,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 
   if (response_length > 65536) {  // Sanity check
     ESP_LOGE(TAG, "Response too large: %u bytes", response_length);
+    close(this->socket_);
+    this->socket_ = -1;
+    this->connected_ = false;
     return false;
   }
 
@@ -643,6 +655,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   std::vector<uint8_t> response_data(response_length);
   if (recv(this->socket_, response_data.data(), response_length, MSG_WAITALL) != static_cast<int>(response_length)) {
     ESP_LOGE(TAG, "Failed to receive RPC response data");
+    close(this->socket_);
+    this->socket_ = -1;
+    this->connected_ = false;
     return false;
   }
 
