@@ -17,6 +17,7 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <sys/stat.h>
 
 // Optional storage integration (soft dependency)
 #if defined(USE_STORAGE)
@@ -435,8 +436,20 @@ class NFSClient : public Component
     if (!this->get_file_attributes(path, attr)) {
       return false;
     }
-    file_stat.size = attr.size;
-    file_stat.is_directory = (attr.type == NF3DIR);
+    file_stat.st_size = attr.size;
+    file_stat.st_mode = attr.mode;
+    file_stat.st_uid = attr.uid;
+    file_stat.st_gid = attr.gid;
+    file_stat.st_atime = static_cast<time_t>(attr.atime_sec);
+    file_stat.st_mtime = static_cast<time_t>(attr.mtime_sec);
+    file_stat.st_ctime = static_cast<time_t>(attr.ctime_sec);
+    if (attr.type == NF3DIR) {
+      file_stat.st_mode |= S_IFDIR;
+    } else if (attr.type == NF3REG) {
+      file_stat.st_mode |= S_IFREG;
+    } else {
+      file_stat.st_mode |= S_IFREG;  // Default to regular file for other types
+    }
     return true;
   }
 
