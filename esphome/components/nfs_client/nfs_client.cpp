@@ -583,7 +583,7 @@ bool NFSClient::connect_() {
   // Determine which port to use based on mount state (RFC 1813)
   uint16_t target_port;
   const char *service_name;
-  if (this->mount_state_ == MountState::CONNECTING_PMAP) {
+  if (this->mount_state_ == MountState::CONNECTING_PMAP || this->mount_state_ == MountState::QUERYING_PMAP_NFS) {
     target_port = PMAP_PORT;
     service_name = "portmapper";
   } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
@@ -832,10 +832,16 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
     return false;
   }
 
-  // Parse RPC reply
-  RPCAcceptStatus status;
-  if (!this->rpc_.parse_reply(response, xid, status)) {
-    ESP_LOGE(TAG, "Failed to parse PMAP reply");
+  // Parse RPC reply - handle PROG_UNAVAIL specially for portmapper
+  RPCAcceptStatus accept_status;
+  if (!this->rpc_.parse_reply(response, xid, accept_status)) {
+    // parse_reply returns false if accept_status != RPC_SUCCESS
+    // For portmapper, PROG_UNAVAIL means program not registered (valid response)
+    if (accept_status == RPC_PROG_UNAVAIL) {
+      ESP_LOGI(TAG, "Program %u version %u not registered with portmapper", program, version);
+    } else {
+      ESP_LOGE(TAG, "Portmapper RPC failed with status %u", static_cast<uint32_t>(accept_status));
+    }
     return false;
   }
 
@@ -847,7 +853,7 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
   }
 
   if (port_result == 0) {
-    ESP_LOGE(TAG, "Portmapper returned port 0 - program %u version %u not registered", program, version);
+    ESP_LOGI(TAG, "Portmapper returned port 0 - program %u version %u not registered", program, version);
     return false;
   }
 
