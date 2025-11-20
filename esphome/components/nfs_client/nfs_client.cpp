@@ -1531,17 +1531,24 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     // Decode entries
     bool has_entry;
+    size_t entry_count = 0;
     while (response.decode_bool(has_entry) && has_entry) {
       NFSDirEntry entry;
       if (!response.decode_uint64(entry.fileid)) {
+        ESP_LOGW(TAG, "READDIR: Failed to decode fileid at entry %zu", entry_count);
         break;
       }
       if (!response.decode_string(entry.name)) {
+        ESP_LOGW(TAG, "READDIR: Failed to decode name at entry %zu", entry_count);
         break;
       }
       if (!response.decode_uint64(entry.cookie)) {
+        ESP_LOGW(TAG, "READDIR: Failed to decode cookie at entry %zu", entry_count);
         break;
       }
+
+      entry_count++;
+      ESP_LOGD(TAG, "READDIR: Entry %zu: name='%s', cookie=%llu", entry_count, entry.name.c_str(), entry.cookie);
 
       // Skip "." and ".."
       if (entry.name != "." && entry.name != "..") {
@@ -1551,13 +1558,19 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       cookie = entry.cookie;
     }
 
+    ESP_LOGI(TAG, "READDIR: Decoded %zu entries, last cookie=%llu", entry_count, cookie);
+
     // Check if EOF
     bool eof;
     if (!response.decode_bool(eof)) {
+      ESP_LOGE(TAG, "READDIR: Failed to decode EOF flag");
       return false;
     }
 
+    ESP_LOGI(TAG, "READDIR: EOF flag = %s", eof ? "TRUE" : "FALSE");
+
     if (eof) {
+      ESP_LOGI(TAG, "READDIR: Completed, total entries collected: %zu", entries.size());
       break;
     }
   }
