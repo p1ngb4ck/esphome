@@ -1366,7 +1366,7 @@ bool NFSClient::nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name)
 }
 
 bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries) {
-  ESP_LOGVV(TAG, "NFS READDIR");
+  ESP_LOGI(TAG, "NFS READDIR starting");
 
   entries.clear();
   uint64_t cookie = 0;
