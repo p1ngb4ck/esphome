@@ -1417,7 +1417,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     // Decode cookieverf (fixed 8 bytes, not length-prefixed)
     cookieverf.resize(8);
-    if (!response.decode_fixed_opaque(cookieverf.data(), 8)) {
+    if (!response.decode_bytes(cookieverf.data(), 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
