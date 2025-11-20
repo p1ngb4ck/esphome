@@ -284,7 +284,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
         return;
       } else {
         if (net_storage->get_mount_path() == filepath || net_storage->is_directory(filepath)) {
-          this->handle_network_directory_listing(request, net_storage, filepath);
+          this->handle_network_directory_listing(net_storage, filepath);
         } else {
           this->handle_network_file_download(request, net_storage, filepath);
         }
@@ -341,6 +341,50 @@ bool HttpFileBrowser::handle_network_directory_listing(storage::NetworkStorage *
   // Use network storage API to get file stat
   std::vector<storage::NetworkStorage::DirEntry> entries;
   return net_storage->list_directory(path, entries);
+}
+
+bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *request, storage::NetworkStorage *net_storage,
+                                                   const std::string &path) {
+  // check file size, read file data to buffer if size is < 10kB, else stream file
+  struct stat file_stat;
+  if (!net_storage->stat(path, file_stat)) {
+    ESP_LOGW(TAG, "Network storage file stat failed for: %s", path.c_str());
+    request->send(404, "text/plain", "Not Found");
+    return false;
+  }
+  size_t file_size = file_stat.size;
+  ESP_LOGD(TAG, "Network storage file size for %s: %zu bytes", path.c_str(), file_size);
+  std::vector<uint8_t> file_data;
+  if (file_size <= 10 * 1024) {
+    // Small file - read entire file into memory
+    file_data.resize(file_size);
+    size_t bytes_read = 0;
+    if (!net_storage->read_file(path, file_data.data(), file_size, bytes_read) || bytes_read != file_size) {
+      ESP_LOGW(TAG, "Network storage read failed for: %s", path.c_str());
+      request->send(500, "text/plain", "Internal Server Error: Failed to read file");
+      return false;
+    }
+  } else {
+    // Large file - stream directly from network storage
+    AsyncWebServerResponse *response = request->beginResponse(
+        "application/octet-stream", file_size, [net_storage, path](uint8_t *buffer, size_t maxLen, size_t index) {
+          size_t bytes_read = 0;
+          if (!net_storage->read_file(path, buffer, maxLen, bytes_read, index)) {
+            ESP_LOGW(TAG, "Network storage read failed during streaming for: %s", path.c_str());
+            return 0;
+          }
+          return bytes_read;
+        });
+    response->addHeader("Content-Disposition", "attachment; filename=\"" + Path::get_filename(path) + "\"");
+    request->send(response);
+    return true;
+  }
+  // Send small file from memory
+  AsyncWebServerResponse *response =
+      request->beginResponse("application/octet-stream", file_size, file_data.data(), file_size);
+  response->addHeader("Content-Disposition", "attachment; filename=\"" + Path::get_filename(path) + "\"");
+  request->send(response);
+  return true;
 }
 
 void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index,
