@@ -1692,10 +1692,10 @@ std::string HttpFileBrowser::generate_html_footer() {
                        }
 
                        let info = 'File Information:\n\n';
-                       info += 'Path: ' + data.path + '\n';
+                       info += 'Path: ' + path + '\n';
                        info += 'Size: ' + data.size + ' bytes\n';
                        info +=
-                           'Modified: ' + new Date(data.modified * 1000).toLocaleString() + '\n';
+                           'Modified: ' + new Date(data.modified).toLocaleString() + '\n';
                        info += 'Type: ' + (data.is_directory ? 'Directory' : 'File') + '\n';
 
                        alert(info);
