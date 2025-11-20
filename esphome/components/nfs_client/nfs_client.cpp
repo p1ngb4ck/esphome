@@ -561,12 +561,14 @@ bool NFSClient::connect_() {
     target_port = this->mount_port_;
     service_name = "MOUNT service";
   } else if (this->mount_port_discovered_) {
-    // Use discovered MOUNT port for NFS operations (many servers multiplex both on same port)
+    // RFC 1813: File handles are portable across connections
+    // Use MOUNT port for NFS if portmapper didn't provide separate NFS port
     target_port = this->mount_port_;
-    service_name = "NFS service (MOUNT port)";
+    service_name = "NFS/MOUNT service";
   } else {
+    // Fall back to configured port (usually 2049)
     target_port = this->port_;
-    service_name = "NFS server (default)";
+    service_name = "NFS server (configured port)";
   }
 
   ESP_LOGD(TAG, "Connecting to %s %s:%u...", service_name, this->server_.c_str(), target_port);
