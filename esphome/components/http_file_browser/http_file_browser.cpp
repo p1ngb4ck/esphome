@@ -277,7 +277,14 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
 
     struct stat file_stat;
     if (net_storage != nullptr) {
-      // Network storage - use network storage API for directory listing or file download
+      // Network storage - check if connected first
+      if (!net_storage->is_connected()) {
+        ESP_LOGW(TAG, "Network storage not connected: %s", filepath.c_str());
+        request->send(503, "text/plain", "Service Unavailable: Network storage not connected");
+        return;
+      }
+
+      // Use network storage API for directory listing or file download
       if (this->get_network_file_stat(net_storage, filepath, file_stat) == false) {
         ESP_LOGW(TAG, "Network storage file stat failed for: %s", filepath.c_str());
         request->send(404, "text/plain", "Not Found");
@@ -2875,7 +2882,37 @@ bool HttpFileBrowser::recursive_delete_directory_network(storage::NetworkStorage
 
 // Mount status helper
 bool HttpFileBrowser::is_mount_point_mounted(const std::string &mount_path) {
-  // Check USB MSC devices
+  // Use storage component if available (new architecture)
+  if (this->storage_ != nullptr) {
+    // Check if this is a network storage mount
+    auto *net_storage = this->storage_->find_network_storage_for_path(mount_path);
+    if (net_storage != nullptr) {
+      // Network storage - use is_connected()
+      return net_storage->is_connected();
+    }
+
+    // Check local storage mounts
+    const auto &mounts = this->storage_->get_mounts();
+    for (const auto &mount : mounts) {
+      if (mount.path == mount_path) {
+        // Local storage - check if mount path exists and is accessible
+        struct stat st;
+        if (stat(mount_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+          return false;
+        }
+
+        // Try to actually open the directory to verify filesystem is ready
+        DIR *dir = opendir(mount_path.c_str());
+        if (dir == nullptr) {
+          return false;
+        }
+        closedir(dir);
+        return true;
+      }
+    }
+  }
+
+  // Fallback to old device-specific checks for backwards compatibility
 #ifdef USE_USB_STORAGE
   for (void *dev_ptr : this->usb_storage_devices_) {
     auto *device = static_cast<usb_storage::USBStorageDevice *>(dev_ptr);
@@ -2885,7 +2922,6 @@ bool HttpFileBrowser::is_mount_point_mounted(const std::string &mount_path) {
   }
 #endif
 
-  // Check SD storage devices
 #ifdef USE_SD_STORAGE
   for (void *dev_ptr : this->sd_storage_devices_) {
     auto *device = static_cast<sd_storage::SdMmc *>(dev_ptr);
@@ -2895,7 +2931,17 @@ bool HttpFileBrowser::is_mount_point_mounted(const std::string &mount_path) {
   }
 #endif
 
-  // If no matching device found, assume it's mounted (could be static mount)
+  // If no matching device found, try to check if path exists and is accessible
+  struct stat st;
+  if (stat(mount_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+    return false;
+  }
+
+  DIR *dir = opendir(mount_path.c_str());
+  if (dir == nullptr) {
+    return false;
+  }
+  closedir(dir);
   return true;
 }
 
@@ -3963,17 +4009,46 @@ void HttpFileBrowser::handle_api_fileinfo(AsyncWebServerRequest *request) {
 
   std::string filepath = this->uri_to_filepath(path_param->value().c_str());
 
-  // Get file information
+  // Check if this is network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(filepath);
+  }
+
   struct stat file_stat;
-  if (stat(filepath.c_str(), &file_stat) != 0) {
+  bool stat_ok = false;
+
+  if (net_storage != nullptr) {
+    // Network storage
+    if (!net_storage->is_connected()) {
+      request->send(503, "application/json", "{\"error\":\"Network storage not connected\"}");
+      return;
+    }
+    stat_ok = net_storage->stat(filepath, file_stat);
+  } else {
+    // Local storage
+    stat_ok = (stat(filepath.c_str(), &file_stat) == 0);
+  }
+
+  if (!stat_ok) {
     request->send(404, "application/json", "{\"error\":\"File not found\"}");
     return;
   }
 
   std::string json = "{";
-  json += "\"size\":" + std::to_string(file_stat.st_size);
+  json += "\"name\":\"" + get_filename_from_path(filepath) + "\"";
+  json += ",\"path\":\"" + filepath + "\"";
+  json += ",\"size\":" + std::to_string(file_stat.st_size);
   json += ",\"is_directory\":" + std::string(S_ISDIR(file_stat.st_mode) ? "true" : "false");
   json += ",\"last_modified\":" + std::to_string(file_stat.st_mtime);
+
+  // Add storage type
+  if (net_storage != nullptr) {
+    json += ",\"storage_type\":\"" + std::string(net_storage->get_protocol()) + "\"";
+  } else {
+    json += ",\"storage_type\":\"local\"";
+  }
+
   json += "}";
 
   request->send(200, "application/json", json.c_str());
