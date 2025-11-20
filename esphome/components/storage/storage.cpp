@@ -360,6 +360,28 @@ void Storage::register_device(StorageDevice *device) {
   ESP_LOGD(TAG, "Registered storage device: %s (id: %s, type: %d)", info.name.c_str(), info.id.c_str(),
            static_cast<int>(info.type));
 
+  // Also register mount path for FileManager compatibility
+  // This bridges the old mount system with the new device registry
+  if (!info.mount_path.empty()) {
+    // Determine platform string based on storage type
+    std::string platform;
+    switch (info.type) {
+      case StorageType::SD_CARD:
+        platform = "sd_mmc";
+        break;
+      case StorageType::USB_MSC:
+        platform = "usb_msc";
+        break;
+      case StorageType::BINARY_STORAGE:
+        platform = "binary_storage";
+        break;
+      default:
+        platform = "unknown";
+        break;
+    }
+    this->register_mount(info.mount_path, platform);
+  }
+
   // Call callbacks
   this->on_device_added_callbacks_.call(device);
 }
@@ -375,6 +397,21 @@ void Storage::unregister_device(StorageDevice *device) {
     ESP_LOGD(TAG, "Unregistering storage device: %s", info.id.c_str());
 
     this->devices_.erase(it);
+
+    // Also unregister mount path for FileManager compatibility
+    if (!info.mount_path.empty()) {
+      // Remove from mounts_ vector
+      auto mount_it = this->mounts_.begin();
+      while (mount_it != this->mounts_.end()) {
+        if (mount_it->path == info.mount_path) {
+          ESP_LOGD(TAG, "Removing mount point: %s", info.mount_path.c_str());
+          mount_it = this->mounts_.erase(mount_it);
+          break;
+        } else {
+          ++mount_it;
+        }
+      }
+    }
 
     // Call callbacks
     this->on_device_removed_callbacks_.call(device);
