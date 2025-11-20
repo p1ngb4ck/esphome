@@ -263,6 +263,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       request->send(400, "text/plain", "Bad Request: Invalid file path");
       return;
     }
+    bool is_virtual_root = (this->root_path_ == "/" && filepath == "/");
     // Check if this is network storage
     storage::NetworkStorage *net_storage = nullptr;
     if (filepath.empty()) {
