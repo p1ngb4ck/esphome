@@ -503,13 +503,14 @@ class NFSClient : public Component
   //========================================================================
 
   enum class MountState : uint8_t {
-    IDLE,              // Not attempted yet
-    CONNECTING_PMAP,   // Connecting to portmapper (port 111)
-    QUERYING_PMAP,     // Querying portmapper for MOUNT port
-    CONNECTING_MOUNT,  // Connecting to MOUNT service
-    MOUNTING,          // Attempting NFS mount
-    MOUNTED,           // Successfully mounted
-    FAILED,            // Mount failed, waiting to retry
+    IDLE,                 // Not attempted yet
+    CONNECTING_PMAP,      // Connecting to portmapper (port 111)
+    QUERYING_PMAP_MOUNT,  // Querying portmapper for MOUNT port
+    CONNECTING_MOUNT,     // Connecting to MOUNT service
+    MOUNTING,             // Attempting NFS mount
+    QUERYING_PMAP_NFS,    // Querying portmapper for NFS port
+    MOUNTED,              // Successfully mounted
+    FAILED,               // Mount failed, waiting to retry
   };
 
   MountState mount_state_{MountState::IDLE};
@@ -523,9 +524,11 @@ class NFSClient : public Component
   bool server_addr_resolved_{false};
 #endif
 
-  // Discovered MOUNT port from portmapper
+  // Discovered ports from portmapper
   uint16_t mount_port_{0};
   bool mount_port_discovered_{false};
+  uint16_t nfs_port_{0};
+  bool nfs_port_discovered_{false};
 
   //========================================================================
   // RPC Client

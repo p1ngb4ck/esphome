@@ -375,7 +375,7 @@ void NFSClient::loop() {
       // Connect to portmapper (port 111)
       if (this->connect_()) {
         ESP_LOGD(TAG, "Connected to portmapper, querying for MOUNT service...");
-        this->mount_state_ = MountState::QUERYING_PMAP;
+        this->mount_state_ = MountState::QUERYING_PMAP_MOUNT;
       } else {
         ESP_LOGW(TAG, "Failed to connect to portmapper, will retry in %u seconds", this->mount_retry_interval_ / 1000);
         this->mount_state_ = MountState::FAILED;
@@ -383,17 +383,18 @@ void NFSClient::loop() {
       }
       break;
 
-    case MountState::QUERYING_PMAP:
+    case MountState::QUERYING_PMAP_MOUNT:
       // Query portmapper for MOUNT port
       if (this->query_portmapper_(MOUNT_PROGRAM, MOUNT_VERSION_3, this->mount_port_)) {
         this->mount_port_discovered_ = true;
         ESP_LOGI(TAG, "MOUNT service available on port %u", this->mount_port_);
         // Disconnect from portmapper and connect to MOUNT service
-        this->disconnect_();
+        this->close_connection_();
         this->mount_state_ = MountState::CONNECTING_MOUNT;
       } else {
-        ESP_LOGW(TAG, "Failed to query portmapper, will retry in %u seconds", this->mount_retry_interval_ / 1000);
-        this->disconnect_();
+        ESP_LOGW(TAG, "Failed to query portmapper for MOUNT, will retry in %u seconds",
+                 this->mount_retry_interval_ / 1000);
+        this->close_connection_();
         this->mount_state_ = MountState::FAILED;
         this->last_mount_attempt_ = now;
       }
@@ -418,9 +419,33 @@ void NFSClient::loop() {
         ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
 
         // RFC 1813: File handles are portable across connections
-        // Close MOUNT connection - NFS operations will use separate connection to NFS port
+        // Close MOUNT connection, will query for NFS port next
         this->close_connection_();
+        this->mount_state_ = MountState::QUERYING_PMAP_NFS;
+      } else {
+        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        this->disconnect_();
+        this->mount_state_ = MountState::FAILED;
+        this->last_mount_attempt_ = now;
+      }
+      break;
 
+    case MountState::QUERYING_PMAP_NFS:
+      // Reconnect to portmapper to query for NFS port
+      if (!this->connected_) {
+        this->mount_state_ = MountState::CONNECTING_PMAP;
+        // Will loop back to connect to portmapper
+      } else {
+        // Query portmapper for NFS port
+        if (this->query_portmapper_(NFS_PROGRAM, NFS_VERSION_3, this->nfs_port_)) {
+          this->nfs_port_discovered_ = true;
+          ESP_LOGI(TAG, "NFS service available on port %u", this->nfs_port_);
+        } else {
+          ESP_LOGW(TAG, "Failed to query portmapper for NFS, using configured port %u", this->port_);
+          this->nfs_port_ = this->port_;
+          this->nfs_port_discovered_ = false;
+        }
+        this->close_connection_();
         this->mounted_ = true;
         this->mount_state_ = MountState::MOUNTED;
 
@@ -428,11 +453,6 @@ void NFSClient::loop() {
         if (!this->mount_path_.empty()) {
           this->register_with_storage();
         }
-      } else {
-        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %u seconds", this->mount_retry_interval_ / 1000);
-        this->disconnect_();  // Clean up failed connection
-        this->mount_state_ = MountState::FAILED;
-        this->last_mount_attempt_ = now;
       }
       break;
 
@@ -551,7 +571,7 @@ bool NFSClient::connect_() {
     return true;
   }
 
-  // Determine which port to use based on mount state
+  // Determine which port to use based on mount state (RFC 1813)
   uint16_t target_port;
   const char *service_name;
   if (this->mount_state_ == MountState::CONNECTING_PMAP) {
@@ -560,15 +580,14 @@ bool NFSClient::connect_() {
   } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
     target_port = this->mount_port_;
     service_name = "MOUNT service";
-  } else if (this->mount_port_discovered_) {
-    // RFC 1813: File handles are portable across connections
-    // Use MOUNT port for NFS if portmapper didn't provide separate NFS port
-    target_port = this->mount_port_;
-    service_name = "NFS/MOUNT service";
+  } else if (this->nfs_port_discovered_) {
+    // Use discovered NFS port from portmapper
+    target_port = this->nfs_port_;
+    service_name = "NFS service (via portmapper)";
   } else {
-    // Fall back to configured port (usually 2049)
+    // Fallback to configured port (default 2049)
     target_port = this->port_;
-    service_name = "NFS server (configured port)";
+    service_name = "NFS service (configured)";
   }
 
   ESP_LOGD(TAG, "Connecting to %s %s:%u...", service_name, this->server_.c_str(), target_port);
@@ -608,6 +627,12 @@ bool NFSClient::connect_() {
   // Set TCP_NODELAY
   int nodelay = 1;
   setsockopt(this->socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+  // Set socket receive timeout (RFC 1831 doesn't specify timeout, but prevent hanging)
+  struct timeval tv;
+  tv.tv_sec = 5;
+  tv.tv_usec = 0;
+  setsockopt(this->socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   this->connected_ = true;
   return true;
