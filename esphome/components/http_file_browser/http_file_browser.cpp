@@ -1799,9 +1799,9 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
     <tbody>)";
 
   if (is_virtual_root) {
-    // List mount points from storage
+    // List local mount points from storage
     const auto &mounts = this->storage_->get_mounts();
-    ESP_LOGI(TAG, "Virtual root - listing %d mount points", mounts.size());
+    ESP_LOGI(TAG, "Virtual root - listing %d local mount points", mounts.size());
 
     for (const auto &mount : mounts) {
       FileInfo info;
@@ -1812,6 +1812,29 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.is_directory = true;
       info.is_mount_point = true;
       info.mounted = this->is_mount_point_mounted(mount.path);  // Check mount status
+      info.size = 0;
+      info.modified = 0;
+
+      html += this->generate_file_row(info, this->url_prefix_);
+    }
+
+    // List network storage mount points
+    const auto &network_storage = this->storage_->get_network_storage();
+    ESP_LOGI(TAG, "Virtual root - listing %d network storage mount points", network_storage.size());
+
+    for (const auto *net_storage : network_storage) {
+      if (net_storage == nullptr)
+        continue;
+
+      FileInfo info;
+      const std::string &mount_path = net_storage->get_mount_path();
+      info.name = mount_path.substr(1);  // Remove leading slash
+      if (info.name.empty())
+        info.name = "network";
+      info.path = mount_path;
+      info.is_directory = true;
+      info.is_mount_point = true;
+      info.mounted = net_storage->is_connected();  // Use is_connected() for network storage
       info.size = 0;
       info.modified = 0;
 

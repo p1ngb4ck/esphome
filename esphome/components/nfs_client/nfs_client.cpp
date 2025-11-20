@@ -531,6 +531,13 @@ bool NFSClient::connect_() {
     return false;
   }
 
+  // Get local address to log source IP/port
+  struct sockaddr_in local_addr;
+  socklen_t addr_len = sizeof(local_addr);
+  if (getsockname(this->socket_, (struct sockaddr *) &local_addr, &addr_len) == 0) {
+    ESP_LOGD(TAG, "Connected from %s:%u", inet_ntoa(local_addr.sin_addr), ntohs(local_addr.sin_port));
+  }
+
   // Set TCP_NODELAY
   int nodelay = 1;
   setsockopt(this->socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
