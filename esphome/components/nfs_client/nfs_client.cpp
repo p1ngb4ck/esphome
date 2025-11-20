@@ -1103,8 +1103,15 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     return false;
   }
 
+  ESP_LOGD(TAG, "GETATTR: Decoding attributes, buffer position=%zu, size=%zu", response.position(), response.size());
+
   // Decode attributes
-  return attr.decode(response);
+  if (!attr.decode(response)) {
+    ESP_LOGW(TAG, "GETATTR: attr.decode() failed");
+    return false;
+  }
+
+  return true;
 }
 
 bool NFSClient::nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t count, std::vector<uint8_t> &data) {
