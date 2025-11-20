@@ -292,7 +292,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
     }
 
     if (stat(filepath.c_str(), &file_stat) != 0) {
-      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+      request->send(400, "text/plain", "Bad Request: File not found");
       return;
     }
     if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
