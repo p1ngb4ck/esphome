@@ -380,7 +380,15 @@ bool NFSClient::connect_() {
 
   int ret_dns = getaddrinfo(this->server_.c_str(), port_str, &hints, &result);
   if (ret_dns != 0 || result == nullptr) {
-    ESP_LOGE(TAG, "Failed to resolve host '%s': error %d", this->server_.c_str(), ret_dns);
+    // Check if this is a .local mDNS hostname
+    bool is_mdns_host = this->server_.length() > 6 && this->server_.substr(this->server_.length() - 6) == ".local";
+    if (is_mdns_host) {
+      ESP_LOGE(TAG, "Failed to resolve mDNS host '%s': error %d", this->server_.c_str(), ret_dns);
+      ESP_LOGE(TAG, "mDNS .local hostnames may not work reliably with getaddrinfo()");
+      ESP_LOGE(TAG, "Recommendation: Use IP address instead (e.g., '192.168.1.100')");
+    } else {
+      ESP_LOGE(TAG, "Failed to resolve host '%s': error %d", this->server_.c_str(), ret_dns);
+    }
     close(this->socket_);
     this->socket_ = -1;
     return false;
