@@ -182,6 +182,39 @@ async def to_code(config):
         for fm_config in config[CONF_FILE_MANAGERS]:
             await setup_file_manager(fm_config, var)
 
+    # Register mount callbacks for SD storage devices
+    # SD/USB devices store themselves in CORE.data during their to_code()
+    # We register callbacks so when they mount, they register with storage
+    from esphome.core import CORE
+
+    if hasattr(CORE, "data") and "sd_storage_devices" in CORE.data:
+        for sd_device in CORE.data["sd_storage_devices"]:
+            # Register callback: when SD mounts, register it with storage
+            cg.add(
+                sd_device.add_mount_ready_callback(
+                    cg.RawExpression(
+                        f"[](const std::string &mount_path) {{ "
+                        f"if (storage::global_storage != nullptr) {{ "
+                        f"storage::global_storage->register_device({sd_device}); "
+                        f"}} }}"
+                    )
+                )
+            )
+
+    if hasattr(CORE, "data") and "usb_storage_devices" in CORE.data:
+        for usb_device in CORE.data["usb_storage_devices"]:
+            # Register callback: when USB mounts, register it with storage
+            cg.add(
+                usb_device.add_mount_ready_callback(
+                    cg.RawExpression(
+                        f"[](const std::string &mount_path) {{ "
+                        f"if (storage::global_storage != nullptr) {{ "
+                        f"storage::global_storage->register_device({usb_device}); "
+                        f"}} }}"
+                    )
+                )
+            )
+
     # Device registry automation triggers
     for conf in config.get(CONF_ON_DEVICE_ADDED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

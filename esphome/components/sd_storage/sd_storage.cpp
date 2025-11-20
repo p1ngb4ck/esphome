@@ -38,13 +38,9 @@ void SdMmc::setup() {
     return;
   }
 
-#ifdef USE_STORAGE
-  // Register with storage registry if available (soft dependency)
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    ESP_LOGI(TAG, "Registered with storage registry");
-  }
-#endif
+  // Note: Storage registration happens via mount_ready_callback
+  // registered by storage component during codegen. This allows
+  // removable media to register/unregister dynamically.
 }
 
 void SdMmc::loop() {
