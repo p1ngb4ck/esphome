@@ -6,6 +6,11 @@
 #include <cstring>
 #include <algorithm>
 
+#ifdef USE_ESP_IDF
+#include "mdns.h"
+#include "esp_netif.h"
+#endif
+
 #if defined(USE_STORAGE)
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/network_storage.h"
@@ -215,7 +220,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
   if (!xdr.decode_uint32(flavor) || !xdr.decode_uint32(length)) {
     return false;
   }
-  xdr.position() + XDRBuffer::align_4(length);  // Skip verifier data
+  xdr.skip(XDRBuffer::align_4(length));  // Skip verifier data
 
   // Accept status
   uint32_t accept_status;
@@ -353,22 +358,45 @@ void NFSClient::register_with_storage() {
 // Connection Management
 //========================================================================
 
-bool NFSClient::connect_() {
-  if (this->connected_) {
+#ifdef USE_ESP_IDF
+bool NFSClient::resolve_hostname_() {
+  // Return cached result if already resolved
+  if (this->server_addr_resolved_) {
     return true;
   }
 
-  ESP_LOGD(TAG, "Connecting to NFS server %s:%u...", this->server_.c_str(), this->port_);
+  ESP_LOGD(TAG, "Resolving hostname: %s", this->server_.c_str());
 
-#ifdef USE_ESP_IDF
-  // Create TCP socket
-  this->socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (this->socket_ < 0) {
-    ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
-    return false;
+  // Initialize server address structure
+  memset(&this->server_addr_, 0, sizeof(this->server_addr_));
+  this->server_addr_.sin_family = AF_INET;
+  this->server_addr_.sin_port = htons(this->port_);
+
+  // Check if this is a .local mDNS hostname
+  bool is_mdns_host = this->server_.length() > 6 && this->server_.substr(this->server_.length() - 6) == ".local";
+
+  if (is_mdns_host) {
+    // Try mDNS resolution first for .local hostnames
+    ESP_LOGD(TAG, "Attempting mDNS resolution for '%s'", this->server_.c_str());
+
+    // Strip .local suffix for mdns_query_a (it expects just the hostname)
+    std::string hostname = this->server_.substr(0, this->server_.length() - 6);
+
+    esp_ip4_addr_t addr;
+    esp_err_t err = mdns_query_a(hostname.c_str(), 2000, &addr);  // 2 second timeout
+
+    if (err == ESP_OK) {
+      this->server_addr_.sin_addr.s_addr = addr.addr;
+      this->server_addr_resolved_ = true;
+      ESP_LOGI(TAG, "Resolved '%s' via mDNS to " IPSTR, this->server_.c_str(), IP2STR(&addr));
+      return true;
+    } else {
+      ESP_LOGW(TAG, "mDNS resolution failed for '%s' (error %d), trying DNS fallback", this->server_.c_str(), err);
+      // Fall through to regular DNS resolution
+    }
   }
 
-  // Resolve host address using getaddrinfo (thread-safe, supports IPv4/IPv6)
+  // Regular DNS resolution using getaddrinfo
   struct addrinfo hints {
   }, *result = nullptr;
   hints.ai_family = AF_INET;        // IPv4
@@ -380,26 +408,46 @@ bool NFSClient::connect_() {
 
   int ret_dns = getaddrinfo(this->server_.c_str(), port_str, &hints, &result);
   if (ret_dns != 0 || result == nullptr) {
-    // Check if this is a .local mDNS hostname
-    bool is_mdns_host = this->server_.length() > 6 && this->server_.substr(this->server_.length() - 6) == ".local";
     if (is_mdns_host) {
-      ESP_LOGE(TAG, "Failed to resolve mDNS host '%s': error %d", this->server_.c_str(), ret_dns);
-      ESP_LOGE(TAG, "mDNS .local hostnames may not work reliably with getaddrinfo()");
+      ESP_LOGE(TAG, "Failed to resolve mDNS host '%s' via both mDNS and DNS: error %d", this->server_.c_str(), ret_dns);
       ESP_LOGE(TAG, "Recommendation: Use IP address instead (e.g., '192.168.1.100')");
     } else {
       ESP_LOGE(TAG, "Failed to resolve host '%s': error %d", this->server_.c_str(), ret_dns);
     }
-    close(this->socket_);
-    this->socket_ = -1;
     return false;
   }
 
-  struct sockaddr_in server_addr;
-  memcpy(&server_addr, result->ai_addr, sizeof(server_addr));
+  memcpy(&this->server_addr_, result->ai_addr, sizeof(this->server_addr_));
   freeaddrinfo(result);
 
-  // Connect
-  if (::connect(this->socket_, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+  this->server_addr_resolved_ = true;
+  ESP_LOGI(TAG, "Resolved '%s' to %s", this->server_.c_str(), inet_ntoa(this->server_addr_.sin_addr));
+  return true;
+}
+#endif
+
+bool NFSClient::connect_() {
+  if (this->connected_) {
+    return true;
+  }
+
+  ESP_LOGD(TAG, "Connecting to NFS server %s:%u...", this->server_.c_str(), this->port_);
+
+#ifdef USE_ESP_IDF
+  // Resolve hostname first (uses cache if already resolved)
+  if (!this->resolve_hostname_()) {
+    return false;
+  }
+
+  // Create TCP socket
+  this->socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (this->socket_ < 0) {
+    ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
+    return false;
+  }
+
+  // Connect using cached server address
+  if (::connect(this->socket_, (struct sockaddr *) &this->server_addr_, sizeof(this->server_addr_)) < 0) {
     ESP_LOGE(TAG, "Failed to connect: errno %d", errno);
     close(this->socket_);
     this->socket_ = -1;

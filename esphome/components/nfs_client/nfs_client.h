@@ -204,6 +204,7 @@ class XDRBuffer {
   size_t size() const { return this->data_.size(); }
   size_t position() const { return this->position_; }
   void reset() { this->position_ = 0; }
+  void skip(size_t bytes) { this->position_ += bytes; }
   void clear() {
     this->data_.clear();
     this->position_ = 0;
@@ -469,6 +470,12 @@ class NFSClient : public Component
   uint32_t mount_retry_interval_{30000};  // Retry every 30 seconds
   bool mount_attempted_in_setup_{false};
 
+#ifdef USE_ESP_IDF
+  // Cached resolved IP address to avoid repeated DNS lookups
+  struct sockaddr_in server_addr_ {};
+  bool server_addr_resolved_{false};
+#endif
+
   //========================================================================
   // RPC Client
   //========================================================================
@@ -479,6 +486,9 @@ class NFSClient : public Component
   // Internal Operations
   //========================================================================
 
+#ifdef USE_ESP_IDF
+  bool resolve_hostname_();
+#endif
   bool connect_();
   void disconnect_();
   bool send_rpc_(const XDRBuffer &request, XDRBuffer &response);
