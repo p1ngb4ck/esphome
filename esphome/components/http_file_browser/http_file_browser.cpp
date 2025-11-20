@@ -367,7 +367,8 @@ bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *reques
   // Send file from memory
   AsyncWebServerResponse *response =
       request->beginResponse(200, "application/octet-stream", file_data.data(), file_data.size());
-  response->addHeader("Content-Disposition", "attachment; filename=\"" + get_filename_from_path(path) + "\"");
+  std::string content_disposition = "attachment; filename=\"" + get_filename_from_path(path) + "\"";
+  response->addHeader("Content-Disposition", content_disposition.c_str());
   request->send(response);
   return true;
 }
