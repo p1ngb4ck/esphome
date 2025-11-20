@@ -327,7 +327,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
   }
 }
 
-void HttpFileBrowser::get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path,
+bool HttpFileBrowser::get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path,
                                             struct stat &file_stat) {
   // Use network storage API to get file stat
   return net_storage->list_directory(path, file_stat);
