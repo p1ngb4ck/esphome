@@ -400,17 +400,16 @@ void Storage::unregister_device(StorageDevice *device) {
 
     // Also unregister mount path for FileManager compatibility
     if (!info.mount_path.empty()) {
-      // Remove from mounts_ vector
-      auto mount_it = this->mounts_.begin();
-      while (mount_it != this->mounts_.end()) {
-        if (mount_it->path == info.mount_path) {
-          ESP_LOGD(TAG, "Removing mount point: %s", info.mount_path.c_str());
-          mount_it = this->mounts_.erase(mount_it);
-          break;
+      // Remove from mounts_ StaticVector (manually since StaticVector doesn't have erase())
+      StaticVector<MountEntry, MAX_MOUNT_POINTS> new_mounts;
+      for (size_t i = 0; i < this->mounts_.size(); i++) {
+        if (this->mounts_[i].path != info.mount_path) {
+          new_mounts.push_back(this->mounts_[i]);
         } else {
-          ++mount_it;
+          ESP_LOGD(TAG, "Removing mount point: %s", info.mount_path.c_str());
         }
       }
+      this->mounts_ = new_mounts;
     }
 
     // Call callbacks
