@@ -188,6 +188,12 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at used");
     return false;
   }
+  // Skip rdev/specinfo (8 bytes) - only meaningful for device files
+  uint64_t rdev;
+  if (!xdr.decode_uint64(rdev)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at rdev");
+    return false;
+  }
   if (!xdr.decode_uint64(this->fsid)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at fsid, position=%zu, size=%zu", xdr.position(), xdr.size());
     return false;
