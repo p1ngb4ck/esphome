@@ -269,7 +269,10 @@ void RPCClient::encode_auth_unix_(XDRBuffer &xdr, uint32_t uid, uint32_t gid) {
   auth_data.encode_string("esphome");                               // Machine name
   auth_data.encode_uint32(uid);                                     // UID
   auth_data.encode_uint32(gid);                                     // GID
-  auth_data.encode_uint32(0);                                       // No auxiliary GIDs
+
+  // Include primary GID in auxiliary GID list (common NFS client behavior)
+  auth_data.encode_uint32(1);    // One auxiliary GID
+  auth_data.encode_uint32(gid);  // Primary GID also in aux list
 
   // Encode AUTH_UNIX data as opaque
   xdr.encode_opaque(auth_data.data().data(), auth_data.size());
