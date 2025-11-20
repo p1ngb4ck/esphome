@@ -155,17 +155,73 @@ void NFSFileHandle::encode(XDRBuffer &xdr) const { xdr.encode_opaque(this->data.
 bool NFSFileHandle::decode(XDRBuffer &xdr) { return xdr.decode_opaque(this->data); }
 
 bool NFSFileAttr::decode(XDRBuffer &xdr) {
+  // fattr3 structure from RFC 1813 section 3.3.5
+  // Total: 21 fields, 84 bytes
   uint32_t type_val;
-  if (!xdr.decode_uint32(type_val))
+  if (!xdr.decode_uint32(type_val)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at type");
     return false;
+  }
   this->type = static_cast<NFSFileType>(type_val);
 
-  return xdr.decode_uint32(this->mode) && xdr.decode_uint32(this->nlink) && xdr.decode_uint32(this->uid) &&
-         xdr.decode_uint32(this->gid) && xdr.decode_uint64(this->size) && xdr.decode_uint64(this->used) &&
-         xdr.decode_uint64(this->fsid) && xdr.decode_uint64(this->fileid) && xdr.decode_uint64(this->atime_sec) &&
-         xdr.decode_uint32(this->atime_nsec) && xdr.decode_uint64(this->mtime_sec) &&
-         xdr.decode_uint32(this->mtime_nsec) && xdr.decode_uint64(this->ctime_sec) &&
-         xdr.decode_uint32(this->ctime_nsec);
+  if (!xdr.decode_uint32(this->mode)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mode");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->nlink)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at nlink");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->uid)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at uid");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->gid)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at gid");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->size)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at size");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->used)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at used");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->fsid)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fsid, position=%zu, size=%zu", xdr.position(), xdr.size());
+    return false;
+  }
+  if (!xdr.decode_uint64(this->fileid)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fileid");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->atime_sec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_sec");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->atime_nsec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_nsec");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->mtime_sec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_sec");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->mtime_nsec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_nsec");
+    return false;
+  }
+  if (!xdr.decode_uint64(this->ctime_sec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_sec");
+    return false;
+  }
+  if (!xdr.decode_uint32(this->ctime_nsec)) {
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%zu, size=%zu", xdr.position(), xdr.size());
+    return false;
+  }
+
+  return true;
 }
 
 //========================================================================
@@ -361,18 +417,8 @@ void NFSClient::loop() {
       if (this->mount_export_(this->export_path_, this->root_fh_)) {
         ESP_LOGI(TAG, "Successfully mounted NFS export: %s", this->export_path_.c_str());
 
-        // Query portmapper for NFS service port
-        if (this->query_portmapper_(NFS_PROGRAM, NFS_VERSION_3, this->nfs_port_)) {
-          this->nfs_port_discovered_ = true;
-          ESP_LOGI(TAG, "NFS service available on port %u", this->nfs_port_);
-        } else {
-          ESP_LOGW(TAG, "Failed to query NFS port, using default %u", this->port_);
-          this->nfs_port_ = this->port_;
-          this->nfs_port_discovered_ = false;
-        }
-
-        // Disconnect from MOUNT service, file operations will connect to NFS service
-        this->disconnect_();
+        // Keep the connection alive - NFS servers multiplex MOUNT and NFS programs on same connection
+        // The file handle from MOUNT is valid for this connection context
 
         this->mounted_ = true;
         this->mount_state_ = MountState::MOUNTED;
@@ -512,10 +558,7 @@ bool NFSClient::connect_() {
     service_name = "portmapper";
   } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
     target_port = this->mount_port_;
-    service_name = "MOUNT service";
-  } else if (this->nfs_port_discovered_) {
-    target_port = this->nfs_port_;
-    service_name = "NFS service (discovered)";
+    service_name = "MOUNT service (multiplexed with NFS)";
   } else {
     target_port = this->port_;
     service_name = "NFS server (default)";
