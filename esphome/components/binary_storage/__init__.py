@@ -373,6 +373,14 @@ async def to_code(config):
     # Define USE_BINARY_STORAGE for StorageDevice interface
     cg.add_define("USE_BINARY_STORAGE")
 
+    # LittleFS VFS requires directory operations - ensure CONFIG_VFS_SUPPORT_DIR is enabled
+    # This must be done before any LittleFS setup to ensure VFS struct has required members
+    mode = config.get(CONF_MODE, MODE_RAW)
+    if mode in [MODE_LITTLEFS, MODE_BOTH]:
+        from esphome.components.esp32 import require_vfs_dir
+
+        require_vfs_dir()
+
     # Add ESPHome's forked esp_littlefs with custom block device support
     # This fork also provides partition-based mounting via esp_vfs_littlefs_register
     cg.add_library(
@@ -390,9 +398,14 @@ async def to_code(config):
     cg.add_build_flag("-DCONFIG_LITTLEFS_PAGE_SIZE=256")
     cg.add_build_flag("-DCONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT")
 
-    # Handle FLASH_PARTITION - uses partition-based mounting
+    # Handle FLASH_PARTITION - uses partition-based mounting with LittleFS
     if device_type in ["FLASH_PARTITION", "PARTITION"]:
         cg.add_define("USE_BINARY_STORAGE_FLASH_PARTITION")
+
+        # Flash partition always uses LittleFS, ensure VFS directory support is enabled
+        from esphome.components.esp32 import require_vfs_dir
+
+        require_vfs_dir()
 
         var = cg.new_Pvariable(config[CONF_ID])
         await cg.register_component(var, config)
