@@ -1536,6 +1536,7 @@ bool NFSClient::list_directory(const std::string &path, std::vector<storage::Net
   // Call existing NFS-specific list_directory
   std::vector<NFSDirEntry> nfs_entries;
   if (!this->list_directory(path, nfs_entries)) {
+    ESP_LOGW(TAG, "Failed to list directory: %s", path.c_str());
     return false;
   }
 
