@@ -1065,18 +1065,25 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
 
   XDRBuffer response;
   if (!this->send_rpc_(request, response)) {
+    ESP_LOGW(TAG, "GETATTR: send_rpc_ failed");
     return false;
   }
 
+  ESP_LOGD(TAG, "GETATTR: response buffer size=%zu, position=%zu", response.size(), response.position());
+
   RPCAcceptStatus rpc_status;
   if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
+    ESP_LOGW(TAG, "GETATTR: parse_reply failed");
     return false;
   }
+
+  ESP_LOGD(TAG, "GETATTR: after parse_reply, buffer position=%zu", response.position());
 
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status)) {
-    ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status");
+    ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status, position=%zu, size=%zu", response.position(),
+             response.size());
     return false;
   }
   if (nfs_status != NFS3_OK) {
