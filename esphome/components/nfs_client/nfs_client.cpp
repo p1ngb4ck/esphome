@@ -929,6 +929,7 @@ std::vector<std::string> NFSClient::split_path_(const std::string &path) {
 
 bool NFSClient::resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFileAttr &attr) {
   if (!this->mounted_) {
+    ESP_LOGW(TAG, "resolve_path_: not mounted");
     return false;
   }
 
@@ -937,7 +938,12 @@ bool NFSClient::resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFil
 
   // Empty path = root
   if (path.empty() || path == "/") {
-    return this->nfs_getattr_(fh, attr);
+    ESP_LOGD(TAG, "resolve_path_: getting root attributes");
+    bool result = this->nfs_getattr_(fh, attr);
+    if (!result) {
+      ESP_LOGW(TAG, "resolve_path_: failed to get root attributes");
+    }
+    return result;
   }
 
   // Split path into components
