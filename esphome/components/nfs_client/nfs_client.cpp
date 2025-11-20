@@ -431,28 +431,37 @@ void NFSClient::loop() {
       break;
 
     case MountState::QUERYING_PMAP_NFS:
-      // Reconnect to portmapper to query for NFS port
+      // Connect to portmapper to query for NFS port
       if (!this->connected_) {
-        this->mount_state_ = MountState::CONNECTING_PMAP;
-        // Will loop back to connect to portmapper
-      } else {
-        // Query portmapper for NFS port
-        if (this->query_portmapper_(NFS_PROGRAM, NFS_VERSION_3, this->nfs_port_)) {
-          this->nfs_port_discovered_ = true;
-          ESP_LOGI(TAG, "NFS service available on port %u", this->nfs_port_);
-        } else {
-          ESP_LOGW(TAG, "Failed to query portmapper for NFS, using configured port %u", this->port_);
+        if (!this->connect_()) {
+          ESP_LOGW(TAG, "Failed to connect to portmapper for NFS query, using configured port %u", this->port_);
           this->nfs_port_ = this->port_;
           this->nfs_port_discovered_ = false;
+          this->mounted_ = true;
+          this->mount_state_ = MountState::MOUNTED;
+          if (!this->mount_path_.empty()) {
+            this->register_with_storage();
+          }
+          break;
         }
-        this->close_connection_();
-        this->mounted_ = true;
-        this->mount_state_ = MountState::MOUNTED;
+      }
 
-        // Register with storage if configured
-        if (!this->mount_path_.empty()) {
-          this->register_with_storage();
-        }
+      // Query portmapper for NFS port
+      if (this->query_portmapper_(NFS_PROGRAM, NFS_VERSION_3, this->nfs_port_)) {
+        this->nfs_port_discovered_ = true;
+        ESP_LOGI(TAG, "NFS service available on port %u", this->nfs_port_);
+      } else {
+        ESP_LOGW(TAG, "Portmapper query for NFS failed, using configured port %u", this->port_);
+        this->nfs_port_ = this->port_;
+        this->nfs_port_discovered_ = false;
+      }
+      this->close_connection_();
+      this->mounted_ = true;
+      this->mount_state_ = MountState::MOUNTED;
+
+      // Register with storage if configured
+      if (!this->mount_path_.empty()) {
+        this->register_with_storage();
       }
       break;
 
