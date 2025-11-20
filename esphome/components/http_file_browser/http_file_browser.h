@@ -123,7 +123,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool is_upload_enabled() const { return this->upload_enabled_; }
   bool is_download_enabled() const { return this->download_enabled_; }
   bool is_deletion_enabled() const { return this->deletion_enabled_; }
-  bool get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path, struct stat &file_stat) {}
+  bool get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path, struct stat &file_stat);
 
  protected:
   // Web server base reference
