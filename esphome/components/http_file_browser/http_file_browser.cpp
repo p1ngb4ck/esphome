@@ -299,7 +299,8 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       }
 
       // Route to directory listing or file download based on type
-      if (net_storage->is_directory(filepath)) {
+      std::string relative_filepath = strip_network_mount_prefix(net_storage, filepath);
+      if (net_storage->is_directory(relative_filepath)) {
         this->handle_network_directory_listing(request, net_storage, filepath);
       } else {
         this->handle_network_file_download(request, net_storage, filepath);
@@ -348,16 +349,20 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
 
 bool HttpFileBrowser::get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path,
                                             struct stat &file_stat) {
-  // Use network storage API to get file stat
-  return net_storage->stat(path, file_stat);
+  // Strip mount point prefix and use network storage API to get file stat
+  std::string relative_path = strip_network_mount_prefix(net_storage, path);
+  return net_storage->stat(relative_path, file_stat);
 }
 
 bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *request,
                                                        storage::NetworkStorage *net_storage, const std::string &path) {
+  // Strip mount point prefix to get path relative to network storage root
+  std::string relative_path = strip_network_mount_prefix(net_storage, path);
+
   // Get directory entries from network storage
   std::vector<storage::NetworkStorage::DirEntry> entries;
-  if (!net_storage->list_directory(path, entries)) {
-    ESP_LOGW(TAG, "Failed to list network directory: %s", path.c_str());
+  if (!net_storage->list_directory(relative_path, entries)) {
+    ESP_LOGW(TAG, "Failed to list network directory: %s (relative: %s)", path.c_str(), relative_path.c_str());
     request->send(500, "text/plain", "Internal Server Error: Failed to list directory");
     return false;
   }
@@ -392,10 +397,13 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
 
 bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *request, storage::NetworkStorage *net_storage,
                                                    const std::string &path) {
+  // Strip mount point prefix
+  std::string relative_path = strip_network_mount_prefix(net_storage, path);
+
   // Get file size
   struct stat file_stat;
-  if (!net_storage->stat(path, file_stat)) {
-    ESP_LOGW(TAG, "Network storage file stat failed for: %s", path.c_str());
+  if (!net_storage->stat(relative_path, file_stat)) {
+    ESP_LOGW(TAG, "Network storage file stat failed for: %s (relative: %s)", path.c_str(), relative_path.c_str());
     request->send(404, "text/plain", "Not Found");
     return false;
   }
@@ -405,8 +413,8 @@ bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *reques
   // For now, read entire file into memory
   // TODO: Implement streaming with AsyncResponseStream when web_server_idf supports it
   std::vector<uint8_t> file_data;
-  if (!net_storage->read_file(path, file_data)) {
-    ESP_LOGW(TAG, "Network storage read failed for: %s", path.c_str());
+  if (!net_storage->read_file(relative_path, file_data)) {
+    ESP_LOGW(TAG, "Network storage read failed for: %s (relative: %s)", path.c_str(), relative_path.c_str());
     request->send(500, "text/plain", "Internal Server Error: Failed to read file");
     return false;
   }
@@ -3017,6 +3025,20 @@ std::string HttpFileBrowser::get_filename_from_path(const std::string &path) {
   }
   // Return everything after the last '/'
   return path.substr(pos + 1);
+}
+
+std::string HttpFileBrowser::strip_network_mount_prefix(storage::NetworkStorage *net_storage, const std::string &path) {
+  // Strip mount point prefix to get path relative to network storage root
+  const std::string &mount_path = net_storage->get_mount_path();
+  if (path.compare(0, mount_path.length(), mount_path) == 0) {
+    std::string relative = path.substr(mount_path.length());
+    // Ensure it starts with / or is /
+    if (relative.empty() || relative[0] != '/') {
+      relative = "/" + relative;
+    }
+    return relative;
+  }
+  return path;
 }
 
 // API handlers
