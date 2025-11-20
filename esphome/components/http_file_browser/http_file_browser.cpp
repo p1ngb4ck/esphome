@@ -327,6 +327,12 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
   }
 }
 
+void HttpFileBrowser::get_network_file_stat(storage::NetworkStorage *net_storage, const std::string &path,
+                                            struct stat &file_stat) {
+  // Use network storage API to get file stat
+  return net_storage->list_directory(path, file_stat);
+}
+
 void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const PlatformString &filename, size_t index,
                                    uint8_t *data, size_t len, bool final) {
   // Only log at milestones to avoid flooding logs with hundreds of tiny chunk calls
