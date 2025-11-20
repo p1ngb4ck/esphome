@@ -275,6 +275,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       }
     }
 
+    struct stat file_stat;
     if (net_storage != nullptr) {
       // Network storage - use network storage API for directory listing or file download
       if (this->get_network_file_stat(net_storage, filepath, file_stat) == false) {
@@ -291,7 +292,6 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       }
     }
 
-    struct stat file_stat;
     if (stat(filepath.c_str(), &file_stat) != 0) {
       request->send(400, "text/plain", "Bad Request: File not found");
       return;
