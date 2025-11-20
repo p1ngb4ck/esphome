@@ -159,6 +159,14 @@ void Storage::register_network_storage(NetworkStorage *storage) {
     return;
   }
 
+  // Check if already registered (prevent duplicates)
+  for (const auto *existing : this->network_storage_) {
+    if (existing == storage) {
+      ESP_LOGV(TAG, "Network storage already registered: %s", storage->get_mount_path().c_str());
+      return;
+    }
+  }
+
   this->network_storage_.push_back(storage);
   ESP_LOGD(TAG, "Registered network storage: %s (protocol: %s, mount: %s)", storage->get_protocol(),
            storage->get_protocol(), storage->get_mount_path().c_str());
