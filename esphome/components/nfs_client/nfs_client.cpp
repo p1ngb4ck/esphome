@@ -1091,27 +1091,8 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     return false;
   }
 
-  // Decode post_op_attr (attributes_follow boolean + fattr3)
-  bool attributes_follow;
-  if (!response.decode_bool(attributes_follow)) {
-    ESP_LOGW(TAG, "GETATTR: Failed to decode attributes_follow boolean");
-    return false;
-  }
-
-  if (!attributes_follow) {
-    ESP_LOGW(TAG, "GETATTR: Server returned no attributes");
-    return false;
-  }
-
-  ESP_LOGD(TAG, "GETATTR: Decoding attributes, buffer position=%zu, size=%zu", response.position(), response.size());
-
-  // Decode attributes
-  if (!attr.decode(response)) {
-    ESP_LOGW(TAG, "GETATTR: attr.decode() failed");
-    return false;
-  }
-
-  return true;
+  // GETATTR returns fattr3 directly (not post_op_attr like other operations)
+  return attr.decode(response);
 }
 
 bool NFSClient::nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t count, std::vector<uint8_t> &data) {
