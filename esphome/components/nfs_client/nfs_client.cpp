@@ -763,7 +763,39 @@ bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh)
   }
 
   if (mount_status != 0) {
-    ESP_LOGE(TAG, "MOUNT failed with status: %u", mount_status);
+    // MOUNT v3 error codes from RFC 1813
+    const char *error_str = "UNKNOWN";
+    switch (mount_status) {
+      case 1:
+        error_str = "MNT3ERR_PERM (Not owner)";
+        break;
+      case 2:
+        error_str = "MNT3ERR_NOENT (No such file or directory)";
+        break;
+      case 5:
+        error_str = "MNT3ERR_IO (I/O error)";
+        break;
+      case 13:
+        error_str = "MNT3ERR_ACCESS (Permission denied - check NFS export configuration)";
+        break;
+      case 20:
+        error_str = "MNT3ERR_NOTDIR (Not a directory)";
+        break;
+      case 63:
+        error_str = "MNT3ERR_NAMETOOLONG (Filename too long)";
+        break;
+      case 10004:
+        error_str = "MNT3ERR_NOTSUPP (Operation not supported)";
+        break;
+      case 10006:
+        error_str = "MNT3ERR_SERVERFAULT (Server fault)";
+        break;
+    }
+    ESP_LOGE(TAG, "MOUNT failed: %s (status %u)", error_str, mount_status);
+    ESP_LOGE(TAG, "Check NFS server export configuration:");
+    ESP_LOGE(TAG, "  - Verify export path exists on server");
+    ESP_LOGE(TAG, "  - Check /etc/exports allows access from %s", inet_ntoa(this->server_addr_.sin_addr));
+    ESP_LOGE(TAG, "  - Run 'exportfs -v' on server to verify exports");
     return false;
   }
 
