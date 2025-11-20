@@ -559,7 +559,11 @@ bool NFSClient::connect_() {
     service_name = "portmapper";
   } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
     target_port = this->mount_port_;
-    service_name = "MOUNT service (multiplexed with NFS)";
+    service_name = "MOUNT service";
+  } else if (this->mount_port_discovered_) {
+    // Use discovered MOUNT port for NFS operations (many servers multiplex both on same port)
+    target_port = this->mount_port_;
+    service_name = "NFS service (MOUNT port)";
   } else {
     target_port = this->port_;
     service_name = "NFS server (default)";
