@@ -196,40 +196,67 @@ void RPCClient::build_call(XDRBuffer &xdr, uint32_t xid, uint32_t program, uint3
 bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStatus &status) {
   uint32_t xid, msg_type, reply_status;
 
-  if (!xdr.decode_uint32(xid) || xid != expected_xid) {
+  ESP_LOGD(TAG, "parse_reply: buffer size=%zu, position=%zu", xdr.size(), xdr.position());
+
+  if (!xdr.decode_uint32(xid)) {
+    ESP_LOGE(TAG, "Failed to decode XID");
+    return false;
+  }
+  if (xid != expected_xid) {
     ESP_LOGE(TAG, "XID mismatch: expected %u, got %u", expected_xid, xid);
     return false;
   }
+  ESP_LOGD(TAG, "XID match: %u", xid);
 
-  if (!xdr.decode_uint32(msg_type) || msg_type != RPC_REPLY) {
-    ESP_LOGE(TAG, "Not an RPC reply");
+  if (!xdr.decode_uint32(msg_type)) {
+    ESP_LOGE(TAG, "Failed to decode msg_type");
     return false;
   }
+  if (msg_type != RPC_REPLY) {
+    ESP_LOGE(TAG, "Not an RPC reply, got: %u", msg_type);
+    return false;
+  }
+  ESP_LOGD(TAG, "msg_type: %u (RPC_REPLY)", msg_type);
 
   if (!xdr.decode_uint32(reply_status)) {
+    ESP_LOGE(TAG, "Failed to decode reply_status");
     return false;
   }
+  ESP_LOGD(TAG, "reply_status: %u", reply_status);
 
   if (reply_status != RPC_MSG_ACCEPTED) {
-    ESP_LOGE(TAG, "RPC message denied");
+    ESP_LOGE(TAG, "RPC message denied, status: %u", reply_status);
     return false;
   }
 
   // Skip verifier (flavor + length + data)
   uint32_t flavor, length;
-  if (!xdr.decode_uint32(flavor) || !xdr.decode_uint32(length)) {
+  if (!xdr.decode_uint32(flavor)) {
+    ESP_LOGE(TAG, "Failed to decode verifier flavor");
     return false;
   }
+  if (!xdr.decode_uint32(length)) {
+    ESP_LOGE(TAG, "Failed to decode verifier length");
+    return false;
+  }
+  ESP_LOGD(TAG, "Verifier: flavor=%u, length=%u, aligned=%zu", flavor, length, XDRBuffer::align_4(length));
   xdr.skip(XDRBuffer::align_4(length));  // Skip verifier data
+  ESP_LOGD(TAG, "After verifier skip: position=%zu", xdr.position());
 
   // Accept status
   uint32_t accept_status;
   if (!xdr.decode_uint32(accept_status)) {
+    ESP_LOGE(TAG, "Failed to decode accept_status, position=%zu, size=%zu", xdr.position(), xdr.size());
     return false;
   }
+  ESP_LOGD(TAG, "accept_status: %u", accept_status);
 
   status = static_cast<RPCAcceptStatus>(accept_status);
-  return (status == RPC_SUCCESS);
+  if (status != RPC_SUCCESS) {
+    ESP_LOGE(TAG, "RPC not successful, status: %u", static_cast<uint32_t>(status));
+    return false;
+  }
+  return true;
 }
 
 void RPCClient::encode_auth_unix_(XDRBuffer &xdr, uint32_t uid, uint32_t gid) {
