@@ -352,14 +352,14 @@ bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *reques
     request->send(404, "text/plain", "Not Found");
     return false;
   }
-  size_t file_size = file_stat.size;
+  size_t file_size = file_stat.st_size;
   ESP_LOGD(TAG, "Network storage file size for %s: %zu bytes", path.c_str(), file_size);
   std::vector<uint8_t> file_data;
   if (file_size <= 10 * 1024) {
     // Small file - read entire file into memory
     file_data.resize(file_size);
     size_t bytes_read = 0;
-    if (!net_storage->read_file(path, file_data.data(), file_size, bytes_read) || bytes_read != file_size) {
+    if (!net_storage->read_file(path, file_data.data()) || bytes_read != file_size) {
       ESP_LOGW(TAG, "Network storage read failed for: %s", path.c_str());
       request->send(500, "text/plain", "Internal Server Error: Failed to read file");
       return false;
