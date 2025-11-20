@@ -1060,8 +1060,12 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
 
   // Parse NFS status
   uint32_t nfs_status;
-  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "GETATTR failed: status=%u", nfs_status);
+  if (!response.decode_uint32(nfs_status)) {
+    ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status");
+    return false;
+  }
+  if (nfs_status != NFS3_OK) {
+    ESP_LOGW(TAG, "GETATTR failed: NFS status=%u (NFS3_OK=%u)", nfs_status, NFS3_OK);
     return false;
   }
 
