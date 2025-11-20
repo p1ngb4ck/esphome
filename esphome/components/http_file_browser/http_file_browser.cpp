@@ -284,19 +284,27 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
         return;
       }
 
-      // Use network storage API for directory listing or file download
+      // Check if accessing the mount point itself
+      if (net_storage->get_mount_path() == filepath) {
+        // Accessing mount point root - show directory listing
+        this->handle_network_directory_listing(net_storage, filepath);
+        return;
+      }
+
+      // For paths within the mount, check if file/directory exists
       if (this->get_network_file_stat(net_storage, filepath, file_stat) == false) {
         ESP_LOGW(TAG, "Network storage file stat failed for: %s", filepath.c_str());
         request->send(404, "text/plain", "Not Found");
         return;
-      } else {
-        if (net_storage->get_mount_path() == filepath || net_storage->is_directory(filepath)) {
-          this->handle_network_directory_listing(net_storage, filepath);
-        } else {
-          this->handle_network_file_download(request, net_storage, filepath);
-        }
-        return;
       }
+
+      // Route to directory listing or file download based on type
+      if (net_storage->is_directory(filepath)) {
+        this->handle_network_directory_listing(net_storage, filepath);
+      } else {
+        this->handle_network_file_download(request, net_storage, filepath);
+      }
+      return;
     }
 
     if (!is_virtual_root && stat(filepath.c_str(), &file_stat) != 0) {
