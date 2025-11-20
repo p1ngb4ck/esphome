@@ -327,6 +327,12 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       this->upload_file_ = nullptr;
     }
 
+    // Clear chunk buffer if it was used for network storage
+    if (this->chunk_buffer_) {
+      this->chunk_buffer_.reset();
+      this->chunk_buffer_size_ = 0;
+    }
+
     std::string uri = request->url().c_str();
     ESP_LOGI(TAG, "Upload started: index=0, uri='%s', filename='%s'", uri.c_str(), filename.c_str());
 
@@ -335,7 +341,58 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
 
     ESP_LOGD(TAG, "Upload directory: %s", this->upload_directory_.c_str());
 
-    // Check if target is a directory
+    // Build full upload path
+    std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
+
+    // Check if this is network storage
+    storage::NetworkStorage *net_storage = nullptr;
+    if (this->storage_ != nullptr) {
+      net_storage = this->storage_->find_network_storage_for_path(upload_path);
+    }
+
+    if (net_storage != nullptr) {
+      // Network storage - accumulate data in memory buffer
+      ESP_LOGI(TAG, "Starting network storage upload: %s", upload_path.c_str());
+
+      // Check if directory exists (network storage doesn't support stat, so we'll trust it)
+      // The actual directory check will happen during list_directory call if needed
+
+      // Get expected file size from query parameter (if provided by JavaScript)
+      size_t expected_size = 0;
+      auto *filesize_param = request->getParam("filesize");
+      if (filesize_param) {
+        expected_size = std::stoul(filesize_param->value().c_str());
+        ESP_LOGI(TAG, "Expected upload size from query param: %zu bytes (network storage)", expected_size);
+      } else {
+        ESP_LOGW(TAG, "No filesize query parameter found - network storage requires known file size");
+      }
+
+      // Initialize progress tracking (thread-safe)
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.operation = "upload";
+      this->progress_.source = filename.c_str();
+      this->progress_.destination = upload_path;
+      this->progress_.total_bytes = expected_size;
+      this->progress_.transferred_bytes = 0;
+      this->progress_.in_progress = true;
+      this->progress_.cancelled = false;
+      this->progress_.start_time = millis();
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      // Reset yield tracking
+      this->upload_bytes_since_yield_ = 0;
+
+      // Allocate buffer for network storage upload (will accumulate all chunks)
+      this->chunk_buffer_size_ = expected_size > 0 ? expected_size : FILE_BUFFER_SIZE;
+      this->chunk_buffer_ = std::make_unique<uint8_t[]>(this->chunk_buffer_size_);
+
+      // upload_file_ remains null - signals network storage mode
+      this->upload_file_ = nullptr;
+
+      return;
+    }
+
+    // Local storage - check if target is a directory
     struct stat file_stat;
     if (stat(this->upload_directory_.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
       ESP_LOGE(TAG, "Upload target is not a directory: %s (errno: %d)", this->upload_directory_.c_str(), errno);
@@ -345,9 +402,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       return;
     }
 
-    // Open file for writing
-    std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
-    ESP_LOGI(TAG, "Starting async upload: %s", upload_path.c_str());
+    ESP_LOGI(TAG, "Starting local storage upload: %s", upload_path.c_str());
 
     // Get expected file size from query parameter (if provided by JavaScript)
     size_t expected_size = 0;
@@ -388,31 +443,32 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
     }
   }
 
-  // Check if upload_file is null (happens if index != 0 on first call, meaning we missed initialization)
-  if (!this->upload_file_ && index != 0) {
-    ESP_LOGE(TAG, "Upload file not initialized (index=%zu, expected to start at 0). Upload state corrupted.", index);
-    if (final) {
-      request->send(500, "text/plain", "Upload state corrupted - please retry upload");
-    }
-    return;
-  }
-
   // Check for cancellation (thread-safe)
   portENTER_CRITICAL(&this->progress_mutex_);
   bool cancelled = this->progress_.cancelled;
+  size_t current_transferred = this->progress_.transferred_bytes;
   portEXIT_CRITICAL(&this->progress_mutex_);
 
-  if (cancelled && this->upload_file_) {
+  if (cancelled) {
     ESP_LOGI(TAG, "Upload cancelled by user");
-    fclose(this->upload_file_);
-    this->upload_file_ = nullptr;
 
-    // Delete partial file
-    std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
-    if (remove(upload_path.c_str()) == 0) {
-      ESP_LOGI(TAG, "Deleted partial upload file: %s", upload_path.c_str());
-    } else {
-      ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+    if (this->upload_file_) {
+      // Local storage cleanup
+      fclose(this->upload_file_);
+      this->upload_file_ = nullptr;
+
+      // Delete partial file
+      std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
+      if (remove(upload_path.c_str()) == 0) {
+        ESP_LOGI(TAG, "Deleted partial upload file: %s", upload_path.c_str());
+      } else {
+        ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+      }
+    } else if (this->chunk_buffer_) {
+      // Network storage cleanup
+      ESP_LOGI(TAG, "Clearing network storage upload buffer");
+      this->chunk_buffer_.reset();
+      this->chunk_buffer_size_ = 0;
     }
 
     portENTER_CRITICAL(&this->progress_mutex_);
@@ -426,55 +482,105 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
     return;
   }
 
-  // Write data chunk
-  if (this->upload_file_ && len > 0) {
-    size_t written = fwrite(data, 1, len, this->upload_file_);
-    if (written != len) {
-      ESP_LOGE(TAG, "Failed to write async upload data");
-      fclose(this->upload_file_);
-      this->upload_file_ = nullptr;
+  // Handle data chunk
+  if (len > 0) {
+    if (this->upload_file_) {
+      // Local storage - write directly to file
+      size_t written = fwrite(data, 1, len, this->upload_file_);
+      if (written != len) {
+        ESP_LOGE(TAG, "Failed to write async upload data");
+        fclose(this->upload_file_);
+        this->upload_file_ = nullptr;
 
-      // Delete partial file on write failure
-      std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
-      if (remove(upload_path.c_str()) == 0) {
-        ESP_LOGI(TAG, "Deleted partial upload file after write failure: %s", upload_path.c_str());
-      } else {
-        ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+        // Delete partial file on write failure
+        std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
+        if (remove(upload_path.c_str()) == 0) {
+          ESP_LOGI(TAG, "Deleted partial upload file after write failure: %s", upload_path.c_str());
+        } else {
+          ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+        }
+
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;  // Reset cancelled flag after handling
+        portEXIT_CRITICAL(&this->progress_mutex_);
+        if (final) {
+          request->send(500, "text/plain", "Failed to write file");
+        }
+        return;
       }
 
+      // Update progress (thread-safe)
       portENTER_CRITICAL(&this->progress_mutex_);
-      this->progress_.in_progress = false;
-      this->progress_.cancelled = false;  // Reset cancelled flag after handling
+      if (this->progress_.in_progress) {
+        this->progress_.transferred_bytes += written;
+      }
       portEXIT_CRITICAL(&this->progress_mutex_);
+
+      // Yield CPU periodically to allow web server to handle other requests (like progress API)
+      // Longer yield time (100ms) but less frequent (every 128KB instead of 16KB)
+      this->upload_bytes_since_yield_ += written;
+      static constexpr size_t YIELD_INTERVAL_BYTES = 128 * 1024;  // 128KB between yields
+      if (this->upload_bytes_since_yield_ >= YIELD_INTERVAL_BYTES) {
+        vTaskDelay(10);  // Yield for ~100ms to give httpd time to send progress responses
+        this->upload_bytes_since_yield_ = 0;
+      }
+    } else if (this->chunk_buffer_) {
+      // Network storage - accumulate data in buffer
+      // Check if we have enough space in buffer
+      if (current_transferred + len > this->chunk_buffer_size_) {
+        ESP_LOGE(TAG, "Network storage upload buffer overflow: %zu + %zu > %zu", current_transferred, len,
+                 this->chunk_buffer_size_);
+
+        // Clean up
+        this->chunk_buffer_.reset();
+        this->chunk_buffer_size_ = 0;
+
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+
+        if (final) {
+          request->send(500, "text/plain", "Upload buffer overflow");
+        }
+        return;
+      }
+
+      // Copy data to buffer
+      std::memcpy(this->chunk_buffer_.get() + current_transferred, data, len);
+
+      // Update progress (thread-safe)
+      portENTER_CRITICAL(&this->progress_mutex_);
+      if (this->progress_.in_progress) {
+        this->progress_.transferred_bytes += len;
+      }
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      // Yield CPU periodically
+      this->upload_bytes_since_yield_ += len;
+      static constexpr size_t YIELD_INTERVAL_BYTES = 128 * 1024;  // 128KB between yields
+      if (this->upload_bytes_since_yield_ >= YIELD_INTERVAL_BYTES) {
+        vTaskDelay(10);  // Yield for ~100ms to give httpd time to send progress responses
+        this->upload_bytes_since_yield_ = 0;
+      }
+    } else {
+      // No file handle and no chunk buffer - this shouldn't happen
+      ESP_LOGE(TAG, "Upload state corrupted: no file handle or chunk buffer");
       if (final) {
-        request->send(500, "text/plain", "Failed to write file");
+        request->send(500, "text/plain", "Upload state corrupted");
       }
       return;
-    }
-
-    // Update progress (thread-safe)
-    portENTER_CRITICAL(&this->progress_mutex_);
-    if (this->progress_.in_progress) {
-      this->progress_.transferred_bytes += written;
-    }
-    portEXIT_CRITICAL(&this->progress_mutex_);
-
-    // Yield CPU periodically to allow web server to handle other requests (like progress API)
-    // Longer yield time (100ms) but less frequent (every 128KB instead of 16KB)
-    this->upload_bytes_since_yield_ += written;
-    static constexpr size_t YIELD_INTERVAL_BYTES = 128 * 1024;  // 128KB between yields
-    if (this->upload_bytes_since_yield_ >= YIELD_INTERVAL_BYTES) {
-      vTaskDelay(10);  // Yield for ~100ms to give httpd time to send progress responses
-      this->upload_bytes_since_yield_ = 0;
     }
   }
 
   // Finalize upload
   if (final) {
     if (this->upload_file_) {
+      // Local storage - close file
       fclose(this->upload_file_);
       this->upload_file_ = nullptr;
-      ESP_LOGI(TAG, "Async upload completed: %s", this->upload_filename_.c_str());
+      ESP_LOGI(TAG, "Local storage upload completed: %s", this->upload_filename_.c_str());
 
       // Mark progress as complete (thread-safe)
       portENTER_CRITICAL(&this->progress_mutex_);
@@ -483,7 +589,49 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       portEXIT_CRITICAL(&this->progress_mutex_);
 
       request->send(201, "text/plain", "File uploaded successfully");
+    } else if (this->chunk_buffer_) {
+      // Network storage - write accumulated data
+      std::string upload_path = Path::join(this->upload_directory_, this->upload_filename_);
+
+      // Get current transferred size for final write
+      portENTER_CRITICAL(&this->progress_mutex_);
+      size_t final_size = this->progress_.transferred_bytes;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      ESP_LOGI(TAG, "Writing %zu bytes to network storage: %s", final_size, upload_path.c_str());
+
+      // Get network storage for path
+      storage::NetworkStorage *net_storage = nullptr;
+      if (this->storage_ != nullptr) {
+        net_storage = this->storage_->find_network_storage_for_path(upload_path);
+      }
+
+      bool success = false;
+      if (net_storage != nullptr) {
+        success = net_storage->write_file(upload_path, this->chunk_buffer_.get(), final_size);
+      } else {
+        ESP_LOGE(TAG, "Network storage not found for path: %s", upload_path.c_str());
+      }
+
+      // Clean up buffer
+      this->chunk_buffer_.reset();
+      this->chunk_buffer_size_ = 0;
+
+      // Mark progress as complete
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.in_progress = false;
+      this->progress_.cancelled = false;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      if (success) {
+        ESP_LOGI(TAG, "Network storage upload completed: %s (%zu bytes)", upload_path.c_str(), final_size);
+        request->send(201, "text/plain", "File uploaded successfully");
+      } else {
+        ESP_LOGE(TAG, "Network storage upload failed: %s", upload_path.c_str());
+        request->send(500, "text/plain", "Failed to write file to network storage");
+      }
     } else {
+      // No file handle and no chunk buffer
       portENTER_CRITICAL(&this->progress_mutex_);
       this->progress_.in_progress = false;
       this->progress_.cancelled = false;  // Reset cancelled flag after handling
@@ -2022,24 +2170,87 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     return;
   }
 
-  // Get file size
-  struct stat file_stat;
-  if (stat(filepath.c_str(), &file_stat) != 0) {
-    request->send(404, "text/plain", "File not found");
-    return;
-  }
-  size_t file_size = file_stat.st_size;
-
   // Set content type based on file extension
   std::string mime_type = Path::mime_type(filepath);
   std::string filename = Path::file_name(filepath);
   std::string content_disposition = "attachment; filename=\"" + filename + "\"";
 
-  ESP_LOGI(TAG, "Starting file download: %s (size: %zu bytes)", filename.c_str(), file_size);
-
   // Use raw httpd API for streaming (AsyncWebServer wraps httpd but doesn't expose streaming)
   // Get the underlying httpd_req_t
   httpd_req_t *req = static_cast<httpd_req_t *>(*request);
+
+  // Check if this is network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(filepath);
+  }
+
+  if (net_storage != nullptr) {
+    // Network storage path - read entire file into memory then stream
+    ESP_LOGI(TAG, "Starting network storage file download: %s", filename.c_str());
+
+    std::vector<uint8_t> file_data;
+    if (!net_storage->read_file(filepath, file_data)) {
+      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Failed to read file from network storage");
+      return;
+    }
+
+    size_t file_size = file_data.size();
+    ESP_LOGI(TAG, "Read %zu bytes from network storage, starting download", file_size);
+
+    // Set response headers
+    httpd_resp_set_type(req, mime_type.c_str());
+    httpd_resp_set_hdr(req, "Content-Disposition", content_disposition.c_str());
+    httpd_resp_set_hdr(req, "Content-Length", std::to_string(file_size).c_str());
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    // Stream data in chunks to avoid large memory copy
+    size_t total_sent = 0;
+    bool success = true;
+
+    while (total_sent < file_size) {
+      App.feed_wdt();  // Feed watchdog for large files
+
+      size_t to_send = std::min(FILE_BUFFER_SIZE, file_size - total_sent);
+
+      esp_err_t err =
+          httpd_resp_send_chunk(req, reinterpret_cast<const char *>(file_data.data() + total_sent), to_send);
+      if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
+        success = false;
+        break;
+      }
+
+      total_sent += to_send;
+
+      // Log progress every ~3MB
+      if (file_size > 3 * 1024 * 1024 && (total_sent % (3 * 1024 * 1024) < FILE_BUFFER_SIZE)) {
+        ESP_LOGI(TAG, "Download progress: %zu / %zu MB (%.1f%%)", total_sent / (1024 * 1024), file_size / (1024 * 1024),
+                 (float) total_sent / file_size * 100.0f);
+      }
+    }
+
+    // Send final empty chunk to signal completion
+    if (success) {
+      httpd_resp_send_chunk(req, nullptr, 0);
+      ESP_LOGI(TAG, "Download completed: %zu bytes", total_sent);
+    } else {
+      ESP_LOGW(TAG, "Download incomplete: %zu / %zu bytes", total_sent, file_size);
+    }
+
+    return;
+  }
+
+  // Local storage path - use VFS streaming
+  // Get file size
+  struct stat file_stat;
+  if (stat(filepath.c_str(), &file_stat) != 0) {
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+    return;
+  }
+  size_t file_size = file_stat.st_size;
+
+  ESP_LOGI(TAG, "Starting local file download: %s (size: %zu bytes)", filename.c_str(), file_size);
 
   // Open file
   FILE *file = fopen(filepath.c_str(), "rb");
@@ -2302,6 +2513,31 @@ void HttpFileBrowser::count_directory_contents(const std::string &path, int &fil
   closedir(dir);
 }
 
+// Network storage version of count_directory_contents
+void HttpFileBrowser::count_directory_contents_network(storage::NetworkStorage *net_storage, const std::string &path,
+                                                       int &file_count, int &dir_count) {
+  if (net_storage == nullptr) {
+    return;
+  }
+
+  // List directory contents
+  std::vector<storage::NetworkStorage::DirEntry> entries;
+  if (!net_storage->list_directory(path, entries)) {
+    return;
+  }
+
+  for (const auto &entry : entries) {
+    if (entry.is_directory) {
+      dir_count++;
+      // Recursively count subdirectory contents
+      std::string entry_path = Path::join(path, entry.name);
+      this->count_directory_contents_network(net_storage, entry_path, file_count, dir_count);
+    } else {
+      file_count++;
+    }
+  }
+}
+
 bool HttpFileBrowser::recursive_delete_directory(const std::string &path, bool track_progress) {
   DIR *dir = opendir(path.c_str());
   if (!dir) {
@@ -2395,6 +2631,102 @@ bool HttpFileBrowser::recursive_delete_directory(const std::string &path, bool t
   if (success) {
     if (rmdir(path.c_str()) != 0) {
       ESP_LOGE(TAG, "Failed to delete directory: %s (errno: %d, %s)", path.c_str(), errno, strerror(errno));
+      return false;
+    }
+
+    // Update progress for the directory
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.processed_items++;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+    }
+  }
+
+  return success;
+}
+
+// Network storage recursive directory deletion
+bool HttpFileBrowser::recursive_delete_directory_network(storage::NetworkStorage *net_storage, const std::string &path,
+                                                         bool track_progress) {
+  if (net_storage == nullptr) {
+    ESP_LOGE(TAG, "Network storage is null");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Recursively deleting network storage directory: %s", path.c_str());
+
+  // List directory contents
+  std::vector<storage::NetworkStorage::DirEntry> entries;
+  if (!net_storage->list_directory(path, entries)) {
+    ESP_LOGE(TAG, "Failed to list network storage directory: %s", path.c_str());
+    return false;
+  }
+
+  bool log_each_file = (entries.size() > 5) || track_progress;
+  if (log_each_file && !track_progress) {
+    ESP_LOGI(TAG, "Deleting network directory with %zu entries: %s (will log each entry)", entries.size(),
+             path.c_str());
+  }
+
+  bool success = true;
+
+  // Delete all entries
+  for (const auto &entry : entries) {
+    // Feed watchdog
+    App.feed_wdt();
+
+    // Check for cancellation if tracking progress
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      bool cancelled = this->progress_.cancelled;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      if (cancelled) {
+        ESP_LOGI(TAG, "Delete operation cancelled by user");
+        return false;
+      }
+    }
+
+    std::string entry_path = Path::join(path, entry.name);
+
+    if (entry.is_directory) {
+      // Recursively delete subdirectory
+      if (!this->recursive_delete_directory_network(net_storage, entry_path, track_progress)) {
+        success = false;
+        break;
+      }
+    } else {
+      // Update progress with current file
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.current_file = entry_path;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+
+      // Delete file
+      if (log_each_file) {
+        ESP_LOGI(TAG, "Deleting network file: %s", entry_path.c_str());
+      }
+
+      if (!net_storage->delete_file(entry_path)) {
+        ESP_LOGE(TAG, "Failed to delete network file: %s", entry_path.c_str());
+        success = false;
+        break;
+      }
+
+      // Update progress counter
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.processed_items++;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+    }
+  }
+
+  // Delete the directory itself (now empty)
+  if (success) {
+    if (!net_storage->delete_directory(path)) {
+      ESP_LOGE(TAG, "Failed to delete network directory: %s", path.c_str());
       return false;
     }
 
@@ -2592,15 +2924,54 @@ void HttpFileBrowser::handle_api_rename(AsyncWebServerRequest *request) {
 
   ESP_LOGI(TAG, "API RENAME: %s -> %s", source.c_str(), new_path.c_str());
 
-  // Check if source exists
-  struct stat src_stat;
-  if (stat(source.c_str(), &src_stat) != 0) {
+  // Check if source exists (using helper that supports network storage)
+  bool is_directory = false;
+  if (!this->path_exists(source, is_directory)) {
     request->send(404, "application/json", "{\"error\":\"Source file not found\"}");
     return;
   }
 
+  // Check if source is on network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(source);
+  }
+
   // Perform rename
-  if (rename(source.c_str(), new_path.c_str()) == 0) {
+  bool success = false;
+
+  if (net_storage != nullptr) {
+    // Network storage - use copy+delete (NetworkStorage has no rename operation)
+    ESP_LOGI(TAG, "Network storage rename detected, using copy+delete");
+
+    // Read source file
+    std::vector<uint8_t> file_data;
+    if (!net_storage->read_file(source, file_data)) {
+      ESP_LOGE(TAG, "Failed to read source file for rename: %s", source.c_str());
+      request->send(500, "application/json", "{\"error\":\"Failed to read source file\"}");
+      return;
+    }
+
+    // Write to new path
+    if (!net_storage->write_file(new_path, file_data.data(), file_data.size())) {
+      ESP_LOGE(TAG, "Failed to write destination file for rename: %s", new_path.c_str());
+      request->send(500, "application/json", "{\"error\":\"Failed to write destination file\"}");
+      return;
+    }
+
+    // Delete source file
+    if (!net_storage->delete_file(source)) {
+      ESP_LOGW(TAG, "Failed to delete source after rename copy: %s (destination written successfully)", source.c_str());
+      // Still consider success since destination was written
+    }
+
+    success = true;
+  } else {
+    // Local storage - use atomic rename
+    success = (rename(source.c_str(), new_path.c_str()) == 0);
+  }
+
+  if (success) {
     request->send(200, "application/json", "{\"success\":true}");
   } else {
     ESP_LOGE(TAG, "Rename failed: %s (errno: %d, %s)", source.c_str(), errno, strerror(errno));
@@ -2666,18 +3037,54 @@ void HttpFileBrowser::handle_api_delete(AsyncWebServerRequest *request) {
 
   bool success = false;
   if (is_directory) {
-    // Check if this is network storage - recursive deletion not yet supported
-    if (this->storage_ != nullptr && this->storage_->find_network_storage_for_path(filepath) != nullptr) {
+    // Check if this is network storage
+    storage::NetworkStorage *net_storage = nullptr;
+    if (this->storage_ != nullptr) {
+      net_storage = this->storage_->find_network_storage_for_path(filepath);
+    }
+
+    if (net_storage != nullptr) {
+      // Network storage - use network storage recursive deletion
       ESP_LOGI(TAG, "Attempting to delete directory on network storage: %s", filepath.c_str());
-      // NetworkStorage only supports deleting empty directories
-      success = this->delete_path(filepath, true);
-      if (!success) {
-        ESP_LOGW(TAG,
-                 "Directory deletion failed - network storage only supports deleting empty directories. Please delete "
-                 "contents first.");
+
+      // Count files/directories first (recursively)
+      int file_count = 0;
+      int dir_count = 0;
+      this->count_directory_contents_network(net_storage, filepath, file_count, dir_count);
+      int total_items = file_count + dir_count;
+
+      // Initialize progress tracking for large deletions (>5 items)
+      bool track_progress = (total_items > 5);
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.operation = "delete";
+        this->progress_.source = filepath;
+        this->progress_.destination = "";
+        this->progress_.current_file = "";
+        this->progress_.total_items = total_items;
+        this->progress_.processed_items = 0;
+        this->progress_.in_progress = true;
+        this->progress_.cancelled = false;
+        this->progress_.start_time = millis();
+        portEXIT_CRITICAL(&this->progress_mutex_);
+        ESP_LOGI(TAG, "Deleting network directory recursively: %s (%d files, %d dirs)", filepath.c_str(), file_count,
+                 dir_count);
+      } else {
+        ESP_LOGI(TAG, "Deleting network directory recursively: %s", filepath.c_str());
+      }
+
+      // Recursive directory deletion for network storage
+      success = this->recursive_delete_directory_network(net_storage, filepath, track_progress);
+
+      // Clear progress tracking
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;  // Reset cancelled flag after handling
+        portEXIT_CRITICAL(&this->progress_mutex_);
       }
     } else {
-      // Local storage - use recursive deletion
+      // Local storage - use VFS recursive deletion
       // Count files/directories first
       int file_count = 0;
       int dir_count = 0;
@@ -3498,6 +3905,106 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
     portEXIT_CRITICAL(&this->progress_mutex_);
   }
 
+  // Check if source or destination is on network storage
+  storage::NetworkStorage *src_net_storage = nullptr;
+  storage::NetworkStorage *dst_net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    src_net_storage = this->storage_->find_network_storage_for_path(src_path);
+    dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
+  }
+
+  // Handle network storage copy operations
+  if (src_net_storage != nullptr || dst_net_storage != nullptr) {
+    ESP_LOGI(TAG, "Starting network storage file copy: %s -> %s (size: %lld bytes)", src_path.c_str(), dst_path.c_str(),
+             (long long) file_size);
+
+    // Read source file (from network or local storage)
+    std::vector<uint8_t> file_data;
+    bool read_success = false;
+
+    if (src_net_storage != nullptr) {
+      // Read from network storage
+      read_success = src_net_storage->read_file(src_path, file_data);
+    } else {
+      // Read from local storage
+      read_success = this->read_file_content(src_path, file_data);
+    }
+
+    if (!read_success) {
+      ESP_LOGE(TAG, "Failed to read source file: %s", src_path.c_str());
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        if (this->progress_.operation == "copy") {
+          this->progress_.in_progress = false;
+          this->progress_.cancelled = false;
+        }
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+      return false;
+    }
+
+    // Update progress after reading
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.transferred_bytes = file_data.size();
+      portEXIT_CRITICAL(&this->progress_mutex_);
+    }
+
+    // Check for cancellation before writing
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      bool cancelled = this->progress_.cancelled;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+
+      if (cancelled) {
+        ESP_LOGI(TAG, "Copy operation cancelled by user before writing");
+        portENTER_CRITICAL(&this->progress_mutex_);
+        if (this->progress_.operation == "copy") {
+          this->progress_.in_progress = false;
+          this->progress_.cancelled = false;
+        }
+        portEXIT_CRITICAL(&this->progress_mutex_);
+        return false;
+      }
+    }
+
+    // Write destination file (to network or local storage)
+    bool write_success = false;
+
+    if (dst_net_storage != nullptr) {
+      // Write to network storage
+      write_success = dst_net_storage->write_file(dst_path, file_data.data(), file_data.size());
+    } else {
+      // Write to local storage
+      write_success = this->write_file_content(dst_path, file_data.data(), file_data.size());
+    }
+
+    if (write_success) {
+      ESP_LOGI(TAG, "Network storage file copy completed successfully: %zu bytes", file_data.size());
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        if (this->progress_.operation == "copy") {
+          this->progress_.in_progress = false;
+          this->progress_.cancelled = false;
+        }
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+      return true;
+    } else {
+      ESP_LOGE(TAG, "Failed to write destination file: %s", dst_path.c_str());
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        if (this->progress_.operation == "copy") {
+          this->progress_.in_progress = false;
+          this->progress_.cancelled = false;
+        }
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+      return false;
+    }
+  }
+
+  // Local storage copy (both source and destination are local)
   FILE *src = fopen(src_path.c_str(), "rb");
   if (!src) {
     ESP_LOGE(TAG, "Failed to open source file: %s (errno: %d, %s)", src_path.c_str(), errno, strerror(errno));
@@ -3645,8 +4152,19 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
     portEXIT_CRITICAL(&this->progress_mutex_);
   }
 
-  // Try atomic rename first (works within same filesystem)
-  if (rename(src_path.c_str(), dst_path.c_str()) == 0) {
+  // Check if source or destination is on network storage
+  storage::NetworkStorage *src_net_storage = nullptr;
+  storage::NetworkStorage *dst_net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    src_net_storage = this->storage_->find_network_storage_for_path(src_path);
+    dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
+  }
+
+  // Network storage doesn't support atomic rename - always use copy+delete
+  bool is_network_move = (src_net_storage != nullptr || dst_net_storage != nullptr);
+
+  // Try atomic rename first (only for local-to-local moves)
+  if (!is_network_move && rename(src_path.c_str(), dst_path.c_str()) == 0) {
     ESP_LOGI(TAG, "File moved successfully (atomic rename)");
     if (track_progress) {
       portENTER_CRITICAL(&this->progress_mutex_);
@@ -3658,12 +4176,18 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
     return true;
   }
 
-  // If rename fails with EXDEV (cross-device), fall back to copy+delete
-  if (errno == EXDEV) {
-    ESP_LOGI(TAG, "Cross-mount move detected, using copy+delete fallback");
+  // If network storage or rename failed with EXDEV (cross-device), use copy+delete fallback
+  if (is_network_move || errno == EXDEV) {
+    if (is_network_move) {
+      ESP_LOGI(TAG, "Network storage move detected, using copy+delete");
+    } else {
+      ESP_LOGI(TAG, "Cross-mount move detected, using copy+delete fallback");
+    }
+
     // Note: perform_file_copy will handle progress tracking if track_progress is true
     if (perform_file_copy(src_path, dst_path, file_size, track_progress)) {
-      if (remove(src_path.c_str()) == 0) {
+      // Delete source file using helper that supports network storage
+      if (this->delete_path(src_path, false)) {
         ESP_LOGI(TAG, "File move completed successfully");
         if (track_progress) {
           portENTER_CRITICAL(&this->progress_mutex_);
@@ -3673,8 +4197,7 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
         }
         return true;
       } else {
-        ESP_LOGE(TAG, "Failed to delete source after copy: %s (errno: %d, %s)", src_path.c_str(), errno,
-                 strerror(errno));
+        ESP_LOGE(TAG, "Failed to delete source after copy: %s", src_path.c_str());
         // File was copied but source remains - still consider success
         if (track_progress) {
           portENTER_CRITICAL(&this->progress_mutex_);
