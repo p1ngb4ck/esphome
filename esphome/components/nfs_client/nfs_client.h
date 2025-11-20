@@ -74,6 +74,11 @@ static constexpr uint32_t NFS_VERSION_3 = 3;
 static constexpr uint32_t MOUNT_PROGRAM = 100005;
 static constexpr uint32_t MOUNT_VERSION_3 = 3;
 
+/// Portmapper program number
+static constexpr uint32_t PMAP_PROGRAM = 100000;
+static constexpr uint32_t PMAP_VERSION = 2;
+static constexpr uint16_t PMAP_PORT = 111;
+
 /// NFS ports (use portmapper/rpcbind in production)
 static constexpr uint16_t NFS_DEFAULT_PORT = 2049;
 static constexpr uint16_t MOUNT_DEFAULT_PORT = 2049;
@@ -112,6 +117,16 @@ enum MOUNTv3Procedure : uint32_t {
   MOUNTPROC3_UMNT = 3,
   MOUNTPROC3_UMNTALL = 4,
   MOUNTPROC3_EXPORT = 5,
+};
+
+/// Portmapper v2 procedure numbers
+enum PMAPv2Procedure : uint32_t {
+  PMAPPROC_NULL = 0,
+  PMAPPROC_SET = 1,
+  PMAPPROC_UNSET = 2,
+  PMAPPROC_GETPORT = 3,
+  PMAPPROC_DUMP = 4,
+  PMAPPROC_CALLIT = 5,
 };
 
 /// NFS file types
@@ -458,11 +473,13 @@ class NFSClient : public Component
   //========================================================================
 
   enum class MountState : uint8_t {
-    IDLE,        // Not attempted yet
-    CONNECTING,  // Attempting DNS resolution and TCP connection
-    MOUNTING,    // Attempting NFS mount
-    MOUNTED,     // Successfully mounted
-    FAILED,      // Mount failed, waiting to retry
+    IDLE,              // Not attempted yet
+    CONNECTING_PMAP,   // Connecting to portmapper (port 111)
+    QUERYING_PMAP,     // Querying portmapper for MOUNT port
+    CONNECTING_MOUNT,  // Connecting to MOUNT service
+    MOUNTING,          // Attempting NFS mount
+    MOUNTED,           // Successfully mounted
+    FAILED,            // Mount failed, waiting to retry
   };
 
   MountState mount_state_{MountState::IDLE};
@@ -475,6 +492,10 @@ class NFSClient : public Component
   struct sockaddr_in server_addr_ {};
   bool server_addr_resolved_{false};
 #endif
+
+  // Discovered MOUNT port from portmapper
+  uint16_t mount_port_{0};
+  bool mount_port_discovered_{false};
 
   //========================================================================
   // RPC Client
@@ -492,6 +513,7 @@ class NFSClient : public Component
   bool connect_();
   void disconnect_();
   bool send_rpc_(const XDRBuffer &request, XDRBuffer &response);
+  bool query_portmapper_(uint32_t program, uint32_t version, uint16_t &port);
 
   //========================================================================
   // MOUNT Protocol

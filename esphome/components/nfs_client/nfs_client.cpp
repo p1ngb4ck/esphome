@@ -306,19 +306,48 @@ void NFSClient::loop() {
 
   switch (this->mount_state_) {
     case MountState::IDLE:
-      // Start mount attempt
+      // Start mount attempt - first query portmapper for MOUNT port
       ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
-      this->mount_state_ = MountState::CONNECTING;
+      this->mount_state_ = MountState::CONNECTING_PMAP;
       this->last_mount_attempt_ = now;
       break;
 
-    case MountState::CONNECTING:
-      // Attempt connection (non-blocking as much as possible)
+    case MountState::CONNECTING_PMAP:
+      // Connect to portmapper (port 111)
       if (this->connect_()) {
-        ESP_LOGD(TAG, "Connected to NFS server, attempting mount...");
+        ESP_LOGD(TAG, "Connected to portmapper, querying for MOUNT service...");
+        this->mount_state_ = MountState::QUERYING_PMAP;
+      } else {
+        ESP_LOGW(TAG, "Failed to connect to portmapper, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        this->mount_state_ = MountState::FAILED;
+        this->last_mount_attempt_ = now;
+      }
+      break;
+
+    case MountState::QUERYING_PMAP:
+      // Query portmapper for MOUNT port
+      if (this->query_portmapper_(MOUNT_PROGRAM, MOUNT_VERSION_3, this->mount_port_)) {
+        this->mount_port_discovered_ = true;
+        ESP_LOGI(TAG, "MOUNT service available on port %u", this->mount_port_);
+        // Disconnect from portmapper and connect to MOUNT service
+        this->disconnect_();
+        this->mount_state_ = MountState::CONNECTING_MOUNT;
+      } else {
+        ESP_LOGW(TAG, "Failed to query portmapper, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        this->disconnect_();
+        this->mount_state_ = MountState::FAILED;
+        this->last_mount_attempt_ = now;
+      }
+      break;
+
+    case MountState::CONNECTING_MOUNT:
+      // Connect to MOUNT service on discovered port
+      if (this->connect_()) {
+        ESP_LOGD(TAG, "Connected to MOUNT service, attempting mount...");
         this->mount_state_ = MountState::MOUNTING;
       } else {
-        ESP_LOGW(TAG, "Failed to connect to NFS server, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to connect to MOUNT service, will retry in %u seconds",
+                 this->mount_retry_interval_ / 1000);
         this->mount_state_ = MountState::FAILED;
         this->last_mount_attempt_ = now;
       }
@@ -458,7 +487,21 @@ bool NFSClient::connect_() {
     return true;
   }
 
-  ESP_LOGD(TAG, "Connecting to NFS server %s:%u...", this->server_.c_str(), this->port_);
+  // Determine which port to use based on mount state
+  uint16_t target_port;
+  const char *service_name;
+  if (this->mount_state_ == MountState::CONNECTING_PMAP) {
+    target_port = PMAP_PORT;
+    service_name = "portmapper";
+  } else if (this->mount_state_ == MountState::CONNECTING_MOUNT && this->mount_port_discovered_) {
+    target_port = this->mount_port_;
+    service_name = "MOUNT service";
+  } else {
+    target_port = this->port_;
+    service_name = "NFS server";
+  }
+
+  ESP_LOGD(TAG, "Connecting to %s %s:%u...", service_name, this->server_.c_str(), target_port);
 
 #ifdef USE_ESP_IDF
   // Resolve hostname first (uses cache if already resolved)
@@ -473,8 +516,12 @@ bool NFSClient::connect_() {
     return false;
   }
 
-  // Connect using cached server address
-  if (::connect(this->socket_, (struct sockaddr *) &this->server_addr_, sizeof(this->server_addr_)) < 0) {
+  // Update port in server address structure
+  struct sockaddr_in connect_addr = this->server_addr_;
+  connect_addr.sin_port = htons(target_port);
+
+  // Connect using server address with appropriate port
+  if (::connect(this->socket_, (struct sockaddr *) &connect_addr, sizeof(connect_addr)) < 0) {
     ESP_LOGE(TAG, "Failed to connect: errno %d", errno);
     close(this->socket_);
     this->socket_ = -1;
@@ -628,6 +675,55 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   response = XDRBuffer(response_data);
   return true;
 #endif
+}
+
+//========================================================================
+// Portmapper Protocol
+//========================================================================
+
+bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &port) {
+  ESP_LOGD(TAG, "Querying portmapper for program %u version %u", program, version);
+
+  // Build PMAP GETPORT call
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, PMAP_PROGRAM, PMAP_VERSION, PMAPPROC_GETPORT, 0, 0);
+
+  // PMAP GETPORT arguments: prog, vers, prot, port (unused)
+  request.encode_uint32(program);
+  request.encode_uint32(version);
+  request.encode_uint32(6);  // IPPROTO_TCP
+  request.encode_uint32(0);  // port (unused in request)
+
+  // Send RPC call
+  XDRBuffer response;
+  if (!this->send_rpc_(request, response)) {
+    ESP_LOGE(TAG, "Failed to send PMAP GETPORT");
+    return false;
+  }
+
+  // Parse RPC reply
+  RPCAcceptStatus status;
+  if (!this->rpc_.parse_reply(response, xid, status)) {
+    ESP_LOGE(TAG, "Failed to parse PMAP reply");
+    return false;
+  }
+
+  // Decode port number
+  uint32_t port_result;
+  if (!response.decode_uint32(port_result)) {
+    ESP_LOGE(TAG, "Failed to decode port from PMAP reply");
+    return false;
+  }
+
+  if (port_result == 0) {
+    ESP_LOGE(TAG, "Portmapper returned port 0 - program %u version %u not registered", program, version);
+    return false;
+  }
+
+  port = static_cast<uint16_t>(port_result);
+  ESP_LOGI(TAG, "Discovered port %u for program %u version %u via portmapper", port, program, version);
+  return true;
 }
 
 //========================================================================
