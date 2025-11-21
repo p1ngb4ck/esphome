@@ -92,7 +92,7 @@ bool XDRBuffer::decode_bytes(uint8_t *data, size_t length) {
     return false;
   }
 
-  std::copy(this->data_.begin() + this->position_, this->data_.begin() + this->position_ + length, data);
+  memcpy(data, this->data_.data() + this->position_, length);
   this->position_ += length;
   return true;
 }
@@ -1523,6 +1523,13 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     // Decode cookieverf (fixed 8 bytes)
+    ESP_LOGW(TAG, "READDIR: at pos %zu, dumping next 16 bytes:", response.position());
+    const auto &buf = response.data();
+    size_t pos = response.position();
+    for (size_t i = 0; i < 16 && pos + i < buf.size(); i += 4) {
+      ESP_LOGW(TAG, "  [%zu]: %02X %02X %02X %02X", pos + i, buf[pos + i], buf[pos + i + 1], buf[pos + i + 2],
+               buf[pos + i + 3]);
+    }
     if (!response.decode_bytes(cookieverf, 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
