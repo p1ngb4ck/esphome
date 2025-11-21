@@ -9,9 +9,6 @@
 #ifdef USE_ESP_IDF
 #include "mdns.h"
 #include "esp_netif.h"
-#if defined(USE_PSRAM)
-#include <esp_heap_caps.h>
-#endif
 #endif
 
 #if defined(USE_STORAGE)
@@ -68,14 +65,14 @@ void XDRBuffer::encode_opaque(const uint8_t *data, size_t length) {
 }
 
 bool XDRBuffer::decode_uint32(uint32_t &value) {
-  if (this->position_ + 4 > this->size()) {
+  if (this->position_ + 4 > this->data_.size()) {
     return false;
   }
 
-  const uint8_t *buf = this->buffer();
-  value = (static_cast<uint32_t>(buf[this->position_]) << 24) |
-          (static_cast<uint32_t>(buf[this->position_ + 1]) << 16) |
-          (static_cast<uint32_t>(buf[this->position_ + 2]) << 8) | static_cast<uint32_t>(buf[this->position_ + 3]);
+  value = (static_cast<uint32_t>(this->data_[this->position_]) << 24) |
+          (static_cast<uint32_t>(this->data_[this->position_ + 1]) << 16) |
+          (static_cast<uint32_t>(this->data_[this->position_ + 2]) << 8) |
+          static_cast<uint32_t>(this->data_[this->position_ + 3]);
 
   this->position_ += 4;
   return true;
@@ -91,11 +88,11 @@ bool XDRBuffer::decode_uint64(uint64_t &value) {
 }
 
 bool XDRBuffer::decode_bytes(uint8_t *data, size_t length) {
-  if (this->position_ + length > this->size()) {
+  if (this->position_ + length > this->data_.size()) {
     return false;
   }
 
-  memcpy(data, this->buffer() + this->position_, length);
+  memcpy(data, this->data_.data() + this->position_, length);
   this->position_ += length;
   return true;
 }
@@ -132,12 +129,11 @@ bool XDRBuffer::decode_opaque(std::vector<uint8_t> &data) {
     return false;
   }
 
-  if (this->position_ + length > this->size()) {
+  if (this->position_ + length > this->data_.size()) {
     return false;
   }
 
-  const uint8_t *buf = this->buffer();
-  data.assign(buf + this->position_, buf + this->position_ + length);
+  data.assign(this->data_.begin() + this->position_, this->data_.begin() + this->position_ + length);
   this->position_ += align_4(length);
 
   return true;
@@ -154,7 +150,7 @@ bool XDRBuffer::decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t 
     return false;
   }
 
-  if (this->position_ + length > this->size()) {
+  if (this->position_ + length > this->data_.size()) {
     return false;
   }
 
@@ -165,7 +161,7 @@ bool XDRBuffer::decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t 
   }
 
   // Copy directly to caller's buffer
-  std::memcpy(buffer, this->buffer() + this->position_, length);
+  std::memcpy(buffer, this->data_.data() + this->position_, length);
   actual_len = length;
   this->position_ += align_4(length);
 
@@ -247,32 +243,37 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
     return false;
   }
   // nfstime3 fields: seconds and nseconds are both uint32 (RFC 1813 section 2.2)
-  // We only store seconds to save RAM (nanosecond precision not needed)
-  uint32_t nsec_temp;  // Temporary for skipping nsec fields
+  uint32_t atime_sec_32, mtime_sec_32, ctime_sec_32;
 
-  if (!xdr.decode_uint32(this->atime)) {
+  if (!xdr.decode_uint32(atime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_sec");
     return false;
   }
-  if (!xdr.decode_uint32(nsec_temp)) {  // Skip atime nanoseconds
+  this->atime_sec = atime_sec_32;
+
+  if (!xdr.decode_uint32(this->atime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_nsec");
     return false;
   }
 
-  if (!xdr.decode_uint32(this->mtime)) {
+  if (!xdr.decode_uint32(mtime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_sec");
     return false;
   }
-  if (!xdr.decode_uint32(nsec_temp)) {  // Skip mtime nanoseconds
+  this->mtime_sec = mtime_sec_32;
+
+  if (!xdr.decode_uint32(this->mtime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_nsec");
     return false;
   }
 
-  if (!xdr.decode_uint32(this->ctime)) {
+  if (!xdr.decode_uint32(ctime_sec_32)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_sec");
     return false;
   }
-  if (!xdr.decode_uint32(nsec_temp)) {  // Skip ctime nanoseconds
+  this->ctime_sec = ctime_sec_32;
+
+  if (!xdr.decode_uint32(this->ctime_nsec)) {
     ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%zu, size=%zu", xdr.position(), xdr.size());
     return false;
   }
@@ -391,14 +392,7 @@ void RPCClient::encode_auth_null_(XDRBuffer &xdr) {
 // NFSClient Implementation
 //========================================================================
 
-NFSClient::~NFSClient() {
-  this->disconnect_();
-  // Free RPC response buffer
-  if (this->rpc_response_buffer_ != nullptr) {
-    free(this->rpc_response_buffer_);
-    this->rpc_response_buffer_ = nullptr;
-  }
-}
+NFSClient::~NFSClient() { this->disconnect_(); }
 
 void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
@@ -511,30 +505,6 @@ void NFSClient::loop() {
         this->nfs_port_discovered_ = false;
       }
       this->close_connection_();
-
-      // Allocate RPC response buffer (65KB) on first mount - prefer PSRAM if available
-      if (this->rpc_response_buffer_ == nullptr) {
-#if defined(USE_PSRAM) && defined(USE_ESP_IDF)
-        this->rpc_response_buffer_ = (uint8_t *) heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (this->rpc_response_buffer_ != nullptr) {
-          ESP_LOGD(TAG, "Allocated 65KB RPC buffer from PSRAM");
-        } else {
-          ESP_LOGW(TAG, "PSRAM allocation failed, using heap for RPC buffer");
-          this->rpc_response_buffer_ = (uint8_t *) malloc(65536);
-        }
-#else
-        this->rpc_response_buffer_ = (uint8_t *) malloc(65536);
-        ESP_LOGD(TAG, "Allocated 65KB RPC buffer from heap");
-#endif
-
-        if (this->rpc_response_buffer_ == nullptr) {
-          ESP_LOGE(TAG, "Failed to allocate RPC response buffer!");
-          this->mount_state_ = MountState::FAILED;
-          this->last_mount_attempt_ = now;
-          break;
-        }
-      }
-
       this->mounted_ = true;
       this->mount_state_ = MountState::MOUNTED;
 
@@ -826,17 +796,11 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  // Use pre-allocated buffer (allocated on first mount)
-  // Buffer is reused across all RPC calls
-  uint8_t *response_data = this->rpc_response_buffer_;
-  if (response_data == nullptr) {
-    ESP_LOGE(TAG, "RPC response buffer not allocated!");
-    return false;
-  }
-
+  // Receive response data in a loop to handle partial reads
+  std::vector<uint8_t> response_data(response_length);
   size_t total_received = 0;
   while (total_received < response_length) {
-    int received = recv(this->socket_, response_data + total_received, response_length - total_received, 0);
+    int received = recv(this->socket_, response_data.data() + total_received, response_length - total_received, 0);
     if (received <= 0) {
       ESP_LOGE(TAG, "Failed to receive RPC response data: received=%d, expected=%u, total_received=%zu, errno=%d",
                received, response_length, total_received, errno);
@@ -848,10 +812,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     total_received += received;
   }
 
-  // Wrap pre-allocated buffer in XDRBuffer (zero-copy)
-  response = XDRBuffer(response_data, response_length);
-
-  // Note: Buffer is reused for all RPC calls, freed only in destructor
+  response = XDRBuffer(response_data);
   return true;
 #else
   // Arduino WiFiClient
@@ -891,14 +852,8 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  // Use pre-allocated buffer (allocated on first mount)
-  // Buffer is reused across all RPC calls
-  uint8_t *response_data = this->rpc_response_buffer_;
-  if (response_data == nullptr) {
-    ESP_LOGE(TAG, "RPC response buffer not allocated!");
-    return false;
-  }
-
+  // Read response data in a loop to handle partial reads
+  std::vector<uint8_t> response_data(response_length);
   size_t total_read = 0;
   start = millis();
 
@@ -906,7 +861,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     int available = this->client_->available();
     if (available > 0) {
       size_t to_read = std::min(static_cast<size_t>(available), response_length - total_read);
-      int bytes_read = this->client_->read(response_data + total_read, to_read);
+      int bytes_read = this->client_->read(response_data.data() + total_read, to_read);
       if (bytes_read > 0) {
         total_read += bytes_read;
       } else if (bytes_read < 0) {
@@ -923,10 +878,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  // Wrap pre-allocated buffer in XDRBuffer (zero-copy)
-  response = XDRBuffer(response_data, response_length);
-
-  // Note: Buffer is reused for all RPC calls, freed only in destructor
+  response = XDRBuffer(response_data);
   return true;
 #endif
 }
@@ -2114,16 +2066,15 @@ bool NFSClient::list_directory(const std::string &path, std::vector<storage::Net
     return false;
   }
 
-  // Convert NFSDirEntry to NetworkStorage::DirEntry on-the-fly
-  // This avoids allocating a second vector
+  // Convert NFSDirEntry to NetworkStorage::DirEntry
   entries.clear();
   entries.reserve(nfs_entries.size());
-  for (auto &nfs_entry : nfs_entries) {
+  for (const auto &nfs_entry : nfs_entries) {
     storage::NetworkStorage::DirEntry entry;
-    entry.name = std::move(nfs_entry.name);  // Move to avoid string copy
+    entry.name = nfs_entry.name;
     entry.size = nfs_entry.has_attr ? nfs_entry.attr.size : 0;
     entry.is_directory = nfs_entry.has_attr && (nfs_entry.attr.type == NF3DIR);
-    entries.push_back(std::move(entry));  // Move to avoid copy
+    entries.push_back(entry);
   }
 
   return true;

@@ -163,15 +163,6 @@ async def to_code(config):
 
     cg.add_define("USE_STORAGE")
 
-    # Enable PSRAM buffer pool on ESP32 with guaranteed PSRAM
-    from esphome.core import CORE
-
-    if CORE.is_esp32:
-        from esphome.components import psram
-
-        if psram.is_guaranteed():
-            cg.add_define("USE_PSRAM")
-
     # Register each mount
     for mount_config in config.get(CONF_MOUNTS, []):
         mount_path = mount_config[CONF_MOUNT_PATH]
