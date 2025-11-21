@@ -2445,7 +2445,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
         request->send(500, "text/plain", "Failed to list directory on network storage");
         return;
       }
-      ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
+      ESP_LOGI(TAG, "Found %d files/folders in %s", entries.size(), filepath.c_str());
       for (const auto &entry : entries) {
         FileInfo info;
         info.name = entry.name;
@@ -2457,11 +2457,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
     } else {
       // Local storage path
       ESP_LOGI(TAG, "Listing local directory: %s", filepath.c_str());
-      std::vector<FileInfo> files;
-      if (!this->list_directory(filepath, files)) {
-        request->send(500, "text/plain", "Failed to list local directory");
-        return;
-      }
+      std::vector<FileInfo> files = this->list_directory(filepath);
       ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
       for (const auto &info : files) {
         html += this->generate_file_row(info, this->url_prefix_);
