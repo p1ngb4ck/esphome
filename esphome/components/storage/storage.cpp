@@ -99,8 +99,8 @@ void Storage::dump_config() {
   }
 }
 
-void Storage::register_mount(const std::string &path, const std::string &platform) {
-  this->mounts_.push_back({path, platform});
+void Storage::register_mount(const std::string &path, const std::string &platform, MountSpaceProvider *space_provider) {
+  this->mounts_.push_back({path, platform, space_provider});
   ESP_LOGD(TAG, "Registered mount: %s (platform: %s)", path.c_str(), platform.c_str());
 }
 

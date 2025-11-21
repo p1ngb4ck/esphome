@@ -39,10 +39,18 @@ namespace storage {
 // Forward declarations
 class Storage;
 
+// Mount space info provider interface
+class MountSpaceProvider {
+ public:
+  virtual ~MountSpaceProvider() = default;
+  virtual bool get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) = 0;
+};
+
 // Mount point entry - lightweight alternative to std::map
 struct MountEntry {
   std::string path;
   std::string platform;
+  MountSpaceProvider *space_provider{nullptr};  // Optional, for LittleFS etc.
 };
 
 // =====================================================
@@ -107,7 +115,8 @@ class Storage : public Component {
   std::vector<std::string> list_files(const std::string &path);
 
   // Mount management
-  void register_mount(const std::string &path, const std::string &platform);
+  void register_mount(const std::string &path, const std::string &platform,
+                      MountSpaceProvider *space_provider = nullptr);
   const esphome::StaticVector<MountEntry, MAX_MOUNT_POINTS> &get_mounts() const { return this->mounts_; }
   std::string find_mount_for_path(const std::string &path);
 

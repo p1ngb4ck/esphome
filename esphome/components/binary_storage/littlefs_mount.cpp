@@ -608,6 +608,21 @@ void LittleFSMount::dump_config() {
   }
 }
 
+bool LittleFSMount::get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) {
+  if (!this->mounted_ || this->lfs_ == nullptr || this->lfs_cfg_ == nullptr) {
+    return false;
+  }
+
+  lfs_ssize_t block_count = lfs_fs_size(this->lfs_.get());
+  if (block_count < 0) {
+    return false;
+  }
+
+  total_bytes = static_cast<uint64_t>(this->lfs_cfg_->block_count) * this->lfs_cfg_->block_size;
+  used_bytes = static_cast<uint64_t>(block_count) * this->lfs_cfg_->block_size;
+  return true;
+}
+
 bool LittleFSMount::init_lfs_config_() {
   ESP_LOGD(TAG, "Initializing LittleFS configuration...");
 
@@ -756,7 +771,7 @@ void LittleFSMount::register_with_storage_() {
   if (storage::global_storage != nullptr) {
     // Storage exists, register this mount point
     std::string platform = this->storage_->get_device_type();
-    storage::global_storage->register_mount(this->mount_path_, platform);
+    storage::global_storage->register_mount(this->mount_path_, platform, this);
     ESP_LOGI(TAG, "Registered LittleFS mount with storage: %s (platform: %s)", this->mount_path_.c_str(),
              platform.c_str());
   } else {

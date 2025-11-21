@@ -4,6 +4,7 @@
 #ifdef USE_ESP_IDF
 #include "binary_storage.h"
 #include "esphome/core/component.h"
+#include "esphome/components/storage/storage.h"
 #include "lfs.h"
 #include <string>
 #include <memory>
@@ -55,7 +56,7 @@ struct LfsVfsDir {
  * - Custom block device adapter for BinaryStorage
  * - Integrates with storage for unified access
  */
-class LittleFSMount : public Component {
+class LittleFSMount : public Component, public storage::MountSpaceProvider {
  public:
   LittleFSMount() = default;
   ~LittleFSMount();
@@ -139,6 +140,15 @@ class LittleFSMount : public Component {
    * @return true on success
    */
   bool format();
+
+  /**
+   * @brief Get filesystem space information
+   *
+   * @param total_bytes Output: total space in bytes
+   * @param used_bytes Output: used space in bytes
+   * @return true on success, false if not mounted
+   */
+  bool get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) override;
 
  protected:
   //========================================================================

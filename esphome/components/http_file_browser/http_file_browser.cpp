@@ -2339,11 +2339,24 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.size = 0;
       info.modified = 0;
 
-      // Try to get space information for mounted FAT-based devices (SD, USB)
-      // Skip non-FAT filesystems like FRAM, SPIFFS, etc.
-      if (info.mounted && (mount.platform == "sd_storage" || mount.platform == "usb_storage")) {
+      // Try to get space information for mounted devices
+      if (info.mounted) {
         uint64_t total = 0, free = 0;
-        if (this->get_mount_space_info(mount.path, total, free)) {
+        bool got_space = false;
+
+        if (mount.platform == "sd_storage" || mount.platform == "usb_storage") {
+          // FAT-based filesystems
+          got_space = this->get_mount_space_info(mount.path, total, free);
+        } else if (mount.space_provider != nullptr) {
+          // LittleFS-based mounts (FRAM, EEPROM, SPI flash, etc.)
+          uint64_t used = 0;
+          if (mount.space_provider->get_space_info(total, used)) {
+            free = total - used;
+            got_space = true;
+          }
+        }
+
+        if (got_space) {
           info.total_space = total;
           info.free_space = free;
           info.has_space_info = true;
