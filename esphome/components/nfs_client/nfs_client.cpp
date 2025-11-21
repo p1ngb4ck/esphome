@@ -1297,15 +1297,39 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
     return false;
   }
 
-  // Skip pre-op and post-op attributes
-  bool has_wcc;
-  if (response.decode_bool(has_wcc) && has_wcc) {
-    // Skip WCC data
+  // Skip wcc_data (pre_op_attr + post_op_attr)
+  // pre_op_attr: bool + (if true: size, mtime, ctime)
+  bool has_pre_op;
+  if (!response.decode_bool(has_pre_op)) {
+    ESP_LOGW(TAG, "WRITE: failed to decode has_pre_op");
+    return false;
+  }
+  if (has_pre_op) {
+    // Skip wcc_attr: size(8) + mtime(8) + ctime(8) = 24 bytes
+    uint64_t dummy64;
+    uint32_t dummy32;
+    response.decode_uint64(dummy64);  // size
+    response.decode_uint32(dummy32);  // mtime_sec
+    response.decode_uint32(dummy32);  // mtime_nsec
+    response.decode_uint32(dummy32);  // ctime_sec
+    response.decode_uint32(dummy32);  // ctime_nsec
+  }
+
+  // post_op_attr
+  bool has_post_op;
+  if (!response.decode_bool(has_post_op)) {
+    ESP_LOGW(TAG, "WRITE: failed to decode has_post_op");
+    return false;
+  }
+  if (has_post_op) {
+    NFSFileAttr attr;
+    attr.decode(response);
   }
 
   // Decode bytes written
   uint32_t bytes_written;
   if (!response.decode_uint32(bytes_written)) {
+    ESP_LOGW(TAG, "WRITE: failed to decode bytes_written");
     return false;
   }
 
