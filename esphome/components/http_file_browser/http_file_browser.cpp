@@ -387,11 +387,12 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     </div>)HTML";
   }
 
-  // File table (no Size column for network storage - would require extra GETATTR calls)
+  // File table with Size column (READDIRPLUS provides file attributes)
   html += R"(<table>
     <thead>
       <tr>
         <th>Name</th>
+        <th>Size</th>
         <th>Type</th>
         <th>Actions</th>
       </tr>
@@ -414,6 +415,19 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     }
     html += "</td>";
 
+    // Size column
+    html += "<td>";
+    if (!entry.is_directory) {
+      if (entry.size < 1024) {
+        html += std::to_string(entry.size) + " B";
+      } else if (entry.size < 1024 * 1024) {
+        html += std::to_string(entry.size / 1024) + " KB";
+      } else {
+        html += std::to_string(entry.size / (1024 * 1024)) + " MB";
+      }
+    }
+    html += "</td>";
+
     // Type column
     html += "<td>";
     if (entry.is_directory) {
@@ -425,13 +439,22 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
 
     // Actions column
     html += "<td class=\"actions\">";
-    if (!entry.is_directory && this->download_enabled_) {
-      html += "<button onclick=\"download_file('" + file_uri + "', '" + entry.name + "')\">Download</button>";
+    if (!entry.is_directory) {
+      if (this->download_enabled_) {
+        html += "<button onclick=\"download_file('" + file_uri + "', '" + entry.name + "')\">Download</button>";
+      }
+      html += "<button onclick=\"copy_file('" + entry_path + "')\">Copy</button>";
+      html += "<button onclick=\"move_file('" + entry_path + "')\">Move</button>";
     }
-    if (this->deletion_enabled_) {
-      html += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
-    }
+    html += "<button onclick=\"rename_file('" + entry_path + "')\">Rename</button>";
     html += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
+    if (this->deletion_enabled_) {
+      if (entry.is_directory) {
+        html += "<button onclick=\"delete_directory('" + entry_path + "')\">Delete</button>";
+      } else {
+        html += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
+      }
+    }
     html += "</td>";
 
     html += "</tr>";
@@ -1037,9 +1060,9 @@ bool HttpFileBrowser::delete_path(const std::string &path, bool is_directory) {
   // Check if this path is on network storage
   if (this->storage_ != nullptr) {
     auto *net_storage = this->storage_->find_network_storage_for_path(path);
-    std::string relative_path = strip_network_mount_prefix(net_storage, path);
     if (net_storage != nullptr) {
       // Use NetworkStorage API
+      std::string relative_path = strip_network_mount_prefix(net_storage, path);
       if (is_directory) {
         return net_storage->delete_directory(relative_path);
       } else {
@@ -1060,9 +1083,9 @@ bool HttpFileBrowser::create_dir(const std::string &path) {
   // Check if this path is on network storage
   if (this->storage_ != nullptr) {
     auto *net_storage = this->storage_->find_network_storage_for_path(path);
-    std::string relative_path = strip_network_mount_prefix(net_storage, path);
     if (net_storage != nullptr) {
       // Use NetworkStorage API
+      std::string relative_path = strip_network_mount_prefix(net_storage, path);
       return net_storage->create_directory(relative_path);
     }
   }
@@ -3484,12 +3507,15 @@ void HttpFileBrowser::handle_api_delete(AsyncWebServerRequest *request) {
 
     if (net_storage != nullptr) {
       // Network storage - use network storage recursive deletion
-      ESP_LOGI(TAG, "Attempting to delete directory on network storage: %s", filepath.c_str());
+      // Strip mount prefix for NFS operations
+      std::string relative_path = strip_network_mount_prefix(net_storage, filepath);
+      ESP_LOGI(TAG, "Attempting to delete directory on network storage: %s (relative: %s)", filepath.c_str(),
+               relative_path.c_str());
 
       // Count files/directories first (recursively)
       int file_count = 0;
       int dir_count = 0;
-      this->count_directory_contents_network(net_storage, filepath, file_count, dir_count);
+      this->count_directory_contents_network(net_storage, relative_path, file_count, dir_count);
       int total_items = file_count + dir_count;
 
       // Initialize progress tracking for large deletions (>5 items)
@@ -3506,14 +3532,14 @@ void HttpFileBrowser::handle_api_delete(AsyncWebServerRequest *request) {
         this->progress_.cancelled = false;
         this->progress_.start_time = millis();
         portEXIT_CRITICAL(&this->progress_mutex_);
-        ESP_LOGI(TAG, "Deleting network directory recursively: %s (%d files, %d dirs)", filepath.c_str(), file_count,
-                 dir_count);
+        ESP_LOGI(TAG, "Deleting network directory recursively: %s (%d files, %d dirs)", relative_path.c_str(),
+                 file_count, dir_count);
       } else {
-        ESP_LOGI(TAG, "Deleting network directory recursively: %s", filepath.c_str());
+        ESP_LOGI(TAG, "Deleting network directory recursively: %s", relative_path.c_str());
       }
 
-      // Recursive directory deletion for network storage
-      success = this->recursive_delete_directory_network(net_storage, filepath, track_progress);
+      // Recursive directory deletion for network storage (uses relative paths)
+      success = this->recursive_delete_directory_network(net_storage, relative_path, track_progress);
 
       // Clear progress tracking
       if (track_progress) {
@@ -4156,19 +4182,47 @@ void HttpFileBrowser::handle_api_dirisempty(AsyncWebServerRequest *request) {
   std::string dir_uri = path_param->value().c_str();
   std::string dirpath = this->uri_to_filepath(dir_uri);
 
-  // Check if path exists and is a directory
-  struct stat dir_stat;
-  if (stat(dirpath.c_str(), &dir_stat) != 0) {
-    request->send(404, "application/json", "{\"error\":\"Path not found\"}");
-    return;
+  // Check if this is network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(dirpath);
   }
 
-  if (!S_ISDIR(dir_stat.st_mode)) {
-    request->send(400, "application/json", "{\"error\":\"Path is not a directory\"}");
-    return;
+  bool is_empty = false;
+
+  if (net_storage != nullptr) {
+    // Network storage - use NetworkStorage API
+    std::string relative_path = strip_network_mount_prefix(net_storage, dirpath);
+
+    // Check if it's a directory
+    if (!net_storage->is_directory(relative_path)) {
+      request->send(400, "application/json", "{\"error\":\"Path is not a directory\"}");
+      return;
+    }
+
+    // List directory and check if empty
+    std::vector<storage::NetworkStorage::DirEntry> entries;
+    if (!net_storage->list_directory(relative_path, entries)) {
+      request->send(404, "application/json", "{\"error\":\"Failed to list directory\"}");
+      return;
+    }
+    is_empty = entries.empty();
+  } else {
+    // Local storage - use VFS
+    struct stat dir_stat;
+    if (stat(dirpath.c_str(), &dir_stat) != 0) {
+      request->send(404, "application/json", "{\"error\":\"Path not found\"}");
+      return;
+    }
+
+    if (!S_ISDIR(dir_stat.st_mode)) {
+      request->send(400, "application/json", "{\"error\":\"Path is not a directory\"}");
+      return;
+    }
+
+    is_empty = this->is_directory_empty(dirpath);
   }
 
-  bool is_empty = this->is_directory_empty(dirpath);
   std::string json = "{\"is_empty\":" + std::string(is_empty ? "true" : "false") + "}";
   request->send(200, "application/json", json.c_str());
 }
