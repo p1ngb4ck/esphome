@@ -33,7 +33,7 @@ static constexpr uint32_t FTP_TIMEOUT_MS = 5000;
 static constexpr uint8_t FTP_MAX_RETRIES = 3;
 
 /// FTP default port
-static constexpr uint16_t FTP_DEFAULT_PORT = 69;
+static constexpr uint16_t FTP_DEFAULT_PORT = 21;
 
 /// FTP Opcodes
 enum FTPOpcode : uint16_t {
@@ -183,7 +183,8 @@ struct FTPResult {
  */
 class FTPClient : public Component {
  public:
-  FTPClient();
+  FTPClient() = default;
+  ~FTPClient();
 
   // Component lifecycle
   void setup() override;
@@ -204,6 +205,16 @@ class FTPClient : public Component {
    * @brief Set FTP server port
    */
   void set_port(uint16_t port) { this->port_ = port; }
+
+  /**
+   * @brief Set FTP username
+   */
+  void set_username(const std::string &username) { this->username_ = username; }
+
+  /**
+   * @brief Set FTP password
+   */
+  void set_password(const std::string &password) { this->password_ = password; }
 
   /**
    * @brief Set mount path for storage integration
@@ -264,6 +275,8 @@ class FTPClient : public Component {
   std::string server_;
   uint16_t port_{FTP_DEFAULT_PORT};
   std::string mount_path_;
+  std::string username_;
+  std::string password_;
 
   //========================================================================
   // Network State
