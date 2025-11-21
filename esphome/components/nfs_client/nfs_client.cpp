@@ -1477,7 +1477,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
   entries.clear();
   uint64_t cookie = 0;
-  std::vector<uint8_t> cookieverf(8, 0);
+  uint8_t cookieverf[8] = {0};
 
   // READDIR may need multiple calls to get all entries
   while (true) {
@@ -1488,7 +1488,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // READDIR arguments: dir fh + cookie + cookieverf + count
     dir_fh.encode(request);
     request.encode_uint64(cookie);
-    request.encode_opaque(cookieverf.data(), cookieverf.size());
+    request.encode_opaque(cookieverf, 8);
     request.encode_uint32(8192);  // Max bytes to return
 
     XDRBuffer response;
@@ -1526,8 +1526,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     // Decode cookieverf (fixed 8 bytes, not length-prefixed)
-    cookieverf.resize(8);
-    if (!response.decode_bytes(cookieverf.data(), 8)) {
+    if (!response.decode_bytes(cookieverf, 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
