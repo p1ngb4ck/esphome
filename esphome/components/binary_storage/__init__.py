@@ -343,6 +343,18 @@ def _final_validate(config):
     if internal_type:
         configured = CORE.data.setdefault("binary_storage_device_types", set())
         configured.add(internal_type)
+
+    # If using LittleFS mode, ensure VFS directory support is enabled early
+    # This must happen before to_code() so ESP32's sdkconfig is set correctly
+    mode = config.get(CONF_MODE, MODE_RAW)
+    if mode in [MODE_LITTLEFS, MODE_BOTH] or device_type in [
+        "FLASH_PARTITION",
+        "PARTITION",
+    ]:
+        from esphome.components.esp32 import require_vfs_dir
+
+        require_vfs_dir()
+
     return config
 
 

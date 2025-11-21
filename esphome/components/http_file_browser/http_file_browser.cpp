@@ -2498,17 +2498,19 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   }
 
   if (net_storage != nullptr) {
-    // Network storage path - read entire file into memory then stream
+    // Network storage path - stream using chunked reads (memory efficient)
     ESP_LOGI(TAG, "Starting network storage file download: %s", filename.c_str());
 
-    std::vector<uint8_t> file_data;
-    if (!net_storage->read_file(filepath, file_data)) {
-      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Failed to read file from network storage");
+    // Get file size via stat
+    std::string relative_path = strip_network_mount_prefix(net_storage, filepath);
+    struct stat file_stat;
+    if (!net_storage->stat(relative_path, file_stat)) {
+      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Failed to get file info from network storage");
       return;
     }
+    size_t file_size = file_stat.st_size;
 
-    size_t file_size = file_data.size();
-    ESP_LOGI(TAG, "Read %zu bytes from network storage, starting download", file_size);
+    ESP_LOGI(TAG, "Network storage file size: %zu bytes, starting chunked download", file_size);
 
     // Set response headers
     httpd_resp_set_type(req, mime_type.c_str());
@@ -2516,24 +2518,34 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     httpd_resp_set_hdr(req, "Content-Length", std::to_string(file_size).c_str());
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
-    // Stream data in chunks to avoid large memory copy
+    // Stream data in chunks using read_file_chunk (memory efficient)
+    auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
     size_t total_sent = 0;
     bool success = true;
 
     while (total_sent < file_size) {
       App.feed_wdt();  // Feed watchdog for large files
 
-      size_t to_send = std::min(FILE_BUFFER_SIZE, file_size - total_sent);
+      size_t bytes_read = 0;
+      if (!net_storage->read_file_chunk(relative_path, buffer.get(), total_sent, FILE_BUFFER_SIZE, bytes_read)) {
+        ESP_LOGE(TAG, "Failed to read chunk at offset %zu from network storage", total_sent);
+        success = false;
+        break;
+      }
 
-      esp_err_t err =
-          httpd_resp_send_chunk(req, reinterpret_cast<const char *>(file_data.data() + total_sent), to_send);
+      if (bytes_read == 0) {
+        // EOF reached
+        break;
+      }
+
+      esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer.get()), bytes_read);
       if (err != ESP_OK) {
         ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
         success = false;
         break;
       }
 
-      total_sent += to_send;
+      total_sent += bytes_read;
 
       // Log progress every ~3MB
       if (file_size > 3 * 1024 * 1024 && (total_sent % (3 * 1024 * 1024) < FILE_BUFFER_SIZE)) {
@@ -4487,95 +4499,135 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
     dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
   }
 
-  // Handle network storage copy operations
+  // Handle network storage copy operations (chunked for memory efficiency)
   if (src_net_storage != nullptr || dst_net_storage != nullptr) {
     ESP_LOGI(TAG, "Starting network storage file copy: %s -> %s (size: %lld bytes)", src_path.c_str(), dst_path.c_str(),
              (long long) file_size);
 
-    // Read source file (from network or local storage)
-    std::vector<uint8_t> file_data;
-    bool read_success = false;
+    // Strip mount prefixes for network storage operations
+    std::string src_relative = src_net_storage ? strip_network_mount_prefix(src_net_storage, src_path) : src_path;
+    std::string dst_relative = dst_net_storage ? strip_network_mount_prefix(dst_net_storage, dst_path) : dst_path;
 
-    if (src_net_storage != nullptr) {
-      // Read from network storage
-      read_success = src_net_storage->read_file(src_path, file_data);
-    } else {
-      // Read from local storage
-      read_success = this->read_file_content(src_path, file_data);
-    }
+    // Use chunked copy to avoid loading entire file into memory
+    constexpr size_t COPY_CHUNK_SIZE = 32 * 1024;  // 32KB chunks
+    auto buffer = std::make_unique<uint8_t[]>(COPY_CHUNK_SIZE);
+    size_t total_copied = 0;
+    bool copy_success = true;
+    bool first_chunk = true;
 
-    if (!read_success) {
-      ESP_LOGE(TAG, "Failed to read source file: %s", src_path.c_str());
-      if (track_progress) {
-        portENTER_CRITICAL(&this->progress_mutex_);
-        if (this->progress_.operation == "copy") {
+    // For local source, open file
+    FILE *src_file = nullptr;
+    if (src_net_storage == nullptr) {
+      src_file = fopen(src_path.c_str(), "rb");
+      if (!src_file) {
+        ESP_LOGE(TAG, "Failed to open source file: %s", src_path.c_str());
+        if (track_progress) {
+          portENTER_CRITICAL(&this->progress_mutex_);
           this->progress_.in_progress = false;
-          this->progress_.cancelled = false;
+          portEXIT_CRITICAL(&this->progress_mutex_);
         }
-        portEXIT_CRITICAL(&this->progress_mutex_);
-      }
-      return false;
-    }
-
-    // Update progress after reading
-    if (track_progress) {
-      portENTER_CRITICAL(&this->progress_mutex_);
-      this->progress_.transferred_bytes = file_data.size();
-      portEXIT_CRITICAL(&this->progress_mutex_);
-    }
-
-    // Check for cancellation before writing
-    if (track_progress) {
-      portENTER_CRITICAL(&this->progress_mutex_);
-      bool cancelled = this->progress_.cancelled;
-      portEXIT_CRITICAL(&this->progress_mutex_);
-
-      if (cancelled) {
-        ESP_LOGI(TAG, "Copy operation cancelled by user before writing");
-        portENTER_CRITICAL(&this->progress_mutex_);
-        if (this->progress_.operation == "copy") {
-          this->progress_.in_progress = false;
-          this->progress_.cancelled = false;
-        }
-        portEXIT_CRITICAL(&this->progress_mutex_);
         return false;
       }
     }
 
-    // Write destination file (to network or local storage)
-    bool write_success = false;
-
-    if (dst_net_storage != nullptr) {
-      // Write to network storage
-      write_success = dst_net_storage->write_file(dst_path, file_data.data(), file_data.size());
-    } else {
-      // Write to local storage
-      write_success = this->write_file_content(dst_path, file_data.data(), file_data.size());
+    // For local destination, open file
+    FILE *dst_file = nullptr;
+    if (dst_net_storage == nullptr) {
+      dst_file = fopen(dst_path.c_str(), "wb");
+      if (!dst_file) {
+        ESP_LOGE(TAG, "Failed to open destination file: %s", dst_path.c_str());
+        if (src_file)
+          fclose(src_file);
+        if (track_progress) {
+          portENTER_CRITICAL(&this->progress_mutex_);
+          this->progress_.in_progress = false;
+          portEXIT_CRITICAL(&this->progress_mutex_);
+        }
+        return false;
+      }
     }
 
-    if (write_success) {
-      ESP_LOGI(TAG, "Network storage file copy completed successfully: %zu bytes", file_data.size());
+    while (copy_success) {
+      App.feed_wdt();
+
+      // Check for cancellation
       if (track_progress) {
         portENTER_CRITICAL(&this->progress_mutex_);
-        if (this->progress_.operation == "copy") {
-          this->progress_.in_progress = false;
-          this->progress_.cancelled = false;
-        }
+        bool cancelled = this->progress_.cancelled;
         portEXIT_CRITICAL(&this->progress_mutex_);
+        if (cancelled) {
+          ESP_LOGI(TAG, "Copy cancelled at %zu bytes", total_copied);
+          copy_success = false;
+          break;
+        }
       }
-      return true;
-    } else {
-      ESP_LOGE(TAG, "Failed to write destination file: %s", dst_path.c_str());
+
+      // Read chunk
+      size_t bytes_read = 0;
+      if (src_net_storage != nullptr) {
+        if (!src_net_storage->read_file_chunk(src_relative, buffer.get(), total_copied, COPY_CHUNK_SIZE, bytes_read)) {
+          ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_copied);
+          copy_success = false;
+          break;
+        }
+      } else {
+        bytes_read = fread(buffer.get(), 1, COPY_CHUNK_SIZE, src_file);
+        if (bytes_read == 0 && ferror(src_file)) {
+          ESP_LOGE(TAG, "Failed to read from source file");
+          copy_success = false;
+          break;
+        }
+      }
+
+      if (bytes_read == 0) {
+        // EOF
+        break;
+      }
+
+      // Write chunk
+      if (dst_net_storage != nullptr) {
+        if (!dst_net_storage->write_file_chunk(dst_relative, buffer.get(), total_copied, bytes_read, first_chunk)) {
+          ESP_LOGE(TAG, "Failed to write chunk at offset %zu", total_copied);
+          copy_success = false;
+          break;
+        }
+      } else {
+        size_t written = fwrite(buffer.get(), 1, bytes_read, dst_file);
+        if (written != bytes_read) {
+          ESP_LOGE(TAG, "Failed to write to destination file");
+          copy_success = false;
+          break;
+        }
+      }
+
+      total_copied += bytes_read;
+      first_chunk = false;
+
+      // Update progress
       if (track_progress) {
         portENTER_CRITICAL(&this->progress_mutex_);
-        if (this->progress_.operation == "copy") {
-          this->progress_.in_progress = false;
-          this->progress_.cancelled = false;
-        }
+        this->progress_.transferred_bytes = total_copied;
         portEXIT_CRITICAL(&this->progress_mutex_);
       }
-      return false;
     }
+
+    // Cleanup
+    if (src_file)
+      fclose(src_file);
+    if (dst_file)
+      fclose(dst_file);
+
+    if (copy_success) {
+      ESP_LOGI(TAG, "Network storage file copy completed: %zu bytes", total_copied);
+    }
+
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.in_progress = false;
+      this->progress_.cancelled = false;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+    }
+    return copy_success;
   }
 
   // Local storage copy (both source and destination are local)

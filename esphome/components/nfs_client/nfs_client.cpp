@@ -1497,23 +1497,25 @@ bool NFSClient::nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name)
 }
 
 bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries) {
-  ESP_LOGI(TAG, "NFS READDIR starting");
+  // Use READDIRPLUS to get file attributes (needed for is_directory detection)
+  ESP_LOGI(TAG, "NFS READDIRPLUS starting");
 
   entries.clear();
   uint64_t cookie = 0;
   uint8_t cookieverf[8] = {0};
 
-  // READDIR may need multiple calls to get all entries
+  // READDIRPLUS may need multiple calls to get all entries
   while (true) {
     uint32_t xid = RPCClient::generate_xid();
     XDRBuffer request;
-    this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_READDIR, this->uid_, this->gid_);
+    this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_READDIRPLUS, this->uid_, this->gid_);
 
-    // READDIR arguments: dir fh + cookie + cookieverf + count
+    // READDIRPLUS arguments: dir fh + cookie + cookieverf + dircount + maxcount
     dir_fh.encode(request);
     request.encode_uint64(cookie);
     request.encode_bytes(cookieverf, 8);  // Fixed 8 bytes, no length prefix
-    request.encode_uint32(8192);          // Max bytes to return
+    request.encode_uint32(4096);          // dircount: max bytes of directory info
+    request.encode_uint32(32768);         // maxcount: max bytes of total response
 
     XDRBuffer response;
     if (!this->send_rpc_(request, response)) {
@@ -1528,38 +1530,67 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // Parse NFS status
     uint32_t nfs_status;
     if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-      ESP_LOGW(TAG, "READDIR failed: status=%u", nfs_status);
+      ESP_LOGW(TAG, "READDIRPLUS failed: status=%u", nfs_status);
       return false;
     }
 
-    // Decode post-op attributes (optional)
-    bool has_attr;
-    if (!response.decode_bool(has_attr)) {
-      ESP_LOGW(TAG, "READDIR: Failed to decode has_attr");
+    // Decode post-op attributes (optional) - directory attributes
+    bool has_dir_attr;
+    if (!response.decode_bool(has_dir_attr)) {
+      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_dir_attr");
       return false;
     }
-    if (has_attr) {
-      NFSFileAttr attr;
-      if (!attr.decode(response)) {
-        ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes");
+    if (has_dir_attr) {
+      NFSFileAttr dir_attr;
+      if (!dir_attr.decode(response)) {
+        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode dir_attributes");
         return false;
       }
     }
 
     // Decode cookieverf (fixed 8 bytes per RFC 1813)
     if (!response.decode_bytes(cookieverf, 8)) {
-      ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
+      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode cookieverf");
       return false;
     }
 
-    // Decode directory entries
+    // Decode directory entries (entryplus3)
     bool has_entry;
     while (response.decode_bool(has_entry) && has_entry) {
       NFSDirEntry entry;
       if (!response.decode_uint64(entry.fileid) || !response.decode_string(entry.name) ||
           !response.decode_uint64(entry.cookie)) {
-        ESP_LOGW(TAG, "READDIR: Failed to decode entry");
+        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode entry base");
         return false;
+      }
+
+      // Decode name_attributes (post_op_attr)
+      bool has_name_attr;
+      if (!response.decode_bool(has_name_attr)) {
+        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_name_attr for %s", entry.name.c_str());
+        return false;
+      }
+      if (has_name_attr) {
+        if (!entry.attr.decode(response)) {
+          ESP_LOGW(TAG, "READDIRPLUS: Failed to decode name_attributes for %s", entry.name.c_str());
+          return false;
+        }
+        entry.has_attr = true;
+      }
+
+      // Decode name_handle (post_op_fh3) - we don't store it but must skip it
+      bool has_name_handle;
+      if (!response.decode_bool(has_name_handle)) {
+        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_name_handle for %s", entry.name.c_str());
+        return false;
+      }
+      if (has_name_handle) {
+        // Skip the file handle (opaque<NFS3_FHSIZE>)
+        std::string fh_data;
+        if (!response.decode_string(fh_data)) {
+          ESP_LOGW(TAG, "READDIRPLUS: Failed to skip name_handle for %s", entry.name.c_str());
+          return false;
+        }
       }
 
       if (entry.name != "." && entry.name != "..") {
@@ -1571,17 +1602,17 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // Decode EOF flag
     bool eof;
     if (!response.decode_bool(eof)) {
-      ESP_LOGW(TAG, "READDIR: Failed to decode EOF");
+      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode EOF");
       return false;
     }
 
     if (eof) {
-      ESP_LOGI(TAG, "READDIR: Got %zu entries", entries.size());
+      ESP_LOGI(TAG, "READDIRPLUS: Got %zu entries", entries.size());
       break;
     }
 
     if (cookie == 0) {
-      ESP_LOGW(TAG, "READDIR: No progress, aborting");
+      ESP_LOGW(TAG, "READDIRPLUS: No progress, aborting");
       return false;
     }
   }
