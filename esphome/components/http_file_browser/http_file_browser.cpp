@@ -2810,7 +2810,34 @@ bool HttpFileBrowser::is_directory_empty(const std::string &path) {
 }
 
 bool HttpFileBrowser::is_directory_writable(const std::string &dir_path) {
-  // Check if directory exists and is actually a directory
+  // Check if this is network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(dir_path);
+  }
+
+  if (net_storage != nullptr) {
+    // Network storage - use NetworkStorage API
+    std::string relative_path = strip_network_mount_prefix(net_storage, dir_path);
+
+    // Check if directory exists using network storage
+    struct stat dir_stat;
+    if (!net_storage->stat(relative_path, dir_stat)) {
+      ESP_LOGW(TAG, "Directory does not exist (network): %s", dir_path.c_str());
+      return false;
+    }
+
+    if (!S_ISDIR(dir_stat.st_mode)) {
+      ESP_LOGW(TAG, "Path is not a directory (network): %s", dir_path.c_str());
+      return false;
+    }
+
+    // For network storage, assume writable if directory exists
+    // (NFS permissions are handled by the server)
+    return true;
+  }
+
+  // Local VFS storage
   struct stat dir_stat;
   if (stat(dir_path.c_str(), &dir_stat) != 0) {
     ESP_LOGW(TAG, "Directory does not exist: %s", dir_path.c_str());
