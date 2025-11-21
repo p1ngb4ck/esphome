@@ -3743,27 +3743,55 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
       fclose(this->upload_file_);
       this->upload_file_ = nullptr;
     }
+    this->upload_is_network_ = false;
+    this->upload_network_path_.clear();
+    this->upload_network_offset_ = 0;
 
-    // Check if target directory exists and is a directory
-    struct stat file_stat;
-    if (stat(dir_path.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
-      ESP_LOGE(TAG, "Upload target is not a directory: %s", dir_path.c_str());
-      request->send(400, "application/json", "{\"error\":\"Target is not a directory\"}");
-      return;
+    // Check if this is network storage
+#if defined(USE_STORAGE)
+    storage::NetworkStorage *net_storage = nullptr;
+    if (this->storage_ != nullptr) {
+      net_storage = this->storage_->find_network_storage_for_path(dir_path);
     }
 
-    // Check if directory is writable (only once at start of upload)
-    if (!this->is_directory_writable(dir_path)) {
-      request->send(403, "application/json", "{\"error\":\"Upload directory is not writable\"}");
-      return;
-    }
+    if (net_storage != nullptr) {
+      // Network storage - verify directory exists using NetworkStorage API
+      if (!net_storage->is_directory(dir_path)) {
+        ESP_LOGE(TAG, "Network storage upload target is not a directory: %s", dir_path.c_str());
+        request->send(400, "application/json", "{\"error\":\"Target is not a directory\"}");
+        return;
+      }
 
-    // Open file for writing
-    this->upload_file_ = fopen(upload_path.c_str(), "wb");
-    if (!this->upload_file_) {
-      ESP_LOGE(TAG, "Failed to open file for chunked upload: %s", upload_path.c_str());
-      request->send(500, "application/json", "{\"error\":\"Failed to open file\"}");
-      return;
+      // Set up network storage upload state
+      this->upload_is_network_ = true;
+      this->upload_network_path_ = upload_path;
+      this->upload_network_offset_ = 0;
+
+      ESP_LOGI(TAG, "Starting network storage chunked upload: %s", upload_path.c_str());
+    } else
+#endif
+    {
+      // Local storage - check if target is a directory using VFS
+      struct stat file_stat;
+      if (stat(dir_path.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
+        ESP_LOGE(TAG, "Upload target is not a directory: %s", dir_path.c_str());
+        request->send(400, "application/json", "{\"error\":\"Target is not a directory\"}");
+        return;
+      }
+
+      // Check if directory is writable (only once at start of upload)
+      if (!this->is_directory_writable(dir_path)) {
+        request->send(403, "application/json", "{\"error\":\"Upload directory is not writable\"}");
+        return;
+      }
+
+      // Open file for writing
+      this->upload_file_ = fopen(upload_path.c_str(), "wb");
+      if (!this->upload_file_) {
+        ESP_LOGE(TAG, "Failed to open file for chunked upload: %s", upload_path.c_str());
+        request->send(500, "application/json", "{\"error\":\"Failed to open file\"}");
+        return;
+      }
     }
 
     // Initialize progress tracking
@@ -3785,7 +3813,8 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   }
 
   // Write chunk data
-  if (!this->upload_file_) {
+  // For network storage, upload_file_ is null but upload_is_network_ is true
+  if (!this->upload_file_ && !this->upload_is_network_) {
     ESP_LOGE(TAG, "Upload file not open for chunk %d", chunk_index);
 
     // Clean up progress state (file handle was lost/corrupted)
@@ -3860,27 +3889,77 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
 
   // Write data to file
   if (bytes_to_write > 0) {
-    size_t written = fwrite(data_ptr, 1, bytes_to_write, this->upload_file_);
-    if (written != bytes_to_write) {
-      ESP_LOGE(TAG, "Failed to write chunk %d data: wrote %zu of %zu bytes", chunk_index, written, bytes_to_write);
-      fclose(this->upload_file_);
-      this->upload_file_ = nullptr;
+    bool write_success = false;
+    size_t written = 0;
 
-      // Delete partial file on write failure (analogous to perform_file_copy)
-      if (remove(upload_path.c_str()) == 0) {
-        ESP_LOGI(TAG, "Deleted partial upload file after write failure: %s", upload_path.c_str());
-      } else {
-        ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+#if defined(USE_STORAGE)
+    if (this->upload_is_network_) {
+      // Network storage - write chunk directly via NetworkStorage API
+      auto *net_storage = this->storage_->find_network_storage_for_path(this->upload_network_path_);
+      if (net_storage != nullptr) {
+        // First chunk creates the file, subsequent chunks append at offset
+        bool create = (chunk_index == 0);
+        if (net_storage->write_file_chunk(this->upload_network_path_, data_ptr, this->upload_network_offset_,
+                                          bytes_to_write, create)) {
+          write_success = true;
+          written = bytes_to_write;
+          this->upload_network_offset_ += bytes_to_write;
+        }
       }
 
-      // Clear progress tracking on failure (analogous to perform_file_copy)
-      portENTER_CRITICAL(&this->progress_mutex_);
-      this->progress_.in_progress = false;
-      this->progress_.cancelled = false;  // Reset cancelled flag after handling
-      portEXIT_CRITICAL(&this->progress_mutex_);
+      if (!write_success) {
+        ESP_LOGE(TAG, "Network storage write failed for chunk %d", chunk_index);
 
-      request->send(500, "application/json", "{\"error\":\"Write failed\"}");
-      return;
+        // Try to delete partial file
+        if (net_storage != nullptr) {
+          net_storage->delete_file(this->upload_network_path_);
+        }
+
+        // Clear state
+        this->upload_is_network_ = false;
+        this->upload_network_path_.clear();
+        this->upload_network_offset_ = 0;
+
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+
+        request->send(500, "application/json", "{\"error\":\"Network storage write failed\"}");
+        return;
+      }
+    } else
+#endif
+    {
+      // Local storage - write via FILE*
+      written = fwrite(data_ptr, 1, bytes_to_write, this->upload_file_);
+      write_success = (written == bytes_to_write);
+
+      if (!write_success) {
+        ESP_LOGE(TAG, "Failed to write chunk %d data: wrote %zu of %zu bytes", chunk_index, written, bytes_to_write);
+        fclose(this->upload_file_);
+        this->upload_file_ = nullptr;
+
+        // Delete partial file on write failure
+        if (remove(upload_path.c_str()) == 0) {
+          ESP_LOGI(TAG, "Deleted partial upload file after write failure: %s", upload_path.c_str());
+        } else {
+          ESP_LOGE(TAG, "Failed to delete partial upload file: %s (errno: %d)", upload_path.c_str(), errno);
+        }
+
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+
+        request->send(500, "application/json", "{\"error\":\"Write failed\"}");
+        return;
+      }
+
+      // Flush periodically for local storage
+      if (chunk_index % 10 == 0) {
+        fflush(this->upload_file_);
+      }
     }
 
     // Update progress
@@ -3888,21 +3967,11 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
     this->progress_.transferred_bytes += written;
     portEXIT_CRITICAL(&this->progress_mutex_);
 
-    // Log only every 50th chunk, first, and last to reduce overhead
-    // Also log around potential failure threshold (chunks 170-180)
+    // Log only every 50th chunk, first, and last
     if (chunk_index % 50 == 0 || chunk_index == 0 || chunk_index == total_chunks - 1 ||
         (chunk_index >= 170 && chunk_index <= 180)) {
       ESP_LOGD(TAG, "Wrote chunk %d: %zu bytes (total: %zu/%zu), free_heap=%zu", chunk_index, written,
                this->progress_.transferred_bytes, file_size, esp_get_free_heap_size());
-    }
-
-    // Flush periodically to ensure data reaches disk (every 10 chunks)
-    // This prevents large amounts of data accumulating in FILE* buffers
-    if (chunk_index % 10 == 0) {
-      int flush_result = fflush(this->upload_file_);
-      if (flush_result != 0) {
-        ESP_LOGE(TAG, "fflush failed at chunk %d: errno=%d", chunk_index, errno);
-      }
     }
   }
 
@@ -3912,12 +3981,22 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   // Last chunk - finalize
   if (chunk_index == total_chunks - 1) {
     if (this->upload_file_) {
-      // Flush all buffered data before closing to prevent data loss
+      // Local storage - flush and close
       fflush(this->upload_file_);
       fclose(this->upload_file_);
       this->upload_file_ = nullptr;
       ESP_LOGI(TAG, "Completed chunked upload: %s (%zu bytes)", upload_path.c_str(), this->progress_.transferred_bytes);
     }
+#if defined(USE_STORAGE)
+    if (this->upload_is_network_) {
+      // Network storage - clean up state (file already written chunk by chunk)
+      ESP_LOGI(TAG, "Completed network storage chunked upload: %s (%zu bytes)", this->upload_network_path_.c_str(),
+               this->progress_.transferred_bytes);
+      this->upload_is_network_ = false;
+      this->upload_network_path_.clear();
+      this->upload_network_offset_ = 0;
+    }
+#endif
 
     // Mark progress as complete
     portENTER_CRITICAL(&this->progress_mutex_);

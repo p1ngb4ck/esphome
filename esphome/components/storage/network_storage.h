@@ -82,6 +82,18 @@ class NetworkStorage {
   virtual bool write_file(const std::string &path, const uint8_t *data, size_t length) = 0;
 
   /**
+   * @brief Write a chunk of data to file at a specific offset
+   * @param path File path relative to mount point or absolute
+   * @param data Data to write
+   * @param offset Byte offset in file to start writing at
+   * @param length Length of data in bytes
+   * @param create If true and file doesn't exist, create it
+   * @return true if successful, false on error
+   */
+  virtual bool write_file_chunk(const std::string &path, const uint8_t *data, size_t offset, size_t length,
+                                bool create = false) = 0;
+
+  /**
    * @brief Delete a file
    * @param path File path relative to mount point or absolute
    * @return true if successful, false on error

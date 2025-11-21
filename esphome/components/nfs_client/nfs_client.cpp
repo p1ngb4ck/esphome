@@ -1693,6 +1693,41 @@ bool NFSClient::write_file(const std::string &path, const uint8_t *data, size_t 
   return true;
 }
 
+bool NFSClient::write_file_chunk(const std::string &path, const uint8_t *data, size_t offset, size_t length,
+                                 bool create) {
+  NFSFileHandle fh;
+  NFSFileAttr attr;
+
+  // Try to resolve existing file
+  if (!this->resolve_path_(path, fh, attr)) {
+    if (!create) {
+      ESP_LOGW(TAG, "File does not exist and create=false: %s", path.c_str());
+      return false;
+    }
+
+    // Create file first
+    NFSFileHandle parent_fh;
+    std::string filename;
+    if (!this->resolve_parent_path_(path, parent_fh, filename)) {
+      ESP_LOGW(TAG, "Failed to resolve parent path: %s", path.c_str());
+      return false;
+    }
+
+    if (!this->nfs_create_(parent_fh, filename, 0644, fh)) {
+      ESP_LOGW(TAG, "Failed to create file: %s", path.c_str());
+      return false;
+    }
+  }
+
+  // Write chunk at offset
+  if (!this->nfs_write_(fh, offset, data, length)) {
+    ESP_LOGE(TAG, "Failed to write chunk at offset %zu", offset);
+    return false;
+  }
+
+  return true;
+}
+
 bool NFSClient::delete_file(const std::string &path) {
   NFSFileHandle parent_fh;
   std::string filename;

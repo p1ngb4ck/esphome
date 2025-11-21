@@ -223,6 +223,11 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   std::unique_ptr<uint8_t[]> chunk_buffer_;
   size_t chunk_buffer_size_{0};
 
+  // Network storage chunked upload state
+  bool upload_is_network_{false};    // True if current chunked upload targets network storage
+  std::string upload_network_path_;  // Full path for network storage upload
+  size_t upload_network_offset_{0};  // Current byte offset for next chunk
+
   // Helper methods
   bool is_directory_writable(const std::string &dir_path);
   std::string uri_to_filepath(const std::string &uri);
