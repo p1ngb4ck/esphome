@@ -1523,10 +1523,11 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     // Decode cookieverf (fixed 8 bytes)
-    ESP_LOGW(TAG, "READDIR: at pos %zu, dumping next 16 bytes:", response.position());
+    ESP_LOGW(TAG, "READDIR: at pos %zu, dumping ALL remaining %zu bytes:", response.position(),
+             response.size() - response.position());
     const auto &buf = response.data();
     size_t pos = response.position();
-    for (size_t i = 0; i < 16 && pos + i < buf.size(); i += 4) {
+    for (size_t i = 0; i < response.size() - pos; i += 4) {
       ESP_LOGW(TAG, "  [%zu]: %02X %02X %02X %02X", pos + i, buf[pos + i], buf[pos + i + 1], buf[pos + i + 2],
                buf[pos + i + 3]);
     }
@@ -1534,6 +1535,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
+    ESP_LOGW(TAG, "READDIR: cookieverf decoded OK, now at pos %zu", response.position());
 
     // Decode directory entries
     bool has_entry;
