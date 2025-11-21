@@ -190,6 +190,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
     std::string destination;
     off_t file_size;
     bool track_progress;
+    bool is_directory;
   };
 
   struct MoveTaskParams {
@@ -198,6 +199,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
     std::string destination;
     off_t file_size;
     bool track_progress;
+    bool is_directory;
   };
 
   struct DownloadTaskParams {
@@ -304,6 +306,10 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
                          bool track_progress = false);
   bool perform_file_move(const std::string &src_path, const std::string &dst_path, off_t file_size,
                          bool track_progress = false);
+
+  // Directory operation helpers (recursive copy/move)
+  bool perform_directory_copy(const std::string &src_path, const std::string &dst_path, bool track_progress = false);
+  bool perform_directory_move(const std::string &src_path, const std::string &dst_path, bool track_progress = false);
 };
 
 }  // namespace http_file_browser

@@ -443,9 +443,9 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
       if (this->download_enabled_) {
         html += "<button onclick=\"download_file('" + file_uri + "', '" + entry.name + "')\">Download</button>";
       }
-      html += "<button onclick=\"copy_file('" + entry_path + "')\">Copy</button>";
-      html += "<button onclick=\"move_file('" + entry_path + "')\">Move</button>";
     }
+    html += "<button onclick=\"copy_file('" + entry_path + "')\">Copy</button>";
+    html += "<button onclick=\"move_file('" + entry_path + "')\">Move</button>";
     html += "<button onclick=\"rename_file('" + entry_path + "')\">Rename</button>";
     html += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
     if (this->deletion_enabled_) {
@@ -3220,27 +3220,23 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
   // Check if source exists (supports network storage)
   bool is_directory = false;
   if (!this->path_exists(source, is_directory)) {
-    request->send(404, "application/json", "{\"error\":\"Source file not found\"}");
+    request->send(404, "application/json", "{\"error\":\"Source not found\"}");
     return;
   }
 
-  if (is_directory) {
-    request->send(400, "application/json", "{\"error\":\"Directory copy not supported\"}");
-    return;
-  }
-
-  // Get file size for progress tracking
+  // Get file size for progress tracking (0 for directories, will be updated as we discover files)
   off_t file_size = 0;
-  struct stat src_stat;
-
-  // Try local stat first
-  if (stat(source.c_str(), &src_stat) == 0) {
-    file_size = src_stat.st_size;
-  } else if (this->storage_ != nullptr) {
-    // Network storage - try to get size via NetworkStorage::stat
-    auto *net_storage = this->storage_->find_network_storage_for_path(source);
-    if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+  if (!is_directory) {
+    struct stat src_stat;
+    // Try local stat first
+    if (stat(source.c_str(), &src_stat) == 0) {
       file_size = src_stat.st_size;
+    } else if (this->storage_ != nullptr) {
+      // Network storage - try to get size via NetworkStorage::stat
+      auto *net_storage = this->storage_->find_network_storage_for_path(source);
+      if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+        file_size = src_stat.st_size;
+      }
     }
   }
 
@@ -3266,9 +3262,10 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
   // Create task parameters
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
-  ESP_LOGI(TAG, "Copy: file size %lld bytes, free_heap=%zu", (long long) file_size, esp_get_free_heap_size());
+  ESP_LOGI(TAG, "Copy: %s, size %lld bytes, free_heap=%zu", is_directory ? "directory" : "file", (long long) file_size,
+           esp_get_free_heap_size());
 
-  auto *task_params = new CopyTaskParams{this, source, destination, file_size, track_progress};
+  auto *task_params = new CopyTaskParams{this, source, destination, file_size, track_progress, is_directory};
 
   // Create FreeRTOS task for background copy (4KB stack, priority 1)
   BaseType_t result = xTaskCreate(copy_task, "http_copy", 4096, task_params, 1, nullptr);
@@ -3303,27 +3300,23 @@ void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
   // Check if source exists (supports network storage)
   bool is_directory = false;
   if (!this->path_exists(source, is_directory)) {
-    request->send(404, "application/json", "{\"error\":\"Source file not found\"}");
+    request->send(404, "application/json", "{\"error\":\"Source not found\"}");
     return;
   }
 
-  if (is_directory) {
-    request->send(400, "application/json", "{\"error\":\"Directory move not supported\"}");
-    return;
-  }
-
-  // Get file size for progress tracking
+  // Get file size for progress tracking (0 for directories)
   off_t file_size = 0;
-  struct stat src_stat;
-
-  // Try local stat first
-  if (stat(source.c_str(), &src_stat) == 0) {
-    file_size = src_stat.st_size;
-  } else if (this->storage_ != nullptr) {
-    // Network storage - try to get size via NetworkStorage::stat
-    auto *net_storage = this->storage_->find_network_storage_for_path(source);
-    if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+  if (!is_directory) {
+    struct stat src_stat;
+    // Try local stat first
+    if (stat(source.c_str(), &src_stat) == 0) {
       file_size = src_stat.st_size;
+    } else if (this->storage_ != nullptr) {
+      // Network storage - try to get size via NetworkStorage::stat
+      auto *net_storage = this->storage_->find_network_storage_for_path(source);
+      if (net_storage != nullptr && net_storage->stat(source, src_stat)) {
+        file_size = src_stat.st_size;
+      }
     }
   }
 
@@ -3349,8 +3342,10 @@ void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
   // Create task parameters
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
+  ESP_LOGI(TAG, "Move: %s, size %lld bytes, free_heap=%zu", is_directory ? "directory" : "file", (long long) file_size,
+           esp_get_free_heap_size());
 
-  auto *task_params = new MoveTaskParams{this, source, destination, file_size, track_progress};
+  auto *task_params = new MoveTaskParams{this, source, destination, file_size, track_progress, is_directory};
 
   // Create FreeRTOS task for background move (4KB stack, priority 1)
   BaseType_t result = xTaskCreate(move_task, "http_move", 4096, task_params, 1, nullptr);
@@ -4331,11 +4326,17 @@ struct FileCloser {
 // FreeRTOS task functions for background operations
 void HttpFileBrowser::copy_task(void *params) {
   auto *task_params = static_cast<CopyTaskParams *>(params);
-  ESP_LOGI(TAG, "Copy task started for %s -> %s", task_params->source.c_str(), task_params->destination.c_str());
+  ESP_LOGI(TAG, "Copy task started for %s -> %s (%s)", task_params->source.c_str(), task_params->destination.c_str(),
+           task_params->is_directory ? "directory" : "file");
 
   // Perform the copy operation
-  task_params->server->perform_file_copy(task_params->source, task_params->destination, task_params->file_size,
-                                         task_params->track_progress);
+  if (task_params->is_directory) {
+    task_params->server->perform_directory_copy(task_params->source, task_params->destination,
+                                                task_params->track_progress);
+  } else {
+    task_params->server->perform_file_copy(task_params->source, task_params->destination, task_params->file_size,
+                                           task_params->track_progress);
+  }
 
   ESP_LOGI(TAG, "Copy task completed");
 
@@ -4348,11 +4349,17 @@ void HttpFileBrowser::copy_task(void *params) {
 
 void HttpFileBrowser::move_task(void *params) {
   auto *task_params = static_cast<MoveTaskParams *>(params);
-  ESP_LOGI(TAG, "Move task started for %s -> %s", task_params->source.c_str(), task_params->destination.c_str());
+  ESP_LOGI(TAG, "Move task started for %s -> %s (%s)", task_params->source.c_str(), task_params->destination.c_str(),
+           task_params->is_directory ? "directory" : "file");
 
   // Perform the move operation
-  task_params->server->perform_file_move(task_params->source, task_params->destination, task_params->file_size,
-                                         task_params->track_progress);
+  if (task_params->is_directory) {
+    task_params->server->perform_directory_move(task_params->source, task_params->destination,
+                                                task_params->track_progress);
+  } else {
+    task_params->server->perform_file_move(task_params->source, task_params->destination, task_params->file_size,
+                                           task_params->track_progress);
+  }
 
   ESP_LOGI(TAG, "Move task completed");
 
@@ -4906,6 +4913,227 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
     }
   }
 
+  return false;
+}
+
+bool HttpFileBrowser::perform_directory_copy(const std::string &src_path, const std::string &dst_path,
+                                             bool track_progress) {
+  ESP_LOGI(TAG, "Starting recursive directory copy: %s -> %s", src_path.c_str(), dst_path.c_str());
+
+  // Initialize progress tracking
+  if (track_progress) {
+    portENTER_CRITICAL(&this->progress_mutex_);
+    this->progress_.operation = "copy";
+    this->progress_.source = src_path;
+    this->progress_.destination = dst_path;
+    this->progress_.total_bytes = 0;  // Will be updated as we discover files
+    this->progress_.transferred_bytes = 0;
+    this->progress_.in_progress = true;
+    this->progress_.cancelled = false;
+    this->progress_.start_time = millis();
+    portEXIT_CRITICAL(&this->progress_mutex_);
+  }
+
+  // Check for network storage
+  storage::NetworkStorage *src_net_storage = nullptr;
+  storage::NetworkStorage *dst_net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    src_net_storage = this->storage_->find_network_storage_for_path(src_path);
+    dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
+  }
+
+  // Create destination directory
+  if (!this->create_dir(dst_path)) {
+    ESP_LOGE(TAG, "Failed to create destination directory: %s", dst_path.c_str());
+    if (track_progress) {
+      portENTER_CRITICAL(&this->progress_mutex_);
+      this->progress_.in_progress = false;
+      portEXIT_CRITICAL(&this->progress_mutex_);
+    }
+    return false;
+  }
+
+  bool success = true;
+
+  // List source directory entries
+  if (src_net_storage != nullptr) {
+    // Network storage source
+    std::string src_relative = strip_network_mount_prefix(src_net_storage, src_path);
+    std::vector<storage::NetworkStorage::DirEntry> entries;
+    if (!src_net_storage->list_directory(src_relative, entries)) {
+      ESP_LOGE(TAG, "Failed to list source directory: %s", src_path.c_str());
+      success = false;
+    } else {
+      for (const auto &entry : entries) {
+        App.feed_wdt();
+
+        // Check for cancellation
+        if (track_progress) {
+          portENTER_CRITICAL(&this->progress_mutex_);
+          bool cancelled = this->progress_.cancelled;
+          portEXIT_CRITICAL(&this->progress_mutex_);
+          if (cancelled) {
+            ESP_LOGI(TAG, "Directory copy cancelled");
+            success = false;
+            break;
+          }
+        }
+
+        std::string src_entry_path = src_path + "/" + entry.name;
+        std::string dst_entry_path = dst_path + "/" + entry.name;
+
+        if (entry.is_directory) {
+          // Recursively copy subdirectory (don't track progress for nested calls)
+          if (!this->perform_directory_copy(src_entry_path, dst_entry_path, false)) {
+            ESP_LOGE(TAG, "Failed to copy subdirectory: %s", src_entry_path.c_str());
+            success = false;
+            break;
+          }
+        } else {
+          // Copy file (don't track progress for individual files in directory copy)
+          if (!this->perform_file_copy(src_entry_path, dst_entry_path, entry.size, false)) {
+            ESP_LOGE(TAG, "Failed to copy file: %s", src_entry_path.c_str());
+            success = false;
+            break;
+          }
+          // Update progress
+          if (track_progress) {
+            portENTER_CRITICAL(&this->progress_mutex_);
+            this->progress_.transferred_bytes += entry.size;
+            portEXIT_CRITICAL(&this->progress_mutex_);
+          }
+        }
+      }
+    }
+  } else {
+    // Local VFS source
+    DIR *dir = opendir(src_path.c_str());
+    if (!dir) {
+      ESP_LOGE(TAG, "Failed to open source directory: %s", src_path.c_str());
+      success = false;
+    } else {
+      struct dirent *entry;
+      while ((entry = readdir(dir)) != nullptr && success) {
+        App.feed_wdt();
+
+        // Skip . and ..
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+          continue;
+        }
+
+        // Check for cancellation
+        if (track_progress) {
+          portENTER_CRITICAL(&this->progress_mutex_);
+          bool cancelled = this->progress_.cancelled;
+          portEXIT_CRITICAL(&this->progress_mutex_);
+          if (cancelled) {
+            ESP_LOGI(TAG, "Directory copy cancelled");
+            success = false;
+            break;
+          }
+        }
+
+        std::string src_entry_path = src_path + "/" + entry->d_name;
+        std::string dst_entry_path = dst_path + "/" + entry->d_name;
+
+        struct stat entry_stat;
+        if (stat(src_entry_path.c_str(), &entry_stat) != 0) {
+          ESP_LOGE(TAG, "Failed to stat: %s", src_entry_path.c_str());
+          success = false;
+          break;
+        }
+
+        if (S_ISDIR(entry_stat.st_mode)) {
+          // Recursively copy subdirectory
+          if (!this->perform_directory_copy(src_entry_path, dst_entry_path, false)) {
+            ESP_LOGE(TAG, "Failed to copy subdirectory: %s", src_entry_path.c_str());
+            success = false;
+            break;
+          }
+        } else {
+          // Copy file
+          if (!this->perform_file_copy(src_entry_path, dst_entry_path, entry_stat.st_size, false)) {
+            ESP_LOGE(TAG, "Failed to copy file: %s", src_entry_path.c_str());
+            success = false;
+            break;
+          }
+          // Update progress
+          if (track_progress) {
+            portENTER_CRITICAL(&this->progress_mutex_);
+            this->progress_.transferred_bytes += entry_stat.st_size;
+            portEXIT_CRITICAL(&this->progress_mutex_);
+          }
+        }
+      }
+      closedir(dir);
+    }
+  }
+
+  if (track_progress) {
+    portENTER_CRITICAL(&this->progress_mutex_);
+    this->progress_.in_progress = false;
+    portEXIT_CRITICAL(&this->progress_mutex_);
+  }
+
+  if (success) {
+    ESP_LOGI(TAG, "Directory copy completed: %s -> %s", src_path.c_str(), dst_path.c_str());
+  }
+  return success;
+}
+
+bool HttpFileBrowser::perform_directory_move(const std::string &src_path, const std::string &dst_path,
+                                             bool track_progress) {
+  ESP_LOGI(TAG, "Starting directory move: %s -> %s", src_path.c_str(), dst_path.c_str());
+
+  // Check for network storage
+  storage::NetworkStorage *src_net_storage = nullptr;
+  storage::NetworkStorage *dst_net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    src_net_storage = this->storage_->find_network_storage_for_path(src_path);
+    dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
+  }
+
+  bool is_network_move = (src_net_storage != nullptr || dst_net_storage != nullptr);
+
+  // Try atomic rename first (only for local-to-local on same mount)
+  if (!is_network_move && rename(src_path.c_str(), dst_path.c_str()) == 0) {
+    ESP_LOGI(TAG, "Directory moved successfully (atomic rename)");
+    return true;
+  }
+
+  // Use copy+delete for network storage or cross-mount moves
+  if (is_network_move || errno == EXDEV) {
+    if (is_network_move) {
+      ESP_LOGI(TAG, "Network storage directory move, using copy+delete");
+    } else {
+      ESP_LOGI(TAG, "Cross-mount directory move, using copy+delete");
+    }
+
+    // Copy the entire directory tree
+    if (!this->perform_directory_copy(src_path, dst_path, track_progress)) {
+      ESP_LOGE(TAG, "Failed to copy directory for move operation");
+      return false;
+    }
+
+    // Delete the source directory tree
+    if (src_net_storage != nullptr) {
+      std::string src_relative = strip_network_mount_prefix(src_net_storage, src_path);
+      if (!this->recursive_delete_directory_network(src_net_storage, src_relative, false)) {
+        ESP_LOGE(TAG, "Failed to delete source directory after copy (network): %s", src_path.c_str());
+        // Directory was copied but source remains - consider partial success
+      }
+    } else {
+      if (!this->recursive_delete_directory(src_path, false)) {
+        ESP_LOGE(TAG, "Failed to delete source directory after copy: %s", src_path.c_str());
+        // Directory was copied but source remains - consider partial success
+      }
+    }
+
+    ESP_LOGI(TAG, "Directory move completed: %s -> %s", src_path.c_str(), dst_path.c_str());
+    return true;
+  }
+
+  ESP_LOGE(TAG, "Failed to move directory %s to %s (errno: %d)", src_path.c_str(), dst_path.c_str(), errno);
   return false;
 }
 
