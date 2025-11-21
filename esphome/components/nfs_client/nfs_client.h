@@ -429,9 +429,11 @@ class NFSClient : public Component
 #if defined(USE_STORAGE)
   bool create_directory(const std::string &path) override;
   bool delete_directory(const std::string &path) override;
+  bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) override;
 #else
   bool create_directory(const std::string &path);
   bool delete_directory(const std::string &path);
+  bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes);
 #endif
 
   // File info

@@ -1800,6 +1800,66 @@ bool NFSClient::get_file_attributes(const std::string &path, NFSFileAttr &attr) 
   return this->resolve_path_(path, fh, attr);
 }
 
+bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
+  if (!this->mounted_ || !this->root_fh_.is_valid()) {
+    return false;
+  }
+
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_FSSTAT, this->uid_, this->gid_);
+
+  // FSSTAT arguments: just the root file handle
+  this->root_fh_.encode(request);
+
+  XDRBuffer response;
+  if (!this->send_rpc_(request, response)) {
+    return false;
+  }
+
+  RPCAcceptStatus rpc_status;
+  if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
+    return false;
+  }
+
+  // Parse NFS status
+  uint32_t nfs_status;
+  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
+    ESP_LOGW(TAG, "FSSTAT failed: status=%u", nfs_status);
+    return false;
+  }
+
+  // Skip post-op attributes
+  bool has_attr;
+  if (!response.decode_bool(has_attr)) {
+    return false;
+  }
+  if (has_attr) {
+    NFSFileAttr attr;
+    if (!attr.decode(response)) {
+      return false;
+    }
+  }
+
+  // Decode space info (all uint64)
+  uint64_t tbytes, fbytes, abytes;
+  uint64_t tfiles, ffiles, afiles;
+  uint32_t invarsec;
+
+  if (!response.decode_uint64(tbytes) || !response.decode_uint64(fbytes) || !response.decode_uint64(abytes) ||
+      !response.decode_uint64(tfiles) || !response.decode_uint64(ffiles) || !response.decode_uint64(afiles) ||
+      !response.decode_uint32(invarsec)) {
+    ESP_LOGW(TAG, "FSSTAT: Failed to decode response");
+    return false;
+  }
+
+  total_bytes = tbytes;
+  free_bytes = fbytes;  // Use fbytes (free to privileged), could use abytes for non-privileged
+
+  ESP_LOGD(TAG, "FSSTAT: total=%llu, free=%llu, avail=%llu", tbytes, fbytes, abytes);
+  return true;
+}
+
 #if defined(USE_STORAGE)
 // NetworkStorage interface override - converts NFSDirEntry to NetworkStorage::DirEntry
 bool NFSClient::list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) {

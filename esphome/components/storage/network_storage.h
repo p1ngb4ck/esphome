@@ -152,6 +152,14 @@ class NetworkStorage {
    */
   virtual bool delete_directory(const std::string &path) = 0;
 
+  /**
+   * @brief Get filesystem space information
+   * @param total_bytes Output: total space in bytes
+   * @param free_bytes Output: free space in bytes
+   * @return true if successful, false if not supported or error
+   */
+  virtual bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) { return false; }
+
  protected:
   /**
    * @brief Helper to strip mount point prefix from path

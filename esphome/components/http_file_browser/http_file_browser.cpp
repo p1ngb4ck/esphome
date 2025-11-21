@@ -1844,12 +1844,27 @@ std::string HttpFileBrowser::generate_html_footer() {
                          return;
                        }
 
+                       // Format size with appropriate units
+                       let sizeStr;
+                       if (data.size < 1024) {
+                         sizeStr = data.size + ' B';
+                       } else if (data.size < 1024 * 1024) {
+                         sizeStr = (data.size / 1024).toFixed(1) + ' KB';
+                       } else if (data.size < 1024 * 1024 * 1024) {
+                         sizeStr = (data.size / (1024 * 1024)).toFixed(1) + ' MB';
+                       } else {
+                         sizeStr = (data.size / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+                       }
+
                        let info = 'File Information:\n\n';
-                       info += 'Path: ' + path + '\n';
-                       info += 'Size: ' + data.size + ' bytes\n';
-                       info +=
-                           'Modified: ' + new Date(data.last_modified * 1000).toLocaleString() + '\n';
+                       info += 'Name: ' + data.name + '\n';
+                       info += 'Path: ' + data.path + '\n';
                        info += 'Type: ' + (data.is_directory ? 'Directory' : 'File') + '\n';
+                       info += 'Size: ' + sizeStr + ' (' + data.size + ' bytes)\n';
+                       info += 'Modified: ' + new Date(data.last_modified * 1000).toLocaleString() + '\n';
+                       info += 'Permissions: ' + data.mode + '\n';
+                       info += 'Owner: ' + data.uid + ':' + data.gid + '\n';
+                       info += 'Storage: ' + data.storage_type + '\n';
 
                        alert(info);
                      })
@@ -2203,19 +2218,25 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
   } else if (info.is_mount_point && info.has_space_info) {
     // Show space info for mount points
     uint64_t used = info.total_space - info.free_space;
-    uint64_t total_mb = info.total_space / (1024 * 1024);
-    uint64_t used_mb = used / (1024 * 1024);
-    uint64_t free_mb = info.free_space / (1024 * 1024);
 
     // Calculate percentage used
     int percent_used = (info.total_space > 0) ? (used * 100 / info.total_space) : 0;
 
-    // Format: "Used / Total (XX% used)"
-    if (total_mb < 1024) {
-      row += std::to_string(used_mb) + " / " + std::to_string(total_mb) + " MB";
-    } else {
-      row += std::to_string(used_mb / 1024) + " / " + std::to_string(total_mb / 1024) + " GB";
-    }
+    // Helper to format bytes with one decimal place
+    auto format_size = [](uint64_t bytes) -> std::string {
+      if (bytes < 1024ULL * 1024) {
+        return std::to_string(bytes / 1024) + " KB";
+      } else if (bytes < 1024ULL * 1024 * 1024) {
+        uint64_t mb_x10 = (bytes * 10) / (1024 * 1024);
+        return std::to_string(mb_x10 / 10) + "." + std::to_string(mb_x10 % 10) + " MB";
+      } else {
+        uint64_t gb_x10 = (bytes * 10) / (1024ULL * 1024 * 1024);
+        return std::to_string(gb_x10 / 10) + "." + std::to_string(gb_x10 % 10) + " GB";
+      }
+    };
+
+    // Format: "Used / Total (XX%)"
+    row += format_size(used) + " / " + format_size(info.total_space);
     row += " (" + std::to_string(percent_used) + "%)";
   }
 
@@ -2351,9 +2372,15 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.size = 0;
       info.modified = 0;
 
-      // Network storage currently doesn't provide space info
-      // Could be added to NetworkStorage interface in the future
-      info.has_space_info = false;
+      // Try to get space info from network storage
+      if (info.mounted) {
+        uint64_t total = 0, free = 0;
+        if (net_storage->get_space_info(total, free)) {
+          info.total_space = total;
+          info.free_space = free;
+          info.has_space_info = true;
+        }
+      }
 
       html += this->generate_file_row(info, this->url_prefix_);
     }
@@ -4239,6 +4266,11 @@ void HttpFileBrowser::handle_api_fileinfo(AsyncWebServerRequest *request) {
   json += ",\"size\":" + std::to_string(file_stat.st_size);
   json += ",\"is_directory\":" + std::string(S_ISDIR(file_stat.st_mode) ? "true" : "false");
   json += ",\"last_modified\":" + std::to_string(file_stat.st_mtime);
+
+  // Add permissions as octal string
+  json += ",\"mode\":\"" + std::to_string((file_stat.st_mode & 0777)) + "\"";
+  json += ",\"uid\":" + std::to_string(file_stat.st_uid);
+  json += ",\"gid\":" + std::to_string(file_stat.st_gid);
 
   // Add storage type
   if (net_storage != nullptr) {
