@@ -269,18 +269,14 @@ void RPCClient::build_call(XDRBuffer &xdr, uint32_t xid, uint32_t program, uint3
 bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStatus &status) {
   uint32_t xid, msg_type, reply_status;
 
-  ESP_LOGD(TAG, "parse_reply: buffer size=%zu, position=%zu", xdr.size(), xdr.position());
-
   if (!xdr.decode_uint32(xid)) {
     ESP_LOGE(TAG, "Failed to decode XID, position=%zu size=%zu", xdr.position(), xdr.size());
     return false;
   }
-  ESP_LOGD(TAG, "Decoded XID: %u (expected %u)", xid, expected_xid);
   if (xid != expected_xid) {
     ESP_LOGE(TAG, "XID mismatch: expected %u, got %u", expected_xid, xid);
     return false;
   }
-  ESP_LOGD(TAG, "XID match: %u", xid);
 
   if (!xdr.decode_uint32(msg_type)) {
     ESP_LOGE(TAG, "Failed to decode msg_type");
@@ -290,13 +286,11 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
     ESP_LOGE(TAG, "Not an RPC reply, got: %u", msg_type);
     return false;
   }
-  ESP_LOGD(TAG, "msg_type: %u (RPC_REPLY)", msg_type);
 
   if (!xdr.decode_uint32(reply_status)) {
     ESP_LOGE(TAG, "Failed to decode reply_status");
     return false;
   }
-  ESP_LOGD(TAG, "reply_status: %u", reply_status);
 
   if (reply_status != RPC_MSG_ACCEPTED) {
     ESP_LOGE(TAG, "RPC message denied, status: %u", reply_status);
@@ -313,9 +307,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
     ESP_LOGE(TAG, "Failed to decode verifier length");
     return false;
   }
-  ESP_LOGD(TAG, "Verifier: flavor=%u, length=%u, aligned=%zu", flavor, length, XDRBuffer::align_4(length));
   xdr.skip(XDRBuffer::align_4(length));  // Skip verifier data
-  ESP_LOGD(TAG, "After verifier skip: position=%zu", xdr.position());
 
   // Accept status
   uint32_t accept_status;
@@ -323,7 +315,6 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
     ESP_LOGE(TAG, "Failed to decode accept_status, position=%zu, size=%zu", xdr.position(), xdr.size());
     return false;
   }
-  ESP_LOGD(TAG, "accept_status: %u", accept_status);
 
   status = static_cast<RPCAcceptStatus>(accept_status);
   if (status != RPC_SUCCESS) {
@@ -1201,8 +1192,6 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     ESP_LOGW(TAG, "GETATTR: parse_reply failed");
     return false;
   }
-
-  ESP_LOGD(TAG, "GETATTR: after parse_reply, buffer position=%zu", response.position());
 
   // Parse NFS status
   uint32_t nfs_status;
