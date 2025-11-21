@@ -1015,11 +1015,9 @@ bool HttpFileBrowser::path_exists(const std::string &path, bool &is_directory) {
       if (net_storage->is_directory(relative_path)) {
         is_directory = true;
         return true;
-      } else if {
-        if (net_storage->file_exists(relative_path)) {
-          is_directory = false;
-          return true;
-        }
+      } else if (net_storage->file_exists(relative_path)) {
+        is_directory = false;
+        return true;
       } else {
         return false;
       }
