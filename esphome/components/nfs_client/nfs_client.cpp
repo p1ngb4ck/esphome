@@ -1825,7 +1825,7 @@ bool NFSClient::create_directory(const std::string &path) {
   }
 
   NFSFileHandle fh;
-  return this->nfs_mkdir_(parent_fh, dirname, 0755, fh);
+  return this->nfs_mkdir_(parent_fh, dirname, 0777, fh);
 }
 
 bool NFSClient::delete_directory(const std::string &path) {

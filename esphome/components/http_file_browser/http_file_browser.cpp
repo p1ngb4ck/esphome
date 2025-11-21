@@ -1091,7 +1091,7 @@ bool HttpFileBrowser::create_dir(const std::string &path) {
   }
 
   // Use VFS for local storage
-  return mkdir(path.c_str(), 0755) == 0;
+  return mkdir(path.c_str(), 0777) == 0;
 }
 
 bool HttpFileBrowser::read_file_content(const std::string &path, std::vector<uint8_t> &data) {
