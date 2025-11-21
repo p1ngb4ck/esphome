@@ -2344,7 +2344,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
         uint64_t total = 0, free = 0;
         bool got_space = false;
 
-        if (mount.platform == "sd_storage" || mount.platform == "usb_storage") {
+        if (mount.platform == "sd_mmc" || mount.platform == "usb_msc") {
           // FAT-based filesystems
           got_space = this->get_mount_space_info(mount.path, total, free);
         } else if (mount.space_provider != nullptr) {
