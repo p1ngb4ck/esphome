@@ -764,14 +764,20 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     return false;
   }
 
-  // Receive response data
+  // Receive response data in a loop to handle partial reads
   std::vector<uint8_t> response_data(response_length);
-  if (recv(this->socket_, response_data.data(), response_length, MSG_WAITALL) != static_cast<int>(response_length)) {
-    ESP_LOGE(TAG, "Failed to receive RPC response data");
-    close(this->socket_);
-    this->socket_ = -1;
-    this->connected_ = false;
-    return false;
+  size_t total_received = 0;
+  while (total_received < response_length) {
+    int received = recv(this->socket_, response_data.data() + total_received, response_length - total_received, 0);
+    if (received <= 0) {
+      ESP_LOGE(TAG, "Failed to receive RPC response data: received=%d, expected=%u, total_received=%zu, errno=%d",
+               received, response_length, total_received, errno);
+      close(this->socket_);
+      this->socket_ = -1;
+      this->connected_ = false;
+      return false;
+    }
+    total_received += received;
   }
 
   response = XDRBuffer(response_data);
