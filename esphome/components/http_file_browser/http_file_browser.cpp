@@ -2339,8 +2339,9 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       info.size = 0;
       info.modified = 0;
 
-      // Try to get space information for mounted devices
-      if (info.mounted) {
+      // Try to get space information for mounted FAT-based devices (SD, USB)
+      // Skip non-FAT filesystems like FRAM, SPIFFS, etc.
+      if (info.mounted && (mount.platform == "sd_storage" || mount.platform == "usb_storage")) {
         uint64_t total = 0, free = 0;
         if (this->get_mount_space_info(mount.path, total, free)) {
           info.total_space = total;
@@ -3055,17 +3056,15 @@ bool HttpFileBrowser::get_mount_space_info(const std::string &mount_path, uint64
   }
 
 #ifdef USE_ESP_IDF
-  // Try to get FAT filesystem info for SD/USB mounts
-  FATFS *fs;
-  DWORD fre_clust;
-
-  // Get volume label (mount path)
-  if (f_getfree(mount_path.c_str(), &fre_clust, &fs) == FR_OK) {
-    // Calculate total and free space
-    total = static_cast<uint64_t>(fs->n_fatent - 2) * fs->csize * 512;  // 512 bytes per sector (standard)
-    free = static_cast<uint64_t>(fre_clust) * fs->csize * 512;
+  // Use ESP-IDF VFS function to get FAT filesystem info
+  uint64_t total_bytes = 0, free_bytes = 0;
+  esp_err_t ret = esp_vfs_fat_info(mount_path.c_str(), &total_bytes, &free_bytes);
+  if (ret == ESP_OK) {
+    total = total_bytes;
+    free = free_bytes;
     return true;
   }
+  ESP_LOGV(TAG, "esp_vfs_fat_info failed for %s: %s", mount_path.c_str(), esp_err_to_name(ret));
 #endif
 
   return false;
