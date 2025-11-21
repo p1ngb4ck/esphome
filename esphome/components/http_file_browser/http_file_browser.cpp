@@ -2452,14 +2452,13 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
         info.path = Path::join(filepath, entry.name);
         info.is_directory = entry.is_directory;
         info.size = entry.size;
-        info.modified = entry.last_modified;
         html += this->generate_file_row(info, this->url_prefix_);
       }
     } else {
       // Local storage path
       ESP_LOGI(TAG, "Listing local directory: %s", filepath.c_str());
       std::vector<FileInfo> files;
-      if (!this->list_local_directory(filepath, files)) {
+      if (!this->list_directory(filepath, files)) {
         request->send(500, "text/plain", "Failed to list local directory");
         return;
       }
