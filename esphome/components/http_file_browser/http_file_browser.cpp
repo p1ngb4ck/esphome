@@ -2432,11 +2432,41 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
     }
   } else {
     // Regular directory listing
-    auto files = this->list_directory(filepath);
-    ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
-
-    for (const auto &file : files) {
-      html += this->generate_file_row(file, this->url_prefix_);
+    // check if filepath is on network storage
+    storage::NetworkStorage *net_storage = nullptr;
+    if (this->storage_ != nullptr) {
+      net_storage = this->storage_->find_network_storage_for_path(filepath);
+    }
+    if (net_storage != nullptr) {
+      ESP_LOGI(TAG, "Listing directory on network storage: %s", filepath.c_str());
+      std::vector<esphome::storage::NetworkStorage::DirEntry> entries;
+      bool ret = net_storage->list_directory(filepath, entries);
+      if (!ret) {
+        request->send(500, "text/plain", "Failed to list directory on network storage");
+        return;
+      }
+      ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
+      for (const auto &entry : entries) {
+        FileInfo info;
+        info.name = entry.name;
+        info.path = Path::join(filepath, entry.name);
+        info.is_directory = entry.is_directory;
+        info.size = entry.size;
+        info.modified = entry.last_modified;
+        html += this->generate_file_row(info, this->url_prefix_);
+      }
+    } else {
+      // Local storage path
+      ESP_LOGI(TAG, "Listing local directory: %s", filepath.c_str());
+      std::vector<FileInfo> files;
+      if (!this->list_local_directory(filepath, files)) {
+        request->send(500, "text/plain", "Failed to list local directory");
+        return;
+      }
+      ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
+      for (const auto &info : files) {
+        html += this->generate_file_row(info, this->url_prefix_);
+      }
     }
   }
 
