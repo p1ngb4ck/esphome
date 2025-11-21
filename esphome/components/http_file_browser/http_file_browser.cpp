@@ -367,10 +367,37 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     return false;
   }
 
-  // Generate HTML directory listing
-  std::string html = this->generate_html_header("Index of " + path);
-  html += "<h2>Index of " + path + "</h2>";
-  html += "<table><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead><tbody>";
+  // Generate HTML directory listing (matching main directory listing style)
+  std::string html = this->generate_html_header("File Browser");
+
+  html += "<div class=\"header-actions\">";
+  html += "<h1>File Browser</h1>";
+  html += "<button onclick=\"create_directory()\">New Folder</button>";
+  html += "</div>";
+
+  html += this->generate_breadcrumb(path);
+
+  // Upload form
+  if (this->upload_enabled_) {
+    html += R"HTML(<div class="upload-form">
+      <form id="uploadForm" onsubmit="return handleUpload(event);">
+        <input type="file" name="file" id="uploadFile" required>
+        <button type="submit">Upload</button>
+      </form>
+    </div>)HTML";
+  }
+
+  // File table
+  html += R"(<table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Size</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>)";
 
   // Convert NetworkStorage::DirEntry to FileInfo for consistent display
   for (const auto &entry : entries) {
