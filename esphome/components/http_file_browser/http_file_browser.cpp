@@ -23,10 +23,28 @@
 #ifdef USE_ESP_IDF
 #include <esp_vfs_fat.h>
 #include <diskio_impl.h>
+#include <esp_heap_caps.h>
 #endif
 
 namespace esphome {
 namespace http_file_browser {
+
+// Helper to allocate file buffers from PSRAM when available
+static inline std::unique_ptr<uint8_t[], void (*)(void *)> allocate_file_buffer() {
+#if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
+  // Allocate from PSRAM when guaranteed available
+  void *ptr = heap_caps_malloc(FILE_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (ptr == nullptr) {
+    // Fallback to internal RAM if PSRAM allocation fails
+    ptr = heap_caps_malloc(FILE_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  return std::unique_ptr<uint8_t[], void (*)(void *)>(static_cast<uint8_t *>(ptr), free);
+#else
+  // Standard allocation for platforms without PSRAM or when PSRAM not guaranteed
+  return std::unique_ptr<uint8_t[], void (*)(void *)>(new uint8_t[FILE_BUFFER_SIZE],
+                                                      [](void *p) { delete[] static_cast<uint8_t *>(p); });
+#endif
+}
 
 void HttpFileBrowser::setup() {
   ESP_LOGI(TAG, "Setting up HTTP File Browser with prefix: %s", this->url_prefix_.c_str());
@@ -2545,7 +2563,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
     // Stream data in chunks using read_file_chunk (memory efficient)
-    auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
+    auto buffer = allocate_file_buffer();
     size_t total_sent = 0;
     bool success = true;
 
@@ -2616,7 +2634,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
   // Stream file in chunks
-  auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
+  auto buffer = allocate_file_buffer();
   size_t total_sent = 0;
   bool success = true;
 
@@ -2715,8 +2733,8 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   // Get raw httpd_req_t to read POST body
   httpd_req_t *req = static_cast<httpd_req_t *>(*request);
   size_t remaining = request->contentLength();
-  // Use architecture-specific buffer size (4KB/8KB/16KB based on ESP32 variant)
-  auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);  // Heap allocation to avoid stack overflow
+  // Use architecture-specific buffer size (4KB/8KB/16KB/32KB/64KB based on ESP32 variant and PSRAM)
+  auto buffer = allocate_file_buffer();  // Allocates from PSRAM when available
   bool success = true;
 
   ESP_LOGI(TAG, "Reading upload data: %zu bytes total", remaining);
@@ -4530,8 +4548,8 @@ void HttpFileBrowser::download_task(void *params) {
   httpd_resp_set_hdr(req, "Content-Length", content_length.c_str());
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
-  // Use architecture-specific buffer size (4KB/8KB/16KB based on ESP32 variant)
-  auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
+  // Use architecture-specific buffer size (4KB/8KB/16KB/32KB/64KB based on ESP32 variant and PSRAM)
+  auto buffer = allocate_file_buffer();
   size_t total_sent = 0;
   bool success = true;
 
@@ -4634,7 +4652,7 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
     std::string dst_relative = dst_net_storage ? strip_network_mount_prefix(dst_net_storage, dst_path) : dst_path;
 
     // Use chunked copy to avoid loading entire file into memory
-    auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
+    auto buffer = allocate_file_buffer();
     size_t total_copied = 0;
     bool copy_success = true;
     bool first_chunk = true;
