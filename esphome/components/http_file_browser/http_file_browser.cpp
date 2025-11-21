@@ -4611,8 +4611,7 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
     std::string dst_relative = dst_net_storage ? strip_network_mount_prefix(dst_net_storage, dst_path) : dst_path;
 
     // Use chunked copy to avoid loading entire file into memory
-    constexpr size_t COPY_CHUNK_SIZE = 32 * 1024;  // 32KB chunks
-    auto buffer = std::make_unique<uint8_t[]>(COPY_CHUNK_SIZE);
+    auto buffer = std::make_unique<uint8_t[]>(FILE_BUFFER_SIZE);
     size_t total_copied = 0;
     bool copy_success = true;
     bool first_chunk = true;
@@ -4667,13 +4666,13 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
       // Read chunk
       size_t bytes_read = 0;
       if (src_net_storage != nullptr) {
-        if (!src_net_storage->read_file_chunk(src_relative, buffer.get(), total_copied, COPY_CHUNK_SIZE, bytes_read)) {
+        if (!src_net_storage->read_file_chunk(src_relative, buffer.get(), total_copied, FILE_BUFFER_SIZE, bytes_read)) {
           ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_copied);
           copy_success = false;
           break;
         }
       } else {
-        bytes_read = fread(buffer.get(), 1, COPY_CHUNK_SIZE, src_file);
+        bytes_read = fread(buffer.get(), 1, FILE_BUFFER_SIZE, src_file);
         if (bytes_read == 0 && ferror(src_file)) {
           ESP_LOGE(TAG, "Failed to read from source file");
           copy_success = false;
