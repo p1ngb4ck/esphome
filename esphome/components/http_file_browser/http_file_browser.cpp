@@ -795,7 +795,8 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
 
       bool success = false;
       if (net_storage != nullptr) {
-        success = net_storage->write_file(upload_path, this->chunk_buffer_.get(), final_size);
+        std::string relative_path = strip_network_mount_prefix(net_storage, upload_path);
+        success = net_storage->write_file(relative_path, this->chunk_buffer_.get(), final_size);
       } else {
         ESP_LOGE(TAG, "Network storage not found for path: %s", upload_path.c_str());
       }
@@ -3811,6 +3812,7 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
       this->upload_file_ = nullptr;
     }
     this->upload_is_network_ = false;
+    this->upload_network_storage_ = nullptr;
     this->upload_network_path_.clear();
     this->upload_network_offset_ = 0;
 
@@ -3822,19 +3824,26 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
     }
 
     if (net_storage != nullptr) {
-      // Network storage - verify directory exists using NetworkStorage API
-      if (!net_storage->is_directory(dir_path)) {
-        ESP_LOGE(TAG, "Network storage upload target is not a directory: %s", dir_path.c_str());
+      // Network storage - strip mount prefix for NFS operations
+      std::string relative_dir = strip_network_mount_prefix(net_storage, dir_path);
+      std::string relative_upload = strip_network_mount_prefix(net_storage, upload_path);
+
+      // Verify directory exists using NetworkStorage API
+      if (!net_storage->is_directory(relative_dir)) {
+        ESP_LOGE(TAG, "Network storage upload target is not a directory: %s (relative: %s)", dir_path.c_str(),
+                 relative_dir.c_str());
         request->send(400, "application/json", "{\"error\":\"Target is not a directory\"}");
         return;
       }
 
       // Set up network storage upload state
       this->upload_is_network_ = true;
-      this->upload_network_path_ = upload_path;
+      this->upload_network_storage_ = net_storage;
+      this->upload_network_path_ = relative_upload;
       this->upload_network_offset_ = 0;
 
-      ESP_LOGI(TAG, "Starting network storage chunked upload: %s", upload_path.c_str());
+      ESP_LOGI(TAG, "Starting network storage chunked upload: %s (relative: %s)", upload_path.c_str(),
+               relative_upload.c_str());
     } else
 #endif
     {
@@ -3960,30 +3969,26 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
     size_t written = 0;
 
 #if defined(USE_STORAGE)
-    if (this->upload_is_network_) {
+    if (this->upload_is_network_ && this->upload_network_storage_ != nullptr) {
       // Network storage - write chunk directly via NetworkStorage API
-      auto *net_storage = this->storage_->find_network_storage_for_path(this->upload_network_path_);
-      if (net_storage != nullptr) {
-        // First chunk creates the file, subsequent chunks append at offset
-        bool create = (chunk_index == 0);
-        if (net_storage->write_file_chunk(this->upload_network_path_, data_ptr, this->upload_network_offset_,
-                                          bytes_to_write, create)) {
-          write_success = true;
-          written = bytes_to_write;
-          this->upload_network_offset_ += bytes_to_write;
-        }
+      // First chunk creates the file, subsequent chunks append at offset
+      bool create = (chunk_index == 0);
+      if (this->upload_network_storage_->write_file_chunk(this->upload_network_path_, data_ptr,
+                                                          this->upload_network_offset_, bytes_to_write, create)) {
+        write_success = true;
+        written = bytes_to_write;
+        this->upload_network_offset_ += bytes_to_write;
       }
 
       if (!write_success) {
         ESP_LOGE(TAG, "Network storage write failed for chunk %d", chunk_index);
 
         // Try to delete partial file
-        if (net_storage != nullptr) {
-          net_storage->delete_file(this->upload_network_path_);
-        }
+        this->upload_network_storage_->delete_file(this->upload_network_path_);
 
         // Clear state
         this->upload_is_network_ = false;
+        this->upload_network_storage_ = nullptr;
         this->upload_network_path_.clear();
         this->upload_network_offset_ = 0;
 
@@ -4060,6 +4065,7 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
       ESP_LOGI(TAG, "Completed network storage chunked upload: %s (%zu bytes)", this->upload_network_path_.c_str(),
                this->progress_.transferred_bytes);
       this->upload_is_network_ = false;
+      this->upload_network_storage_ = nullptr;
       this->upload_network_path_.clear();
       this->upload_network_offset_ = 0;
     }
