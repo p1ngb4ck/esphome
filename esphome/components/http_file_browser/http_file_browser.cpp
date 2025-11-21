@@ -387,27 +387,54 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     </div>)HTML";
   }
 
-  // File table
+  // File table (no Size column for network storage - would require extra GETATTR calls)
   html += R"(<table>
     <thead>
       <tr>
         <th>Name</th>
         <th>Type</th>
-        <th>Size</th>
         <th>Actions</th>
       </tr>
     </thead>
     <tbody>)";
 
-  // Convert NetworkStorage::DirEntry to FileInfo for consistent display
+  // Generate rows for network storage entries
   for (const auto &entry : entries) {
-    FileInfo info;
-    info.name = entry.name;
-    info.path = Path::join(path, entry.name);
-    info.is_directory = entry.is_directory;
-    info.size = entry.size;
-    info.modified = 0;  // Network storage doesn't provide modification time in DirEntry
-    html += this->generate_file_row(info, this->url_prefix_);
+    std::string entry_path = Path::join(path, entry.name);
+    std::string file_uri = this->url_prefix_ + entry_path;
+
+    html += "<tr>";
+
+    // Name column
+    html += "<td>";
+    if (entry.is_directory) {
+      html += "<a href=\"" + file_uri + "\" class=\"folder\">" + entry.name + "</a>";
+    } else {
+      html += "<span class=\"file\">" + entry.name + "</span>";
+    }
+    html += "</td>";
+
+    // Type column
+    html += "<td>";
+    if (entry.is_directory) {
+      html += "<span class=\"file-type\">Folder</span>";
+    } else {
+      html += "<span class=\"file-type\">" + Path::file_type(entry.name) + "</span>";
+    }
+    html += "</td>";
+
+    // Actions column
+    html += "<td class=\"actions\">";
+    if (!entry.is_directory && this->download_enabled_) {
+      html += "<button onclick=\"download_file('" + file_uri + "', '" + entry.name + "')\">Download</button>";
+    }
+    if (this->delete_enabled_) {
+      html += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
+    }
+    html += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
+    html += "</td>";
+
+    html += "</tr>";
   }
 
   html += "</tbody></table>";
@@ -4262,7 +4289,9 @@ void HttpFileBrowser::handle_api_fileinfo(AsyncWebServerRequest *request) {
       request->send(503, "application/json", "{\"error\":\"Network storage not connected\"}");
       return;
     }
-    stat_ok = net_storage->stat(filepath, file_stat);
+    // Strip mount prefix to get path relative to network storage root
+    std::string relative_path = strip_network_mount_prefix(net_storage, filepath);
+    stat_ok = net_storage->stat(relative_path, file_stat);
   } else {
     // Local storage
     stat_ok = (stat(filepath.c_str(), &file_stat) == 0);
