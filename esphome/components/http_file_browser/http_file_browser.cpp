@@ -2316,6 +2316,10 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
   } else {
     // Directory actions
     if (!info.is_mount_point) {
+      // Copy button (not for mount points)
+      row += "<button onclick=\"copy_file('" + info.path + "')\">Copy</button>";
+      // Move button (not for mount points)
+      row += "<button onclick=\"move_file('" + info.path + "')\">Move</button>";
       // Rename button (not for mount points)
       row += "<button onclick=\"rename_file('" + info.path + "')\">Rename</button>";
       // Delete button (not for mount points)
