@@ -1488,8 +1488,8 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // READDIR arguments: dir fh + cookie + cookieverf + count
     dir_fh.encode(request);
     request.encode_uint64(cookie);
-    request.encode_opaque(cookieverf, 8);
-    request.encode_uint32(8192);  // Max bytes to return
+    request.encode_bytes(cookieverf, 8);  // Fixed 8 bytes, no length prefix
+    request.encode_uint32(8192);          // Max bytes to return
 
     XDRBuffer response;
     if (!this->send_rpc_(request, response)) {
@@ -1522,18 +1522,11 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       }
     }
 
-    // Decode cookieverf (fixed 8 bytes)
-    size_t remaining = response.size() - response.position();
-    ESP_LOGW(TAG, "READDIR: at pos %zu, remaining %zu bytes", response.position(), remaining);
-    // Dump bytes one at a time to find where crash occurs
-    for (size_t i = 0; i < remaining; i++) {
-      ESP_LOGW(TAG, "  byte[%zu] = 0x%02X", response.position() + i, response.data()[response.position() + i]);
-    }
+    // Decode cookieverf (fixed 8 bytes per RFC 1813)
     if (!response.decode_bytes(cookieverf, 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
-    ESP_LOGW(TAG, "READDIR: cookieverf decoded OK, now at pos %zu", response.position());
 
     // Decode directory entries
     bool has_entry;
