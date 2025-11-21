@@ -1507,6 +1507,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       ESP_LOGW(TAG, "READDIR failed: status=%u", nfs_status);
       return false;
     }
+    ESP_LOGD(TAG, "READDIR: after nfs_status pos=%zu", response.position());
 
     // Skip post-op attributes
     bool has_attr;
@@ -1515,11 +1516,13 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes boolean");
       return false;
     }
+    ESP_LOGD(TAG, "READDIR: has_attr=%d, pos=%zu", has_attr, response.position());
     if (has_attr) {
       if (!attr.decode(response)) {
         ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes");
         return false;
       }
+      ESP_LOGD(TAG, "READDIR: after fattr3 pos=%zu", response.position());
     }
 
     // Decode cookieverf (fixed 8 bytes, not length-prefixed)
@@ -1528,6 +1531,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
+    ESP_LOGD(TAG, "READDIR: after cookieverf pos=%zu", response.position());
 
     // Decode entries (RFC 1813: entry3 is linked list with value_follows boolean)
     bool has_entry;
