@@ -103,4 +103,5 @@ async def to_code(config):
 
     # Optional authentication
     if config.get(CONF_AUTH_ENABLED, False):
+        cg.add_define("USE_WEBSERVER_AUTH")
         cg.add(var.set_auth(config[CONF_USERNAME], config[CONF_PASSWORD]))
