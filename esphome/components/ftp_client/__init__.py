@@ -27,7 +27,7 @@ async def to_code(config):
     await cg.register_component(var, config)
     cg.add_define("USE_NETWORK")
     cg.add(var.set_server(config[CONF_SERVER]))
-    cg.add(var.set_server(config[CONF_USERNAME]))
+    cg.add(var.set_username(config[CONF_USERNAME]))
     cg.add(var.set_password(config[CONF_PASSWORD]))
     cg.add(var.set_port(config[CONF_PORT]))
     if CONF_MOUNT_PATH in config:
