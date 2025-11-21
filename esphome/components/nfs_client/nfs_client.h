@@ -199,15 +199,6 @@ class XDRBuffer {
   explicit XDRBuffer(size_t capacity) { this->data_.reserve(capacity); }
   explicit XDRBuffer(const std::vector<uint8_t> &data) : data_(data), position_(0) {}
 
-  /**
-   * @brief Wrap an external buffer (zero-copy constructor)
-   * @param buffer Pointer to external buffer (must remain valid for XDRBuffer lifetime)
-   * @param size Size of buffer in bytes
-   * @note Buffer is not owned - caller must manage lifetime and free it
-   */
-  XDRBuffer(uint8_t *buffer, size_t size)
-      : external_buffer_(buffer), external_size_(size), position_(0), is_external_(true) {}
-
   // Encoding (writing)
   void encode_uint32(uint32_t value);
   void encode_uint64(uint64_t value);
@@ -227,25 +218,20 @@ class XDRBuffer {
 
   // Buffer management
   const std::vector<uint8_t> &data() const { return this->data_; }
-  const uint8_t *buffer() const { return this->is_external_ ? this->external_buffer_ : this->data_.data(); }
-  size_t size() const { return this->is_external_ ? this->external_size_ : this->data_.size(); }
+  size_t size() const { return this->data_.size(); }
   size_t position() const { return this->position_; }
   void reset() { this->position_ = 0; }
   void skip(size_t bytes) { this->position_ += bytes; }
   void clear() {
     this->data_.clear();
     this->position_ = 0;
-    // Don't touch external buffer - caller owns it
   }
   // XDR alignment helper
   static size_t align_4(size_t size) { return (size + 3) & ~3; }
 
  protected:
   std::vector<uint8_t> data_;
-  uint8_t *external_buffer_{nullptr};  // Non-owning pointer to external buffer
-  size_t external_size_{0};            // Size of external buffer
   size_t position_{0};
-  bool is_external_{false};  // True if using external buffer
 };
 
 //========================================================================
@@ -268,8 +254,7 @@ struct NFSFileHandle {
 };
 
 /**
- * @brief NFS file attributes (optimized for RAM usage)
- * @note Timestamps reduced to 32-bit Unix time (sufficient until 2038)
+ * @brief NFS file attributes
  */
 struct NFSFileAttr {
   NFSFileType type;
@@ -277,14 +262,16 @@ struct NFSFileAttr {
   uint32_t nlink;
   uint32_t uid;
   uint32_t gid;
-  uint64_t size;    // Keep 64-bit for large files
-  uint64_t used;    // Keep 64-bit
-  uint64_t fsid;    // Keep 64-bit
-  uint64_t fileid;  // Keep 64-bit
-  uint32_t atime;   // 32-bit Unix timestamp (saves 8 bytes vs 64-bit + 32-bit nsec)
-  uint32_t mtime;   // 32-bit Unix timestamp (saves 8 bytes)
-  uint32_t ctime;   // 32-bit Unix timestamp (saves 8 bytes)
-  // Total savings: 24 bytes per instance
+  uint64_t size;
+  uint64_t used;
+  uint64_t fsid;
+  uint64_t fileid;
+  uint64_t atime_sec;
+  uint32_t atime_nsec;
+  uint64_t mtime_sec;
+  uint32_t mtime_nsec;
+  uint64_t ctime_sec;
+  uint32_t ctime_nsec;
 
   NFSFileAttr()
       : type(NF3REG),
@@ -296,9 +283,12 @@ struct NFSFileAttr {
         used(0),
         fsid(0),
         fileid(0),
-        atime(0),
-        mtime(0),
-        ctime(0) {}
+        atime_sec(0),
+        atime_nsec(0),
+        mtime_sec(0),
+        mtime_nsec(0),
+        ctime_sec(0),
+        ctime_nsec(0) {}
 
   bool decode(XDRBuffer &xdr);
 };
@@ -460,9 +450,9 @@ class NFSClient : public Component
     file_stat.st_mode = attr.mode;
     file_stat.st_uid = attr.uid;
     file_stat.st_gid = attr.gid;
-    file_stat.st_atime = static_cast<time_t>(attr.atime);
-    file_stat.st_mtime = static_cast<time_t>(attr.mtime);
-    file_stat.st_ctime = static_cast<time_t>(attr.ctime);
+    file_stat.st_atime = static_cast<time_t>(attr.atime_sec);
+    file_stat.st_mtime = static_cast<time_t>(attr.mtime_sec);
+    file_stat.st_ctime = static_cast<time_t>(attr.ctime_sec);
     if (attr.type == NF3DIR) {
       file_stat.st_mode |= S_IFDIR;
     } else if (attr.type == NF3REG) {
@@ -555,12 +545,6 @@ class NFSClient : public Component
   //========================================================================
 
   RPCClient rpc_;
-
-  //========================================================================
-  // PSRAM Buffer Pool (for RPC responses)
-  //========================================================================
-
-  uint8_t *rpc_response_buffer_{nullptr};  // Buffer from PSRAM pool for current/last RPC
 
   //========================================================================
   // File Handle Cache (for chunked operations)

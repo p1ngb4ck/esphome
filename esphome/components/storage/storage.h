@@ -195,32 +195,6 @@ class Storage : public Component {
     this->on_device_changed_callbacks_.add(std::move(callback));
   }
 
-  //========================================================================
-  // Shared PSRAM Buffer Pool (for storage operations)
-  //========================================================================
-
-  /**
-   * @brief Allocate a buffer from the shared PSRAM pool
-   * @param size Requested size in bytes
-   * @return Pointer to buffer, or nullptr if unavailable
-   * @note Buffer is NOT automatically freed - caller must call free_buffer()
-   * @note Thread-safe with mutex protection
-   */
-  uint8_t *allocate_buffer(size_t size);
-
-  /**
-   * @brief Free a buffer back to the pool
-   * @param buffer Pointer returned by allocate_buffer()
-   * @note Thread-safe with mutex protection
-   */
-  void free_buffer(uint8_t *buffer);
-
-  /**
-   * @brief Get maximum available buffer size in pool
-   * @return Size in bytes, or 0 if no PSRAM
-   */
-  size_t get_max_buffer_size() const;
-
  protected:
   esphome::StaticVector<MountEntry, MAX_MOUNT_POINTS> mounts_;
   esphome::StaticVector<DeviceNode, MAX_DEVICE_NODES> device_nodes_;
@@ -231,17 +205,6 @@ class Storage : public Component {
   CallbackManager<void(StorageDevice *)> on_device_added_callbacks_;
   CallbackManager<void(StorageDevice *)> on_device_removed_callbacks_;
   CallbackManager<void(StorageDevice *)> on_device_changed_callbacks_;
-
-  // Shared PSRAM buffer pool
-  struct BufferSlot {
-    uint8_t *ptr{nullptr};
-    size_t size{0};
-    bool in_use{false};
-  };
-  static constexpr size_t MAX_BUFFER_SLOTS = 4;  // 4× 64KB = 256KB total
-  BufferSlot buffer_pool_[MAX_BUFFER_SLOTS];
-  portMUX_TYPE buffer_pool_mutex_ = portMUX_INITIALIZER_UNLOCKED;
-  bool psram_available_{false};
 };
 
 // Global accessor for soft dependency pattern

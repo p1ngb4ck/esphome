@@ -30,22 +30,20 @@ class HttpFileBrowser;
 #if defined(USE_ESP32_VARIANT_ESP32P4)
 #if defined(HTTP_FILE_BROWSER_USE_PSRAM)
 static constexpr size_t FILE_BUFFER_SIZE = 65536;  // 64KB for P4 with guaranteed PSRAM
-static constexpr size_t MAX_DIR_ENTRIES = 512;
 #else
 static constexpr size_t FILE_BUFFER_SIZE = 16384;  // 16KB for P4 (SRAM)
-static constexpr size_t MAX_DIR_ENTRIES = 128;     // Reduced for SRAM-only devices
 #endif
+static constexpr size_t MAX_DIR_ENTRIES = 512;
 #elif defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 #if defined(HTTP_FILE_BROWSER_USE_PSRAM)
 static constexpr size_t FILE_BUFFER_SIZE = 32768;  // 32KB for S2/S3 with guaranteed PSRAM
-static constexpr size_t MAX_DIR_ENTRIES = 512;
 #else
 static constexpr size_t FILE_BUFFER_SIZE = 8192;  // 8KB for S2/S3 (SRAM)
-static constexpr size_t MAX_DIR_ENTRIES = 128;    // Reduced for SRAM-only devices
 #endif
+static constexpr size_t MAX_DIR_ENTRIES = 512;
 #else
 static constexpr size_t FILE_BUFFER_SIZE = 4096;  // 4KB default
-static constexpr size_t MAX_DIR_ENTRIES = 128;    // Reduced for SRAM-only devices
+static constexpr size_t MAX_DIR_ENTRIES = 256;
 #endif
 
 // Path utilities
