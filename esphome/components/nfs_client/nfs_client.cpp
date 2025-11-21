@@ -1523,13 +1523,11 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     // Decode cookieverf (fixed 8 bytes)
-    ESP_LOGW(TAG, "READDIR: at pos %zu, dumping ALL remaining %zu bytes:", response.position(),
-             response.size() - response.position());
-    const auto &buf = response.data();
-    size_t pos = response.position();
-    for (size_t i = 0; i < response.size() - pos; i += 4) {
-      ESP_LOGW(TAG, "  [%zu]: %02X %02X %02X %02X", pos + i, buf[pos + i], buf[pos + i + 1], buf[pos + i + 2],
-               buf[pos + i + 3]);
+    size_t remaining = response.size() - response.position();
+    ESP_LOGW(TAG, "READDIR: at pos %zu, remaining %zu bytes", response.position(), remaining);
+    // Dump bytes one at a time to find where crash occurs
+    for (size_t i = 0; i < remaining; i++) {
+      ESP_LOGW(TAG, "  byte[%zu] = 0x%02X", response.position() + i, response.data()[response.position() + i]);
     }
     if (!response.decode_bytes(cookieverf, 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
