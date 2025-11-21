@@ -591,7 +591,8 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
 
     // Clear chunk buffer if it was used for network storage
     if (this->chunk_buffer_) {
-      this->chunk_buffer_.reset();
+      free(this->chunk_buffer_);
+      this->chunk_buffer_ = nullptr;
       this->chunk_buffer_size_ = 0;
     }
 
@@ -756,7 +757,8 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
     } else if (this->chunk_buffer_) {
       // Network storage cleanup
       ESP_LOGI(TAG, "Clearing network storage upload buffer");
-      this->chunk_buffer_.reset();
+      free(this->chunk_buffer_);
+      this->chunk_buffer_ = nullptr;
       this->chunk_buffer_size_ = 0;
     }
 
@@ -822,7 +824,8 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
                  this->chunk_buffer_size_);
 
         // Clean up
-        this->chunk_buffer_.reset();
+        free(this->chunk_buffer_);
+        this->chunk_buffer_ = nullptr;
         this->chunk_buffer_size_ = 0;
 
         portENTER_CRITICAL(&this->progress_mutex_);
@@ -904,7 +907,8 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       }
 
       // Clean up buffer
-      this->chunk_buffer_.reset();
+      free(this->chunk_buffer_);
+      this->chunk_buffer_ = nullptr;
       this->chunk_buffer_size_ = 0;
 
       // Mark progress as complete
