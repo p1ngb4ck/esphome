@@ -302,17 +302,16 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
       std::string relative_filepath = strip_network_mount_prefix(net_storage, filepath);
       if (net_storage->is_directory(relative_filepath)) {
         this->handle_network_directory_listing(request, net_storage, filepath);
-      } else {
-        this->handle_network_file_download(request, net_storage, filepath);
+        return;
       }
-      return;
+      // For network storage files, fall through to handle_file_download which supports chunked reads
     }
 
-    if (!is_virtual_root && stat(filepath.c_str(), &file_stat) != 0) {
+    if (!is_virtual_root && net_storage == nullptr && stat(filepath.c_str(), &file_stat) != 0) {
       request->send(400, "text/plain", "Bad Request: File not found");
       return;
     }
-    if (is_virtual_root || S_ISDIR(file_stat.st_mode)) {
+    if (is_virtual_root || (net_storage == nullptr && S_ISDIR(file_stat.st_mode))) {
       this->handle_directory_listing(request, filepath);
     } else {
       this->handle_file_download(request, filepath);
