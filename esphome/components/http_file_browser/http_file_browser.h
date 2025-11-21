@@ -241,8 +241,8 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   uint8_t *download_buffer_{nullptr};
   uint8_t *copy_buffer_{nullptr};
 
-  // Reusable chunk buffer for uploads (avoids repeated allocations)
-  std::unique_ptr<uint8_t[], void (*)(void *)> chunk_buffer_;
+  // Reusable chunk buffer for large uploads (dynamically allocated when needed)
+  uint8_t *chunk_buffer_{nullptr};
   size_t chunk_buffer_size_{0};
 
   // Network storage chunked upload state
