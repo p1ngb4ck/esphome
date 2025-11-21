@@ -1009,7 +1009,7 @@ bool HttpFileBrowser::path_exists(const std::string &path, bool &is_directory) {
     auto *net_storage = this->storage_->find_network_storage_for_path(path);
     if (net_storage != nullptr) {
       // Network storage - strip mount prefix for NFS operations
-      std::string relative_path = strip_network_mount_prefix(net_storage, dir_path);
+      std::string relative_path = strip_network_mount_prefix(net_storage, path);
 
       // Verify directory exists using NetworkStorage API
       if (net_storage->is_directory(relative_path)) {
