@@ -20,6 +20,14 @@
 #define yield() delayMicroseconds(1)
 #endif
 
+// PSRAM support (only on ESP-IDF with guaranteed PSRAM)
+#if defined(USE_ESP_IDF) && defined(USE_PSRAM)
+#include <esp_heap_caps.h>
+#define STORAGE_USE_PSRAM_POOL 1
+#else
+#define STORAGE_USE_PSRAM_POOL 0
+#endif
+
 namespace esphome {
 namespace storage {
 
@@ -66,6 +74,32 @@ void Storage::setup() {
 
   // Set global accessor for soft dependency pattern
   global_storage = this;
+
+  // Initialize PSRAM buffer pool (only on devices with PSRAM)
+#if STORAGE_USE_PSRAM_POOL
+  this->psram_available_ = true;
+  size_t psram_size = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  if (psram_size < 256 * 1024) {
+    ESP_LOGW(TAG, "Insufficient PSRAM (%zu bytes), buffer pool disabled", psram_size);
+    this->psram_available_ = false;
+  } else {
+    // Allocate 4× 64KB buffers from PSRAM
+    for (size_t i = 0; i < MAX_BUFFER_SLOTS; i++) {
+      this->buffer_pool_[i].ptr = static_cast<uint8_t *>(heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      if (this->buffer_pool_[i].ptr != nullptr) {
+        this->buffer_pool_[i].size = 65536;
+        this->buffer_pool_[i].in_use = false;
+        ESP_LOGD(TAG, "Allocated PSRAM buffer slot %zu: 64KB", i);
+      } else {
+        ESP_LOGW(TAG, "Failed to allocate PSRAM buffer slot %zu", i);
+      }
+    }
+    ESP_LOGCONFIG(TAG, "PSRAM Buffer Pool: 4× 64KB = 256KB total");
+  }
+#else
+  this->psram_available_ = false;
+  ESP_LOGD(TAG, "PSRAM buffer pool not available on this platform");
+#endif
 
   ESP_LOGCONFIG(TAG, "  Mounts configured: %zu", this->mounts_.size());
   for (const auto &mount : this->mounts_) {
@@ -482,6 +516,59 @@ std::vector<StorageDevice *> Storage::get_devices_by_type(StorageType type) {
   }
 
   return result;
+}
+
+//========================================================================
+// Shared PSRAM Buffer Pool
+//========================================================================
+
+uint8_t *Storage::allocate_buffer(size_t size) {
+  if (!this->psram_available_ || size > 65536) {
+    return nullptr;
+  }
+
+  portENTER_CRITICAL(&this->buffer_pool_mutex_);
+
+  // Find first available buffer that fits
+  for (size_t i = 0; i < MAX_BUFFER_SLOTS; i++) {
+    if (this->buffer_pool_[i].ptr != nullptr && !this->buffer_pool_[i].in_use && this->buffer_pool_[i].size >= size) {
+      this->buffer_pool_[i].in_use = true;
+      portEXIT_CRITICAL(&this->buffer_pool_mutex_);
+      return this->buffer_pool_[i].ptr;
+    }
+  }
+
+  portEXIT_CRITICAL(&this->buffer_pool_mutex_);
+  return nullptr;
+}
+
+void Storage::free_buffer(uint8_t *buffer) {
+  if (buffer == nullptr) {
+    return;
+  }
+
+  portENTER_CRITICAL(&this->buffer_pool_mutex_);
+
+  // Find the buffer in the pool and mark as free
+  for (size_t i = 0; i < MAX_BUFFER_SLOTS; i++) {
+    if (this->buffer_pool_[i].ptr == buffer) {
+      this->buffer_pool_[i].in_use = false;
+      portEXIT_CRITICAL(&this->buffer_pool_mutex_);
+      return;
+    }
+  }
+
+  portEXIT_CRITICAL(&this->buffer_pool_mutex_);
+  ESP_LOGW(TAG, "Attempted to free buffer not in pool: %p", buffer);
+}
+
+size_t Storage::get_max_buffer_size() const {
+  if (!this->psram_available_) {
+    return 0;
+  }
+
+  // All buffers are 64KB
+  return 65536;
 }
 
 }  // namespace storage
