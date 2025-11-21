@@ -3,6 +3,11 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/components/network/ip_address.h"
+// Optional storage integration (soft dependency)
+#if defined(USE_STORAGE)
+#include "esphome/components/storage/storage.h"
+#include "esphome/components/storage/network_storage.h"
+#endif
 
 #ifdef USE_ESP_IDF
 #include "lwip/sockets.h"
