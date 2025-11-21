@@ -213,6 +213,7 @@ class XDRBuffer {
   bool decode_bytes(uint8_t *data, size_t length);
   bool decode_string(std::string &str);
   bool decode_opaque(std::vector<uint8_t> &data);
+  bool decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t &actual_len);
   bool decode_bool(bool &value);
 
   // Buffer management
@@ -476,6 +477,9 @@ class NFSClient : public Component
 
   // Helper to check if path is a directory
   bool is_directory(const std::string &path) override;
+
+  // Rename/move file or directory (uses native NFS RENAME)
+  bool rename_path(const std::string &old_path, const std::string &new_path) override;
 #endif
 
  protected:
@@ -543,6 +547,15 @@ class NFSClient : public Component
   RPCClient rpc_;
 
   //========================================================================
+  // File Handle Cache (for chunked operations)
+  //========================================================================
+
+  std::string cached_path_;
+  NFSFileHandle cached_fh_;
+  NFSFileAttr cached_attr_;
+  uint32_t cache_timestamp_{0};
+
+  //========================================================================
   // Internal Operations
   //========================================================================
 
@@ -575,6 +588,8 @@ class NFSClient : public Component
   bool nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh);
   bool nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name);
   bool nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries);
+  bool nfs_rename_(const NFSFileHandle &from_dir_fh, const std::string &from_name, const NFSFileHandle &to_dir_fh,
+                   const std::string &to_name);
 
   //========================================================================
   // Path Resolution

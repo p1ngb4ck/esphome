@@ -3445,23 +3445,47 @@ void HttpFileBrowser::handle_api_rename(AsyncWebServerRequest *request) {
   bool success = false;
 
   if (net_storage != nullptr) {
-    // Network storage - use copy+delete (NetworkStorage has no rename operation)
-    ESP_LOGI(TAG, "Network storage rename detected, using copy+delete");
+    // Check if destination is also on the same network storage
+    storage::NetworkStorage *dest_net_storage = nullptr;
+    if (this->storage_ != nullptr) {
+      dest_net_storage = this->storage_->find_network_storage_for_path(new_path);
+    }
 
-    if (is_directory) {
-      // Directory rename - use directory move
-      success = this->perform_directory_move(source, new_path, false);
-    } else {
-      // File rename - get file size for chunked copy
-      struct stat file_stat;
-      off_t file_size = 0;
+    // If both source and destination are on the same network storage, try native rename
+    if (dest_net_storage != nullptr && dest_net_storage == net_storage) {
+      ESP_LOGI(TAG, "Same network storage detected, using native rename");
       std::string source_relative = strip_network_mount_prefix(net_storage, source);
-      if (net_storage->stat(source_relative, file_stat)) {
-        file_size = file_stat.st_size;
-      }
+      std::string dest_relative = strip_network_mount_prefix(net_storage, new_path);
+      success = net_storage->rename_path(source_relative, dest_relative);
 
-      // Use perform_file_move which handles chunked operations
-      success = this->perform_file_move(source, new_path, file_size, false);
+      if (!success) {
+        // If native rename failed or not supported, fall back to copy+delete
+        ESP_LOGW(TAG, "Native rename failed or not supported, falling back to copy+delete");
+        if (is_directory) {
+          success = this->perform_directory_move(source, new_path, false);
+        } else {
+          struct stat file_stat;
+          off_t file_size = 0;
+          if (net_storage->stat(source_relative, file_stat)) {
+            file_size = file_stat.st_size;
+          }
+          success = this->perform_file_move(source, new_path, file_size, false);
+        }
+      }
+    } else {
+      // Cross-storage move - use copy+delete
+      ESP_LOGI(TAG, "Cross-storage move detected, using copy+delete");
+      if (is_directory) {
+        success = this->perform_directory_move(source, new_path, false);
+      } else {
+        struct stat file_stat;
+        off_t file_size = 0;
+        std::string source_relative = strip_network_mount_prefix(net_storage, source);
+        if (net_storage->stat(source_relative, file_stat)) {
+          file_size = file_stat.st_size;
+        }
+        success = this->perform_file_move(source, new_path, file_size, false);
+      }
     }
   } else {
     // Local storage - use atomic rename
@@ -4886,10 +4910,9 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
     dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
   }
 
-  // Network storage doesn't support atomic rename - always use copy+delete
   bool is_network_move = (src_net_storage != nullptr || dst_net_storage != nullptr);
 
-  // Try atomic rename first (only for local-to-local moves)
+  // Try atomic rename first (local-to-local)
   if (!is_network_move && rename(src_path.c_str(), dst_path.c_str()) == 0) {
     ESP_LOGI(TAG, "File moved successfully (atomic rename)");
     if (track_progress) {
@@ -4902,10 +4925,29 @@ bool HttpFileBrowser::perform_file_move(const std::string &src_path, const std::
     return true;
   }
 
+  // If both source and destination are on the same network storage, try native rename
+  if (src_net_storage != nullptr && dst_net_storage != nullptr && src_net_storage == dst_net_storage) {
+    ESP_LOGI(TAG, "Same network storage detected, using native rename");
+    std::string src_relative = strip_network_mount_prefix(src_net_storage, src_path);
+    std::string dst_relative = strip_network_mount_prefix(dst_net_storage, dst_path);
+    if (src_net_storage->rename_path(src_relative, dst_relative)) {
+      ESP_LOGI(TAG, "File moved successfully (network native rename)");
+      if (track_progress) {
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.transferred_bytes = file_size;
+        this->progress_.in_progress = false;
+        this->progress_.cancelled = false;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+      }
+      return true;
+    }
+    ESP_LOGW(TAG, "Native rename failed or not supported, falling back to copy+delete");
+  }
+
   // If network storage or rename failed with EXDEV (cross-device), use copy+delete fallback
   if (is_network_move || errno == EXDEV) {
     if (is_network_move) {
-      ESP_LOGI(TAG, "Network storage move detected, using copy+delete");
+      ESP_LOGI(TAG, "Cross-storage move detected, using copy+delete");
     } else {
       ESP_LOGI(TAG, "Cross-mount move detected, using copy+delete fallback");
     }
@@ -5134,10 +5176,22 @@ bool HttpFileBrowser::perform_directory_move(const std::string &src_path, const 
 
   bool is_network_move = (src_net_storage != nullptr || dst_net_storage != nullptr);
 
-  // Try atomic rename first (only for local-to-local on same mount)
+  // Try atomic rename first
   if (!is_network_move && rename(src_path.c_str(), dst_path.c_str()) == 0) {
     ESP_LOGI(TAG, "Directory moved successfully (atomic rename)");
     return true;
+  }
+
+  // If both source and destination are on the same network storage, try native rename
+  if (src_net_storage != nullptr && dst_net_storage != nullptr && src_net_storage == dst_net_storage) {
+    ESP_LOGI(TAG, "Same network storage detected, using native rename");
+    std::string src_relative = strip_network_mount_prefix(src_net_storage, src_path);
+    std::string dst_relative = strip_network_mount_prefix(dst_net_storage, dst_path);
+    if (src_net_storage->rename_path(src_relative, dst_relative)) {
+      ESP_LOGI(TAG, "Directory moved successfully (network native rename)");
+      return true;
+    }
+    ESP_LOGW(TAG, "Native rename failed or not supported, falling back to copy+delete");
   }
 
   // Use copy+delete for network storage or cross-mount moves

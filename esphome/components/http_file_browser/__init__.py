@@ -79,6 +79,13 @@ async def to_code(config):
     if CORE.is_esp32:
         add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
 
+        # Check if PSRAM is guaranteed to be available for larger buffers
+        # Import here to avoid circular dependency
+        from esphome.components import psram
+
+        if psram.is_guaranteed():
+            cg.add_define("HTTP_FILE_BROWSER_USE_PSRAM")
+
     # Get web_server_base instance
     web_server_base_var = await cg.get_variable(
         config[web_server_base.CONF_WEB_SERVER_BASE_ID]

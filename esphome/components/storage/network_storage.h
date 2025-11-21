@@ -160,6 +160,15 @@ class NetworkStorage {
    */
   virtual bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) { return false; }
 
+  /**
+   * @brief Rename/move a file or directory (atomic if on same filesystem)
+   * @param old_path Old path relative to mount point or absolute
+   * @param new_path New path relative to mount point or absolute
+   * @return true if successful, false on error or not supported
+   * @note Default implementation returns false (not supported)
+   */
+  virtual bool rename_path(const std::string &old_path, const std::string &new_path) { return false; }
+
  protected:
   /**
    * @brief Helper to strip mount point prefix from path

@@ -123,7 +123,9 @@ bool XDRBuffer::decode_opaque(std::vector<uint8_t> &data) {
     return false;
   }
 
-  if (length > NFS_FHSIZE3) {
+  // Sanity check: limit to reasonable size (1MB) to prevent excessive memory allocation
+  // Note: This is used for both file handles (≤64 bytes) and file data (up to FILE_BUFFER_SIZE)
+  if (length > 1024 * 1024) {
     return false;
   }
 
@@ -132,6 +134,35 @@ bool XDRBuffer::decode_opaque(std::vector<uint8_t> &data) {
   }
 
   data.assign(this->data_.begin() + this->position_, this->data_.begin() + this->position_ + length);
+  this->position_ += align_4(length);
+
+  return true;
+}
+
+bool XDRBuffer::decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t &actual_len) {
+  uint32_t length;
+  if (!this->decode_uint32(length)) {
+    return false;
+  }
+
+  // Sanity check
+  if (length > 1024 * 1024) {
+    return false;
+  }
+
+  if (this->position_ + length > this->data_.size()) {
+    return false;
+  }
+
+  // Check if caller's buffer is large enough
+  if (length > max_len) {
+    ESP_LOGE("XDRBuffer", "Buffer too small: need %u, have %zu", length, max_len);
+    return false;
+  }
+
+  // Copy directly to caller's buffer
+  std::memcpy(buffer, this->data_.data() + this->position_, length);
+  actual_len = length;
   this->position_ += align_4(length);
 
   return true;
@@ -152,7 +183,16 @@ bool XDRBuffer::decode_bool(bool &value) {
 
 void NFSFileHandle::encode(XDRBuffer &xdr) const { xdr.encode_opaque(this->data.data(), this->data.size()); }
 
-bool NFSFileHandle::decode(XDRBuffer &xdr) { return xdr.decode_opaque(this->data); }
+bool NFSFileHandle::decode(XDRBuffer &xdr) {
+  if (!xdr.decode_opaque(this->data)) {
+    return false;
+  }
+  // File handles must be ≤ NFS_FHSIZE3 (64 bytes) per RFC 1813
+  if (this->data.size() > NFS_FHSIZE3) {
+    return false;
+  }
+  return true;
+}
 
 bool NFSFileAttr::decode(XDRBuffer &xdr) {
   // fattr3 structure from RFC 1813 section 3.3.5
@@ -647,8 +687,9 @@ bool NFSClient::connect_() {
   setsockopt(this->socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
   // Set socket receive timeout (RFC 1831 doesn't specify timeout, but prevent hanging)
+  // Use 30 seconds to allow for slow NFS servers and large file operations
   struct timeval tv;
-  tv.tv_sec = 5;
+  tv.tv_sec = 30;
   tv.tv_usec = 0;
   if (setsockopt(this->socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
     ESP_LOGW(TAG, "Failed to set receive timeout: errno %d", errno);
@@ -785,9 +826,9 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   this->client_->write(length_buf, 4);
   this->client_->write(request.data().data(), request.size());
 
-  // Wait for response
+  // Wait for response length (4 bytes) with 10 second timeout
   uint32_t start = millis();
-  while (this->client_->available() < 4 && millis() - start < 5000) {
+  while (this->client_->available() < 4 && millis() - start < 10000) {
     delay(10);
   }
 
@@ -806,20 +847,36 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 
   response_length &= 0x7FFFFFFF;
 
-  // Wait for full response
-  start = millis();
-  while (this->client_->available() < static_cast<int>(response_length) && millis() - start < 5000) {
-    delay(10);
-  }
-
-  if (this->client_->available() < static_cast<int>(response_length)) {
-    ESP_LOGE(TAG, "Timeout waiting for full response");
+  if (response_length > 65536) {  // Sanity check
+    ESP_LOGE(TAG, "Response too large: %u bytes", response_length);
     return false;
   }
 
-  // Read response data
+  // Read response data in a loop to handle partial reads
   std::vector<uint8_t> response_data(response_length);
-  this->client_->read(response_data.data(), response_length);
+  size_t total_read = 0;
+  start = millis();
+
+  while (total_read < response_length && millis() - start < 10000) {
+    int available = this->client_->available();
+    if (available > 0) {
+      size_t to_read = std::min(static_cast<size_t>(available), response_length - total_read);
+      int bytes_read = this->client_->read(response_data.data() + total_read, to_read);
+      if (bytes_read > 0) {
+        total_read += bytes_read;
+      } else if (bytes_read < 0) {
+        ESP_LOGE(TAG, "Failed to read response data");
+        return false;
+      }
+    } else {
+      delay(10);  // Wait for more data
+    }
+  }
+
+  if (total_read < response_length) {
+    ESP_LOGE(TAG, "Timeout waiting for full response: got %zu / %u bytes", total_read, response_length);
+    return false;
+  }
 
   response = XDRBuffer(response_data);
   return true;
@@ -1491,6 +1548,40 @@ bool NFSClient::nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name)
   return true;
 }
 
+bool NFSClient::nfs_rename_(const NFSFileHandle &from_dir_fh, const std::string &from_name,
+                            const NFSFileHandle &to_dir_fh, const std::string &to_name) {
+  ESP_LOGD(TAG, "NFS RENAME: %s -> %s", from_name.c_str(), to_name.c_str());
+
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_RENAME, this->uid_, this->gid_);
+
+  // RENAME arguments: from_dir fh + from_name + to_dir fh + to_name
+  from_dir_fh.encode(request);
+  request.encode_string(from_name);
+  to_dir_fh.encode(request);
+  request.encode_string(to_name);
+
+  XDRBuffer response;
+  if (!this->send_rpc_(request, response)) {
+    return false;
+  }
+
+  RPCAcceptStatus rpc_status;
+  if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
+    return false;
+  }
+
+  // Parse NFS status
+  uint32_t nfs_status;
+  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
+    ESP_LOGW(TAG, "RENAME failed: status=%u", nfs_status);
+    return false;
+  }
+
+  return true;
+}
+
 bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries) {
   // Use READDIRPLUS to get file attributes (needed for is_directory detection)
   ESP_LOGI(TAG, "NFS READDIRPLUS starting");
@@ -1668,10 +1759,25 @@ bool NFSClient::read_file_chunk(const std::string &path, uint8_t *buffer, size_t
   NFSFileHandle fh;
   NFSFileAttr attr;
 
-  // Resolve path to file handle
-  if (!this->resolve_path_(path, fh, attr)) {
-    ESP_LOGW(TAG, "Failed to resolve path: %s", path.c_str());
-    return false;
+  // Check cache (valid for 5 seconds to handle sequential chunked reads)
+  uint32_t now = millis();
+  if (this->cached_path_ == path && (now - this->cache_timestamp_) < 5000 && this->cached_fh_.is_valid()) {
+    fh = this->cached_fh_;
+    attr = this->cached_attr_;
+    ESP_LOGVV(TAG, "Using cached file handle for %s", path.c_str());
+  } else {
+    // Resolve path to file handle
+    if (!this->resolve_path_(path, fh, attr)) {
+      ESP_LOGW(TAG, "Failed to resolve path: %s", path.c_str());
+      return false;
+    }
+
+    // Cache the file handle for subsequent reads
+    this->cached_path_ = path;
+    this->cached_fh_ = fh;
+    this->cached_attr_ = attr;
+    this->cache_timestamp_ = now;
+    ESP_LOGVV(TAG, "Cached file handle for %s", path.c_str());
   }
 
   // Check if it's a regular file
@@ -1692,19 +1798,59 @@ bool NFSClient::read_file_chunk(const std::string &path, uint8_t *buffer, size_t
     to_read = attr.size - offset;
   }
 
-  // Read chunk into temporary vector
-  std::vector<uint8_t> chunk;
-  if (!this->nfs_read_(fh, offset, to_read, chunk)) {
-    ESP_LOGW(TAG, "Failed to read file chunk at offset %zu", offset);
+  // Perform NFS READ RPC
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_READ, this->uid_, this->gid_);
+
+  fh.encode(request);
+  request.encode_uint64(offset);
+  request.encode_uint32(to_read);
+
+  XDRBuffer response;
+  if (!this->send_rpc_(request, response)) {
+    this->cached_path_.clear();
     return false;
   }
 
-  // Copy to output buffer
-  bytes_read = chunk.size();
-  if (bytes_read > 0) {
-    std::memcpy(buffer, chunk.data(), bytes_read);
+  RPCAcceptStatus rpc_status;
+  if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
+    this->cached_path_.clear();
+    return false;
   }
 
+  // Parse NFS status
+  uint32_t nfs_status;
+  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
+    ESP_LOGW(TAG, "READ failed: status=%u", nfs_status);
+    this->cached_path_.clear();
+    return false;
+  }
+
+  // Skip post-op attributes
+  bool has_attr_result;
+  NFSFileAttr attr_result;
+  if (response.decode_bool(has_attr_result) && has_attr_result) {
+    attr_result.decode(response);
+  }
+
+  // Decode count + EOF flag
+  uint32_t nfs_bytes_read;
+  bool eof;
+  if (!response.decode_uint32(nfs_bytes_read) || !response.decode_bool(eof)) {
+    this->cached_path_.clear();
+    return false;
+  }
+
+  // Decode data directly into caller's buffer (no intermediate allocation)
+  size_t actual_bytes;
+  if (!response.decode_opaque_to_buffer(buffer, max_len, actual_bytes)) {
+    ESP_LOGW(TAG, "Failed to decode file data at offset %zu", offset);
+    this->cached_path_.clear();
+    return false;
+  }
+
+  bytes_read = actual_bytes;
   ESP_LOGVV(TAG, "Read file chunk: %s (offset=%zu, bytes_read=%zu)", path.c_str(), offset, bytes_read);
   return true;
 }
@@ -1932,6 +2078,31 @@ bool NFSClient::list_directory(const std::string &path, std::vector<storage::Net
   }
 
   return true;
+}
+
+bool NFSClient::rename_path(const std::string &old_path, const std::string &new_path) {
+  if (!this->is_mounted()) {
+    ESP_LOGW(TAG, "Not mounted, cannot rename");
+    return false;
+  }
+
+  // Resolve parent directories and filenames for both paths
+  NFSFileHandle old_parent_fh;
+  std::string old_name;
+  if (!this->resolve_parent_path_(old_path, old_parent_fh, old_name)) {
+    ESP_LOGW(TAG, "Failed to resolve old path: %s", old_path.c_str());
+    return false;
+  }
+
+  NFSFileHandle new_parent_fh;
+  std::string new_name;
+  if (!this->resolve_parent_path_(new_path, new_parent_fh, new_name)) {
+    ESP_LOGW(TAG, "Failed to resolve new path: %s", new_path.c_str());
+    return false;
+  }
+
+  // Use NFS RENAME RPC call
+  return this->nfs_rename_(old_parent_fh, old_name, new_parent_fh, new_name);
 }
 #endif
 
