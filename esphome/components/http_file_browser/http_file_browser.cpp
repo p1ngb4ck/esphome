@@ -1037,7 +1037,7 @@ bool HttpFileBrowser::delete_path(const std::string &path, bool is_directory) {
   // Check if this path is on network storage
   if (this->storage_ != nullptr) {
     auto *net_storage = this->storage_->find_network_storage_for_path(path);
-    std::string relative_path = this->storage_->strip_network_mount_prefix(net_storage, path);
+    std::string relative_path = strip_network_mount_prefix(net_storage, path);
     if (net_storage != nullptr) {
       // Use NetworkStorage API
       if (is_directory) {
@@ -1060,7 +1060,7 @@ bool HttpFileBrowser::create_dir(const std::string &path) {
   // Check if this path is on network storage
   if (this->storage_ != nullptr) {
     auto *net_storage = this->storage_->find_network_storage_for_path(path);
-    std::string relative_path = this->storage_->strip_network_mount_prefix(net_storage, path);
+    std::string relative_path = strip_network_mount_prefix(net_storage, path);
     if (net_storage != nullptr) {
       // Use NetworkStorage API
       return net_storage->create_directory(relative_path);
