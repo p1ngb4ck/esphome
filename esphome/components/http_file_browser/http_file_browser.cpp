@@ -2375,7 +2375,8 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       // Try to get space info from network storage
       if (info.mounted) {
         uint64_t total = 0, free = 0;
-        if (net_storage->get_space_info(total, free)) {
+        // const_cast needed as get_space_info may need to do RPC calls
+        if (const_cast<storage::NetworkStorage *>(net_storage)->get_space_info(total, free)) {
           info.total_space = total;
           info.free_space = free;
           info.has_space_info = true;
