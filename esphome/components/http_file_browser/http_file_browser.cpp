@@ -428,7 +428,7 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     if (!entry.is_directory && this->download_enabled_) {
       html += "<button onclick=\"download_file('" + file_uri + "', '" + entry.name + "')\">Download</button>";
     }
-    if (this->delete_enabled_) {
+    if (this->deletion_enabled_) {
       html += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
     }
     html += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
