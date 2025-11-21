@@ -3,23 +3,20 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/components/network/ip_address.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include <string>
+#include <vector>
+#include <functional>
+#include <memory>
 
 #if defined(USE_STORAGE)
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/network_storage.h"
 #endif
-
-#ifdef USE_ESP_IDF
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
-#else
-#include <WiFiUdp.h>
-#endif
-
-#include <string>
-#include <vector>
-#include <functional>
-#include <memory>
 
 namespace esphome {
 namespace ftp_client {

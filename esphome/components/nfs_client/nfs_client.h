@@ -546,6 +546,10 @@ class NFSClient : public Component
 
   RPCClient rpc_;
 
+  // Shared RPC response buffer (allocated once in setup, reused for all RPC calls)
+  // Size: 65KB to handle largest possible NFSv3 responses
+  uint8_t *rpc_response_buffer_{nullptr};
+
   //========================================================================
   // File Handle Cache (for chunked operations)
   //========================================================================

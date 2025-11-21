@@ -29,28 +29,47 @@
 namespace esphome {
 namespace http_file_browser {
 
-// Helper to allocate file buffers from PSRAM when available
-static inline std::unique_ptr<uint8_t[], void (*)(void *)> allocate_file_buffer() {
-#if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
-  // Allocate from PSRAM when guaranteed available
-  void *ptr = heap_caps_malloc(FILE_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (ptr == nullptr) {
-    // Fallback to internal RAM if PSRAM allocation fails
-    ptr = heap_caps_malloc(FILE_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  }
-  return std::unique_ptr<uint8_t[], void (*)(void *)>(static_cast<uint8_t *>(ptr), free);
-#else
-  // Standard allocation for platforms without PSRAM or when PSRAM not guaranteed
-  return std::unique_ptr<uint8_t[], void (*)(void *)>(new uint8_t[FILE_BUFFER_SIZE],
-                                                      [](void *p) { delete[] static_cast<uint8_t *>(p); });
-#endif
-}
+// Note: File buffers are now preallocated in setup() as part of buffer_pool_
+// See upload_buffer_, download_buffer_, copy_buffer_ members
 
 void HttpFileBrowser::setup() {
   ESP_LOGI(TAG, "Setting up HTTP File Browser with prefix: %s", this->url_prefix_.c_str());
   ESP_LOGI(TAG, "Root path: %s", this->root_path_.c_str());
   ESP_LOGI(TAG, "Upload: %s, Download: %s, Delete: %s", this->upload_enabled_ ? "YES" : "NO",
            this->download_enabled_ ? "YES" : "NO", this->deletion_enabled_ ? "YES" : "NO");
+
+  // Allocate buffer pool for file operations
+  // Pool contains 3 buffers: upload, download, copy (each FILE_BUFFER_SIZE)
+  // FILE_BUFFER_SIZE varies by platform and PSRAM availability:
+  //   - PSRAM devices: 32-64KB per buffer = 96-192KB total
+  //   - Non-PSRAM devices: 4-16KB per buffer = 12-48KB total
+  this->buffer_pool_size_ = FILE_BUFFER_SIZE * 3;
+
+#if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
+  this->buffer_pool_ = (uint8_t *) heap_caps_malloc(this->buffer_pool_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->buffer_pool_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated %zu byte buffer pool from PSRAM (%zu KB per buffer)", this->buffer_pool_size_,
+             FILE_BUFFER_SIZE / 1024);
+  } else {
+    ESP_LOGW(TAG, "PSRAM allocation failed, using heap for buffer pool");
+    this->buffer_pool_ = (uint8_t *) malloc(this->buffer_pool_size_);
+  }
+#else
+  this->buffer_pool_ = (uint8_t *) malloc(this->buffer_pool_size_);
+  ESP_LOGI(TAG, "Allocated %zu byte buffer pool from heap (%zu KB per buffer)", this->buffer_pool_size_,
+           FILE_BUFFER_SIZE / 1024);
+#endif
+
+  if (this->buffer_pool_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate buffer pool!");
+    this->mark_failed();
+    return;
+  }
+
+  // Partition buffer pool into separate buffers
+  this->upload_buffer_ = this->buffer_pool_;
+  this->download_buffer_ = this->buffer_pool_ + FILE_BUFFER_SIZE;
+  this->copy_buffer_ = this->buffer_pool_ + (FILE_BUFFER_SIZE * 2);
 
   // Register directly with AsyncWebServer to bypass web_server_base's auth middleware
   // This allows http_file_browser to have its own independent authentication
@@ -60,6 +79,17 @@ void HttpFileBrowser::setup() {
     ESP_LOGI(TAG, "HTTP File Browser registered successfully (bypassing base auth)");
   } else {
     ESP_LOGE(TAG, "Failed to get web server instance");
+  }
+}
+
+HttpFileBrowser::~HttpFileBrowser() {
+  // Free buffer pool
+  if (this->buffer_pool_ != nullptr) {
+    free(this->buffer_pool_);
+    this->buffer_pool_ = nullptr;
+    this->upload_buffer_ = nullptr;
+    this->download_buffer_ = nullptr;
+    this->copy_buffer_ = nullptr;
   }
 }
 
@@ -610,8 +640,34 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       this->upload_bytes_since_yield_ = 0;
 
       // Allocate buffer for network storage upload (will accumulate all chunks)
+      // Use PSRAM if available for better performance
       this->chunk_buffer_size_ = expected_size > 0 ? expected_size : FILE_BUFFER_SIZE;
-      this->chunk_buffer_ = std::make_unique<uint8_t[]>(this->chunk_buffer_size_);
+
+#if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
+      uint8_t *temp_buffer =
+          (uint8_t *) heap_caps_malloc(this->chunk_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (temp_buffer != nullptr) {
+        this->chunk_buffer_ = std::unique_ptr<uint8_t[], void (*)(void *)>(temp_buffer, free);
+        ESP_LOGD(TAG, "Allocated %zu byte upload buffer from PSRAM", this->chunk_buffer_size_);
+      } else {
+        ESP_LOGW(TAG, "PSRAM allocation failed for %zu bytes, using heap", this->chunk_buffer_size_);
+        temp_buffer = (uint8_t *) malloc(this->chunk_buffer_size_);
+        this->chunk_buffer_ = std::unique_ptr<uint8_t[], void (*)(void *)>(temp_buffer, free);
+      }
+#else
+      uint8_t *temp_buffer = (uint8_t *) malloc(this->chunk_buffer_size_);
+      this->chunk_buffer_ = std::unique_ptr<uint8_t[], void (*)(void *)>(temp_buffer, free);
+      ESP_LOGD(TAG, "Allocated %zu byte upload buffer from heap", this->chunk_buffer_size_);
+#endif
+
+      if (this->chunk_buffer_.get() == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for network upload!", this->chunk_buffer_size_);
+        portENTER_CRITICAL(&this->progress_mutex_);
+        this->progress_.in_progress = false;
+        portEXIT_CRITICAL(&this->progress_mutex_);
+        request->send(500, "text/plain", "Failed to allocate upload buffer");
+        return;
+      }
 
       // upload_file_ remains null - signals network storage mode
       this->upload_file_ = nullptr;
@@ -2563,7 +2619,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
     // Stream data in chunks using read_file_chunk (memory efficient)
-    auto buffer = allocate_file_buffer();
+    uint8_t *buffer = this->download_buffer_;  // Network download
     size_t total_sent = 0;
     bool success = true;
 
@@ -2571,7 +2627,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
       App.feed_wdt();  // Feed watchdog for large files
 
       size_t bytes_read = 0;
-      if (!net_storage->read_file_chunk(relative_path, buffer.get(), total_sent, FILE_BUFFER_SIZE, bytes_read)) {
+      if (!net_storage->read_file_chunk(relative_path, buffer, total_sent, FILE_BUFFER_SIZE, bytes_read)) {
         ESP_LOGE(TAG, "Failed to read chunk at offset %zu from network storage", total_sent);
         success = false;
         break;
@@ -2582,7 +2638,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
         break;
       }
 
-      esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer.get()), bytes_read);
+      esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
       if (err != ESP_OK) {
         ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
         success = false;
@@ -2634,7 +2690,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
   // Stream file in chunks
-  auto buffer = allocate_file_buffer();
+  uint8_t *buffer = this->download_buffer_;  // Network download
   size_t total_sent = 0;
   bool success = true;
 
@@ -2642,7 +2698,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     App.feed_wdt();  // Feed watchdog for large files
 
     size_t to_read = std::min(FILE_BUFFER_SIZE, file_size - total_sent);
-    size_t bytes_read = fread(buffer.get(), 1, to_read, file);
+    size_t bytes_read = fread(buffer, 1, to_read, file);
 
     if (bytes_read == 0) {
       ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_sent);
@@ -2650,7 +2706,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
       break;
     }
 
-    esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer.get()), bytes_read);
+    esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
       success = false;
@@ -2733,8 +2789,8 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   // Get raw httpd_req_t to read POST body
   httpd_req_t *req = static_cast<httpd_req_t *>(*request);
   size_t remaining = request->contentLength();
-  // Use architecture-specific buffer size (4KB/8KB/16KB/32KB/64KB based on ESP32 variant and PSRAM)
-  auto buffer = allocate_file_buffer();  // Allocates from PSRAM when available
+  // Use preallocated upload buffer from buffer pool
+  uint8_t *buffer = this->upload_buffer_;
   bool success = true;
 
   ESP_LOGI(TAG, "Reading upload data: %zu bytes total", remaining);
@@ -2746,7 +2802,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
     App.feed_wdt();
 
     size_t to_read = (remaining > FILE_BUFFER_SIZE) ? FILE_BUFFER_SIZE : remaining;
-    int received = httpd_req_recv(req, reinterpret_cast<char *>(buffer.get()), to_read);
+    int received = httpd_req_recv(req, reinterpret_cast<char *>(buffer), to_read);
 
     if (received <= 0) {
       ESP_LOGE(TAG, "Failed to receive data: %d (errno: %d)", received, errno);
@@ -2754,7 +2810,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
       break;
     }
 
-    size_t written = fwrite(buffer.get(), 1, received, file);
+    size_t written = fwrite(buffer, 1, received, file);
     fflush(file);  // Ensure data is written immediately
 
     if (written != static_cast<size_t>(received)) {
@@ -4549,7 +4605,7 @@ void HttpFileBrowser::download_task(void *params) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
   // Use architecture-specific buffer size (4KB/8KB/16KB/32KB/64KB based on ESP32 variant and PSRAM)
-  auto buffer = allocate_file_buffer();
+  uint8_t *buffer = this->download_buffer_;  // Network download
   size_t total_sent = 0;
   bool success = true;
 
@@ -4557,7 +4613,7 @@ void HttpFileBrowser::download_task(void *params) {
     App.feed_wdt();  // Feed watchdog for large files
 
     size_t to_read = std::min(FILE_BUFFER_SIZE, task_params->file_size - total_sent);
-    size_t bytes_read = fread(buffer.get(), 1, to_read, file);
+    size_t bytes_read = fread(buffer, 1, to_read, file);
 
     if (bytes_read == 0) {
       ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_sent);
@@ -4565,7 +4621,7 @@ void HttpFileBrowser::download_task(void *params) {
       break;
     }
 
-    esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer.get()), bytes_read);
+    esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
     if (err != ESP_OK) {
       ESP_LOGI(TAG, "Download cancelled or connection closed at %zu / %zu bytes (%s)", total_sent,
                task_params->file_size, esp_err_to_name(err));
@@ -4652,7 +4708,8 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
     std::string dst_relative = dst_net_storage ? strip_network_mount_prefix(dst_net_storage, dst_path) : dst_path;
 
     // Use chunked copy to avoid loading entire file into memory
-    auto buffer = allocate_file_buffer();
+    // Use preallocated copy buffer from buffer pool
+    uint8_t *buffer = this->copy_buffer_;
     size_t total_copied = 0;
     bool copy_success = true;
     bool first_chunk = true;
@@ -4707,13 +4764,13 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
       // Read chunk
       size_t bytes_read = 0;
       if (src_net_storage != nullptr) {
-        if (!src_net_storage->read_file_chunk(src_relative, buffer.get(), total_copied, FILE_BUFFER_SIZE, bytes_read)) {
+        if (!src_net_storage->read_file_chunk(src_relative, buffer, total_copied, FILE_BUFFER_SIZE, bytes_read)) {
           ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_copied);
           copy_success = false;
           break;
         }
       } else {
-        bytes_read = fread(buffer.get(), 1, FILE_BUFFER_SIZE, src_file);
+        bytes_read = fread(buffer, 1, FILE_BUFFER_SIZE, src_file);
         if (bytes_read == 0 && ferror(src_file)) {
           ESP_LOGE(TAG, "Failed to read from source file");
           copy_success = false;
@@ -4728,13 +4785,13 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
 
       // Write chunk
       if (dst_net_storage != nullptr) {
-        if (!dst_net_storage->write_file_chunk(dst_relative, buffer.get(), total_copied, bytes_read, first_chunk)) {
+        if (!dst_net_storage->write_file_chunk(dst_relative, buffer, total_copied, bytes_read, first_chunk)) {
           ESP_LOGE(TAG, "Failed to write chunk at offset %zu", total_copied);
           copy_success = false;
           break;
         }
       } else {
-        size_t written = fwrite(buffer.get(), 1, bytes_read, dst_file);
+        size_t written = fwrite(buffer, 1, bytes_read, dst_file);
         if (written != bytes_read) {
           ESP_LOGE(TAG, "Failed to write to destination file");
           copy_success = false;
@@ -4808,7 +4865,7 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
   ESP_LOGI(TAG, "Starting file copy: %s -> %s (size: %lld bytes)", src_path.c_str(), dst_path.c_str(),
            (long long) file_size);
 
-  while ((bytes_read = fread(buffer.get(), 1, COPY_BUFFER_SIZE, src)) > 0) {
+  while ((bytes_read = fread(buffer, 1, COPY_BUFFER_SIZE, src)) > 0) {
     // Check for cancellation (thread-safe)
     if (track_progress) {
       portENTER_CRITICAL(&this->progress_mutex_);
@@ -4822,7 +4879,7 @@ bool HttpFileBrowser::perform_file_copy(const std::string &src_path, const std::
       }
     }
 
-    size_t bytes_written = fwrite(buffer.get(), 1, bytes_read, dst);
+    size_t bytes_written = fwrite(buffer, 1, bytes_read, dst);
     if (bytes_written != bytes_read) {
       ESP_LOGE(TAG, "Write failed at offset %zu (errno: %d, %s)", total_copied, errno, strerror(errno));
       copy_success = false;

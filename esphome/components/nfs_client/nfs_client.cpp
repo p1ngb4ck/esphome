@@ -392,7 +392,14 @@ void RPCClient::encode_auth_null_(XDRBuffer &xdr) {
 // NFSClient Implementation
 //========================================================================
 
-NFSClient::~NFSClient() { this->disconnect_(); }
+NFSClient::~NFSClient() {
+  this->disconnect_();
+  // Free RPC response buffer
+  if (this->rpc_response_buffer_ != nullptr) {
+    free(this->rpc_response_buffer_);
+    this->rpc_response_buffer_ = nullptr;
+  }
+}
 
 void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
@@ -402,6 +409,27 @@ void NFSClient::setup() {
 
   if (!this->mount_path_.empty()) {
     ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
+  }
+
+  // Allocate RPC response buffer (65KB) - prefer PSRAM if available
+  // This buffer is reused for all RPC calls to avoid runtime allocations
+#if defined(USE_PSRAM) && defined(USE_ESP_IDF)
+  this->rpc_response_buffer_ = (uint8_t *) heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->rpc_response_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated 65KB RPC buffer from PSRAM");
+  } else {
+    ESP_LOGW(TAG, "PSRAM allocation failed, using heap for RPC buffer");
+    this->rpc_response_buffer_ = (uint8_t *) malloc(65536);
+  }
+#else
+  this->rpc_response_buffer_ = (uint8_t *) malloc(65536);
+  ESP_LOGI(TAG, "Allocated 65KB RPC buffer from heap");
+#endif
+
+  if (this->rpc_response_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate RPC response buffer!");
+    this->mark_failed();
+    return;
   }
 
   // Don't block in setup() - just set state to start mounting in loop()

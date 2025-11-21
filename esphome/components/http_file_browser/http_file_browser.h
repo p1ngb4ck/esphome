@@ -99,6 +99,7 @@ struct FileInfo {
 class HttpFileBrowser : public Component, public AsyncWebHandler {
  public:
   HttpFileBrowser(web_server_base::WebServerBase *base) : base_(base) {}
+  ~HttpFileBrowser();
 
   void setup() override;
   void loop() override;
@@ -230,8 +231,18 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   size_t upload_received_size_{0};
   size_t upload_bytes_since_yield_{0};  // Track bytes to yield CPU periodically
 
+  // Buffer pool (allocated once in setup, partitioned for different operations)
+  // Layout: [upload_buffer | download_buffer | copy_buffer]
+  uint8_t *buffer_pool_{nullptr};
+  size_t buffer_pool_size_{0};
+
+  // Partitioned buffers (pointers into buffer_pool_)
+  uint8_t *upload_buffer_{nullptr};
+  uint8_t *download_buffer_{nullptr};
+  uint8_t *copy_buffer_{nullptr};
+
   // Reusable chunk buffer for uploads (avoids repeated allocations)
-  std::unique_ptr<uint8_t[]> chunk_buffer_;
+  std::unique_ptr<uint8_t[], void (*)(void *)> chunk_buffer_;
   size_t chunk_buffer_size_{0};
 
   // Network storage chunked upload state
