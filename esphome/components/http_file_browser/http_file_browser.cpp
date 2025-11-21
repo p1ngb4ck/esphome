@@ -2789,6 +2789,23 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
 
 // Directory helpers
 bool HttpFileBrowser::is_directory_empty(const std::string &path) {
+  // Check if this is network storage
+  storage::NetworkStorage *net_storage = nullptr;
+  if (this->storage_ != nullptr) {
+    net_storage = this->storage_->find_network_storage_for_path(path);
+  }
+
+  if (net_storage != nullptr) {
+    // Network storage - use NetworkStorage API
+    std::string relative_path = strip_network_mount_prefix(net_storage, path);
+    std::vector<storage::NetworkStorage::DirEntry> entries;
+    if (!net_storage->list_directory(relative_path, entries)) {
+      return true;  // Can't list, treat as empty
+    }
+    return entries.empty();
+  }
+
+  // Local VFS storage
   DIR *dir = opendir(path.c_str());
   if (!dir) {
     return true;  // Can't open, treat as empty
@@ -3432,28 +3449,21 @@ void HttpFileBrowser::handle_api_rename(AsyncWebServerRequest *request) {
     // Network storage - use copy+delete (NetworkStorage has no rename operation)
     ESP_LOGI(TAG, "Network storage rename detected, using copy+delete");
 
-    // Read source file
-    std::vector<uint8_t> file_data;
-    if (!net_storage->read_file(source, file_data)) {
-      ESP_LOGE(TAG, "Failed to read source file for rename: %s", source.c_str());
-      request->send(500, "application/json", "{\"error\":\"Failed to read source file\"}");
-      return;
-    }
+    if (is_directory) {
+      // Directory rename - use directory move
+      success = this->perform_directory_move(source, new_path, false);
+    } else {
+      // File rename - get file size for chunked copy
+      struct stat file_stat;
+      off_t file_size = 0;
+      std::string source_relative = strip_network_mount_prefix(net_storage, source);
+      if (net_storage->stat(source_relative, file_stat)) {
+        file_size = file_stat.st_size;
+      }
 
-    // Write to new path
-    if (!net_storage->write_file(new_path, file_data.data(), file_data.size())) {
-      ESP_LOGE(TAG, "Failed to write destination file for rename: %s", new_path.c_str());
-      request->send(500, "application/json", "{\"error\":\"Failed to write destination file\"}");
-      return;
+      // Use perform_file_move which handles chunked operations
+      success = this->perform_file_move(source, new_path, file_size, false);
     }
-
-    // Delete source file
-    if (!net_storage->delete_file(source)) {
-      ESP_LOGW(TAG, "Failed to delete source after rename copy: %s (destination written successfully)", source.c_str());
-      // Still consider success since destination was written
-    }
-
-    success = true;
   } else {
     // Local storage - use atomic rename
     success = (rename(source.c_str(), new_path.c_str()) == 0);
