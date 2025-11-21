@@ -1529,26 +1529,24 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       return false;
     }
 
-    // Decode entries
+    // Decode entries (RFC 1813: entry3 is linked list with value_follows boolean)
     bool has_entry;
-    size_t entry_count = 0;
     while (response.decode_bool(has_entry) && has_entry) {
       NFSDirEntry entry;
       if (!response.decode_uint64(entry.fileid)) {
-        ESP_LOGW(TAG, "READDIR: Failed to decode fileid at entry %zu", entry_count);
-        break;
+        ESP_LOGE(TAG, "READDIR: Failed to decode fileid");
+        return false;
       }
       if (!response.decode_string(entry.name)) {
-        ESP_LOGW(TAG, "READDIR: Failed to decode name at entry %zu", entry_count);
-        break;
+        ESP_LOGE(TAG, "READDIR: Failed to decode name");
+        return false;
       }
       if (!response.decode_uint64(entry.cookie)) {
-        ESP_LOGW(TAG, "READDIR: Failed to decode cookie at entry %zu", entry_count);
-        break;
+        ESP_LOGE(TAG, "READDIR: Failed to decode cookie");
+        return false;
       }
 
-      entry_count++;
-      ESP_LOGD(TAG, "READDIR: Entry %zu: name='%s', cookie=%llu", entry_count, entry.name.c_str(), entry.cookie);
+      ESP_LOGD(TAG, "READDIR: Entry '%s', cookie=%llu", entry.name.c_str(), entry.cookie);
 
       // Skip "." and ".."
       if (entry.name != "." && entry.name != "..") {
@@ -1558,20 +1556,24 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       cookie = entry.cookie;
     }
 
-    ESP_LOGI(TAG, "READDIR: Decoded %zu entries, last cookie=%llu", entry_count, cookie);
-
-    // Check if EOF
+    // EOF flag comes right after the entry list (value_follows=FALSE)
     bool eof;
     if (!response.decode_bool(eof)) {
-      ESP_LOGE(TAG, "READDIR: Failed to decode EOF flag");
+      ESP_LOGE(TAG, "READDIR: Failed to decode EOF flag, pos=%zu size=%zu", response.position(), response.size());
       return false;
     }
 
-    ESP_LOGI(TAG, "READDIR: EOF flag = %s", eof ? "TRUE" : "FALSE");
+    ESP_LOGD(TAG, "READDIR: eof=%d, cookie=%llu, pos=%zu size=%zu", eof, cookie, response.position(), response.size());
 
     if (eof) {
-      ESP_LOGI(TAG, "READDIR: Completed, total entries collected: %zu", entries.size());
+      ESP_LOGI(TAG, "READDIR: Completed with %zu entries", entries.size());
       break;
+    }
+
+    // Safety check: if no entries and cookie didn't change, we're stuck
+    if (cookie == 0) {
+      ESP_LOGE(TAG, "READDIR: Server returned eof=false but no entries, aborting to prevent infinite loop");
+      return false;
     }
   }
 
