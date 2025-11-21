@@ -1507,75 +1507,57 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       ESP_LOGW(TAG, "READDIR failed: status=%u", nfs_status);
       return false;
     }
-    ESP_LOGD(TAG, "READDIR: after nfs_status pos=%zu", response.position());
 
-    // Skip post-op attributes
+    // Decode post-op attributes (optional)
     bool has_attr;
-    NFSFileAttr attr;
     if (!response.decode_bool(has_attr)) {
-      ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes boolean");
+      ESP_LOGW(TAG, "READDIR: Failed to decode has_attr");
       return false;
     }
-    ESP_LOGD(TAG, "READDIR: has_attr=%d, pos=%zu", has_attr, response.position());
     if (has_attr) {
+      NFSFileAttr attr;
       if (!attr.decode(response)) {
         ESP_LOGW(TAG, "READDIR: Failed to decode dir_attributes");
         return false;
       }
-      ESP_LOGD(TAG, "READDIR: after fattr3 pos=%zu", response.position());
     }
 
-    // Decode cookieverf (fixed 8 bytes, not length-prefixed)
+    // Decode cookieverf (fixed 8 bytes)
     if (!response.decode_bytes(cookieverf, 8)) {
       ESP_LOGW(TAG, "READDIR: Failed to decode cookieverf");
       return false;
     }
-    ESP_LOGD(TAG, "READDIR: after cookieverf pos=%zu", response.position());
 
-    // Decode entries (RFC 1813: entry3 is linked list with value_follows boolean)
+    // Decode directory entries
     bool has_entry;
     while (response.decode_bool(has_entry) && has_entry) {
       NFSDirEntry entry;
-      if (!response.decode_uint64(entry.fileid)) {
-        ESP_LOGE(TAG, "READDIR: Failed to decode fileid");
-        return false;
-      }
-      if (!response.decode_string(entry.name)) {
-        ESP_LOGE(TAG, "READDIR: Failed to decode name");
-        return false;
-      }
-      if (!response.decode_uint64(entry.cookie)) {
-        ESP_LOGE(TAG, "READDIR: Failed to decode cookie");
+      if (!response.decode_uint64(entry.fileid) || !response.decode_string(entry.name) ||
+          !response.decode_uint64(entry.cookie)) {
+        ESP_LOGW(TAG, "READDIR: Failed to decode entry");
         return false;
       }
 
-      ESP_LOGD(TAG, "READDIR: Entry '%s', cookie=%llu", entry.name.c_str(), entry.cookie);
-
-      // Skip "." and ".."
       if (entry.name != "." && entry.name != "..") {
         entries.push_back(entry);
       }
-
       cookie = entry.cookie;
     }
 
-    // EOF flag comes right after the entry list (value_follows=FALSE)
+    // Decode EOF flag
     bool eof;
     if (!response.decode_bool(eof)) {
-      ESP_LOGE(TAG, "READDIR: Failed to decode EOF flag, pos=%zu size=%zu", response.position(), response.size());
+      ESP_LOGW(TAG, "READDIR: Failed to decode EOF");
       return false;
     }
 
-    ESP_LOGD(TAG, "READDIR: eof=%d, cookie=%llu, pos=%zu size=%zu", eof, cookie, response.position(), response.size());
-
     if (eof) {
-      ESP_LOGI(TAG, "READDIR: Completed with %zu entries", entries.size());
+      ESP_LOGI(TAG, "READDIR: Got %zu entries", entries.size());
       break;
     }
 
-    // Safety check: if no entries and cookie didn't change, we're stuck
     if (cookie == 0) {
-      ESP_LOGE(TAG, "READDIR: Server returned eof=false but no entries, aborting to prevent infinite loop");
+      ESP_LOGW(TAG, "READDIR: No progress, aborting");
       return false;
     }
   }
