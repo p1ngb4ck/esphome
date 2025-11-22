@@ -1,6 +1,5 @@
 #include "esphome/core/defines.h"
 #include "flash_partition.h"
-#include "esp_vfs_littlefs.h"
 
 #ifdef USE_BINARY_STORAGE_FLASH_PARTITION
 
