@@ -1,10 +1,30 @@
 #pragma once
 
 #include "esphome/core/defines.h"
-
 #ifdef USE_BINARY_STORAGE_FLASH_PARTITION
 
 #include "esphome/core/component.h"
+#include "esphome/core/hal.h"
+#include "esp_partition.h"
+#include "spi_flash_mmap.h"
+
+#if CONFIG_IDF_TARGET_ESP32
+#include "esp32/rom/spi_flash.h"
+#elif CONFIG_IDF_TARGET_ESP32S2
+#include "esp32s2/rom/spi_flash.h"
+#elif CONFIG_IDF_TARGET_ESP32S3
+#include "esp32s3/rom/spi_flash.h"
+#elif CONFIG_IDF_TARGET_ESP32C3
+#include "esp32c3/rom/spi_flash.h"
+#elif CONFIG_IDF_TARGET_ESP32H2
+#include "esp32h2/rom/spi_flash.h"
+#elif CONFIG_IDF_TARGET_ESP8684
+#include "esp8684/rom/spi_flash.h"
+#elif __has_include("esp32/rom/spi_flash.h")
+#include "esp32/rom/spi_flash.h"  //IDF 4
+#else
+#include "rom/spi_flash.h"  //IDF 3
+#endif
 #include <string>
 
 #ifdef USE_ESP_IDF
