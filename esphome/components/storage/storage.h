@@ -106,7 +106,7 @@ class Storage : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  float get_setup_priority() const override { return setup_priority::BUS; }
 
   // File methods
   bool file_exists(const std::string &path);
