@@ -491,6 +491,7 @@ async def to_code(config):
 
     # Setup LittleFS mount if mode requires it
     if mode in [MODE_LITTLEFS, MODE_BOTH]:
+        cg.add_define("USE_STORAGE")
         # Determine mount path
         mount_path = config.get(CONF_MOUNT_PATH)
         if not mount_path:
