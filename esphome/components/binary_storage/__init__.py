@@ -5,6 +5,7 @@ import re
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import i2c, spi
+from esphome.components.esp32 import require_vfs_dir
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADDRESS,
@@ -17,6 +18,7 @@ from esphome.const import (
     CONF_TYPE,
     CONF_VALUE,
 )
+from esphome.core import CORE
 
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = []  # No hard dependencies - components loaded on demand
@@ -335,24 +337,16 @@ TYPE_TO_DEVICE = {
 
 
 def _final_validate(config):
-    """Track configured device types for source file filtering."""
-    from esphome.core import CORE
-
     device_type = config[CONF_TYPE].upper()
     internal_type = TYPE_TO_DEVICE.get(device_type)
     if internal_type:
         configured = CORE.data.setdefault("binary_storage_device_types", set())
         configured.add(internal_type)
-
-    # If using LittleFS mode, ensure VFS directory support is enabled early
-    # This must happen before to_code() so ESP32's sdkconfig is set correctly
     mode = config.get(CONF_MODE, MODE_RAW)
     if mode in [MODE_LITTLEFS, MODE_BOTH] or device_type in [
         "FLASH_PARTITION",
         "PARTITION",
     ]:
-        from esphome.components.esp32 import require_vfs_dir
-
         require_vfs_dir()
 
     return config
@@ -362,9 +356,6 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 def FILTER_SOURCE_FILES():
-    """Return list of source files to exclude based on configured device types."""
-    from esphome.core import CORE
-
     # Get configured device types
     configured = CORE.data.get("binary_storage_device_types", set())
 
@@ -377,9 +368,6 @@ def FILTER_SOURCE_FILES():
 
 
 async def to_code(config):
-    """Configure binary storage device."""
-    from esphome.core import CORE
-
     device_type = config[CONF_TYPE].upper()
 
     # Define USE_BINARY_STORAGE for StorageDevice interface
@@ -389,8 +377,6 @@ async def to_code(config):
     # This must be done before any LittleFS setup to ensure VFS struct has required members
     mode = config.get(CONF_MODE, MODE_RAW)
     if mode in [MODE_LITTLEFS, MODE_BOTH]:
-        from esphome.components.esp32 import require_vfs_dir
-
         require_vfs_dir()
 
     # Add ESPHome's forked esp_littlefs with custom block device support
@@ -413,9 +399,6 @@ async def to_code(config):
     # Handle FLASH_PARTITION - uses partition-based mounting with LittleFS
     if device_type in ["FLASH_PARTITION", "PARTITION"]:
         cg.add_define("USE_BINARY_STORAGE_FLASH_PARTITION")
-
-        # Flash partition always uses LittleFS, ensure VFS directory support is enabled
-        from esphome.components.esp32 import require_vfs_dir
 
         require_vfs_dir()
 
