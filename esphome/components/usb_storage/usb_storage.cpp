@@ -316,7 +316,7 @@ void USBStorageHost::setup() {
   // Register with global storage registry
 #ifdef USE_STORAGE
   if (storage::global_storage != nullptr) {
-    storage::global_storage->register_host(this);
+    storage::global_storage->register_device(this);
     ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
   }
 #endif
