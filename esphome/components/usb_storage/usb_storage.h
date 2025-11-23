@@ -97,7 +97,7 @@ class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, pu
   void setup() override;
   void dump_config() override;
   // Run after storage component (DATA=600) to ensure global_storage is initialized
-  float get_setup_priority() const override { return 400.0f; }
+  float get_setup_priority() const override { return setup_priority::DATA; }
 
   void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }
   void set_mount_path(const std::string &mount_path) { this->mount_path_ = mount_path; }
