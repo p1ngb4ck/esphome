@@ -297,8 +297,6 @@ static void msc_event_callback(const msc_host_event_t *event, void *arg) {
 
 void USBStorageHost::setup() {
   ESP_LOGCONFIG(TAG, "Registering USB Storage Host Component...");
-  ESP_LOGI(TAG, "USBStorageHost setup() called");
-
   const msc_host_driver_config_t msc_config = {
       .create_backround_task = true,
       .task_priority = 5,
@@ -318,12 +316,13 @@ void USBStorageHost::setup() {
 
 void USBStorageDevice::setup() {
   ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)");
-  ESP_LOGI(TAG, "USBStorageDevice setup() called - will be triggered by interface-class matching");
-
-  // Note: Storage registration happens via mount_ready_callback
-  // registered by storage component during codegen. This allows
-  // removable media to register/unregister dynamically when devices
-  // are connected/disconnected.
+  // register with global storage registry
+#ifdef USE_STORAGE
+  if (storage::global_storage != nullptr) {
+    storage::global_storage->register_device(this);
+    ESP_LOGD(TAG, "Registered with storage registry");
+  }
+#endif
 }
 
 void USBStorageDevice::dump_config() {
@@ -407,9 +406,9 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
   ESP_LOGI(TAG, "Successfully allocated MSC device to slot %d", this->slot_);
 
   this->print_device_info();
-  this->list_files();
-  this->file_operations();
-  this->speed_test();
+  // this->list_files();
+  // this->file_operations();
+  // this->speed_test();
 
   // Notify all registered callbacks that mount is ready
   ESP_LOGI(TAG, "Notifying %zu mount ready callbacks for '%s'", this->mount_ready_callbacks_.size(),
