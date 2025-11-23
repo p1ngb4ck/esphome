@@ -312,7 +312,10 @@ void USBStorageHost::setup() {
   }
 
   ESP_LOGI(TAG, "MSC host driver initialized successfully");
+}
 
+void USBStorageDevice::setup() {
+  ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)");
   // Register with global storage registry
 #ifdef USE_STORAGE
   if (storage::global_storage != nullptr) {
@@ -321,8 +324,6 @@ void USBStorageHost::setup() {
   }
 #endif
 }
-
-void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
