@@ -7,7 +7,7 @@
 // duplicate definitions when this bridge compiles alongside other media
 // player translation units.
 #define TAG SPEAKER_AUDIO_PIPELINE_BRIDGE_LOG_TAG
-#include "speaker/media_player/audio_pipeline.cpp"
+#include "esphome/components/speaker/media_player/audio_pipeline.cpp"
 #undef TAG
 
 namespace esphome {

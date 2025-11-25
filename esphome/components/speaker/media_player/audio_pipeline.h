@@ -19,7 +19,7 @@ namespace esphome {
 namespace speaker {
 
 // Internal sink/source buffers for reader and decoder
-static const size_t DEFAULT_TRANSFER_BUFFER_SIZE = 24 * 1024;
+inline constexpr size_t DEFAULT_TRANSFER_BUFFER_SIZE = 24 * 1024;
 
 enum class AudioPipelineType : uint8_t {
   MEDIA,
