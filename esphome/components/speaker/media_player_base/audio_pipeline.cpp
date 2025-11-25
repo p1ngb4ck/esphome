@@ -592,4 +592,4 @@ void AudioPipeline::decode_task(void *params) {
 }  // namespace speaker
 }  // namespace esphome
 
-#endif
+#endif  // USE_ESP_IDF

@@ -577,4 +577,4 @@ void SpeakerMediaPlayer::set_volume_(float volume, bool publish) {
 }  // namespace speaker
 }  // namespace esphome
 
-#endif
+#endif  // USE_ESP_IDF

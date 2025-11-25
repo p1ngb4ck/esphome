@@ -30,7 +30,7 @@ from esphome.external_files import download_content
 _LOGGER = logging.getLogger(__name__)
 
 
-AUTO_LOAD = ["audio"]
+AUTO_LOAD = ["audio", "speaker.media_player_base"]
 
 CODEOWNERS = ["@kahrendt", "@synesthesiam"]
 DOMAIN = "media_player"
