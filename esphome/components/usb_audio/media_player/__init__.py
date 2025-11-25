@@ -28,13 +28,7 @@ DEPENDENCIES = ["usb_audio", "speaker"]
 
 
 def AUTO_LOAD(config):
-    auto_load = (
-        speaker_mp.AUTO_LOAD.copy()
-        if isinstance(speaker_mp.AUTO_LOAD, list)
-        else [speaker_mp.AUTO_LOAD]
-    )
-    auto_load.append("speaker.media_player_base")
-    return auto_load
+    return speaker_mp.AUTO_LOAD
 
 
 SpeakerMediaPlayerBase = speaker_mp.SpeakerMediaPlayer
