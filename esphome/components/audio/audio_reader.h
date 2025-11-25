@@ -50,6 +50,12 @@ class AudioReader {
   /// @return ESP_OK
   esp_err_t start(AudioFile *audio_file, AudioFileType &file_type);
 
+  /// @brief Starts reading an audio file from a local file path. The transfer buffer is allocated here.
+  /// @param file_path Local file path (e.g., "/usb/music.mp3", "/sd/audio.flac").
+  /// @param file_type AudioFileType variable passed-by-reference indicating the type of file being read.
+  /// @return ESP_OK if successful, ESP_ERR_NOT_FOUND if file doesn't exist, ESP_ERR_NOT_SUPPORTED if format unknown.
+  esp_err_t start_file_path(const std::string &file_path, AudioFileType &file_type);
+
   /// @brief Reads new file data from the source and sends to the ring buffer sink.
   /// @return AudioReaderState
   AudioReaderState read();
@@ -65,6 +71,7 @@ class AudioReader {
 
   AudioReaderState file_read_();
   AudioReaderState http_read_();
+  AudioReaderState file_path_read_();
 
   std::shared_ptr<RingBuffer> file_ring_buffer_;
   std::unique_ptr<AudioSinkTransferBuffer> output_transfer_buffer_;
@@ -78,6 +85,11 @@ class AudioReader {
   AudioFile *current_audio_file_{nullptr};
   AudioFileType audio_file_type_{AudioFileType::NONE};
   const uint8_t *file_current_{nullptr};
+
+  // File path streaming members
+  FILE *file_handle_{nullptr};
+  size_t file_size_{0};
+  size_t file_position_{0};
 };
 }  // namespace audio
 }  // namespace esphome

@@ -53,7 +53,13 @@ enum HttpStatus {
   HTTP_STATUS_INTERNAL_ERROR = 500
 };
 
-AudioReader::~AudioReader() { this->cleanup_connection_(); }
+AudioReader::~AudioReader() {
+  this->cleanup_connection_();
+  if (this->file_handle_ != nullptr) {
+    fclose(this->file_handle_);
+    this->file_handle_ = nullptr;
+  }
+}
 
 esp_err_t AudioReader::add_sink(const std::weak_ptr<RingBuffer> &output_ring_buffer) {
   if (current_audio_file_ != nullptr) {
@@ -77,6 +83,74 @@ esp_err_t AudioReader::start(AudioFile *audio_file, AudioFileType &file_type) {
 
   this->file_current_ = audio_file->data;
   file_type = audio_file->file_type;
+
+  return ESP_OK;
+}
+
+esp_err_t AudioReader::start_file_path(const std::string &file_path, AudioFileType &file_type) {
+  file_type = AudioFileType::NONE;
+
+  // Clean up any existing file handle
+  if (this->file_handle_ != nullptr) {
+    fclose(this->file_handle_);
+    this->file_handle_ = nullptr;
+  }
+
+  // Open file for reading
+  this->file_handle_ = fopen(file_path.c_str(), "rb");
+  if (this->file_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to open file: %s", file_path.c_str());
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  // Get file size
+  fseek(this->file_handle_, 0, SEEK_END);
+  this->file_size_ = ftell(this->file_handle_);
+  fseek(this->file_handle_, 0, SEEK_SET);
+  this->file_position_ = 0;
+
+  ESP_LOGD(TAG, "Opened file: %s (size: %zu bytes)", file_path.c_str(), this->file_size_);
+
+  // Detect file type from extension
+  std::string path_lower = str_lower_case(file_path);
+
+  if (str_endswith(path_lower, ".wav")) {
+    file_type = AudioFileType::WAV;
+  }
+#ifdef USE_AUDIO_MP3_SUPPORT
+  else if (str_endswith(path_lower, ".mp3")) {
+    file_type = AudioFileType::MP3;
+  }
+#endif
+#ifdef USE_AUDIO_FLAC_SUPPORT
+  else if (str_endswith(path_lower, ".flac")) {
+    file_type = AudioFileType::FLAC;
+  }
+#endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+  else if (str_endswith(path_lower, ".aac") || str_endswith(path_lower, ".m4a")) {
+    file_type = AudioFileType::AAC;
+  }
+#endif
+  else {
+    ESP_LOGE(TAG, "Unsupported file format: %s", file_path.c_str());
+    fclose(this->file_handle_);
+    this->file_handle_ = nullptr;
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+
+  this->audio_file_type_ = file_type;
+  this->last_data_read_ms_ = millis();
+
+  // Allocate transfer buffer for file streaming
+  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(this->buffer_size_);
+  if (this->output_transfer_buffer_ == nullptr) {
+    fclose(this->file_handle_);
+    this->file_handle_ = nullptr;
+    return ESP_ERR_NO_MEM;
+  }
+
+  ESP_LOGI(TAG, "Started file path streaming: %s (type: %s)", file_path.c_str(), audio_file_type_to_string(file_type));
 
   return ESP_OK;
 }
@@ -222,6 +296,8 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
 AudioReaderState AudioReader::read() {
   if (this->client_ != nullptr) {
     return this->http_read_();
+  } else if (this->file_handle_ != nullptr) {
+    return this->file_path_read_();
   } else if (this->current_audio_file_ != nullptr) {
     return this->file_read_();
   }
@@ -308,6 +384,54 @@ AudioReaderState AudioReader::http_read_() {
       }
 
       delay(READ_WRITE_TIMEOUT_MS);
+    }
+  }
+
+  return AudioReaderState::READING;
+}
+
+AudioReaderState AudioReader::file_path_read_() {
+  if (this->file_handle_ == nullptr) {
+    return AudioReaderState::FAILED;
+  }
+
+  // Transfer any buffered data to the sink first
+  this->output_transfer_buffer_->transfer_data_to_sink(pdMS_TO_TICKS(READ_WRITE_TIMEOUT_MS), false);
+
+  // Check if we have space in the transfer buffer
+  size_t free_space = this->output_transfer_buffer_->free();
+  if (free_space == 0) {
+    // Buffer is full, try again later
+    return AudioReaderState::READING;
+  }
+
+  // Check if we've reached end of file
+  if (this->file_position_ >= this->file_size_) {
+    // Wait for all buffered data to be transferred
+    if (this->output_transfer_buffer_->available() == 0) {
+      fclose(this->file_handle_);
+      this->file_handle_ = nullptr;
+      ESP_LOGI(TAG, "Finished reading file");
+      return AudioReaderState::FINISHED;
+    }
+    return AudioReaderState::READING;
+  }
+
+  // Read a chunk from the file
+  size_t to_read = std::min(free_space, this->buffer_size_);
+  size_t bytes_read = fread(this->output_transfer_buffer_->get_buffer_end(), 1, to_read, this->file_handle_);
+
+  if (bytes_read > 0) {
+    this->output_transfer_buffer_->increase_buffer_length(bytes_read);
+    this->file_position_ += bytes_read;
+    this->last_data_read_ms_ = millis();
+  } else {
+    // Read error or EOF
+    if (ferror(this->file_handle_)) {
+      ESP_LOGE(TAG, "File read error at position %zu", this->file_position_);
+      fclose(this->file_handle_);
+      this->file_handle_ = nullptr;
+      return AudioReaderState::FAILED;
     }
   }
 
