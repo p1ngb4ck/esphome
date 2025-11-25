@@ -26,7 +26,6 @@ from esphome.const import (
 from esphome.core import CORE, HexInt
 from esphome.core.entity_helpers import inherit_property_from
 from esphome.external_files import download_content
-from esphome.final_validate import full_config
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -219,13 +218,7 @@ def _validate_repeated_speaker(config):
 
 
 def _final_validate(config):
-    # Default to using codec if psram is enabled
-    if (use_codec := config.get(CONF_CODEC_SUPPORT_ENABLED)) is None:
-        use_codec = psram.DOMAIN in full_config.get()
-    conf_id = config[CONF_ID].id
-    core_data = CORE.data.setdefault(DOMAIN, {})
-    core_data.setdefault(conf_id, {})
-    core_data[conf_id][CONF_CODEC_SUPPORT_ENABLED] = use_codec
+    use_codec = config.get(CONF_CODEC_SUPPORT_ENABLED, True)
 
     for file_config in config.get(CONF_FILES, []):
         _, media_file_type = _read_audio_file_and_type(file_config)
@@ -335,7 +328,9 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    if CORE.data[DOMAIN][config[CONF_ID].id][CONF_CODEC_SUPPORT_ENABLED]:
+    use_codec = config.get(CONF_CODEC_SUPPORT_ENABLED, True)
+
+    if use_codec:
         # Compile all supported audio codecs
         cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
         cg.add_define("USE_AUDIO_MP3_SUPPORT", True)
