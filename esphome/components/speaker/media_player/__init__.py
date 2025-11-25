@@ -329,7 +329,10 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 
 async def to_code(config):
     use_codec = config.get(CONF_CODEC_SUPPORT_ENABLED, True)
-
+    conf_id = config[CONF_ID].id
+    core_data = CORE.data.setdefault(DOMAIN, {})
+    core_data.setdefault(conf_id, {})
+    core_data[conf_id][CONF_CODEC_SUPPORT_ENABLED] = use_codec
     if use_codec:
         # Compile all supported audio codecs
         cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
