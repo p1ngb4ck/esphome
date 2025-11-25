@@ -223,7 +223,8 @@ def _final_validate(config):
     if (use_codec := config.get(CONF_CODEC_SUPPORT_ENABLED)) is None:
         use_codec = psram.DOMAIN in full_config.get()
     conf_id = config[CONF_ID].id
-    core_data = CORE.data.setdefault(DOMAIN, {conf_id: {}})
+    core_data = CORE.data.setdefault(DOMAIN, {})
+    core_data.setdefault(conf_id, {})
     core_data[conf_id][CONF_CODEC_SUPPORT_ENABLED] = use_codec
 
     for file_config in config.get(CONF_FILES, []):
