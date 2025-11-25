@@ -6,7 +6,7 @@ from pathlib import Path
 
 from esphome import automation, external_files
 import esphome.codegen as cg
-from esphome.components import audio, esp32, media_player, network, psram, speaker
+from esphome.components import audio, esp32, media_player, psram, speaker
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BUFFER_SIZE,
@@ -31,7 +31,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 AUTO_LOAD = ["audio"]
-DEPENDENCIES = ["network"]
 
 CODEOWNERS = ["@kahrendt", "@synesthesiam"]
 DOMAIN = "media_player"
@@ -276,17 +275,6 @@ PIPELINE_SCHEMA = cv.Schema(
 )
 
 
-def _request_high_performance_networking(config):
-    """Request high performance networking for streaming media.
-
-    Speaker media player streams audio data, so it always benefits from
-    optimized WiFi and lwip settings regardless of codec support.
-    Called during config validation to ensure flags are set before to_code().
-    """
-    network.require_high_performance_networking()
-    return config
-
-
 CONFIG_SCHEMA = cv.All(
     media_player.media_player_schema(SpeakerMediaPlayer).extend(
         {
@@ -311,7 +299,6 @@ CONFIG_SCHEMA = cv.All(
     ),
     cv.only_with_esp_idf,
     _validate_repeated_speaker,
-    _request_high_performance_networking,
 )
 
 
