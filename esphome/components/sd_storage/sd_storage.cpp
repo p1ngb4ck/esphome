@@ -14,6 +14,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#if defined(ESP32_USE_VARIANT_ESP32P4)
+#define SDMMC_FREQ_HIGHSPEED
+#endif
+
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
 #endif
@@ -62,8 +66,11 @@ void SdMmc::dump_config() {
 bool SdMmc::mount_card() {
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.slot = SDMMC_HOST_SLOT_0 + this->slot_;
+#if defined(SDMMC_FREQ_HIGHSPEED)
   host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 50MHz
-
+#else
+  host.max_freq_khz = SDMMC_FREQ_DEFAULT;  // 25MHz
+#endif
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
   slot_config.width = this->mode_1bit_ ? 1 : 4;
 
