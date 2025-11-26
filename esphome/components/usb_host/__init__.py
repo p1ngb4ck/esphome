@@ -124,7 +124,7 @@ async def to_code(config: ConfigType) -> None:
         esp32.add_idf_component(
             name="usb",
             repo="https://github.com/p1ngb4ck/esp-usb.git",
-            ref="dual-host-support",
+            ref="feat/dual-host-support",
             path="host/usb",
             override_path="host/usb",
         )
