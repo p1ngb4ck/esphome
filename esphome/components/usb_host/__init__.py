@@ -68,8 +68,9 @@ USB_HOST_INSTANCE_SCHEMA = cv.Schema(
 )
 
 CONFIG_SCHEMA = cv.All(
-    cv.Schema(
+    cv.COMPONENT_SCHEMA.extend(
         {
+            cv.GenerateID(): cv.declare_id(USBHost),
             cv.Optional(CONF_ENABLE_HUBS, default=False): cv.boolean,
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
