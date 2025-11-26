@@ -129,6 +129,14 @@ async def to_code(config: ConfigType) -> None:
             "https://github.com/p1ngb4ck/tinyusb.git#feat/dual-host-support",
         )
 
+        # Override ESP-IDF's built-in TinyUSB component
+        esp32.add_idf_component(
+            name="espressif__tinyusb",
+            repo="https://github.com/p1ngb4ck/tinyusb.git",
+            ref="feat/dual-host-support",
+            override_path=".",
+        )
+
         esp32.add_idf_component(
             name="usb",
             repo="https://github.com/p1ngb4ck/esp-usb.git",
