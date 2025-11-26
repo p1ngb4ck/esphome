@@ -61,10 +61,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
             ),
-            cv.Optional(CONF_DUAL_HOST_SUPPORT, default=False): cv.All(
-                cv.boolean,
-                cv.only_on_esp32_variant(VARIANT_ESP32P4),
-            ),
+            cv.Optional(CONF_DUAL_HOST_SUPPORT, default=False): cv.boolean,
             cv.Optional(CONF_INSTANCES): cv.ensure_list(USB_HOST_INSTANCE_SCHEMA),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
