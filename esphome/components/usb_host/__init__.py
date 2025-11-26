@@ -126,7 +126,7 @@ async def to_code(config: ConfigType) -> None:
         cg.add_library(
             "TinyUSB library for dual host support",
             None,
-            "https://github.com/p1ngb4ck/tinyusb.git#dual-host-support",
+            "https://github.com/p1ngb4ck/tinyusb.git#feat/dual-host-support",
         )
 
         esp32.add_idf_component(
