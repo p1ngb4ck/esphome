@@ -12,6 +12,9 @@
 #include "esphome/core/lock_free_queue.h"
 #include "esphome/core/event_pool.h"
 #include <atomic>
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+#include "host/usbh.h"  // For tuh_instance_t (usbh_instance*)
+#endif
 
 namespace esphome {
 namespace usb_host {
@@ -225,7 +228,7 @@ class USBHost : public Component {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host support (ESP32-P4 only)
   void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
-  void *get_tuh_instance() const { return this->tuh_instance_; }
+  tuh_instance_t get_tuh_instance() const { return this->tuh_instance_; }
 #endif
 
  protected:
@@ -236,8 +239,8 @@ class USBHost : public Component {
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_type_{0};   // 0 = FS, 1 = HS
-  void *tuh_instance_{nullptr};  // TinyUSB instance handle (void* to avoid including TinyUSB headers)
+  uint8_t controller_type_{0};            // 0 = FS, 1 = HS
+  tuh_instance_t tuh_instance_{nullptr};  // TinyUSB instance handle
 #endif
 };
 
