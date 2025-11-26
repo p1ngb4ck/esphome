@@ -512,6 +512,37 @@ Respect these constraints to avoid wasting the user's time and destroying their 
          .extend(i2c.i2c_device_schema(0x48))
          .extend(spi.spi_device_schema(cs_pin_required=True))
         ```
+    *   **Platform-Specific Boolean Features:**
+        When a boolean configuration option should only be `True` on specific platforms, create a custom validator function that checks both the value and the platform.
+
+        **INCORRECT:**
+        ```python
+        cv.Optional(CONF_FEATURE, default=False): cv.All(
+            cv.boolean,
+            cv.only_on_esp32_variant(VARIANT_ESP32P4),  # ❌ Wrong - doesn't work in cv.All
+        ),
+        ```
+
+        **CORRECT:**
+        ```python
+        def validate_feature(value):
+            """Validate feature is only True on ESP32-P4."""
+            value = cv.boolean(value)
+            if value:
+                from esphome.components.esp32 import get_esp32_variant
+                variant = get_esp32_variant()
+                if variant != VARIANT_ESP32P4:
+                    raise cv.Invalid(
+                        f"feature is only available on ESP32-P4, not {variant}"
+                    )
+            return value
+
+        CONFIG_SCHEMA = cv.Schema({
+            cv.Optional(CONF_FEATURE, default=False): validate_feature,  # ✅ Correct
+        })
+        ```
+
+        **Why:** `only_on_esp32_variant()` is a schema-level validator that returns the entire object unchanged. It doesn't work as a value validator inside `cv.All()`. For conditional platform checks on boolean values, create a custom validator function that validates the boolean first, then checks the platform only when the value is `True`.
 
 ## 5. Key Files & Entrypoints
 

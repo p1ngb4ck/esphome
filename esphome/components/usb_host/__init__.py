@@ -1,10 +1,11 @@
 import esphome.codegen as cg
-from esphome.components import socket
+from esphome.components import esp32, socket
 from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
     add_idf_sdkconfig_option,
+    get_esp32_variant,
     only_on_variant,
 )
 import esphome.config_validation as cv
@@ -26,6 +27,18 @@ CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_DUAL_HOST_SUPPORT = "dual_host_support"
 CONF_INSTANCES = "instances"
 CONF_CONTROLLER = "controller"
+
+
+def validate_dual_host_support(value):
+    """Validate dual_host_support is only True on ESP32-P4."""
+    value = cv.boolean(value)
+    if value:
+        variant = get_esp32_variant()
+        if variant != VARIANT_ESP32P4:
+            raise cv.Invalid(
+                f"dual_host_support is only available on ESP32-P4, not {variant}"
+            )
+    return value
 
 
 def usb_device_schema(
@@ -61,10 +74,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
             ),
-            cv.Optional(CONF_DUAL_HOST_SUPPORT, default=False): cv.All(
-                cv.boolean,
-                cv.only_on_esp32_variant(VARIANT_ESP32P4),
-            ),
+            cv.Optional(
+                CONF_DUAL_HOST_SUPPORT, default=False
+            ): validate_dual_host_support,
             cv.Optional(CONF_INSTANCES): cv.ensure_list(USB_HOST_INSTANCE_SCHEMA),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
@@ -85,6 +97,26 @@ async def register_usb_client(config, parent):
 
 
 async def to_code(config: ConfigType) -> None:
+    dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
+
+    # Load modified TinyUSB and esp-usb components for dual host support
+    if dual_host_support:
+        # Add modified TinyUSB (multi-instance support)
+        esp32.add_idf_component(
+            name="tinyusb",
+            repo="https://github.com/p1ngb4ck/tinyusb.git",
+            ref="dual-host-support",
+            path=".",
+        )
+
+        # Add modified esp-usb USB Host library (depends on modified TinyUSB above)
+        esp32.add_idf_component(
+            name="usb",
+            repo="https://github.com/p1ngb4ck/esp-usb.git",
+            ref="dual-host-support",
+            path="host/usb",
+        )
+
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
         add_idf_sdkconfig_option("CONFIG_USB_HOST_HUBS_SUPPORTED", True)
@@ -92,7 +124,6 @@ async def to_code(config: ConfigType) -> None:
     max_requests = config[CONF_MAX_TRANSFER_REQUESTS]
     cg.add_define("USB_HOST_MAX_REQUESTS", max_requests)
 
-    dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
     if dual_host_support:
         cg.add_define("USE_USB_HOST_DUAL_INSTANCE")
 
