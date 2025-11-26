@@ -113,6 +113,8 @@ async def to_code(config: ConfigType) -> None:
             var = cg.new_Pvariable(instance_conf[CONF_ID])
             await cg.register_component(var, instance_conf)
             controller_type = instance_conf[CONF_CONTROLLER]
+            # Set the controller type (0 = FS, 1 = HS) for TinyUSB initialization
+            cg.add(var.set_controller_type(controller_type))
             usb_host_instances[instance_conf[CONF_ID]] = {
                 "var": var,
                 "controller": controller_type,

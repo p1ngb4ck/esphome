@@ -6,6 +6,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+// For dual USB Host support, we need direct TinyUSB access
+extern "C" {
+// TinyUSB host mode init function (multi-instance)
+// Returns TinyUSB instance handle for the specified root hub port
+void *tuh_init(uint8_t rhport);
+}
+#endif
+
 namespace esphome {
 namespace usb_host {
 
@@ -30,6 +39,25 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 }
 
 void USBHost::setup() {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual USB Host mode (ESP32-P4 only)
+  // Initialize TinyUSB directly with the specified controller (rhport)
+  // rhport 0 = Full-Speed (USB0), rhport 1 = High-Speed (USB1)
+  ESP_LOGI(TAG, "Initializing TinyUSB dual host mode, controller type: %d", this->controller_type_);
+  this->tuh_instance_ = tuh_init(this->controller_type_);
+  if (this->tuh_instance_ == nullptr) {
+    ESP_LOGE(TAG, "TinyUSB tuh_init failed for controller %d", this->controller_type_);
+    this->status_set_error(LOG_STR("tuh_init failed"));
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "TinyUSB instance initialized successfully for controller %d", this->controller_type_);
+
+  // Still need ESP-IDF USB Host for client registration
+  // In dual mode, this should be called only once globally, not per instance
+  // TODO: Coordinate global usb_host_install() across instances
+#else
+  // Singleton mode (ESP32-S2, ESP32-S3, or ESP32-P4 without dual_host_support)
   usb_host_config_t config{};
 
   if (usb_host_install(&config) != ESP_OK) {
@@ -37,6 +65,7 @@ void USBHost::setup() {
     this->mark_failed();
     return;
   }
+#endif
 
   // NEW: Register coordinator client for interface-class handler dispatch
   // This client receives device events and coordinates with VID/PID clients

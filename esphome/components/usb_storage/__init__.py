@@ -129,6 +129,10 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
+    # In dual host mode, pass USBHost reference for TinyUSB instance retrieval
+    if dual_host_support:
+        cg.add(var.set_usb_host(usb_host_var))
+
     # Register interface-class based handlers and store them for later use
     # by storage to register mount callbacks
     if not hasattr(CORE, "data"):

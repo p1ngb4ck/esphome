@@ -86,8 +86,8 @@ void USBAudioComponent::setup() {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Multi-instance API: Initialize UAC driver with USB Host instance
-  // TODO: Get correct USB Host instance based on configuration
-  this->uac_driver_ = uac_host_driver_init(nullptr, &uac_cfg);
+  void *tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
+  this->uac_driver_ = uac_host_driver_init(tuh_inst, &uac_cfg);
   if (this->uac_driver_ == nullptr) {
     ESP_LOGE(TAG, "uac_host_driver_init failed (multi-instance)");
     usb_host_uninstall();

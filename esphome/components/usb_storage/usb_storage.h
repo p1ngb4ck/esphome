@@ -67,6 +67,10 @@ class USBStorageHost : public Component {
  public:
   void setup() override;
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }
+#endif
+
  protected:
   void free_all_msc_devices(void);
   void free_msc_device(int slot);
@@ -79,6 +83,7 @@ class USBStorageHost : public Component {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   msc_host_driver_handle_t msc_driver_{nullptr};  // Driver handle for multi-instance API
+  usb_host::USBHost *usb_host_{nullptr};          // Reference to USBHost for getting TinyUSB instance
 #endif
 };
 

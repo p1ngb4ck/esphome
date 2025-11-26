@@ -222,12 +222,23 @@ class USBHost : public Component {
   void add_device_to_whitelist(uint16_t vid, uint16_t pid);
   bool is_device_whitelisted(uint16_t vid, uint16_t pid) const;
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual USB Host support (ESP32-P4 only)
+  void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
+  void *get_tuh_instance() const { return this->tuh_instance_; }
+#endif
+
  protected:
-  std::vector<USBClient *> clients_{};             // EXISTING: VID/PID based clients
-  std::vector<USBDeviceHandler *> handlers_{};     // NEW: Interface-class based handlers
-  std::set<uint8_t> claimed_devices_{};            // NEW: Track devices claimed by VID/PID clients
-  usb_host_client_handle_t coordinator_handle_{};  // NEW: Handle for handler dispatch
+  std::vector<USBClient *> clients_{};                             // EXISTING: VID/PID based clients
+  std::vector<USBDeviceHandler *> handlers_{};                     // NEW: Interface-class based handlers
+  std::set<uint8_t> claimed_devices_{};                            // NEW: Track devices claimed by VID/PID clients
+  usb_host_client_handle_t coordinator_handle_{};                  // NEW: Handle for handler dispatch
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
+
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  uint8_t controller_type_{0};   // 0 = FS, 1 = HS
+  void *tuh_instance_{nullptr};  // TinyUSB instance handle (void* to avoid including TinyUSB headers)
+#endif
 };
 
 }  // namespace usb_host

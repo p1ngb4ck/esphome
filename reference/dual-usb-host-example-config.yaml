@@ -1,0 +1,218 @@
+# Example ESPHome configuration for ESP32-P4 with Dual USB Host support
+#
+# This configuration demonstrates:
+# - Dual USB Host with separate Full-Speed (FS) and High-Speed (HS) controllers
+# - USB Storage (MSC) on High-Speed controller for fast data transfer
+# - USB Audio (UAC) on Full-Speed controller for audio devices
+#
+# Hardware Requirements:
+# - ESP32-P4 development board (e.g., ESP32-P4-Function-EV-Board)
+# - USB storage device (flash drive) connected to USB1 (HS port)
+# - USB audio device (microphone/speaker) connected to USB0 (FS port)
+
+esphome:
+  name: esp32-p4-dual-usb-example
+  friendly_name: ESP32-P4 Dual USB Host Demo
+
+esp32:
+  board: esp32-p4-function-ev-board
+  variant: esp32p4
+  framework:
+    type: esp-idf
+    version: recommended
+    # Platform IO framework options if needed
+    platform_version: recommended
+
+# Enable logging
+logger:
+  level: DEBUG
+  # Show detailed USB logs
+  logs:
+    usb_host: DEBUG
+    usb_storage: DEBUG
+    usb_audio: DEBUG
+
+# WiFi configuration (optional, for OTA updates)
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot in case wifi connection fails
+  ap:
+    ssid: "ESP32-P4-USB-Demo"
+    password: "usb-demo-password"
+
+# Enable Home Assistant API (optional)
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+# Enable OTA updates (optional)
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# Enable web server for diagnostics (optional)
+web_server:
+  port: 80
+
+# ============================================================================
+# Dual USB Host Configuration - ESP32-P4 Specific
+# ============================================================================
+# This enables both USB OTG controllers simultaneously:
+# - USB0: Full-Speed (12 Mbps) - For USB Audio, HID devices
+# - USB1: High-Speed (480 Mbps) - For USB Storage, Video cameras
+usb_host:
+  # Enable dual host support (ESP32-P4 only)
+  dual_host_support: true
+
+  # Define USB Host instances for each physical controller
+  instances:
+    # Full-Speed controller (USB0) - 12 Mbps
+    - id: usb_fs_host
+      controller: fs  # Full-Speed controller
+
+    # High-Speed controller (USB1) - 480 Mbps
+    - id: usb_hs_host
+      controller: hs  # High-Speed controller
+
+# ============================================================================
+# USB Storage Configuration - High-Speed Controller
+# ============================================================================
+# USB storage devices (flash drives, external HDDs) benefit from high-speed
+# interface for faster read/write operations
+usb_storage:
+  id: usb_storage_host
+  usb_host_id: usb_hs_host  # Bind to High-Speed controller for fast data transfer
+
+  devices:
+    - id: usb_thumb_drive
+      mount_path: /usb
+      # VID/PID filtering (optional - set to 0x0000 for wildcard match)
+      vid: 0x0000  # Match any vendor
+      pid: 0x0000  # Match any product
+
+      # Trigger when USB storage device is mounted
+      on_mounted:
+        - logger.log:
+            format: "USB Storage mounted at %s"
+            args: ['mount_path.c_str()']
+        # You can add actions here, like:
+        # - lambda: |-
+        #     // Access files on the USB drive
+        #     FILE* f = fopen("/usb/test.txt", "r");
+        #     // ... file operations ...
+        #     fclose(f);
+
+# ============================================================================
+# USB Audio Configuration - Full-Speed Controller
+# ============================================================================
+# USB audio devices typically operate at Full-Speed (12 Mbps)
+# This includes USB microphones, speakers, and audio interfaces
+usb_audio:
+  id: usb_audio_device
+  usb_host_id: usb_fs_host  # Bind to Full-Speed controller for audio devices
+
+  # Connection timeout
+  connect_timeout: 5s
+
+  # Buffer sizes for audio streaming
+  microphone_buffer_size: 6400  # Bytes for microphone input
+  speaker_buffer_size: 6400     # Bytes for speaker output
+
+# ============================================================================
+# Storage Component Configuration (Optional)
+# ============================================================================
+# If you're using the storage architecture for file operations
+storage:
+  # Storage component will automatically detect USB storage devices
+  # and make them available for file operations
+
+# ============================================================================
+# Example: Using USB Storage with Automations
+# ============================================================================
+# Example button to list files on USB storage
+button:
+  - platform: template
+    name: "List USB Files"
+    on_press:
+      - usb_storage.list_files: usb_thumb_drive
+
+  - platform: template
+    name: "Remount USB Drive"
+    on_press:
+      - usb_storage.remount: usb_thumb_drive
+
+  - platform: template
+    name: "Unmount USB Drive"
+    on_press:
+      - usb_storage.unmount: usb_thumb_drive
+
+# Example: Check if USB storage is mounted
+binary_sensor:
+  - platform: template
+    name: "USB Drive Mounted"
+    lambda: |-
+      return id(usb_thumb_drive).is_mounted();
+    # Update every 5 seconds
+    update_interval: 5s
+
+# ============================================================================
+# Example: USB Audio with Voice Assistant (Optional)
+# ============================================================================
+# If you're using the microphone and speaker components with voice assistant
+# microphone:
+#   - platform: usb_audio
+#     id: usb_mic
+#     usb_audio_id: usb_audio_device
+#     # Microphone configuration
+#     channels: 1
+#     bits_per_sample: 16
+#     sample_rate: 16000
+#
+# speaker:
+#   - platform: usb_audio
+#     id: usb_speaker
+#     usb_audio_id: usb_audio_device
+#     # Speaker configuration
+#     channels: 2
+#     bits_per_sample: 16
+#     sample_rate: 48000
+#
+# voice_assistant:
+#   microphone: usb_mic
+#   speaker: usb_speaker
+#   # Additional voice assistant configuration...
+
+# ============================================================================
+# Important Notes
+# ============================================================================
+# 1. Device Speed Requirements:
+#    - Full-Speed (USB0): USB Audio, USB HID (keyboards/mice), low-speed storage
+#    - High-Speed (USB1): USB Storage (fast), USB Video (UVC), high-speed devices
+#
+# 2. Physical Connection:
+#    - Make sure USB storage is connected to USB1 (HS port) on ESP32-P4
+#    - Make sure USB audio is connected to USB0 (FS port) on ESP32-P4
+#    - Check your development board's documentation for port locations
+#
+# 3. ESP32-P4 Limitation:
+#    - ESP32-P4 cannot translate speeds between FS and HS
+#    - This is why we need dual USB Host support
+#    - Connecting a FS-only device to HS port may work but is not guaranteed
+#
+# 4. Instance Handle Wiring:
+#    - USB components support selecting which controller to use via usb_host_id parameter
+#    - usb_storage and usb_audio can now explicitly bind to FS or HS controllers
+#    - The TinyUSB instance is retrieved from the specified USBHost and passed to drivers
+#
+# 5. TinyUSB Instance Initialization:
+#    - USBHost component needs to initialize TinyUSB instances during setup()
+#    - Each USBHost instance should call tuh_init() with the appropriate rhport (0=FS, 1=HS)
+#    - The returned tuh_instance_t is stored and exposed via get_tuh_instance()
+#    - This integration requires ESP-IDF modifications to expose TinyUSB properly
+#
+# 6. Backward Compatibility:
+#    - This configuration will work on ESP32-S2 and ESP32-S3 by automatically
+#      falling back to singleton USB Host mode (single controller only)
+#    - dual_host_support is only available on ESP32-P4

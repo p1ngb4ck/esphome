@@ -73,6 +73,10 @@ class USBAudioComponent : public Component {
   void set_microphone(USBAudioMicrophone *microphone) { this->microphone_ = microphone; }
   void set_speaker(USBAudioSpeaker *speaker) { this->speaker_ = speaker; }
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }
+#endif
+
   bool ensure_started(Endpoint endpoint);
   void resume_microphone();
   void suspend_microphone();
@@ -148,6 +152,7 @@ class USBAudioComponent : public Component {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   uac_host_driver_handle_t uac_driver_{nullptr};  // Driver handle for multi-instance API
+  usb_host::USBHost *usb_host_{nullptr};          // Reference to USBHost for getting TinyUSB instance
 #endif
 };
 

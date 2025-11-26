@@ -313,8 +313,8 @@ void USBStorageHost::setup() {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Multi-instance API: Initialize MSC driver with USB Host instance
-  // TODO: Get correct USB Host instance based on configuration
-  this->msc_driver_ = msc_host_driver_init(nullptr, &msc_config);
+  void *tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
+  this->msc_driver_ = msc_host_driver_init(tuh_inst, &msc_config);
   if (this->msc_driver_ == nullptr) {
     ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance)");
     this->mark_failed();
