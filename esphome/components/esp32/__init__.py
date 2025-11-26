@@ -1201,13 +1201,13 @@ def _write_idf_component_yml():
         dependencies = {}
         for name, component in components.items():
             dependency = {}
-            if component[KEY_REF]:
+            if component.get(KEY_REF):
                 dependency["version"] = component[KEY_REF]
-            if component[KEY_REPO]:
+            if component.get(KEY_REPO):
                 dependency["git"] = component[KEY_REPO]
-            if component[KEY_PATH]:
+            if component.get(KEY_PATH):
                 dependency["path"] = component[KEY_PATH]
-            if component[KEY_OVERRIDE_PATH]:
+            if component.get(KEY_OVERRIDE_PATH):
                 dependency["override_path"] = component[KEY_OVERRIDE_PATH]
             dependencies[name] = dependency
         contents = yaml_util.dump({"dependencies": dependencies})
