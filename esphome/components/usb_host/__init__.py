@@ -121,6 +121,14 @@ async def to_code(config: ConfigType) -> None:
     # The esp-usb idf_component.yml references the modified TinyUSB
     # Use override_path to replace the built-in ESP-IDF "usb" component
     if dual_host_support:
+        # Add modified TinyUSB library with multi-instance support
+        # This overrides the built-in TinyUSB library in ESP-IDF
+        cg.add_library(
+            "TinyUSB library for dual host support",
+            None,
+            "https://github.com/p1ngb4ck/tinyusb.git#dual-host-support",
+        )
+
         esp32.add_idf_component(
             name="usb",
             repo="https://github.com/p1ngb4ck/esp-usb.git",

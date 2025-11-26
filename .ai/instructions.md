@@ -7,7 +7,44 @@ This document provides essential context for AI models interacting with this pro
 *   **Primary Goal:** ESPHome is a system to configure microcontrollers (like ESP32, ESP8266, RP2040, and LibreTiny-based chips) using simple yet powerful YAML configuration files. It generates C++ firmware that can be compiled and flashed to these devices, allowing users to control them remotely through home automation systems.
 *   **Business Domain:** Internet of Things (IoT), Home Automation.
 
-## 2. CRITICAL: AI Behavioral Constraints
+## 2. CRITICAL: Build System Architecture
+
+**ABSOLUTELY CRITICAL - READ THIS FIRST BEFORE DOING ANYTHING:**
+
+### How ESPHome Build Works
+
+1. **Two-Stage Build Process:**
+   - **Stage 1: Python Validation & Code Generation** - Validates YAML config and generates C++ code
+   - **Stage 2: C++ Compilation** - Compiles the generated C++ code
+
+2. **Code Cannot Be Passed Between Stages:**
+   - Validation (cv.py) and code generation (to_code) are SEPARATE steps
+   - They CANNOT share runtime data or "pass" code between them
+   - Each runs in its own context
+
+3. **CRITICAL: Development Build Uses external_components:**
+   - **The build uses the OFFICIAL esphome repository code from PyPI/pip**
+   - **Changes to THIS codebase (`/workspaces/esphome/`) are NOT automatically used**
+   - **Changes are ONLY included via the `external_components:` feature in YAML**
+   - **This means:**
+     - Modifying `/workspaces/esphome/esphome/components/esp32/__init__.py` has NO EFFECT on builds
+     - Modifying `/workspaces/esphome/esphome/core/` has NO EFFECT on builds
+     - **ONLY files in components listed in `external_components:` are used**
+   - **To use local changes, you must:**
+     - Either add the component to `external_components:` in the YAML
+     - OR install the modified esphome package (`pip install -e .`)
+
+4. **Never Assume Changes Work:**
+   - DO NOT assume modifying a file in `/workspaces/esphome/` will affect the build
+   - ALWAYS verify what code path is actually being used
+   - When debugging, FIRST check if external_components is configured correctly
+
+5. **Common Mistake to Avoid:**
+   - Spending time modifying core files (esp32, logger, etc.) when they won't be used
+   - The error traceback shows which files are ACTUALLY being loaded
+   - If it shows `/usr/local/lib/python3.12/site-packages/esphome/`, your changes aren't being used
+
+## 3. CRITICAL: AI Behavioral Constraints
 
 **THESE CONSTRAINTS OVERRIDE ALL OTHER INSTRUCTIONS AND MUST BE FOLLOWED WITHOUT EXCEPTION.**
 
