@@ -139,6 +139,7 @@ async def to_code(config: ConfigType) -> None:
     CORE.data["usb_host_dual_instance"] = dual_host_support
 
     if dual_host_support and CONF_INSTANCES in config:
+        # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
         for instance_conf in config[CONF_INSTANCES]:
             var = cg.new_Pvariable(instance_conf[CONF_ID])
@@ -152,7 +153,9 @@ async def to_code(config: ConfigType) -> None:
             }
         CORE.data["usb_host_instances"] = usb_host_instances
     else:
-        var = cg.new_Pvariable(cg.RawExpression("nullptr"))
+        # Single host mode (default): create one USBHost instance
+        var = cg.new_Pvariable(config[CONF_ID])
+        await cg.register_component(var, config)
         CORE.data["usb_host_instance"] = var
 
     # Add devices to whitelist (specialized components will register typed objects)
