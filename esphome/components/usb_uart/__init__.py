@@ -8,6 +8,7 @@ from esphome.components.uart import (
 )
 from esphome.components.usb_host import (
     USBClient,
+    USBHost,
     register_usb_client,
     usb_device_schema,
 )
@@ -21,6 +22,8 @@ from esphome.const import (
     CONF_ID,
 )
 from esphome.core import CORE
+
+CONF_USB_HOST_ID = "usb_host_id"
 
 AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
@@ -126,8 +129,12 @@ def channel_schema(max_channels, baud_rate_required, class_name):
 CONFIG_SCHEMA = cv.ensure_list(
     cv.typed_schema(
         {
-            it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
-                channel_schema(it.max_channels, it.baud_rate_required, it.cls)
+            it.name: usb_device_schema(it.cls, it.vid, it.pid)
+            .extend(channel_schema(it.max_channels, it.baud_rate_required, it.cls))
+            .extend(
+                {
+                    cv.Optional(CONF_USB_HOST_ID): cv.use_id(USBHost),
+                }
             )
             for it in uart_types
         },
@@ -137,13 +144,19 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config):
-    # Get the USBHost instance from CORE.data
-    # It should have been stored by the usb_host component's to_code()
-    usb_host_var = CORE.data.get("usb_host_instance")
-    if usb_host_var is None:
-        raise cv.Invalid("usb_uart requires a usb_host component to be configured")
-
     for device in config:
+        # Get the USBHost instance - either specified per-device or use default
+        if CONF_USB_HOST_ID in device:
+            # Dual host mode: use specified instance
+            usb_host_var = await cg.get_variable(device[CONF_USB_HOST_ID])
+        else:
+            # Single host mode: use default instance from CORE.data
+            usb_host_var = CORE.data.get("usb_host_instance")
+            if usb_host_var is None:
+                raise cv.Invalid(
+                    "usb_uart requires either usb_host_id or a usb_host component"
+                )
+
         var = await register_usb_client(device, usb_host_var)
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
