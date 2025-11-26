@@ -123,7 +123,7 @@ async def to_code(config: ConfigType) -> None:
         esp32.add_idf_component(
             name="tinyusb",
             repo="https://github.com/p1ngb4ck/tinyusb.git",
-            ref="dual-host-support",
+            ref="feat/dual-host-support",
             path=".",
         )
 
