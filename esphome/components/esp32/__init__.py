@@ -48,6 +48,7 @@ from .const import (  # noqa
     KEY_COMPONENTS,
     KEY_ESP32,
     KEY_EXTRA_BUILD_FILES,
+    KEY_OVERRIDE_PATH,
     KEY_PATH,
     KEY_REF,
     KEY_REPO,
@@ -249,13 +250,25 @@ def add_idf_component(
     repo: str = None,
     ref: str = None,
     path: str = None,
+    override_path: str = None,
     refresh: TimePeriod = None,
     components: list[str] | None = None,
     submodules: list[str] | None = None,
 ):
-    """Add an esp-idf component to the project."""
-    if not repo and not ref and not path:
-        raise ValueError("Requires at least one of repo, ref or path")
+    """Add an esp-idf component to the project.
+
+    Args:
+        name: Component name
+        repo: Git repository URL
+        ref: Git ref (tag/branch/commit)
+        path: Path within repository
+        override_path: Override path for built-in components (to replace ESP-IDF built-in components)
+        refresh: Deprecated
+        components: Deprecated
+        submodules: Deprecated
+    """
+    if not repo and not ref and not path and not override_path:
+        raise ValueError("Requires at least one of repo, ref, path, or override_path")
     if refresh or submodules or components:
         _LOGGER.warning(
             "The refresh, components and submodules parameters in add_idf_component() are "
@@ -268,12 +281,14 @@ def add_idf_component(
                 KEY_REPO: repo,
                 KEY_REF: ref,
                 KEY_PATH: f"{path}/{comp}" if path else comp,
+                KEY_OVERRIDE_PATH: override_path,
             }
     else:
         CORE.data[KEY_ESP32][KEY_COMPONENTS][name] = {
             KEY_REPO: repo,
             KEY_REF: ref,
             KEY_PATH: path,
+            KEY_OVERRIDE_PATH: override_path,
         }
 
 
@@ -1192,6 +1207,8 @@ def _write_idf_component_yml():
                 dependency["git"] = component[KEY_REPO]
             if component[KEY_PATH]:
                 dependency["path"] = component[KEY_PATH]
+            if component[KEY_OVERRIDE_PATH]:
+                dependency["override_path"] = component[KEY_OVERRIDE_PATH]
             dependencies[name] = dependency
         contents = yaml_util.dump({"dependencies": dependencies})
     else:

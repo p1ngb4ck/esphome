@@ -119,12 +119,14 @@ async def to_code(config: ConfigType) -> None:
 
     # Load modified esp-usb USB Host library for dual host support
     # The esp-usb idf_component.yml references the modified TinyUSB
+    # Use override_path to replace the built-in ESP-IDF "usb" component
     if dual_host_support:
         esp32.add_idf_component(
             name="usb",
             repo="https://github.com/p1ngb4ck/esp-usb.git",
             ref="dual-host-support",
             path="host/usb",
+            override_path="host/usb",
         )
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)

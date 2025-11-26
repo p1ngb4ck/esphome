@@ -9,6 +9,7 @@ KEY_REPO = "repo"
 KEY_REF = "ref"
 KEY_REFRESH = "refresh"
 KEY_PATH = "path"
+KEY_OVERRIDE_PATH = "override_path"
 KEY_SUBMODULES = "submodules"
 KEY_EXTRA_BUILD_FILES = "extra_build_files"
 
