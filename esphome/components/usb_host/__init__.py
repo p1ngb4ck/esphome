@@ -64,6 +64,7 @@ USB_HOST_INSTANCE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(USBHost),
         cv.Required(CONF_CONTROLLER): cv.enum({"fs": 0, "hs": 1}, upper=False),
+        cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
     }
 )
 
@@ -168,6 +169,11 @@ async def to_code(config: ConfigType) -> None:
             controller_type = instance_conf[CONF_CONTROLLER]
             # Set the controller type (0 = FS, 1 = HS) for TinyUSB initialization
             cg.add(var.set_controller_type(controller_type))
+
+            # Add devices to this instance's whitelist
+            for device in instance_conf.get(CONF_DEVICES) or ():
+                cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
+
             usb_host_instances[instance_conf[CONF_ID]] = {
                 "var": var,
                 "controller": controller_type,
@@ -180,10 +186,10 @@ async def to_code(config: ConfigType) -> None:
         CORE.data["usb_host_instance"] = var
 
     # Add devices to whitelist (specialized components will register typed objects)
-    for device in config.get(CONF_DEVICES) or ():
-        if dual_host_support:
-            pass
-        elif "usb_host_instance" in CORE.data:
+    # In dual host mode, devices are specified per-instance (handled above)
+    # In single host mode, devices are specified at top level
+    if not dual_host_support:
+        for device in config.get(CONF_DEVICES) or ():
             cg.add(
                 CORE.data["usb_host_instance"].add_device_to_whitelist(
                     device[CONF_VID], device[CONF_PID]
