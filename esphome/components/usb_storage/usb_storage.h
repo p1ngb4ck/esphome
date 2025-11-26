@@ -76,6 +76,10 @@ class USBStorageHost : public Component {
   msc_host_device_handle_t get_handle_by_address(uint8_t usb_addr);
 
   msc_dev_entry_t *msc_devices_[MAX_MSC_DEVICES] = {NULL};
+
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  msc_host_driver_handle_t msc_driver_{nullptr};  // Driver handle for multi-instance API
+#endif
 };
 
 // Forward declaration for mount callback

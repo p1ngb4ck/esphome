@@ -52,11 +52,25 @@ def _ensure_buffer_size(value: int) -> int:
 
 
 async def to_code(config):
-    # External IDF component dependency:
-    # Using espressif/usb_host_uac version 1.3.1 (minimum required).
-    # If updating, ensure compatibility with ESPHome and supported ESP32 variants.
-    # See: https://components.espressif.com/components/espressif/usb_host_uac
-    esp32.add_idf_component(name="espressif/usb_host_uac", ref="1.3.1")
+    from esphome.core import CORE
+
+    # Load appropriate UAC driver based on dual_host_support flag
+    dual_host_support = CORE.data.get("usb_host_dual_instance", False)
+    if dual_host_support:
+        # Load modified multi-instance UAC driver from p1ngb4ck/esp-usb
+        esp32.add_idf_component(
+            name="usb_host_uac",
+            repo="https://github.com/p1ngb4ck/esp-usb.git",
+            ref="dual-host-support",
+            path="host/class/uac/usb_host_uac",
+        )
+    else:
+        # Load original singleton UAC driver
+        # External IDF component dependency:
+        # Using espressif/usb_host_uac version 1.3.1 (minimum required).
+        # If updating, ensure compatibility with ESPHome and supported ESP32 variants.
+        # See: https://components.espressif.com/components/espressif/usb_host_uac
+        esp32.add_idf_component(name="espressif/usb_host_uac", ref="1.3.1")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

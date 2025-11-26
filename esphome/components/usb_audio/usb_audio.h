@@ -145,6 +145,10 @@ class USBAudioComponent : public Component {
   bool speaker_mute_supported_{true};
   bool speaker_volume_warned_{false};
   bool speaker_mute_warned_{false};
+
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  uac_host_driver_handle_t uac_driver_{nullptr};  // Driver handle for multi-instance API
+#endif
 };
 
 }  // namespace usb_audio

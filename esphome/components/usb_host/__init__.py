@@ -23,6 +23,9 @@ CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
+CONF_DUAL_HOST_SUPPORT = "dual_host_support"
+CONF_INSTANCES = "instances"
+CONF_CONTROLLER = "controller"
 
 
 def usb_device_schema(
@@ -44,17 +47,29 @@ def usb_device_schema(
     return schema
 
 
+USB_HOST_INSTANCE_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(USBHost),
+        cv.Required(CONF_CONTROLLER): cv.enum({"fs": 0, "hs": 1}, upper=False),
+    }
+)
+
 CONFIG_SCHEMA = cv.All(
-    cv.COMPONENT_SCHEMA.extend(
+    cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(USBHost),
             cv.Optional(CONF_ENABLE_HUBS, default=False): cv.boolean,
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
             ),
+            cv.Optional(CONF_DUAL_HOST_SUPPORT, default=False): cv.All(
+                cv.boolean,
+                cv.only_on_esp32_variant(VARIANT_ESP32P4),
+            ),
+            cv.Optional(CONF_INSTANCES): cv.ensure_list(USB_HOST_INSTANCE_SCHEMA),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
     ),
+    cv.has_at_least_one_key(CONF_INSTANCES, CONF_DEVICES),
     cv.only_with_esp_idf,
     only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
 )
@@ -77,21 +92,43 @@ async def to_code(config: ConfigType) -> None:
     max_requests = config[CONF_MAX_TRANSFER_REQUESTS]
     cg.add_define("USB_HOST_MAX_REQUESTS", max_requests)
 
+    dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
+    if dual_host_support:
+        cg.add_define("USE_USB_HOST_DUAL_INSTANCE")
+
     # USB uses the socket wake_loop_threadsafe() mechanism to wake the main loop from USB task
     # This enables low-latency (~12μs) USB event processing instead of waiting for
     # select() timeout (0-16ms). The wake socket is shared across all components.
     socket.require_wake_loop_threadsafe()
 
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
-    # Store USBHost instance in CORE.data for components loaded via AUTO_LOAD (like usb_uart)
     from esphome.core import CORE
 
     if not hasattr(CORE, "data"):
         CORE.data = {}
-    CORE.data["usb_host_instance"] = var
+    CORE.data["usb_host_dual_instance"] = dual_host_support
+
+    if dual_host_support and CONF_INSTANCES in config:
+        usb_host_instances = {}
+        for instance_conf in config[CONF_INSTANCES]:
+            var = cg.new_Pvariable(instance_conf[CONF_ID])
+            await cg.register_component(var, instance_conf)
+            controller_type = instance_conf[CONF_CONTROLLER]
+            usb_host_instances[instance_conf[CONF_ID]] = {
+                "var": var,
+                "controller": controller_type,
+            }
+        CORE.data["usb_host_instances"] = usb_host_instances
+    else:
+        var = cg.new_Pvariable(cg.RawExpression("nullptr"))
+        CORE.data["usb_host_instance"] = var
 
     # Add devices to whitelist (specialized components will register typed objects)
     for device in config.get(CONF_DEVICES) or ():
-        cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
+        if dual_host_support:
+            pass
+        elif "usb_host_instance" in CORE.data:
+            cg.add(
+                CORE.data["usb_host_instance"].add_device_to_whitelist(
+                    device[CONF_VID], device[CONF_PID]
+                )
+            )

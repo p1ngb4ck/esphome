@@ -84,6 +84,24 @@ void USBAudioComponent::setup() {
       .callback_arg = this,
   };
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Multi-instance API: Initialize UAC driver with USB Host instance
+  // TODO: Get correct USB Host instance based on configuration
+  this->uac_driver_ = uac_host_driver_init(nullptr, &uac_cfg);
+  if (this->uac_driver_ == nullptr) {
+    ESP_LOGE(TAG, "uac_host_driver_init failed (multi-instance)");
+    usb_host_uninstall();
+    this->host_installed_ = false;
+    if (this->event_queue_ != nullptr) {
+      vQueueDelete(this->event_queue_);
+      this->event_queue_ = nullptr;
+    }
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "UAC host driver initialized successfully (multi-instance)");
+#else
+  // Singleton API: Use global uac_host_install
   err = uac_host_install(&uac_cfg);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "uac_host_install failed: %s", esp_err_to_name(err));
@@ -96,6 +114,8 @@ void USBAudioComponent::setup() {
     this->mark_failed();
     return;
   }
+  ESP_LOGI(TAG, "UAC host driver initialized successfully (singleton)");
+#endif
   this->uac_installed_ = true;
 
   this->host_task_running_ = true;
@@ -445,7 +465,13 @@ bool USBAudioComponent::open_stream_(const USBAudioEvent &event) {
   };
 
   uac_host_device_handle_t handle = nullptr;
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Multi-instance API: Pass driver handle
+  esp_err_t err = uac_host_driver_device_open(this->uac_driver_, &dev_cfg, &handle);
+#else
+  // Singleton API: No driver handle needed
   esp_err_t err = uac_host_device_open(&dev_cfg, &handle);
+#endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "uac_host_device_open failed: %s", esp_err_to_name(err));
     return false;

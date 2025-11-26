@@ -106,7 +106,21 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    add_idf_component(name="espressif/usb_host_msc", ref="1.1.4")
+    from esphome.core import CORE
+
+    # Load appropriate MSC driver based on dual_host_support flag
+    dual_host_support = CORE.data.get("usb_host_dual_instance", False)
+    if dual_host_support:
+        # Load modified multi-instance MSC driver from p1ngb4ck/esp-usb
+        add_idf_component(
+            name="usb_host_msc",
+            repo="https://github.com/p1ngb4ck/esp-usb.git",
+            ref="dual-host-support",
+            path="host/class/msc/usb_host_msc",
+        )
+    else:
+        # Load original singleton MSC driver
+        add_idf_component(name="espressif/usb_host_msc", ref="1.1.4")
 
     # Get USBHost instance for handler registration
     usb_host_var = await cg.get_variable(config[CONF_USB_HOST_ID])
@@ -117,16 +131,15 @@ async def to_code(config):
 
     # Register interface-class based handlers and store them for later use
     # by storage to register mount callbacks
+    if not hasattr(CORE, "data"):
+        CORE.data = {}
+    if "usb_storage_devices" not in CORE.data:
+        CORE.data["usb_storage_devices"] = []
+
     for device in config.get(CONF_DEVICES) or ():
         device_var = await register_usb_storage_handler(device, var, usb_host_var)
         # Store device reference in CORE.data for storage to access
         # This allows storage to register callbacks with USB storage devices
-        from esphome.core import CORE
-
-        if not hasattr(CORE, "data"):
-            CORE.data = {}
-        if "usb_storage_devices" not in CORE.data:
-            CORE.data["usb_storage_devices"] = []
         CORE.data["usb_storage_devices"].append(device_var)
 
 

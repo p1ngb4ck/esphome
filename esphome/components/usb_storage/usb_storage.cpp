@@ -81,7 +81,14 @@ esp_err_t USBStorageHost::allocate_new_msc_device(uint8_t new_dev_address, const
 
   ESP_LOGI(TAG, "Memory allocated, calling msc_host_install_device...");
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Multi-instance API: Pass driver handle
+  esp_err_t err =
+      msc_host_driver_install_device(this->msc_driver_, new_dev_address, &this->msc_devices_[slot]->msc_device);
+#else
+  // Singleton API: No driver handle needed
   esp_err_t err = msc_host_install_device(new_dev_address, &this->msc_devices_[slot]->msc_device);
+#endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "msc_host_install_device failed: %s", esp_err_to_name(err));
     free(this->msc_devices_[slot]);
@@ -304,14 +311,26 @@ void USBStorageHost::setup() {
       .callback = msc_event_callback,
   };
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Multi-instance API: Initialize MSC driver with USB Host instance
+  // TODO: Get correct USB Host instance based on configuration
+  this->msc_driver_ = msc_host_driver_init(nullptr, &msc_config);
+  if (this->msc_driver_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance)");
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "MSC host driver initialized successfully (multi-instance)");
+#else
+  // Singleton API: Use global msc_host_install
   esp_err_t err = msc_host_install(&msc_config);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize MSC host driver: %s", esp_err_to_name(err));
     this->mark_failed();
     return;
   }
-
-  ESP_LOGI(TAG, "MSC host driver initialized successfully");
+  ESP_LOGI(TAG, "MSC host driver initialized successfully (singleton)");
+#endif
 }
 
 void USBStorageDevice::setup() {
