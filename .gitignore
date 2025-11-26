@@ -144,3 +144,4 @@ sdkconfig.*
 /managed_components
 
 api-docs/
+/reference/
