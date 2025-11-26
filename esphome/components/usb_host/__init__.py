@@ -74,11 +74,7 @@ def _validate_schema(config):
     dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT, False)
 
     if dual_host_support:
-        # Dual host mode: instances required, no main id
-        if CONF_ID in config:
-            raise cv.Invalid(
-                "'id' not allowed in dual_host_support mode, use 'instances' instead"
-            )
+        # Dual host mode: instances required, no top-level id
         if CONF_INSTANCES not in config:
             raise cv.Invalid("'instances' required when dual_host_support is enabled")
     elif CONF_INSTANCES in config:
@@ -170,8 +166,9 @@ async def to_code(config: ConfigType) -> None:
             # Set the controller type (0 = FS, 1 = HS) for TinyUSB initialization
             cg.add(var.set_controller_type(controller_type))
 
-            # Add devices to this instance's whitelist
+            # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():
+                await register_usb_client(device, var)
                 cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
 
             usb_host_instances[instance_conf[CONF_ID]] = {
@@ -185,11 +182,12 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
         CORE.data["usb_host_instance"] = var
 
-    # Add devices to whitelist (specialized components will register typed objects)
+    # Register devices as USBClient components and add to whitelist
     # In dual host mode, devices are specified per-instance (handled above)
     # In single host mode, devices are specified at top level
     if not dual_host_support:
         for device in config.get(CONF_DEVICES) or ():
+            await register_usb_client(device, CORE.data["usb_host_instance"])
             cg.add(
                 CORE.data["usb_host_instance"].add_device_to_whitelist(
                     device[CONF_VID], device[CONF_PID]
