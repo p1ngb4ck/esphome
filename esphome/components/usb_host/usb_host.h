@@ -14,7 +14,9 @@
 #include "esphome/core/event_pool.h"
 #include <atomic>
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-#include "host/usbh.h"  // For tuh_instance_t (usbh_instance*)
+// Forward declare TinyUSB instance type (defined in TinyUSB's host/usbh.h as usbh_instance*)
+struct usbh_instance;
+using tuh_instance_t = usbh_instance *;
 #endif
 
 namespace esphome {
