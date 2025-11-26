@@ -1,8 +1,9 @@
 #pragma once
 
+#include "esphome/core/defines.h"  // MUST be first to see all defines
+
 // Should not be needed, but it's required to pass CI clang-tidy checks
 #if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
-#include "esphome/core/defines.h"
 #include "esphome/core/component.h"
 #include <vector>
 #include <set>
