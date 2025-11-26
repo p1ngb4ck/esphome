@@ -11,7 +11,7 @@
 extern "C" {
 // TinyUSB host mode init function (multi-instance)
 // Returns TinyUSB instance handle for the specified root hub port
-void *tuh_init(uint8_t rhport);
+tuh_instance_t tuh_init(uint8_t rhport);
 }
 #endif
 
@@ -53,9 +53,15 @@ void USBHost::setup() {
   }
   ESP_LOGI(TAG, "TinyUSB instance initialized successfully for controller %d", this->controller_type_);
 
-  // Still need ESP-IDF USB Host for client registration
-  // In dual mode, this should be called only once globally, not per instance
-  // TODO: Coordinate global usb_host_install() across instances
+  // Install ESP-IDF USB Host for this controller instance
+  // Each USBHost instance (FS and HS) needs its own usb_host_install()
+  // so devices can register to the correct controller
+  usb_host_config_t config{};
+  if (usb_host_install(&config) != ESP_OK) {
+    this->status_set_error(LOG_STR("usb_host_install failed"));
+    this->mark_failed();
+    return;
+  }
 #else
   // Singleton mode (ESP32-S2, ESP32-S3, or ESP32-P4 without dual_host_support)
   usb_host_config_t config{};
