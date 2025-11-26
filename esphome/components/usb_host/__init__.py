@@ -53,7 +53,7 @@ USB_HOST_INSTANCE_SCHEMA = cv.Schema(
         cv.Required(CONF_CONTROLLER): cv.enum({"fs": 0, "hs": 1}, upper=False),
     }
 )
-
+# todo : remove me
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
