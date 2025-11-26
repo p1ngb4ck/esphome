@@ -67,8 +67,28 @@ USB_HOST_INSTANCE_SCHEMA = cv.Schema(
     }
 )
 
+
+def _validate_schema(config):
+    """Conditionally apply schema based on dual_host_support."""
+    dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT, False)
+
+    if dual_host_support:
+        # Dual host mode: instances required, no main id
+        if CONF_ID in config:
+            raise cv.Invalid(
+                "'id' not allowed in dual_host_support mode, use 'instances' instead"
+            )
+        if CONF_INSTANCES not in config:
+            raise cv.Invalid("'instances' required when dual_host_support is enabled")
+    elif CONF_INSTANCES in config:
+        # Single host mode: instances not allowed
+        raise cv.Invalid("'instances' only allowed when dual_host_support is enabled")
+
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
-    cv.COMPONENT_SCHEMA.extend(
+    cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(USBHost),
             cv.Optional(CONF_ENABLE_HUBS, default=False): cv.boolean,
@@ -81,8 +101,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_INSTANCES): cv.ensure_list(USB_HOST_INSTANCE_SCHEMA),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
-    ),
-    cv.has_at_least_one_key(CONF_INSTANCES, CONF_DEVICES),
+    ).extend(cv.COMPONENT_SCHEMA),
+    _validate_schema,
     cv.only_with_esp_idf,
     only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
 )
