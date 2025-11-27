@@ -10,7 +10,7 @@
 // For dual USB Host support, we need direct TinyUSB access
 // Include TinyUSB header to get tuh_init() inline function and tuh_instance_t type
 extern "C" {
-#include "host/usbh.h"
+#include "tinyusb/src/host/usbh.h"
 }
 #endif
 
