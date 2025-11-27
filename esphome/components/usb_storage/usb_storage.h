@@ -22,7 +22,7 @@
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "esp_timer.h"
-#include "host/usb/msc_host.h"
+#include "host/usb/class/msc/msc_host.h"
 #include "host/usb/msc_host_vfs.h"
 #include "host/usb/usb_types_stack.h"
 #include <stdbool.h>
