@@ -14,10 +14,10 @@
 #include "esphome/core/event_pool.h"
 #include <atomic>
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-// Include TinyUSB header for tuh_instance_t type definition
-extern "C" {
-#include <tinyusb/src/host/usbh.h>
-}
+// Forward declare TinyUSB types to avoid including TinyUSB headers in this header file
+// The actual TinyUSB headers are only included in usb_host_component.cpp where they're needed
+struct usbh_instance;
+using tuh_instance_t = usbh_instance *;
 #endif
 
 namespace esphome {
