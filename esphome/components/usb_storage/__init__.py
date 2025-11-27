@@ -110,15 +110,15 @@ async def to_code(config):
 
     # Load appropriate MSC driver based on dual_host_support flag
     dual_host_support = CORE.data.get("usb_host_dual_instance", False)
-    if not dual_host_support:
+    if dual_host_support:
         # Load modified multi-instance MSC driver from p1ngb4ck/esp-usb
-        # add_idf_component(
-        #    name="usb_host_msc",
-        #    repo="https://github.com/p1ngb4ck/esp-usb.git",
-        #    ref="dual-host-support",
-        #    path="host/class/msc/usb_host_msc",
-        # )
-        # else:
+        add_idf_component(
+            name="usb_host_msc",
+            repo="https://github.com/p1ngb4ck/esp-usb.git",
+            ref="feat/dual-host-support",
+            path="host/class/msc/usb_host_msc",
+        )
+    else:
         # Load original singleton MSC driver
         add_idf_component(name="espressif/usb_host_msc", ref="1.1.4")
 
