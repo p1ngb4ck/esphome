@@ -43,14 +43,21 @@ void USBHost::setup() {
   // Initialize TinyUSB directly with the specified controller (rhport)
   // rhport 0 = Full-Speed (USB0), rhport 1 = High-Speed (USB1)
   ESP_LOGI(TAG, "Initializing TinyUSB dual host mode, controller type: %d", this->controller_type_);
-  this->tuh_instance_ = tuh_init(this->controller_type_);
-  if (this->tuh_instance_ == nullptr) {
+  if (!tuh_init(this->controller_type_)) {
     ESP_LOGE(TAG, "TinyUSB tuh_init failed for controller %d", this->controller_type_);
     this->status_set_error(LOG_STR("tuh_init failed"));
     this->mark_failed();
     return;
   }
-  ESP_LOGI(TAG, "TinyUSB instance initialized successfully for controller %d", this->controller_type_);
+  // Get the TinyUSB instance for this rhport
+  this->tuh_instance_ = tuh_get_instance(this->controller_type_);
+  if (this->tuh_instance_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to get TinyUSB instance for controller %d", this->controller_type_);
+    this->status_set_error(LOG_STR("tuh_get_instance failed"));
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "TinyUSB initialized successfully for controller %d", this->controller_type_);
 
   // Install ESP-IDF USB Host for this controller instance
   // Each USBHost instance (FS and HS) needs its own usb_host_install()

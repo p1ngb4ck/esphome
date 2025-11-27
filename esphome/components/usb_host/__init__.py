@@ -117,6 +117,16 @@ async def register_usb_client(config, parent):
 async def to_code(config: ConfigType) -> None:
     dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
 
+    # Set TinyUSB MCU type based on ESP32 variant
+    variant = get_esp32_variant()
+    mcu_map = {
+        VARIANT_ESP32S2: "OPT_MCU_ESP32S2",
+        VARIANT_ESP32S3: "OPT_MCU_ESP32S3",
+        VARIANT_ESP32P4: "OPT_MCU_ESP32P4",
+    }
+    if variant in mcu_map:
+        cg.add_build_flag(f"-DCFG_TUSB_MCU={mcu_map[variant]}")
+
     # Load modified esp-usb USB Host library for dual host support
     # TinyUSB is now included directly in esp-usb repo (not as submodule)
     # Use override_path to replace the built-in ESP-IDF "usb" component
