@@ -8,10 +8,9 @@
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
 // For dual USB Host support, we need direct TinyUSB access
+// Include TinyUSB header to get tuh_init() inline function and tuh_instance_t type
 extern "C" {
-// TinyUSB host mode init function (multi-instance)
-// Returns TinyUSB instance handle for the specified root hub port
-tuh_instance_t tuh_init(uint8_t rhport);
+#include "host/usbh.h"
 }
 #endif
 

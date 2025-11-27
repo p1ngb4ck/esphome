@@ -1070,7 +1070,7 @@ void USBUartTypeCH934X::on_connected() {
 
   if (!this->parse_descriptors(this->device_handle_)) {
     ESP_LOGE(TAG, "CH934X parse_descriptors failed for device %d", this->device_addr_);
-    this->status_set_error("No UART-Serial-Hub device found");
+    this->status_set_error(LOG_STR("No UART-Serial-Hub device found"));
     this->disconnect();
     return;
   }
@@ -1095,7 +1095,7 @@ void USBUartTypeCH934X::on_connected() {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "usb_host_interface_claim failed: %s, intf=%d", esp_err_to_name(err),
              this->uart_host_dev_.data_interface);
-    this->status_set_error("usb_host_interface_claim failed");
+    this->status_set_error(LOG_STR("usb_host_interface_claim failed"));
     this->disconnect();
     return;
   }
