@@ -138,13 +138,13 @@ async def to_code(config: ConfigType) -> None:
             path="host/usb",
             override_path="host/usb",
         )
-        # Add custom TinyUSB library with dual-instance support
-        # This provides the TinyUSB headers and implementation
-        cg.add_library(
-            name="TinyUSB",
-            repository="https://github.com/p1ngb4ck/tinyusb.git",
-            version="feat/dual-host-support",
-        )
+        # TinyUSB is now provided via esp-usb's idf_component.yml dependency
+        # Commenting out to avoid duplicate TinyUSB compilation
+        # cg.add_library(
+        #     name="TinyUSB",
+        #     repository="https://github.com/p1ngb4ck/tinyusb.git",
+        #     version="feat/dual-host-support",
+        # )
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
