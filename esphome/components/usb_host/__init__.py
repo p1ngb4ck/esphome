@@ -140,11 +140,11 @@ async def to_code(config: ConfigType) -> None:
         )
         # TinyUSB is now provided via esp-usb's idf_component.yml dependency
         # Commenting out to avoid duplicate TinyUSB compilation
-        # cg.add_library(
-        #     name="TinyUSB",
-        #     repository="https://github.com/p1ngb4ck/tinyusb.git",
-        #     version="feat/dual-host-support",
-        # )
+        cg.add_library(
+            name="TinyUSB",
+            repository="https://github.com/p1ngb4ck/tinyusb.git",
+            version="feat/dual-host-support",
+        )
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
