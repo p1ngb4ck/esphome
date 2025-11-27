@@ -16,7 +16,7 @@
 #ifdef USE_USB_HOST_DUAL_INSTANCE
 // Include TinyUSB header for tuh_instance_t type definition
 extern "C" {
-#include "tinyusb/src/host/usbh.h"
+#include <tinyusb/src/host/usbh.h>
 }
 #endif
 
