@@ -245,6 +245,7 @@ class USBHost : public Component {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   uint8_t controller_type_{0};            // 0 = FS, 1 = HS
   tuh_instance_t tuh_instance_{nullptr};  // TinyUSB instance handle
+  bool usb_host_installed_{false};
 #endif
 };
 

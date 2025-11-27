@@ -62,11 +62,14 @@ void USBHost::setup() {
   // Install ESP-IDF USB Host for this controller instance
   // Each USBHost instance (FS and HS) needs its own usb_host_install()
   // so devices can register to the correct controller
-  usb_host_config_t config{};
-  if (usb_host_install(&config) != ESP_OK) {
-    this->status_set_error(LOG_STR("usb_host_install failed"));
-    this->mark_failed();
-    return;
+  if (!this->usb_host_installed_) {
+    usb_host_config_t config{};
+    if (usb_host_install(&config) != ESP_OK) {
+      this->status_set_error(LOG_STR("usb_host_install failed"));
+      this->mark_failed();
+      return;
+    }
+    this->usb_host_installed_ = true;
   }
 #else
   // Singleton mode (ESP32-S2, ESP32-S3, or ESP32-P4 without dual_host_support)
