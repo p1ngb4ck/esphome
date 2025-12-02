@@ -83,4 +83,5 @@ void UARTTransport::send_packet(const std::vector<uint8_t> &buf) const {
   this->write_byte_(crc >> 8);
   this->parent_->write_byte(FLAG_BYTE);
 }
+
 }  // namespace esphome::uart

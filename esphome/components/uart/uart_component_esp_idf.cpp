@@ -15,6 +15,7 @@
 #endif
 
 namespace esphome::uart {
+
 static const char *const TAG = "uart.idf";
 
 uart_config_t IDFUARTComponent::get_config_() {
@@ -236,12 +237,12 @@ void IDFUARTComponent::dump_config() {
                 "  Baud Rate: %" PRIu32 " baud\n"
                 "  Data Bits: %u\n"
                 "  Parity: %s\n"
-                "  Stop bits: %u",
+                "  Stop bits: %u"
 #ifdef USE_UART_WAKE_LOOP_ON_RX
                 "\n  Wake on data RX: ENABLED"
 #endif
-                this->baud_rate_,
-                this->data_bits_, LOG_STR_ARG(parity_to_str(this->parity_)), this->stop_bits_);
+                ,
+                this->baud_rate_, this->data_bits_, LOG_STR_ARG(parity_to_str(this->parity_)), this->stop_bits_);
   this->check_logger_conflict();
 }
 
