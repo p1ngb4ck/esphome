@@ -75,8 +75,8 @@ void USBHost::setup() {
       .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
 
   esp_err_t client_err = usb_host_client_register(&client_config, &this->coordinator_handle_);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(err));
+  if (client_err != ESP_OK) {
+    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
     // Non-fatal: VID/PID clients will still work
   } else {
     ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
