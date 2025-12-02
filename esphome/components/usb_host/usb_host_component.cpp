@@ -7,11 +7,9 @@
 #include "freertos/task.h"
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-// For dual USB Host support, we need direct TinyUSB access
-// Include TinyUSB header to get tuh_init() inline function and tuh_instance_t type
-extern "C" {
-#include "host/usbh.h"
-}
+// For dual USB Host support on ESP32-P4
+// Use controller-specific ESP-IDF API instead of calling TinyUSB directly
+// This ensures proper USB PHY initialization before hardware access
 #endif
 
 namespace esphome {
@@ -40,41 +38,26 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 void USBHost::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
-  // Initialize TinyUSB directly with the specified controller (rhport)
-  // rhport 0 = Full-Speed (USB0), rhport 1 = High-Speed (USB1)
-  ESP_LOGI(TAG, "Initializing TinyUSB dual host mode, controller type: %d", this->controller_type_);
-  if (!tuh_init(this->controller_type_)) {
-    ESP_LOGE(TAG, "TinyUSB tuh_init failed for controller %d", this->controller_type_);
-    this->status_set_error(LOG_STR("tuh_init failed"));
-    this->mark_failed();
-    return;
-  }
-  // Get the TinyUSB instance for this rhport
-  this->tuh_instance_ = tuh_get_instance(this->controller_type_);
-  if (this->tuh_instance_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to get TinyUSB instance for controller %d", this->controller_type_);
-    this->status_set_error(LOG_STR("tuh_get_instance failed"));
-    this->mark_failed();
-    return;
-  }
-  ESP_LOGI(TAG, "TinyUSB initialized successfully for controller %d", this->controller_type_);
+  // Use new controller-specific API from esp-usb that includes PHY initialization
+  // Controller 0 = Full-Speed (USB0), Controller 1 = High-Speed (USB1)
+  ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_type_);
 
-  // Install ESP-IDF USB Host for this controller instance
-  // Each USBHost instance (FS and HS) needs its own usb_host_install()
-  // so devices can register to the correct controller
-  /*
-  if (!this->usb_host_installed_) {
-    usb_host_config_t config{};
-    if (usb_host_install(&config) != ESP_OK) {
-      this->status_set_error(LOG_STR("usb_host_install failed"));
-      this->mark_failed();
-      return;
-    }
-    this->usb_host_installed_ = true;
+  usb_host_config_t config = {};
+  config.skip_phy_setup = false;  // Let ESP-IDF handle PHY init (critical!)
+  config.intr_flags = ESP_INTR_FLAG_LEVEL1;
+
+  esp_err_t err = usb_host_install_controller(this->controller_type_, &config);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "usb_host_install_controller failed for controller %d: %s", this->controller_type_,
+             esp_err_to_name(err));
+    this->status_set_error(LOG_STR("usb_host_install_controller failed"));
+    this->mark_failed();
+    return;
   }
-  */
+
+  ESP_LOGI(TAG, "USB Host controller %d initialized successfully", this->controller_type_);
 #else
-  // Singleton mode (ESP32-S2, ESP32-S3, or ESP32-P4 without dual_host_support)
+  // Singleton mode (ESP32-S2, ESP32-S3)
   usb_host_config_t config{};
 
   if (usb_host_install(&config) != ESP_OK) {
@@ -100,15 +83,28 @@ void USBHost::setup() {
   }
 }
 void USBHost::loop() {
-  int err;
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual USB Host mode - handle events for this specific controller
   uint32_t event_flags;
-  err = usb_host_lib_handle_events(0, &event_flags);
+  esp_err_t err = usb_host_controller_handle_events(this->controller_type_, 0, &event_flags);
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-    ESP_LOGD(TAG, "lib_handle_events failed failed: %s", esp_err_to_name(err));
+    ESP_LOGD(TAG, "controller_handle_events failed: %s", esp_err_to_name(err));
   }
   if (event_flags != 0) {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
+#else
+  // Singleton mode
+  int err;
+  uint32_t event_flags;
+  err = usb_host_lib_handle_events(0, &event_flags);
+  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+    ESP_LOGD(TAG, "lib_handle_events failed: %s", esp_err_to_name(err));
+  }
+  if (event_flags != 0) {
+    ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
+  }
+#endif
 
   // NEW: Handle coordinator client events for interface-class handlers
   // Without this, coordinator_event_cb() is never called!

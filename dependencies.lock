@@ -153,7 +153,7 @@ dependencies:
       type: service
     version: 1.0.0
   espressif/mdns:
-    component_hash: 3ec0af5f6bce310512e90f482388d21cc7c0e99668172d2f895356165fc6f7c5
+    component_hash: 29e47564b1a7ee778135e17fbbf2a2773f71c97ebabfe626c8eda7c958a7ad16
     dependencies:
     - name: idf
       require: private
@@ -161,7 +161,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.8.2
+    version: 1.9.1
   espressif/tinyusb:
     component_hash: 5ea9d3b6d6b0734a0a0b3491967aa0e1bece2974132294dbda5dd2839b247bfa
     dependencies:
@@ -214,6 +214,6 @@ direct_dependencies:
 - espressif/lan867x
 - espressif/mdns
 - zorxx/multipart-parser
-manifest_hash: 7e464a263449439427c412cd48c2fa9b577026d9f6025201c105939c763dd28b
+manifest_hash: 5260ecca2f3874741f63441678cdcdf32b7eb96710f1ea70dc508a5b561e92ab
 target: esp32p4
 version: 2.0.0

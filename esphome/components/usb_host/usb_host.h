@@ -232,7 +232,7 @@ class USBHost : public Component {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host support (ESP32-P4 only)
   void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
-  tuh_instance_t get_tuh_instance() const { return this->tuh_instance_; }
+  uint8_t get_controller_type() const { return this->controller_type_; }
 #endif
 
  protected:
@@ -243,9 +243,8 @@ class USBHost : public Component {
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_type_{0};            // 0 = FS, 1 = HS
-  tuh_instance_t tuh_instance_{nullptr};  // TinyUSB instance handle
-  bool usb_host_installed_{false};
+  uint8_t controller_type_{0};  // 0 = FS, 1 = HS
+  // No need to store tuh_instance - ESP-IDF manages it
 #endif
 };
 
