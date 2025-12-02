@@ -11,8 +11,7 @@
 #include "esphome/core/automation.h"
 #endif
 
-namespace esphome {
-namespace uart {
+namespace esphome::uart {
 
 enum UARTParityOptions {
   UART_CONFIG_PARITY_NONE,
@@ -212,5 +211,4 @@ class UARTComponent {
 #endif
 };
 
-}  // namespace uart
-}  // namespace esphome
+}  // namespace esphome::uart
