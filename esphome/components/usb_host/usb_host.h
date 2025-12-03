@@ -217,7 +217,9 @@ class USBClient : public Component, public Parented<USBHost> {
 };
 class USBHost : public Component {
  public:
+#if defined(USE_USB_HOST_DUAL_INSTANCE)
   USBHost(uint8_t controller_index = 1) : controller_index_{controller_index} {}
+#endif
   float get_setup_priority() const override { return setup_priority::IO; }
   void loop() override;
   void setup() override;
