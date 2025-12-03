@@ -189,7 +189,7 @@ void USBClient::setup() {
   // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
   ESP_LOGE(TAG, "Creating init task for deferred initialization");
   xTaskCreate(init_task_fn, "usb_init",
-              2048,               // Stack size for init task
+              4096,               // Stack size for init task
               this,               // Task parameter
               USB_TASK_PRIORITY,  // Same priority as USB task
               &this->init_task_handle_);
@@ -216,7 +216,7 @@ void USBClient::setup() {
   // Pre-allocate USB transfer buffers for all slots at startup
   // This avoids any dynamic allocation during runtime
   for (auto &request : this->requests_) {
-    usb_host_transfer_alloc(64, 0, &request.transfer);
+    usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
     request.client = this;  // Set once, never changes
   }
 

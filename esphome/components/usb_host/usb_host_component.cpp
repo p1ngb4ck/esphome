@@ -74,7 +74,7 @@ void USBHost::setup() {
   // NEW: Register coordinator client for interface-class handler dispatch
   // This client receives device events and coordinates with VID/PID clients
   // TEMPORARILY DISABLED TO DEBUG INTERRUPT STORM
-  /*
+
   usb_host_client_config_t client_config{
       .is_synchronous = false,
       .max_num_event_msg = 5,
@@ -94,7 +94,7 @@ void USBHost::setup() {
   } else {
     ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
   }
-  */
+
   ESP_LOGW(TAG, "Coordinator client registration DISABLED for debugging");
 
   // Mark USB Host as fully initialized

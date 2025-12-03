@@ -23,7 +23,7 @@ extern "C" {
 
 // No RTOS for now (ESPHome runs on Arduino/ESP-IDF event loop)
 #ifndef CFG_TUSB_OS
-#define CFG_TUSB_OS OPT_OS_NONE
+#define CFG_TUSB_OS OPT_OS_ESP32
 #endif
 
 // Debug level (0 = no debug, 3 = verbose)
