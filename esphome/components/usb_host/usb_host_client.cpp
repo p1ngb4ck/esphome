@@ -182,18 +182,41 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 #endif
 }
 void USBClient::setup() {
+  // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
+  // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
+  xTaskCreate(init_task_fn, "usb_init",
+              2048,               // Stack size for init task
+              this,               // Task parameter
+              USB_TASK_PRIORITY,  // Same priority as USB task
+              &this->init_task_handle_);
+
+  if (this->init_task_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create USB init task");
+    this->mark_failed();
+  }
+}
+
+void USBClient::init_task_fn(void *arg) {
+  auto *client = static_cast<USBClient *>(arg);
+  client->deferred_init();
+  // Task deletes itself after init
+  vTaskDelete(nullptr);
+}
+
+void USBClient::deferred_init() {
+  // Wait for USBHost to be initialized
+  while (this->parent_ == nullptr || !this->parent_->is_initialized()) {
+    vTaskDelay(pdMS_TO_TICKS(10));  // Check every 10ms
+  }
+
+  ESP_LOGD(TAG, "USBHost ready, proceeding with client registration");
+
   usb_host_client_config_t config{.is_synchronous = false,
                                   .max_num_event_msg = 5,
                                   .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual host mode: Use controller-specific client registration
-  // Get the host_handle from parent USBHost instance
-  if (this->parent_ == nullptr) {
-    ESP_LOGE(TAG, "USBClient has no parent USBHost - cannot register client");
-    this->mark_failed();
-    return;
-  }
   auto err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
 #else
   // Singleton mode: Use global client registration
@@ -218,6 +241,9 @@ void USBClient::setup() {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();
   }
+
+  // Clear init task handle as we're about to exit
+  this->init_task_handle_ = nullptr;
 }
 
 void USBClient::usb_task_fn(void *arg) {

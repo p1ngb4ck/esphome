@@ -89,6 +89,9 @@ void USBHost::setup() {
   } else {
     ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
   }
+
+  // Mark USB Host as fully initialized
+  this->initialized_ = true;
 }
 void USBHost::loop() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE

@@ -191,7 +191,12 @@ class USBClient : public Component, public Parented<USBHost> {
   static void usb_task_fn(void *arg);
   [[noreturn]] void usb_task_loop() const;
 
+  // Deferred initialization task - waits for USBHost to be ready
+  static void init_task_fn(void *arg);
+  void deferred_init();
+
   TaskHandle_t usb_task_handle_{nullptr};
+  TaskHandle_t init_task_handle_{nullptr};
 
   usb_host_client_handle_t handle_{};
   usb_device_handle_t device_handle_{};
@@ -208,9 +213,10 @@ class USBClient : public Component, public Parented<USBHost> {
 };
 class USBHost : public Component {
  public:
-  float get_setup_priority() const override { return setup_priority::BUS; }
+  float get_setup_priority() const override { return setup_priority::IO; }
   void loop() override;
   void setup() override;
+  bool is_initialized() const { return this->initialized_; }
 
   // NEW: Device claiming system for coordination between VID/PID clients and interface-class handlers
   bool try_claim_device(uint8_t address);
@@ -243,6 +249,7 @@ class USBHost : public Component {
   std::set<uint8_t> claimed_devices_{};                            // NEW: Track devices claimed by VID/PID clients
   usb_host_client_handle_t coordinator_handle_{};                  // NEW: Handle for handler dispatch
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
+  bool initialized_{false};                                        // Track if USB host is fully initialized
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   uint8_t controller_type_{0};       // 0 = FS, 1 = HS
