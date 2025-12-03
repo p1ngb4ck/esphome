@@ -182,9 +182,12 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 #endif
 }
 void USBClient::setup() {
+  ESP_LOGE(TAG, "=== USBClient::setup() ENTRY - VID=%04X PID=%04X parent=%p ===", this->vid_, this->pid_,
+           (void *) this->parent_);
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
   // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
+  ESP_LOGE(TAG, "Creating init task for deferred initialization");
   xTaskCreate(init_task_fn, "usb_init",
               2048,               // Stack size for init task
               this,               // Task parameter
@@ -194,7 +197,10 @@ void USBClient::setup() {
   if (this->init_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create USB init task");
     this->mark_failed();
+  } else {
+    ESP_LOGE(TAG, "Init task created successfully");
   }
+  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
 #else
   // Original singleton mode initialization - register client immediately
   usb_host_client_config_t config{.is_synchronous = false,
@@ -230,7 +236,9 @@ void USBClient::setup() {
 
 void USBClient::init_task_fn(void *arg) {
   auto *client = static_cast<USBClient *>(arg);
+  ESP_LOGE(TAG, "=== init_task_fn STARTED - calling deferred_init() ===");
   client->deferred_init();
+  ESP_LOGE(TAG, "=== init_task_fn COMPLETED - deleting task ===");
   // Task deletes itself after init
   vTaskDelete(nullptr);
 }

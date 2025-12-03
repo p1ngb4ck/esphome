@@ -36,6 +36,7 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 }
 
 void USBHost::setup() {
+  ESP_LOGE(TAG, "=== USBHost::setup() ENTRY - controller_index=%d ===", this->controller_index_);
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
   // Use new controller-specific API from esp-usb that includes PHY initialization
@@ -94,6 +95,7 @@ void USBHost::setup() {
 
   // Mark USB Host as fully initialized
   this->initialized_ = true;
+  ESP_LOGE(TAG, "=== USBHost::setup() EXIT - initialized=true ===");
 }
 void USBHost::loop() {
   static uint32_t loop_count = 0;
