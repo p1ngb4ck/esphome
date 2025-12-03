@@ -199,8 +199,8 @@ void USBClient::setup() {
     this->mark_failed();
   } else {
     ESP_LOGE(TAG, "Init task created successfully");
-  }
-  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ==="); */
+  }*/
+  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
   // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
   // Parent is set via constructor parameter in Python codegen
   uint32_t wait_count = 0;
