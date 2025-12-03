@@ -45,7 +45,8 @@ void USBHost::setup() {
   usb_host_config_t config = {};
   config.skip_phy_setup = false;  // Let ESP-IDF/esp-usb handle PHY init (critical!)
   config.intr_flags = ESP_INTR_FLAG_LEVEL1;
-  config.peripheral_map = (1U << this->controller_index_);  // BIT(0) or BIT(1) to select peripheral
+  // Invert mapping: controller_index 0 (FS) → OTG1 (BIT1), controller_index 1 (HS) → OTG0 (BIT0)
+  config.peripheral_map = (1U << (1 - this->controller_index_));
 
   esp_err_t err =
       usb_host_install_controller(this->controller_index_, &config, &this->tuh_instance_, &this->host_handle_);
