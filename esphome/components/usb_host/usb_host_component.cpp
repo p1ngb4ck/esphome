@@ -40,24 +40,24 @@ void USBHost::setup() {
   // Dual USB Host mode (ESP32-P4 only)
   // Use new controller-specific API from esp-usb that includes PHY initialization
   // Controller 0 = High-Speed (USB OTG0), Controller 1 = Full-Speed (USB OTG1)
-  ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_type_);
+  ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_index_);
 
   usb_host_config_t config = {};
   config.skip_phy_setup = false;  // Let ESP-IDF/esp-usb handle PHY init (critical!)
   config.intr_flags = ESP_INTR_FLAG_LEVEL1;
-  config.peripheral_map = (1U << this->controller_type_);  // BIT(0) or BIT(1) to select peripheral
+  config.peripheral_map = (1U << this->controller_index_);  // BIT(0) or BIT(1) to select peripheral
 
   esp_err_t err =
-      usb_host_install_controller(this->controller_type_, &config, &this->tuh_instance_, &this->host_handle_);
+      usb_host_install_controller(this->controller_index_, &config, &this->tuh_instance_, &this->host_handle_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "usb_host_install_controller failed for controller %d: %s", this->controller_type_,
+    ESP_LOGE(TAG, "usb_host_install_controller failed for controller %d: %s", this->controller_index_,
              esp_err_to_name(err));
     this->status_set_error(LOG_STR("usb_host_install_controller failed"));
     this->mark_failed();
     return;
   }
 
-  ESP_LOGI(TAG, "USB Host controller %d initialized successfully", this->controller_type_);
+  ESP_LOGI(TAG, "USB Host controller %d initialized successfully", this->controller_index_);
 #else
   // Singleton mode (ESP32-S2, ESP32-S3)
   usb_host_config_t config{};
@@ -98,7 +98,7 @@ void USBHost::loop() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode - handle events for this specific controller
   uint32_t event_flags;
-  esp_err_t err = usb_host_controller_handle_events(this->controller_type_, 0, &event_flags);
+  esp_err_t err = usb_host_controller_handle_events(this->controller_index_, 0, &event_flags);
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
     ESP_LOGD(TAG, "controller_handle_events failed: %s", esp_err_to_name(err));
   }

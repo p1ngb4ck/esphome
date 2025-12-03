@@ -187,7 +187,7 @@ async def to_code(config: ConfigType) -> None:
                 # S2/S3: Only one controller (FS), always use index 0
                 controller_index = 0
 
-            cg.add(var.set_controller_type(controller_index))
+            cg.add(var.set_controller_index(controller_index))
 
             # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():

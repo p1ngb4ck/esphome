@@ -237,8 +237,8 @@ class USBHost : public Component {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host support (ESP32-P4 only)
-  void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
-  uint8_t get_controller_type() const { return this->controller_type_; }
+  void set_controller_index(uint8_t index) { this->controller_index_ = index; }
+  uint8_t get_controller_type() const { return this->controller_index_; }
   tuh_instance_t get_tuh_instance() const { return static_cast<tuh_instance_t>(this->tuh_instance_); }
   usb_host_handle_t get_host_handle() const { return this->host_handle_; }
 #endif
@@ -252,7 +252,7 @@ class USBHost : public Component {
   bool initialized_{false};                                        // Track if USB host is fully initialized
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_type_{0};       // 0 = FS, 1 = HS
+  uint8_t controller_index_{0};      // 0 = FS, 1 = HS
   void *tuh_instance_{nullptr};      // Opaque handle from ESP-IDF, cast to tuh_instance_t when needed
   usb_host_handle_t host_handle_{};  // USB Host library handle for controller-specific client registration
 #endif
