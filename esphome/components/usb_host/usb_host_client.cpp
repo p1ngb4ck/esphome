@@ -182,6 +182,7 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 #endif
 }
 void USBClient::setup() {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
   // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
   // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
   xTaskCreate(init_task_fn, "usb_init",
@@ -194,6 +195,37 @@ void USBClient::setup() {
     ESP_LOGE(TAG, "Failed to create USB init task");
     this->mark_failed();
   }
+#else
+  // Original singleton mode initialization - register client immediately
+  usb_host_client_config_t config{.is_synchronous = false,
+                                  .max_num_event_msg = 5,
+                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
+  auto err = usb_host_client_register(&config, &this->handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
+    this->status_set_error(LOG_STR("Client register failed"));
+    this->mark_failed();
+    return;
+  }
+  // Pre-allocate USB transfer buffers for all slots at startup
+  // This avoids any dynamic allocation during runtime
+  for (auto &request : this->requests_) {
+    usb_host_transfer_alloc(64, 0, &request.transfer);
+    request.client = this;  // Set once, never changes
+  }
+
+  // Create and start USB task
+  xTaskCreate(usb_task_fn, "usb_task",
+              USB_TASK_STACK_SIZE,  // Stack size
+              this,                 // Task parameter
+              USB_TASK_PRIORITY,    // Priority (higher than main loop)
+              &this->usb_task_handle_);
+
+  if (this->usb_task_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create USB task");
+    this->mark_failed();
+  }
+#endif
 }
 
 void USBClient::init_task_fn(void *arg) {
