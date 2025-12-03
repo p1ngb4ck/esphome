@@ -63,7 +63,7 @@ def usb_device_schema(
 USB_HOST_INSTANCE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(USBHost),
-        cv.Required(CONF_CONTROLLER): cv.enum({"fs": 1, "hs": 0}, upper=False),
+        cv.Required(CONF_CONTROLLER): cv.enum({"fs": 0, "hs": 1}, upper=False),
         cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
     }
 )
@@ -171,9 +171,9 @@ async def to_code(config: ConfigType) -> None:
         # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
         for instance_conf in config[CONF_INSTANCES]:
-            # Map user-facing config (0=FS, 1=HS) to actual hardware controller indices
-            # ESP32-P4: Controller 0 = HS, Controller 1 = FS (hardware reality)
-            # User config: fs=0, hs=1 (logical/user-friendly)
+            # User config matches TinyUSB array indices directly:
+            # fs=0 → array[0], hs=1 → array[1]
+            # The _dwc2_controller[] array in TinyUSB is ordered [FS, HS]
             config_value = instance_conf[CONF_CONTROLLER]
             var = cg.new_Pvariable(instance_conf[CONF_ID], config_value)
             await cg.register_component(var, instance_conf)

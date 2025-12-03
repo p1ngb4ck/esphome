@@ -39,7 +39,7 @@ void USBHost::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
   // Use new controller-specific API from esp-usb that includes PHY initialization
-  // Controller 0 = High-Speed (USB OTG0), Controller 1 = Full-Speed (USB OTG1)
+  // controller_index_ matches TinyUSB array: 0 = FS (USB OTG1), 1 = HS (USB OTG0)
   ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_index_);
 
   usb_host_config_t config = {};
