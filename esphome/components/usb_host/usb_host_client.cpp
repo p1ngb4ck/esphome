@@ -200,7 +200,6 @@ void USBClient::setup() {
   } else {
     ESP_LOGE(TAG, "Init task created successfully");
   }*/
-  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
   // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
   // Parent is set via constructor parameter in Python codegen
   uint32_t wait_count = 0;
@@ -254,6 +253,7 @@ void USBClient::setup() {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();
   }
+  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
 #else
   // Original singleton mode initialization - register client immediately
   usb_host_client_config_t config{.is_synchronous = false,
