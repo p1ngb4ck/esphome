@@ -187,7 +187,7 @@ void USBClient::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
   // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
-  ESP_LOGE(TAG, "Creating init task for deferred initialization");
+  /* ESP_LOGE(TAG, "Creating init task for deferred initialization");
   xTaskCreate(init_task_fn, "usb_init",
               4096,               // Stack size for init task
               this,               // Task parameter
@@ -200,7 +200,60 @@ void USBClient::setup() {
   } else {
     ESP_LOGE(TAG, "Init task created successfully");
   }
-  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
+  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ==="); */
+  // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
+  // Parent is set via constructor parameter in Python codegen
+  uint32_t wait_count = 0;
+  constexpr uint32_t MAX_WAIT_MS = 5000;  // 5 second timeout
+  constexpr uint32_t CHECK_INTERVAL_MS = 10;
+  constexpr uint32_t MAX_ITERATIONS = MAX_WAIT_MS / CHECK_INTERVAL_MS;
+
+  while (this->parent_ == nullptr) {
+    if (wait_count++ >= MAX_ITERATIONS) {
+      ESP_LOGE(TAG, "Timeout waiting for parent to be set - this should never happen!");
+      this->mark_failed();
+      return;
+    }
+    ESP_LOGD(TAG, "Waiting for parent to be set...");
+    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
+  }
+
+  // Now wait for USBHost to be fully initialized
+  wait_count = 0;
+  while (!this->parent_->is_initialized()) {
+    if (wait_count++ >= MAX_ITERATIONS) {
+      ESP_LOGE(TAG, "Timeout waiting for USBHost initialization");
+      this->mark_failed();
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
+  }
+
+  ESP_LOGD(TAG, "USBHost ready, proceeding with client registration");
+
+  usb_host_client_config_t config{.is_synchronous = false,
+                                  .max_num_event_msg = 5,
+                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
+
+  auto err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
+    this->status_set_error(static_cast<const LogString *>(LOG_STR("Client register failed")));
+    this->mark_failed();
+    return;
+  }
+
+  // Create and start USB task
+  xTaskCreate(usb_task_fn, "usb_task",
+              USB_TASK_STACK_SIZE,  // Stack size
+              this,                 // Task parameter
+              USB_TASK_PRIORITY,    // Priority (higher than main loop)
+              &this->usb_task_handle_);
+
+  if (this->usb_task_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create USB task");
+    this->mark_failed();
+  }
 #else
   // Original singleton mode initialization - register client immediately
   usb_host_client_config_t config{.is_synchronous = false,
