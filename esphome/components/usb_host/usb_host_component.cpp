@@ -39,12 +39,13 @@ void USBHost::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
   // Use new controller-specific API from esp-usb that includes PHY initialization
-  // Controller 0 = Full-Speed (USB0), Controller 1 = High-Speed (USB1)
+  // Controller 0 = High-Speed (USB OTG0), Controller 1 = Full-Speed (USB OTG1)
   ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_type_);
 
   usb_host_config_t config = {};
-  config.skip_phy_setup = false;  // Let ESP-IDF handle PHY init (critical!)
+  config.skip_phy_setup = false;  // Let ESP-IDF/esp-usb handle PHY init (critical!)
   config.intr_flags = ESP_INTR_FLAG_LEVEL1;
+  config.peripheral_map = (1U << this->controller_type_);  // BIT(0) or BIT(1) to select peripheral
 
   esp_err_t err =
       usb_host_install_controller(this->controller_type_, &config, &this->tuh_instance_, &this->host_handle_);
