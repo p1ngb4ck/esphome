@@ -157,7 +157,11 @@ class USBClient : public Component, public Parented<USBHost> {
   friend class USBHost;
 
  public:
-  USBClient(uint16_t vid, uint16_t pid) : vid_(vid), pid_(pid), trq_in_use_(0) {}
+  USBClient(uint16_t vid, uint16_t pid, USBHost *parent = nullptr) : vid_(vid), pid_(pid), trq_in_use_(0) {
+    if (parent != nullptr) {
+      this->set_parent(parent);
+    }
+  }
   void setup() override;
   void loop() override;
   // setup must happen after the host bus has been setup

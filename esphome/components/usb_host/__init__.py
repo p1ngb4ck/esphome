@@ -106,11 +106,12 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def register_usb_client(config, parent):
-    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
+    # Pass parent as 3rd constructor parameter so it's available in setup()
+    # This is critical for dual-host mode where deferred_init() needs parent immediately
+    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID], parent)
     await cg.register_component(var, config)
-    cg.add(
-        var.set_parent(parent)
-    )  # NEW: Set USBHost as parent for claiming coordination
+    # Note: set_parent() is also called in constructor, but keeping this for backward compatibility
+    # cg.add(var.set_parent(parent))
     return var
 
 

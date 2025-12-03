@@ -236,9 +236,32 @@ void USBClient::init_task_fn(void *arg) {
 }
 
 void USBClient::deferred_init() {
-  // Wait for USBHost to be initialized
-  while (this->parent_ == nullptr || !this->parent_->is_initialized()) {
-    vTaskDelay(pdMS_TO_TICKS(10));  // Check every 10ms
+  // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
+  // Parent is set via constructor parameter in Python codegen
+  uint32_t wait_count = 0;
+  constexpr uint32_t MAX_WAIT_MS = 5000;  // 5 second timeout
+  constexpr uint32_t CHECK_INTERVAL_MS = 10;
+  constexpr uint32_t MAX_ITERATIONS = MAX_WAIT_MS / CHECK_INTERVAL_MS;
+
+  while (this->parent_ == nullptr) {
+    if (wait_count++ >= MAX_ITERATIONS) {
+      ESP_LOGE(TAG, "Timeout waiting for parent to be set - this should never happen!");
+      this->mark_failed();
+      return;
+    }
+    ESP_LOGD(TAG, "Waiting for parent to be set...");
+    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
+  }
+
+  // Now wait for USBHost to be fully initialized
+  wait_count = 0;
+  while (!this->parent_->is_initialized()) {
+    if (wait_count++ >= MAX_ITERATIONS) {
+      ESP_LOGE(TAG, "Timeout waiting for USBHost initialization");
+      this->mark_failed();
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
   }
 
   ESP_LOGD(TAG, "USBHost ready, proceeding with client registration");
