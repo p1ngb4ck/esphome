@@ -173,9 +173,21 @@ async def to_code(config: ConfigType) -> None:
         for instance_conf in config[CONF_INSTANCES]:
             var = cg.new_Pvariable(instance_conf[CONF_ID])
             await cg.register_component(var, instance_conf)
-            controller_type = instance_conf[CONF_CONTROLLER]
-            # Set the controller type (0 = FS, 1 = HS) for TinyUSB initialization
-            cg.add(var.set_controller_type(controller_type))
+
+            # Map user-facing config (0=FS, 1=HS) to actual hardware controller indices
+            # ESP32-P4: Controller 0 = HS, Controller 1 = FS (hardware reality)
+            # User config: fs=0, hs=1 (logical/user-friendly)
+            config_value = instance_conf[CONF_CONTROLLER]
+            variant = get_esp32_variant()
+
+            if variant == VARIANT_ESP32P4:
+                # P4: Map config to hardware - swap fs/hs to match controller indices
+                controller_index = 0 if config_value == 1 else 1  # hs=0, fs=1
+            else:
+                # S2/S3: Only one controller (FS), always use index 0
+                controller_index = 0
+
+            cg.add(var.set_controller_type(controller_index))
 
             # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():
@@ -184,7 +196,7 @@ async def to_code(config: ConfigType) -> None:
 
             usb_host_instances[instance_conf[CONF_ID]] = {
                 "var": var,
-                "controller": controller_type,
+                "controller": controller_index,
             }
         CORE.data["usb_host_instances"] = usb_host_instances
     else:
