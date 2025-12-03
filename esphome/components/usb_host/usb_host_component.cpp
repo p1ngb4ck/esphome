@@ -96,6 +96,11 @@ void USBHost::setup() {
   this->initialized_ = true;
 }
 void USBHost::loop() {
+  static uint32_t loop_count = 0;
+  if (loop_count++ < 5) {
+    ESP_LOGI(TAG, "USBHost::loop() called, count=%u", loop_count);
+  }
+
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode - handle events for this specific controller
   uint32_t event_flags;
