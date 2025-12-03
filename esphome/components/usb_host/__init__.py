@@ -171,9 +171,6 @@ async def to_code(config: ConfigType) -> None:
         # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
         for instance_conf in config[CONF_INSTANCES]:
-            var = cg.new_Pvariable(instance_conf[CONF_ID])
-            await cg.register_component(var, instance_conf)
-
             # Map user-facing config (0=FS, 1=HS) to actual hardware controller indices
             # ESP32-P4: Controller 0 = HS, Controller 1 = FS (hardware reality)
             # User config: fs=0, hs=1 (logical/user-friendly)
@@ -186,8 +183,9 @@ async def to_code(config: ConfigType) -> None:
             else:
                 # S2/S3: Only one controller (FS), always use index 0
                 controller_index = 0
-
-            cg.add(var.set_controller_index(controller_index))
+            var = cg.new_Pvariable(instance_conf[CONF_ID], controller_index)
+            await cg.register_component(var, instance_conf)
+            # cg.add(var.set_controller_index(controller_index))
 
             # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():

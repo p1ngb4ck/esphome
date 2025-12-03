@@ -213,6 +213,7 @@ class USBClient : public Component, public Parented<USBHost> {
 };
 class USBHost : public Component {
  public:
+  USBHost(uint8_t controller_index) : controller_index_{controller_index} {}
   float get_setup_priority() const override { return setup_priority::IO; }
   void loop() override;
   void setup() override;
@@ -252,7 +253,7 @@ class USBHost : public Component {
   bool initialized_{false};                                        // Track if USB host is fully initialized
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_index_{0};      // 0 = FS, 1 = HS
+  uint8_t controller_index_{0};      // 0 = FS on S2/S3, 0 = HS & 1 = FS on P4
   void *tuh_instance_{nullptr};      // Opaque handle from ESP-IDF, cast to tuh_instance_t when needed
   usb_host_handle_t host_handle_{};  // USB Host library handle for controller-specific client registration
 #endif
