@@ -185,7 +185,21 @@ void USBClient::setup() {
   usb_host_client_config_t config{.is_synchronous = false,
                                   .max_num_event_msg = 5,
                                   .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
+
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual host mode: Use controller-specific client registration
+  // Get the host_handle from parent USBHost instance
+  if (this->parent_ == nullptr) {
+    ESP_LOGE(TAG, "USBClient has no parent USBHost - cannot register client");
+    this->mark_failed();
+    return;
+  }
+  auto err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
+#else
+  // Singleton mode: Use global client registration
   auto err = usb_host_client_register(&config, &this->handle_);
+#endif
+
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
     this->status_set_error(static_cast<const LogString *>(LOG_STR("Client register failed")));

@@ -46,7 +46,8 @@ void USBHost::setup() {
   config.skip_phy_setup = false;  // Let ESP-IDF handle PHY init (critical!)
   config.intr_flags = ESP_INTR_FLAG_LEVEL1;
 
-  esp_err_t err = usb_host_install_controller(this->controller_type_, &config, &this->tuh_instance_);
+  esp_err_t err =
+      usb_host_install_controller(this->controller_type_, &config, &this->tuh_instance_, &this->host_handle_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "usb_host_install_controller failed for controller %d: %s", this->controller_type_,
              esp_err_to_name(err));
@@ -74,7 +75,14 @@ void USBHost::setup() {
       .max_num_event_msg = 5,
       .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual host mode: Use controller-specific client registration
+  esp_err_t client_err =
+      usb_host_client_register_controller(this->host_handle_, &client_config, &this->coordinator_handle_);
+#else
+  // Singleton mode: Use global client registration
   esp_err_t client_err = usb_host_client_register(&client_config, &this->coordinator_handle_);
+#endif
   if (client_err != ESP_OK) {
     ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
     // Non-fatal: VID/PID clients will still work

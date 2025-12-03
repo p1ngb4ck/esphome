@@ -234,6 +234,7 @@ class USBHost : public Component {
   void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
   uint8_t get_controller_type() const { return this->controller_type_; }
   tuh_instance_t get_tuh_instance() const { return static_cast<tuh_instance_t>(this->tuh_instance_); }
+  usb_host_handle_t get_host_handle() const { return this->host_handle_; }
 #endif
 
  protected:
@@ -244,8 +245,9 @@ class USBHost : public Component {
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_type_{0};   // 0 = FS, 1 = HS
-  void *tuh_instance_{nullptr};  // Opaque handle from ESP-IDF, cast to tuh_instance_t when needed
+  uint8_t controller_type_{0};       // 0 = FS, 1 = HS
+  void *tuh_instance_{nullptr};      // Opaque handle from ESP-IDF, cast to tuh_instance_t when needed
+  usb_host_handle_t host_handle_{};  // USB Host library handle for controller-specific client registration
 #endif
 };
 
