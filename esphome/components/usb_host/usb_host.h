@@ -196,7 +196,7 @@ class USBClient : public Component, public Parented<USBHost> {
   [[noreturn]] void usb_task_loop() const;
 
   // Deferred initialization task - waits for USBHost to be ready
-  // static void init_task_fn(void *arg);
+  static void init_task_fn(void *arg);
   void deferred_init();
 
   TaskHandle_t usb_task_handle_{nullptr};

@@ -234,7 +234,7 @@ void USBClient::setup() {
 #endif
 }
 
-const static void init_task_fn(void *arg) {
+void USBClient::init_task_fn(void *arg) {
   auto *client = static_cast<USBClient *>(arg);
   ESP_LOGE(TAG, "=== init_task_fn STARTED - calling deferred_init() ===");
   client->deferred_init();
