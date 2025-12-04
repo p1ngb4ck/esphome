@@ -120,13 +120,6 @@ esp_err_t USBStorageHost::allocate_new_msc_device(uint8_t new_dev_address, const
     this->msc_devices_[slot] = NULL;
     return err;
   }
-#ifdef USE_STORAGE
-  // Register with storage registry
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this->msc_devices_[slot]->msc_device);
-    ESP_LOGD(TAG, "Registered with storage registry");
-  }
-#endif
   return ESP_OK;
 }
 
@@ -350,16 +343,7 @@ void USBStorageHost::setup() {
 #endif
 }
 
-void USBStorageDevice::setup() {
-  ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)");
-  // Register with global storage registry
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
-  }
-#endif
-}
+void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
@@ -453,10 +437,11 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
     callback(this->mount_path_);
   }
 
+// Register with global storage registry
 #ifdef USE_STORAGE
-  // Notify storage registry of mount state change
   if (storage::global_storage != nullptr) {
-    storage::global_storage->notify_device_changed(this);
+    storage::global_storage->register_device(this);
+    ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
   }
 #endif
 }
