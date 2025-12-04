@@ -33,6 +33,7 @@
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage_device.h"
+#include "esphome/components/storage/storage.h"
 #endif
 
 namespace esphome {
