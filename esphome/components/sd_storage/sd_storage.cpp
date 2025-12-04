@@ -32,8 +32,9 @@ void SdMmc::setup() {
   ESP_LOGI(TAG, "Initializing SD/MMC card");
   ESP_LOGI(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
 
-  if (this->power_ctrl_pin_ != 0) {
-    ESP_LOGI(TAG, "  Power control pin: %d", this->power_ctrl_pin_);
+  if (this->cs_pin_ != 0) {
+    ESP_LOGI(TAG, "  Power control pin: %d", this->cs_pin_);
+    this->cs_pin_->setup();
   }
 
   if (!this->mount_card()) {

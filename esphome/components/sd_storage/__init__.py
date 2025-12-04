@@ -33,7 +33,7 @@ CONF_DATA1_PIN = "data1_pin"
 CONF_DATA2_PIN = "data2_pin"
 CONF_DATA3_PIN = "data3_pin"
 CONF_MODE_1BIT = "mode_1bit"
-CONF_POWER_CTRL_PIN = "power_ctrl_pin"
+CONF_CS_PIN = "cs_pin"
 CONF_SLOT = "slot"
 CONF_ON_MOUNTED = "on_mounted"
 CONF_MOUNT_PATH = "mount_path"
@@ -48,7 +48,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DATA2_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA3_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_MODE_1BIT, default=False): cv.boolean,
-        cv.Optional(CONF_POWER_CTRL_PIN): pins.internal_gpio_output_pin_number,
+        cv.Optional(CONF_CS_PIN): pins.internal_gpio_output_pin_number,
         cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
         cv.Optional(CONF_MOUNT_PATH, default="/sdcard"): cv.string,
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
@@ -82,8 +82,8 @@ async def to_code(config):
         if CONF_DATA3_PIN in config:
             cg.add(var.set_data3_pin(config[CONF_DATA3_PIN]))
 
-    if CONF_POWER_CTRL_PIN in config:
-        cg.add(var.set_power_ctrl_pin(config[CONF_POWER_CTRL_PIN]))
+    if CONF_CS_PIN in config:
+        cg.add(var.set_cs_pin(config[CONF_CS_PIN]))
 
     # Set mount path
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))

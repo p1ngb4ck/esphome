@@ -57,7 +57,7 @@ class SdMmc : public Component {
   void set_data2_pin(uint8_t pin) { this->data2_pin_ = pin; }
   void set_data3_pin(uint8_t pin) { this->data3_pin_ = pin; }
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
-  void set_power_ctrl_pin(uint8_t pin) { this->power_ctrl_pin_ = pin; }
+  void set_cs_pin(uint8_t pin) { this->cs_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
   void set_id(const std::string &id) { this->id_ = id; }
@@ -148,7 +148,7 @@ class SdMmc : public Component {
   uint8_t data1_pin_{0};
   uint8_t data2_pin_{0};
   uint8_t data3_pin_{0};
-  uint8_t power_ctrl_pin_{0};
+  uint8_t cs_pin_{0};
   bool mode_1bit_{false};
   uint8_t slot_{0};
 
