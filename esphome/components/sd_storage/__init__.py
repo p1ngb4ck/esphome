@@ -136,29 +136,40 @@ SD_MMC_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 # SPI Schema (new configuration)
-SD_SPI_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(SdSpi),
-        cv.Optional(CONF_MODE_1BIT, default=True): cv.boolean,
-        cv.Optional(CONF_CLK_PIN): pins.internal_gpio_output_pin_number,
-        cv.Optional(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
-        cv.Optional(CONF_DATA0_PIN): pins.internal_gpio_pin_number,
-        cv.Optional(CONF_DATA3_PIN): pins.gpio_output_pin_schema,  # Alias for CS pin
-        cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
-        # DATA1 and DATA2 are not used in standard SD SPI mode (only 1-bit)
-        cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
-        cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger),
-            }
-        ),
-    },
-    extra_schemas=[
-        validate_spi_cs_config,
-        validate_spi_bus_pins,
-        validate_spi_mode,
-    ],
-).extend(spi.spi_device_schema(cs_pin_required=False))
+SD_SPI_SCHEMA = (
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(SdSpi),
+            cv.Optional(CONF_MODE_1BIT, default=True): cv.boolean,
+            cv.Optional(CONF_CLK_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_DATA0_PIN): pins.internal_gpio_pin_number,
+            cv.Optional(
+                CONF_DATA3_PIN
+            ): pins.internal_gpio_output_pin_schema,  # Alias for CS pin
+            cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
+            # DATA1 and DATA2 are not used in standard SD SPI mode (only 1-bit)
+            cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
+            cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger),
+                }
+            ),
+        },
+        extra_schemas=[
+            validate_spi_cs_config,
+            validate_spi_bus_pins,
+            validate_spi_mode,
+        ],
+    )
+    .extend(spi.spi_device_schema(cs_pin_required=False))
+    .extend(
+        {
+            # Override CS_PIN from spi_device_schema to require internal GPIO only
+            cv.Optional(CONF_CS_PIN): pins.internal_gpio_output_pin_schema,
+        }
+    )
+)
 
 CONFIG_SCHEMA = cv.All(
     cv.typed_schema(
@@ -203,9 +214,10 @@ async def to_code(config):
         cg.add_define("USE_SD_STORAGE_SPI")
         await spi.register_spi_device(var, config)
         cg.add(var.set_slot(config[CONF_SLOT]))
-        if CONF_CS_PIN in config:
-            cs_pin_config = config.get(CONF_CS_PIN)
-            cg.add(var.set_cs_pin_number(cs_pin_config["number"]))
+
+        # CS pin is already set by register_spi_device() as InternalGPIOPin
+        # We can use cs_pin_->get_pin() in C++ to get the pin number
+
         # Set mode (must be 1-bit for SPI)
         if mode_1bit := config.get(CONF_MODE_1BIT):
             cg.add(var.set_mode_1bit(mode_1bit))

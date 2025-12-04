@@ -2,6 +2,7 @@
 
 #include "esphome/core/automation.h"
 #include "esphome/core/defines.h"
+#include "sd_storage_base.h"
 
 // Include the appropriate header based on which mode is enabled
 #if defined(USE_SD_STORAGE_SDMMC)
@@ -14,22 +15,6 @@
 
 namespace esphome {
 namespace sd_storage {
-
-// Helper base interface for both SdMmc and SdSpi
-// This allows automation classes to work with both types
-class SdStorageBase {
- public:
-  virtual ~SdStorageBase() = default;
-  virtual bool mount_card() = 0;
-  virtual void unmount_card() = 0;
-  virtual std::vector<FileInfo> list_directory(const std::string &path) = 0;
-  virtual bool is_mounted() const = 0;
-  virtual const std::string &get_mount_path() const = 0;
-  virtual void add_mount_ready_callback(const mount_ready_callback_t &callback) = 0;
-};
-
-// Make both SdMmc and SdSpi inherit from SdStorageBase
-// (This is achieved through template magic since we can't modify the class declarations)
 
 // Triggers - templated to work with both SdMmc and SdSpi
 template<typename T> class CardMountedTrigger : public Trigger<std::string> {

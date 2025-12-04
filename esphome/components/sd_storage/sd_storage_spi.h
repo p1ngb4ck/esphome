@@ -47,8 +47,7 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   // Pin configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
-  void set_cs_pin(GPIOPin *pin) { this->cs_pin_ = pin; }
-  void set_cs_pin_number(uint8_t pin) { this->cs_pin_number_ = pin; }
+  void set_cs_pin(InternalGPIOPin *pin) { this->cs_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_id(const std::string &id) { this->id_ = id; }
   void set_spi_interface(SPIInterface interface) { this->spi_interface_ = interface; }
@@ -133,8 +132,7 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
 
  protected:
   // Configuration
-  GPIOPin *cs_pin_{nullptr};
-  uint8_t cs_pin_number_{255};
+  InternalGPIOPin *cs_pin_{nullptr};
   bool mode_1bit_{true};  // SPI mode is always 1-bit
   uint8_t slot_{0};
   SPIInterface spi_interface_{};
