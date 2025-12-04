@@ -124,7 +124,7 @@ bool SdSpi::mount_card() {
 
   // Configure SDSPI device
   sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-  // slot_config.host_id = this->spi_interface_;
+  slot_config.host_id = this->spi_interface_;
   slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_pin_number_);
 
   // Try mounting with different frequencies

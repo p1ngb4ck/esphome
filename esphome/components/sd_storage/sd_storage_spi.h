@@ -51,6 +51,7 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   void set_cs_pin_number(uint8_t pin) { this->cs_pin_number_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_id(const std::string &id) { this->id_ = id; }
+  void set_spi_interface(SPIInterface interface) { this->spi_interface_ = interface; }
 
   // File operations
   bool write_file(const std::string &path, const std::string &data);
@@ -136,6 +137,7 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   uint8_t cs_pin_number_{255};
   bool mode_1bit_{true};  // SPI mode is always 1-bit
   uint8_t slot_{0};
+  SPIInterface spi_interface_{};
 
   // Card state
   CardType card_type_{CardType::UNKNOWN};
