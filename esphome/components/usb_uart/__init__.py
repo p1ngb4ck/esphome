@@ -150,19 +150,7 @@ async def to_code(config):
     socket.require_wake_loop_threadsafe()
 
     for device in config:
-        # Get the USBHost instance - either specified per-device or use default
-        if CONF_USB_HOST_ID in device:
-            # Dual host mode: use specified instance
-            usb_host_var = await cg.get_variable(device[CONF_USB_HOST_ID])
-        else:
-            # Single host mode: use default instance from CORE.data
-            usb_host_var = CORE.data.get("usb_host_instance")
-            if usb_host_var is None:
-                raise cv.Invalid(
-                    "usb_uart requires either usb_host_id or a usb_host component"
-                )
-
-        var = await register_usb_client(device, usb_host_var)
+        var = await register_usb_client(device)
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
             await cg.register_parented(chvar, var)
