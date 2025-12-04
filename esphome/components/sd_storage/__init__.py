@@ -121,6 +121,7 @@ SD_MMC_SCHEMA = cv.Schema(
         cv.Required(CONF_CLK_PIN): pins.internal_gpio_output_pin_number,
         cv.Required(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
         cv.Required(CONF_DATA0_PIN): pins.internal_gpio_pin_number,
+        cv.Optional(CONF_CS_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA1_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA2_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA3_PIN): pins.internal_gpio_pin_number,
@@ -144,6 +145,7 @@ SD_SPI_SCHEMA = cv.Schema(
         cv.Optional(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
         cv.Optional(CONF_DATA0_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA3_PIN): pins.gpio_output_pin_schema,  # Alias for CS pin
+        cv.Optional(CONF_CS_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
         # DATA1 and DATA2 are not used in standard SD SPI mode (only 1-bit)
         cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
@@ -198,7 +200,9 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     card_type = config[CONF_TYPE]
-
+    if cs_pin := config.get(CONF_CS_PIN):
+        cs_ctrl = await cg.gpio_pin_expression(cs_pin)
+        cg.add(var.set_cs_pin(cs_ctrl))
     if card_type == TYPE_SD_SPI:
         # SPI mode configuration
         cg.add_define("USE_SD_STORAGE_SPI")

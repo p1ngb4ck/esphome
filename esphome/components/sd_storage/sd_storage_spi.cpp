@@ -76,7 +76,7 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_.c_str());
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
-  LOG_PIN("  CS Pin:", this->cs_);
+  ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", this->cs_pin_);
 
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
