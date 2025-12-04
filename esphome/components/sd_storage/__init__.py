@@ -198,13 +198,13 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     card_type = config[CONF_TYPE]
-    if cs_pin := config.get(CONF_CS_PIN):
-        cg.add(var.set_cs_pin_number(cs_pin))
     if card_type == TYPE_SD_SPI:
         # SPI mode configuration
         cg.add_define("USE_SD_STORAGE_SPI")
         await spi.register_spi_device(var, config)
         cg.add(var.set_slot(config[CONF_SLOT]))
+        if cs_pin := config.get(CONF_CS_PIN):
+            cg.add(var.set_cs_pin_number(cs_pin))
         # Set mode (must be 1-bit for SPI)
         if mode_1bit := config.get(CONF_MODE_1BIT):
             cg.add(var.set_mode_1bit(mode_1bit))
