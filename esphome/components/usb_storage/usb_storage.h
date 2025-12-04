@@ -114,10 +114,12 @@ class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, pu
   void set_pid(uint16_t pid) { this->pid_ = pid; }
   void set_id(const std::string &id) { this->id_ = id; }
 
-  // USBDeviceHandler Interface implementation
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // USBDeviceHandler Interface implementation (dual-host mode only)
   bool matches_device(const usb_config_desc_t *config_desc) override;
   void on_device_connected(usb_device_handle_t device_handle, uint8_t addr) override;
   void on_device_disconnected(usb_device_handle_t device_handle) override;
+#endif
 
   // MSC-specific operations
   void list_files();
