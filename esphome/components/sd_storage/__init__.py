@@ -24,8 +24,9 @@ AUTO_LOAD = []
 esp32.require_vfs_dir()
 
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
-SdMmc = sd_storage_ns.class_("SdMmc", cg.Component)
-SdSpi = sd_storage_ns.class_("SdSpi", spi.SPIDevice, cg.Component)
+SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component)
+SdMmc = sd_storage_ns.class_("SdMmc", SdStorageBase)
+SdSpi = sd_storage_ns.class_("SdSpi", spi.SPIDevice, SdStorageBase)
 
 # Automation classes (templated to work with both SdMmc and SdSpi)
 # The actual C++ classes are templates, so we don't specify the parent type here
@@ -210,12 +211,6 @@ async def to_code(config):
         if spi_interface := config.get(CONF_SPI_INTERFACE):
             cg.add(var.set_spi_interface(cg.RawExpression(spi_interface)))
 
-        # Set unused data pins as pullup inputs if provided
-        if pin := config.get(CONF_DATA1_PIN):
-            cg.add(var.set_data1_pin(await cg.gpio_pin_expression(pin)))
-        if pin := config.get(CONF_DATA2_PIN):
-            cg.add(var.set_data2_pin(await cg.gpio_pin_expression(pin)))
-
     elif card_type == TYPE_SD_MMC:
         # SDMMC mode configuration
         cg.add_define("USE_SD_STORAGE_SDMMC")
@@ -263,7 +258,7 @@ async def to_code(config):
 # Actions - these work with both SdMmc and SdSpi via polymorphism
 SD_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
     {
-        cv.Required(CONF_ID): cv.use_id(SdMmc, SdSpi),
+        cv.Required(CONF_ID): cv.use_id(SdStorageBase),
     }
 )
 
@@ -286,7 +281,7 @@ async def sd_storage_unmount_to_code(config, action_id, template_arg, args):
 
 LIST_FILES_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_ID): cv.use_id(SdMmc, SdSpi),
+        cv.Required(CONF_ID): cv.use_id(SdStorageBase),
         cv.Optional("path", default=""): cv.templatable(cv.string),
     }
 )

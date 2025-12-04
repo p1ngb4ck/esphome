@@ -4,13 +4,9 @@
 
 #ifdef USE_SD_STORAGE_SPI
 
-#include "esphome/core/component.h"
+#include "sd_storage_base.h"
 #include "esphome/core/gpio.h"
 #include "esphome/components/spi/spi.h"
-#include <string>
-#include <vector>
-#include <functional>
-#include <cstdint>
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage_device.h"
@@ -26,33 +22,15 @@ namespace sd_storage {
 
 static const char *const TAG_SPI = "sd_storage.spi";
 
-enum class CardType : uint8_t {
-  UNKNOWN = 0,
-  SDIO = 1,
-  MMC = 2,
-  SDHC = 3,
-  SDXC = 3,
-  SDSC = 4,
-};
-
-struct FileInfo {
-  std::string path;
-  uint32_t size;
-  bool is_directory;
-};
-
-// Forward declaration for mount callback
-using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
-
 #ifdef USE_STORAGE
 class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
                                     spi::DATA_RATE_10MHZ>,
-              public Component,
+              public SdStorageBase,
               public storage::StorageDevice {
 #else
 class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
                                     spi::DATA_RATE_10MHZ>,
-              public Component {
+              public SdStorageBase {
 #endif
  public:
   enum ErrorCode {
@@ -69,8 +47,6 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   // Pin configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
   void set_spi_interface(spi::SPIInterface spi_interface) { this->spi_interface_ = spi_interface; }
-  void set_data1_pin(GPIOPin *pin) { this->data1_pin_ = pin; }
-  void set_data2_pin(GPIOPin *pin) { this->data2_pin_ = pin; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
   void set_id(const std::string &id) { this->id_ = id; }
 
@@ -156,8 +132,6 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   // Configuration
   bool mode_1bit_{true};  // SPI mode is always 1-bit
   spi::SPIInterface spi_interface_;
-  GPIOPin *data1_pin_{nullptr};  // Optional pullup pin for unused data line
-  GPIOPin *data2_pin_{nullptr};  // Optional pullup pin for unused data line
 
   // Card state
   CardType card_type_{CardType::UNKNOWN};

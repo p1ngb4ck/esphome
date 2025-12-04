@@ -4,12 +4,8 @@
 
 #ifdef USE_SD_STORAGE_SDMMC
 
-#include "esphome/core/component.h"
+#include "sd_storage_base.h"
 #include "esphome/core/gpio.h"
-#include <string>
-#include <vector>
-#include <functional>
-#include <cstdint>
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage_device.h"
@@ -20,30 +16,12 @@ namespace sd_storage {
 
 static const char *const TAG = "sd_storage";
 
-enum class CardType : uint8_t {
-  UNKNOWN = 0,
-  SDIO = 1,
-  MMC = 2,
-  SDHC = 3,
-  SDXC = 3,
-  SDSC = 4,
-};
-
-struct FileInfo {
-  std::string path;
-  uint32_t size;
-  bool is_directory;
-};
-
 enum MemoryUnits : short { Byte = 0, KiloByte = 1, MegaByte = 2, GigaByte = 3, TeraByte = 4, PetaByte = 5 };
 
-// Forward declaration for mount callback
-using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
-
 #ifdef USE_STORAGE
-class SdMmc : public Component, public storage::StorageDevice {
+class SdMmc : public SdStorageBase, public storage::StorageDevice {
 #else
-class SdMmc : public Component {
+class SdMmc : public SdStorageBase {
 #endif
  public:
   void setup() override;
