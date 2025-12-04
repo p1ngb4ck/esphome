@@ -58,12 +58,9 @@ void FlashPartition::setup() {
   }
 
 #ifdef USE_STORAGE
-  // Register with storage registry
   if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    // Also register the mount point so http_file_browser can show space info
     storage::global_storage->register_mount(this->mount_path_, "flash_partition", this);
-    ESP_LOGD(TAG, "Registered with storage registry and mount point");
+    ESP_LOGD(TAG, "Registered mount with storage");
   }
 #endif
 
