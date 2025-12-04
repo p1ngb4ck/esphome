@@ -11,7 +11,6 @@ from esphome.components.esp32 import (
 from esphome.components.usb_host import USBHost, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
-from esphome.core import CORE
 
 CODEOWNERS = ["p1ngb4ck"]
 DEPENDENCIES = ["usb_host", "esp32"]
@@ -65,13 +64,9 @@ async def register_usb_storage_handler(device_config, storage_host, usb_host):
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
 
-    # Only register as interface-class handler in dual-host mode
-    # In singleton mode (S2/S3), MSC driver handles enumeration via background task
-    dual_host_support = CORE.data.get("usb_host_dual_instance", False)
-    if dual_host_support:
-        cg.add(
-            usb_host.register_device_handler(var)
-        )  # Register as interface-class handler with USBHost
+    cg.add(
+        usb_host.register_device_handler(var)
+    )  # Register as interface-class handler with USBHost
 
     # Register on_mounted trigger
     for conf in device_config.get(CONF_ON_MOUNTED, []):
