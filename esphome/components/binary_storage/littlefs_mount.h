@@ -14,7 +14,7 @@ namespace esphome {
 namespace binary_storage {
 
 // Maximum number of simultaneously open files (kept low for MCU memory constraints)
-static constexpr int LFS_VFS_MAX_FDS = 4;
+static constexpr int LFS_VFS_MAX_FDS = 8;
 
 // Forward declaration
 class LittleFSMount;
