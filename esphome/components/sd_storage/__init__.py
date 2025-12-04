@@ -198,9 +198,9 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     card_type = config[CONF_TYPE]
-    if cs_pin := config.get(CONF_CS_PIN):
-        cs_ctrl = await cg.gpio_pin_expression(cs_pin)
-        cg.add(var.set_cs_pin(cs_ctrl))
+    # if cs_pin := config.get(CONF_CS_PIN):
+    #    cs_ctrl = await cg.gpio_pin_expression(cs_pin)
+    #    cg.add(var.set_cs_pin(cs_ctrl))
     if card_type == TYPE_SD_SPI:
         # SPI mode configuration
         cg.add_define("USE_SD_STORAGE_SPI")
