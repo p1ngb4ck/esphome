@@ -304,14 +304,16 @@ static void msc_event_callback(const msc_host_event_t *event, void *arg) {
 
 void USBStorageHost::setup() {
   ESP_LOGCONFIG(TAG, "Registering USB Storage Host Component...");
+
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Dual-host mode: Coordinator handles device events, MSC driver should NOT create background task
   const msc_host_driver_config_t msc_config = {
-      .create_backround_task = true,
+      .create_backround_task = false,  // Coordinator handles enumeration
       .task_priority = 5,
       .stack_size = 4096,
       .callback = msc_event_callback,
   };
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
   // Multi-instance API: Initialize MSC driver with USB Host instance
   tuh_instance_t tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
   this->msc_driver_ = msc_host_driver_init(tuh_inst, &msc_config);
@@ -322,6 +324,14 @@ void USBStorageHost::setup() {
   }
   ESP_LOGI(TAG, "MSC host driver initialized successfully (multi-instance)");
 #else
+  // Singleton mode (S2/S3): Original behavior - MSC driver creates background task
+  const msc_host_driver_config_t msc_config = {
+      .create_backround_task = true,  // MSC driver handles enumeration itself
+      .task_priority = 5,
+      .stack_size = 4096,
+      .callback = msc_event_callback,
+  };
+
   // Singleton API: Use global msc_host_install
   esp_err_t err = msc_host_install(&msc_config);
   if (err != ESP_OK) {

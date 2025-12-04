@@ -460,6 +460,7 @@ void USBClient::loop() {
         }
 
         if ((vid_pid_match || is_wildcard) && !skip_for_specific_driver) {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
           // NEW: Try to claim device (coordinates with USBHost for interface-class handlers)
           ESP_LOGD(TAG, "Attempting to claim device %d (VID=%04X, PID=%04X, parent=%p)", this->device_addr_, this->vid_,
                    this->pid_, (void *) this->parent_);
@@ -471,6 +472,7 @@ void USBClient::loop() {
           }
           ESP_LOGD(TAG, "Device %d successfully claimed (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
                    this->pid_);
+#endif
 
           usb_device_info_t dev_info;
           err = usb_host_device_info(this->device_handle_, &dev_info);
@@ -582,12 +584,14 @@ TransferRequest *USBClient::get_trq_() {
 void USBClient::disconnect() {
   this->on_disconnected();
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
   // NEW: Release device claim - but only if we actually claimed it (state == CONNECTED)
   // If we opened the device but didn't claim it (e.g., wildcard skipped MSC device),
   // don't release it - the interface-class handler may have claimed it instead
   if (this->parent_ != nullptr && this->device_addr_ != -1 && this->state_ == USB_CLIENT_CONNECTED) {
     this->parent_->release_device(this->device_addr_);
   }
+#endif
 
   auto err = usb_host_device_close(this->handle_, this->device_handle_);
   if (err != ESP_OK) {
