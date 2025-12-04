@@ -105,10 +105,8 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-async def register_usb_client(config, parent):
-    # Pass parent as 3rd constructor parameter so it's available in setup()
-    # This is critical for dual-host mode where deferred_init() needs parent immediately
-    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID], parent)
+async def register_usb_client(config):
+    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
     # Note: set_parent() is also called in constructor, but keeping this for backward compatibility
     # cg.add(var.set_parent(parent))
@@ -178,11 +176,10 @@ async def to_code(config: ConfigType) -> None:
             config_value = instance_conf[CONF_CONTROLLER]
             var = cg.new_Pvariable(instance_conf[CONF_ID], config_value)
             await cg.register_component(var, instance_conf)
-            # cg.add(var.set_controller_index(controller_index))
 
             # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():
-                await register_usb_client(device, var)
+                await register_usb_client(device)
                 cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
 
             usb_host_instances[instance_conf[CONF_ID]] = {
@@ -194,14 +191,13 @@ async def to_code(config: ConfigType) -> None:
         # Single host mode (default): create one USBHost instance
         var = cg.new_Pvariable(config[CONF_ID])
         await cg.register_component(var, config)
-        CORE.data["usb_host_instance"] = var
 
     # Register devices as USBClient components and add to whitelist
     # In dual host mode, devices are specified per-instance (handled above)
     # In single host mode, devices are specified at top level
     if not dual_host_support:
         for device in config.get(CONF_DEVICES) or ():
-            await register_usb_client(device, CORE.data["usb_host_instance"])
+            await register_usb_client(device)
             cg.add(
                 CORE.data["usb_host_instance"].add_device_to_whitelist(
                     device[CONF_VID], device[CONF_PID]
