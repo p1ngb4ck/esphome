@@ -15,6 +15,7 @@
 #ifdef USE_ESP_IDF
 #include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
 #endif
 
 namespace esphome {
@@ -23,14 +24,9 @@ namespace sd_storage {
 static const char *const TAG_SPI = "sd_storage.spi";
 
 #ifdef USE_STORAGE
-class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
-                                    spi::DATA_RATE_10MHZ>,
-              public SdStorageBase,
-              public storage::StorageDevice {
+class SdSpi : public SdStorageBase, public storage::StorageDevice {
 #else
-class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
-                                    spi::DATA_RATE_10MHZ>,
-              public SdStorageBase {
+class SdSpi : public SdStorageBase {
 #endif
  public:
   enum ErrorCode {
@@ -47,6 +43,9 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   // Pin configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
+  void set_clk_pin(uint8_t pin) { this->clk_pin_ = pin; }
+  void set_mosi_pin(uint8_t pin) { this->mosi_pin_ = pin; }
+  void set_miso_pin(uint8_t pin) { this->miso_pin_ = pin; }
   void set_cs_pin(InternalGPIOPin *pin) { this->cs_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_id(const std::string &id) { this->id_ = id; }
@@ -131,7 +130,10 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
 #endif
 
  protected:
-  // Configuration
+  // Configuration - SPI pins
+  uint8_t clk_pin_{255};
+  uint8_t mosi_pin_{255};
+  uint8_t miso_pin_{255};
   InternalGPIOPin *cs_pin_{nullptr};
   bool mode_1bit_{true};  // SPI mode is always 1-bit
   uint8_t slot_{0};
