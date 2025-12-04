@@ -48,7 +48,7 @@ CONF_DATA3_PIN = "data3_pin"
 CONF_MODE_1BIT = "mode_1bit"
 CONF_SLOT = "slot"
 CONF_ON_MOUNTED = "on_mounted"
-CONF_SPI_INTERFACE = "_spi_interface"
+CONF_SPI_INTERFACE = "spi_interface"
 
 TYPE_SD_MMC = "sd_mmc"
 TYPE_SD_SPI = "sd_spi"
