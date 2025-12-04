@@ -182,9 +182,9 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 #endif
 }
 void USBClient::setup() {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
   ESP_LOGE(TAG, "=== USBClient::setup() ENTRY - VID=%04X PID=%04X parent=%p ===", this->vid_, this->pid_,
            (void *) this->parent_);
-#ifdef USE_USB_HOST_DUAL_INSTANCE
   // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
   // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
   /* ESP_LOGE(TAG, "Creating init task for deferred initialization");
