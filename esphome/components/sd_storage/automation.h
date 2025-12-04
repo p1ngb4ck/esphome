@@ -1,26 +1,51 @@
 #pragma once
 
 #include "esphome/core/automation.h"
+#include "esphome/core/defines.h"
+
+// Include the appropriate header based on which mode is enabled
+#if defined(USE_SD_STORAGE_SDMMC)
 #include "sd_storage.h"
+#endif
+
+#if defined(USE_SD_STORAGE_SPI)
+#include "sd_storage_spi.h"
+#endif
 
 namespace esphome {
 namespace sd_storage {
 
-// Triggers
-class CardMountedTrigger : public Trigger<std::string> {
+// Helper base interface for both SdMmc and SdSpi
+// This allows automation classes to work with both types
+class SdStorageBase {
  public:
-  explicit CardMountedTrigger(SdMmc *parent) {
+  virtual ~SdStorageBase() = default;
+  virtual bool mount_card() = 0;
+  virtual void unmount_card() = 0;
+  virtual std::vector<FileInfo> list_directory(const std::string &path) = 0;
+  virtual bool is_mounted() const = 0;
+  virtual const std::string &get_mount_path() const = 0;
+  virtual void add_mount_ready_callback(const mount_ready_callback_t &callback) = 0;
+};
+
+// Make both SdMmc and SdSpi inherit from SdStorageBase
+// (This is achieved through template magic since we can't modify the class declarations)
+
+// Triggers - templated to work with both SdMmc and SdSpi
+template<typename T> class CardMountedTrigger : public Trigger<std::string> {
+ public:
+  explicit CardMountedTrigger(T *parent) {
     parent->add_mount_ready_callback([this](const std::string &mount_path) { this->trigger(mount_path); });
   }
 };
 
-// Actions
-template<typename... Ts> class MountCardAction : public Action<Ts...> {
+// Actions - templated to work with both SdMmc and SdSpi
+template<typename T, typename... Ts> class MountCardAction : public Action<Ts...> {
  public:
-  explicit MountCardAction(SdMmc *sd_mmc) : sd_mmc_(sd_mmc) {}
+  explicit MountCardAction(T *sd_storage) : sd_storage_(sd_storage) {}
 
   void play(Ts... x) override {
-    if (this->sd_mmc_->mount_card()) {
+    if (this->sd_storage_->mount_card()) {
       ESP_LOGI("sd_storage", "Card mounted successfully via automation");
     } else {
       ESP_LOGE("sd_storage", "Failed to mount card via automation");
@@ -28,36 +53,36 @@ template<typename... Ts> class MountCardAction : public Action<Ts...> {
   }
 
  protected:
-  SdMmc *sd_mmc_;
+  T *sd_storage_;
 };
 
-template<typename... Ts> class UnmountCardAction : public Action<Ts...> {
+template<typename T, typename... Ts> class UnmountCardAction : public Action<Ts...> {
  public:
-  explicit UnmountCardAction(SdMmc *sd_mmc) : sd_mmc_(sd_mmc) {}
+  explicit UnmountCardAction(T *sd_storage) : sd_storage_(sd_storage) {}
 
   void play(Ts... x) override {
-    this->sd_mmc_->unmount_card();
+    this->sd_storage_->unmount_card();
     ESP_LOGI("sd_storage", "Card unmounted via automation");
   }
 
  protected:
-  SdMmc *sd_mmc_;
+  T *sd_storage_;
 };
 
-template<typename... Ts> class ListFilesAction : public Action<Ts...> {
+template<typename T, typename... Ts> class ListFilesAction : public Action<Ts...> {
  public:
-  explicit ListFilesAction(SdMmc *sd_mmc) : sd_mmc_(sd_mmc) {}
+  explicit ListFilesAction(T *sd_storage) : sd_storage_(sd_storage) {}
 
   TEMPLATABLE_VALUE(std::string, path)
 
   void play(Ts... x) override {
     auto path = this->path_.value(x...);
     if (path.empty()) {
-      path = this->sd_mmc_->get_mount_path();
+      path = this->sd_storage_->get_mount_path();
     }
 
     ESP_LOGI("sd_storage", "Listing files in: %s", path.c_str());
-    auto files = this->sd_mmc_->list_directory(path);
+    auto files = this->sd_storage_->list_directory(path);
     for (const auto &file : files) {
       if (file.is_directory) {
         ESP_LOGI("sd_storage", "  [DIR]  %s", file.path.c_str());
@@ -69,18 +94,18 @@ template<typename... Ts> class ListFilesAction : public Action<Ts...> {
   }
 
  protected:
-  SdMmc *sd_mmc_;
+  T *sd_storage_;
 };
 
-// Conditions
-template<typename... Ts> class CardMountedCondition : public Condition<Ts...> {
+// Conditions - templated to work with both SdMmc and SdSpi
+template<typename T, typename... Ts> class CardMountedCondition : public Condition<Ts...> {
  public:
-  explicit CardMountedCondition(SdMmc *sd_mmc) : sd_mmc_(sd_mmc) {}
+  explicit CardMountedCondition(T *sd_storage) : sd_storage_(sd_storage) {}
 
-  bool check(Ts... x) override { return this->sd_mmc_->is_mounted(); }
+  bool check(Ts... x) override { return this->sd_storage_->is_mounted(); }
 
  protected:
-  SdMmc *sd_mmc_;
+  T *sd_storage_;
 };
 
 }  // namespace sd_storage

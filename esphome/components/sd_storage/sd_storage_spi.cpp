@@ -1,47 +1,65 @@
-#include "sd_storage.h"
+#include "sd_storage_spi.h"
 
-#ifdef USE_SD_STORAGE_SDMMC
+#ifdef USE_SD_STORAGE_SPI
 
-#include "esphome/core/defines.h"
 #include "esphome/core/log.h"
-#include <fstream>
+#include <cerrno>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <errno.h>
-#include <cstdio>
+
+extern "C" {
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
+}
 #include "ff.h"
-#include "sdmmc_cmd.h"
-#include "driver/sdmmc_host.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#if defined(ESP32_USE_VARIANT_ESP32P4)
-#define SDMMC_FREQ_HIGHSPEED
-#endif
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
 #endif
 
+#ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
+#define VFS_FAT_MOUNT_DEFAULT_CONFIG() \
+  { .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 0, .disk_status_check_enable = false, }
+#endif  // VFS_FAT_MOUNT_DEFAULT_CONFIG
+
+// SD OCR SDHC capability bit
+int constexpr SD_OCR_SDHC_CAP = (1 << 30);
+
 namespace esphome {
 namespace sd_storage {
 
-static sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-static sdmmc_card_t *card = nullptr;
+static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
 
-void SdMmc::setup() {
-  ESP_LOGI(TAG, "Initializing SD/MMC card");
-  ESP_LOGI(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
-
-  if (this->cs_pin_ != 0) {
-    ESP_LOGI(TAG, "  Power control pin: %d", this->cs_pin_);
-    this->cs_pin_->setup();
+std::string SdSpi::build_full_path(const char *path) {
+  std::string full_path = this->mount_path_;
+  if (path[0] != '/') {
+    full_path += "/";
   }
+  full_path += path;
+  return full_path;
+}
+
+void SdSpi::setup() {
+  ESP_LOGI(TAG_SPI, "Initializing SD card in SPI mode");
+
+  // Setup unused data pins as pullup inputs if provided
+  auto setup_input_pullup = [](GPIOPin *pin) {
+    if (pin != nullptr) {
+      pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+      pin->setup();
+    }
+  };
+  setup_input_pullup(this->data1_pin_);
+  setup_input_pullup(this->data2_pin_);
+
+  // Initialize SPI device
+  this->spi_setup();
 
   if (!this->mount_card()) {
-    ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+    ESP_LOGE(TAG_SPI, "Failed to mount SD card");
     this->mark_failed();
     return;
   }
@@ -51,102 +69,107 @@ void SdMmc::setup() {
   // removable media to register/unregister dynamically.
 }
 
-void SdMmc::loop() {
+void SdSpi::loop() {
   // Nothing to do in loop
 }
 
-void SdMmc::dump_config() {
-  ESP_LOGCONFIG(TAG, "SD/MMC Card:");
-  ESP_LOGCONFIG(TAG, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
-  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
+void SdSpi::dump_config() {
+  ESP_LOGCONFIG(TAG_SPI, "SD Storage (SPI):");
+  ESP_LOGCONFIG(TAG_SPI, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
+  ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_.c_str());
+  ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
+  LOG_PIN("  CS Pin:", this->cs_);
+
+  if (this->data1_pin_ != nullptr) {
+    LOG_PIN("  Data1 Pin (pullup):", this->data1_pin_);
+  }
+  if (this->data2_pin_ != nullptr) {
+    LOG_PIN("  Data2 Pin (pullup):", this->data2_pin_);
+  }
 
   if (this->is_mounted_) {
-    ESP_LOGCONFIG(TAG, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
-    ESP_LOGCONFIG(TAG, "  Total bytes: %" PRIu64, this->total_bytes_);
-    ESP_LOGCONFIG(TAG, "  Used bytes: %" PRIu64, this->used_bytes_);
+    ESP_LOGCONFIG(TAG_SPI, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
+    ESP_LOGCONFIG(TAG_SPI, "  Total bytes: %" PRIu64, this->total_bytes_);
+    ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
+  }
+
+  if (this->is_failed()) {
+    ESP_LOGE(TAG_SPI, "Setup failed: %s", SdSpi::error_code_to_string(this->init_error_).c_str());
   }
 }
 
-bool SdMmc::mount_card() {
-  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-  host.slot = SDMMC_HOST_SLOT_0 + this->slot_;
-#if defined(SDMMC_FREQ_HIGHSPEED)
-  host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;  // 50MHz
-#else
-  host.max_freq_khz = SDMMC_FREQ_DEFAULT;  // 25MHz
-#endif
-  sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-  slot_config.width = this->mode_1bit_ ? 1 : 4;
-
-  // Configure SDMMC host
-  host.flags = SDMMC_HOST_FLAG_4BIT;
-  if (this->mode_1bit_) {
-    host.flags = SDMMC_HOST_FLAG_1BIT;
+std::string SdSpi::error_code_to_string(SdSpi::ErrorCode code) {
+  switch (code) {
+    case ErrorCode::ERR_MOUNT:
+      return "Failed to mount card";
+    case ErrorCode::ERR_NO_CARD:
+      return "No card found";
+    default:
+      return "Unknown error";
   }
-  host.slot = this->slot_;
+}
 
-#ifdef SOC_SDMMC_USE_GPIO_MATRIX
-  // Configure pins
-  slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
-  slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
-  slot_config.d0 = static_cast<gpio_num_t>(this->data0_pin_);
-  if (!this->mode_1bit_) {
-    slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
-    slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
-    slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
-  }
-#endif
+bool SdSpi::mount_card() {
+  ESP_LOGI(TAG_SPI, "Mounting SD card via SPI");
 
-  // Enable internal pull-ups for SD card communication
-  slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+  // Configure VFS mount
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = VFS_FAT_MOUNT_DEFAULT_CONFIG();
+  mount_config.format_if_mount_failed = false;
+  mount_config.max_files = 16;
+  mount_config.allocation_unit_size = 256 * 1024;
 
-  // Initialize host
-  ESP_LOGI(TAG, "Initializing SDMMC slot %d", this->slot_);
-  esp_err_t ret = sdmmc_host_init_slot(host.slot, &slot_config);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to init SDMMC slot %d: %s", this->slot_, esp_err_to_name(ret));
+  // Initialize SDSPI host
+  const auto init_err = sdspi_host_init();
+  if (init_err != ESP_OK) {
+    ESP_LOGE(TAG_SPI, "Failed to init sdspi host: %s", esp_err_to_name(init_err));
+    this->init_error_ = ErrorCode::ERR_MOUNT;
     return false;
   }
+  ESP_LOGV(TAG_SPI, "SDSPI host initialized");
 
-  // Mount filesystem with retry logic
-  const char *mount_point = this->mount_path_.c_str();
-  const esp_vfs_fat_mount_config_t mount_config = {
-      .format_if_mount_failed = false,
-      .max_files = 16,
-      .allocation_unit_size = 256 * 1024,
-  };
+  // Configure SDSPI host
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = this->spi_interface_;
 
-  // Allocate card structure
-  card = (sdmmc_card_t *) malloc(sizeof(sdmmc_card_t));
+  // Configure SDSPI device
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.host_id = this->spi_interface_;
+  slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_->get_pin());
 
-  // Attempt to mount with retries
-  ret = ESP_FAIL;
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    ESP_LOGI(TAG, "Mounting SD card on slot %d to '%s' (attempt %d/3)...", this->slot_, mount_point, attempt);
-    ret = esp_vfs_fat_sdmmc_mount(mount_point, &host, &slot_config, &mount_config, &card);
-    if (ret == ESP_OK) {
-      ESP_LOGI(TAG, "SD card mounted successfully on slot %d to '%s'!", this->slot_, mount_point);
+  // Try mounting with different frequencies
+  esp_err_t mount_error = ESP_OK;
+  for (const auto freq_khz : {SDMMC_FREQ_DEFAULT, SDMMC_FREQ_PROBING}) {
+    host.max_freq_khz = freq_khz;
+    ESP_LOGV(TAG_SPI, "Attempting mount with frequency: %d kHz", host.max_freq_khz);
+
+    mount_error = esp_vfs_fat_sdspi_mount(this->mount_path_.c_str(), &host, &slot_config, &mount_config, &this->card_);
+    if (mount_error != ESP_ERR_INVALID_RESPONSE) {
       break;
     }
-    ESP_LOGW(TAG, "Mount attempt %d failed: %s", attempt, esp_err_to_name(ret));
-    vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms between attempts
   }
 
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount filesystem to '%s': %s", mount_point, esp_err_to_name(ret));
-    free(card);
-    card = nullptr;
+  if (mount_error != ESP_OK) {
+    ESP_LOGE(TAG_SPI, "Failed to mount FAT fs: %s", esp_err_to_name(mount_error));
+    switch (mount_error) {
+      case ESP_FAIL:
+      case ESP_ERR_INVALID_CRC:
+        this->init_error_ = ErrorCode::ERR_MOUNT;
+        break;
+      case ESP_ERR_TIMEOUT:
+      default:
+        this->init_error_ = ErrorCode::ERR_NO_CARD;
+    }
     return false;
   }
 
   // Determine card type
-  if (card->is_mmc) {
+  if (this->card_->is_mmc) {
     this->card_type_ = CardType::MMC;
-  } else if (card->is_sdio) {
+  } else if (this->card_->is_sdio) {
     this->card_type_ = CardType::SDIO;
   } else {
     // Check if it's SDHC/SDXC (High Capacity) by looking at OCR register
-    if (card->ocr & (1 << 30)) {
+    if (this->card_->ocr & SD_OCR_SDHC_CAP) {
       this->card_type_ = CardType::SDHC;
     } else {
       this->card_type_ = CardType::SDSC;
@@ -156,10 +179,13 @@ bool SdMmc::mount_card() {
   this->is_mounted_ = true;
   this->update_card_info();
 
-  ESP_LOGI(TAG, "SD/MMC card mounted successfully at %s", mount_point);
+  ESP_LOGI(TAG_SPI, "SD card mounted successfully at %s", this->mount_path_.c_str());
+  ESP_LOGI(TAG_SPI, "  Max frequency: %d kHz", this->card_->max_freq_khz);
+  ESP_LOGI(TAG_SPI, "  Real frequency: %d kHz", this->card_->real_freq_khz);
 
   // Notify all registered callbacks that mount is ready
-  ESP_LOGI(TAG, "Notifying %zu mount ready callbacks for '%s'", this->mount_ready_callbacks_.size(), mount_point);
+  ESP_LOGI(TAG_SPI, "Notifying %zu mount ready callbacks for '%s'", this->mount_ready_callbacks_.size(),
+           this->mount_path_.c_str());
   for (const auto &callback : this->mount_ready_callbacks_) {
     callback(this->mount_path_);
   }
@@ -168,16 +194,16 @@ bool SdMmc::mount_card() {
   // Register with storage registry
   if (storage::global_storage != nullptr) {
     storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered with storage registry");
+    ESP_LOGD(TAG_SPI, "Registered with storage registry");
   }
 #endif
 
   return true;
 }
 
-void SdMmc::unmount_card() {
-  if (this->is_mounted_ && card != nullptr) {
-    ESP_LOGI(TAG, "Unmounting SD/MMC card from '%s'", this->mount_path_.c_str());
+void SdSpi::unmount_card() {
+  if (this->is_mounted_ && this->card_ != nullptr) {
+    ESP_LOGI(TAG_SPI, "Unmounting SD card from '%s'", this->mount_path_.c_str());
 
 #ifdef USE_STORAGE
     // Unregister from storage registry if available
@@ -186,21 +212,20 @@ void SdMmc::unmount_card() {
     }
 #endif
 
-    esp_vfs_fat_sdcard_unmount(this->mount_path_.c_str(), card);
-    free(card);
-    card = nullptr;
+    esp_vfs_fat_sdcard_unmount(this->mount_path_.c_str(), this->card_);
+    this->card_ = nullptr;
     this->is_mounted_ = false;
-    ESP_LOGI(TAG, "SD/MMC card unmounted successfully");
+    ESP_LOGI(TAG_SPI, "SD card unmounted successfully");
   }
 }
 
-bool SdMmc::update_card_info() {
-  if (!this->is_mounted_ || card == nullptr) {
+bool SdSpi::update_card_info() {
+  if (!this->is_mounted_ || this->card_ == nullptr) {
     return false;
   }
 
   // Get card info
-  this->total_bytes_ = (uint64_t) card->csd.capacity * card->csd.sector_size;
+  this->total_bytes_ = (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size;
 
   // Get filesystem usage using f_getfree
   uint64_t total, free_bytes;
@@ -213,7 +238,7 @@ bool SdMmc::update_card_info() {
   return true;
 }
 
-uint64_t SdMmc::get_free_bytes() const {
+uint64_t SdSpi::get_free_bytes() const {
   if (!this->is_mounted_)
     return 0;
 
@@ -234,136 +259,147 @@ uint64_t SdMmc::get_free_bytes() const {
   return (uint64_t) fre_sect * fs->ssize;
 }
 
-std::string SdMmc::build_full_path(const char *path) {
-  std::string full_path = this->mount_path_;
-  if (path[0] != '/') {
-    full_path += "/";
-  }
-  full_path += path;
-  return full_path;
-}
-
 // Original string-based methods
-bool SdMmc::write_file(const std::string &path, const std::string &data) {
+bool SdSpi::write_file(const std::string &path, const std::string &data) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot write file");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot write file");
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
-  std::ofstream file(full_path, std::ios::binary);
-
-  if (!file.is_open()) {
-    ESP_LOGW(TAG, "Failed to open file for writing: %s", full_path.c_str());
+  std::string full_path = this->build_full_path(path.c_str());
+  FILE *file = fopen(full_path.c_str(), "wb");
+  if (file == nullptr) {
+    ESP_LOGW(TAG_SPI, "Failed to open file for writing: %s", full_path.c_str());
     return false;
   }
 
-  file.write(data.c_str(), data.length());
-  file.close();
+  size_t written = fwrite(data.c_str(), 1, data.length(), file);
+  fclose(file);
 
-  ESP_LOGD(TAG, "Wrote %d bytes to %s", data.length(), full_path.c_str());
+  if (written != data.length()) {
+    ESP_LOGW(TAG_SPI, "Failed to write all data to file");
+    return false;
+  }
+
+  ESP_LOGD(TAG_SPI, "Wrote %d bytes to %s", data.length(), full_path.c_str());
   return true;
 }
 
-bool SdMmc::append_file(const std::string &path, const std::string &data) {
+bool SdSpi::append_file(const std::string &path, const std::string &data) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot append to file");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot append to file");
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
-  std::ofstream file(full_path, std::ios::binary | std::ios::app);
-
-  if (!file.is_open()) {
-    ESP_LOGW(TAG, "Failed to open file for appending: %s", full_path.c_str());
+  std::string full_path = this->build_full_path(path.c_str());
+  FILE *file = fopen(full_path.c_str(), "ab");
+  if (file == nullptr) {
+    ESP_LOGW(TAG_SPI, "Failed to open file for appending: %s", full_path.c_str());
     return false;
   }
 
-  file.write(data.c_str(), data.length());
-  file.close();
+  size_t written = fwrite(data.c_str(), 1, data.length(), file);
+  fclose(file);
 
-  ESP_LOGD(TAG, "Appended %d bytes to %s", data.length(), full_path.c_str());
+  if (written != data.length()) {
+    ESP_LOGW(TAG_SPI, "Failed to append all data to file");
+    return false;
+  }
+
+  ESP_LOGD(TAG_SPI, "Appended %d bytes to %s", data.length(), full_path.c_str());
   return true;
 }
 
-std::string SdMmc::read_file(const std::string &path) {
+std::string SdSpi::read_file(const std::string &path) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot read file");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot read file");
     return "";
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
-  std::ifstream file(full_path, std::ios::binary);
-
-  if (!file.is_open()) {
-    ESP_LOGW(TAG, "Failed to open file for reading: %s", full_path.c_str());
+  std::string full_path = this->build_full_path(path.c_str());
+  FILE *file = fopen(full_path.c_str(), "rb");
+  if (file == nullptr) {
+    ESP_LOGW(TAG_SPI, "Failed to open file for reading: %s", full_path.c_str());
     return "";
   }
 
-  std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  file.close();
+  // Get file size
+  fseek(file, 0, SEEK_END);
+  size_t file_size = ftell(file);
+  fseek(file, 0, SEEK_SET);
 
-  ESP_LOGD(TAG, "Read %d bytes from %s", content.length(), full_path.c_str());
+  // Read file content
+  std::string content;
+  content.resize(file_size);
+  size_t bytes_read = fread(&content[0], 1, file_size, file);
+  fclose(file);
+
+  if (bytes_read != file_size) {
+    ESP_LOGW(TAG_SPI, "Failed to read entire file");
+    return "";
+  }
+
+  ESP_LOGD(TAG_SPI, "Read %d bytes from %s", bytes_read, full_path.c_str());
   return content;
 }
 
-bool SdMmc::delete_file(const std::string &path) {
+bool SdSpi::delete_file(const std::string &path) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot delete file");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot delete file");
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
 
   if (remove(full_path.c_str()) == 0) {
-    ESP_LOGD(TAG, "Deleted file: %s", full_path.c_str());
+    ESP_LOGD(TAG_SPI, "Deleted file: %s", full_path.c_str());
     return true;
   } else {
-    ESP_LOGW(TAG, "Failed to delete file: %s", full_path.c_str());
+    ESP_LOGW(TAG_SPI, "Failed to delete file: %s", full_path.c_str());
     return false;
   }
 }
 
-bool SdMmc::create_directory(const std::string &path) {
+bool SdSpi::create_directory(const std::string &path) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot create directory");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot create directory");
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
 
   if (mkdir(full_path.c_str(), 0755) == 0) {
-    ESP_LOGD(TAG, "Created directory: %s", full_path.c_str());
+    ESP_LOGD(TAG_SPI, "Created directory: %s", full_path.c_str());
     return true;
   } else {
-    ESP_LOGW(TAG, "Failed to create directory: %s (errno: %d)", full_path.c_str(), errno);
+    ESP_LOGW(TAG_SPI, "Failed to create directory: %s (errno: %d)", full_path.c_str(), errno);
     return false;
   }
 }
 
-bool SdMmc::remove_directory(const std::string &path) {
+bool SdSpi::remove_directory(const std::string &path) {
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot remove directory");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot remove directory");
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
 
   if (rmdir(full_path.c_str()) == 0) {
-    ESP_LOGD(TAG, "Removed directory: %s", full_path.c_str());
+    ESP_LOGD(TAG_SPI, "Removed directory: %s", full_path.c_str());
     return true;
   } else {
-    ESP_LOGW(TAG, "Failed to remove directory: %s", full_path.c_str());
+    ESP_LOGW(TAG_SPI, "Failed to remove directory: %s", full_path.c_str());
     return false;
   }
 }
 
-bool SdMmc::is_directory(const std::string &path) {
+bool SdSpi::is_directory(const std::string &path) {
   if (!this->is_mounted_) {
     return false;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
   struct stat path_stat;
 
   if (stat(full_path.c_str(), &path_stat) != 0) {
@@ -373,12 +409,12 @@ bool SdMmc::is_directory(const std::string &path) {
   return S_ISDIR(path_stat.st_mode);
 }
 
-uint32_t SdMmc::file_size(const std::string &path) {
+uint32_t SdSpi::file_size(const std::string &path) {
   if (!this->is_mounted_) {
     return 0;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
   struct stat path_stat;
 
   if (stat(full_path.c_str(), &path_stat) != 0) {
@@ -388,19 +424,19 @@ uint32_t SdMmc::file_size(const std::string &path) {
   return path_stat.st_size;
 }
 
-std::vector<FileInfo> SdMmc::list_directory(const std::string &path) {
+std::vector<FileInfo> SdSpi::list_directory(const std::string &path) {
   std::vector<FileInfo> files;
 
   if (!this->is_mounted_) {
-    ESP_LOGW(TAG, "Card not mounted, cannot list directory");
+    ESP_LOGW(TAG_SPI, "Card not mounted, cannot list directory");
     return files;
   }
 
-  std::string full_path = this->mount_path_ + "/" + path;
+  std::string full_path = this->build_full_path(path.c_str());
   DIR *dir = opendir(full_path.c_str());
 
   if (dir == nullptr) {
-    ESP_LOGW(TAG, "Failed to open directory: %s (errno: %d)", full_path.c_str(), errno);
+    ESP_LOGW(TAG_SPI, "Failed to open directory: %s (errno: %d)", full_path.c_str(), errno);
     return files;
   }
 
@@ -422,7 +458,7 @@ std::vector<FileInfo> SdMmc::list_directory(const std::string &path) {
   }
 
   closedir(dir);
-  ESP_LOGD(TAG, "Listed %d entries in %s", files.size(), full_path.c_str());
+  ESP_LOGD(TAG_SPI, "Listed %d entries in %s", files.size(), full_path.c_str());
   return files;
 }
 
@@ -431,16 +467,16 @@ std::vector<FileInfo> SdMmc::list_directory(const std::string &path) {
 // StorageDevice Interface Implementation
 //========================================================================
 
-storage::StorageInfo SdMmc::get_info() {
+storage::StorageInfo SdSpi::get_info() {
   storage::StorageInfo info;
-  info.id = this->id_.empty() ? "sd_storage" : this->id_;
-  info.name = "SD Card";
+  info.id = this->id_.empty() ? "sd_storage_spi" : this->id_;
+  info.name = "SD Card (SPI)";
   info.type = storage::StorageType::SD_CARD;
   info.filesystem = storage::FilesystemType::FAT;
   info.mount_path = this->mount_path_;
   info.total_bytes = this->total_bytes_;
   info.free_bytes = this->get_free_bytes();
-  info.block_size = card != nullptr ? card->csd.sector_size : 512;
+  info.block_size = this->card_ != nullptr ? this->card_->csd.sector_size : 512;
   info.is_mounted = this->is_mounted_;
   info.is_removable = true;
   info.is_read_only = false;
@@ -449,7 +485,7 @@ storage::StorageInfo SdMmc::get_info() {
   return info;
 }
 
-bool SdMmc::file_exists(const char *path) {
+bool SdSpi::file_exists(const char *path) {
   if (!this->is_mounted_)
     return false;
 
@@ -458,7 +494,7 @@ bool SdMmc::file_exists(const char *path) {
   return stat(full_path.c_str(), &path_stat) == 0 && S_ISREG(path_stat.st_mode);
 }
 
-bool SdMmc::get_file_size(const char *path, size_t *size) {
+bool SdSpi::get_file_size(const char *path, size_t *size) {
   if (!this->is_mounted_)
     return false;
 
@@ -473,7 +509,7 @@ bool SdMmc::get_file_size(const char *path, size_t *size) {
   return true;
 }
 
-bool SdMmc::read_file(const char *path, uint8_t *data, size_t *length) {
+bool SdSpi::read_file(const char *path, uint8_t *data, size_t *length) {
   if (!this->is_mounted_)
     return false;
 
@@ -488,7 +524,7 @@ bool SdMmc::read_file(const char *path, uint8_t *data, size_t *length) {
   return true;
 }
 
-bool SdMmc::write_file(const char *path, const uint8_t *data, size_t length) {
+bool SdSpi::write_file(const char *path, const uint8_t *data, size_t length) {
   if (!this->is_mounted_)
     return false;
 
@@ -502,7 +538,7 @@ bool SdMmc::write_file(const char *path, const uint8_t *data, size_t length) {
   return written == length;
 }
 
-bool SdMmc::append_file(const char *path, const uint8_t *data, size_t length) {
+bool SdSpi::append_file(const char *path, const uint8_t *data, size_t length) {
   if (!this->is_mounted_)
     return false;
 
@@ -516,7 +552,7 @@ bool SdMmc::append_file(const char *path, const uint8_t *data, size_t length) {
   return written == length;
 }
 
-bool SdMmc::delete_file(const char *path) {
+bool SdSpi::delete_file(const char *path) {
   if (!this->is_mounted_)
     return false;
 
@@ -524,7 +560,7 @@ bool SdMmc::delete_file(const char *path) {
   return remove(full_path.c_str()) == 0;
 }
 
-bool SdMmc::rename_file(const char *old_path, const char *new_path) {
+bool SdSpi::rename_file(const char *old_path, const char *new_path) {
   if (!this->is_mounted_)
     return false;
 
@@ -533,7 +569,7 @@ bool SdMmc::rename_file(const char *old_path, const char *new_path) {
   return rename(full_old.c_str(), full_new.c_str()) == 0;
 }
 
-bool SdMmc::copy_file(const char *src_path, const char *dst_path) {
+bool SdSpi::copy_file(const char *src_path, const char *dst_path) {
   if (!this->is_mounted_)
     return false;
 
@@ -566,7 +602,7 @@ bool SdMmc::copy_file(const char *src_path, const char *dst_path) {
   return success;
 }
 
-bool SdMmc::dir_exists(const char *path) {
+bool SdSpi::dir_exists(const char *path) {
   if (!this->is_mounted_)
     return false;
 
@@ -575,7 +611,7 @@ bool SdMmc::dir_exists(const char *path) {
   return stat(full_path.c_str(), &path_stat) == 0 && S_ISDIR(path_stat.st_mode);
 }
 
-bool SdMmc::create_dir(const char *path) {
+bool SdSpi::create_dir(const char *path) {
   if (!this->is_mounted_)
     return false;
 
@@ -583,7 +619,7 @@ bool SdMmc::create_dir(const char *path) {
   return mkdir(full_path.c_str(), 0755) == 0;
 }
 
-bool SdMmc::delete_dir(const char *path, bool recursive) {
+bool SdSpi::delete_dir(const char *path, bool recursive) {
   if (!this->is_mounted_)
     return false;
 
@@ -619,7 +655,7 @@ bool SdMmc::delete_dir(const char *path, bool recursive) {
   return rmdir(full_path.c_str()) == 0;
 }
 
-bool SdMmc::list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) {
+bool SdSpi::list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) {
   if (!this->is_mounted_)
     return false;
 
@@ -656,7 +692,7 @@ bool SdMmc::list_dir(const char *path, std::vector<storage::StorageFileInfo> *en
   return true;
 }
 
-bool SdMmc::get_space_info(uint64_t *total, uint64_t *free) {
+bool SdSpi::get_space_info(uint64_t *total, uint64_t *free) {
   if (!this->is_mounted_)
     return false;
 
@@ -672,7 +708,7 @@ bool SdMmc::get_space_info(uint64_t *total, uint64_t *free) {
 
   FRESULT res = f_getfree(path.c_str(), &fre_clust, &fs);
   if (res != FR_OK) {
-    ESP_LOGW(TAG, "Failed to get filesystem info: %d", res);
+    ESP_LOGW(TAG_SPI, "Failed to get filesystem info: %d", res);
     return false;
   }
 
@@ -687,7 +723,7 @@ bool SdMmc::get_space_info(uint64_t *total, uint64_t *free) {
   return true;
 }
 
-bool SdMmc::can_write_file(const char *path, size_t size) {
+bool SdSpi::can_write_file(const char *path, size_t size) {
   if (!this->is_mounted_)
     return false;
 
@@ -698,7 +734,7 @@ bool SdMmc::can_write_file(const char *path, size_t size) {
   return free_space >= size;
 }
 
-void *SdMmc::open_file(const char *path, const char *mode) {
+void *SdSpi::open_file(const char *path, const char *mode) {
   if (!this->is_mounted_)
     return nullptr;
 
@@ -706,43 +742,43 @@ void *SdMmc::open_file(const char *path, const char *mode) {
   return fopen(full_path.c_str(), mode);
 }
 
-size_t SdMmc::read_file_chunk(void *handle, uint8_t *buffer, size_t size) {
+size_t SdSpi::read_file_chunk(void *handle, uint8_t *buffer, size_t size) {
   if (handle == nullptr)
     return 0;
   return fread(buffer, 1, size, static_cast<FILE *>(handle));
 }
 
-size_t SdMmc::write_file_chunk(void *handle, const uint8_t *data, size_t size) {
+size_t SdSpi::write_file_chunk(void *handle, const uint8_t *data, size_t size) {
   if (handle == nullptr)
     return 0;
   return fwrite(data, 1, size, static_cast<FILE *>(handle));
 }
 
-bool SdMmc::seek_file(void *handle, size_t offset) {
+bool SdSpi::seek_file(void *handle, size_t offset) {
   if (handle == nullptr)
     return false;
   return fseek(static_cast<FILE *>(handle), offset, SEEK_SET) == 0;
 }
 
-size_t SdMmc::tell_file(void *handle) {
+size_t SdSpi::tell_file(void *handle) {
   if (handle == nullptr)
     return 0;
   return ftell(static_cast<FILE *>(handle));
 }
 
-bool SdMmc::close_file(void *handle) {
+bool SdSpi::close_file(void *handle) {
   if (handle == nullptr)
     return false;
   return fclose(static_cast<FILE *>(handle)) == 0;
 }
 
-bool SdMmc::format() {
+bool SdSpi::format() {
   // Not implemented - would need to unmount, format, and remount
-  ESP_LOGW(TAG, "Format not implemented for SD cards");
+  ESP_LOGW(TAG_SPI, "Format not implemented for SD cards");
   return false;
 }
 
-bool SdMmc::sync() {
+bool SdSpi::sync() {
   // FAT filesystem syncs on file close
   return true;
 }
@@ -752,4 +788,4 @@ bool SdMmc::sync() {
 }  // namespace sd_storage
 }  // namespace esphome
 
-#endif  // USE_SD_STORAGE_SDMMC
+#endif  // USE_SD_STORAGE_SPI

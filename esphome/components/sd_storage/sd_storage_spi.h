@@ -2,10 +2,11 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_SD_STORAGE_SDMMC
+#ifdef USE_SD_STORAGE_SPI
 
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
+#include "esphome/components/spi/spi.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -15,10 +16,15 @@
 #include "esphome/components/storage/storage_device.h"
 #endif
 
+#ifdef USE_ESP_IDF
+#include "sdmmc_cmd.h"
+#include "driver/sdspi_host.h"
+#endif
+
 namespace esphome {
 namespace sd_storage {
 
-static const char *const TAG = "sd_storage";
+static const char *const TAG_SPI = "sd_storage.spi";
 
 enum class CardType : uint8_t {
   UNKNOWN = 0,
@@ -35,17 +41,25 @@ struct FileInfo {
   bool is_directory;
 };
 
-enum MemoryUnits : short { Byte = 0, KiloByte = 1, MegaByte = 2, GigaByte = 3, TeraByte = 4, PetaByte = 5 };
-
 // Forward declaration for mount callback
 using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
 
 #ifdef USE_STORAGE
-class SdMmc : public Component, public storage::StorageDevice {
+class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                    spi::DATA_RATE_10MHZ>,
+              public Component,
+              public storage::StorageDevice {
 #else
-class SdMmc : public Component {
+class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                    spi::DATA_RATE_10MHZ>,
+              public Component {
 #endif
  public:
+  enum ErrorCode {
+    ERR_MOUNT,
+    ERR_NO_CARD,
+  };
+
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -53,15 +67,10 @@ class SdMmc : public Component {
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   // Pin configuration
-  void set_clk_pin(uint8_t pin) { this->clk_pin_ = pin; }
-  void set_cmd_pin(uint8_t pin) { this->cmd_pin_ = pin; }
-  void set_data0_pin(uint8_t pin) { this->data0_pin_ = pin; }
-  void set_data1_pin(uint8_t pin) { this->data1_pin_ = pin; }
-  void set_data2_pin(uint8_t pin) { this->data2_pin_ = pin; }
-  void set_data3_pin(uint8_t pin) { this->data3_pin_ = pin; }
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
-  void set_cs_pin(GPIOPin *pin) { this->cs_pin_ = pin; }
-  void set_slot(uint8_t slot) { this->slot_ = slot; }
+  void set_spi_interface(spi::SPIInterface spi_interface) { this->spi_interface_ = spi_interface; }
+  void set_data1_pin(GPIOPin *pin) { this->data1_pin_ = pin; }
+  void set_data2_pin(GPIOPin *pin) { this->data2_pin_ = pin; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
   void set_id(const std::string &id) { this->id_ = id; }
 
@@ -144,36 +153,39 @@ class SdMmc : public Component {
 #endif
 
  protected:
-  // Pin configuration
-  uint8_t clk_pin_{0};
-  uint8_t cmd_pin_{0};
-  uint8_t data0_pin_{0};
-  uint8_t data1_pin_{0};
-  uint8_t data2_pin_{0};
-  uint8_t data3_pin_{0};
-  GPIOPin *cs_pin_{nullptr};
-  bool mode_1bit_{false};
-  uint8_t slot_{0};
+  // Configuration
+  bool mode_1bit_{true};  // SPI mode is always 1-bit
+  spi::SPIInterface spi_interface_;
+  GPIOPin *data1_pin_{nullptr};  // Optional pullup pin for unused data line
+  GPIOPin *data2_pin_{nullptr};  // Optional pullup pin for unused data line
 
   // Card state
   CardType card_type_{CardType::UNKNOWN};
   bool is_mounted_{false};
   uint64_t total_bytes_{0};
   uint64_t used_bytes_{0};
+  ErrorCode init_error_;
 
   // Mount configuration and callbacks
   std::string mount_path_{"/sdcard"};                          // Default mount path
   std::string id_;                                             // Unique identifier for storage registry
   std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // Callbacks to notify when mount is ready
 
+#ifdef USE_ESP_IDF
+  sdmmc_card_t *card_{nullptr};
+#endif
+
   // Mount management (internal)
   bool update_card_info();
 
   // Helper to build full path
   std::string build_full_path(const char *path);
+
+  // Error code conversion
+  static std::string error_code_to_string(ErrorCode code);
 };
 
 }  // namespace sd_storage
 }  // namespace esphome
 
-#endif  // USE_SD_STORAGE_SDMMC
+#endif  // USE_SD_STORAGE_SPI
