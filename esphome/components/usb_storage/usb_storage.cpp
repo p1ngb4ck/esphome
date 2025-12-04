@@ -359,7 +359,6 @@ void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
 }
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
 bool USBStorageDevice::matches_device(const usb_config_desc_t *config_desc) {
   ESP_LOGD(TAG, "matches_device() called - checking if device is MSC (vid_filter=0x%04X, pid_filter=0x%04X)",
            this->vid_, this->pid_);
@@ -481,7 +480,6 @@ void USBStorageDevice::on_device_disconnected(usb_device_handle_t device_handle)
   }
 #endif
 }
-#endif  // USE_USB_HOST_DUAL_INSTANCE
 
 bool USBStorageDevice::remount_device() {
   if (this->device_addr_ == 255) {
