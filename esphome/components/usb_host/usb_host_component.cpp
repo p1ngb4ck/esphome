@@ -36,7 +36,6 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 }
 
 void USBHost::setup() {
-  ESP_LOGVV(TAG, "=== USBHost::setup() ENTRY - controller_index=%d ===", this->controller_index_);
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
   // Use new controller-specific API from esp-usb that includes PHY initialization
