@@ -53,7 +53,8 @@ namespace binary_storage {
 class FlashPartition : public Component
 #ifdef USE_STORAGE
     ,
-                       public storage::StorageDevice
+                       public storage::StorageDevice,
+                       public storage::MountSpaceProvider
 #endif
 {
  public:
@@ -177,8 +178,10 @@ class FlashPartition : public Component
   bool delete_dir(const char *path, bool recursive) override;
   bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
 
-  // Space information
+  // Space information (StorageDevice interface - returns free space)
   bool get_space_info(uint64_t *total, uint64_t *free) override;
+  // MountSpaceProvider interface - returns used space
+  bool get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) override;
   bool can_write_file(const char *path, size_t size) override;
 
   // Streaming file access

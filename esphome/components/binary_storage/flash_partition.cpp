@@ -61,7 +61,9 @@ void FlashPartition::setup() {
   // Register with storage registry
   if (storage::global_storage != nullptr) {
     storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered with storage registry");
+    // Also register the mount point so http_file_browser can show space info
+    storage::global_storage->register_mount(this->mount_path_, "flash_partition", this);
+    ESP_LOGD(TAG, "Registered with storage registry and mount point");
   }
 #endif
 
@@ -402,6 +404,25 @@ bool FlashPartition::get_space_info(uint64_t *total, uint64_t *free) {
 
   *total = total_size;
   *free = total_size - used_size;
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool FlashPartition::get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) {
+#ifdef USE_ESP_IDF
+  if (!this->mounted_)
+    return false;
+
+  size_t total_size = 0, used_size = 0;
+  esp_err_t ret = esp_littlefs_info(this->partition_label_.c_str(), &total_size, &used_size);
+  if (ret != ESP_OK) {
+    return false;
+  }
+
+  total_bytes = total_size;
+  used_bytes = used_size;
   return true;
 #else
   return false;
