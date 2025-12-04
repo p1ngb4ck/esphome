@@ -123,7 +123,7 @@ esp_err_t USBStorageHost::allocate_new_msc_device(uint8_t new_dev_address, const
 #ifdef USE_STORAGE
   // Register with storage registry
   if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
+    storage::global_storage->register_device(this->msc_devices_[slot]->msc_device);
     ESP_LOGD(TAG, "Registered with storage registry");
   }
 #endif
