@@ -120,12 +120,12 @@ bool SdSpi::mount_card() {
 
   // Configure SDSPI host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.slot = this->get_slot_;
+  host.slot = this->slot_;
 
   // Configure SDSPI device
   sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
   // slot_config.host_id = this->spi_interface_;
-  slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_->get_pin());
+  slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_pin->get_pin());
 
   // Try mounting with different frequencies
   esp_err_t mount_error = ESP_OK;
