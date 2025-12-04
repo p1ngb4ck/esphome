@@ -143,9 +143,7 @@ SD_SPI_SCHEMA = cv.Schema(
         cv.Optional(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
         cv.Optional(CONF_DATA0_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA3_PIN): pins.gpio_output_pin_schema,  # Alias for CS pin
-        # Unused pins in case they are connected - set to pull up mode
-        cv.Optional(CONF_DATA1_PIN): pins.gpio_input_pullup_pin_schema,
-        cv.Optional(CONF_DATA2_PIN): pins.gpio_input_pullup_pin_schema,
+        # DATA1 and DATA2 are not used in standard SD SPI mode (only 1-bit)
         cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
             {
