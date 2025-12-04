@@ -191,15 +191,6 @@ async def to_code(config: ConfigType) -> None:
         # Single host mode (default): create one USBHost instance
         var = cg.new_Pvariable(config[CONF_ID])
         await cg.register_component(var, config)
-
-    # Register devices as USBClient components and add to whitelist
-    # In dual host mode, devices are specified per-instance (handled above)
-    # In single host mode, devices are specified at top level
-    if not dual_host_support:
         for device in config.get(CONF_DEVICES) or ():
             await register_usb_client(device)
-            cg.add(
-                CORE.data["usb_host_instance"].add_device_to_whitelist(
-                    device[CONF_VID], device[CONF_PID]
-                )
-            )
+            cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
