@@ -52,8 +52,6 @@ void SdSpi::setup() {
       pin->setup();
     }
   };
-  setup_input_pullup(this->data1_pin_);
-  setup_input_pullup(this->data2_pin_);
 
   // Initialize SPI device
   this->spi_setup();
@@ -79,13 +77,6 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_.c_str());
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
   LOG_PIN("  CS Pin:", this->cs_);
-
-  if (this->data1_pin_ != nullptr) {
-    LOG_PIN("  Data1 Pin (pullup):", this->data1_pin_);
-  }
-  if (this->data2_pin_ != nullptr) {
-    LOG_PIN("  Data2 Pin (pullup):", this->data2_pin_);
-  }
 
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
