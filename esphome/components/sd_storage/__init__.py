@@ -2,7 +2,15 @@ from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import esp32
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TRIGGER_ID
+from esphome.const import (
+    CONF_CLK_PIN,
+    CONF_ID,
+    CONF_OUTPUT,
+    CONF_PATH,
+    CONF_PULLDOWN,
+    CONF_PULLUP,
+    CONF_TRIGGER_ID,
+)
 
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = ["esp32"]
@@ -26,7 +34,6 @@ CardMountedCondition = sd_storage_ns.class_(
     "CardMountedCondition", automation.Condition
 )
 
-CONF_CLK_PIN = "clk_pin"
 CONF_CMD_PIN = "cmd_pin"
 CONF_DATA0_PIN = "data0_pin"
 CONF_DATA1_PIN = "data1_pin"
@@ -36,7 +43,6 @@ CONF_MODE_1BIT = "mode_1bit"
 CONF_CS_PIN = "cs_pin"
 CONF_SLOT = "slot"
 CONF_ON_MOUNTED = "on_mounted"
-CONF_MOUNT_PATH = "mount_path"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -48,9 +54,15 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DATA2_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_DATA3_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_MODE_1BIT, default=False): cv.boolean,
-        cv.Optional(CONF_CS_PIN): pins.internal_gpio_output_pin_number,
+        cv.Optional(CONF_CS_PIN): pins.gpio_pin_schema(
+            {
+                CONF_OUTPUT: True,
+                CONF_PULLUP: False,
+                CONF_PULLDOWN: False,
+            }
+        ),
         cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
-        cv.Optional(CONF_MOUNT_PATH, default="/sdcard"): cv.string,
+        cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger),
@@ -83,10 +95,12 @@ async def to_code(config):
             cg.add(var.set_data3_pin(config[CONF_DATA3_PIN]))
 
     if CONF_CS_PIN in config:
-        cg.add(var.set_cs_pin(config[CONF_CS_PIN]))
+        cs_pin = config[CONF_CS_PIN]
+        cs_ctrl = await cg.gpio_pin_expression(cs_pin)
+        cg.add(var.set_cs_pin(cs_ctrl))
 
     # Set mount path
-    cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
+    cg.add(var.set_mount_path(config[CONF_PATH]))
 
     # Set ID for storage registry
     cg.add(var.set_id(str(config[CONF_ID])))
