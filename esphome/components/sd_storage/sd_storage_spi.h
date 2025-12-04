@@ -46,7 +46,6 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
 
   // Pin configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
-  void set_spi_interface(spi::SPIInterface spi_interface) { this->spi_interface_ = spi_interface; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
   void set_cs_pin(GPIOPin *pin) { this->cs_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
@@ -135,7 +134,6 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   GPIOPin *cs_pin_{nullptr};
   bool mode_1bit_{true};  // SPI mode is always 1-bit
   uint8_t slot_{0};
-  spi::SPIInterface spi_interface_;
 
   // Card state
   CardType card_type_{CardType::UNKNOWN};

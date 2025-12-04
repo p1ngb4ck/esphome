@@ -9,7 +9,6 @@
 #include <cstring>
 #include <sys/stat.h>
 #include <dirent.h>
-#include "esphome/components/spi/spi.h"
 
 extern "C" {
 #include "esp_vfs.h"
@@ -121,11 +120,11 @@ bool SdSpi::mount_card() {
 
   // Configure SDSPI host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.slot = this->spi_interface_;
+  host.slot = this->get_slot_;
 
   // Configure SDSPI device
   sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-  slot_config.host_id = this->spi_interface_;
+  // slot_config.host_id = this->spi_interface_;
   slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_->get_pin());
 
   // Try mounting with different frequencies
