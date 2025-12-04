@@ -9,6 +9,7 @@
 #include <cstring>
 #include <sys/stat.h>
 #include <dirent.h>
+#include "esphome/components/spi/spi.h"
 
 extern "C" {
 #include "esp_vfs.h"
