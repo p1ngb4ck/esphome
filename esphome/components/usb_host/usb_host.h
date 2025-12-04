@@ -220,7 +220,13 @@ class USBHost : public Component {
 #if defined(USE_USB_HOST_DUAL_INSTANCE)
   USBHost(uint8_t controller_index = 1) : controller_index_{controller_index} {}
 #endif
-  float get_setup_priority() const override { return setup_priority::IO; }
+  float get_setup_priority() const override {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+    return setup_priority::IO;  // Deferred init for dual-host mode
+#else
+    return setup_priority::BUS;  // Original behavior for S2/S3
+#endif
+  }
   void loop() override;
   void setup() override;
   bool is_initialized() const { return this->initialized_; }
