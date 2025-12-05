@@ -45,8 +45,18 @@ std::string SdSpi::build_full_path(const char *path) {
 void SdSpi::setup() {
   ESP_LOGI(TAG_SPI, "Initializing SD card in SPI mode");
 
-  // Note: We do NOT call spi_setup() because we're using ESP-IDF's SDSPI driver
-  // which requires exclusive access to the SPI peripheral and manages pins itself
+  // Setup DATA1/DATA2 pins as pullup inputs if specified
+  auto setup_input_pullup = [](GPIOPin *pin) {
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+    pin->setup();
+  };
+  if (this->data1_pin_ != nullptr)
+    setup_input_pullup(this->data1_pin_);
+  if (this->data2_pin_ != nullptr)
+    setup_input_pullup(this->data2_pin_);
+
+  // Initialize SPI bus
+  this->spi_setup();
 
   if (!this->mount_card()) {
     ESP_LOGE(TAG_SPI, "Failed to mount SD card");
@@ -68,10 +78,7 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_.c_str());
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
-  ESP_LOGCONFIG(TAG_SPI, "  CLK Pin: %d", this->clk_pin_);
-  ESP_LOGCONFIG(TAG_SPI, "  MOSI Pin: %d", this->mosi_pin_);
-  ESP_LOGCONFIG(TAG_SPI, "  MISO Pin: %d", this->miso_pin_);
-  ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", this->cs_pin_ ? this->cs_pin_->get_pin() : 255);
+  ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", spi::Utility::get_pin_no(this->cs_));
 
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
@@ -104,37 +111,19 @@ bool SdSpi::mount_card() {
   mount_config.max_files = 16;
   mount_config.allocation_unit_size = 256 * 1024;
 
-  // Configure SPI bus (CLK, MOSI, MISO pins)
-  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-  slot_config.host_id = this->spi_interface_;
-  slot_config.gpio_cs = static_cast<gpio_num_t>(this->cs_pin_->get_pin());
-
-  // Initialize SDSPI host with bus configuration
-  spi_bus_config_t bus_config{};
-  bus_config.mosi_io_num = this->mosi_pin_;
-  bus_config.miso_io_num = this->miso_pin_;
-  bus_config.sclk_io_num = this->clk_pin_;
-  bus_config.quadwp_io_num = -1;      // Not used
-  bus_config.quadhd_io_num = -1;      // Not used
-  bus_config.max_transfer_sz = 4000;  // Default transfer size
-
-  const auto bus_init_err = spi_bus_initialize(this->spi_interface_, &bus_config, SDSPI_DEFAULT_DMA);
-  if (bus_init_err != ESP_OK) {
-    ESP_LOGE(TAG_SPI, "Failed to init SPI bus: %s", esp_err_to_name(bus_init_err));
-    this->init_error_ = ErrorCode::ERR_MOUNT;
-    return false;
-  }
-  ESP_LOGV(TAG_SPI, "SPI bus initialized");
-
   // Initialize SDSPI host
   const auto init_err = sdspi_host_init();
   if (init_err != ESP_OK) {
     ESP_LOGE(TAG_SPI, "Failed to init sdspi host: %s", esp_err_to_name(init_err));
-    spi_bus_free(this->spi_interface_);  // Clean up bus
     this->init_error_ = ErrorCode::ERR_MOUNT;
     return false;
   }
   ESP_LOGV(TAG_SPI, "SDSPI host initialized");
+
+  // Configure SDSPI device with CS pin from SPIDevice
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.host_id = this->spi_interface_;
+  slot_config.gpio_cs = static_cast<gpio_num_t>(spi::Utility::get_pin_no(this->cs_));
 
   // Configure SDSPI host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
@@ -223,10 +212,7 @@ void SdSpi::unmount_card() {
     // Deinitialize SDSPI host
     sdspi_host_deinit();
 
-    // Free SPI bus
-    spi_bus_free(this->spi_interface_);
-
-    ESP_LOGI(TAG_SPI, "SD card unmounted and SPI bus freed");
+    ESP_LOGI(TAG_SPI, "SD card unmounted");
   }
 }
 

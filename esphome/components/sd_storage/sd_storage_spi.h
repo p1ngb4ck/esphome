@@ -24,9 +24,14 @@ namespace sd_storage {
 static const char *const TAG_SPI = "sd_storage.spi";
 
 #ifdef USE_STORAGE
-class SdSpi : public SdStorageBase, public storage::StorageDevice {
+class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                    spi::DATA_RATE_10MHZ>,
+              public SdStorageBase,
+              public storage::StorageDevice {
 #else
-class SdSpi : public SdStorageBase {
+class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING,
+                                    spi::DATA_RATE_10MHZ>,
+              public SdStorageBase {
 #endif
  public:
   enum ErrorCode {
@@ -40,16 +45,13 @@ class SdSpi : public SdStorageBase {
   // Run after storage component (DATA=600) to ensure global_storage is initialized
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  // Pin configuration
+  // Configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
   void set_mount_path(const std::string &path) { this->mount_path_ = path; }
-  void set_clk_pin(uint8_t pin) { this->clk_pin_ = pin; }
-  void set_mosi_pin(uint8_t pin) { this->mosi_pin_ = pin; }
-  void set_miso_pin(uint8_t pin) { this->miso_pin_ = pin; }
-  void set_cs_pin(InternalGPIOPin *pin) { this->cs_pin_ = pin; }
-  void set_slot(uint8_t slot) { this->slot_ = slot; }
   void set_id(const std::string &id) { this->id_ = id; }
   void set_spi_interface(SPIInterface interface) { this->spi_interface_ = interface; }
+  void set_data1_pin(GPIOPin *pin) { this->data1_pin_ = pin; }
+  void set_data2_pin(GPIOPin *pin) { this->data2_pin_ = pin; }
 
   // File operations
   bool write_file(const std::string &path, const std::string &data);
@@ -130,14 +132,11 @@ class SdSpi : public SdStorageBase {
 #endif
 
  protected:
-  // Configuration - SPI pins
-  uint8_t clk_pin_{255};
-  uint8_t mosi_pin_{255};
-  uint8_t miso_pin_{255};
-  InternalGPIOPin *cs_pin_{nullptr};
-  bool mode_1bit_{true};  // SPI mode is always 1-bit
-  uint8_t slot_{0};
+  // Configuration
+  bool mode_1bit_{true};
   SPIInterface spi_interface_{};
+  GPIOPin *data1_pin_{nullptr};
+  GPIOPin *data2_pin_{nullptr};
 
   // Card state
   CardType card_type_{CardType::UNKNOWN};

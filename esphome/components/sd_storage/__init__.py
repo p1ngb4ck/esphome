@@ -25,7 +25,7 @@ esp32.require_vfs_dir()
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
 SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component)
 SdMmc = sd_storage_ns.class_("SdMmc", SdStorageBase)
-SdSpi = sd_storage_ns.class_("SdSpi", SdStorageBase)
+SdSpi = sd_storage_ns.class_("SdSpi", spi.SPIDevice, SdStorageBase)
 
 # Automation classes (templated to work with both SdMmc and SdSpi)
 # The actual C++ classes are templates, so we don't specify the parent type here
@@ -76,19 +76,20 @@ def validate_spi_cs_config(config):
     return config
 
 
-def validate_spi_bus_exclusive(config):
-    """Ensure SD SPI is not sharing the SPI bus with other devices.
+def validate_spi_bus_pins(config):
+    """Validate that SPI bus pins are NOT specified in sd_storage config.
 
-    Similar to SPI Ethernet, SD card requires exclusive access to the SPI peripheral
-    because ESP-IDF's SDSPI driver takes full control of the bus."""
-    # Check that required pins are specified
-    if not config.get(CONF_CLK_PIN):
-        raise cv.Invalid(f"{CONF_CLK_PIN} is required for SPI mode")
-    if not config.get(CONF_CMD_PIN):
-        raise cv.Invalid(f"{CONF_CMD_PIN} (MOSI) is required for SPI mode")
-    if not config.get(CONF_DATA0_PIN):
-        raise cv.Invalid(f"{CONF_DATA0_PIN} (MISO) is required for SPI mode")
-
+    Pins should be defined in the spi: component instead."""
+    cmd_pin = config.get(CONF_CMD_PIN)
+    data0_pin = config.get(CONF_DATA0_PIN)
+    clk_pin = config.get(CONF_CLK_PIN)
+    if cmd_pin or data0_pin or clk_pin:
+        raise cv.Invalid(
+            f"Please move pins to SPI bus definition:\n"
+            f" '{CONF_CMD_PIN}' to '{spi.CONF_MOSI_PIN}'\n"
+            f" '{CONF_DATA0_PIN}' to '{spi.CONF_MISO_PIN}'\n"
+            f" '{CONF_CLK_PIN}' to '{spi.CONF_CLK_PIN}'"
+        )
     return config
 
 
@@ -135,32 +136,34 @@ SD_MMC_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-SD_SPI_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(SdSpi),
-        cv.Required(CONF_CLK_PIN): pins.internal_gpio_output_pin_number,
-        cv.Required(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,  # MOSI
-        cv.Required(CONF_DATA0_PIN): pins.internal_gpio_pin_number,  # MISO
-        cv.Optional(
-            CONF_DATA3_PIN
-        ): pins.internal_gpio_output_pin_schema,  # Alias for CS pin
-        cv.Optional(CONF_CS_PIN): pins.internal_gpio_output_pin_schema,
-        cv.Optional(CONF_MODE_1BIT, default=True): cv.boolean,
-        cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
-        # DATA1 and DATA2 are not used in standard SD SPI mode (only 1-bit)
-        cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
-        cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger),
-            }
-        ),
-    },
-    extra_schemas=[
-        validate_spi_cs_config,
-        validate_spi_bus_exclusive,
-        validate_spi_mode,
-    ],
-).extend(cv.COMPONENT_SCHEMA)
+SD_SPI_SCHEMA = (
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(SdSpi),
+            cv.Optional(CONF_CLK_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_CMD_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_DATA0_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_DATA3_PIN): pins.gpio_output_pin_schema,
+            cv.Optional(CONF_DATA1_PIN): pins.gpio_input_pullup_pin_schema,
+            cv.Optional(CONF_DATA2_PIN): pins.gpio_input_pullup_pin_schema,
+            cv.Optional(CONF_MODE_1BIT, default=True): cv.boolean,
+            cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
+            cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
+            cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger),
+                }
+            ),
+        },
+        extra_schemas=[
+            validate_spi_cs_config,
+            validate_spi_bus_pins,
+            validate_spi_mode,
+        ],
+    )
+    .extend(spi.spi_device_schema(cs_pin_required=False))
+    .extend(cv.COMPONENT_SCHEMA)
+)
 
 CONFIG_SCHEMA = cv.All(
     cv.typed_schema(
@@ -175,49 +178,39 @@ CONFIG_SCHEMA = cv.All(
 
 
 def _final_validate_spi_interface(config):
-    """Validate SPI interface usage for SD SPI mode.
-
-    SD SPI can use either hardware SPI or software SPI (bit-banging):
-    - Hardware SPI: Faster but requires dedicated SPI peripheral
-    - Software SPI: Slower but can use any GPIO pins
-
-    This validation warns if user tries to share hardware SPI with other devices."""
+    """Get SPI interface from spi: component configuration."""
     if config[CONF_TYPE] != TYPE_SD_SPI:
         return
 
-    from esphome.components.esp32 import get_esp32_variant
-    from esphome.components.esp32.const import (
-        VARIANT_ESP32C3,
-        VARIANT_ESP32S2,
-        VARIANT_ESP32S3,
-    )
-
-    # Determine default SPI host based on ESP32 variant
-    variant = get_esp32_variant()
-    if variant in (VARIANT_ESP32C3, VARIANT_ESP32S2, VARIANT_ESP32S3):
-        sd_spi_host = "SPI2_HOST"
-    else:
-        # ESP32 classic, ESP32-P4, ESP32-C6, etc. - use SPI3 by default
-        sd_spi_host = "SPI3_HOST"
-
-    # Store the SPI interface for use in to_code()
-    config[CONF_SPI_INTERFACE] = sd_spi_host
-
-    # Warn if spi: component is using the same hardware SPI interface
-    # User can still proceed - ESP-IDF will fall back to software SPI if needed
+    # Check if spi_id is specified (required when multiple SPI buses exist)
+    spi_id = config.get(spi.CONF_SPI_ID)
     if spi_configs := fv.full_config.get().get(CONF_SPI):
-        for spi_conf in spi_configs:
-            if (index := spi_conf.get(spi.CONF_INTERFACE_INDEX)) is not None:
-                interface = spi.get_spi_interface(index)
-                if interface == sd_spi_host:
-                    raise cv.Invalid(
-                        f"SD card is configured to use hardware SPI interface '{sd_spi_host}', "
-                        f"but the `spi:` component is also using this interface. "
-                        f"Options: "
-                        f"(1) Change `interface` on `spi:` component to use a different SPI bus, "
-                        f"(2) Remove `spi:` component if only using SD card, "
-                        f"(3) Use different pins for SD card to enable software SPI mode (slower but works with any pins)."
-                    )
+        if len(spi_configs) > 1 and spi_id is None:
+            raise cv.Invalid(
+                "Multiple SPI buses defined. Please specify which one to use with 'spi_id'"
+            )
+
+        # Use first SPI bus if only one exists and spi_id not specified
+        if spi_id is None:
+            spi_conf = spi_configs[0]
+        else:
+            # Find the specified SPI bus
+            spi_conf = None
+            for conf in spi_configs:
+                if conf[spi.CONF_ID] == spi_id:
+                    spi_conf = conf
+                    break
+            if spi_conf is None:
+                raise cv.Invalid(f"SPI bus '{spi_id}' not found")
+
+        index = spi_conf.get(spi.CONF_INTERFACE_INDEX)
+        if index is None:
+            raise cv.Invalid(
+                f"Can't find interface index in spi config {spi_conf[spi.CONF_ID]}"
+            )
+
+        interface = spi.get_spi_interface(index)
+        config[CONF_SPI_INTERFACE] = interface
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate_spi_interface
@@ -229,29 +222,26 @@ async def to_code(config):
 
     card_type = config[CONF_TYPE]
     if card_type == TYPE_SD_SPI:
-        # SPI mode configuration
-        # Note: SD SPI uses ESP-IDF's SDSPI driver which requires exclusive bus access
-        # We do NOT use spi.register_spi_device() because we're not sharing the bus
         cg.add_define("USE_SD_STORAGE_SPI")
 
-        # Set SPI pins directly (SDSPI driver will configure them)
-        cg.add(var.set_clk_pin(config[CONF_CLK_PIN]))
-        cg.add(var.set_mosi_pin(config[CONF_CMD_PIN]))  # CMD pin = MOSI
-        cg.add(var.set_miso_pin(config[CONF_DATA0_PIN]))  # DATA0 pin = MISO
-
-        # Set CS pin
-        cs_pin = await cg.gpio_pin_expression(config[CONF_CS_PIN])
-        cg.add(var.set_cs_pin(cs_pin))
-
-        cg.add(var.set_slot(config[CONF_SLOT]))
+        # Register with SPI bus
+        await spi.register_spi_device(var, config)
 
         # Set mode (must be 1-bit for SPI)
         if mode_1bit := config.get(CONF_MODE_1BIT):
             cg.add(var.set_mode_1bit(mode_1bit))
 
-        # Set SPI interface (determined by final_validate based on ESP32 variant)
+        # Set SPI interface from spi: component config
         if spi_interface := config.get(CONF_SPI_INTERFACE):
             cg.add(var.set_spi_interface(cg.RawExpression(spi_interface)))
+
+        # Optional pullup pins for unused data lines
+        if pin := config.get(CONF_DATA1_PIN):
+            data1_pin = await cg.gpio_pin_expression(pin)
+            cg.add(var.set_data1_pin(data1_pin))
+        if pin := config.get(CONF_DATA2_PIN):
+            data2_pin = await cg.gpio_pin_expression(pin)
+            cg.add(var.set_data2_pin(data2_pin))
 
     elif card_type == TYPE_SD_MMC:
         # SDMMC mode configuration
