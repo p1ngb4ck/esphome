@@ -691,6 +691,34 @@ bool NFSClient::connect_() {
     return false;
   }
 
+  // Try to bind to a privileged port (600-1023) to avoid NFS server "insecure" requirement
+  // Traditional NFS servers require clients to connect from privileged ports (<1024)
+  // ESP32/FreeRTOS doesn't have privilege restrictions, so we can bind to any port
+  struct sockaddr_in bind_addr;
+  memset(&bind_addr, 0, sizeof(bind_addr));
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_addr.s_addr = INADDR_ANY;
+
+  bool bound_privileged = false;
+  // Try ports 1023 down to 600 (avoid well-known ports <512)
+  for (uint16_t port = 1023; port >= 600; port--) {
+    bind_addr.sin_port = htons(port);
+    if (::bind(this->socket_, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) == 0) {
+      ESP_LOGI(TAG, "Bound to privileged source port %u", port);
+      bound_privileged = true;
+      break;
+    }
+    // Stop if we get an error other than "address already in use"
+    if (errno != EADDRINUSE) {
+      break;
+    }
+  }
+
+  if (!bound_privileged) {
+    ESP_LOGW(TAG, "Could not bind to privileged port (errno %d), NFS server may require 'insecure' option", errno);
+    // Continue anyway - socket will use ephemeral port >1024
+  }
+
   // Update port in server address structure
   struct sockaddr_in connect_addr = this->server_addr_;
   connect_addr.sin_port = htons(target_port);
