@@ -138,7 +138,7 @@ bool SdSpi::mount_card() {
 
   // Configure SDSPI host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  host.slot = this->slot_;
+  host.slot = this->spi_interface_;
 
   // Try mounting with different frequencies
   esp_err_t mount_error = ESP_OK;
