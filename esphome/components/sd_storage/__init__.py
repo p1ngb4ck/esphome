@@ -203,10 +203,14 @@ def _final_validate_spi_interface(config):
             if spi_conf is None:
                 raise cv.Invalid(f"SPI bus '{spi_id}' not found")
 
+        # Check if this is a hardware SPI interface
         index = spi_conf.get(spi.CONF_INTERFACE_INDEX)
         if index is None:
+            # Software SPI - SD card won't work with software SPI
             raise cv.Invalid(
-                f"Can't find interface index in spi config {spi_conf[spi.CONF_ID]}"
+                f"SD card requires hardware SPI interface. "
+                f"The spi bus '{spi_conf[spi.CONF_ID]}' is configured as software SPI. "
+                f"Please use hardware SPI pins or specify 'interface: hardware' in your spi: config."
             )
 
         interface = spi.get_spi_interface(index)
