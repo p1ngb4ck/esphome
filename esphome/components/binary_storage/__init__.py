@@ -489,6 +489,12 @@ async def to_code(config):
     if CONF_ADDRESSING_BITS in config:
         cg.add(var.set_addressing_bits(config[CONF_ADDRESSING_BITS]))
 
+    # Set storage ID for device registration (required for storage integration)
+    cg.add(var.set_storage_id(str(config[CONF_ID])))
+    # Set storage name (use model if available, otherwise device type)
+    storage_name = config.get(CONF_MODEL, device_type)
+    cg.add(var.set_storage_name(storage_name))
+
     # Setup LittleFS mount if mode requires it
     if mode in [MODE_LITTLEFS, MODE_BOTH]:
         cg.add_define("USE_STORAGE")
