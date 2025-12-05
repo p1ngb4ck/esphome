@@ -27,8 +27,8 @@ class SdMmc : public SdStorageBase {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  // Run after storage component (DATA=600) to ensure global_storage is initialized
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  // Run at HARDWARE priority (800) to complete SD mounting before other devices initialize
+  float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   // Pin configuration
   void set_clk_pin(uint8_t pin) { this->clk_pin_ = pin; }

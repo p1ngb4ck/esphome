@@ -42,8 +42,9 @@ class SdSpi : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARIT
   void setup() override;
   void loop() override;
   void dump_config() override;
-  // Run after storage component (DATA=600) to ensure global_storage is initialized
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  // Run at HARDWARE priority (800) to complete SD mounting before other SPI devices initialize
+  // This prevents bus contention with devices like binary_storage that also use the same SPI bus
+  float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   // Configuration
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
