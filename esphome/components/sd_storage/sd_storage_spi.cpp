@@ -105,6 +105,10 @@ std::string SdSpi::error_code_to_string(SdSpi::ErrorCode code) {
 bool SdSpi::mount_card() {
   ESP_LOGI(TAG_SPI, "Mounting SD card via SPI");
 
+  // Log SPI configuration for debugging
+  ESP_LOGD(TAG_SPI, "SPI Interface: %d", this->spi_interface_);
+  ESP_LOGD(TAG_SPI, "CS Pin: %d", spi::Utility::get_pin_no(this->cs_));
+
   // Configure VFS mount
   esp_vfs_fat_sdmmc_mount_config_t mount_config = VFS_FAT_MOUNT_DEFAULT_CONFIG();
   mount_config.format_if_mount_failed = false;
@@ -125,9 +129,13 @@ bool SdSpi::mount_card() {
   slot_config.host_id = this->spi_interface_;
   slot_config.gpio_cs = static_cast<gpio_num_t>(spi::Utility::get_pin_no(this->cs_));
 
+  ESP_LOGD(TAG_SPI, "slot_config.host_id: %d, slot_config.gpio_cs: %d", slot_config.host_id, slot_config.gpio_cs);
+
   // Configure SDSPI host
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
   host.slot = this->spi_interface_;
+
+  ESP_LOGD(TAG_SPI, "host.slot: %d", host.slot);
 
   // Try mounting with different frequencies
   esp_err_t mount_error = ESP_OK;
