@@ -3,7 +3,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PORT
-from esphome.components import network
 
 # Constants
 CONF_SERVER = "server"
@@ -21,7 +20,7 @@ DEFAULT_PORT = 2049
 DEFAULT_UID = 0
 DEFAULT_GID = 0
 
-CONFIG_SCHEMA = cv.Schema(
+NFS_SHARE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(NFSClient),
         cv.Required(CONF_SERVER): cv.string,
@@ -34,21 +33,43 @@ CONFIG_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 
-async def to_code(config):
-    """Generate code for NFS client component."""
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
+def validate_mount_paths(configs):
+    """Validate that all mount paths are unique."""
+    mount_paths = []
+    for config in configs:
+        if CONF_MOUNT_PATH in config:
+            path = config[CONF_MOUNT_PATH]
+            if path in mount_paths:
+                raise cv.Invalid(
+                    f"Duplicate mount path '{path}'. Each NFS share must have a unique mount path."
+                )
+            mount_paths.append(path)
+    return configs
 
-    # Add network dependency
+
+CONFIG_SCHEMA = cv.All(
+    cv.ensure_list(NFS_SHARE_SCHEMA),
+    validate_mount_paths,
+)
+
+
+async def to_code(config):
+    """Generate code for NFS client component(s)."""
+    # Add network dependency once
     cg.add_define("USE_NETWORK")
 
-    # Configure NFS client
-    cg.add(var.set_server(config[CONF_SERVER]))
-    cg.add(var.set_port(config[CONF_PORT]))
-    cg.add(var.set_export(config[CONF_EXPORT]))
-    cg.add(var.set_uid(config[CONF_UID]))
-    cg.add(var.set_gid(config[CONF_GID]))
+    # Generate code for each NFS share
+    for share_config in config:
+        var = cg.new_Pvariable(share_config[CONF_ID])
+        await cg.register_component(var, share_config)
 
-    # Set mount path if specified
-    if CONF_MOUNT_PATH in config:
-        cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
+        # Configure NFS client
+        cg.add(var.set_server(share_config[CONF_SERVER]))
+        cg.add(var.set_port(share_config[CONF_PORT]))
+        cg.add(var.set_export(share_config[CONF_EXPORT]))
+        cg.add(var.set_uid(share_config[CONF_UID]))
+        cg.add(var.set_gid(share_config[CONF_GID]))
+
+        # Set mount path if specified
+        if CONF_MOUNT_PATH in share_config:
+            cg.add(var.set_mount_path(share_config[CONF_MOUNT_PATH]))

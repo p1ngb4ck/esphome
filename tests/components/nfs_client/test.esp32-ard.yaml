@@ -3,3 +3,7 @@ nfs_client:
     server: nas.local
     export: /mnt/share
     mount_path: /nfs/server1
+  - id: nas_mount2
+    server: nas.local
+    export: /mnt/public
+    mount_path: /nfs/server2

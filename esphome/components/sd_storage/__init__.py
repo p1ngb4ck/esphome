@@ -135,11 +135,6 @@ SD_MMC_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-# SPI Schema (new configuration)
-# Note: SD SPI can use either hardware SPI or software SPI (bit-banging):
-# - If pins match hardware SPI peripheral: Uses hardware SPI (fast, but exclusive access required)
-# - If pins don't match hardware SPI: Uses software SPI (slower, but can coexist with other devices)
-# All pins must be specified here, not via the spi: component
 SD_SPI_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(SdSpi),
@@ -280,14 +275,8 @@ async def to_code(config):
             if CONF_DATA3_PIN in config:
                 cg.add(var.set_data3_pin(config[CONF_DATA3_PIN]))
 
-    # Set mount path (common to both modes)
     cg.add(var.set_mount_path(config[CONF_PATH]))
-
-    # Set ID for storage registry (common to both modes)
     cg.add(var.set_id(str(config[CONF_ID])))
-
-    # Store device reference in CORE.data for storage to access
-    # This allows storage to register callbacks with SD storage
     if not hasattr(CORE, "data"):
         CORE.data = {}
     if "sd_storage_devices" not in CORE.data:
@@ -302,7 +291,6 @@ async def to_code(config):
         )
 
 
-# Actions - these work with both SdMmc and SdSpi via polymorphism
 SD_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
     {
         cv.Required(CONF_ID): cv.use_id(SdStorageBase),
