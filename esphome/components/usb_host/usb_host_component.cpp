@@ -22,15 +22,16 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 
   switch (event_msg->event) {
     case USB_HOST_CLIENT_EVENT_NEW_DEV:
-      ESP_LOGV(TAG, "Coordinator: New device %d", event_msg->new_dev.address);
+      ESP_LOGI(TAG, "Coordinator: New device %d detected", event_msg->new_dev.address);
       // Try to dispatch to interface-class handlers (if not claimed by VID/PID)
       host->try_dispatch_to_handlers(event_msg->new_dev.address);
       break;
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
-      ESP_LOGV(TAG, "Coordinator: Device gone");
+      ESP_LOGI(TAG, "Coordinator: Device %d gone", event_msg->dev_gone.dev_hdl);
       // Handler disconnection is managed by the handlers themselves
       break;
     default:
+      ESP_LOGI(TAG, "Coordinator: Unknown event %d", event_msg->event);
       break;
   }
 }
