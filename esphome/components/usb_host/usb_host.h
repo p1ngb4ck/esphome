@@ -99,7 +99,11 @@ static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;  // Size of event queue betwe
 #ifndef USB_TASK_STACK_SIZE
 static constexpr size_t USB_TASK_STACK_SIZE = 4096;  // Stack size for USB task
 #endif
-static constexpr UBaseType_t USB_TASK_PRIORITY = 5;  // Higher priority than main loop (tskIDLE_PRIORITY + 5)
+// USB task priority: Same as main loop (priority 1) to prevent preemption during xTaskCreate()
+// If set higher, FreeRTOS immediately switches to the new task before xTaskCreate() returns,
+// causing the task to block in usb_host_client_handle_events() and preventing the main loop
+// from continuing to create additional USB tasks.
+static constexpr UBaseType_t USB_TASK_PRIORITY = 1;  // Same as main loop priority
 
 // used to report a transfer status
 struct TransferStatus {
