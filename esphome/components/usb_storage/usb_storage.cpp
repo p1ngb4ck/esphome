@@ -306,6 +306,9 @@ void USBStorageHost::setup() {
   ESP_LOGCONFIG(TAG, "Registering USB Storage Host Component...");
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Debug: Check if usb_host_ is set
+  ESP_LOGI(TAG, "usb_host_ pointer: %p", (void *) this->usb_host_);
+
   // Dual-host mode: Coordinator handles device events, MSC driver should NOT create background task
   const msc_host_driver_config_t msc_config = {
       .create_backround_task = false,  // Coordinator handles enumeration
@@ -316,9 +319,11 @@ void USBStorageHost::setup() {
 
   // Multi-instance API: Initialize MSC driver with USB Host instance
   tuh_instance_t tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
+  ESP_LOGI(TAG, "TinyUSB instance pointer: %p", (void *) tuh_inst);
+
   this->msc_driver_ = msc_host_driver_init(tuh_inst, &msc_config);
   if (this->msc_driver_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance)");
+    ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance) - tuh_inst=%p", (void *) tuh_inst);
     this->mark_failed();
     return;
   }
