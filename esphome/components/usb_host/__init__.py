@@ -105,11 +105,14 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-async def register_usb_client(config):
-    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
+async def register_usb_client(config, parent=None):
+    if parent is not None:
+        var = cg.new_Pvariable(
+            config[CONF_ID], config[CONF_VID], config[CONF_PID], parent
+        )
+    else:
+        var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
-    # Note: set_parent() is also called in constructor, but keeping this for backward compatibility
-    # cg.add(var.set_parent(parent))
     return var
 
 
@@ -179,7 +182,7 @@ async def to_code(config: ConfigType) -> None:
 
             # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():
-                await register_usb_client(device)
+                await register_usb_client(device, parent=var)
                 cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
 
             usb_host_instances[instance_conf[CONF_ID]] = {

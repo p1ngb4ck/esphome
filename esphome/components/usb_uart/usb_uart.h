@@ -183,7 +183,12 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
 
 class USBUartComponent : public usb_host::USBClient {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartComponent(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : usb_host::USBClient(vid, pid, parent) {}
+#else
   USBUartComponent(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
+#endif
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -209,7 +214,12 @@ class USBUartComponent : public usb_host::USBClient {
 
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : USBUartComponent(vid, pid, parent) {}
+#else
   USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
+#endif
 
  protected:
   virtual std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
@@ -220,7 +230,12 @@ class USBUartTypeCdcAcm : public USBUartComponent {
 
 class USBUartTypeCP210X : public USBUartTypeCdcAcm {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartTypeCP210X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : USBUartTypeCdcAcm(vid, pid, parent) {}
+#else
   USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+#endif
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
@@ -228,7 +243,12 @@ class USBUartTypeCP210X : public USBUartTypeCdcAcm {
 };
 class USBUartTypeCH34X : public USBUartTypeCdcAcm {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartTypeCH34X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : USBUartTypeCdcAcm(vid, pid, parent) {}
+#else
   USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+#endif
 
  protected:
   void enable_channels() override;
@@ -236,7 +256,12 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartTypeFT23XX(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : USBUartTypeCdcAcm(vid, pid, parent) {}
+#else
   USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+#endif
 
   virtual void start_input(USBUartChannel *channel);
 
@@ -255,9 +280,16 @@ class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
 
 class USBUartTypeCH934X : public USBUartComponent {
  public:
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  USBUartTypeCH934X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
+      : USBUartComponent(vid, pid, parent) {
+    ESP_LOGI("usb_uart", "=== CH934X CONSTRUCTOR CALLED! VID=%04X PID=%04X ===", vid, pid);
+  }
+#else
   USBUartTypeCH934X(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {
     ESP_LOGI("usb_uart", "=== CH934X CONSTRUCTOR CALLED! VID=%04X PID=%04X ===", vid, pid);
   }
+#endif
 
   // ESPHome component loop - handles RX queue processing and TX multiplexing
   void loop() override;
