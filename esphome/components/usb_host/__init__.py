@@ -106,11 +106,18 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def register_usb_client(config, parent=None):
-    if parent is not None:
+    from esphome.core import CORE
+
+    # Check if dual_host_support is enabled
+    dual_host_support = CORE.data.get("usb_host_dual_instance", False)
+
+    if dual_host_support and parent is not None:
+        # Dual-host mode: pass parent as constructor parameter
         var = cg.new_Pvariable(
             config[CONF_ID], config[CONF_VID], config[CONF_PID], parent
         )
     else:
+        # Singleton mode: do not pass parent parameter
         var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
     return var
