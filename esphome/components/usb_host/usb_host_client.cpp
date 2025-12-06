@@ -364,12 +364,15 @@ void USBClient::loop() {
       ESP_LOGI(TAG, "Client registered successfully");
 
       // Pre-allocate USB transfer buffers for all slots
+      ESP_LOGI(TAG, "Allocating %d USB transfer buffers...", MAX_REQUESTS);
       for (auto &request : this->requests_) {
         usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
         request.client = this;
       }
+      ESP_LOGI(TAG, "Transfer buffers allocated");
 
       // Create and start USB task
+      ESP_LOGI(TAG, "Creating USB task...");
       xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
 
       if (this->usb_task_handle_ == nullptr) {

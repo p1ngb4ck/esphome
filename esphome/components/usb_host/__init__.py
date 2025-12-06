@@ -74,9 +74,14 @@ def _validate_schema(config):
     dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT, False)
 
     if dual_host_support:
-        # Dual host mode: instances required, no top-level id
+        # Dual host mode: instances required, no top-level devices
         if CONF_INSTANCES not in config:
             raise cv.Invalid("'instances' required when dual_host_support is enabled")
+        if CONF_DEVICES in config:
+            raise cv.Invalid(
+                "'devices' not allowed at top level when dual_host_support is enabled. "
+                "Place devices under instances."
+            )
     elif CONF_INSTANCES in config:
         # Single host mode: instances not allowed
         raise cv.Invalid("'instances' only allowed when dual_host_support is enabled")

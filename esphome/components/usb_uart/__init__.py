@@ -150,7 +150,11 @@ async def to_code(config):
     socket.require_wake_loop_threadsafe()
 
     for device in config:
-        var = await register_usb_client(device)
+        # In dual-host mode, usb_host_id specifies which USBHost instance to use as parent
+        parent = None
+        if CONF_USB_HOST_ID in device:
+            parent = await cg.get_variable(device[CONF_USB_HOST_ID])
+        var = await register_usb_client(device, parent=parent)
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
             await cg.register_parented(chvar, var)
