@@ -183,86 +183,21 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 }
 void USBClient::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  ESP_LOGE(TAG, "=== USBClient::setup() ENTRY - VID=%04X PID=%04X parent=%p ===", this->vid_, this->pid_,
+  ESP_LOGI(TAG, "=== USBClient::setup() ENTRY - VID=%04X PID=%04X parent=%p ===", this->vid_, this->pid_,
            (void *) this->parent_);
-  // Defer actual initialization to a FreeRTOS task that waits for USBHost to be ready
-  // This ensures ESP-IDF HAL layer is fully initialized before accessing hardware
-  /* ESP_LOGE(TAG, "Creating init task for deferred initialization");
-  xTaskCreate(init_task_fn, "usb_init",
-              4096,               // Stack size for init task
-              this,               // Task parameter
-              USB_TASK_PRIORITY,  // Same priority as USB task
-              &this->init_task_handle_);
 
-  if (this->init_task_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create USB init task");
-    this->mark_failed();
-  } else {
-    ESP_LOGE(TAG, "Init task created successfully");
-  }*/
-  // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
-  // Parent is set via constructor parameter in Python codegen
-  uint32_t wait_count = 0;
-  constexpr uint32_t MAX_WAIT_MS = 5000;  // 5 second timeout
-  constexpr uint32_t CHECK_INTERVAL_MS = 10;
-  constexpr uint32_t MAX_ITERATIONS = MAX_WAIT_MS / CHECK_INTERVAL_MS;
-
-  while (this->parent_ == nullptr) {
-    if (wait_count++ >= MAX_ITERATIONS) {
-      ESP_LOGE(TAG, "Timeout waiting for parent to be set - this should never happen!");
-      this->mark_failed();
-      return;
-    }
-    ESP_LOGD(TAG, "Waiting for parent to be set...");
-    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
-  }
-
-  // Now wait for USBHost to be fully initialized
-  wait_count = 0;
-  while (!this->parent_->is_initialized()) {
-    if (wait_count++ >= MAX_ITERATIONS) {
-      ESP_LOGE(TAG, "Timeout waiting for USBHost initialization");
-      this->mark_failed();
-      return;
-    }
-    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
-  }
-
-  ESP_LOGD(TAG, "USBHost ready, proceeding with client registration");
-
-  usb_host_client_config_t config{.is_synchronous = false,
-                                  .max_num_event_msg = 5,
-                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
-
-  ESP_LOGE(TAG, "Calling usb_host_client_register_controller with host_handle=%p", this->parent_->get_host_handle());
-  auto err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
-  ESP_LOGE(TAG, "usb_host_client_register_controller returned: %s", esp_err_to_name(err));
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
-    this->status_set_error(static_cast<const LogString *>(LOG_STR("Client register failed")));
+  // CRITICAL: Verify parent is set (should be set via constructor parameter in Python codegen)
+  if (this->parent_ == nullptr) {
+    ESP_LOGE(TAG, "Parent is nullptr - this should never happen!");
     this->mark_failed();
     return;
   }
 
-  // Pre-allocate USB transfer buffers for all slots at startup
-  // This avoids any dynamic allocation during runtime
-  for (auto &request : this->requests_) {
-    usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
-    request.client = this;  // Set once, never changes
-  }
-
-  // Create and start USB task
-  xTaskCreate(usb_task_fn, "usb_task",
-              USB_TASK_STACK_SIZE,  // Stack size
-              this,                 // Task parameter
-              USB_TASK_PRIORITY,    // Priority (higher than main loop)
-              &this->usb_task_handle_);
-
-  if (this->usb_task_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create USB task");
-    this->mark_failed();
-  }
-  ESP_LOGE(TAG, "=== USBClient::setup() EXIT ===");
+  // Set state to REGISTERING - actual registration will happen in loop()
+  // This is necessary because usb_host_client_register_controller() needs
+  // usb_host_controller_handle_events() to be running to process the registration
+  this->state_ = USB_CLIENT_REGISTERING;
+  ESP_LOGI(TAG, "USBClient::setup() complete - registration deferred to loop()");
 #else
   // Original singleton mode initialization - register client immediately
   usb_host_client_config_t config{.is_synchronous = false,
@@ -404,6 +339,50 @@ void USBClient::loop() {
   }
 
   switch (this->state_) {
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+    case USB_CLIENT_REGISTERING: {
+      // Wait for USBHost to be fully initialized before attempting registration
+      if (!this->parent_->is_initialized()) {
+        return;  // Keep waiting, try again next loop
+      }
+
+      ESP_LOGI(TAG, "USBHost initialized, registering client (VID=%04X PID=%04X)", this->vid_, this->pid_);
+
+      // Register client with the controller
+      usb_host_client_config_t config{.is_synchronous = false,
+                                      .max_num_event_msg = 5,
+                                      .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
+
+      esp_err_t err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
+        this->status_set_error(LOG_STR("Client register failed"));
+        this->mark_failed();
+        return;
+      }
+
+      ESP_LOGI(TAG, "Client registered successfully");
+
+      // Pre-allocate USB transfer buffers for all slots
+      for (auto &request : this->requests_) {
+        usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
+        request.client = this;
+      }
+
+      // Create and start USB task
+      xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
+
+      if (this->usb_task_handle_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create USB task");
+        this->mark_failed();
+        return;
+      }
+
+      ESP_LOGI(TAG, "USB task created, moving to INIT state");
+      this->state_ = USB_CLIENT_INIT;
+      break;
+    }
+#endif
     case USB_CLIENT_OPEN: {
       int err;
       ESP_LOGD(TAG, "Open device %d", this->device_addr_);

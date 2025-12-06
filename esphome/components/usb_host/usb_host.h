@@ -147,6 +147,7 @@ struct UsbEvent {
 
 enum ClientState {
   USB_CLIENT_INIT = 0,
+  USB_CLIENT_REGISTERING,  // Waiting to register client (dual-host mode only)
   USB_CLIENT_OPEN,
   USB_CLIENT_CLOSE,
   USB_CLIENT_GET_DESC,
