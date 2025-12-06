@@ -309,9 +309,9 @@ void USBStorageHost::setup() {
   // Debug: Check if usb_host_ is set
   ESP_LOGI(TAG, "usb_host_ pointer: %p", (void *) this->usb_host_);
 
-  // Dual-host mode: Coordinator handles device events, MSC driver should NOT create background task
+  // Dual-host mode: Try with background task enabled to see if driver requires it
   const msc_host_driver_config_t msc_config = {
-      .create_backround_task = false,  // Coordinator handles enumeration
+      .create_backround_task = true,  // Testing: MSC driver might need background task
       .task_priority = 5,
       .stack_size = 4096,
       .callback = msc_event_callback,
