@@ -13,7 +13,14 @@ static const char *const TAG = "transcoder";
 // Global transcoder instance
 Transcoder *global_transcoder = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
-Transcoder::Transcoder() { global_transcoder = this; }
+Transcoder::Transcoder() {
+  global_transcoder = this;
+
+#ifdef USE_HARDWARE_JPEG_DECODER
+  // Create mutex for JPEG decoder exclusive access
+  this->jpeg_decoder_mutex_ = xSemaphoreCreateMutex();
+#endif
+}
 
 void Transcoder::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Transcoder...");
@@ -129,6 +136,67 @@ void Transcoder::release_jpeg_decoder() {
     this->jpeg_decoder_ = nullptr;
     ESP_LOGD(TAG, "Hardware JPEG decoder released (workaround for ESP32-P4 state corruption bug)");
   }
+}
+
+bool Transcoder::acquire_jpeg_decoder_exclusive(const char *owner_name) {
+  if (this->jpeg_decoder_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "JPEG decoder mutex not initialized");
+    return false;
+  }
+
+  ESP_LOGD(TAG, "Component '%s' waiting to acquire JPEG decoder...", owner_name);
+
+  // Block until we can acquire the mutex
+  if (xSemaphoreTake(this->jpeg_decoder_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to acquire JPEG decoder mutex");
+    return false;
+  }
+
+  // Store owner for debugging
+  this->jpeg_decoder_owner_ = owner_name;
+
+  // Initialize decoder if needed
+  if (this->jpeg_decoder_ == nullptr) {
+    ESP_LOGI(TAG, "Component '%s' initializing JPEG decoder...", owner_name);
+
+    jpeg_decode_engine_cfg_t decode_eng_cfg = {};
+    decode_eng_cfg.intr_priority = 0;
+    decode_eng_cfg.timeout_ms = 200;
+
+    esp_err_t ret = jpeg_new_decoder_engine(&decode_eng_cfg, &this->jpeg_decoder_);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to create hardware JPEG decoder: %s", esp_err_to_name(ret));
+      xSemaphoreGive(this->jpeg_decoder_mutex_);
+      this->jpeg_decoder_owner_ = nullptr;
+      return false;
+    }
+
+    ESP_LOGI(TAG, "JPEG decoder initialized for '%s' (handle: %p)", owner_name, this->jpeg_decoder_);
+  } else {
+    ESP_LOGD(TAG, "Component '%s' acquired existing JPEG decoder (handle: %p)", owner_name, this->jpeg_decoder_);
+  }
+
+  return true;
+}
+
+void Transcoder::release_jpeg_decoder_exclusive() {
+  if (this->jpeg_decoder_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "JPEG decoder mutex not initialized");
+    return;
+  }
+
+  const char *previous_owner = this->jpeg_decoder_owner_;
+  this->jpeg_decoder_owner_ = nullptr;
+
+  // Delete decoder (workaround for ESP32-P4 state corruption bug)
+  if (this->jpeg_decoder_ != nullptr) {
+    jpeg_del_decoder_engine(this->jpeg_decoder_);
+    this->jpeg_decoder_ = nullptr;
+    ESP_LOGD(TAG, "Component '%s' released JPEG decoder", previous_owner ? previous_owner : "unknown");
+  }
+
+  // Release mutex so other components can acquire
+  xSemaphoreGive(this->jpeg_decoder_mutex_);
 }
 #endif
 

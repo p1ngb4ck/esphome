@@ -48,6 +48,11 @@
 #include "esp_h264_types.h"
 #endif
 
+#ifdef USE_ESP32
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#endif
+
 namespace esphome {
 namespace transcoder {
 
@@ -86,9 +91,25 @@ class Transcoder : public Component {
   jpeg_decoder_handle_t get_jpeg_decoder();
 
   /**
+   * @brief Acquire exclusive access to JPEG decoder (ESP32-P4)
+   * Blocks until decoder is available. Must be paired with release_jpeg_decoder_exclusive().
+   * Use for long-running operations (e.g., video playback).
+   * @param owner_name Name of component acquiring decoder (for debugging)
+   * @return true if acquired successfully, false on error
+   */
+  bool acquire_jpeg_decoder_exclusive(const char *owner_name);
+
+  /**
+   * @brief Release exclusive access to JPEG decoder (ESP32-P4)
+   * Deletes decoder and releases the lock for other components.
+   */
+  void release_jpeg_decoder_exclusive();
+
+  /**
    * @brief Release hardware JPEG decoder (ESP32-P4)
    * Deletes decoder to work around ESP32-P4 state corruption bug
    * Must be called after each decode operation
+   * @deprecated Use acquire_jpeg_decoder_exclusive() for exclusive access
    */
   void release_jpeg_decoder();
 
@@ -166,6 +187,8 @@ class Transcoder : public Component {
   // JPEG Decoder state
 #ifdef USE_HARDWARE_JPEG_DECODER
   jpeg_decoder_handle_t jpeg_decoder_{nullptr};
+  SemaphoreHandle_t jpeg_decoder_mutex_{nullptr};
+  const char *jpeg_decoder_owner_{nullptr};
 #endif
 
 #ifdef USE_ESP_JPEG_DECODER

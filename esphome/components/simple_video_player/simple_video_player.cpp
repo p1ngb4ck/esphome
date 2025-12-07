@@ -226,6 +226,19 @@ void SimpleVideoPlayer::playback_loop_() {
   lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), width, height, LV_IMG_CF_TRUE_COLOR);
   lv_obj_invalidate(this->canvas_);
 
+#ifdef USE_HARDWARE_JPEG_DECODER
+  // Acquire exclusive access to JPEG decoder for duration of playback
+  if (this->transcoder_ != nullptr) {
+    if (!this->transcoder_->acquire_jpeg_decoder_exclusive("simple_video_player")) {
+      ESP_LOGE(TAG, "Failed to acquire exclusive JPEG decoder access");
+      this->set_error_(PlaybackError::DECODER_INIT_FAILED);
+      this->free_buffers_();
+      this->close_file_();
+      return;
+    }
+  }
+#endif
+
   // Reset file position to start
   this->seek_to_(0);
   this->cache_buffer_file_pos_ = 0;
@@ -296,9 +309,9 @@ void SimpleVideoPlayer::playback_loop_() {
   this->free_buffers_();
 
 #ifdef USE_HARDWARE_JPEG_DECODER
-  // Release decoder after playback (P4 workaround for state corruption bug)
+  // Release exclusive access to decoder after playback
   if (this->transcoder_ != nullptr) {
-    this->transcoder_->release_jpeg_decoder();
+    this->transcoder_->release_jpeg_decoder_exclusive();
   }
 #endif
 
@@ -398,10 +411,10 @@ int SimpleVideoPlayer::read_next_frame_() {
 
 bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 #ifdef USE_HARDWARE_JPEG_DECODER
-  // Get JPEG decoder from transcoder (reuses existing decoder, doesn't re-init)
+  // Use decoder acquired exclusively for this playback session
   jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
   if (decoder == nullptr) {
-    ESP_LOGE(TAG, "Failed to get JPEG decoder");
+    ESP_LOGE(TAG, "JPEG decoder not available (should have been acquired at playback start)");
     return false;
   }
 
