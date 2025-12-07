@@ -685,7 +685,7 @@ void SimpleVideoPlayer::set_error_(PlaybackError error) {
   this->state_ = PlayerState::ERROR;
   xSemaphoreGive(this->state_mutex_);
 
-  this->on_error_callbacks_.call(error);
+  this->on_error_callbacks_.call(static_cast<uint8_t>(error));
 }
 
 }  // namespace esphome::simple_video_player

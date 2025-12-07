@@ -63,7 +63,7 @@ class PlaybackPausedTrigger : public Trigger<> {
 };
 
 /// Trigger fired when playback error occurs
-class PlaybackErrorTrigger : public Trigger<PlaybackError> {
+class PlaybackErrorTrigger : public Trigger<uint8_t> {
  public:
   explicit PlaybackErrorTrigger(SimpleVideoPlayer *parent);
 };
@@ -131,7 +131,7 @@ class SimpleVideoPlayer : public Component {
     this->on_finished_callbacks_.add(std::move(callback));
   }
   void add_on_paused_callback(std::function<void()> &&callback) { this->on_paused_callbacks_.add(std::move(callback)); }
-  void add_on_error_callback(std::function<void(PlaybackError)> &&callback) {
+  void add_on_error_callback(std::function<void(uint8_t)> &&callback) {
     this->on_error_callbacks_.add(std::move(callback));
   }
 
@@ -244,7 +244,7 @@ class SimpleVideoPlayer : public Component {
   CallbackManager<void()> on_started_callbacks_;
   CallbackManager<void()> on_finished_callbacks_;
   CallbackManager<void()> on_paused_callbacks_;
-  CallbackManager<void(PlaybackError)> on_error_callbacks_;
+  CallbackManager<void(uint8_t)> on_error_callbacks_;
 };
 
 //========================================================================
@@ -313,7 +313,7 @@ inline PlaybackPausedTrigger::PlaybackPausedTrigger(SimpleVideoPlayer *parent) {
 }
 
 inline PlaybackErrorTrigger::PlaybackErrorTrigger(SimpleVideoPlayer *parent) {
-  parent->add_on_error_callback([this](PlaybackError error) { this->trigger(error); });
+  parent->add_on_error_callback([this](uint8_t error) { this->trigger(error); });
 }
 
 }  // namespace esphome::simple_video_player
