@@ -184,11 +184,19 @@ async def to_code(config: ConfigType) -> None:
     if dual_host_support and CONF_INSTANCES in config:
         # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
+        combined_peripheral_map = 0
+
         for instance_conf in config[CONF_INSTANCES]:
-            # User config matches TinyUSB array indices directly:
-            # fs=0 → array[0], hs=1 → array[1]
-            # The _dwc2_controller[] array in TinyUSB is ordered [FS, HS]
+            # User config matches controller indices:
+            # fs=0 → controller 0 (OTG1), hs=1 → controller 1 (OTG0)
+            # peripheral_map: controller 0 → BIT1 (OTG1-FS), controller 1 → BIT0 (OTG0-HS)
             config_value = instance_conf[CONF_CONTROLLER]
+
+            # Build combined peripheral_map for HCD installation
+            # Invert mapping: controller_index 0 (FS) → OTG1 (BIT1), controller_index 1 (HS) → OTG0 (BIT0)
+            peripheral_bit = 1 << (1 - config_value)
+            combined_peripheral_map |= peripheral_bit
+
             var = cg.new_Pvariable(instance_conf[CONF_ID], config_value)
             await cg.register_component(var, instance_conf)
 
@@ -201,6 +209,12 @@ async def to_code(config: ConfigType) -> None:
                 "var": var,
                 "controller": config_value,
             }
+
+        # Define the combined peripheral map for all configured controllers
+        # This is used by usb_host_install_controller() to install HCD with all ports
+        cg.add_define(
+            "USB_HOST_DUAL_PERIPHERAL_MAP", f"0x{combined_peripheral_map:02X}"
+        )
         CORE.data["usb_host_instances"] = usb_host_instances
     else:
         # Single host mode (default): create one USBHost instance
