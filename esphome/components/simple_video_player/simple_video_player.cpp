@@ -30,13 +30,6 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Allocate work buffer for JPEG decoding
-  if (!this->allocate_work_buffer_()) {
-    ESP_LOGE(TAG, "Failed to allocate work buffer");
-    this->mark_failed();
-    return;
-  }
-
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
 }
 
