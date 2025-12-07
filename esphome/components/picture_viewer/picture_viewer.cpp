@@ -619,13 +619,33 @@ void PictureViewer::refresh_images() {
     // Get current file list from file_manager's directory state
     const auto &directory_state = this->file_manager_->get_directory_state();
 
+    // Normalize directory path (remove trailing slash for comparison)
+    std::string normalized_dir = current_dir->path;
+    if (!normalized_dir.empty() && normalized_dir.back() == '/') {
+      normalized_dir.pop_back();
+    }
+
+    ESP_LOGD(TAG, "Total files in file_manager state: %zu", directory_state.size());
+    ESP_LOGD(TAG, "Normalized directory path: '%s'", normalized_dir.c_str());
+
     // Filter files that belong to the current directory
     std::vector<storage::FileInfo> directory_files;
     for (const auto &entry : directory_state) {
       const storage::FileInfo &file_info = entry.second;
+
+      // Normalize file's directory path (remove trailing slash)
+      std::string file_dir = file_info.directory;
+      if (!file_dir.empty() && file_dir.back() == '/') {
+        file_dir.pop_back();
+      }
+
+      ESP_LOGVV(TAG, "Comparing file dir '%s' with target '%s' (file: %s)", file_dir.c_str(), normalized_dir.c_str(),
+                file_info.filename.c_str());
+
       // Check if this file belongs to the current directory
-      if (file_info.directory == current_dir->path) {
+      if (file_dir == normalized_dir) {
         directory_files.push_back(file_info);
+        ESP_LOGD(TAG, "  Matched: %s", file_info.filename.c_str());
       }
     }
 
