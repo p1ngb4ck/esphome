@@ -185,19 +185,20 @@ async def to_code(config: ConfigType) -> None:
         # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
 
-        # Calculate combined peripheral_map from config before any code generation
-        # Must be done with pure Python integers before cg.* calls
+        # Calculate combined peripheral_map from user config values
+        # User provides "fs" or "hs" strings in YAML
         combined_peripheral_map = 0
+        controller_map = {"fs": 0, "hs": 1}  # Map user strings to controller indices
         for instance_conf in config[CONF_INSTANCES]:
-            # controller value is 0 (fs) or 1 (hs) from cv.enum validation
+            # Get controller index from user's string value
+            controller_idx = controller_map[instance_conf[CONF_CONTROLLER]]
             # Invert mapping: controller 0 (FS) → OTG1 (BIT1), controller 1 (HS) → OTG0 (BIT0)
-            controller_val = instance_conf[CONF_CONTROLLER]
-            peripheral_bit = 1 << (1 - int(controller_val))
+            peripheral_bit = 1 << (1 - controller_idx)
             combined_peripheral_map |= peripheral_bit
 
         # Now generate C++ code for each instance
         for instance_conf in config[CONF_INSTANCES]:
-            controller_index = instance_conf[CONF_CONTROLLER]
+            controller_index = controller_map[instance_conf[CONF_CONTROLLER]]
             var = cg.new_Pvariable(instance_conf[CONF_ID], controller_index)
             await cg.register_component(var, instance_conf)
 
