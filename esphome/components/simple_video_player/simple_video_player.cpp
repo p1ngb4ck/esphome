@@ -295,6 +295,13 @@ void SimpleVideoPlayer::playback_loop_() {
   this->close_file_();
   this->free_buffers_();
 
+#ifdef USE_HARDWARE_JPEG_DECODER
+  // Release decoder after playback (P4 workaround for state corruption bug)
+  if (this->transcoder_ != nullptr) {
+    this->transcoder_->release_jpeg_decoder();
+  }
+#endif
+
   // Clear canvas
   if (this->output_buffer_) {
     std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
@@ -391,7 +398,7 @@ int SimpleVideoPlayer::read_next_frame_() {
 
 bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 #ifdef USE_HARDWARE_JPEG_DECODER
-  // Get JPEG decoder from transcoder
+  // Get JPEG decoder from transcoder (reuses existing decoder, doesn't re-init)
   jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
   if (decoder == nullptr) {
     ESP_LOGE(TAG, "Failed to get JPEG decoder");
@@ -403,7 +410,6 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 
   if (aligned_size > this->input_buffer_size_) {
     ESP_LOGE(TAG, "Aligned frame size too large");
-    this->transcoder_->release_jpeg_decoder();
     return false;
   }
 
@@ -417,9 +423,6 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
   uint32_t out_size = this->output_buffer_size_;
   esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, this->input_buffer_.get(), aligned_size,
                                        this->output_buffer_.get(), this->output_buffer_size_, &out_size);
-
-  // Release decoder (P4 workaround)
-  this->transcoder_->release_jpeg_decoder();
 
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "JPEG decode failed: %d", err);
