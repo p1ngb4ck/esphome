@@ -26,7 +26,7 @@ AUTO_LOAD = ["transcoder", "image"]
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
 
 # Classes
-SimpleVideoViewer = simple_video_player_ns.class_("SimpleVideoViewer", cg.Component)
+SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Component)
 
 CONF_CANVAS_ID = "canvas_id"
 
@@ -52,7 +52,7 @@ JPEG_OUTPUT_FORMAT = {
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
-            cv.GenerateID(): cv.declare_id(SimpleVideoViewer),
+            cv.GenerateID(): cv.declare_id(SimpleVideoPlayer),
             cv.Required(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
         }
     ).extend(cv.COMPONENT_SCHEMA),
