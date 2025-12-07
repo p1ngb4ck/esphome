@@ -69,8 +69,6 @@ typedef struct {
 } player_ctx_t;
 
 static lv_obj_t *create_lvgl_objects(lv_obj_t *screen) {
-  bsp_display_lock(0);
-
   /* Rows */
   lv_obj_t *cont_col = lv_obj_create(screen);
   lv_obj_set_size(cont_col, player_ctx.screen_width, player_ctx.screen_height);
@@ -86,7 +84,6 @@ static lv_obj_t *create_lvgl_objects(lv_obj_t *screen) {
   /* Video canvas */
   player_ctx.canvas = lv_canvas_create(cont_col);
   lv_obj_add_event_cb(player_ctx.canvas, pause_event_cb, LV_EVENT_CLICKED, NULL);
-  bsp_display_unlock();
 
   return cont_col;
 }
@@ -101,15 +98,12 @@ static void play_event_cb(lv_event_t *e) {
 
 static void stop_event_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
-
   if (code == LV_EVENT_CLICKED) {
     lvgl_simple_player_stop();
 
-    bsp_display_unlock();
     if (lvgl_simple_player_wait_task_stop(100) != ESP_OK) {
       ESP_LOGE(TAG, "Player task stop timeout");
     }
-    bsp_display_lock(100);
   }
 }
 
@@ -219,12 +213,6 @@ static int video_decoder_read_jpeg_image(uint32_t *file_seek_start, uint32_t *fi
   }
   *file_seek_start = seek_pos_next;
   *file_seek_offset = seek_pos_offset;
-
-  // if (seek_pos_next % CACHE_BUF_ALIGN != 0) {
-  //     ESP_LOGE(TAG, "File seek next is not aligned to %d", CACHE_BUF_ALIGN);
-  //     return 0;
-  // }
-
   return jpeg_image_size;
 }
 
@@ -265,41 +253,65 @@ static void show_video_task(void *arg) {
 
   /* Open video file */
   ESP_LOGI(TAG, "Opening video file %s ...", player_ctx.video_path);
-  ESP_GOTO_ON_FALSE(media_src_storage_open(&player_ctx.file) == 0, ESP_ERR_NO_MEM, err, TAG, "Storage open failed");
-  ESP_GOTO_ON_FALSE(media_src_storage_connect(&player_ctx.file, player_ctx.video_path) == 0, ESP_ERR_NO_MEM, err, TAG,
-                    "Storage connect failed");
+
+  if (!media_src_storage_open(&player_ctx.file) == ESP_OK) {
+    ESP_LOGE(TAG, "Storage open failed");
+    clean_on_error();
+    return;
+  }
+  if (!media_src_storage_connect(&player_ctx.file, player_ctx.video_path) == ESP_OK) {
+    ESP_LOGE(TAG, "Storage connect failed");
+    clean_on_error();
+    return;
+  }
 
   if (player_ctx.bgm_path != NULL) {
     ESP_LOGI(TAG, "Opening bgm file %s ...", player_ctx.bgm_path);
   }
 
   /* Get file size */
-  ESP_GOTO_ON_FALSE(media_src_storage_get_size(&player_ctx.file, &player_ctx.filesize) == 0, ESP_ERR_NO_MEM, err, TAG,
-                    "Get file size failed");
-
+  if (!media_src_storage_get_size(&player_ctx.file, &player_ctx.filesize) == ESP_OK) {
+    ESP_LOGE(TAG, "Get file size failed");
+    clean_on_error();
+    return;
+  }
   /* Create input buffer */
   player_ctx.in_buff = video_decoder_malloc(player_ctx.in_buff_size, true, &player_ctx.in_buff_size);
-  ESP_GOTO_ON_FALSE(player_ctx.in_buff, ESP_ERR_NO_MEM, err, TAG, "Allocation in_buff failed");
+  if (!player_ctx.in_buff) {
+    ESP_LOGE(TAG, "Allocation in_buff failed");
+    clean_on_error();
+    return;
+  }
 
   /* Init video decoder */
-  ESP_GOTO_ON_ERROR(video_decoder_init(), err, TAG, "Initialize video decoder failed");
+  if (!video_decoder_init() == ESP_OK) {
+    ESP_LOGE(TAG, "Initialize video decoder failed");
+    clean_on_error();
+    return;
+  }
 
   /* Get video output size */
   uint32_t height = 0;
   uint32_t width = 0;
-  ESP_GOTO_ON_ERROR(get_video_size(&width, &height), err, TAG, "Get video file size failed");
+  if (!get_video_size(&width, &height) == ESP_OK) {
+    ESP_LOGE(TAG, "Get video size failed");
+    clean_on_error();
+    return;
+  }
   width = ALIGN_UP(width, 16);
 
   /* Create output buffer */
   player_ctx.out_buff_size = width * height * 3;
   player_ctx.out_buff = video_decoder_malloc(player_ctx.out_buff_size, false, &player_ctx.out_buff_size);
-  ESP_GOTO_ON_FALSE(player_ctx.out_buff, ESP_ERR_NO_MEM, err, TAG, "Allocation out_buff failed");
+  if (!player_ctx.out_buff == ESP_OK) {
+    ESP_LOGE(TAG, "Allocation out_buff failed");
+    clean_on_error();
+    return;
+  }
 
-  bsp_display_lock(0);
   /* Set buffer to LVGL canvas */
   lv_canvas_set_buffer(player_ctx.canvas, player_ctx.out_buff, width, height, LV_IMG_CF_TRUE_COLOR);
   lv_obj_invalidate(player_ctx.canvas);
-  bsp_display_unlock();
 
   player_ctx.state = PLAYER_STATE_PLAYING;
 
@@ -343,24 +355,16 @@ static void show_video_task(void *arg) {
     } else {
       all_size += processed;
     }
-
-    if (bsp_display_lock(10)) {
-      lv_obj_invalidate(player_ctx.canvas);
-      bsp_display_unlock();
-    }
   }
+}
 
-err:
-  bsp_display_lock(0);
+static void clean_on_error() {
   /* Show black on screen */
   memset(player_ctx.out_buff, 0, player_ctx.out_buff_size);
   if (player_ctx.auto_height) {
     lv_obj_set_height(player_ctx.main, 320);
   }
   lv_obj_invalidate(player_ctx.canvas);
-  /* Set slider */
-  // lv_slider_set_value(player_ctx.slider, 0, LV_ANIM_ON);
-  bsp_display_unlock();
 
   if (player_ctx.bgm_path != NULL) {
     bsp_extra_player_register_callback(NULL, NULL);
@@ -415,10 +419,22 @@ void SimpleVideoPlayer::setup() {
 void SimpleVideoPlayer::loop() {}
 
 lv_obj_t *SimpleVideoPlayer::lvgl_simple_player_create(lvgl_simple_player_cfg_t *params) {
-  ESP_RETURN_ON_FALSE(params->video_path, NULL, TAG, "File path must be filled");
-  ESP_RETURN_ON_FALSE(params->screen, NULL, TAG, "LVGL screen must be filled");
-  ESP_RETURN_ON_FALSE(params->buff_size, NULL, TAG, "Size of the video frame buffer must be filled");
-  ESP_RETURN_ON_FALSE(params->screen_width > 0 && params->screen_height > 0, NULL, TAG, "Object size must be filled");
+  if (!params->video_path) {
+    ESP_LOGE(TAG, "File path must be filled");
+    return NULL;
+  }
+  if (!params->screen) {
+    ESP_LOGE(TAG, "LVGL screen must be filled");
+    return NULL;
+  }
+  if (!params->buff_size) {
+    ESP_LOGE(TAG, "Buffer size must be filled");
+    return NULL;
+  }
+  if (!(params->screen_width > 0 && params->screen_height > 0)) {
+    ESP_LOGE(TAG, "Screen width and height must be greater than 0");
+    return NULL;
+  }
 
   player_ctx.video_path = params->video_path;
   player_ctx.bgm_path = params->bgm_path;
