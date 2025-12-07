@@ -351,7 +351,7 @@ int SimpleVideoPlayer::read_next_frame_() {
     // Search for EOI marker in cache
     size_t search_len = this->cache_buffer_valid_ - this->cache_buffer_offset_;
     uint8_t *search_start = this->cache_buffer_.get() + this->cache_buffer_offset_;
-    uint8_t *eoi_ptr = static_cast<uint8_t *>(std::memmem(search_start, search_len, &JPEG_EOI, 2));
+    uint8_t *eoi_ptr = static_cast<uint8_t *>(memmem(search_start, search_len, &JPEG_EOI, 2));
 
     if (eoi_ptr != nullptr) {
       // Found EOI marker

@@ -47,40 +47,32 @@ class SimpleVideoPlayer;
 /// Trigger fired when playback starts
 class PlaybackStartedTrigger : public Trigger<> {
  public:
-  explicit PlaybackStartedTrigger(SimpleVideoPlayer *parent) {
-    parent->add_on_started_callback([this]() { this->trigger(); });
-  }
+  explicit PlaybackStartedTrigger(SimpleVideoPlayer *parent);
 };
 
 /// Trigger fired when playback finishes normally
 class PlaybackFinishedTrigger : public Trigger<> {
  public:
-  explicit PlaybackFinishedTrigger(SimpleVideoPlayer *parent) {
-    parent->add_on_finished_callback([this]() { this->trigger(); });
-  }
+  explicit PlaybackFinishedTrigger(SimpleVideoPlayer *parent);
 };
 
 /// Trigger fired when playback is paused
 class PlaybackPausedTrigger : public Trigger<> {
  public:
-  explicit PlaybackPausedTrigger(SimpleVideoPlayer *parent) {
-    parent->add_on_paused_callback([this]() { this->trigger(); });
-  }
+  explicit PlaybackPausedTrigger(SimpleVideoPlayer *parent);
 };
 
 /// Trigger fired when playback error occurs
 class PlaybackErrorTrigger : public Trigger<PlaybackError> {
  public:
-  explicit PlaybackErrorTrigger(SimpleVideoPlayer *parent) {
-    parent->add_on_error_callback([this](PlaybackError error) { this->trigger(error); });
-  }
+  explicit PlaybackErrorTrigger(SimpleVideoPlayer *parent);
 };
 
 /// Main video player component
 class SimpleVideoPlayer : public Component {
  public:
   SimpleVideoPlayer() = default;
-  ~SimpleVideoPlayer() override;
+  ~SimpleVideoPlayer();
 
   // Component lifecycle
   void setup() override;
@@ -303,5 +295,25 @@ template<typename... Ts> class StopAction : public Action<Ts...> {
  protected:
   SimpleVideoPlayer *player_;
 };
+
+//========================================================================
+// Trigger Implementations (after SimpleVideoPlayer is complete)
+//========================================================================
+
+inline PlaybackStartedTrigger::PlaybackStartedTrigger(SimpleVideoPlayer *parent) {
+  parent->add_on_started_callback([this]() { this->trigger(); });
+}
+
+inline PlaybackFinishedTrigger::PlaybackFinishedTrigger(SimpleVideoPlayer *parent) {
+  parent->add_on_finished_callback([this]() { this->trigger(); });
+}
+
+inline PlaybackPausedTrigger::PlaybackPausedTrigger(SimpleVideoPlayer *parent) {
+  parent->add_on_paused_callback([this]() { this->trigger(); });
+}
+
+inline PlaybackErrorTrigger::PlaybackErrorTrigger(SimpleVideoPlayer *parent) {
+  parent->add_on_error_callback([this](PlaybackError error) { this->trigger(error); });
+}
 
 }  // namespace esphome::simple_video_player
