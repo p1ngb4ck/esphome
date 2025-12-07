@@ -190,14 +190,14 @@ async def to_code(config: ConfigType) -> None:
             # User config matches controller indices:
             # fs=0 → controller 0 (OTG1), hs=1 → controller 1 (OTG0)
             # peripheral_map: controller 0 → BIT1 (OTG1-FS), controller 1 → BIT0 (OTG0-HS)
-            config_value = instance_conf[CONF_CONTROLLER]
+            controller_index = instance_conf[CONF_CONTROLLER]
 
             # Build combined peripheral_map for HCD installation
             # Invert mapping: controller_index 0 (FS) → OTG1 (BIT1), controller_index 1 (HS) → OTG0 (BIT0)
-            peripheral_bit = 1 << (1 - config_value)
+            peripheral_bit = 1 << (1 - controller_index)
             combined_peripheral_map |= peripheral_bit
 
-            var = cg.new_Pvariable(instance_conf[CONF_ID], config_value)
+            var = cg.new_Pvariable(instance_conf[CONF_ID], controller_index)
             await cg.register_component(var, instance_conf)
 
             # Register devices as USBClient components and add to whitelist
@@ -207,7 +207,7 @@ async def to_code(config: ConfigType) -> None:
 
             usb_host_instances[instance_conf[CONF_ID]] = {
                 "var": var,
-                "controller": config_value,
+                "controller": controller_index,
             }
 
         # Define the combined peripheral map for all configured controllers
