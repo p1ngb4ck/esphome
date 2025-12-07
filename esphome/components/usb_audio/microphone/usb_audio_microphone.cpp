@@ -13,8 +13,7 @@ extern "C" {
 #include "esp_err.h"
 }
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 static const char *const TAG_MIC = "usb_audio.mic";
 
@@ -212,7 +211,6 @@ void USBAudioMicrophone::enqueue_frame_(const uint8_t *data, size_t length) {
   this->pending_frames_.push_back(std::move(frame));
 }
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)

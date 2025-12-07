@@ -6,8 +6,7 @@
 
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 static const char *const TAG = "usb_audio.media_player";
 
@@ -58,7 +57,6 @@ void USBAudioMediaPlayer::stop_due_to_disconnect_() {
   this->stop_sent_ = true;
 }
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)

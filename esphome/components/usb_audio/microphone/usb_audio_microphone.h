@@ -19,8 +19,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 class USBAudioMicrophone : public microphone::Microphone, public Component, public Parented<USBAudioComponent> {
  public:
@@ -65,7 +64,6 @@ class USBAudioMicrophone : public microphone::Microphone, public Component, publ
   bool logged_invalid_channel_ = false;
 };
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)

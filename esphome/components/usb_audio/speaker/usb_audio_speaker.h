@@ -12,8 +12,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 class USBAudioSpeaker : public speaker::Speaker, public Component, public Parented<USBAudioComponent> {
  public:
@@ -54,7 +53,6 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
   size_t chunk_success_streak_{0};
 };
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)

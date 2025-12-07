@@ -7,8 +7,7 @@
 #include "esphome/components/speaker/media_player/speaker_media_player.h"
 #include "esphome/components/usb_audio/usb_audio.h"
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 class USBAudioMediaPlayer : public speaker::SpeakerMediaPlayer, public Parented<USBAudioComponent> {
  public:
@@ -24,7 +23,6 @@ class USBAudioMediaPlayer : public speaker::SpeakerMediaPlayer, public Parented<
   bool stop_sent_{false};
 };
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)

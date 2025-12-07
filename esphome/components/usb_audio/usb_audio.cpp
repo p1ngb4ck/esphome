@@ -15,8 +15,7 @@ extern "C" {
 #include "esp_intr_alloc.h"
 }
 
-namespace esphome {
-namespace usb_audio {
+namespace esphome::usb_audio {
 
 namespace {
 const char *const TAG = "usb_audio";
@@ -851,7 +850,6 @@ void USBAudioComponent::usb_host_task_() {
   this->usb_host_task_handle_ = nullptr;
 }
 
-}  // namespace usb_audio
-}  // namespace esphome
+}  // namespace esphome::usb_audio
 
 #endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)
