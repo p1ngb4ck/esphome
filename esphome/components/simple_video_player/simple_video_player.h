@@ -48,7 +48,7 @@ typedef struct {
     unsigned int auto_width : 1;  /* Set automatic width by video size */
     unsigned int auto_height : 1; /* Set automatic height by video size */
   } flags;
-} esp_lvgl_simple_player_cfg_t;
+} lvgl_simple_player_cfg_t;
 
 static const jpeg_decode_cfg_t jpeg_decode_cfg = {
     .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
@@ -82,7 +82,7 @@ class SimpleVideoPlayer : public Component {
    * This function creates LVGL objects and starts handling task.
    * @return ESP_OK on success
    */
-  lv_obj_t *lvgl_simple_player_create(esp_lvgl_simple_player_cfg_t *params);
+  lv_obj_t *lvgl_simple_player_create(lvgl_simple_player_cfg_t *params);
 
   /**
    * @brief Get player state

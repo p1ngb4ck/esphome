@@ -95,7 +95,7 @@ static void play_event_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
 
   if (code == LV_EVENT_CLICKED) {
-    esp_lvgl_simple_player_play();
+    lvgl_simple_player_play();
   }
 }
 
@@ -103,10 +103,10 @@ static void stop_event_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
 
   if (code == LV_EVENT_CLICKED) {
-    esp_lvgl_simple_player_stop();
+    lvgl_simple_player_stop();
 
     bsp_display_unlock();
-    if (esp_lvgl_simple_player_wait_task_stop(100) != ESP_OK) {
+    if (lvgl_simple_player_wait_task_stop(100) != ESP_OK) {
       ESP_LOGE(TAG, "Player task stop timeout");
     }
     bsp_display_lock(100);
@@ -118,9 +118,9 @@ static void pause_event_cb(lv_event_t *e) {
 
   if (code == LV_EVENT_CLICKED) {
     if (player_ctx.state == PLAYER_STATE_PAUSED) {
-      esp_lvgl_simple_player_play();
+      lvgl_simple_player_play();
     } else if (player_ctx.state == PLAYER_STATE_PLAYING) {
-      esp_lvgl_simple_player_pause();
+      lvgl_simple_player_pause();
     }
   }
 }
@@ -131,7 +131,7 @@ static void repeat_event_cb(lv_event_t *e) {
 
   if (code == LV_EVENT_VALUE_CHANGED) {
     bool loop = lv_obj_get_state(obj) & LV_STATE_CHECKED ? true : false;
-    esp_lvgl_simple_player_repeat(loop);
+    lvgl_simple_player_repeat(loop);
   }
 }
 
@@ -330,7 +330,7 @@ static void show_video_task(void *arg) {
         all_size = 0;
         continue;
       } else {
-        esp_lvgl_simple_player_stop();
+        lvgl_simple_player_stop();
         continue;
       }
     }
@@ -414,7 +414,7 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {}
 
-lv_obj_t *SimpleVideoPlayer::lvgl_simple_player_create(esp_lvgl_simple_player_cfg_t *params) {
+lv_obj_t *SimpleVideoPlayer::lvgl_simple_player_create(lvgl_simple_player_cfg_t *params) {
   ESP_RETURN_ON_FALSE(params->video_path, NULL, TAG, "File path must be filled");
   ESP_RETURN_ON_FALSE(params->screen, NULL, TAG, "LVGL screen must be filled");
   ESP_RETURN_ON_FALSE(params->buff_size, NULL, TAG, "Size of the video frame buffer must be filled");
@@ -483,7 +483,7 @@ void SimpleVideoPlayer::lvgl_simple_player_play(void) {
     /* Create video task */
     xTaskCreate(show_video_task, "video task", 8 * 1024, NULL, 4, &player_task_handle);
   } else if (player_ctx.state == PLAYER_STATE_PAUSED) {
-    esp_lvgl_simple_player_resume();
+    lvgl_simple_player_resume();
   }
 }
 
@@ -553,8 +553,8 @@ esp_err_t SimpleVideoPlayer::lvgl_simple_player_del(void) {
   }
 
   if (player_task_handle != 0) {
-    esp_lvgl_simple_player_stop();
-    if (esp_lvgl_simple_player_wait_task_stop(-1) != ESP_OK) {
+    lvgl_simple_player_stop();
+    if (lvgl_simple_player_wait_task_stop(-1) != ESP_OK) {
       ESP_LOGE(TAG, "Player task stop timeout");
     }
   }
