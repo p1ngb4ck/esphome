@@ -62,7 +62,7 @@ dependencies:
     - esp32p4
     version: 1.1.2
   espressif/esp_hosted:
-    component_hash: 66b48cdc7f5a515c175fec253b40d4432ed3678c0a6323b1482131d8cd184d98
+    component_hash: 53544436deb5fcbfdbf4a8e2c643cdbe31126556781784278c016d674df99cd2
     dependencies:
     - name: idf
       require: private
@@ -70,7 +70,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.6.1
+    version: 2.7.0
   espressif/esp_jpeg:
     component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
     dependencies:
@@ -106,7 +106,7 @@ dependencies:
       type: service
     version: 1.7.6~1
   espressif/esp_wifi_remote:
-    component_hash: b47955c63b9472f7a2e97484d0e78782d31800a03d882654954ae59d2a6ced53
+    component_hash: 655ca258940f71c102e035af65181f24f4bd989e0b60c8e96a1c70513b81fb25
     dependencies:
     - name: idf
       require: private
@@ -124,7 +124,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.1.5
+    version: 1.2.2
   espressif/lan867x:
     component_hash: 651c9d6e3d96acb08bd5066144b12a12e94df0a6241127a0538d8680689de2c4
     dependencies:
@@ -214,6 +214,6 @@ direct_dependencies:
 - espressif/lan867x
 - espressif/mdns
 - zorxx/multipart-parser
-manifest_hash: 5260ecca2f3874741f63441678cdcdf32b7eb96710f1ea70dc508a5b561e92ab
+manifest_hash: 5eb2432fd3fe57768c0560bd6ce322315c6902c5f0b74d2cbd35dbc3b684b55e
 target: esp32p4
 version: 2.0.0
