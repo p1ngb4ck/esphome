@@ -614,14 +614,26 @@ void PictureViewer::refresh_images() {
 
   ESP_LOGI(TAG, "Requesting file list refresh from file_manager for: %s", current_dir->path.c_str());
 
-  // Request file_manager to send us the current file list for this directory
-  // file_manager will call update_directory_files_() with the current file list
 #ifdef USE_STORAGE
   if (this->file_manager_ != nullptr) {
-    // TODO: file_manager should have a method like:
-    // this->file_manager_->request_directory_update(current_dir->path);
-    // For now, log that we're waiting for file_manager to push updates
-    ESP_LOGI(TAG, "Waiting for file_manager to push file list for directory: %s", current_dir->path.c_str());
+    // Get current file list from file_manager's directory state
+    const auto &directory_state = this->file_manager_->get_directory_state();
+
+    // Filter files that belong to the current directory
+    std::vector<storage::FileInfo> directory_files;
+    for (const auto &entry : directory_state) {
+      const storage::FileInfo &file_info = entry.second;
+      // Check if this file belongs to the current directory
+      if (file_info.directory == current_dir->path) {
+        directory_files.push_back(file_info);
+      }
+    }
+
+    ESP_LOGI(TAG, "Retrieved %zu files from file_manager for directory: %s", directory_files.size(),
+             current_dir->path.c_str());
+
+    // Process the file list directly (instead of waiting for file_manager to push)
+    this->update_directory_files_(current_dir->path, directory_files);
   } else {
     ESP_LOGW(TAG, "No file_manager available - cannot refresh images");
   }
