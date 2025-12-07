@@ -184,19 +184,20 @@ async def to_code(config: ConfigType) -> None:
     if dual_host_support and CONF_INSTANCES in config:
         # Dual host mode: create multiple USBHost instances
         usb_host_instances = {}
+
+        # Calculate combined peripheral_map from config before any code generation
+        # Must be done with pure Python integers before cg.* calls
         combined_peripheral_map = 0
-
         for instance_conf in config[CONF_INSTANCES]:
-            # User config matches controller indices:
-            # fs=0 → controller 0 (OTG1), hs=1 → controller 1 (OTG0)
-            # peripheral_map: controller 0 → BIT1 (OTG1-FS), controller 1 → BIT0 (OTG0-HS)
-            controller_index = instance_conf[CONF_CONTROLLER]
-
-            # Build combined peripheral_map for HCD installation
-            # Invert mapping: controller_index 0 (FS) → OTG1 (BIT1), controller_index 1 (HS) → OTG0 (BIT0)
-            peripheral_bit = 1 << (1 - controller_index)
+            # controller value is 0 (fs) or 1 (hs) from cv.enum validation
+            # Invert mapping: controller 0 (FS) → OTG1 (BIT1), controller 1 (HS) → OTG0 (BIT0)
+            controller_val = instance_conf[CONF_CONTROLLER]
+            peripheral_bit = 1 << (1 - int(controller_val))
             combined_peripheral_map |= peripheral_bit
 
+        # Now generate C++ code for each instance
+        for instance_conf in config[CONF_INSTANCES]:
+            controller_index = instance_conf[CONF_CONTROLLER]
             var = cg.new_Pvariable(instance_conf[CONF_ID], controller_index)
             await cg.register_component(var, instance_conf)
 
