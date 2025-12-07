@@ -616,6 +616,9 @@ void PictureViewer::refresh_images() {
 
 #ifdef USE_STORAGE
   if (this->file_manager_ != nullptr) {
+    // Force an immediate scan to ensure directory_state_ is populated
+    this->file_manager_->scan_now();
+
     // Get current file list from file_manager's directory state
     const auto &directory_state = this->file_manager_->get_directory_state();
 
