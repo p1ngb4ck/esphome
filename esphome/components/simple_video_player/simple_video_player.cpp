@@ -222,8 +222,12 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  // Set canvas buffer
-  lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), width, height, LV_IMG_CF_TRUE_COLOR);
+  // Set canvas buffer with aligned dimensions
+  // The decoder outputs aligned dimensions, so we must tell LVGL about the actual buffer layout
+  uint32_t aligned_width = ALIGN_UP(width, 16);
+  uint32_t aligned_height = ALIGN_UP(height, 16);
+
+  lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height, LV_IMG_CF_TRUE_COLOR);
   lv_obj_invalidate(this->canvas_);
 
 #ifdef USE_HARDWARE_JPEG_DECODER
