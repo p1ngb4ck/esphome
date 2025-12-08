@@ -239,6 +239,7 @@ class SimpleVideoPlayer : public Component {
   // FreeRTOS task
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
+  SemaphoreHandle_t lvgl_mutex_{nullptr};  // Mutex for LVGL thread safety
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

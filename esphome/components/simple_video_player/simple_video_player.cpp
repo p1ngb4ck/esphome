@@ -46,6 +46,10 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
   if (this->state_mutex_ != nullptr) {
     vSemaphoreDelete(this->state_mutex_);
   }
+
+  if (this->lvgl_mutex_ != nullptr) {
+    vSemaphoreDelete(this->lvgl_mutex_);
+  }
 }
 
 void SimpleVideoPlayer::setup() {
@@ -76,6 +80,14 @@ void SimpleVideoPlayer::setup() {
   this->state_mutex_ = xSemaphoreCreateMutex();
   if (this->state_mutex_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create state mutex");
+    this->mark_failed();
+    return;
+  }
+
+  // Create LVGL mutex for thread-safe LVGL API calls
+  this->lvgl_mutex_ = xSemaphoreCreateMutex();
+  if (this->lvgl_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create LVGL mutex");
     this->mark_failed();
     return;
   }
@@ -227,8 +239,16 @@ void SimpleVideoPlayer::playback_loop_() {
   uint32_t aligned_width = ALIGN_UP(width, 16);
   uint32_t aligned_height = ALIGN_UP(height, 16);
 
-  lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height, LV_IMG_CF_TRUE_COLOR);
-  lv_obj_invalidate(this->canvas_);
+  // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task
+  // This prevents crashes from concurrent access to LVGL (not thread-safe)
+  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height,
+                         LV_IMG_CF_TRUE_COLOR);
+    lv_obj_invalidate(this->canvas_);
+    xSemaphoreGive(this->lvgl_mutex_);
+  } else {
+    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas setup");
+  }
 
 #ifdef USE_HARDWARE_JPEG_DECODER
   // Acquire exclusive access to JPEG decoder for duration of playback
@@ -319,10 +339,13 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Clear canvas
+  // Clear canvas (lock LVGL mutex for thread safety)
   if (this->output_buffer_) {
     std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
-    lv_obj_invalidate(this->canvas_);
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      lv_obj_invalidate(this->canvas_);
+      xSemaphoreGive(this->lvgl_mutex_);
+    }
   }
 
   xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
@@ -446,8 +469,13 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
     return false;
   }
 
-  // Update canvas
-  lv_obj_invalidate(this->canvas_);
+  // Update canvas (lock LVGL mutex for thread safety)
+  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    lv_obj_invalidate(this->canvas_);
+    xSemaphoreGive(this->lvgl_mutex_);
+  } else {
+    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas invalidate");
+  }
 
   return true;
 #else
