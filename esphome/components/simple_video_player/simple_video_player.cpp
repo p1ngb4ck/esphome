@@ -625,13 +625,15 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
 //========================================================================
 
 bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_height) {
-  // Align width to 16 bytes (hardware requirement)
+  // Align width and height to 16 bytes (hardware requirement)
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
+  uint32_t aligned_height = ALIGN_UP(video_height, 16);
 
   // Calculate output buffer size (RGB565 = 2 bytes per pixel)
-  this->output_buffer_size_ = aligned_width * video_height * 2;
+  this->output_buffer_size_ = aligned_width * aligned_height * 2;
 
-  ESP_LOGI(TAG, "Allocating buffers for %ux%u video (aligned width: %u)", video_width, video_height, aligned_width);
+  ESP_LOGI(TAG, "Allocating buffers for %ux%u video (aligned: %ux%u)", video_width, video_height, aligned_width,
+           aligned_height);
 
 #ifdef USE_HARDWARE_JPEG_DECODER
   // Allocate input buffer using JPEG decoder memory allocator (PSRAM, DMA-capable)
