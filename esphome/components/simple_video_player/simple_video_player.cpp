@@ -320,19 +320,16 @@ void SimpleVideoPlayer::playback_loop_() {
   if (!canvas_positioned) {
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
     lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
-    lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
-    lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
-    // Calculate offset to keep canvas centered in its original position
-    lv_coord_t x_offset = (canvas_width - width) / 2;
-    lv_coord_t y_offset = (canvas_height - height) / 2;
     if ((lv_coord_t) width < canvas_width || (lv_coord_t) height < canvas_height) {
+      lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
+      lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
+      lv_coord_t x_offset = (canvas_width - width) / 2;
+      lv_coord_t y_offset = (canvas_height - height) / 2;
       ESP_LOGI(TAG, "Resizing canvas from %ux%u to %ux%u", canvas_width, canvas_height, width, height);
-      // Resize canvas to video dimensions
       lv_obj_set_size(this->canvas_, width, height);
-      // Adjust position to keep it centered in original location
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
+      lv_obj_invalidate(this->canvas_);
     }
-    lv_obj_invalidate(this->canvas_);
     canvas_positioned = true;
   }
 
