@@ -436,6 +436,17 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
+#ifdef USE_AUDIO
+    // Process audio decoder (needs to run continuously to drain ring buffer)
+    if (this->audio_enabled_ && this->audio_decoder_) {
+      audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
+      if (decode_state == audio::AudioDecoderState::FAILED) {
+        ESP_LOGW(TAG, "Audio decoding failed");
+        this->audio_enabled_ = false;
+      }
+    }
+#endif
+
     // Frame rate control
     TickType_t frame_end = xTaskGetTickCount();
     TickType_t elapsed = frame_end - frame_start;
@@ -1002,17 +1013,10 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
     return;
   }
 
-  // Write audio frame to ring buffer
+  // Write audio frame to ring buffer (decoder is called continuously in main loop)
   size_t written = this->audio_input_ring_buffer_->write(data, size);
   if (written < size) {
     ESP_LOGV(TAG, "Audio ring buffer full, dropped %zu bytes", size - written);
-  }
-
-  // Decode audio frames
-  audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
-  if (decode_state == audio::AudioDecoderState::FAILED) {
-    ESP_LOGW(TAG, "Audio decoding failed");
-    this->audio_enabled_ = false;
   }
 }
 #endif
