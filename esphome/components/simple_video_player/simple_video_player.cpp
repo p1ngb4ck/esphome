@@ -296,6 +296,7 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
 }
 
 void SimpleVideoPlayer::playback_loop_() {
+  bool canvas_positioned = false;
   ESP_LOGI(TAG, "Playback task started");
 
   // Open file
@@ -314,8 +315,25 @@ void SimpleVideoPlayer::playback_loop_() {
     this->close_file_();
     return;
   }
-
   ESP_LOGI(TAG, "Video dimensions: %ux%u", width, height);
+
+  if (!canvas_positioned) {
+    lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
+    lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
+    lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
+    lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
+    // Calculate offset to keep canvas centered in its original position
+    lv_coord_t x_offset = (canvas_width - width) / 2;
+    lv_coord_t y_offset = (canvas_height - height) / 2;
+    if ((lv_coord_t) width < canvas_width || (lv_coord_t) height < canvas_height) {
+      ESP_LOGI(TAG, "Resizing canvas from %ux%u to %ux%u", canvas_width, canvas_height, width, height);
+      // Resize canvas to video dimensions
+      lv_obj_set_size(this->canvas_, width, height);
+      // Adjust position to keep it centered in original location
+      lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
+    }
+    canvas_positioned = true;
+  }
 
   // Initialize audio decoder for AVI files with audio
 #ifdef USE_AUDIO
@@ -340,30 +358,10 @@ void SimpleVideoPlayer::playback_loop_() {
   // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task
   // This prevents crashes from concurrent access to LVGL (not thread-safe)
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Get canvas configured dimensions and position
-    lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
-    lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
-    lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
-    lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
-
-    // If video is smaller than canvas, resize canvas to match video and adjust position to stay centered
-    if ((lv_coord_t) width < canvas_width || (lv_coord_t) height < canvas_height) {
-      // Calculate offset to keep canvas centered in its original position
-      lv_coord_t x_offset = (canvas_width - width) / 2;
-      lv_coord_t y_offset = (canvas_height - height) / 2;
-
-      // Resize canvas to video dimensions
-      lv_obj_set_size(this->canvas_, width, height);
-
-      // Adjust position to keep it centered in original location
-      lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
-    }
-
     // Set canvas buffer to match video dimensions
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height,
                          LV_IMG_CF_TRUE_COLOR);
 
-    lv_obj_invalidate(this->canvas_);
     xSemaphoreGive(this->lvgl_mutex_);
   } else {
     ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas setup");
