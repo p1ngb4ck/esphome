@@ -332,6 +332,7 @@ void SimpleVideoPlayer::playback_loop_() {
       // Adjust position to keep it centered in original location
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
     }
+    lv_obj_invalidate(this->canvas_);
     canvas_positioned = true;
   }
 
