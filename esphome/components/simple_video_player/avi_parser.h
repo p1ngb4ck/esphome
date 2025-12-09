@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 #include "buffered_file_reader.h"
 
 namespace esphome {
@@ -169,9 +170,9 @@ class AVIParser {
   bool skip_bytes_(size_t count);
 
   /**
-   * @brief Build frame index for seeking
+   * @brief Parse stream header (strh/strf chunks)
    */
-  bool build_index_();
+  bool parse_stream_header_();
 
   // File reader
   BufferedFileReader *reader_{nullptr};
@@ -187,10 +188,6 @@ class AVIParser {
   uint64_t movi_size_{0};       // Size of 'movi' chunk
   uint64_t current_offset_{0};  // Current read position in movi chunk
   uint32_t current_frame_{0};   // Current frame number
-
-  // Frame index (for seeking)
-  std::vector<AVIFrame> frame_index_;
-  bool index_built_{false};
 };
 
 }  // namespace simple_video_player

@@ -49,8 +49,6 @@ bool AVIParser::open(BufferedFileReader *reader) {
   this->movi_size_ = 0;
   this->current_offset_ = 0;
   this->current_frame_ = 0;
-  this->index_built_ = false;
-  this->frame_index_.clear();
 
   // Parse AVI headers
   if (!this->parse_headers_()) {
@@ -86,8 +84,6 @@ void AVIParser::close() {
   this->reader_ = nullptr;
   this->has_video_ = false;
   this->has_audio_ = false;
-  this->frame_index_.clear();
-  this->index_built_ = false;
 }
 
 const AVIStreamInfo *AVIParser::get_video_info() const { return this->has_video_ ? &this->video_info_ : nullptr; }
