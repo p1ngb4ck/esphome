@@ -355,13 +355,17 @@ bool AVIParser::parse_stream_header_() {
 
 int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size) {
   if (!this->is_open()) {
+    ESP_LOGW(TAG, "read_next_frame called but parser not open");
     return -1;
   }
+
+  ESP_LOGD(TAG, "read_next_frame: current_offset=%llu, movi_size=%llu", this->current_offset_, this->movi_size_);
 
   // Search for next frame chunk
   while (this->current_offset_ < this->movi_size_) {
     uint32_t chunk_id;
     if (!this->read_fourcc_(chunk_id)) {
+      ESP_LOGW(TAG, "Failed to read chunk_id at offset %llu", this->current_offset_);
       return -1;
     }
 
