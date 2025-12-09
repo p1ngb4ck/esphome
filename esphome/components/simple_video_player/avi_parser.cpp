@@ -157,7 +157,9 @@ bool AVIParser::parse_headers_() {
 
             if (strl_type == FOURCC_strl) {
               // Stream header list
-              this->parse_stream_header_();
+              if (!this->parse_stream_header_()) {
+                ESP_LOGW(TAG, "Failed to parse stream header");
+              }
             } else {
               // Skip unknown list
               this->skip_bytes_(sub_size - 4);
@@ -275,10 +277,12 @@ bool AVIParser::parse_stream_header_() {
     return false;
   }
 
+  ESP_LOGD(TAG, "strf chunk found, size=%u, info=%p", strf_size, info);
+
   if (info != nullptr) {
     if (info->type == AVIStreamType::VIDEO) {
       // Parse BITMAPINFOHEADER
-      ESP_LOGD(TAG, "Parsing BITMAPINFOHEADER, strf_size=%u", strf_size);
+      ESP_LOGD(TAG, "Parsing BITMAPINFOHEADER for VIDEO stream, strf_size=%u", strf_size);
 
       uint32_t bi_size;
       if (!this->read_uint32_(bi_size)) {
