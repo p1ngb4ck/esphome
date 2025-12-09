@@ -324,7 +324,6 @@ void SimpleVideoPlayer::playback_loop_() {
     if (!this->transcoder_->acquire_jpeg_decoder_exclusive("simple_video_player")) {
       ESP_LOGE(TAG, "Failed to acquire exclusive JPEG decoder access");
       this->set_error_(PlaybackError::DECODER_INIT_FAILED);
-      this->free_buffers_();
       this->close_file_();
       return;
     }
@@ -396,7 +395,8 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Cleanup
   this->close_file_();
-  this->free_buffers_();
+  // Note: Buffers are NOT freed here - they persist for reuse in next playback
+  // Buffers are only freed in destructor when component is destroyed
 
 #ifdef USE_HARDWARE_JPEG_DECODER
   // Release exclusive access to decoder after playback
