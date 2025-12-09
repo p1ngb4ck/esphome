@@ -137,16 +137,24 @@ bool AVIParser::parse_headers_() {
         uint64_t hdrl_end = this->reader_->tell() + chunk_size - 4;
 
         // Parse hdrl contents
+        ESP_LOGD(TAG, "Parsing hdrl contents until offset %llu", hdrl_end);
         while (this->reader_->tell() < hdrl_end) {
+          uint64_t current_pos = this->reader_->tell();
+          ESP_LOGD(TAG, "hdrl loop: at offset %llu (end at %llu)", current_pos, hdrl_end);
+
           uint32_t sub_fourcc;
           if (!this->read_fourcc_(sub_fourcc)) {
+            ESP_LOGW(TAG, "Failed to read sub_fourcc in hdrl");
             break;
           }
+          ESP_LOGD(TAG, "Read sub_fourcc: 0x%08X", sub_fourcc);
 
           uint32_t sub_size;
           if (!this->read_uint32_(sub_size)) {
+            ESP_LOGW(TAG, "Failed to read sub_size in hdrl");
             break;
           }
+          ESP_LOGD(TAG, "Read sub_size: %u", sub_size);
 
           if (sub_fourcc == FOURCC_LIST) {
             // Nested LIST (strl - stream list)
@@ -157,6 +165,7 @@ bool AVIParser::parse_headers_() {
 
             if (strl_type == FOURCC_strl) {
               // Stream header list - track position to skip on error
+              ESP_LOGD(TAG, "Found strl LIST, parsing stream header");
               uint64_t strl_start = this->reader_->tell();
               if (!this->parse_stream_header_()) {
                 ESP_LOGW(TAG, "Failed to parse stream header, skipping rest of strl");
@@ -166,6 +175,8 @@ bool AVIParser::parse_headers_() {
                 if (bytes_remaining > 0) {
                   this->skip_bytes_(bytes_remaining);
                 }
+              } else {
+                ESP_LOGD(TAG, "Successfully parsed stream header");
               }
             } else {
               // Skip unknown list
@@ -317,28 +328,41 @@ bool AVIParser::parse_stream_header_() {
       }
     } else if (info->type == AVIStreamType::AUDIO) {
       // Parse WAVEFORMATEX
+      ESP_LOGD(TAG, "Parsing WAVEFORMATEX for AUDIO stream, strf_size=%u", strf_size);
       uint16_t format_tag;
       if (!this->read_uint16_(format_tag)) {
+        ESP_LOGE(TAG, "Failed to read format_tag");
         return false;
       }
       info->codec = format_tag;
+      ESP_LOGD(TAG, "Audio codec: 0x%04X", format_tag);
 
       if (!this->read_uint16_(info->channels)) {
+        ESP_LOGE(TAG, "Failed to read channels");
         return false;
       }
+      ESP_LOGD(TAG, "Channels: %u", info->channels);
+
       if (!this->read_uint32_(info->sample_rate)) {
+        ESP_LOGE(TAG, "Failed to read sample_rate");
         return false;
       }
+      ESP_LOGD(TAG, "Sample rate: %u", info->sample_rate);
 
       // Skip bytes per second and block align
+      ESP_LOGD(TAG, "Skipping 6 bytes (avg bytes/sec + block align)");
       this->skip_bytes_(6);
 
       if (!this->read_uint16_(info->bits_per_sample)) {
+        ESP_LOGE(TAG, "Failed to read bits_per_sample");
         return false;
       }
+      ESP_LOGD(TAG, "Bits per sample: %u", info->bits_per_sample);
 
       // Skip rest
+      ESP_LOGD(TAG, "Skipping rest of WAVEFORMATEX: %d bytes", strf_size - 16);
       this->skip_bytes_(strf_size - 16);
+      ESP_LOGD(TAG, "WAVEFORMATEX parsing complete");
     }
   } else {
     // Skip strf
@@ -347,9 +371,11 @@ bool AVIParser::parse_stream_header_() {
 
   // Align to word boundary
   if (strf_size & 1) {
+    ESP_LOGD(TAG, "Aligning to word boundary (strf odd size)");
     this->skip_bytes_(1);
   }
 
+  ESP_LOGD(TAG, "parse_stream_header_ returning true");
   return true;
 }
 
