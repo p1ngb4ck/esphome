@@ -164,19 +164,24 @@ bool AVIParser::parse_headers_() {
             }
 
             if (strl_type == FOURCC_strl) {
-              // Stream header list - track position to skip on error
+              // Stream header list - track position to skip any remaining data
               ESP_LOGD(TAG, "Found strl LIST, parsing stream header");
               uint64_t strl_start = this->reader_->tell();
+
+              // Parse stream header (strh + strf)
               if (!this->parse_stream_header_()) {
                 ESP_LOGW(TAG, "Failed to parse stream header, skipping rest of strl");
-                // Skip to end of this strl LIST (sub_size - 4 because we already read strl_type)
-                uint64_t bytes_consumed = this->reader_->tell() - strl_start;
-                uint64_t bytes_remaining = (sub_size - 4) - bytes_consumed;
-                if (bytes_remaining > 0) {
-                  this->skip_bytes_(bytes_remaining);
-                }
               } else {
                 ESP_LOGD(TAG, "Successfully parsed stream header");
+              }
+
+              // Always skip to end of strl LIST in case there are additional chunks (strn, indx, etc.)
+              // sub_size includes the strl_type we already read, so subtract 4
+              uint64_t bytes_consumed = this->reader_->tell() - strl_start;
+              uint64_t bytes_remaining = (sub_size - 4) - bytes_consumed;
+              if (bytes_remaining > 0) {
+                ESP_LOGD(TAG, "Skipping %llu remaining bytes in strl LIST", bytes_remaining);
+                this->skip_bytes_(bytes_remaining);
               }
             } else {
               // Skip unknown list
