@@ -156,9 +156,16 @@ bool AVIParser::parse_headers_() {
             }
 
             if (strl_type == FOURCC_strl) {
-              // Stream header list
+              // Stream header list - track position to skip on error
+              uint64_t strl_start = this->reader_->tell();
               if (!this->parse_stream_header_()) {
-                ESP_LOGW(TAG, "Failed to parse stream header");
+                ESP_LOGW(TAG, "Failed to parse stream header, skipping rest of strl");
+                // Skip to end of this strl LIST (sub_size - 4 because we already read strl_type)
+                uint64_t bytes_consumed = this->reader_->tell() - strl_start;
+                uint64_t bytes_remaining = (sub_size - 4) - bytes_consumed;
+                if (bytes_remaining > 0) {
+                  this->skip_bytes_(bytes_remaining);
+                }
               }
             } else {
               // Skip unknown list
@@ -170,9 +177,10 @@ bool AVIParser::parse_headers_() {
           }
         }
       } else if (list_type == FOURCC_movi) {
-        // continue if hdrl not found yet
+        // Skip if hdrl not found yet
         if (!found_hdrl) {
-          ESP_LOGD(TAG, "movi chunk found before hdrl");
+          ESP_LOGD(TAG, "movi chunk found before hdrl, skipping");
+          this->skip_bytes_(chunk_size - 4);
           continue;
         }
         // Movie data chunk
@@ -236,8 +244,9 @@ bool AVIParser::parse_stream_header_() {
       return false;
     }
 
-    // Skip flags and priority
-    this->skip_bytes_(8);
+    // Skip flags, priority, language, and initial frames
+    // dwFlags(4) + wPriority(2) + wLanguage(2) + dwInitialFrames(4) = 12 bytes
+    this->skip_bytes_(12);
 
     // Read scale and rate (for FPS)
     if (!this->read_uint32_(info->fps_den)) {
