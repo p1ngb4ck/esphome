@@ -273,23 +273,23 @@ bool AVIParser::parse_stream_header_() {
   if (info != nullptr) {
     if (info->type == AVIStreamType::VIDEO) {
       // Parse BITMAPINFOHEADER
-      ESP_LOGV(TAG, "Parsing BITMAPINFOHEADER, strf_size=%u", strf_size);
+      ESP_LOGD(TAG, "Parsing BITMAPINFOHEADER, strf_size=%u", strf_size);
 
       uint32_t bi_size;
       if (!this->read_uint32_(bi_size)) {
         return false;
       }
-      ESP_LOGV(TAG, "biSize=%u", bi_size);
+      ESP_LOGD(TAG, "biSize=%u", bi_size);
 
       if (!this->read_uint32_(info->width)) {
         return false;
       }
-      ESP_LOGV(TAG, "Width=%u", info->width);
+      ESP_LOGD(TAG, "Width=%u", info->width);
 
       if (!this->read_uint32_(info->height)) {
         return false;
       }
-      ESP_LOGV(TAG, "Height=%u", info->height);
+      ESP_LOGD(TAG, "Height=%u", info->height);
 
       // Skip rest of bitmap header
       size_t bytes_read = 12;  // biSize + width + height
