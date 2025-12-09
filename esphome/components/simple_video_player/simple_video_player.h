@@ -8,6 +8,7 @@
 #include "esphome/components/lvgl/lvgl_esphome.h"
 #include "esphome/components/transcoder/transcoder.h"
 #include "lvgl.h"
+#include "buffered_file_reader.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -215,16 +216,14 @@ class SimpleVideoPlayer : public Component {
   bool loop_{false};
   std::string video_path_;
 
-  // File handle (polymorphic - local or network)
-  FILE *file_handle_{nullptr};
+  // File reader (uses optimized buffering for local storage)
+  std::unique_ptr<BufferedFileReader> file_reader_;
   bool is_network_file_{false};
   uint64_t file_size_{0};
-  uint64_t file_position_{0};
 
-  // Cache buffer state (for aligned reads)
-  uint64_t cache_buffer_file_pos_{0};  // File position of cached data
-  size_t cache_buffer_valid_{0};       // Valid bytes in cache
-  size_t cache_buffer_offset_{0};      // Read offset within cache
+  // Cache buffer state (for frame parsing)
+  size_t cache_buffer_valid_{0};   // Valid bytes in cache
+  size_t cache_buffer_offset_{0};  // Read offset within cache
 
   // Video properties
   uint32_t video_width_{0};

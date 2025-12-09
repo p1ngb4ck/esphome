@@ -62,12 +62,26 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Verify JPEG decoder is available in transcoder
-  if (!this->transcoder_->is_jpeg_decoder_available()) {
-    ESP_LOGE(TAG, "JPEG decoder not available in transcoder");
+  // Initialize JPEG decoder during setup (not during playback)
+  // This ensures resources are allocated early and won't fail during playback
+#ifdef USE_HARDWARE_JPEG_DECODER
+  jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
+  if (decoder == nullptr) {
+    ESP_LOGE(TAG, "Failed to initialize JPEG decoder during setup");
     this->mark_failed();
     return;
   }
+  ESP_LOGI(TAG, "Hardware JPEG decoder initialized (handle: %p)", decoder);
+#elif defined(USE_ESP_JPEG_DECODER)
+  if (!this->transcoder_->is_jpeg_decoder_available()) {
+    ESP_LOGE(TAG, "ESP-JPEG decoder not available");
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "ESP-JPEG decoder ready");
+#else
+  ESP_LOGW(TAG, "No hardware JPEG decoder available");
+#endif
 
   // Verify canvas is set
   if (this->canvas_ == nullptr) {
@@ -106,9 +120,63 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
+  // Pre-allocate input and output buffers during setup (in PSRAM)
+  // This ensures resources are allocated early and won't fail during playback
+  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers...");
+
+#ifdef USE_HARDWARE_JPEG_DECODER
+  // Allocate input buffer (JPEG encoded frame buffer - PSRAM)
+  jpeg_decode_memory_alloc_cfg_t input_cfg = {
+      .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
+  };
+
+  size_t actual_input_size = 0;
+  uint8_t *input_buf =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_input_size));
+
+  if (input_buf == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate input buffer (%u bytes)", this->input_buffer_size_);
+    this->mark_failed();
+    return;
+  }
+
+  this->input_buffer_.reset(input_buf);
+  ESP_LOGI(TAG, "Input buffer allocated: %zu bytes (PSRAM)", actual_input_size);
+
+  // Allocate maximum output buffer (decoded RGB565 frame buffer - PSRAM)
+  // Calculate max size based on typical 720p video (1280x720) with alignment
+  uint32_t max_width = 1280;
+  uint32_t max_height = 720;
+  uint32_t aligned_max_width = ALIGN_UP(max_width, 16);
+  uint32_t aligned_max_height = ALIGN_UP(max_height, 16);
+  size_t max_output_size = aligned_max_width * aligned_max_height * 2;  // RGB565 = 2 bytes per pixel
+
+  jpeg_decode_memory_alloc_cfg_t output_cfg = {
+      .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
+  };
+
+  size_t actual_output_size = 0;
+  uint8_t *output_buf =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
+
+  if (output_buf == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer (%zu bytes)", max_output_size);
+    this->mark_failed();
+    return;
+  }
+
+  this->output_buffer_.reset(output_buf);
+  this->output_buffer_size_ = actual_output_size;
+  ESP_LOGI(TAG, "Output buffer allocated: %zu bytes (PSRAM, max %ux%u)", actual_output_size, aligned_max_width,
+           aligned_max_height);
+#else
+  ESP_LOGW(TAG, "Hardware JPEG decoder not available - buffers not allocated");
+#endif
+
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %u bytes (internal RAM)", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Input buffer: %u bytes (PSRAM)", this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Output buffer: %zu bytes (PSRAM)", this->output_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 }
 
@@ -265,7 +333,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Reset file position to start
   this->seek_to_(0);
-  this->cache_buffer_file_pos_ = 0;
   this->cache_buffer_valid_ = 0;
   this->cache_buffer_offset_ = 0;
 
@@ -301,7 +368,6 @@ void SimpleVideoPlayer::playback_loop_() {
       if (this->loop_) {
         ESP_LOGI(TAG, "Looping video");
         this->seek_to_(0);
-        this->cache_buffer_file_pos_ = 0;
         this->cache_buffer_valid_ = 0;
         this->cache_buffer_offset_ = 0;
         continue;
@@ -539,39 +605,40 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     // Try to get file size (may not be supported by all backends)
     // For now, assume unknown size for network files
     this->file_size_ = 0;
-    this->file_position_ = 0;
     return true;
   }
 #endif
 
-  // Open local file with standard fopen (works with FatFS VFS)
-  ESP_LOGI(TAG, "Opening local file: %s", path.c_str());
-  this->file_handle_ = std::fopen(path.c_str(), "rb");
+  // Open local file with optimized buffered reader
+  ESP_LOGI(TAG, "Opening local file with buffered reader: %s", path.c_str());
   this->is_network_file_ = false;
 
-  if (this->file_handle_ == nullptr) {
+  // Create buffered file reader
+  this->file_reader_ = std::make_unique<BufferedFileReader>();
+  if (!this->file_reader_->open(path.c_str())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
+    this->file_reader_.reset();
     return false;
   }
 
   // Get file size
-  if (!this->get_file_size_(this->file_size_)) {
+  if (!this->file_reader_->get_size(&this->file_size_)) {
     ESP_LOGW(TAG, "Failed to get file size");
+  } else {
+    ESP_LOGI(TAG, "File size: %llu bytes", this->file_size_);
   }
 
-  this->file_position_ = 0;
   return true;
 }
 
 void SimpleVideoPlayer::close_file_() {
-  if (this->file_handle_ != nullptr) {
-    std::fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
+  if (this->file_reader_) {
+    this->file_reader_->close();
+    this->file_reader_.reset();
   }
 
   this->is_network_file_ = false;
   this->file_size_ = 0;
-  this->file_position_ = 0;
 }
 
 int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
@@ -592,19 +659,12 @@ int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
     return -1;
 #endif
   } else {
-    // Local file - use standard fread
-    if (this->file_handle_ == nullptr) {
+    // Local file - use buffered reader
+    if (!this->file_reader_ || !this->file_reader_->is_open()) {
       return -1;
     }
 
-    size_t bytes_read = std::fread(buffer, 1, size, this->file_handle_);
-    this->file_position_ += bytes_read;
-
-    if (bytes_read == 0 && std::ferror(this->file_handle_)) {
-      return -1;  // Error
-    }
-
-    return bytes_read;
+    return this->file_reader_->read(buffer, size);
   }
 }
 
@@ -615,16 +675,11 @@ bool SimpleVideoPlayer::seek_to_(uint64_t position) {
     ESP_LOGW(TAG, "Seek not supported for network files");
     return false;
   } else {
-    if (this->file_handle_ == nullptr) {
+    if (!this->file_reader_ || !this->file_reader_->is_open()) {
       return false;
     }
 
-    if (std::fseek(this->file_handle_, position, SEEK_SET) != 0) {
-      return false;
-    }
-
-    this->file_position_ = position;
-    return true;
+    return this->file_reader_->seek(position);
   }
 }
 
@@ -634,21 +689,11 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
     size = 0;
     return false;
   } else {
-    if (this->file_handle_ == nullptr) {
+    if (!this->file_reader_ || !this->file_reader_->is_open()) {
       return false;
     }
 
-    long current = std::ftell(this->file_handle_);
-    std::fseek(this->file_handle_, 0, SEEK_END);
-    long end = std::ftell(this->file_handle_);
-    std::fseek(this->file_handle_, current, SEEK_SET);
-
-    if (end < 0) {
-      return false;
-    }
-
-    size = static_cast<uint64_t>(end);
-    return true;
+    return this->file_reader_->get_size(&size);
   }
 }
 
@@ -661,56 +706,37 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
 
-  // Calculate output buffer size (RGB565 = 2 bytes per pixel)
-  this->output_buffer_size_ = aligned_width * aligned_height * 2;
+  // Calculate required output buffer size (RGB565 = 2 bytes per pixel)
+  size_t required_output_size = aligned_width * aligned_height * 2;
 
-  ESP_LOGI(TAG, "Allocating buffers for %ux%u video (aligned: %ux%u)", video_width, video_height, aligned_width,
+  ESP_LOGI(TAG, "Verifying buffers for %ux%u video (aligned: %ux%u)", video_width, video_height, aligned_width,
            aligned_height);
-
-#ifdef USE_HARDWARE_JPEG_DECODER
-  // Allocate input buffer using JPEG decoder memory allocator (PSRAM, DMA-capable)
-  jpeg_decode_memory_alloc_cfg_t input_cfg = {
-      .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
-  };
-
-  size_t actual_input_size = 0;
-  uint8_t *input_buf =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_input_size));
-
-  if (input_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate input buffer");
-    return false;
-  }
-
-  this->input_buffer_.reset(input_buf);
-  this->input_buffer_size_ = actual_input_size;
-
-  // Allocate output buffer using JPEG decoder memory allocator (PSRAM, DMA-capable)
-  jpeg_decode_memory_alloc_cfg_t output_cfg = {
-      .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
-  };
-
-  size_t actual_output_size = 0;
-  uint8_t *output_buf =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->output_buffer_size_, &output_cfg, &actual_output_size));
-
-  if (output_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate output buffer");
-    this->input_buffer_.reset();
-    return false;
-  }
-
-  this->output_buffer_.reset(output_buf);
-  this->output_buffer_size_ = actual_output_size;
-
-  ESP_LOGI(TAG, "Buffers allocated - Input: %zu bytes, Output: %zu bytes", this->input_buffer_size_,
+  ESP_LOGI(TAG, "Required output buffer: %zu bytes, allocated: %zu bytes", required_output_size,
            this->output_buffer_size_);
 
+  // Verify buffers were pre-allocated during setup
+  if (!this->input_buffer_) {
+    ESP_LOGE(TAG, "Input buffer not pre-allocated (this should not happen)");
+    return false;
+  }
+
+  if (!this->output_buffer_) {
+    ESP_LOGE(TAG, "Output buffer not pre-allocated (this should not happen)");
+    return false;
+  }
+
+  // Check if pre-allocated buffers are large enough
+  if (required_output_size > this->output_buffer_size_) {
+    ESP_LOGE(TAG, "Video too large for pre-allocated buffer: %ux%u requires %zu bytes, only %zu bytes available",
+             aligned_width, aligned_height, required_output_size, this->output_buffer_size_);
+    ESP_LOGE(TAG, "Increase max video resolution in setup() or use smaller video");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Buffers verified - Input: %u bytes, Output: %zu bytes (using %zu bytes)", this->input_buffer_size_,
+           this->output_buffer_size_, required_output_size);
+
   return true;
-#else
-  ESP_LOGE(TAG, "Hardware JPEG decoder not available");
-  return false;
-#endif
 }
 
 void SimpleVideoPlayer::free_buffers_() {
