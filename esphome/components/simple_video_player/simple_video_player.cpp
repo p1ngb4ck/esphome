@@ -360,8 +360,10 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Reset file position to start
-  this->seek_to_(0);
+  // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
+  if (this->video_format_ != VideoFormat::AVI_MJPEG) {
+    this->seek_to_(0);
+  }
   this->cache_buffer_valid_ = 0;
   this->cache_buffer_offset_ = 0;
 
