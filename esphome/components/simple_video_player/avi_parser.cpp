@@ -475,10 +475,5 @@ bool AVIParser::skip_bytes_(size_t count) {
   return this->reader_->seek(current + count);
 }
 
-bool AVIParser::build_index_() {
-  // TODO: Build frame index for faster seeking
-  return false;
-}
-
 }  // namespace simple_video_player
 }  // namespace esphome
