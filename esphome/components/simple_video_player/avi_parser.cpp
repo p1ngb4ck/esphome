@@ -311,36 +311,52 @@ bool AVIParser::parse_stream_header_() {
         this->skip_bytes_(strf_size - bytes_read);
       }
     } else if (info->type == AVIStreamType::AUDIO) {
-      // Parse WAVEFORMATEX (minimum size is 16 bytes)
+      // Parse WAVEFORMATEX
+      // Minimum WAVEFORMATEX: wFormatTag(2) + nChannels(2) + nSamplesPerSec(4) +
+      //                       nAvgBytesPerSec(4) + nBlockAlign(2) + wBitsPerSample(2) = 16 bytes
       if (strf_size < 16) {
-        ESP_LOGE(TAG, "strf chunk too small for WAVEFORMATEX: %u bytes", strf_size);
+        ESP_LOGE(TAG, "AUDIO strf chunk too small: %u bytes (need at least 16 for WAVEFORMATEX)", strf_size);
         return false;
       }
 
+      // Read format tag (2 bytes)
       uint16_t format_tag;
       if (!this->read_uint16_(format_tag)) {
+        ESP_LOGE(TAG, "Failed to read audio format tag");
         return false;
       }
       info->codec = format_tag;
 
+      // Read channels (2 bytes)
       if (!this->read_uint16_(info->channels)) {
+        ESP_LOGE(TAG, "Failed to read audio channels");
         return false;
       }
 
+      // Read sample rate (4 bytes)
       if (!this->read_uint32_(info->sample_rate)) {
+        ESP_LOGE(TAG, "Failed to read audio sample rate");
         return false;
       }
 
-      // Skip bytes per second and block align (6 bytes)
-      this->skip_bytes_(6);
+      // Skip bytes per second (4 bytes) and block align (2 bytes)
+      if (!this->skip_bytes_(6)) {
+        ESP_LOGE(TAG, "Failed to skip avg bytes/sec and block align");
+        return false;
+      }
 
+      // Read bits per sample (2 bytes)
       if (!this->read_uint16_(info->bits_per_sample)) {
+        ESP_LOGE(TAG, "Failed to read audio bits per sample");
         return false;
       }
 
-      // Skip rest of WAVEFORMATEX (if any)
+      // Skip rest of WAVEFORMATEX if there's extra data (cbSize + extra format data)
       if (strf_size > 16) {
-        this->skip_bytes_(strf_size - 16);
+        if (!this->skip_bytes_(strf_size - 16)) {
+          ESP_LOGE(TAG, "Failed to skip extra WAVEFORMATEX data");
+          return false;
+        }
       }
     }
   } else {
