@@ -9,6 +9,7 @@
 #include "esphome/components/transcoder/transcoder.h"
 #include "lvgl.h"
 #include "buffered_file_reader.h"
+#include "avi_parser.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -40,6 +41,13 @@ enum class PlaybackError : uint8_t {
   DECODE_ERROR = 4,
   FILE_READ_ERROR = 5,
   INVALID_VIDEO_FORMAT = 6,
+};
+
+/// Video file formats
+enum class VideoFormat : uint8_t {
+  UNKNOWN = 0,
+  RAW_MJPEG = 1,  // Raw concatenated JPEG frames
+  AVI_MJPEG = 2,  // AVI container with MJPEG video
 };
 
 // Forward declarations for automation
@@ -168,6 +176,9 @@ class SimpleVideoPlayer : public Component {
   // File I/O Abstraction (supports local and network storage)
   //========================================================================
 
+  /// Detect video file format (AVI vs raw MJPEG)
+  VideoFormat detect_format_();
+
   /// Open file (local FatFS or network storage)
   bool open_file_(const std::string &path);
 
@@ -221,7 +232,11 @@ class SimpleVideoPlayer : public Component {
   bool is_network_file_{false};
   uint64_t file_size_{0};
 
-  // Cache buffer state (for frame parsing)
+  // Video format and container parser
+  VideoFormat video_format_{VideoFormat::UNKNOWN};
+  std::unique_ptr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
+
+  // Cache buffer state (for frame parsing - only used for raw MJPEG)
   size_t cache_buffer_valid_{0};   // Valid bytes in cache
   size_t cache_buffer_offset_{0};  // Read offset within cache
 

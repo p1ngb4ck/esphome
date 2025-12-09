@@ -442,62 +442,84 @@ bool SimpleVideoPlayer::wait_for_task_stop_(uint32_t timeout_ms) {
 //========================================================================
 
 int SimpleVideoPlayer::read_next_frame_() {
-  size_t frame_size = 0;
-  uint8_t *frame_ptr = this->input_buffer_.get();
+  if (this->video_format_ == VideoFormat::AVI_MJPEG) {
+    // AVI format - use parser to get next video frame
+    AVIFrame frame;
+    int bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
 
-  // Search for JPEG EOI marker to find frame boundary
-  while (true) {
-    // Read more data into cache if needed
-    if (this->cache_buffer_offset_ >= this->cache_buffer_valid_) {
-      // Cache is exhausted, read next chunk
-      int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
-
-      if (bytes_read <= 0) {
-        // EOF or error
-        return bytes_read;
-      }
-
-      this->cache_buffer_valid_ = bytes_read;
-      this->cache_buffer_offset_ = 0;
+    if (bytes_read <= 0) {
+      return bytes_read;  // EOF or error
     }
 
-    // Search for EOI marker in cache
-    size_t search_len = this->cache_buffer_valid_ - this->cache_buffer_offset_;
-    uint8_t *search_start = this->cache_buffer_.get() + this->cache_buffer_offset_;
-    uint8_t *eoi_ptr = static_cast<uint8_t *>(memmem(search_start, search_len, &JPEG_EOI, 2));
+    // Skip non-video frames (audio)
+    while (frame.stream_type != AVIStreamType::VIDEO) {
+      bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
+      if (bytes_read <= 0) {
+        return bytes_read;
+      }
+    }
 
-    if (eoi_ptr != nullptr) {
-      // Found EOI marker
-      size_t chunk_size = (eoi_ptr - search_start) + 2;  // Include EOI marker
+    return bytes_read;
+  } else {
+    // Raw MJPEG - search for JPEG EOI marker to find frame boundary
+    size_t frame_size = 0;
+    uint8_t *frame_ptr = this->input_buffer_.get();
 
-      // Check if frame fits in input buffer
-      if (frame_size + chunk_size > this->input_buffer_size_) {
-        ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + chunk_size, this->input_buffer_size_);
-        return -1;
+    while (true) {
+      // Read more data into cache if needed
+      if (this->cache_buffer_offset_ >= this->cache_buffer_valid_) {
+        // Cache is exhausted, read next chunk
+        int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
+
+        if (bytes_read <= 0) {
+          // EOF or error
+          return bytes_read;
+        }
+
+        this->cache_buffer_valid_ = bytes_read;
+        this->cache_buffer_offset_ = 0;
       }
 
-      // Copy chunk to input buffer
-      std::memcpy(frame_ptr, search_start, chunk_size);
-      frame_size += chunk_size;
-      this->cache_buffer_offset_ += chunk_size;
+      // Search for EOI marker in cache
+      size_t search_len = this->cache_buffer_valid_ - this->cache_buffer_offset_;
+      uint8_t *search_start = this->cache_buffer_.get() + this->cache_buffer_offset_;
+      uint8_t *eoi_ptr = static_cast<uint8_t *>(memmem(search_start, search_len, &JPEG_EOI, 2));
 
-      // Frame complete
-      return frame_size;
-    } else {
-      // EOI not found in this cache chunk, copy entire remaining cache to frame buffer
+      if (eoi_ptr != nullptr) {
+        // Found EOI marker
+        size_t chunk_size = (eoi_ptr - search_start) + 2;  // Include EOI marker
 
-      // Check if frame fits in input buffer
-      if (frame_size + search_len > this->input_buffer_size_) {
-        ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + search_len, this->input_buffer_size_);
-        return -1;
+        // Check if frame fits in input buffer
+        if (frame_size + chunk_size > this->input_buffer_size_) {
+          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + chunk_size,
+                   this->input_buffer_size_);
+          return -1;
+        }
+
+        // Copy chunk to input buffer
+        std::memcpy(frame_ptr, search_start, chunk_size);
+        frame_size += chunk_size;
+        this->cache_buffer_offset_ += chunk_size;
+
+        // Frame complete
+        return frame_size;
+      } else {
+        // EOI not found in this cache chunk, copy entire remaining cache to frame buffer
+
+        // Check if frame fits in input buffer
+        if (frame_size + search_len > this->input_buffer_size_) {
+          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + search_len,
+                   this->input_buffer_size_);
+          return -1;
+        }
+
+        std::memcpy(frame_ptr, search_start, search_len);
+        frame_ptr += search_len;
+        frame_size += search_len;
+        this->cache_buffer_offset_ = this->cache_buffer_valid_;
+
+        // Continue to next cache chunk
       }
-
-      std::memcpy(frame_ptr, search_start, search_len);
-      frame_ptr += search_len;
-      frame_size += search_len;
-      this->cache_buffer_offset_ = this->cache_buffer_valid_;
-
-      // Continue to next cache chunk
     }
   }
 }
@@ -552,37 +574,56 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 
 bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height) {
 #ifdef USE_HARDWARE_JPEG_DECODER
-  // Read first chunk to get JPEG header
-  int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
-  if (bytes_read <= 0) {
-    return false;
+  if (this->video_format_ == VideoFormat::AVI_MJPEG) {
+    // Get dimensions from AVI header
+    const AVIStreamInfo *video_info = this->avi_parser_->get_video_info();
+    if (video_info == nullptr) {
+      ESP_LOGE(TAG, "No video stream found in AVI file");
+      return false;
+    }
+
+    width = video_info->width;
+    height = video_info->height;
+
+    // Store dimensions
+    this->video_width_ = width;
+    this->video_height_ = height;
+
+    ESP_LOGI(TAG, "AVI video dimensions: %ux%u, FPS: %u/%u", width, height, video_info->fps_num, video_info->fps_den);
+    return true;
+  } else {
+    // Raw MJPEG - read first chunk to get JPEG header
+    int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
+    if (bytes_read <= 0) {
+      return false;
+    }
+
+    this->cache_buffer_valid_ = bytes_read;
+    this->cache_buffer_offset_ = 0;
+
+    // Parse JPEG header
+    jpeg_decode_picture_info_t header;
+    esp_err_t err = jpeg_decoder_get_info(this->cache_buffer_.get(), bytes_read, &header);
+
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to parse JPEG header");
+      return false;
+    }
+
+    width = header.width;
+    height = header.height;
+
+    // Store dimensions
+    this->video_width_ = width;
+    this->video_height_ = height;
+
+    // Reset file position for playback
+    this->seek_to_(0);
+    this->cache_buffer_valid_ = 0;
+    this->cache_buffer_offset_ = 0;
+
+    return true;
   }
-
-  this->cache_buffer_valid_ = bytes_read;
-  this->cache_buffer_offset_ = 0;
-
-  // Parse JPEG header
-  jpeg_decode_picture_info_t header;
-  esp_err_t err = jpeg_decoder_get_info(this->cache_buffer_.get(), bytes_read, &header);
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to parse JPEG header");
-    return false;
-  }
-
-  width = header.width;
-  height = header.height;
-
-  // Store dimensions
-  this->video_width_ = width;
-  this->video_height_ = height;
-
-  // Reset file position for playback
-  this->seek_to_(0);
-  this->cache_buffer_valid_ = 0;
-  this->cache_buffer_offset_ = 0;
-
-  return true;
 #else
   ESP_LOGE(TAG, "Hardware JPEG decoder not available");
   return false;
@@ -592,6 +633,33 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
 //========================================================================
 // File I/O Abstraction
 //========================================================================
+
+VideoFormat SimpleVideoPlayer::detect_format_() {
+  // Read first 12 bytes to detect file format
+  uint8_t header[12];
+  int bytes_read = this->read_data_(header, sizeof(header));
+
+  if (bytes_read < 12) {
+    ESP_LOGE(TAG, "Failed to read file header for format detection");
+    return VideoFormat::UNKNOWN;
+  }
+
+  // Check for AVI RIFF signature: "RIFF....AVI "
+  if (header[0] == 'R' && header[1] == 'I' && header[2] == 'F' && header[3] == 'F' && header[8] == 'A' &&
+      header[9] == 'V' && header[10] == 'I' && header[11] == ' ') {
+    ESP_LOGI(TAG, "Detected AVI container format");
+    return VideoFormat::AVI_MJPEG;
+  }
+
+  // Check for JPEG SOI marker: 0xFF 0xD8
+  if (header[0] == 0xFF && header[1] == 0xD8) {
+    ESP_LOGI(TAG, "Detected raw MJPEG format");
+    return VideoFormat::RAW_MJPEG;
+  }
+
+  ESP_LOGW(TAG, "Unknown video format (header: %02X %02X %02X %02X)", header[0], header[1], header[2], header[3]);
+  return VideoFormat::UNKNOWN;
+}
 
 bool SimpleVideoPlayer::open_file_(const std::string &path) {
 #ifdef USE_STORAGE
@@ -628,10 +696,54 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     ESP_LOGI(TAG, "File size: %llu bytes", this->file_size_);
   }
 
+  // Detect video format
+  this->video_format_ = this->detect_format_();
+  if (this->video_format_ == VideoFormat::UNKNOWN) {
+    ESP_LOGE(TAG, "Unknown video format");
+    this->close_file_();
+    return false;
+  }
+
+  // Initialize AVI parser if needed
+  if (this->video_format_ == VideoFormat::AVI_MJPEG) {
+    this->avi_parser_ = std::make_unique<AVIParser>();
+
+    // Seek back to start for parser
+    if (!this->seek_to_(0)) {
+      ESP_LOGE(TAG, "Failed to seek to start for AVI parsing");
+      this->close_file_();
+      return false;
+    }
+
+    // Open AVI file
+    if (!this->avi_parser_->open(this->file_reader_.get())) {
+      ESP_LOGE(TAG, "Failed to parse AVI file");
+      this->avi_parser_.reset();
+      this->close_file_();
+      return false;
+    }
+
+    ESP_LOGI(TAG, "AVI parser initialized successfully");
+  } else {
+    // Raw MJPEG - seek back to start for frame reading
+    if (!this->seek_to_(0)) {
+      ESP_LOGE(TAG, "Failed to seek to start");
+      this->close_file_();
+      return false;
+    }
+  }
+
   return true;
 }
 
 void SimpleVideoPlayer::close_file_() {
+  // Close AVI parser if open
+  if (this->avi_parser_) {
+    this->avi_parser_->close();
+    this->avi_parser_.reset();
+  }
+
+  // Close file reader
   if (this->file_reader_) {
     this->file_reader_->close();
     this->file_reader_.reset();
@@ -639,6 +751,7 @@ void SimpleVideoPlayer::close_file_() {
 
   this->is_network_file_ = false;
   this->file_size_ = 0;
+  this->video_format_ = VideoFormat::UNKNOWN;
 }
 
 int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
