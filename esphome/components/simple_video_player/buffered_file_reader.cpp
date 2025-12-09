@@ -61,7 +61,6 @@ bool BufferedFileReader::open(const char *path) {
   this->align_position_ = 0;
   this->eof_ = false;
 
-  ESP_LOGD(TAG, "Opened file: %s", path);
   return true;
 }
 
@@ -69,7 +68,6 @@ void BufferedFileReader::close() {
   if (this->file_handle_ != nullptr) {
     std::fclose(this->file_handle_);
     this->file_handle_ = nullptr;
-    ESP_LOGD(TAG, "File closed");
   }
 
   this->flush_cache();

@@ -181,7 +181,6 @@ bool AVIParser::parse_headers_() {
       } else if (list_type == FOURCC_movi) {
         // Skip if hdrl not found yet
         if (!found_hdrl) {
-          ESP_LOGD(TAG, "movi chunk found before hdrl, skipping");
           this->skip_bytes_(chunk_size - 4);
           continue;
         }
@@ -189,7 +188,6 @@ bool AVIParser::parse_headers_() {
         found_movi = true;
         this->movi_offset_ = this->reader_->tell();
         this->movi_size_ = chunk_size - 4;
-        ESP_LOGD(TAG, "Found movi chunk at offset %llu, size %u", this->movi_offset_, this->movi_size_);
 
         // We're now positioned at the start of movi data - ready for read_next_frame()
         // Break immediately - if we continue the loop, it will read the first frame chunk as a fourcc!
@@ -374,11 +372,8 @@ bool AVIParser::parse_stream_header_() {
 
 int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size) {
   if (!this->is_open()) {
-    ESP_LOGW(TAG, "read_next_frame called but parser not open");
     return -1;
   }
-
-  ESP_LOGD(TAG, "read_next_frame: current_offset=%llu, movi_size=%llu", this->current_offset_, this->movi_size_);
 
   // Search for next frame chunk
   while (this->current_offset_ < this->movi_size_) {
