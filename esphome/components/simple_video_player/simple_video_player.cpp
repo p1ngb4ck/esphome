@@ -340,36 +340,38 @@ void SimpleVideoPlayer::playback_loop_() {
   // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task
   // This prevents crashes from concurrent access to LVGL (not thread-safe)
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Get canvas dimensions for centering
+    // Get canvas dimensions
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
     lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
 
-    // Clear canvas to black once before playback
-    lv_obj_t *parent = lv_obj_get_parent(this->canvas_);
-    if (parent != nullptr) {
-      lv_draw_rect_dsc_t rect_dsc;
-      lv_draw_rect_dsc_init(&rect_dsc);
-      rect_dsc.bg_color = lv_color_black();
-      rect_dsc.bg_opa = LV_OPA_COVER;
-      lv_area_t area = {0, 0, canvas_width - 1, canvas_height - 1};
-      lv_draw_ctx_t *draw_ctx = lv_disp_get_default()->driver->draw_ctx;
-      if (draw_ctx != nullptr) {
-        lv_draw_rect(draw_ctx, &rect_dsc, &area);
+    // Only center and fill black if canvas is larger than video
+    if (canvas_width > (lv_coord_t) width || canvas_height > (lv_coord_t) height) {
+      // Clear canvas to black once before playback
+      lv_obj_t *parent = lv_obj_get_parent(this->canvas_);
+      if (parent != nullptr) {
+        lv_draw_rect_dsc_t rect_dsc;
+        lv_draw_rect_dsc_init(&rect_dsc);
+        rect_dsc.bg_color = lv_color_black();
+        rect_dsc.bg_opa = LV_OPA_COVER;
+        lv_area_t area = {0, 0, canvas_width - 1, canvas_height - 1};
+        lv_draw_ctx_t *draw_ctx = lv_disp_get_default()->driver->draw_ctx;
+        if (draw_ctx != nullptr) {
+          lv_draw_rect(draw_ctx, &rect_dsc, &area);
+        }
       }
+
+      // Center the video
+      lv_coord_t x_offset = (canvas_width - width) / 2;
+      lv_coord_t y_offset = (canvas_height - height) / 2;
+      lv_obj_set_pos(this->canvas_, x_offset, y_offset);
+    } else {
+      // Canvas matches video size exactly - no centering needed
+      lv_obj_set_pos(this->canvas_, 0, 0);
     }
 
     // Set canvas buffer to match video dimensions
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height,
                          LV_IMG_CF_TRUE_COLOR);
-
-    // If canvas is larger than video, center it
-    if (canvas_width > (lv_coord_t) width || canvas_height > (lv_coord_t) height) {
-      lv_coord_t x_offset = (canvas_width - width) / 2;
-      lv_coord_t y_offset = (canvas_height - height) / 2;
-      lv_obj_set_pos(this->canvas_, x_offset, y_offset);
-    } else {
-      lv_obj_set_pos(this->canvas_, 0, 0);
-    }
 
     lv_obj_invalidate(this->canvas_);
     xSemaphoreGive(this->lvgl_mutex_);
