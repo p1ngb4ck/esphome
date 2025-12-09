@@ -395,6 +395,17 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
 
     this->current_offset_ += 8;
 
+    // Handle LIST 'rec ' chunks (some AVI files wrap frames in these)
+    if (chunk_id == FOURCC_LIST) {
+      uint32_t list_type;
+      if (!this->read_fourcc_(list_type)) {
+        return -1;
+      }
+      this->current_offset_ += 4;
+      // Just skip into the LIST - the next iteration will read the actual frame chunk
+      continue;
+    }
+
     // Check if this is a video or audio chunk
     bool is_video = (chunk_id == FOURCC_00dc || chunk_id == FOURCC_00db);
     bool is_audio = (chunk_id == FOURCC_01wb);
