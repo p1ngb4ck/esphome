@@ -491,16 +491,14 @@ int SimpleVideoPlayer::read_next_frame_() {
       return bytes_read;  // EOF or error
     }
 
-    // Process audio frames, return video frames
+    // Skip audio frames if no speaker, otherwise process them
     while (frame.stream_type != AVIStreamType::VIDEO) {
 #ifdef USE_AUDIO
-      // Process audio frame
-      if (frame.stream_type == AVIStreamType::AUDIO) {
+      if (frame.stream_type == AVIStreamType::AUDIO && this->audio_enabled_) {
         this->process_audio_frame_(frame, this->input_buffer_.get(), bytes_read);
       }
 #endif
-
-      // Read next frame
+      // Skip this frame (audio) and read next frame
       bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
       if (bytes_read <= 0) {
         return bytes_read;
@@ -946,7 +944,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   // Create ring buffer for audio input (32KB)
-  this->audio_input_ring_buffer_ = std::make_shared<RingBuffer>(32 * 1024);
+  this->audio_input_ring_buffer_ = RingBuffer::create(32 * 1024);
 
   // Create audio decoder (16KB input, 8KB output buffers)
   this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(16 * 1024, 8 * 1024);
