@@ -522,7 +522,7 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
   // Configure decoder for RGB565 output
   jpeg_decode_cfg_t decode_cfg = {
       .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
-      .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+      .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,  // RGB order for correct colors (not BGR)
   };
 
   // Decode frame
