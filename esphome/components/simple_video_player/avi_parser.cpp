@@ -170,7 +170,7 @@ bool AVIParser::parse_headers_() {
       } else if (list_type == FOURCC_movi) {
         // continue if hdrl not found yet
         if (!found_hdrl) {
-          ESP_LOGV(TAG, "movi chunk found before hdrl");
+          ESP_LOGD(TAG, "movi chunk found before hdrl");
           continue;
         }
         // Movie data chunk
