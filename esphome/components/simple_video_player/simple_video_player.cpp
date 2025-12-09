@@ -975,8 +975,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   // Create ring buffer for audio input (32KB)
-  this->audio_input_ring_buffer_ = RingBuffer::create(88200 * 2 * 2,  // 1 second buffer for 44.1kHz stereo 16-bit
-                                                      RingBufferType::BYTE_BUFFER);
+  this->audio_input_ring_buffer_ = RingBuffer::create(48000 * 2 * 2);  // 1 second buffer for 48kHz stereo 16-bit
+  if (this->audio_input_ring_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create audio input ring buffer");
+    return false;
+  }
 
   // Create audio decoder (16KB input, 8KB output buffers)
   this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(16 * 1024, 8 * 1024);
