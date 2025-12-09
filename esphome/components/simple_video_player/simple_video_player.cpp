@@ -173,11 +173,34 @@ void SimpleVideoPlayer::setup() {
   ESP_LOGW(TAG, "Hardware JPEG decoder not available - buffers not allocated");
 #endif
 
+  // Initialize audio decoder if speaker is configured
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr) {
+    ESP_LOGI(TAG, "Audio playback enabled with speaker");
+
+    // Allocate audio decode buffer (PSRAM)
+    this->audio_decode_buffer_.reset(new uint8_t[this->audio_decode_buffer_size_]);
+    if (!this->audio_decode_buffer_) {
+      ESP_LOGW(TAG, "Failed to allocate audio decode buffer - audio disabled");
+      this->speaker_ = nullptr;
+    } else {
+      ESP_LOGI(TAG, "Audio decode buffer allocated: %zu bytes", this->audio_decode_buffer_size_);
+    }
+  } else {
+    ESP_LOGI(TAG, "Audio playback disabled (no speaker configured)");
+  }
+#endif
+
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %u bytes (internal RAM)", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Input buffer: %u bytes (PSRAM)", this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Output buffer: %zu bytes (PSRAM)", this->output_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Audio: Enabled");
+  }
+#endif
 }
 
 void SimpleVideoPlayer::loop() {
@@ -294,6 +317,13 @@ void SimpleVideoPlayer::playback_loop_() {
 
   ESP_LOGI(TAG, "Video dimensions: %ux%u", width, height);
 
+  // Initialize audio decoder for AVI files with audio
+#ifdef USE_AUDIO
+  if (this->video_format_ == VideoFormat::AVI_MJPEG) {
+    this->init_audio_decoder_();  // Non-fatal if audio init fails
+  }
+#endif
+
   // Allocate buffers based on video size
   if (!this->allocate_buffers_(width, height)) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
@@ -398,6 +428,16 @@ void SimpleVideoPlayer::playback_loop_() {
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
   // Buffers are only freed in destructor when component is destroyed
 
+#ifdef USE_AUDIO
+  // Stop and cleanup audio decoder
+  if (this->audio_enabled_) {
+    this->audio_decoder_.reset();
+    this->audio_input_ring_buffer_.reset();
+    this->audio_enabled_ = false;
+    ESP_LOGI(TAG, "Audio decoder stopped");
+  }
+#endif
+
 #ifdef USE_HARDWARE_JPEG_DECODER
   // Release exclusive access to decoder after playback
   if (this->transcoder_ != nullptr) {
@@ -443,7 +483,7 @@ bool SimpleVideoPlayer::wait_for_task_stop_(uint32_t timeout_ms) {
 
 int SimpleVideoPlayer::read_next_frame_() {
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
-    // AVI format - use parser to get next video frame
+    // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
     int bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
 
@@ -451,8 +491,16 @@ int SimpleVideoPlayer::read_next_frame_() {
       return bytes_read;  // EOF or error
     }
 
-    // Skip non-video frames (audio)
+    // Process audio frames, return video frames
     while (frame.stream_type != AVIStreamType::VIDEO) {
+#ifdef USE_AUDIO
+      // Process audio frame
+      if (frame.stream_type == AVIStreamType::AUDIO) {
+        this->process_audio_frame_(frame, this->input_buffer_.get(), bytes_read);
+      }
+#endif
+
+      // Read next frame
       bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
       if (bytes_read <= 0) {
         return bytes_read;
@@ -863,6 +911,89 @@ void SimpleVideoPlayer::free_buffers_() {
 
   this->output_buffer_size_ = 0;
 }
+
+//========================================================================
+// Audio Processing
+//========================================================================
+
+#ifdef USE_AUDIO
+bool SimpleVideoPlayer::init_audio_decoder_() {
+  // Check if audio is enabled
+  if (this->speaker_ == nullptr) {
+    return false;
+  }
+
+  const AVIStreamInfo *audio_info = this->avi_parser_->get_audio_info();
+  if (audio_info == nullptr) {
+    ESP_LOGI(TAG, "No audio stream found in AVI file");
+    return false;
+  }
+
+  // Determine audio codec type
+  audio::AudioFileType codec_type = audio::AudioFileType::NONE;
+  if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::MP3)) {
+    codec_type = audio::AudioFileType::MP3;
+    ESP_LOGI(TAG, "Audio stream: MP3, %u Hz, %u channels", audio_info->sample_rate, audio_info->channels);
+  } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
+    codec_type = audio::AudioFileType::FLAC;
+    ESP_LOGI(TAG, "Audio stream: FLAC, %u Hz, %u channels", audio_info->sample_rate, audio_info->channels);
+  } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::PCM)) {
+    codec_type = audio::AudioFileType::WAV;
+    ESP_LOGI(TAG, "Audio stream: PCM, %u Hz, %u channels", audio_info->sample_rate, audio_info->channels);
+  } else {
+    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04X", audio_info->codec);
+    return false;
+  }
+
+  // Create ring buffer for audio input (32KB)
+  this->audio_input_ring_buffer_ = std::make_shared<RingBuffer>(32 * 1024);
+
+  // Create audio decoder (16KB input, 8KB output buffers)
+  this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(16 * 1024, 8 * 1024);
+
+  // Add source ring buffer
+  std::weak_ptr<RingBuffer> source_weak = this->audio_input_ring_buffer_;
+  if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to add audio decoder source");
+    return false;
+  }
+
+  // Add speaker as sink
+  if (this->audio_decoder_->add_sink(this->speaker_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to add audio decoder sink");
+    return false;
+  }
+
+  // Start audio decoder
+  if (this->audio_decoder_->start(codec_type) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start audio decoder");
+    return false;
+  }
+
+  this->audio_enabled_ = true;
+  ESP_LOGI(TAG, "Audio decoder initialized successfully");
+  return true;
+}
+
+void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size) {
+  if (!this->audio_enabled_ || this->audio_input_ring_buffer_ == nullptr) {
+    return;
+  }
+
+  // Write audio frame to ring buffer
+  size_t written = this->audio_input_ring_buffer_->write(data, size);
+  if (written < size) {
+    ESP_LOGV(TAG, "Audio ring buffer full, dropped %zu bytes", size - written);
+  }
+
+  // Decode audio frames
+  audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
+  if (decode_state == audio::AudioDecoderState::FAILED) {
+    ESP_LOGW(TAG, "Audio decoding failed");
+    this->audio_enabled_ = false;
+  }
+}
+#endif
 
 //========================================================================
 // Error Handling

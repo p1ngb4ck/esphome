@@ -7,6 +7,14 @@
 
 #include "esphome/components/lvgl/lvgl_esphome.h"
 #include "esphome/components/transcoder/transcoder.h"
+
+#ifdef USE_SPEAKER
+#include "esphome/components/speaker/speaker.h"
+#endif
+
+#ifdef USE_AUDIO
+#include "esphome/components/audio/audio_decoder.h"
+#endif
 #include "lvgl.h"
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
@@ -99,6 +107,10 @@ class SimpleVideoPlayer : public Component {
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
 
+#ifdef USE_SPEAKER
+  void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+#endif
+
   //========================================================================
   // Playback Control API
   //========================================================================
@@ -172,6 +184,14 @@ class SimpleVideoPlayer : public Component {
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
 
+#ifdef USE_AUDIO
+  /// Initialize audio decoder for AVI audio stream
+  bool init_audio_decoder_();
+
+  /// Process audio frames from AVI
+  void process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size);
+#endif
+
   //========================================================================
   // File I/O Abstraction (supports local and network storage)
   //========================================================================
@@ -221,6 +241,10 @@ class SimpleVideoPlayer : public Component {
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (JPEG frame buffer)
   float target_fps_{30.0f};                 // Target frame rate
 
+#ifdef USE_SPEAKER
+  speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
+#endif
+
   // Playback state
   PlayerState state_{PlayerState::STOPPED};
   PlaybackError last_error_{PlaybackError::NONE};
@@ -235,6 +259,15 @@ class SimpleVideoPlayer : public Component {
   // Video format and container parser
   VideoFormat video_format_{VideoFormat::UNKNOWN};
   std::unique_ptr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
+
+#ifdef USE_AUDIO
+  // Audio decoding (for AVI with audio streams)
+  std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
+  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio
+  std::unique_ptr<uint8_t[]> audio_decode_buffer_;       // Buffer for decoded audio samples
+  size_t audio_decode_buffer_size_{8 * 1024};            // 8KB decode buffer
+  bool audio_enabled_{false};                            // Audio stream available and enabled
+#endif
 
   // Cache buffer state (for frame parsing - only used for raw MJPEG)
   size_t cache_buffer_valid_{0};   // Valid bytes in cache

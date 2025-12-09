@@ -4,6 +4,7 @@ import logging
 
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components import speaker
 from esphome.components.transcoder import require_jpeg_decoder
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
@@ -21,7 +22,7 @@ except ImportError:
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = []
-AUTO_LOAD = ["transcoder", "image"]
+AUTO_LOAD = ["transcoder", "image", "audio"]
 
 # Namespaces
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
@@ -51,6 +52,7 @@ StopAction = simple_video_player_ns.class_("StopAction", automation.Action)
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
+CONF_SPEAKER_ID = "speaker_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
 CONF_TARGET_FPS = "target_fps"
@@ -79,6 +81,7 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(SimpleVideoPlayer),
             cv.Required(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
+            cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
             ): cv.int_range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE),
@@ -132,6 +135,13 @@ async def to_code(config):
     # Set canvas
     canvas = await cg.get_variable(config[CONF_CANVAS_ID])
     cg.add(var.set_canvas(canvas))
+
+    # Set speaker (optional - for audio playback)
+    if CONF_SPEAKER_ID in config:
+        spkr = await cg.get_variable(config[CONF_SPEAKER_ID])
+        cg.add(var.set_speaker(spkr))
+        cg.add_define("USE_SPEAKER")
+        cg.add_define("USE_AUDIO")
 
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
