@@ -179,8 +179,8 @@ bool AVIParser::parse_headers_() {
         this->movi_size_ = chunk_size - 4;
         ESP_LOGD(TAG, "Found movi chunk at offset %llu, size %u", this->movi_offset_, this->movi_size_);
 
-        // Skip movi chunk for now (we'll come back to it)
-        this->skip_bytes_(this->movi_size_);
+        // Stay positioned at start of movi data - ready for read_next_frame()
+        // DON'T skip it - we need to read frames from here!
       } else {
         // Skip unknown LIST
         this->skip_bytes_(chunk_size - 4);
