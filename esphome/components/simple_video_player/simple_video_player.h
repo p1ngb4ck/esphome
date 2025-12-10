@@ -321,10 +321,12 @@ class SimpleVideoPlayer : public Component {
   uint32_t video_height_{0};
 
   // Buffers (allocated on demand)
-  std::unique_ptr<uint8_t[]> cache_buffer_;   // Internal RAM, aligned for DMA
-  std::unique_ptr<uint8_t[]> input_buffer_;   // PSRAM, JPEG encoded frame
-  std::unique_ptr<uint8_t[]> output_buffer_;  // PSRAM, decoded RGB565 frame
+  std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM, aligned for DMA
+  std::unique_ptr<uint8_t[]> input_buffer_;      // PSRAM, JPEG encoded frame
+  std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
+  uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
+  uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
 
   // FreeRTOS task
   TaskHandle_t task_handle_{nullptr};
@@ -333,6 +335,7 @@ class SimpleVideoPlayer : public Component {
 
   // VSYNC: defer canvas invalidation until render complete
   volatile bool canvas_needs_invalidate_{false};
+  volatile bool buffer_swap_pending_{false};  // True when we have a new buffer ready to swap
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

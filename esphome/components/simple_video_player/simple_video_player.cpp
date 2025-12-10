@@ -166,20 +166,31 @@ void SimpleVideoPlayer::setup() {
       .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
   };
 
+  // Allocate double-buffered output buffers for zero-tearing playback
   size_t actual_output_size = 0;
-  uint8_t *output_buf =
+  uint8_t *output_buf_0 =
       static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
 
-  if (output_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate output buffer (%zu bytes)", max_output_size);
+  if (output_buf_0 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 0 (%zu bytes)", max_output_size);
     this->mark_failed();
     return;
   }
 
-  this->output_buffer_.reset(output_buf);
+  uint8_t *output_buf_1 =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
+
+  if (output_buf_1 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 1 (%zu bytes)", max_output_size);
+    this->mark_failed();
+    return;
+  }
+
+  this->output_buffer_[0].reset(output_buf_0);
+  this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = actual_output_size;
-  ESP_LOGI(TAG, "Output buffer allocated: %zu bytes (PSRAM, max %ux%u)", actual_output_size, aligned_max_width,
-           aligned_max_height);
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", actual_output_size,
+           aligned_max_width, aligned_max_height);
 #else
   ESP_LOGW(TAG, "Hardware JPEG decoder not available - buffers not allocated");
 #endif
@@ -350,6 +361,11 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
+  // Initialize double-buffering indices
+  this->display_buffer_index_ = 0;  // LVGL displays buffer 0 initially
+  this->current_buffer_index_ = 1;  // We decode into buffer 1 first
+  this->buffer_swap_pending_ = false;
+
   // Set canvas buffer with aligned dimensions
   // The decoder outputs aligned dimensions, so we must tell LVGL about the actual buffer layout
   uint32_t aligned_width = ALIGN_UP(width, 16);
@@ -358,9 +374,9 @@ void SimpleVideoPlayer::playback_loop_() {
   // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task
   // This prevents crashes from concurrent access to LVGL (not thread-safe)
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Set canvas buffer to match video dimensions
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), aligned_width, aligned_height,
-                         LV_IMG_CF_TRUE_COLOR);
+    // Set canvas buffer to display buffer initially (buffer 0)
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                         aligned_height, LV_IMG_CF_TRUE_COLOR);
 
     xSemaphoreGive(this->lvgl_mutex_);
   } else {
@@ -483,10 +499,12 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Clear canvas on stop - use VSYNC mechanism for non-blocking invalidation
-  if (this->output_buffer_) {
-    std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
+  // Clear both buffers on stop - use VSYNC mechanism for non-blocking invalidation
+  if (this->output_buffer_[0] && this->output_buffer_[1]) {
+    std::memset(this->output_buffer_[0].get(), 0, this->output_buffer_size_);
+    std::memset(this->output_buffer_[1].get(), 0, this->output_buffer_size_);
     // Use VSYNC flag instead of direct invalidation - non-blocking
+    this->buffer_swap_pending_ = true;
     this->canvas_needs_invalidate_ = true;
   }
 
@@ -630,18 +648,20 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
       .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
   };
 
-  // Decode frame
+  // Double buffering: Decode into the back buffer (not currently displayed)
+  // LVGL displays display_buffer_index_, we decode into current_buffer_index_
   uint32_t out_size = this->output_buffer_size_;
   esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, this->input_buffer_.get(), aligned_size,
-                                       this->output_buffer_.get(), this->output_buffer_size_, &out_size);
+                                       this->output_buffer_[this->current_buffer_index_].get(),
+                                       this->output_buffer_size_, &out_size);
 
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "JPEG decode failed: %d", err);
     return false;
   }
 
-  // VSYNC: Mark canvas for invalidation in on_lvgl_render_complete() callback
-  // This avoids invalidating during LVGL's active render cycle
+  // Mark that we have a new frame ready to swap during VSYNC
+  this->buffer_swap_pending_ = true;
   this->canvas_needs_invalidate_ = true;
 
   return true;
@@ -652,13 +672,29 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 }
 
 void SimpleVideoPlayer::on_lvgl_render_complete() {
-  // VSYNC: Invalidate canvas after LVGL render cycle completes
-  // This is called by LVGL's draw_end callback to avoid invalidating during active render
-  if (this->canvas_needs_invalidate_) {
-    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-      lv_obj_invalidate(this->canvas_);
+  // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
+  // This is called by LVGL's draw_end callback to avoid tearing
+  if (this->buffer_swap_pending_) {
+    // Non-blocking mutex - if LVGL is busy, skip this frame's swap
+    if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
+      // Swap buffers: make the newly decoded buffer visible
+      this->display_buffer_index_ = this->current_buffer_index_;
+      this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
+
+      // Update canvas to point to the new display buffer
+      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
+      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
+      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                           aligned_height, LV_IMG_CF_TRUE_COLOR);
+
+      // Invalidate canvas to trigger redraw with new buffer
+      if (this->canvas_needs_invalidate_) {
+        lv_obj_invalidate(this->canvas_);
+        this->canvas_needs_invalidate_ = false;
+      }
+
       xSemaphoreGive(this->lvgl_mutex_);
-      this->canvas_needs_invalidate_ = false;
+      this->buffer_swap_pending_ = false;
     }
   }
 }
