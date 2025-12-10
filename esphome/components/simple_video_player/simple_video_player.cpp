@@ -487,6 +487,20 @@ void SimpleVideoPlayer::playback_loop_() {
       vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
 
+    // Swap buffers immediately after decode (simpler than VSYNC for now)
+    // The decode thread can take the mutex since it's not in a critical path
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      this->display_buffer_index_ = this->current_buffer_index_;
+      this->current_buffer_index_ = 1 - this->current_buffer_index_;
+      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
+      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
+      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                           aligned_height, LV_IMG_CF_TRUE_COLOR);
+      lv_obj_invalidate(this->canvas_);
+      xSemaphoreGive(this->lvgl_mutex_);
+      this->buffer_swap_pending_ = false;
+    }
+
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
   }
