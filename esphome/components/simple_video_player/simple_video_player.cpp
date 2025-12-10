@@ -1136,13 +1136,18 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
 void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size) {
   if (!this->audio_enabled_ || this->audio_input_ring_buffer_ == nullptr) {
+    ESP_LOGW(TAG, "process_audio_frame_: audio_enabled=%d, ring_buffer=%p - cannot process %zu bytes",
+             this->audio_enabled_, (void *) this->audio_input_ring_buffer_.get(), size);
     return;
   }
 
   // Write audio frame to ring buffer (decoder is called continuously in main loop)
   size_t written = this->audio_input_ring_buffer_->write(data, size);
   if (written < size) {
-    ESP_LOGV(TAG, "Audio ring buffer full, dropped %zu bytes", size - written);
+    ESP_LOGW(TAG, "Audio ring buffer full, dropped %zu bytes (wrote %zu/%zu)", size - written, written, size);
+  } else {
+    ESP_LOGD(TAG, "Audio frame written to input buffer: %zu bytes (total available: %zu)", written,
+             this->audio_input_ring_buffer_->available());
   }
 }
 
@@ -1214,19 +1219,42 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
+  uint32_t loop_count = 0;
+  uint32_t last_log_time = millis();
+
   while (!this->audio_task_stop_) {
     if (!this->audio_enabled_ || !this->audio_decoder_) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
+    loop_count++;
+
+    // Log buffer status every second for debugging
+    if ((millis() - last_log_time) >= 1000) {
+      size_t input_available = this->audio_input_ring_buffer_ ? this->audio_input_ring_buffer_->available() : 0;
+      size_t decoded_available = this->audio_decoded_ring_buffer_ ? this->audio_decoded_ring_buffer_->available() : 0;
+      ESP_LOGI(TAG, "Audio buffers: input=%zu bytes, decoded=%zu bytes, loops=%u/sec", input_available,
+               decoded_available, loop_count);
+      loop_count = 0;
+      last_log_time = millis();
+    }
+
     // Run audio decoder (decodes compressed audio to PCM)
     audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
 
     if (decode_state == audio::AudioDecoderState::FAILED) {
-      ESP_LOGW(TAG, "Audio decoding failed");
+      ESP_LOGE(TAG, "Audio decoding FAILED - decoder returned FAILED state");
       this->audio_enabled_ = false;
       break;
+    }
+
+    if (decode_state == audio::AudioDecoderState::IDLE) {
+      ESP_LOGV(TAG, "Audio decoder IDLE (waiting for data)");
+    } else if (decode_state == audio::AudioDecoderState::DECODING) {
+      ESP_LOGV(TAG, "Audio decoder DECODING");
+    } else if (decode_state == audio::AudioDecoderState::FINISHED) {
+      ESP_LOGD(TAG, "Audio decoder FINISHED");
     }
 
     // If channel conversion is needed, pull decoded data and convert it
