@@ -7,7 +7,7 @@ import esphome.codegen as cg
 from esphome.components import speaker
 from esphome.components.transcoder import require_jpeg_decoder
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TRIGGER_ID
+from esphome.const import CONF_CHANNEL, CONF_ID, CONF_TRIGGER_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +29,15 @@ simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
 
 # Classes
 SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Component)
+
+# Enums for speaker channel configuration
+SpeakerChannelMode = simple_video_player_ns.enum("SpeakerChannelMode")
+SPEAKER_CHANNEL_MODES = {
+    "mono": SpeakerChannelMode.SPEAKER_CHANNEL_MONO,
+    "left": SpeakerChannelMode.SPEAKER_CHANNEL_LEFT,
+    "right": SpeakerChannelMode.SPEAKER_CHANNEL_RIGHT,
+    "stereo": SpeakerChannelMode.SPEAKER_CHANNEL_STEREO,
+}
 
 # Automation triggers
 PlaybackStartedTrigger = simple_video_player_ns.class_(
@@ -142,6 +151,18 @@ async def to_code(config):
         cg.add(var.set_speaker(spkr))
         cg.add_define("USE_SPEAKER")
         cg.add_define("USE_AUDIO")
+
+        # Extract speaker's channel configuration to enable proper audio routing
+        # We need to look up the speaker's config to determine its channel mode
+        from esphome.core import CORE
+
+        speaker_config = CORE.config.get(CONF_SPEAKER_ID)
+        if speaker_config and CONF_CHANNEL in speaker_config:
+            channel_mode = speaker_config[CONF_CHANNEL]
+            if channel_mode in SPEAKER_CHANNEL_MODES:
+                cg.add(
+                    var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode])
+                )
 
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))

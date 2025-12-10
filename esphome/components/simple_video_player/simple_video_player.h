@@ -32,6 +32,14 @@
 
 namespace esphome::simple_video_player {
 
+/// Speaker channel modes for audio routing
+enum class SpeakerChannelMode : uint8_t {
+  SPEAKER_CHANNEL_MONO = 0,    // Downmix stereo to mono (average L+R)
+  SPEAKER_CHANNEL_LEFT = 1,    // Use only left channel
+  SPEAKER_CHANNEL_RIGHT = 2,   // Use only right channel
+  SPEAKER_CHANNEL_STEREO = 3,  // Pass through stereo unchanged
+};
+
 /// Player states
 enum class PlayerState : uint8_t {
   STOPPED = 0,
@@ -109,6 +117,7 @@ class SimpleVideoPlayer : public Component {
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+  void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 
   //========================================================================
@@ -190,6 +199,26 @@ class SimpleVideoPlayer : public Component {
 
   /// Process audio frames from AVI
   void process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size);
+
+  /// Audio processing task entry point (runs on Core 0)
+  static void audio_task_entry_(void *param);
+
+  /// Audio processing loop (decodes and converts channels)
+  void audio_processing_loop_();
+
+  /// Stop audio processing task
+  void stop_audio_task_();
+
+  /// Convert audio channels based on speaker configuration
+  /// @param input_data Input PCM audio data
+  /// @param output_data Output buffer for converted audio
+  /// @param frame_count Number of audio frames to convert
+  /// @param input_channels Number of channels in input (e.g., 2 for stereo)
+  /// @param output_channels Number of channels in output (e.g., 1 for mono)
+  /// @param bits_per_sample Bits per sample (must be 16)
+  /// @return true if conversion succeeded, false otherwise
+  bool convert_audio_channels_(const uint8_t *input_data, uint8_t *output_data, size_t frame_count,
+                               uint8_t input_channels, uint8_t output_channels, uint8_t bits_per_sample);
 #endif
 
   //========================================================================
@@ -243,6 +272,7 @@ class SimpleVideoPlayer : public Component {
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
+  SpeakerChannelMode speaker_channel_mode_{SpeakerChannelMode::SPEAKER_CHANNEL_MONO};  // Channel routing mode
 #endif
 
   // Playback state
@@ -263,10 +293,19 @@ class SimpleVideoPlayer : public Component {
 #ifdef USE_AUDIO
   // Audio decoding (for AVI with audio streams)
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
-  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio
-  std::unique_ptr<uint8_t[]> audio_decode_buffer_;       // Buffer for decoded audio samples
-  size_t audio_decode_buffer_size_{8 * 1024};            // 8KB decode buffer
-  bool audio_enabled_{false};                            // Audio stream available and enabled
+  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
+  std::shared_ptr<RingBuffer>
+      audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
+  std::unique_ptr<uint8_t[]> audio_temp_buffer_;  // Temporary buffer for audio processing (in PSRAM)
+  size_t audio_temp_buffer_size_{0};              // Dynamically calculated based on audio params
+  uint8_t source_audio_channels_{0};              // Number of channels in source audio
+  uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
+  uint32_t audio_sample_rate_{0};                 // Audio sample rate
+  uint8_t audio_bits_per_sample_{16};             // Audio bits per sample
+  bool needs_channel_conversion_{false};          // Whether channel conversion is needed
+  bool audio_enabled_{false};                     // Audio stream available and enabled
+  TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
+  volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif
 
   // Cache buffer state (for frame parsing - only used for raw MJPEG)
