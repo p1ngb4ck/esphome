@@ -173,19 +173,10 @@ void SimpleVideoPlayer::setup() {
   ESP_LOGW(TAG, "Hardware JPEG decoder not available - buffers not allocated");
 #endif
 
-  // Initialize audio decoder if speaker is configured
+  // Audio buffers are now allocated in init_audio_decoder_() when playback starts
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
     ESP_LOGI(TAG, "Audio playback enabled with speaker");
-
-    // Allocate audio decode buffer (PSRAM)
-    this->audio_decode_buffer_.reset(new uint8_t[this->audio_decode_buffer_size_]);
-    if (!this->audio_decode_buffer_) {
-      ESP_LOGW(TAG, "Failed to allocate audio decode buffer - audio disabled");
-      this->speaker_ = nullptr;
-    } else {
-      ESP_LOGI(TAG, "Audio decode buffer allocated: %zu bytes", this->audio_decode_buffer_size_);
-    }
   } else {
     ESP_LOGI(TAG, "Audio playback disabled (no speaker configured)");
   }
