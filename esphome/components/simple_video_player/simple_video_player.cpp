@@ -411,37 +411,53 @@ void SimpleVideoPlayer::playback_loop_() {
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
-  // Preload and decode first 2 frames to eliminate startup lag
-  // Frame 0: Display immediately
-  // Frame 1: Ready to decode while frame 0 displays
-  ESP_LOGI(TAG, "Preloading first frames for smooth startup...");
+  // Preload and decode first frames for smooth A/V sync startup
+  ESP_LOGI(TAG, "Preloading frames and audio for synchronized playback...");
 
+  // Decode first frame into buffer 1
   int first_frame_size = this->read_next_frame_();
   if (first_frame_size > 0) {
-    if (this->decode_frame_(first_frame_size)) {
-      // First frame decoded successfully - swap to display it immediately
-      if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        this->display_buffer_index_ = this->current_buffer_index_;
-        this->current_buffer_index_ = 1 - this->current_buffer_index_;
-        lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                             aligned_height, LV_IMG_CF_TRUE_COLOR);
-        lv_obj_invalidate(this->canvas_);
-        xSemaphoreGive(this->lvgl_mutex_);
-      }
-      this->frame_count_++;  // Count the first frame
-    }
+    this->decode_frame_(first_frame_size);
+    this->frame_count_++;
   }
 
-  // Preload second frame into input buffer (ready to decode)
-  // This eliminates I/O lag on the first loop iteration
+  // Decode second frame into buffer 0
   int second_frame_size = this->read_next_frame_();
-  if (second_frame_size <= 0) {
-    ESP_LOGW(TAG, "Failed to preload second frame");
+  if (second_frame_size > 0) {
+    this->decode_frame_(second_frame_size);
+    this->frame_count_++;
+  }
+
+#ifdef USE_AUDIO
+  // Prefill audio buffer before starting playback for sync
+  if (this->audio_enabled_) {
+    ESP_LOGI(TAG, "Prefilling audio buffer...");
+    // Give audio task time to fill buffer (100ms worth of audio)
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+#endif
+
+  // Display first frame NOW - synchronized with audio start
+  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    // Buffer 1 has first frame, buffer 0 has second frame
+    // Display buffer 1, prepare to decode into buffer 0 next
+    this->display_buffer_index_ = 1;
+    this->current_buffer_index_ = 0;
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[1].get(), aligned_width, aligned_height,
+                         LV_IMG_CF_TRUE_COLOR);
+    lv_obj_invalidate(this->canvas_);
+    xSemaphoreGive(this->lvgl_mutex_);
+  }
+
+  // Preload third frame into input buffer (ready for loop)
+  int third_frame_size = this->read_next_frame_();
+  if (third_frame_size <= 0) {
+    ESP_LOGW(TAG, "Failed to preload third frame");
   }
 
   // Main playback loop with async I/O optimization
-  // We already have second_frame_size preloaded from above
-  int current_frame_size = second_frame_size;
+  // We already have third_frame_size preloaded from above
+  int current_frame_size = third_frame_size;
 
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
