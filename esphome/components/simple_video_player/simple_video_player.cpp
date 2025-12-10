@@ -500,22 +500,20 @@ void SimpleVideoPlayer::playback_loop_() {
       vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
 
-    // Swap buffers immediately after decode (causes LVGL warnings but displays correctly)
-    // if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    //   this->display_buffer_index_ = this->current_buffer_index_;
-    //   this->current_buffer_index_ = 1 - this->current_buffer_index_;
-    //   uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-    //   uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-    //   lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-    //                        aligned_height, LV_IMG_CF_TRUE_COLOR);
-    //   lv_obj_invalidate(this->canvas_);
-    //   xSemaphoreGive(this->lvgl_mutex_);
-    //   this->buffer_swap_pending_ = false;
-    // }
+    // Atomic buffer swap (just index manipulation - no mutex needed)
+    uint8_t new_display_buffer = this->current_buffer_index_;
+    this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle for next decode
 
-    // Alternative: Use VSYNC callback to avoid LVGL warnings
-    this->buffer_swap_pending_ = true;
-    this->canvas_needs_invalidate_ = true;
+    // Update canvas buffer pointer (with mutex for LVGL API call)
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      this->display_buffer_index_ = new_display_buffer;
+      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
+      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
+      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[new_display_buffer].get(), aligned_width, aligned_height,
+                           LV_IMG_CF_TRUE_COLOR);
+      lv_obj_invalidate(this->canvas_);
+      xSemaphoreGive(this->lvgl_mutex_);
+    }
 
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
@@ -733,27 +731,23 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 
 void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
-  // This is called by LVGL's draw_end callback to avoid tearing
+  // This callback runs in LVGL's thread, so NO MUTEX needed for LVGL API calls
   if (this->buffer_swap_pending_) {
-    // Non-blocking mutex - don't block LVGL thread
-    if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-      // Swap buffers: make the newly decoded buffer visible
-      this->display_buffer_index_ = this->current_buffer_index_;
-      this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
+    // Swap buffers: make the newly decoded buffer visible
+    this->display_buffer_index_ = this->current_buffer_index_;
+    this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
 
-      // Update canvas to point to the new display buffer
-      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                           aligned_height, LV_IMG_CF_TRUE_COLOR);
+    // Update canvas to point to the new display buffer
+    uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
+    uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                         aligned_height, LV_IMG_CF_TRUE_COLOR);
 
-      // Invalidate canvas to trigger redraw with new buffer
-      lv_obj_invalidate(this->canvas_);
+    // Invalidate canvas to trigger redraw with new buffer
+    lv_obj_invalidate(this->canvas_);
 
-      xSemaphoreGive(this->lvgl_mutex_);
-      this->buffer_swap_pending_ = false;
-      this->canvas_needs_invalidate_ = false;
-    }
+    this->buffer_swap_pending_ = false;
+    this->canvas_needs_invalidate_ = false;
   }
 }
 
