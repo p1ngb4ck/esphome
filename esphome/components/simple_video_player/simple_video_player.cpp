@@ -1026,19 +1026,21 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   size_t bytes_per_second_decoded = this->audio_sample_rate_ * bytes_per_frame;
 
   // Target buffering durations (in milliseconds)
-  const uint32_t INPUT_BUFFER_DURATION_MS = 1000;   // 1 second for encoded audio (accounting for compression)
-  const uint32_t DECODED_BUFFER_DURATION_MS = 500;  // 500ms for decoded PCM audio
+  const uint32_t INPUT_BUFFER_DURATION_MS = 250;    // 250ms of COMPRESSED audio data
+  const uint32_t DECODED_BUFFER_DURATION_MS = 500;  // 500ms of decoded PCM audio
   const uint32_t TEMP_BUFFER_DURATION_MS = 100;     // 100ms for channel conversion temp buffer
 
   // Calculate buffer sizes
-  // Input buffer: For compressed audio (FLAC/MP3), allocate for uncompressed equivalent
-  // Most codecs have 2x-10x compression, so we use 1 second of PCM as safe estimate
+  // Input buffer: For COMPRESSED audio (FLAC/MP3)
+  // FLAC: ~50% compression (2x ratio), MP3: ~10% compression (10x ratio)
+  // Use conservative estimate: allocate 250ms of PCM equivalent for compressed data
+  // This gives us ~500ms-2500ms of actual compressed audio depending on codec
   size_t input_buffer_size = (bytes_per_second_decoded * INPUT_BUFFER_DURATION_MS) / 1000;
 
-  // Decoded buffer: Actual PCM data before channel conversion
+  // Decoded buffer: Actual PCM data before channel conversion (500ms of uncompressed audio)
   size_t decoded_buffer_size = (bytes_per_second_decoded * DECODED_BUFFER_DURATION_MS) / 1000;
 
-  // Temp buffer: For channel conversion processing
+  // Temp buffer: For channel conversion processing (100ms of uncompressed audio)
   this->audio_temp_buffer_size_ = (bytes_per_second_decoded * TEMP_BUFFER_DURATION_MS) / 1000;
 
   // Ensure minimum sizes for edge cases (low sample rates)
