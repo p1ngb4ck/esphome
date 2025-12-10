@@ -521,9 +521,9 @@ void LvglComponent::setup() {
   if (this->draw_start_callback_ != nullptr) {
     this->disp_drv_.render_start_cb = render_start_cb;
   }
-  if (this->draw_end_callback_ != nullptr || this->update_when_display_idle_) {
-    this->disp_drv_.monitor_cb = monitor_cb;
-  }
+  // Always register monitor_cb - components may add draw_end callbacks after setup
+  // The callback checks internally if there are any callbacks to invoke
+  this->disp_drv_.monitor_cb = monitor_cb;
 #if LV_USE_LOG
   lv_log_register_print_cb([](const char *buf) {
     auto next = strchr(buf, ')');
