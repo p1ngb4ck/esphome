@@ -989,9 +989,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     ESP_LOGI(TAG, "Audio codec: FLAC, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
              audio_info->bits_per_sample);
   } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::PCM)) {
-    codec_type = audio::AudioFileType::WAV;
-    ESP_LOGI(TAG, "Audio codec: PCM, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-             audio_info->bits_per_sample);
+    // PCM audio in AVI is raw samples without WAV header
+    // We'll handle it directly without AudioDecoder
+    ESP_LOGI(TAG, "Audio codec: PCM (raw), %u Hz, %u channels, %u bits - will process directly",
+             audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
+    codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
   } else {
     ESP_LOGW(TAG, "Unsupported audio codec: 0x%04X", audio_info->codec);
     return false;
@@ -1057,22 +1059,29 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%u ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
   ESP_LOGI(TAG, "  Temp buffer: %zu KB (%u ms)", this->audio_temp_buffer_size_ / 1024, TEMP_BUFFER_DURATION_MS);
 
-  // Create ring buffer for encoded audio input (automatically uses PSRAM via RAMAllocator)
-  this->audio_input_ring_buffer_ = RingBuffer::create(input_buffer_size);
-  if (this->audio_input_ring_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", input_buffer_size / 1024);
-    return false;
-  }
+  // For PCM audio, we don't need a decoder - just handle raw samples directly
+  bool use_decoder = (codec_type != audio::AudioFileType::NONE);
 
-  // If channel conversion is needed, create intermediate ring buffer for decoded audio
-  if (this->needs_channel_conversion_) {
-    this->audio_decoded_ring_buffer_ = RingBuffer::create(decoded_buffer_size);
-    if (this->audio_decoded_ring_buffer_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", decoded_buffer_size / 1024);
+  if (use_decoder) {
+    // Create ring buffer for encoded audio input (automatically uses PSRAM via RAMAllocator)
+    this->audio_input_ring_buffer_ = RingBuffer::create(input_buffer_size);
+    if (this->audio_input_ring_buffer_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", input_buffer_size / 1024);
       return false;
     }
 
-    // Allocate temp buffer for channel conversion in PSRAM (optimal for ESP32-P4 DMA)
+    // If channel conversion is needed, create intermediate ring buffer for decoded audio
+    if (this->needs_channel_conversion_) {
+      this->audio_decoded_ring_buffer_ = RingBuffer::create(decoded_buffer_size);
+      if (this->audio_decoded_ring_buffer_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", decoded_buffer_size / 1024);
+        return false;
+      }
+    }
+  }
+
+  // For all codecs (including PCM), allocate temp buffer if channel conversion is needed
+  if (this->needs_channel_conversion_) {
     ExternalRAMAllocator<uint8_t> allocator(ExternalRAMAllocator<uint8_t>::ALLOW_FAILURE);
     this->audio_temp_buffer_.reset(allocator.allocate(this->audio_temp_buffer_size_));
     if (!this->audio_temp_buffer_) {
@@ -1082,54 +1091,61 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     ESP_LOGD(TAG, "Channel conversion temp buffer allocated in PSRAM: %zu KB", this->audio_temp_buffer_size_ / 1024);
   }
 
-  // Calculate AudioDecoder internal buffer sizes based on codec and sample rate
-  // Input buffer: Should hold compressed frames (larger for higher bitrates)
-  // Output buffer: Should hold decoded PCM frames
-  size_t decoder_input_buffer_size = 64 * 1024;   // 64KB for compressed audio frames
-  size_t decoder_output_buffer_size = 32 * 1024;  // 32KB for decoded PCM output
+  // Only create decoder for compressed formats (MP3/FLAC)
+  if (use_decoder) {
+    // Calculate AudioDecoder internal buffer sizes based on codec and sample rate
+    // Input buffer: Should hold compressed frames (larger for higher bitrates)
+    // Output buffer: Should hold decoded PCM frames
+    size_t decoder_input_buffer_size = 64 * 1024;   // 64KB for compressed audio frames
+    size_t decoder_output_buffer_size = 32 * 1024;  // 32KB for decoded PCM output
 
-  // Adjust for high sample rates (>48kHz)
-  if (this->audio_sample_rate_ > 48000) {
-    decoder_input_buffer_size = 96 * 1024;   // 96KB for high-quality audio
-    decoder_output_buffer_size = 48 * 1024;  // 48KB output
-  }
+    // Adjust for high sample rates (>48kHz)
+    if (this->audio_sample_rate_ > 48000) {
+      decoder_input_buffer_size = 96 * 1024;   // 96KB for high-quality audio
+      decoder_output_buffer_size = 48 * 1024;  // 48KB output
+    }
 
-  ESP_LOGD(TAG, "AudioDecoder buffers: input=%zu KB, output=%zu KB", decoder_input_buffer_size / 1024,
-           decoder_output_buffer_size / 1024);
+    ESP_LOGD(TAG, "AudioDecoder buffers: input=%zu KB, output=%zu KB", decoder_input_buffer_size / 1024,
+             decoder_output_buffer_size / 1024);
 
-  // Create audio decoder with calculated buffer sizes
-  this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(decoder_input_buffer_size, decoder_output_buffer_size);
+    // Create audio decoder with calculated buffer sizes
+    this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(decoder_input_buffer_size, decoder_output_buffer_size);
 
-  // Add source ring buffer
-  std::weak_ptr<RingBuffer> source_weak = this->audio_input_ring_buffer_;
-  if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to add audio decoder source");
-    return false;
-  }
-
-  // Add sink based on whether channel conversion is needed
-  if (this->needs_channel_conversion_) {
-    // Decoder outputs to intermediate buffer (we'll convert in audio task)
-    std::weak_ptr<RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
-    if (this->audio_decoder_->add_sink(decoded_weak) != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to add audio decoder sink (intermediate buffer)");
+    // Add source ring buffer
+    std::weak_ptr<RingBuffer> source_weak = this->audio_input_ring_buffer_;
+    if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to add audio decoder source");
       return false;
     }
-  } else {
-    // No conversion needed, decoder writes directly to speaker
-    if (this->audio_decoder_->add_sink(this->speaker_) != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to add audio decoder sink (speaker)");
+
+    // Add sink based on whether channel conversion is needed
+    if (this->needs_channel_conversion_) {
+      // Decoder outputs to intermediate buffer (we'll convert in audio task)
+      std::weak_ptr<RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
+      if (this->audio_decoder_->add_sink(decoded_weak) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add audio decoder sink (intermediate buffer)");
+        return false;
+      }
+    } else {
+      // No conversion needed, decoder writes directly to speaker
+      if (this->audio_decoder_->add_sink(this->speaker_) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add audio decoder sink (speaker)");
+        return false;
+      }
+    }
+
+    // Start audio decoder
+    if (this->audio_decoder_->start(codec_type) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to start audio decoder");
       return false;
     }
-  }
 
-  // Start audio decoder
-  if (this->audio_decoder_->start(codec_type) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start audio decoder");
-    return false;
-  }
+    ESP_LOGI(TAG, "Audio decoder initialized successfully");
+  }  // End of if (use_decoder)
 
   // Start audio processing task on Core 0 (video playback runs on Core 1)
+  // For PCM: task handles channel conversion and direct speaker output
+  // For MP3/FLAC: task handles decoder + channel conversion + speaker output
   this->audio_task_stop_ = false;
   BaseType_t result = xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096,  // 4KB stack
                                               this, 5,                               // Priority 5 (high)
@@ -1142,24 +1158,40 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   this->audio_enabled_ = true;
-  ESP_LOGI(TAG, "Audio decoder and processing task initialized successfully");
+  ESP_LOGI(TAG, "Audio processing initialized successfully (%s mode)", use_decoder ? "decoder" : "direct PCM");
   return true;
 }
 
 void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size) {
-  if (!this->audio_enabled_ || this->audio_input_ring_buffer_ == nullptr) {
-    ESP_LOGW(TAG, "process_audio_frame_: audio_enabled=%d, ring_buffer=%p - cannot process %zu bytes",
-             this->audio_enabled_, (void *) this->audio_input_ring_buffer_.get(), size);
+  if (!this->audio_enabled_) {
     return;
   }
 
-  // Write audio frame to ring buffer (decoder is called continuously in main loop)
-  size_t written = this->audio_input_ring_buffer_->write(data, size);
-  if (written < size) {
-    ESP_LOGW(TAG, "Audio ring buffer full, dropped %zu bytes (wrote %zu/%zu)", size - written, written, size);
-  } else {
-    ESP_LOGD(TAG, "Audio frame written to input buffer: %zu bytes (total available: %zu)", written,
-             this->audio_input_ring_buffer_->available());
+  // For compressed audio (MP3/FLAC), write to input ring buffer for decoder
+  if (this->audio_input_ring_buffer_ != nullptr) {
+    size_t written = this->audio_input_ring_buffer_->write(data, size);
+    if (written < size) {
+      ESP_LOGW(TAG, "Audio ring buffer full, dropped %zu bytes (wrote %zu/%zu)", size - written, written, size);
+    } else {
+      ESP_LOGD(TAG, "Audio frame written to input buffer: %zu bytes (total available: %zu)", written,
+               this->audio_input_ring_buffer_->available());
+    }
+  }
+  // For PCM audio, data is already decoded - process directly in audio task
+  // The audio task will pull from decoded_ring_buffer or handle inline
+  else if (this->audio_decoded_ring_buffer_ != nullptr) {
+    // PCM with channel conversion: write to decoded ring buffer
+    size_t written = this->audio_decoded_ring_buffer_->write(data, size);
+    if (written < size) {
+      ESP_LOGW(TAG, "PCM buffer full, dropped %zu bytes", size - written);
+    } else {
+      ESP_LOGV(TAG, "PCM frame written: %zu bytes", written);
+    }
+  }
+  // PCM without channel conversion: direct to speaker (inline, not via buffer)
+  else if (this->speaker_) {
+    this->speaker_->play(data, size);
+    ESP_LOGV(TAG, "PCM direct to speaker: %zu bytes", size);
   }
 }
 
@@ -1235,7 +1267,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   uint32_t last_log_time = millis();
 
   while (!this->audio_task_stop_) {
-    if (!this->audio_enabled_ || !this->audio_decoder_) {
+    if (!this->audio_enabled_) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -1252,99 +1284,101 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       last_log_time = millis();
     }
 
-    // Run audio decoder (decodes compressed audio to PCM)
-    audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
+    // Run audio decoder if we have one (MP3/FLAC mode)
+    // For PCM mode, audio_decoder_ is null and we skip decoding
+    if (this->audio_decoder_) {
+      audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
 
-    if (decode_state == audio::AudioDecoderState::FAILED) {
-      ESP_LOGE(TAG, "Audio decoding FAILED - decoder returned FAILED state");
-      this->audio_enabled_ = false;
-      break;
-    }
+      if (decode_state == audio::AudioDecoderState::FAILED) {
+        ESP_LOGE(TAG, "Audio decoding FAILED - decoder returned FAILED state");
+        this->audio_enabled_ = false;
+        break;
+      }
 
-    if (decode_state == audio::AudioDecoderState::DECODING) {
-      ESP_LOGV(TAG, "Audio decoder DECODING");
-    } else if (decode_state == audio::AudioDecoderState::FINISHED) {
-      ESP_LOGD(TAG, "Audio decoder FINISHED");
-    }
+      if (decode_state == audio::AudioDecoderState::DECODING) {
+        ESP_LOGV(TAG, "Audio decoder DECODING");
+      } else if (decode_state == audio::AudioDecoderState::FINISHED) {
+        ESP_LOGD(TAG, "Audio decoder FINISHED");
+      }
 
-    // If channel conversion is needed, pull decoded data and convert it
-    if (this->needs_channel_conversion_ && this->audio_decoded_ring_buffer_ && this->speaker_) {
-      size_t available = this->audio_decoded_ring_buffer_->available();
+      // If channel conversion is needed, pull decoded data and convert it
+      if (this->needs_channel_conversion_ && this->audio_decoded_ring_buffer_ && this->speaker_) {
+        size_t available = this->audio_decoded_ring_buffer_->available();
 
-      if (available > 0) {
-        // Calculate how many frames we can process (limit to temp buffer size)
-        size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
-        size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
-        size_t max_input_bytes = std::min(available, this->audio_temp_buffer_size_);
-        size_t frame_count = max_input_bytes / bytes_per_frame_input;
+        if (available > 0) {
+          // Calculate how many frames we can process (limit to temp buffer size)
+          size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
+          size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
+          size_t max_input_bytes = std::min(available, this->audio_temp_buffer_size_);
+          size_t frame_count = max_input_bytes / bytes_per_frame_input;
 
-        if (frame_count > 0) {
-          // Read decoded audio from intermediate buffer
-          size_t bytes_to_read = frame_count * bytes_per_frame_input;
-          size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), bytes_to_read);
+          if (frame_count > 0) {
+            // Read decoded audio from intermediate buffer
+            size_t bytes_to_read = frame_count * bytes_per_frame_input;
+            size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), bytes_to_read);
 
-          if (bytes_read > 0) {
-            // Perform channel conversion
-            size_t actual_frames = bytes_read / bytes_per_frame_input;
-            size_t output_bytes = actual_frames * bytes_per_frame_output;
+            if (bytes_read > 0) {
+              // Perform channel conversion
+              size_t actual_frames = bytes_read / bytes_per_frame_input;
+              size_t output_bytes = actual_frames * bytes_per_frame_output;
 
-            // For in-place conversion when output <= input size, use same buffer
-            // Otherwise we'd need a second buffer (but this shouldn't happen for stereo→mono)
-            if (this->convert_audio_channels_(this->audio_temp_buffer_.get(), this->audio_temp_buffer_.get(),
-                                              actual_frames, this->source_audio_channels_,
-                                              this->speaker_audio_channels_, 16)) {
-              // Write converted audio to speaker
-              this->speaker_->play(this->audio_temp_buffer_.get(), output_bytes);
+              // For in-place conversion when output <= input size, use same buffer
+              // Otherwise we'd need a second buffer (but this shouldn't happen for stereo→mono)
+              if (this->convert_audio_channels_(this->audio_temp_buffer_.get(), this->audio_temp_buffer_.get(),
+                                                actual_frames, this->source_audio_channels_,
+                                                this->speaker_audio_channels_, 16)) {
+                // Write converted audio to speaker
+                this->speaker_->play(this->audio_temp_buffer_.get(), output_bytes);
+              }
             }
           }
+        } else {
+          // No data available, yield to other tasks
+          vTaskDelay(pdMS_TO_TICKS(5));
         }
       } else {
-        // No data available, yield to other tasks
+        // No conversion needed or passthrough mode - decoder writes directly to speaker
         vTaskDelay(pdMS_TO_TICKS(5));
       }
-    } else {
-      // No conversion needed or passthrough mode - decoder writes directly to speaker
-      vTaskDelay(pdMS_TO_TICKS(5));
     }
+
+    ESP_LOGI(TAG, "Audio processing task stopped");
+    this->audio_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
   }
 
-  ESP_LOGI(TAG, "Audio processing task stopped");
-  this->audio_task_handle_ = nullptr;
-  vTaskDelete(nullptr);
-}
-
-void SimpleVideoPlayer::stop_audio_task_() {
-  if (this->audio_task_handle_ != nullptr) {
-    ESP_LOGI(TAG, "Stopping audio processing task...");
-    this->audio_task_stop_ = true;
-
-    // Wait for task to finish (with timeout)
-    uint32_t timeout_ms = 1000;
-    uint32_t start = millis();
-    while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
+  void SimpleVideoPlayer::stop_audio_task_() {
     if (this->audio_task_handle_ != nullptr) {
-      ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
-      vTaskDelete(this->audio_task_handle_);
-      this->audio_task_handle_ = nullptr;
+      ESP_LOGI(TAG, "Stopping audio processing task...");
+      this->audio_task_stop_ = true;
+
+      // Wait for task to finish (with timeout)
+      uint32_t timeout_ms = 1000;
+      uint32_t start = millis();
+      while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+
+      if (this->audio_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
+        vTaskDelete(this->audio_task_handle_);
+        this->audio_task_handle_ = nullptr;
+      }
     }
   }
-}
 #endif
 
-//========================================================================
-// Error Handling
-//========================================================================
+  //========================================================================
+  // Error Handling
+  //========================================================================
 
-void SimpleVideoPlayer::set_error_(PlaybackError error) {
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  this->last_error_ = error;
-  this->state_ = PlayerState::ERROR;
-  xSemaphoreGive(this->state_mutex_);
+  void SimpleVideoPlayer::set_error_(PlaybackError error) {
+    xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
+    this->last_error_ = error;
+    this->state_ = PlayerState::ERROR;
+    xSemaphoreGive(this->state_mutex_);
 
-  this->on_error_callbacks_.call(static_cast<uint8_t>(error));
-}
+    this->on_error_callbacks_.call(static_cast<uint8_t>(error));
+  }
 
 }  // namespace esphome::simple_video_player
