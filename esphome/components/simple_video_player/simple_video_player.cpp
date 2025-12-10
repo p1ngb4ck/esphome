@@ -1005,6 +1005,18 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Start the speaker to initialize I2S driver
   this->speaker_->start();
 
+  // Wait for speaker to finish initialization (STATE_STARTING → STATE_RUNNING)
+  uint32_t wait_start = millis();
+  const uint32_t SPEAKER_INIT_TIMEOUT_MS = 1000;
+  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_INIT_TIMEOUT_MS) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  if (!this->speaker_->is_running()) {
+    ESP_LOGE(TAG, "Speaker failed to start within %u ms", SPEAKER_INIT_TIMEOUT_MS);
+    return false;
+  }
+
   ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %u Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
