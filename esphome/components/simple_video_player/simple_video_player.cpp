@@ -483,6 +483,13 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
+  // Clear canvas on stop - use VSYNC mechanism for non-blocking invalidation
+  if (this->output_buffer_) {
+    std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
+    // Use VSYNC flag instead of direct invalidation - non-blocking
+    this->canvas_needs_invalidate_ = true;
+  }
+
   xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
   this->state_ = PlayerState::STOPPED;
   xSemaphoreGive(this->state_mutex_);
@@ -648,14 +655,10 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Invalidate canvas after LVGL render cycle completes
   // This is called by LVGL's draw_end callback to avoid invalidating during active render
   if (this->canvas_needs_invalidate_) {
-    // Non-blocking mutex - if LVGL is busy, skip this frame's invalidation
-    // The next frame will trigger invalidation anyway
-    if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-      if (this->canvas_needs_invalidate_) {  // Double-check after acquiring mutex
-        lv_obj_invalidate(this->canvas_);
-        this->canvas_needs_invalidate_ = false;
-      }
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      lv_obj_invalidate(this->canvas_);
       xSemaphoreGive(this->lvgl_mutex_);
+      this->canvas_needs_invalidate_ = false;
     }
   }
 }
@@ -1316,12 +1319,12 @@ void SimpleVideoPlayer::audio_processing_loop_() {
           }
         }
       } else {
-        // No data available, yield CPU to other tasks without timer overhead
-        taskYIELD();
+        // No data available, yield to other tasks
+        vTaskDelay(pdMS_TO_TICKS(5));
       }
     } else {
-      // No conversion needed - yield CPU to avoid tight loop
-      taskYIELD();
+      // No conversion needed - yield to avoid tight loop
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
   }  // End of while loop
 
