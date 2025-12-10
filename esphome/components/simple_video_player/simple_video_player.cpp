@@ -459,6 +459,14 @@ void SimpleVideoPlayer::playback_loop_() {
     // No audio processing needed in main playback loop
 #endif
 
+    // Wait for buffer swap to complete (with timeout to prevent deadlock)
+    // This ensures VSYNC callback has time to swap the buffer before we decode the next frame
+    uint32_t swap_wait_count = 0;
+    while (this->buffer_swap_pending_ && swap_wait_count < 100) {  // Max 100ms wait
+      vTaskDelay(pdMS_TO_TICKS(1));
+      swap_wait_count++;
+    }
+
     // Frame rate control with presentation timestamps
     // Wait until it's time to present this frame
     int64_t current_time_us = esp_timer_get_time();
@@ -683,8 +691,8 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
   // This is called by LVGL's draw_end callback to avoid tearing
   if (this->buffer_swap_pending_) {
-    // Non-blocking mutex - if LVGL is busy, skip this frame's swap
-    if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
+    // Use small timeout instead of 0 to ensure swap happens
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
       // Swap buffers: make the newly decoded buffer visible
       this->display_buffer_index_ = this->current_buffer_index_;
       this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
@@ -696,13 +704,11 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
                            aligned_height, LV_IMG_CF_TRUE_COLOR);
 
       // Invalidate canvas to trigger redraw with new buffer
-      if (this->canvas_needs_invalidate_) {
-        lv_obj_invalidate(this->canvas_);
-        this->canvas_needs_invalidate_ = false;
-      }
+      lv_obj_invalidate(this->canvas_);
 
       xSemaphoreGive(this->lvgl_mutex_);
       this->buffer_swap_pending_ = false;
+      this->canvas_needs_invalidate_ = false;
     }
   }
 }
