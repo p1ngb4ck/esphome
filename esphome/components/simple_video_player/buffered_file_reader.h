@@ -90,6 +90,13 @@ class BufferedFileReader {
    */
   void flush_cache();
 
+  /**
+   * @brief Pre-fill cache for optimal startup performance
+   * Call immediately after open() to avoid first-read overhead
+   * @return true if cache was filled successfully
+   */
+  bool prefill_cache();
+
  protected:
   /**
    * @brief Fill cache with next chunk of data from file

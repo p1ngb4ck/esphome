@@ -91,15 +91,14 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Register VSYNC callback with LVGL component
-  // Get the LVGL component from the canvas's display
-  lv_disp_t *disp = lv_obj_get_disp(this->canvas_);
-  if (disp != nullptr && disp->driver != nullptr) {
-    auto *lvgl_comp = static_cast<lvgl::LvglComponent *>(disp->driver->user_data);
-    if (lvgl_comp != nullptr) {
-      lvgl_comp->add_on_draw_end_callback([this]() { this->on_lvgl_render_complete(); });
-      ESP_LOGI(TAG, "Registered VSYNC callback with LVGL component");
-    }
+  // Register VSYNC callback with LVGL component (passed from codegen)
+  if (this->lvgl_component_ != nullptr) {
+    this->lvgl_component_->add_on_draw_end_callback([this]() { this->on_lvgl_render_complete(); });
+    ESP_LOGI(TAG, "Registered VSYNC callback with LVGL component");
+  } else {
+    ESP_LOGE(TAG, "LVGL component not set");
+    this->mark_failed();
+    return;
   }
 
   // Create state mutex
@@ -877,6 +876,12 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     this->file_reader_.reset();
     return false;
+  }
+
+  // Pre-fill cache for optimal startup performance
+  // This eliminates the first-read overhead and ensures smooth playback from the start
+  if (!this->file_reader_->prefill_cache()) {
+    ESP_LOGW(TAG, "Failed to prefill file cache, playback may start slowly");
   }
 
   // Get file size

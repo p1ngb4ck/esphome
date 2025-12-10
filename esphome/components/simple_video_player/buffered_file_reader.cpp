@@ -80,6 +80,28 @@ void BufferedFileReader::flush_cache() {
   this->eof_ = false;
 }
 
+bool BufferedFileReader::prefill_cache() {
+  if (this->file_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot prefill cache: file not open");
+    return false;
+  }
+
+  if (!this->cache_buffer_) {
+    ESP_LOGE(TAG, "Cannot prefill cache: buffer not allocated");
+    return false;
+  }
+
+  // Fill cache from current position
+  int bytes_read = this->fill_cache_();
+  if (bytes_read < 0) {
+    ESP_LOGE(TAG, "Failed to prefill cache");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Prefilled cache with %d bytes", bytes_read);
+  return true;
+}
+
 int BufferedFileReader::fill_cache_() {
   if (this->file_handle_ == nullptr) {
     return -1;

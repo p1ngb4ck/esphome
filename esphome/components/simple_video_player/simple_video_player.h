@@ -97,7 +97,7 @@ class PlaybackErrorTrigger : public Trigger<uint8_t> {
 /// Main video player component
 class SimpleVideoPlayer : public Component {
  public:
-  SimpleVideoPlayer() = default;
+  explicit SimpleVideoPlayer(lvgl::LvglComponent *lvgl_component) { this->lvgl_component_ = lvgl_component; }
   ~SimpleVideoPlayer();
 
   // Component lifecycle
@@ -268,6 +268,7 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
 
   // Configuration
+  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
   transcoder::Transcoder *transcoder_{nullptr};
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)

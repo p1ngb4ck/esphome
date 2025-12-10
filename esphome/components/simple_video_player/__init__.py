@@ -138,7 +138,16 @@ async def to_code(config):
     cg.add_define("USE_STORAGE")
     cg.add_define("USE_LVGL")
 
-    var = cg.new_Pvariable(config[CONF_ID])
+    # Get the single LVGL component instance (required for VSYNC callbacks)
+    from esphome.core import CORE
+
+    lvgl_configs = CORE.config.get("lvgl", [])
+    if not lvgl_configs:
+        raise cv.Invalid("LVGL component is required for simple_video_player")
+    lvgl_id = lvgl_configs[0][CONF_ID]
+    lvgl_component = await cg.get_variable(lvgl_id)
+
+    var = cg.new_Pvariable(config[CONF_ID], lvgl_component)
     await cg.register_component(var, config)
 
     # Set canvas
