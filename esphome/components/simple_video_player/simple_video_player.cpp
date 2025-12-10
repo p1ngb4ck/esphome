@@ -411,8 +411,11 @@ void SimpleVideoPlayer::playback_loop_() {
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
-  // Decode first frame synchronously to populate buffer 0 before starting main loop
-  // This ensures the display has content immediately
+  // Preload and decode first 2 frames to eliminate startup lag
+  // Frame 0: Display immediately
+  // Frame 1: Ready to decode while frame 0 displays
+  ESP_LOGI(TAG, "Preloading first frames for smooth startup...");
+
   int first_frame_size = this->read_next_frame_();
   if (first_frame_size > 0) {
     if (this->decode_frame_(first_frame_size)) {
@@ -429,7 +432,17 @@ void SimpleVideoPlayer::playback_loop_() {
     }
   }
 
-  // Main playback loop
+  // Preload second frame into input buffer (ready to decode)
+  // This eliminates I/O lag on the first loop iteration
+  int second_frame_size = this->read_next_frame_();
+  if (second_frame_size <= 0) {
+    ESP_LOGW(TAG, "Failed to preload second frame");
+  }
+
+  // Main playback loop with async I/O optimization
+  // We already have second_frame_size preloaded from above
+  int current_frame_size = second_frame_size;
+
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
     if (this->state_ == PlayerState::PAUSED) {
@@ -437,19 +450,13 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Calculate when this frame should be presented (presentation timestamp)
-    int64_t target_present_time_us =
-        this->playback_start_time_us_ + static_cast<int64_t>(this->frame_count_ * this->frame_duration_us_);
-
-    // Read next frame
-    int frame_size = this->read_next_frame_();
-
-    if (frame_size < 0) {
+    // Check if we have a valid frame to decode
+    if (current_frame_size < 0) {
       // Read error
       ESP_LOGE(TAG, "Failed to read frame");
       this->set_error_(PlaybackError::FILE_READ_ERROR);
       break;
-    } else if (frame_size == 0) {
+    } else if (current_frame_size == 0) {
       // End of file
       ESP_LOGI(TAG, "Playback finished");
 
@@ -458,6 +465,7 @@ void SimpleVideoPlayer::playback_loop_() {
         this->seek_to_(0);
         this->cache_buffer_valid_ = 0;
         this->cache_buffer_offset_ = 0;
+        current_frame_size = this->read_next_frame_();
         continue;
       } else {
         this->on_finished_callbacks_.call();
@@ -465,10 +473,15 @@ void SimpleVideoPlayer::playback_loop_() {
       }
     }
 
-    // Decode frame
-    if (!this->decode_frame_(frame_size)) {
+    // Calculate when this frame should be presented (presentation timestamp)
+    int64_t target_present_time_us =
+        this->playback_start_time_us_ + static_cast<int64_t>(this->frame_count_ * this->frame_duration_us_);
+
+    // Decode the current frame (already in input buffer)
+    if (!this->decode_frame_(current_frame_size)) {
       ESP_LOGW(TAG, "Failed to decode frame, skipping");
-      // Don't stop on decode errors, just skip the frame
+      // Read next frame and skip this one
+      current_frame_size = this->read_next_frame_();
       continue;
     }
 
@@ -487,8 +500,7 @@ void SimpleVideoPlayer::playback_loop_() {
       vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
 
-    // Swap buffers immediately after decode (simpler than VSYNC for now)
-    // The decode thread can take the mutex since it's not in a critical path
+    // Swap buffers immediately after decode
     if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
       this->display_buffer_index_ = this->current_buffer_index_;
       this->current_buffer_index_ = 1 - this->current_buffer_index_;
@@ -503,6 +515,10 @@ void SimpleVideoPlayer::playback_loop_() {
 
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
+
+    // Read next frame asynchronously (during display time of current frame)
+    // This happens AFTER buffer swap, so it doesn't delay display
+    current_frame_size = this->read_next_frame_();
   }
 
   // Cleanup
