@@ -411,6 +411,24 @@ void SimpleVideoPlayer::playback_loop_() {
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
+  // Decode first frame synchronously to populate buffer 0 before starting main loop
+  // This ensures the display has content immediately
+  int first_frame_size = this->read_next_frame_();
+  if (first_frame_size > 0) {
+    if (this->decode_frame_(first_frame_size)) {
+      // First frame decoded successfully - swap to display it immediately
+      if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+        this->display_buffer_index_ = this->current_buffer_index_;
+        this->current_buffer_index_ = 1 - this->current_buffer_index_;
+        lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                             aligned_height, LV_IMG_CF_TRUE_COLOR);
+        lv_obj_invalidate(this->canvas_);
+        xSemaphoreGive(this->lvgl_mutex_);
+      }
+      this->frame_count_++;  // Count the first frame
+    }
+  }
+
   // Main playback loop
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
@@ -458,14 +476,6 @@ void SimpleVideoPlayer::playback_loop_() {
     // Audio decoding and channel conversion is now handled by dedicated audio task on Core 0
     // No audio processing needed in main playback loop
 #endif
-
-    // Wait for buffer swap to complete (with timeout to prevent deadlock)
-    // This ensures VSYNC callback has time to swap the buffer before we decode the next frame
-    uint32_t swap_wait_count = 0;
-    while (this->buffer_swap_pending_ && swap_wait_count < 100) {  // Max 100ms wait
-      vTaskDelay(pdMS_TO_TICKS(1));
-      swap_wait_count++;
-    }
 
     // Frame rate control with presentation timestamps
     // Wait until it's time to present this frame
@@ -691,8 +701,8 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
   // This is called by LVGL's draw_end callback to avoid tearing
   if (this->buffer_swap_pending_) {
-    // Use small timeout instead of 0 to ensure swap happens
-    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    // Non-blocking mutex - don't block LVGL thread
+    if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
       // Swap buffers: make the newly decoded buffer visible
       this->display_buffer_index_ = this->current_buffer_index_;
       this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
