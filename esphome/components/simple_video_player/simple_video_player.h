@@ -28,6 +28,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 #endif
 
 namespace esphome::simple_video_player {
@@ -149,6 +150,9 @@ class SimpleVideoPlayer : public Component {
   bool is_stopped() const { return this->state_ == PlayerState::STOPPED; }
   PlaybackError get_last_error() const { return this->last_error_; }
   const std::string &get_current_file() const { return this->video_path_; }
+
+  /// Called by LVGL when render cycle completes (for VSYNC)
+  void on_lvgl_render_complete();
 
   //========================================================================
   // Automation Callbacks
@@ -326,6 +330,9 @@ class SimpleVideoPlayer : public Component {
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
   SemaphoreHandle_t lvgl_mutex_{nullptr};  // Mutex for LVGL thread safety
+
+  // VSYNC: defer canvas invalidation until render complete
+  volatile bool canvas_needs_invalidate_{false};
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

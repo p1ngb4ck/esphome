@@ -391,6 +391,7 @@ void LvKeyboardType::set_obj(lv_obj_t *lv_obj) {
 void LvglComponent::draw_end_() {
   if (this->draw_end_callback_ != nullptr)
     this->draw_end_callback_->trigger();
+  this->draw_end_callbacks_.call();
   if (this->update_when_display_idle_) {
     for (auto *disp : this->displays_)
       disp->update();

@@ -90,6 +90,17 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
+  // Register VSYNC callback with LVGL component
+  // Get the LVGL component from the canvas's display
+  lv_disp_t *disp = lv_obj_get_disp(this->canvas_);
+  if (disp != nullptr && disp->driver != nullptr) {
+    auto *lvgl_comp = static_cast<lvgl::LvglComponent *>(disp->driver->user_data);
+    if (lvgl_comp != nullptr) {
+      lvgl_comp->add_on_draw_end_callback([this]() { this->on_lvgl_render_complete(); });
+      ESP_LOGI(TAG, "Registered VSYNC callback with LVGL component");
+    }
+  }
+
   // Create state mutex
   this->state_mutex_ = xSemaphoreCreateMutex();
   if (this->state_mutex_ == nullptr) {
@@ -473,13 +484,13 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // Clear canvas (lock LVGL mutex for thread safety)
-  if (this->output_buffer_) {
+  /*if (this->output_buffer_) {
     std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
     if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
       lv_obj_invalidate(this->canvas_);
       xSemaphoreGive(this->lvgl_mutex_);
     }
-  }
+  }*/
 
   xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
   this->state_ = PlayerState::STOPPED;
@@ -631,19 +642,27 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
     return false;
   }
 
-  // Update canvas (lock LVGL mutex for thread safety)
-  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    lv_obj_invalidate(this->canvas_);
-    xSemaphoreGive(this->lvgl_mutex_);
-  } else {
-    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas invalidate");
-  }
+  // VSYNC: Mark canvas for invalidation in on_lvgl_render_complete() callback
+  // This avoids invalidating during LVGL's active render cycle
+  this->canvas_needs_invalidate_ = true;
 
   return true;
 #else
   ESP_LOGE(TAG, "Hardware JPEG decoder not available");
   return false;
 #endif
+}
+
+void SimpleVideoPlayer::on_lvgl_render_complete() {
+  // VSYNC: Invalidate canvas after LVGL render cycle completes
+  // This is called by LVGL's draw_end callback to avoid invalidating during active render
+  if (this->canvas_needs_invalidate_) {
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      lv_obj_invalidate(this->canvas_);
+      xSemaphoreGive(this->lvgl_mutex_);
+      this->canvas_needs_invalidate_ = false;
+    }
+  }
 }
 
 bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height) {
@@ -1082,12 +1101,13 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   // For all codecs (including PCM), allocate temp buffer if channel conversion is needed
   if (this->needs_channel_conversion_) {
-    ExternalRAMAllocator<uint8_t> allocator(ExternalRAMAllocator<uint8_t>::ALLOW_FAILURE);
-    this->audio_temp_buffer_.reset(allocator.allocate(this->audio_temp_buffer_size_));
-    if (!this->audio_temp_buffer_) {
+    // Allocate in PSRAM for optimal DMA performance on ESP32-P4
+    uint8_t *temp_buf = static_cast<uint8_t *>(heap_caps_malloc(this->audio_temp_buffer_size_, MALLOC_CAP_SPIRAM));
+    if (!temp_buf) {
       ESP_LOGE(TAG, "Failed to allocate audio temp buffer in PSRAM (%zu KB)", this->audio_temp_buffer_size_ / 1024);
       return false;
     }
+    this->audio_temp_buffer_.reset(temp_buf);
     ESP_LOGD(TAG, "Channel conversion temp buffer allocated in PSRAM: %zu KB", this->audio_temp_buffer_size_ / 1024);
   }
 
@@ -1169,29 +1189,15 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
 
   // For compressed audio (MP3/FLAC), write to input ring buffer for decoder
   if (this->audio_input_ring_buffer_ != nullptr) {
-    size_t written = this->audio_input_ring_buffer_->write(data, size);
-    if (written < size) {
-      ESP_LOGW(TAG, "Audio ring buffer full, dropped %zu bytes (wrote %zu/%zu)", size - written, written, size);
-    } else {
-      ESP_LOGD(TAG, "Audio frame written to input buffer: %zu bytes (total available: %zu)", written,
-               this->audio_input_ring_buffer_->available());
-    }
+    this->audio_input_ring_buffer_->write(data, size);
   }
   // For PCM audio, data is already decoded - process directly in audio task
-  // The audio task will pull from decoded_ring_buffer or handle inline
   else if (this->audio_decoded_ring_buffer_ != nullptr) {
-    // PCM with channel conversion: write to decoded ring buffer
-    size_t written = this->audio_decoded_ring_buffer_->write(data, size);
-    if (written < size) {
-      ESP_LOGW(TAG, "PCM buffer full, dropped %zu bytes", size - written);
-    } else {
-      ESP_LOGV(TAG, "PCM frame written: %zu bytes", written);
-    }
+    this->audio_decoded_ring_buffer_->write(data, size);
   }
-  // PCM without channel conversion: direct to speaker (inline, not via buffer)
+  // PCM without channel conversion: direct to speaker
   else if (this->speaker_) {
     this->speaker_->play(data, size);
-    ESP_LOGV(TAG, "PCM direct to speaker: %zu bytes", size);
   }
 }
 
@@ -1263,25 +1269,10 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
-  uint32_t loop_count = 0;
-  uint32_t last_log_time = millis();
-
   while (!this->audio_task_stop_) {
     if (!this->audio_enabled_) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
-    }
-
-    loop_count++;
-
-    // Log buffer status every second for debugging
-    if ((millis() - last_log_time) >= 1000) {
-      size_t input_available = this->audio_input_ring_buffer_ ? this->audio_input_ring_buffer_->available() : 0;
-      size_t decoded_available = this->audio_decoded_ring_buffer_ ? this->audio_decoded_ring_buffer_->available() : 0;
-      ESP_LOGI(TAG, "Audio buffers: input=%zu bytes, decoded=%zu bytes, loops=%u/sec", input_available,
-               decoded_available, loop_count);
-      loop_count = 0;
-      last_log_time = millis();
     }
 
     // Run audio decoder if we have one (MP3/FLAC mode)
@@ -1290,15 +1281,9 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
-        ESP_LOGE(TAG, "Audio decoding FAILED - decoder returned FAILED state");
+        ESP_LOGE(TAG, "Audio decoding FAILED");
         this->audio_enabled_ = false;
         break;
-      }
-
-      if (decode_state == audio::AudioDecoderState::DECODING) {
-        ESP_LOGV(TAG, "Audio decoder DECODING");
-      } else if (decode_state == audio::AudioDecoderState::FINISHED) {
-        ESP_LOGD(TAG, "Audio decoder FINISHED");
       }
     }  // End of if (this->audio_decoder_)
 

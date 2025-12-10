@@ -161,6 +161,9 @@ class LvglComponent : public PollingComponent {
   void add_on_idle_callback(std::function<void(uint32_t)> &&callback) {
     this->idle_callbacks_.add(std::move(callback));
   }
+  void add_on_draw_end_callback(std::function<void()> &&callback) {
+    this->draw_end_callbacks_.add(std::move(callback));
+  }
 
   static void monitor_cb(lv_disp_drv_t *disp_drv, uint32_t time, uint32_t px);
   static void render_start_cb(lv_disp_drv_t *disp_drv);
@@ -237,6 +240,7 @@ class LvglComponent : public PollingComponent {
   std::map<lv_group_t *, lv_obj_t *> focus_marks_{};
 
   CallbackManager<void(uint32_t)> idle_callbacks_{};
+  CallbackManager<void()> draw_end_callbacks_{};
   Trigger<> *pause_callback_{};
   Trigger<> *resume_callback_{};
   Trigger<> *draw_start_callback_{};
