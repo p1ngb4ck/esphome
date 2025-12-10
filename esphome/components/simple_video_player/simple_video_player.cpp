@@ -992,8 +992,12 @@ void SimpleVideoPlayer::free_buffers_() {
     heap_caps_free(this->input_buffer_.release());
   }
 
-  if (this->output_buffer_) {
-    heap_caps_free(this->output_buffer_.release());
+  // Free both double-buffered output buffers
+  if (this->output_buffer_[0]) {
+    heap_caps_free(this->output_buffer_[0].release());
+  }
+  if (this->output_buffer_[1]) {
+    heap_caps_free(this->output_buffer_[1].release());
   }
 
   this->output_buffer_size_ = 0;
