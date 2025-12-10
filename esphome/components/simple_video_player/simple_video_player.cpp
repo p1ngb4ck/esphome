@@ -516,19 +516,17 @@ void SimpleVideoPlayer::playback_loop_() {
       vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
 
-    // Atomic buffer swap (just index manipulation - no mutex needed)
-    uint8_t new_display_buffer = this->current_buffer_index_;
-    this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle for next decode
+    // Signal VSYNC callback that new frame is ready
+    // VSYNC callback runs in LVGL's thread - the ONLY thread allowed to call LVGL APIs
+    // This prevents "modifying dirty areas in render" warning
+    this->buffer_swap_pending_ = true;
 
-    // Update canvas buffer pointer (with mutex for LVGL API call)
-    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-      this->display_buffer_index_ = new_display_buffer;
-      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[new_display_buffer].get(), aligned_width, aligned_height,
-                           LV_IMG_CF_TRUE_COLOR);
-      lv_obj_invalidate(this->canvas_);
-      xSemaphoreGive(this->lvgl_mutex_);
+    // Wait for VSYNC callback to consume the frame (max 100ms)
+    // This ensures we don't decode next frame before current one is displayed
+    uint32_t wait_count = 0;
+    while (this->buffer_swap_pending_ && wait_count < 100) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      wait_count++;
     }
 
     // Increment frame counter for next frame's presentation timestamp
