@@ -518,16 +518,8 @@ void SimpleVideoPlayer::playback_loop_() {
 
     // Signal VSYNC callback that new frame is ready
     // VSYNC callback runs in LVGL's thread - the ONLY thread allowed to call LVGL APIs
-    // This prevents "modifying dirty areas in render" warning
+    // No waiting - double buffering protects us from race conditions
     this->buffer_swap_pending_ = true;
-
-    // Wait for VSYNC callback to consume the frame (max 100ms)
-    // This ensures we don't decode next frame before current one is displayed
-    uint32_t wait_count = 0;
-    while (this->buffer_swap_pending_ && wait_count < 100) {
-      vTaskDelay(pdMS_TO_TICKS(1));
-      wait_count++;
-    }
 
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
@@ -747,6 +739,11 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
   // This callback runs in LVGL's thread, so NO MUTEX needed for LVGL API calls
   if (this->buffer_swap_pending_) {
+    static uint32_t swap_count = 0;
+    if (swap_count++ % 30 == 0) {  // Log every 30 swaps
+      ESP_LOGD(TAG, "VSYNC swap %u: buf %d->%d", swap_count, this->display_buffer_index_, this->current_buffer_index_);
+    }
+
     // Swap buffers: make the newly decoded buffer visible
     this->display_buffer_index_ = this->current_buffer_index_;
     this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
