@@ -337,6 +337,11 @@ class SimpleVideoPlayer : public Component {
   volatile bool canvas_needs_invalidate_{false};
   volatile bool buffer_swap_pending_{false};  // True when we have a new buffer ready to swap
 
+  // Frame pacing: proper timing for video FPS vs display refresh rate
+  int64_t playback_start_time_us_{0};  // Microsecond timestamp when playback started
+  uint32_t frame_count_{0};            // Number of frames decoded so far
+  float frame_duration_us_{0};         // Duration of one frame in microseconds (1000000/fps)
+
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;
   CallbackManager<void()> on_finished_callbacks_;

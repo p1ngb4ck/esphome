@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
 #include "esp_dma_utils.h"
+#include "esp_timer.h"
 #endif
 
 #ifdef USE_HARDWARE_JPEG_DECODER
@@ -405,8 +406,10 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fire started callback
   this->on_started_callbacks_.call();
 
-  // Calculate frame delay for target FPS
-  uint32_t frame_delay_ms = static_cast<uint32_t>(1000.0f / this->target_fps_);
+  // Initialize frame pacing with presentation timestamps
+  this->playback_start_time_us_ = esp_timer_get_time();  // Current time in microseconds
+  this->frame_count_ = 0;
+  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
   // Main playback loop
   while (this->state_ != PlayerState::STOPPED) {
@@ -416,8 +419,9 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Record frame start time for FPS control
-    TickType_t frame_start = xTaskGetTickCount();
+    // Calculate when this frame should be presented (presentation timestamp)
+    int64_t target_present_time_us =
+        this->playback_start_time_us_ + static_cast<int64_t>(this->frame_count_ * this->frame_duration_us_);
 
     // Read next frame
     int frame_size = this->read_next_frame_();
@@ -455,14 +459,18 @@ void SimpleVideoPlayer::playback_loop_() {
     // No audio processing needed in main playback loop
 #endif
 
-    // Frame rate control
-    TickType_t frame_end = xTaskGetTickCount();
-    TickType_t elapsed = frame_end - frame_start;
-    TickType_t delay_ticks = pdMS_TO_TICKS(frame_delay_ms);
+    // Frame rate control with presentation timestamps
+    // Wait until it's time to present this frame
+    int64_t current_time_us = esp_timer_get_time();
+    int64_t wait_time_us = target_present_time_us - current_time_us;
 
-    if (elapsed < delay_ticks) {
-      vTaskDelay(delay_ticks - elapsed);
+    if (wait_time_us > 0) {
+      // Convert microseconds to milliseconds for vTaskDelay
+      vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
+
+    // Increment frame counter for next frame's presentation timestamp
+    this->frame_count_++;
   }
 
   // Cleanup
