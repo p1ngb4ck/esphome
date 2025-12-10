@@ -1300,85 +1300,88 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       } else if (decode_state == audio::AudioDecoderState::FINISHED) {
         ESP_LOGD(TAG, "Audio decoder FINISHED");
       }
+    }  // End of if (this->audio_decoder_)
 
-      // If channel conversion is needed, pull decoded data and convert it
-      if (this->needs_channel_conversion_ && this->audio_decoded_ring_buffer_ && this->speaker_) {
-        size_t available = this->audio_decoded_ring_buffer_->available();
+    // Channel conversion processing (runs for both decoder mode and PCM mode)
+    // For decoder mode: pulls from decoded_ring_buffer (decoder output)
+    // For PCM mode: pulls from decoded_ring_buffer (direct PCM frames)
+    if (this->needs_channel_conversion_ && this->audio_decoded_ring_buffer_ && this->speaker_) {
+      size_t available = this->audio_decoded_ring_buffer_->available();
 
-        if (available > 0) {
-          // Calculate how many frames we can process (limit to temp buffer size)
-          size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
-          size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
-          size_t max_input_bytes = std::min(available, this->audio_temp_buffer_size_);
-          size_t frame_count = max_input_bytes / bytes_per_frame_input;
+      if (available > 0) {
+        // Calculate how many frames we can process (limit to temp buffer size)
+        size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
+        size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
+        size_t max_input_bytes = std::min(available, this->audio_temp_buffer_size_);
+        size_t frame_count = max_input_bytes / bytes_per_frame_input;
 
-          if (frame_count > 0) {
-            // Read decoded audio from intermediate buffer
-            size_t bytes_to_read = frame_count * bytes_per_frame_input;
-            size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), bytes_to_read);
+        if (frame_count > 0) {
+          // Read decoded audio from intermediate buffer
+          size_t bytes_to_read = frame_count * bytes_per_frame_input;
+          size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), bytes_to_read);
 
-            if (bytes_read > 0) {
-              // Perform channel conversion
-              size_t actual_frames = bytes_read / bytes_per_frame_input;
-              size_t output_bytes = actual_frames * bytes_per_frame_output;
+          if (bytes_read > 0) {
+            // Perform channel conversion
+            size_t actual_frames = bytes_read / bytes_per_frame_input;
+            size_t output_bytes = actual_frames * bytes_per_frame_output;
 
-              // For in-place conversion when output <= input size, use same buffer
-              // Otherwise we'd need a second buffer (but this shouldn't happen for stereo→mono)
-              if (this->convert_audio_channels_(this->audio_temp_buffer_.get(), this->audio_temp_buffer_.get(),
-                                                actual_frames, this->source_audio_channels_,
-                                                this->speaker_audio_channels_, 16)) {
-                // Write converted audio to speaker
-                this->speaker_->play(this->audio_temp_buffer_.get(), output_bytes);
-              }
+            // For in-place conversion when output <= input size, use same buffer
+            // Otherwise we'd need a second buffer (but this shouldn't happen for stereo→mono)
+            if (this->convert_audio_channels_(this->audio_temp_buffer_.get(), this->audio_temp_buffer_.get(),
+                                              actual_frames, this->source_audio_channels_,
+                                              this->speaker_audio_channels_, 16)) {
+              // Write converted audio to speaker
+              this->speaker_->play(this->audio_temp_buffer_.get(), output_bytes);
             }
           }
-        } else {
-          // No data available, yield to other tasks
-          vTaskDelay(pdMS_TO_TICKS(5));
         }
       } else {
-        // No conversion needed or passthrough mode - decoder writes directly to speaker
+        // No data available, yield to other tasks
         vTaskDelay(pdMS_TO_TICKS(5));
       }
+    } else {
+      // No conversion needed - yield to avoid tight loop
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+  }  // End of while loop
+
+  ESP_LOGI(TAG, "Audio processing task stopped");
+  this->audio_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void SimpleVideoPlayer::stop_audio_task_() {
+  if (this->audio_task_handle_ != nullptr) {
+    ESP_LOGI(TAG, "Stopping audio processing task...");
+    this->audio_task_stop_ = true;
+
+    // Wait for task to finish (with timeout)
+    uint32_t timeout_ms = 1000;
+    uint32_t start = millis();
+    while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    ESP_LOGI(TAG, "Audio processing task stopped");
-    this->audio_task_handle_ = nullptr;
-    vTaskDelete(nullptr);
-  }
-
-  void SimpleVideoPlayer::stop_audio_task_() {
     if (this->audio_task_handle_ != nullptr) {
-      ESP_LOGI(TAG, "Stopping audio processing task...");
-      this->audio_task_stop_ = true;
-
-      // Wait for task to finish (with timeout)
-      uint32_t timeout_ms = 1000;
-      uint32_t start = millis();
-      while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-
-      if (this->audio_task_handle_ != nullptr) {
-        ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
-        vTaskDelete(this->audio_task_handle_);
-        this->audio_task_handle_ = nullptr;
-      }
+      ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
+      vTaskDelete(this->audio_task_handle_);
+      this->audio_task_handle_ = nullptr;
     }
   }
+}
 #endif
 
-  //========================================================================
-  // Error Handling
-  //========================================================================
+//========================================================================
+// Error Handling
+//========================================================================
 
-  void SimpleVideoPlayer::set_error_(PlaybackError error) {
-    xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-    this->last_error_ = error;
-    this->state_ = PlayerState::ERROR;
-    xSemaphoreGive(this->state_mutex_);
+void SimpleVideoPlayer::set_error_(PlaybackError error) {
+  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
+  this->last_error_ = error;
+  this->state_ = PlayerState::ERROR;
+  xSemaphoreGive(this->state_mutex_);
 
-    this->on_error_callbacks_.call(static_cast<uint8_t>(error));
-  }
+  this->on_error_callbacks_.call(static_cast<uint8_t>(error));
+}
 
 }  // namespace esphome::simple_video_player
