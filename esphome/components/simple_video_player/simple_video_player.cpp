@@ -1249,9 +1249,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       break;
     }
 
-    if (decode_state == audio::AudioDecoderState::IDLE) {
-      ESP_LOGV(TAG, "Audio decoder IDLE (waiting for data)");
-    } else if (decode_state == audio::AudioDecoderState::DECODING) {
+    if (decode_state == audio::AudioDecoderState::DECODING) {
       ESP_LOGV(TAG, "Audio decoder DECODING");
     } else if (decode_state == audio::AudioDecoderState::FINISHED) {
       ESP_LOGD(TAG, "Audio decoder FINISHED");
