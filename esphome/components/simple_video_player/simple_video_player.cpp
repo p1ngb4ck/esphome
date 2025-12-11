@@ -748,14 +748,15 @@ int SimpleVideoPlayer::read_next_frame_() {
   // During playback, consume frames from preload buffer if available
   // During init (before preload enabled), read directly from file
 
-  if (this->use_preload_buffer_ && this->preload_task_handle_ != nullptr && this->preload_available_ > 0) {
-    // Preload buffer active - consume from it
+  if (this->use_preload_buffer_ && this->preload_task_handle_ != nullptr) {
+    // Preload buffer active - try to consume from it
     // Try to acquire mutex with minimal wait (1ms max) - performance critical path
     if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
+      // Check availability AFTER acquiring mutex to avoid race condition
       if (this->preload_available_ == 0) {
         xSemaphoreGive(this->preload_mutex_);
-        // Buffer empty - return 0 to signal no data (EOF or underrun)
-        return 0;
+        // Buffer empty - fall back to reading directly from file
+        return this->read_next_frame_from_file_();
       }
 
       // Read frame size from preload buffer
@@ -807,9 +808,9 @@ int SimpleVideoPlayer::read_next_frame_() {
 
       return frame_size;
     } else {
-      // Failed to acquire mutex
-      ESP_LOGW(TAG, "Failed to acquire preload mutex");
-      return -1;
+      // Failed to acquire mutex - fall back to reading directly from file
+      // This should be rare but prevents blocking
+      return this->read_next_frame_from_file_();
     }
   } else {
     // Preload not active - read directly from file (during init phase)
