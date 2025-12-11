@@ -354,7 +354,6 @@ class SimpleVideoPlayer : public Component {
   // Frame preload buffer - large PSRAM buffer to absorb SD/USB slowdowns
   // Background task fills this buffer during playback to smooth over storage hiccups
   std::unique_ptr<uint8_t[]> preload_buffer_;  // PSRAM (2-8MB), ring buffer for frame preloading
-  size_t preload_buffer_size_{0};              // Total size of preload buffer
   size_t preload_write_pos_{0};                // Write position in preload buffer (ring buffer)
   size_t preload_read_pos_{0};                 // Read position in preload buffer (ring buffer)
   size_t preload_available_{0};                // Bytes available in preload buffer
