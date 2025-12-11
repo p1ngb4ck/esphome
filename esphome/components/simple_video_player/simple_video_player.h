@@ -360,6 +360,7 @@ class SimpleVideoPlayer : public Component {
   size_t preload_available_{0};                // Bytes available in preload buffer
   TaskHandle_t preload_task_handle_{nullptr};  // Background prefetch task
   volatile bool preload_task_stop_{false};     // Signal to stop prefetch task
+  volatile bool use_preload_buffer_{false};    // Enable consuming from preload buffer (disabled during init)
   SemaphoreHandle_t preload_mutex_{nullptr};   // Mutex for preload buffer access
 
   // FreeRTOS task

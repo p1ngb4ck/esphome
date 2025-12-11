@@ -471,6 +471,9 @@ void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Preload buffer filled: %.1f MB / %u MB ready", this->preload_available_ / (1024.0f * 1024.0f),
            this->preload_buffer_size_ / (1024 * 1024));
 
+  // Enable preload buffer consumption for main playback loop
+  this->use_preload_buffer_ = true;
+
 #ifdef USE_AUDIO
   // Wait for audio buffer to have sufficient data
   if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
@@ -760,9 +763,9 @@ int SimpleVideoPlayer::read_next_frame_from_file_() {
 
 int SimpleVideoPlayer::read_next_frame_() {
   // During playback, consume frames from preload buffer if available
-  // During init (before preload task starts), read directly from file
+  // During init (before preload enabled), read directly from file
 
-  if (this->preload_task_handle_ != nullptr && this->preload_available_ > 0) {
+  if (this->use_preload_buffer_ && this->preload_task_handle_ != nullptr && this->preload_available_ > 0) {
     // Preload buffer active - consume from it
     if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
       if (this->preload_available_ == 0) {
@@ -1732,6 +1735,7 @@ void SimpleVideoPlayer::start_preload_task_() {
   this->preload_read_pos_ = 0;
   this->preload_available_ = 0;
   this->preload_task_stop_ = false;
+  this->use_preload_buffer_ = false;  // Disabled until after initial frames decoded
 
   // Create background prefetch task
   // Priority 3: Higher than main loop (1), lower than decode/audio (10) and LVGL
