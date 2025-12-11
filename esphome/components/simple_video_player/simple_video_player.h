@@ -114,7 +114,6 @@ class SimpleVideoPlayer : public Component {
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
-  void set_preload_buffer_size(uint32_t size) { this->preload_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
 
 #ifdef USE_SPEAKER

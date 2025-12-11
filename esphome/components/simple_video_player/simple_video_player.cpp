@@ -327,30 +327,7 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   // ============================================================================
-  // PHASE 1: Start Background Prefetch FIRST
-  // ============================================================================
-  // Allocate large preload buffer in PSRAM (2-8MB configurable)
-  // This absorbs SD/USB performance variations during playback
-  if (!this->preload_buffer_) {
-    uint8_t *preload_buf = static_cast<uint8_t *>(heap_caps_malloc(this->preload_buffer_size_, MALLOC_CAP_SPIRAM));
-    if (preload_buf == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate preload buffer (%u bytes / %u MB)", this->preload_buffer_size_,
-               this->preload_buffer_size_ / (1024 * 1024));
-      ESP_LOGW(TAG, "Continuing without preload buffer - playback may be less smooth");
-    } else {
-      this->preload_buffer_.reset(preload_buf);
-      ESP_LOGI(TAG, "Preload buffer allocated: %u MB (PSRAM)", this->preload_buffer_size_ / (1024 * 1024));
-    }
-  }
-
-  // Start background prefetch task immediately so buffer fills during initialization
-  if (this->preload_buffer_) {
-    ESP_LOGI(TAG, "Starting background prefetch...");
-    this->start_preload_task_();
-  }
-
-  // ============================================================================
-  // PHASE 2: Initialize Audio (parallel with prefetch)
+  // PHASE 1: Initialize Audio (parallel with prefetch)
   // ============================================================================
   // Audio/speaker initialization happens in parallel with background prefetch
 #ifdef USE_AUDIO
@@ -365,7 +342,7 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // ============================================================================
-  // PHASE 3: Allocate Video Buffers (parallel with prefetch)
+  // PHASE 2: Allocate Video Buffers
   // ============================================================================
   // Allocate buffers based on video size
   if (!this->allocate_buffers_(width, height)) {
@@ -557,10 +534,6 @@ void SimpleVideoPlayer::playback_loop_() {
     // This happens AFTER buffer swap, so it doesn't delay display
     current_frame_size = this->read_next_frame_();
   }
-
-  // Cleanup
-  // Stop background prefetch task
-  this->stop_preload_task_();
 
   this->close_file_();
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
