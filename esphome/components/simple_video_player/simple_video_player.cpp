@@ -429,19 +429,24 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef USE_AUDIO
   // Prefill audio buffer before starting playback for sync
-  if (this->audio_enabled_ && this->speaker_ != nullptr) {
-    ESP_LOGI(TAG, "Prefilling audio buffer...");
-    // Wait until speaker has some buffered data (non-blocking check)
-    // This ensures A/V sync without unnecessary delays
+  // Wait for decoded ring buffer to have at least 100ms of audio data
+  if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
+    // Calculate how many bytes we need for 100ms of audio
+    size_t bytes_per_ms = (this->source_audio_channels_ * 2 * this->audio_sample_rate_) / 1000;  // 16-bit samples
+    size_t target_bytes = bytes_per_ms * 100;                                                    // 100ms worth of audio
+
+    ESP_LOGI(TAG, "Prefilling audio buffer (target: %zu bytes)...", target_bytes);
     uint32_t wait_count = 0;
-    while (!this->speaker_->has_buffered_data() && wait_count < 20) {
+    while (this->audio_decoded_ring_buffer_->available() < target_bytes && wait_count < 40) {
       vTaskDelay(pdMS_TO_TICKS(5));  // Check every 5ms
       wait_count++;
     }
-    if (wait_count >= 20) {
-      ESP_LOGW(TAG, "Audio buffer prefill timeout, proceeding anyway");
+    if (wait_count >= 40) {
+      ESP_LOGW(TAG, "Audio buffer prefill timeout (%zu/%zu bytes), proceeding anyway",
+               this->audio_decoded_ring_buffer_->available(), target_bytes);
     } else {
-      ESP_LOGI(TAG, "Audio buffer prefilled in %u ms", wait_count * 5);
+      ESP_LOGI(TAG, "Audio buffer prefilled in %u ms (%zu bytes)", wait_count * 5,
+               this->audio_decoded_ring_buffer_->available());
     }
   }
 #endif
@@ -755,11 +760,6 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   }
 
   if (this->buffer_swap_pending_) {
-    static uint32_t swap_count = 0;
-    if (swap_count++ % 30 == 0) {  // Log every 30 swaps
-      ESP_LOGD(TAG, "VSYNC swap %u: buf %d->%d", swap_count, this->display_buffer_index_, this->current_buffer_index_);
-    }
-
     // Swap buffers: make the newly decoded buffer visible
     this->display_buffer_index_ = this->current_buffer_index_;
     this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
@@ -1311,13 +1311,32 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   if (this->audio_input_ring_buffer_ != nullptr) {
     this->audio_input_ring_buffer_->write(data, size);
   }
-  // For PCM audio, data is already decoded - process directly in audio task
+  // For PCM audio, data is already decoded - write only complete frames to avoid glitches
   else if (this->audio_decoded_ring_buffer_ != nullptr) {
-    this->audio_decoded_ring_buffer_->write(data, size);
+    // Calculate frame size in bytes (channels × bytes_per_sample)
+    size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
+    // Only write complete frames to avoid audio corruption
+    size_t complete_frames = size / bytes_per_frame;
+    size_t bytes_to_write = complete_frames * bytes_per_frame;
+
+    if (bytes_to_write > 0) {
+      this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
+    }
+
+    // Log warning if we're dropping incomplete frames (shouldn't happen with well-formed AVI)
+    if (size != bytes_to_write) {
+      ESP_LOGW(TAG, "Dropped %zu bytes of incomplete audio frame", size - bytes_to_write);
+    }
   }
-  // PCM without channel conversion: direct to speaker
+  // PCM without channel conversion: write only complete frames to speaker
   else if (this->speaker_) {
-    this->speaker_->play(data, size);
+    size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
+    size_t complete_frames = size / bytes_per_frame;
+    size_t bytes_to_write = complete_frames * bytes_per_frame;
+
+    if (bytes_to_write > 0) {
+      this->speaker_->play(data, bytes_to_write);
+    }
   }
 }
 
