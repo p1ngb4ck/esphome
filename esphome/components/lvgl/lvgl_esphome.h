@@ -163,7 +163,12 @@ class LvglComponent : public PollingComponent {
   }
   void add_on_draw_end_callback(std::function<void()> &&callback) {
     this->draw_end_callbacks_.add(std::move(callback));
+    // Automatically register monitor callback when callbacks are added
+    this->register_monitor_callback();
   }
+
+  /// Ensure monitor callback is registered (for components that add callbacks after setup)
+  void register_monitor_callback();
 
   static void monitor_cb(lv_disp_drv_t *disp_drv, uint32_t time, uint32_t px);
   static void render_start_cb(lv_disp_drv_t *disp_drv);
