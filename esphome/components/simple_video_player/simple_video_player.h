@@ -188,11 +188,7 @@ class SimpleVideoPlayer : public Component {
   // Frame Processing
   //========================================================================
 
-  /// Read next JPEG frame directly from file into input buffer (used by preload task)
-  /// Returns frame size or 0 if EOF, -1 on error
-  int read_next_frame_from_file_();
-
-  /// Read next JPEG frame (from preload buffer during playback, or from file during init)
+  /// Read next JPEG frame
   /// Returns frame size or 0 if EOF, -1 on error
   int read_next_frame_();
 
@@ -201,22 +197,6 @@ class SimpleVideoPlayer : public Component {
 
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
-
-  //========================================================================
-  // Frame Preloading (Background Task)
-  //========================================================================
-
-  /// Background prefetch task entry point
-  static void preload_task_entry_(void *param);
-
-  /// Background prefetch loop - fills preload buffer during playback
-  void preload_loop_();
-
-  /// Start background prefetch task
-  void start_preload_task_();
-
-  /// Stop background prefetch task
-  void stop_preload_task_();
 
 #ifdef USE_AUDIO
   /// Initialize audio decoder for AVI audio stream
