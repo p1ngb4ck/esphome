@@ -8,7 +8,6 @@
 #include "esp_cache.h"
 #include "esp_dma_utils.h"
 #include "esp_timer.h"
-#include "esp_task_wdt.h"
 
 #include "driver/jpeg_decode.h"
 #include "driver/jpeg_types.h"
@@ -418,46 +417,25 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fire started callback
   this->on_started_callbacks_.call();
 
-  // ============================================================================
-  // PHASE 4: Decode Initial Frames (parallel with prefetch still running)
-  // ============================================================================
-  ESP_LOGI(TAG, "Decoding initial frames...");
+  // Initialize frame pacing with presentation timestamps
+  this->playback_start_time_us_ = esp_timer_get_time();  // Current time in microseconds
+  this->frame_count_ = 0;
+  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
-  // Decode first two video frames while prefetch task continues filling buffer in background
-  int frames_preloaded = 0;
+  // Preload and decode first frames for smooth A/V sync startup
+  ESP_LOGI(TAG, "Preloading frames and audio for synchronized playback...");
+
+  // Decode first frame into buffer 1
   int first_frame_size = this->read_next_frame_();
   if (first_frame_size > 0) {
     this->decode_frame_(first_frame_size);
-    frames_preloaded++;
+    this->frame_count_++;
   }
 
   int second_frame_size = this->read_next_frame_();
   if (second_frame_size > 0) {
     this->decode_frame_(second_frame_size);
-    frames_preloaded++;
-  }
-
-  ESP_LOGI(TAG, "Initial frames decoded: %d frames ready for display", frames_preloaded);
-
-  // Now start the background prefetch task - initial frames are already decoded
-  // The file position is now at the correct place for the prefetch task to continue
-  if (this->preload_buffer_) {
-    ESP_LOGI(TAG, "Starting background prefetch task...");
-    this->start_preload_task_();
-
-    // Wait for minimum amount in preload buffer before starting playback
-    // This ensures smooth startup even if SD/USB is slow
-    const size_t MIN_PRELOAD_BYTES = 512 * 1024;  // 512KB minimum
-    uint32_t wait_start = millis();
-    while (this->preload_available_ < MIN_PRELOAD_BYTES && (millis() - wait_start) < 2000) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
-
-    ESP_LOGI(TAG, "Preload buffer filled: %.1f MB / %u MB ready", this->preload_available_ / (1024.0f * 1024.0f),
-             this->preload_buffer_size_ / (1024 * 1024));
-
-    // Enable preload buffer consumption for main playback loop
-    this->use_preload_buffer_ = true;
+    this->frame_count_++;
   }
 
 #ifdef USE_AUDIO
@@ -478,32 +456,27 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // ============================================================================
-  // PHASE 4: Start Playback
-  // ============================================================================
-  ESP_LOGI(TAG, "Starting synchronized playback...");
+  // Display first frame NOW - synchronized with audio start
+  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    // Buffer 1 has first frame, buffer 0 has second frame
+    // Display buffer 1, prepare to decode into buffer 0 next
+    this->display_buffer_index_ = 1;
+    this->current_buffer_index_ = 0;
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[1].get(), aligned_width, aligned_height,
+                         LV_IMG_CF_TRUE_COLOR);
+    lv_obj_invalidate(this->canvas_);
+    xSemaphoreGive(this->lvgl_mutex_);
+  }
 
-  // Initialize frame pacing with presentation timestamps
-  this->playback_start_time_us_ = esp_timer_get_time();  // Current time in microseconds
-  this->frame_count_ = 0;
-  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
+  // Preload third frame into input buffer (ready for loop)
+  int third_frame_size = this->read_next_frame_();
+  if (third_frame_size <= 0) {
+    ESP_LOGW(TAG, "Failed to preload third frame");
+  }
 
-  // Setup buffer indices for first frame display
-  // Buffer 1 has first frame, buffer 0 has second frame
-  // Set up for VSYNC callback to display buffer 1 on next render cycle
-  this->display_buffer_index_ = 0;    // Currently nothing displayed
-  this->current_buffer_index_ = 1;    // First decoded frame is in buffer 1
-  this->buffer_swap_pending_ = true;  // Signal VSYNC callback to display it
-
-  // VSYNC callback will handle the actual canvas update and invalidation
-  // This avoids touching LVGL objects from outside LVGL's thread
-
-  ESP_LOGI(TAG, "Playback initialized - entering main loop");
-
-  // Main playback loop
-  // First frame will be displayed by VSYNC callback
-  // We start by reading the third frame (first two are already decoded)
-  int current_frame_size = this->read_next_frame_();
+  // Main playback loop with async I/O optimization
+  // We already have third_frame_size preloaded from above
+  int current_frame_size = third_frame_size;
 
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
@@ -569,13 +542,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
-
-    // Feed watchdog every 100 frames to prevent task watchdog timeout during long playback
-    // This keeps the system stable without impacting performance
-    if (this->frame_count_ % 100 == 0) {
-      // ESP32-P4 watchdog - feed task watchdog timer
-      esp_task_wdt_reset();
-    }
 
     // Read next frame asynchronously (during display time of current frame)
     // This happens AFTER buffer swap, so it doesn't delay display

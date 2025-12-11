@@ -292,10 +292,9 @@ class SimpleVideoPlayer : public Component {
   lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
   transcoder::Transcoder *transcoder_{nullptr};
   lv_obj_t *canvas_{nullptr};
-  uint32_t cache_buffer_size_{16 * 1024};          // 16KB internal RAM (aligned cache)
-  uint32_t input_buffer_size_{256 * 1024};         // 256KB PSRAM (JPEG frame buffer)
-  uint32_t preload_buffer_size_{4 * 1024 * 1024};  // 4MB PSRAM (frame preload buffer, configurable 2-8MB)
-  float target_fps_{30.0f};                        // Target frame rate
+  uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
+  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (JPEG frame buffer)
+  float target_fps_{30.0f};                 // Target frame rate
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -350,17 +349,6 @@ class SimpleVideoPlayer : public Component {
   size_t output_buffer_size_{0};
   uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
   uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
-
-  // Frame preload buffer - large PSRAM buffer to absorb SD/USB slowdowns
-  // Background task fills this buffer during playback to smooth over storage hiccups
-  std::unique_ptr<uint8_t[]> preload_buffer_;  // PSRAM (2-8MB), ring buffer for frame preloading
-  size_t preload_write_pos_{0};                // Write position in preload buffer (ring buffer)
-  size_t preload_read_pos_{0};                 // Read position in preload buffer (ring buffer)
-  size_t preload_available_{0};                // Bytes available in preload buffer
-  TaskHandle_t preload_task_handle_{nullptr};  // Background prefetch task
-  volatile bool preload_task_stop_{false};     // Signal to stop prefetch task
-  volatile bool use_preload_buffer_{false};    // Enable consuming from preload buffer (disabled during init)
-  SemaphoreHandle_t preload_mutex_{nullptr};   // Mutex for preload buffer access
 
   // FreeRTOS task
   TaskHandle_t task_handle_{nullptr};
