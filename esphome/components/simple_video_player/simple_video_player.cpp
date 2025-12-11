@@ -747,6 +747,13 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
   // This callback runs in LVGL's thread, so NO MUTEX needed for LVGL API calls
+
+  // Always invalidate canvas when playing to keep VSYNC callbacks flowing
+  // This ensures continuous draw cycles that trigger this callback
+  if (this->state_ == PlayerState::PLAYING) {
+    lv_obj_invalidate(this->canvas_);
+  }
+
   if (this->buffer_swap_pending_) {
     static uint32_t swap_count = 0;
     if (swap_count++ % 30 == 0) {  // Log every 30 swaps
@@ -762,9 +769,6 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
     uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
                          aligned_height, LV_IMG_CF_TRUE_COLOR);
-
-    // Invalidate canvas to trigger redraw with new buffer
-    lv_obj_invalidate(this->canvas_);
 
     this->buffer_swap_pending_ = false;
     this->canvas_needs_invalidate_ = false;
