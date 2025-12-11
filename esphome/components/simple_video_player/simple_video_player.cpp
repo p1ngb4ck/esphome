@@ -429,10 +429,20 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef USE_AUDIO
   // Prefill audio buffer before starting playback for sync
-  if (this->audio_enabled_) {
+  if (this->audio_enabled_ && this->speaker_ != nullptr) {
     ESP_LOGI(TAG, "Prefilling audio buffer...");
-    // Give audio task time to fill buffer (100ms worth of audio)
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // Wait until speaker has some buffered data (non-blocking check)
+    // This ensures A/V sync without unnecessary delays
+    uint32_t wait_count = 0;
+    while (!this->speaker_->has_buffered_data() && wait_count < 20) {
+      vTaskDelay(pdMS_TO_TICKS(5));  // Check every 5ms
+      wait_count++;
+    }
+    if (wait_count >= 20) {
+      ESP_LOGW(TAG, "Audio buffer prefill timeout, proceeding anyway");
+    } else {
+      ESP_LOGI(TAG, "Audio buffer prefilled in %u ms", wait_count * 5);
+    }
   }
 #endif
 
