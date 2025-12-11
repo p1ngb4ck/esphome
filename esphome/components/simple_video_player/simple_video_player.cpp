@@ -439,19 +439,26 @@ void SimpleVideoPlayer::playback_loop_() {
 
   ESP_LOGI(TAG, "Initial frames decoded: %d frames ready for display", frames_preloaded);
 
-  // Wait for minimum amount in preload buffer before starting playback
-  // This ensures smooth startup even if SD/USB is slow
-  const size_t MIN_PRELOAD_BYTES = 512 * 1024;  // 512KB minimum
-  uint32_t wait_start = millis();
-  while (this->preload_available_ < MIN_PRELOAD_BYTES && (millis() - wait_start) < 2000) {
-    vTaskDelay(pdMS_TO_TICKS(50));
+  // Now start the background prefetch task - initial frames are already decoded
+  // The file position is now at the correct place for the prefetch task to continue
+  if (this->preload_buffer_) {
+    ESP_LOGI(TAG, "Starting background prefetch task...");
+    this->start_preload_task_();
+
+    // Wait for minimum amount in preload buffer before starting playback
+    // This ensures smooth startup even if SD/USB is slow
+    const size_t MIN_PRELOAD_BYTES = 512 * 1024;  // 512KB minimum
+    uint32_t wait_start = millis();
+    while (this->preload_available_ < MIN_PRELOAD_BYTES && (millis() - wait_start) < 2000) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    ESP_LOGI(TAG, "Preload buffer filled: %.1f MB / %u MB ready", this->preload_available_ / (1024.0f * 1024.0f),
+             this->preload_buffer_size_ / (1024 * 1024));
+
+    // Enable preload buffer consumption for main playback loop
+    this->use_preload_buffer_ = true;
   }
-
-  ESP_LOGI(TAG, "Preload buffer filled: %.1f MB / %u MB ready", this->preload_available_ / (1024.0f * 1024.0f),
-           this->preload_buffer_size_ / (1024 * 1024));
-
-  // Enable preload buffer consumption for main playback loop
-  this->use_preload_buffer_ = true;
 
 #ifdef USE_AUDIO
   // Wait for audio buffer to have sufficient data
@@ -743,7 +750,8 @@ int SimpleVideoPlayer::read_next_frame_() {
 
   if (this->use_preload_buffer_ && this->preload_task_handle_ != nullptr && this->preload_available_ > 0) {
     // Preload buffer active - consume from it
-    if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Try to acquire mutex with minimal wait (1ms max) - performance critical path
+    if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
       if (this->preload_available_ == 0) {
         xSemaphoreGive(this->preload_mutex_);
         // Buffer empty - return 0 to signal no data (EOF or underrun)
