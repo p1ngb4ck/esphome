@@ -9,6 +9,7 @@
 #include "esp_cache.h"
 #include "esp_dma_utils.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #endif
 
 #ifdef USE_HARDWARE_JPEG_DECODER
@@ -252,11 +253,13 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->last_error_ = PlaybackError::NONE;
   xSemaphoreGive(this->state_mutex_);
 
-  // Create playback task
+  // Create playback task with high priority
+  // Priority 10 ensures video playback takes precedence over main loop (priority 1)
+  // and most other ESPHome components, preventing frame drops from component delays
   BaseType_t result = xTaskCreate(playback_task_entry_, "video_player",
                                   8192,  // Stack size
                                   this,
-                                  5,  // Priority
+                                  10,  // Priority (higher than main loop and most components)
                                   &this->task_handle_);
 
   if (result != pdPASS) {
@@ -411,20 +414,21 @@ void SimpleVideoPlayer::playback_loop_() {
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
   // Preload and decode first frames for smooth A/V sync startup
+  // Note: Do NOT increment frame_count_ during preload - it's only for presentation timing
   ESP_LOGI(TAG, "Preloading frames and audio for synchronized playback...");
 
   // Decode first frame into buffer 1
   int first_frame_size = this->read_next_frame_();
   if (first_frame_size > 0) {
     this->decode_frame_(first_frame_size);
-    this->frame_count_++;
+    // Don't increment frame_count_ - preload doesn't count toward presentation timing
   }
 
   // Decode second frame into buffer 0
   int second_frame_size = this->read_next_frame_();
   if (second_frame_size > 0) {
     this->decode_frame_(second_frame_size);
-    this->frame_count_++;
+    // Don't increment frame_count_ - preload doesn't count toward presentation timing
   }
 
 #ifdef USE_AUDIO
@@ -451,17 +455,15 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Display first frame NOW - synchronized with audio start
-  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Buffer 1 has first frame, buffer 0 has second frame
-    // Display buffer 1, prepare to decode into buffer 0 next
-    this->display_buffer_index_ = 1;
-    this->current_buffer_index_ = 0;
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[1].get(), aligned_width, aligned_height,
-                         LV_IMG_CF_TRUE_COLOR);
-    lv_obj_invalidate(this->canvas_);
-    xSemaphoreGive(this->lvgl_mutex_);
-  }
+  // Setup buffer indices for first frame display
+  // Buffer 1 has first frame, buffer 0 has second frame
+  // Set up for VSYNC callback to display buffer 1 on next render cycle
+  this->display_buffer_index_ = 0;    // Currently nothing displayed
+  this->current_buffer_index_ = 1;    // First decoded frame is in buffer 1
+  this->buffer_swap_pending_ = true;  // Signal VSYNC callback to display it
+
+  // VSYNC callback will handle the actual canvas update and invalidation
+  // This avoids touching LVGL objects from outside LVGL's thread
 
   // Preload third frame into input buffer (ready for loop)
   int third_frame_size = this->read_next_frame_();
@@ -470,7 +472,8 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   // Main playback loop with async I/O optimization
-  // We already have third_frame_size preloaded from above
+  // Note: First frame will be displayed by VSYNC callback
+  // We already have second frame in buffer 0, third frame preloaded
   int current_frame_size = third_frame_size;
 
   while (this->state_ != PlayerState::STOPPED) {
@@ -537,6 +540,15 @@ void SimpleVideoPlayer::playback_loop_() {
 
     // Increment frame counter for next frame's presentation timestamp
     this->frame_count_++;
+
+    // Feed watchdog every 100 frames to prevent task watchdog timeout during long playback
+    // This keeps the system stable without impacting performance
+    if (this->frame_count_ % 100 == 0) {
+#ifdef USE_ESP32
+      // ESP32 watchdog - feed task watchdog timer
+      esp_task_wdt_reset();
+#endif
+    }
 
     // Read next frame asynchronously (during display time of current frame)
     // This happens AFTER buffer swap, so it doesn't delay display
@@ -1286,9 +1298,10 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Start audio processing task on Core 0 (video playback runs on Core 1)
   // For PCM: task handles channel conversion and direct speaker output
   // For MP3/FLAC: task handles decoder + channel conversion + speaker output
+  // Audio task priority 10 (same as video) to prevent audio underruns
   this->audio_task_stop_ = false;
   BaseType_t result = xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096,  // 4KB stack
-                                              this, 5,                               // Priority 5 (high)
+                                              this, 10,  // Priority 10 (high - same as video task)
                                               &this->audio_task_handle_,
                                               0);  // Core 0
 
@@ -1455,17 +1468,32 @@ void SimpleVideoPlayer::audio_processing_loop_() {
                                               actual_frames, this->source_audio_channels_,
                                               this->speaker_audio_channels_, 16)) {
               // Write converted audio to speaker
-              this->speaker_->play(this->audio_temp_buffer_.get(), output_bytes);
+              // Handle partial writes - speaker might not accept all data if buffer is full
+              size_t bytes_written = 0;
+              size_t bytes_remaining = output_bytes;
+              const uint8_t *write_ptr = this->audio_temp_buffer_.get();
+
+              while (bytes_remaining > 0) {
+                size_t written = this->speaker_->play(write_ptr, bytes_remaining);
+                if (written > 0) {
+                  bytes_written += written;
+                  bytes_remaining -= written;
+                  write_ptr += written;
+                } else {
+                  // Speaker buffer full, yield briefly and retry
+                  vTaskDelay(pdMS_TO_TICKS(1));
+                }
+              }
             }
           }
         }
       } else {
-        // No data available, yield to other tasks
-        vTaskDelay(pdMS_TO_TICKS(5));
+        // No data available, yield briefly to other tasks
+        vTaskDelay(pdMS_TO_TICKS(1));
       }
     } else {
-      // No conversion needed - yield to avoid tight loop
-      vTaskDelay(pdMS_TO_TICKS(5));
+      // No conversion needed - yield briefly to avoid tight loop
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }  // End of while loop
 
