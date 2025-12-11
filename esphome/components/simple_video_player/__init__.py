@@ -64,7 +64,6 @@ CONF_CANVAS_ID = "canvas_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
-CONF_PRELOAD_BUFFER_SIZE = "preload_buffer_size"
 CONF_TARGET_FPS = "target_fps"
 CONF_ON_PLAYBACK_STARTED = "on_playback_started"
 CONF_ON_PLAYBACK_FINISHED = "on_playback_finished"
@@ -74,7 +73,6 @@ CONF_ON_PLAYBACK_ERROR = "on_playback_error"
 # Default values
 DEFAULT_CACHE_BUFFER_SIZE = 64 * 1024  # 64KB - optimized for better I/O performance
 DEFAULT_INPUT_BUFFER_SIZE = 256 * 1024  # 256KB
-DEFAULT_PRELOAD_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB - absorbs SD/USB slowdowns
 DEFAULT_TARGET_FPS = 30.0
 
 # Validation ranges
@@ -82,8 +80,6 @@ MIN_CACHE_BUFFER_SIZE = 8 * 1024  # 8KB
 MAX_CACHE_BUFFER_SIZE = 128 * 1024  # 128KB - increased for performance
 MIN_INPUT_BUFFER_SIZE = 128 * 1024  # 128KB
 MAX_INPUT_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
-MIN_PRELOAD_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB minimum
-MAX_PRELOAD_BUFFER_SIZE = 8 * 1024 * 1024  # 8MB maximum
 MIN_FPS = 1.0
 MAX_FPS = 60.0
 
@@ -101,9 +97,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
             ): cv.int_range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE),
-            cv.Optional(
-                CONF_PRELOAD_BUFFER_SIZE, default=DEFAULT_PRELOAD_BUFFER_SIZE
-            ): cv.int_range(min=MIN_PRELOAD_BUFFER_SIZE, max=MAX_PRELOAD_BUFFER_SIZE),
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
             ),
@@ -170,8 +163,6 @@ async def to_code(config):
 
         # Extract speaker's channel configuration to enable proper audio routing
         # We need to look up the speaker's config to determine its channel mode
-        from esphome.core import CORE
-
         speaker_config = CORE.config.get(CONF_SPEAKER_ID)
         if speaker_config and CONF_CHANNEL in speaker_config:
             channel_mode = speaker_config[CONF_CHANNEL]
@@ -182,7 +173,6 @@ async def to_code(config):
 
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
-    cg.add(var.set_preload_buffer_size(config[CONF_PRELOAD_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
 
     # Set target FPS
