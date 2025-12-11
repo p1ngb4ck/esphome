@@ -749,69 +749,67 @@ int SimpleVideoPlayer::read_next_frame_() {
   // During init (before preload enabled), read directly from file
 
   if (this->use_preload_buffer_ && this->preload_task_handle_ != nullptr) {
-    // Preload buffer active - try to consume from it
-    // Try to acquire mutex with minimal wait (1ms max) - performance critical path
-    if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(1)) == pdTRUE) {
-      // Check availability AFTER acquiring mutex to avoid race condition
-      if (this->preload_available_ == 0) {
-        xSemaphoreGive(this->preload_mutex_);
-        // Buffer empty - fall back to reading directly from file
-        return this->read_next_frame_from_file_();
-      }
+    // Preload buffer active - MUST consume from it
+    // Once preload is enabled, we can't read from file anymore (preload task owns file position)
 
-      // Read frame size from preload buffer
-      // Frame format in preload buffer: [4-byte size][frame data]
-      uint32_t frame_size = 0;
-      size_t read_end = this->preload_read_pos_ + sizeof(uint32_t);
+    // Acquire mutex to update positions - use blocking acquire for correctness
+    xSemaphoreTake(this->preload_mutex_, portMAX_DELAY);
 
-      if (read_end <= this->preload_buffer_size_) {
-        // No wrap for size
-        memcpy(&frame_size, this->preload_buffer_.get() + this->preload_read_pos_, sizeof(uint32_t));
-        this->preload_read_pos_ = read_end;
-      } else {
-        // Wrap around for size
-        size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
-        size_t second_part = sizeof(uint32_t) - first_part;
-        uint8_t size_bytes[4];
-        memcpy(size_bytes, this->preload_buffer_.get() + this->preload_read_pos_, first_part);
-        memcpy(size_bytes + first_part, this->preload_buffer_.get(), second_part);
-        memcpy(&frame_size, size_bytes, sizeof(uint32_t));
-        this->preload_read_pos_ = second_part;
-      }
-
-      // Validate frame size
-      if (frame_size == 0 || frame_size > this->input_buffer_size_) {
-        xSemaphoreGive(this->preload_mutex_);
-        ESP_LOGE(TAG, "Invalid frame size from preload buffer: %u", frame_size);
-        return -1;
-      }
-
-      // Read frame data from preload buffer to input buffer
-      read_end = this->preload_read_pos_ + frame_size;
-
-      if (read_end <= this->preload_buffer_size_) {
-        // No wrap for data
-        memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, frame_size);
-        this->preload_read_pos_ = read_end;
-      } else {
-        // Wrap around for data
-        size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
-        size_t second_part = frame_size - first_part;
-        memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, first_part);
-        memcpy(this->input_buffer_.get() + first_part, this->preload_buffer_.get(), second_part);
-        this->preload_read_pos_ = second_part;
-      }
-
-      // Update available bytes (size header + frame data)
-      this->preload_available_ -= (sizeof(uint32_t) + frame_size);
+    // Check availability
+    if (this->preload_available_ == 0) {
       xSemaphoreGive(this->preload_mutex_);
-
-      return frame_size;
-    } else {
-      // Failed to acquire mutex - fall back to reading directly from file
-      // This should be rare but prevents blocking
-      return this->read_next_frame_from_file_();
+      // Buffer empty - this is an underrun
+      ESP_LOGW(TAG, "Preload buffer underrun");
+      return 0;
     }
+
+    // Read frame size (4 bytes) - keep inside mutex
+    uint32_t frame_size = 0;
+    size_t read_end = this->preload_read_pos_ + sizeof(uint32_t);
+
+    if (read_end <= this->preload_buffer_size_) {
+      // No wrap for size
+      memcpy(&frame_size, this->preload_buffer_.get() + this->preload_read_pos_, sizeof(uint32_t));
+      this->preload_read_pos_ = read_end;
+    } else {
+      // Wrap around for size
+      size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
+      size_t second_part = sizeof(uint32_t) - first_part;
+      uint8_t size_bytes[4];
+      memcpy(size_bytes, this->preload_buffer_.get() + this->preload_read_pos_, first_part);
+      memcpy(size_bytes + first_part, this->preload_buffer_.get(), second_part);
+      memcpy(&frame_size, size_bytes, sizeof(uint32_t));
+      this->preload_read_pos_ = second_part;
+    }
+
+    // Validate frame size
+    if (frame_size == 0 || frame_size > this->input_buffer_size_) {
+      xSemaphoreGive(this->preload_mutex_);
+      ESP_LOGE(TAG, "Invalid frame size from preload buffer: %u", frame_size);
+      return -1;
+    }
+
+    // Read frame data from preload buffer to input buffer
+    read_end = this->preload_read_pos_ + frame_size;
+
+    if (read_end <= this->preload_buffer_size_) {
+      // No wrap for data
+      memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, frame_size);
+      this->preload_read_pos_ = read_end;
+    } else {
+      // Wrap around for data
+      size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
+      size_t second_part = frame_size - first_part;
+      memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, first_part);
+      memcpy(this->input_buffer_.get() + first_part, this->preload_buffer_.get(), second_part);
+      this->preload_read_pos_ = second_part;
+    }
+
+    // Update available bytes (size header + frame data)
+    this->preload_available_ -= (sizeof(uint32_t) + frame_size);
+    xSemaphoreGive(this->preload_mutex_);
+
+    return frame_size;
   } else {
     // Preload not active - read directly from file (during init phase)
     return this->read_next_frame_from_file_();
