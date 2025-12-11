@@ -4,23 +4,17 @@
 #include <algorithm>
 #include <cstring>
 
-#ifdef USE_ESP32
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
 #include "esp_dma_utils.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
-#endif
 
-#ifdef USE_HARDWARE_JPEG_DECODER
 #include "driver/jpeg_decode.h"
 #include "driver/jpeg_types.h"
 #include "hal/color_types.h"
-#endif
 
-#ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
-#endif
 
 namespace esphome::simple_video_player {
 
@@ -66,7 +60,7 @@ void SimpleVideoPlayer::setup() {
 
   // Initialize JPEG decoder during setup (not during playback)
   // This ensures resources are allocated early and won't fail during playback
-#ifdef USE_HARDWARE_JPEG_DECODER
+  // ESP32-P4 only: Hardware JPEG decoder
   jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
   if (decoder == nullptr) {
     ESP_LOGE(TAG, "Failed to initialize JPEG decoder during setup");
@@ -74,16 +68,6 @@ void SimpleVideoPlayer::setup() {
     return;
   }
   ESP_LOGI(TAG, "Hardware JPEG decoder initialized (handle: %p)", decoder);
-#elif defined(USE_ESP_JPEG_DECODER)
-  if (!this->transcoder_->is_jpeg_decoder_available()) {
-    ESP_LOGE(TAG, "ESP-JPEG decoder not available");
-    this->mark_failed();
-    return;
-  }
-  ESP_LOGI(TAG, "ESP-JPEG decoder ready");
-#else
-  ESP_LOGW(TAG, "No hardware JPEG decoder available");
-#endif
 
   // Verify canvas is set
   if (this->canvas_ == nullptr) {
@@ -119,12 +103,9 @@ void SimpleVideoPlayer::setup() {
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
-#ifdef USE_ESP32
+  // ESP32-P4 only
   this->cache_buffer_.reset(
       static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, this->cache_buffer_size_, MALLOC_CAP_INTERNAL)));
-#else
-  this->cache_buffer_.reset(new uint8_t[this->cache_buffer_size_]);
-#endif
 
   if (!this->cache_buffer_) {
     ESP_LOGE(TAG, "Failed to allocate cache buffer (%u bytes)", this->cache_buffer_size_);
@@ -134,9 +115,9 @@ void SimpleVideoPlayer::setup() {
 
   // Pre-allocate input and output buffers during setup (in PSRAM)
   // This ensures resources are allocated early and won't fail during playback
+  // ESP32-P4 only: Hardware JPEG decoder
   ESP_LOGI(TAG, "Pre-allocating PSRAM buffers...");
 
-#ifdef USE_HARDWARE_JPEG_DECODER
   // Allocate input buffer (JPEG encoded frame buffer - PSRAM)
   jpeg_decode_memory_alloc_cfg_t input_cfg = {
       .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
@@ -191,32 +172,15 @@ void SimpleVideoPlayer::setup() {
   this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = actual_output_size;
 
-  // Allocate large preload buffer in PSRAM (2-8MB configurable)
-  // This absorbs SD/USB performance variations during playback
-  uint8_t *preload_buf = static_cast<uint8_t *>(heap_caps_malloc(this->preload_buffer_size_, MALLOC_CAP_SPIRAM));
-  if (preload_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate preload buffer (%u bytes / %u MB)", this->preload_buffer_size_,
-             this->preload_buffer_size_ / (1024 * 1024));
-    this->mark_failed();
-    return;
-  }
-  this->preload_buffer_.reset(preload_buf);
-  ESP_LOGI(TAG, "Preload buffer allocated: %u MB (PSRAM)", this->preload_buffer_size_ / (1024 * 1024));
-
   ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", actual_output_size,
            aligned_max_width, aligned_max_height);
-#else
-  ESP_LOGW(TAG, "Hardware JPEG decoder not available - buffers not allocated");
-#endif
 
   // Audio buffers are now allocated in init_audio_decoder_() when playback starts
-#ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
     ESP_LOGI(TAG, "Audio playback enabled with speaker");
   } else {
     ESP_LOGI(TAG, "Audio playback disabled (no speaker configured)");
   }
-#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %u bytes (internal RAM)", this->cache_buffer_size_);
@@ -365,9 +329,25 @@ void SimpleVideoPlayer::playback_loop_() {
   // ============================================================================
   // PHASE 1: Start Background Prefetch FIRST
   // ============================================================================
-  // Start this immediately so buffer fills while we do other initialization
-  ESP_LOGI(TAG, "Starting background prefetch...");
-  this->start_preload_task_();
+  // Allocate large preload buffer in PSRAM (2-8MB configurable)
+  // This absorbs SD/USB performance variations during playback
+  if (!this->preload_buffer_) {
+    uint8_t *preload_buf = static_cast<uint8_t *>(heap_caps_malloc(this->preload_buffer_size_, MALLOC_CAP_SPIRAM));
+    if (preload_buf == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate preload buffer (%u bytes / %u MB)", this->preload_buffer_size_,
+               this->preload_buffer_size_ / (1024 * 1024));
+      ESP_LOGW(TAG, "Continuing without preload buffer - playback may be less smooth");
+    } else {
+      this->preload_buffer_.reset(preload_buf);
+      ESP_LOGI(TAG, "Preload buffer allocated: %u MB (PSRAM)", this->preload_buffer_size_ / (1024 * 1024));
+    }
+  }
+
+  // Start background prefetch task immediately so buffer fills during initialization
+  if (this->preload_buffer_) {
+    ESP_LOGI(TAG, "Starting background prefetch...");
+    this->start_preload_task_();
+  }
 
   // ============================================================================
   // PHASE 2: Initialize Audio (parallel with prefetch)
@@ -417,8 +397,8 @@ void SimpleVideoPlayer::playback_loop_() {
     ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas setup");
   }
 
-#ifdef USE_HARDWARE_JPEG_DECODER
   // Acquire exclusive access to JPEG decoder for duration of playback
+  // ESP32-P4 only: Hardware JPEG decoder
   if (this->transcoder_ != nullptr) {
     if (!this->transcoder_->acquire_jpeg_decoder_exclusive("simple_video_player")) {
       ESP_LOGE(TAG, "Failed to acquire exclusive JPEG decoder access");
@@ -427,7 +407,6 @@ void SimpleVideoPlayer::playback_loop_() {
       return;
     }
   }
-#endif
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
   if (this->video_format_ != VideoFormat::AVI_MJPEG) {
@@ -587,10 +566,8 @@ void SimpleVideoPlayer::playback_loop_() {
     // Feed watchdog every 100 frames to prevent task watchdog timeout during long playback
     // This keeps the system stable without impacting performance
     if (this->frame_count_ % 100 == 0) {
-#ifdef USE_ESP32
-      // ESP32 watchdog - feed task watchdog timer
+      // ESP32-P4 watchdog - feed task watchdog timer
       esp_task_wdt_reset();
-#endif
     }
 
     // Read next frame asynchronously (during display time of current frame)
@@ -628,12 +605,11 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-#ifdef USE_HARDWARE_JPEG_DECODER
   // Release exclusive access to decoder after playback
+  // ESP32-P4 only: Hardware JPEG decoder
   if (this->transcoder_ != nullptr) {
     this->transcoder_->release_jpeg_decoder_exclusive();
   }
-#endif
 
   // Clear both buffers on stop - use VSYNC mechanism for non-blocking invalidation
   if (this->output_buffer_[0] && this->output_buffer_[1]) {
@@ -834,8 +810,8 @@ int SimpleVideoPlayer::read_next_frame_() {
 }
 
 bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
-#ifdef USE_HARDWARE_JPEG_DECODER
   // Use decoder acquired exclusively for this playback session
+  // ESP32-P4 only: Hardware JPEG decoder
   jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
   if (decoder == nullptr) {
     ESP_LOGE(TAG, "JPEG decoder not available (should have been acquired at playback start)");
@@ -874,10 +850,6 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
   this->canvas_needs_invalidate_ = true;
 
   return true;
-#else
-  ESP_LOGE(TAG, "Hardware JPEG decoder not available");
-  return false;
-#endif
 }
 
 void SimpleVideoPlayer::on_lvgl_render_complete() {
@@ -907,7 +879,7 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
 }
 
 bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height) {
-#ifdef USE_HARDWARE_JPEG_DECODER
+  // ESP32-P4 only: Hardware JPEG decoder
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     // Get dimensions from AVI header
     const AVIStreamInfo *video_info = this->avi_parser_->get_video_info();
@@ -958,10 +930,6 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
 
     return true;
   }
-#else
-  ESP_LOGE(TAG, "Hardware JPEG decoder not available");
-  return false;
-#endif
 }
 
 //========================================================================
@@ -996,7 +964,6 @@ VideoFormat SimpleVideoPlayer::detect_format_() {
 }
 
 bool SimpleVideoPlayer::open_file_(const std::string &path) {
-#ifdef USE_STORAGE
   // Check if this is a network path
   if (storage::global_storage && storage::global_storage->is_network_path(path)) {
     ESP_LOGI(TAG, "Opening network file: %s", path.c_str());
@@ -1009,7 +976,6 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     this->file_size_ = 0;
     return true;
   }
-#endif
 
   // Open local file with optimized buffered reader
   ESP_LOGI(TAG, "Opening local file with buffered reader: %s", path.c_str());
@@ -1096,7 +1062,6 @@ void SimpleVideoPlayer::close_file_() {
 
 int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
   if (this->is_network_file_) {
-#ifdef USE_STORAGE
     // Network file - use storage API
     // Note: This is a simplified implementation that reads chunks
     // A full implementation would need to handle streaming more efficiently
@@ -1108,9 +1073,6 @@ int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
     // This is a placeholder - actual implementation depends on network storage backend
     ESP_LOGW(TAG, "Network file streaming not fully implemented yet");
     return -1;
-#else
-    return -1;
-#endif
   } else {
     // Local file - use buffered reader
     if (!this->file_reader_ || !this->file_reader_->is_open()) {
