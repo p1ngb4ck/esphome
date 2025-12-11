@@ -114,6 +114,7 @@ class SimpleVideoPlayer : public Component {
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
+  void set_preload_buffer_size(uint32_t size) { this->preload_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
 
 #ifdef USE_SPEAKER
@@ -187,7 +188,11 @@ class SimpleVideoPlayer : public Component {
   // Frame Processing
   //========================================================================
 
-  /// Read next JPEG frame from file into input buffer
+  /// Read next JPEG frame directly from file into input buffer (used by preload task)
+  /// Returns frame size or 0 if EOF, -1 on error
+  int read_next_frame_from_file_();
+
+  /// Read next JPEG frame (from preload buffer during playback, or from file during init)
   /// Returns frame size or 0 if EOF, -1 on error
   int read_next_frame_();
 
@@ -196,6 +201,22 @@ class SimpleVideoPlayer : public Component {
 
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
+
+  //========================================================================
+  // Frame Preloading (Background Task)
+  //========================================================================
+
+  /// Background prefetch task entry point
+  static void preload_task_entry_(void *param);
+
+  /// Background prefetch loop - fills preload buffer during playback
+  void preload_loop_();
+
+  /// Start background prefetch task
+  void start_preload_task_();
+
+  /// Stop background prefetch task
+  void stop_preload_task_();
 
 #ifdef USE_AUDIO
   /// Initialize audio decoder for AVI audio stream
@@ -271,9 +292,10 @@ class SimpleVideoPlayer : public Component {
   lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
   transcoder::Transcoder *transcoder_{nullptr};
   lv_obj_t *canvas_{nullptr};
-  uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
-  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (JPEG frame buffer)
-  float target_fps_{30.0f};                 // Target frame rate
+  uint32_t cache_buffer_size_{16 * 1024};          // 16KB internal RAM (aligned cache)
+  uint32_t input_buffer_size_{256 * 1024};         // 256KB PSRAM (JPEG frame buffer)
+  uint32_t preload_buffer_size_{4 * 1024 * 1024};  // 4MB PSRAM (frame preload buffer, configurable 2-8MB)
+  float target_fps_{30.0f};                        // Target frame rate
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -322,12 +344,23 @@ class SimpleVideoPlayer : public Component {
   uint32_t video_height_{0};
 
   // Buffers (allocated on demand)
-  std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM, aligned for DMA
-  std::unique_ptr<uint8_t[]> input_buffer_;      // PSRAM, JPEG encoded frame
+  std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
+  std::unique_ptr<uint8_t[]> input_buffer_;      // PSRAM (256KB), JPEG encoded frame
   std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
   uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
   uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
+
+  // Frame preload buffer - large PSRAM buffer to absorb SD/USB slowdowns
+  // Background task fills this buffer during playback to smooth over storage hiccups
+  std::unique_ptr<uint8_t[]> preload_buffer_;  // PSRAM (2-8MB), ring buffer for frame preloading
+  size_t preload_buffer_size_{0};              // Total size of preload buffer
+  size_t preload_write_pos_{0};                // Write position in preload buffer (ring buffer)
+  size_t preload_read_pos_{0};                 // Read position in preload buffer (ring buffer)
+  size_t preload_available_{0};                // Bytes available in preload buffer
+  TaskHandle_t preload_task_handle_{nullptr};  // Background prefetch task
+  volatile bool preload_task_stop_{false};     // Signal to stop prefetch task
+  SemaphoreHandle_t preload_mutex_{nullptr};   // Mutex for preload buffer access
 
   // FreeRTOS task
   TaskHandle_t task_handle_{nullptr};

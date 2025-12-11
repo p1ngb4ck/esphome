@@ -190,6 +190,19 @@ void SimpleVideoPlayer::setup() {
   this->output_buffer_[0].reset(output_buf_0);
   this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = actual_output_size;
+
+  // Allocate large preload buffer in PSRAM (2-8MB configurable)
+  // This absorbs SD/USB performance variations during playback
+  uint8_t *preload_buf = static_cast<uint8_t *>(heap_caps_malloc(this->preload_buffer_size_, MALLOC_CAP_SPIRAM));
+  if (preload_buf == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate preload buffer (%u bytes / %u MB)", this->preload_buffer_size_,
+             this->preload_buffer_size_ / (1024 * 1024));
+    this->mark_failed();
+    return;
+  }
+  this->preload_buffer_.reset(preload_buf);
+  ESP_LOGI(TAG, "Preload buffer allocated: %u MB (PSRAM)", this->preload_buffer_size_ / (1024 * 1024));
+
   ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", actual_output_size,
            aligned_max_width, aligned_max_height);
 #else
@@ -349,13 +362,31 @@ void SimpleVideoPlayer::playback_loop_() {
     canvas_positioned = true;
   }
 
-  // Initialize audio decoder for AVI files with audio
+  // ============================================================================
+  // PHASE 1: Start Background Prefetch FIRST
+  // ============================================================================
+  // Start this immediately so buffer fills while we do other initialization
+  ESP_LOGI(TAG, "Starting background prefetch...");
+  this->start_preload_task_();
+
+  // ============================================================================
+  // PHASE 2: Initialize Audio (parallel with prefetch)
+  // ============================================================================
+  // Audio/speaker initialization happens in parallel with background prefetch
 #ifdef USE_AUDIO
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
-    this->init_audio_decoder_();  // Non-fatal if audio init fails
+    ESP_LOGI(TAG, "Initializing audio decoder and speaker...");
+    if (!this->init_audio_decoder_()) {
+      ESP_LOGW(TAG, "Audio initialization failed, continuing with video only");
+    } else {
+      ESP_LOGI(TAG, "Audio system ready");
+    }
   }
 #endif
 
+  // ============================================================================
+  // PHASE 3: Allocate Video Buffers (parallel with prefetch)
+  // ============================================================================
   // Allocate buffers based on video size
   if (!this->allocate_buffers_(width, height)) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
@@ -408,52 +439,65 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fire started callback
   this->on_started_callbacks_.call();
 
+  // ============================================================================
+  // PHASE 4: Decode Initial Frames (parallel with prefetch still running)
+  // ============================================================================
+  ESP_LOGI(TAG, "Decoding initial frames...");
+
+  // Decode first two video frames while prefetch task continues filling buffer in background
+  int frames_preloaded = 0;
+  int first_frame_size = this->read_next_frame_();
+  if (first_frame_size > 0) {
+    this->decode_frame_(first_frame_size);
+    frames_preloaded++;
+  }
+
+  int second_frame_size = this->read_next_frame_();
+  if (second_frame_size > 0) {
+    this->decode_frame_(second_frame_size);
+    frames_preloaded++;
+  }
+
+  ESP_LOGI(TAG, "Initial frames decoded: %d frames ready for display", frames_preloaded);
+
+  // Wait for minimum amount in preload buffer before starting playback
+  // This ensures smooth startup even if SD/USB is slow
+  const size_t MIN_PRELOAD_BYTES = 512 * 1024;  // 512KB minimum
+  uint32_t wait_start = millis();
+  while (this->preload_available_ < MIN_PRELOAD_BYTES && (millis() - wait_start) < 2000) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  ESP_LOGI(TAG, "Preload buffer filled: %.1f MB / %u MB ready", this->preload_available_ / (1024.0f * 1024.0f),
+           this->preload_buffer_size_ / (1024 * 1024));
+
+#ifdef USE_AUDIO
+  // Wait for audio buffer to have sufficient data
+  if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
+    // Calculate target: 200ms of audio for smooth startup
+    size_t bytes_per_ms = (this->source_audio_channels_ * 2 * this->audio_sample_rate_) / 1000;
+    size_t target_bytes = bytes_per_ms * 200;  // 200ms buffer
+
+    ESP_LOGI(TAG, "Waiting for audio buffer to fill (target: %zu bytes)...", target_bytes);
+    uint32_t wait_start = millis();
+    while (this->audio_decoded_ring_buffer_->available() < target_bytes && (millis() - wait_start) < 1000) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    size_t buffered = this->audio_decoded_ring_buffer_->available();
+    ESP_LOGI(TAG, "Audio buffer ready: %zu bytes (%.1f ms)", buffered, (float) buffered / bytes_per_ms);
+  }
+#endif
+
+  // ============================================================================
+  // PHASE 4: Start Playback
+  // ============================================================================
+  ESP_LOGI(TAG, "Starting synchronized playback...");
+
   // Initialize frame pacing with presentation timestamps
   this->playback_start_time_us_ = esp_timer_get_time();  // Current time in microseconds
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
-
-  // Preload and decode first frames for smooth A/V sync startup
-  // Note: Do NOT increment frame_count_ during preload - it's only for presentation timing
-  ESP_LOGI(TAG, "Preloading frames and audio for synchronized playback...");
-
-  // Decode first frame into buffer 1
-  int first_frame_size = this->read_next_frame_();
-  if (first_frame_size > 0) {
-    this->decode_frame_(first_frame_size);
-    // Don't increment frame_count_ - preload doesn't count toward presentation timing
-  }
-
-  // Decode second frame into buffer 0
-  int second_frame_size = this->read_next_frame_();
-  if (second_frame_size > 0) {
-    this->decode_frame_(second_frame_size);
-    // Don't increment frame_count_ - preload doesn't count toward presentation timing
-  }
-
-#ifdef USE_AUDIO
-  // Prefill audio buffer before starting playback for sync
-  // Wait for decoded ring buffer to have at least 100ms of audio data
-  if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
-    // Calculate how many bytes we need for 100ms of audio
-    size_t bytes_per_ms = (this->source_audio_channels_ * 2 * this->audio_sample_rate_) / 1000;  // 16-bit samples
-    size_t target_bytes = bytes_per_ms * 100;                                                    // 100ms worth of audio
-
-    ESP_LOGI(TAG, "Prefilling audio buffer (target: %zu bytes)...", target_bytes);
-    uint32_t wait_count = 0;
-    while (this->audio_decoded_ring_buffer_->available() < target_bytes && wait_count < 40) {
-      vTaskDelay(pdMS_TO_TICKS(5));  // Check every 5ms
-      wait_count++;
-    }
-    if (wait_count >= 40) {
-      ESP_LOGW(TAG, "Audio buffer prefill timeout (%zu/%zu bytes), proceeding anyway",
-               this->audio_decoded_ring_buffer_->available(), target_bytes);
-    } else {
-      ESP_LOGI(TAG, "Audio buffer prefilled in %u ms (%zu bytes)", wait_count * 5,
-               this->audio_decoded_ring_buffer_->available());
-    }
-  }
-#endif
 
   // Setup buffer indices for first frame display
   // Buffer 1 has first frame, buffer 0 has second frame
@@ -465,16 +509,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // VSYNC callback will handle the actual canvas update and invalidation
   // This avoids touching LVGL objects from outside LVGL's thread
 
-  // Preload third frame into input buffer (ready for loop)
-  int third_frame_size = this->read_next_frame_();
-  if (third_frame_size <= 0) {
-    ESP_LOGW(TAG, "Failed to preload third frame");
-  }
+  ESP_LOGI(TAG, "Playback initialized - entering main loop");
 
-  // Main playback loop with async I/O optimization
-  // Note: First frame will be displayed by VSYNC callback
-  // We already have second frame in buffer 0, third frame preloaded
-  int current_frame_size = third_frame_size;
+  // Main playback loop
+  // First frame will be displayed by VSYNC callback
+  // We start by reading the third frame (first two are already decoded)
+  int current_frame_size = this->read_next_frame_();
 
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
@@ -556,6 +596,9 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   // Cleanup
+  // Stop background prefetch task
+  this->stop_preload_task_();
+
   this->close_file_();
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
   // Buffers are only freed in destructor when component is destroyed
@@ -625,7 +668,8 @@ bool SimpleVideoPlayer::wait_for_task_stop_(uint32_t timeout_ms) {
 // Frame Processing
 //========================================================================
 
-int SimpleVideoPlayer::read_next_frame_() {
+int SimpleVideoPlayer::read_next_frame_from_file_() {
+  // Read frame directly from file - used by preload task
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
@@ -711,6 +755,78 @@ int SimpleVideoPlayer::read_next_frame_() {
         // Continue to next cache chunk
       }
     }
+  }
+}
+
+int SimpleVideoPlayer::read_next_frame_() {
+  // During playback, consume frames from preload buffer if available
+  // During init (before preload task starts), read directly from file
+
+  if (this->preload_task_handle_ != nullptr && this->preload_available_ > 0) {
+    // Preload buffer active - consume from it
+    if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (this->preload_available_ == 0) {
+        xSemaphoreGive(this->preload_mutex_);
+        // Buffer empty - return 0 to signal no data (EOF or underrun)
+        return 0;
+      }
+
+      // Read frame size from preload buffer
+      // Frame format in preload buffer: [4-byte size][frame data]
+      uint32_t frame_size = 0;
+      size_t read_end = this->preload_read_pos_ + sizeof(uint32_t);
+
+      if (read_end <= this->preload_buffer_size_) {
+        // No wrap for size
+        memcpy(&frame_size, this->preload_buffer_.get() + this->preload_read_pos_, sizeof(uint32_t));
+        this->preload_read_pos_ = read_end;
+      } else {
+        // Wrap around for size
+        size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
+        size_t second_part = sizeof(uint32_t) - first_part;
+        uint8_t size_bytes[4];
+        memcpy(size_bytes, this->preload_buffer_.get() + this->preload_read_pos_, first_part);
+        memcpy(size_bytes + first_part, this->preload_buffer_.get(), second_part);
+        memcpy(&frame_size, size_bytes, sizeof(uint32_t));
+        this->preload_read_pos_ = second_part;
+      }
+
+      // Validate frame size
+      if (frame_size == 0 || frame_size > this->input_buffer_size_) {
+        xSemaphoreGive(this->preload_mutex_);
+        ESP_LOGE(TAG, "Invalid frame size from preload buffer: %u", frame_size);
+        return -1;
+      }
+
+      // Read frame data from preload buffer to input buffer
+      read_end = this->preload_read_pos_ + frame_size;
+
+      if (read_end <= this->preload_buffer_size_) {
+        // No wrap for data
+        memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, frame_size);
+        this->preload_read_pos_ = read_end;
+      } else {
+        // Wrap around for data
+        size_t first_part = this->preload_buffer_size_ - this->preload_read_pos_;
+        size_t second_part = frame_size - first_part;
+        memcpy(this->input_buffer_.get(), this->preload_buffer_.get() + this->preload_read_pos_, first_part);
+        memcpy(this->input_buffer_.get() + first_part, this->preload_buffer_.get(), second_part);
+        this->preload_read_pos_ = second_part;
+      }
+
+      // Update available bytes (size header + frame data)
+      this->preload_available_ -= (sizeof(uint32_t) + frame_size);
+      xSemaphoreGive(this->preload_mutex_);
+
+      return frame_size;
+    } else {
+      // Failed to acquire mutex
+      ESP_LOGW(TAG, "Failed to acquire preload mutex");
+      return -1;
+    }
+  } else {
+    // Preload not active - read directly from file (during init phase)
+    return this->read_next_frame_from_file_();
   }
 }
 
@@ -1522,6 +1638,143 @@ void SimpleVideoPlayer::stop_audio_task_() {
   }
 }
 #endif
+
+//========================================================================
+// Frame Preloading (Background Task)
+//========================================================================
+
+void SimpleVideoPlayer::preload_task_entry_(void *param) {
+  SimpleVideoPlayer *player = static_cast<SimpleVideoPlayer *>(param);
+  player->preload_loop_();
+}
+
+void SimpleVideoPlayer::preload_loop_() {
+  ESP_LOGI(TAG, "Preload task started on core %d", xPortGetCoreID());
+
+  while (!this->preload_task_stop_) {
+    // Check if buffer has space
+    if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      size_t space_available = this->preload_buffer_size_ - this->preload_available_;
+      xSemaphoreGive(this->preload_mutex_);
+
+      if (space_available > (this->input_buffer_size_ + sizeof(uint32_t))) {
+        // Read next frame from storage directly
+        int frame_size = this->read_next_frame_from_file_();
+
+        if (frame_size > 0 && frame_size <= (int) this->input_buffer_size_) {
+          // Store frame in preload buffer with size header: [4-byte size][frame data]
+          if (xSemaphoreTake(this->preload_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+            uint32_t frame_size_u32 = static_cast<uint32_t>(frame_size);
+            size_t total_size = sizeof(uint32_t) + frame_size;
+
+            // Write size header
+            size_t write_end = this->preload_write_pos_ + sizeof(uint32_t);
+            if (write_end <= this->preload_buffer_size_) {
+              // No wrap for size
+              memcpy(this->preload_buffer_.get() + this->preload_write_pos_, &frame_size_u32, sizeof(uint32_t));
+              this->preload_write_pos_ = write_end;
+            } else {
+              // Wrap around for size
+              size_t first_part = this->preload_buffer_size_ - this->preload_write_pos_;
+              size_t second_part = sizeof(uint32_t) - first_part;
+              memcpy(this->preload_buffer_.get() + this->preload_write_pos_, &frame_size_u32, first_part);
+              memcpy(this->preload_buffer_.get(), ((uint8_t *) &frame_size_u32) + first_part, second_part);
+              this->preload_write_pos_ = second_part;
+            }
+
+            // Write frame data
+            write_end = this->preload_write_pos_ + frame_size;
+            if (write_end <= this->preload_buffer_size_) {
+              // No wrap for data
+              memcpy(this->preload_buffer_.get() + this->preload_write_pos_, this->input_buffer_.get(), frame_size);
+              this->preload_write_pos_ = write_end;
+            } else {
+              // Wrap around for data
+              size_t first_part = this->preload_buffer_size_ - this->preload_write_pos_;
+              size_t second_part = frame_size - first_part;
+              memcpy(this->preload_buffer_.get() + this->preload_write_pos_, this->input_buffer_.get(), first_part);
+              memcpy(this->preload_buffer_.get(), this->input_buffer_.get() + first_part, second_part);
+              this->preload_write_pos_ = second_part;
+            }
+
+            this->preload_available_ += total_size;
+            xSemaphoreGive(this->preload_mutex_);
+          }
+        } else if (frame_size == 0) {
+          // End of file - stop prefetching
+          ESP_LOGI(TAG, "Preload reached end of file");
+          break;
+        }
+      } else {
+        // Buffer full, yield
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+    }
+  }
+
+  ESP_LOGI(TAG, "Preload task stopped");
+  this->preload_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void SimpleVideoPlayer::start_preload_task_() {
+  if (this->preload_task_handle_ != nullptr) {
+    return;  // Already running
+  }
+
+  // Create mutex for preload buffer
+  if (this->preload_mutex_ == nullptr) {
+    this->preload_mutex_ = xSemaphoreCreateMutex();
+  }
+
+  // Reset buffer state
+  this->preload_write_pos_ = 0;
+  this->preload_read_pos_ = 0;
+  this->preload_available_ = 0;
+  this->preload_task_stop_ = false;
+
+  // Create background prefetch task
+  // Priority 3: Higher than main loop (1), lower than decode/audio (10) and LVGL
+  BaseType_t result = xTaskCreatePinnedToCore(preload_task_entry_, "video_prefetch",
+                                              4096,  // 4KB stack
+                                              this,
+                                              3,  // Priority 3 (higher than main loop but lower than decode/LVGL)
+                                              &this->preload_task_handle_,
+                                              1);  // Core 1 (same as video decode)
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create preload task");
+    this->preload_task_handle_ = nullptr;
+  } else {
+    ESP_LOGI(TAG, "Background prefetch task started");
+  }
+}
+
+void SimpleVideoPlayer::stop_preload_task_() {
+  if (this->preload_task_handle_ != nullptr) {
+    ESP_LOGI(TAG, "Stopping preload task...");
+    this->preload_task_stop_ = true;
+
+    // Wait for task to finish
+    uint32_t timeout_ms = 1000;
+    uint32_t start = millis();
+    while (this->preload_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (this->preload_task_handle_ != nullptr) {
+      ESP_LOGW(TAG, "Preload task didn't stop gracefully, deleting forcefully");
+      vTaskDelete(this->preload_task_handle_);
+      this->preload_task_handle_ = nullptr;
+    }
+  }
+
+  // Cleanup mutex
+  if (this->preload_mutex_ != nullptr) {
+    vSemaphoreDelete(this->preload_mutex_);
+    this->preload_mutex_ = nullptr;
+  }
+}
 
 //========================================================================
 // Error Handling
