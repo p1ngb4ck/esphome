@@ -1,14 +1,3 @@
-/**
- * @file transcoder.h
- * @brief Centralized hardware media codec management for ESPHome
- *
- * Provides unified access to hardware-accelerated media codecs including:
- * - JPEG encoder/decoder (ESP32-S2/S3/P4)
- * - H.264 encoder/decoder (ESP32-P4)
- *
- * Components requiring codec support should depend on this component and
- * access codecs through the global_transcoder accessor.
- */
 
 #pragma once
 

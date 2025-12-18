@@ -1,8 +1,3 @@
-/**
- * @file transcoder.cpp
- * @brief Implementation of centralized hardware media codec management
- */
-
 #include "transcoder.h"
 
 namespace esphome {
