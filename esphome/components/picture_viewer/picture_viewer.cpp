@@ -1429,7 +1429,7 @@ bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rg
 #elif defined(USE_JPEGDEC)
   return this->decode_jpeg_jpegdec_(jpeg_data, rgb565_data, width, height, target_width, target_height);
 #else
-#error "No JPEG decoder available"
+  return false;  // No JPEG decoder available
 #endif
 }
 
@@ -1749,7 +1749,8 @@ void PictureViewer::png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h) {
 void PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                        uint8_t rgba[4]) {
   PictureViewer *viewer = (PictureViewer *) pngle_get_user_data(pngle);
-  if (viewer->decode_target_ == nullptr) {
+  // if (viewer->decode_target_ == nullptr) {
+  if (this->decode_target_ == nullptr) {
     return;
   }
 
@@ -1769,9 +1770,12 @@ void PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, u
       uint32_t py = y + dy;
       if (px < viewer->decode_width_ && py < viewer->decode_width_) {  // Use decode_width_ as image width
         size_t offset = (py * viewer->decode_width_ + px) * 2;
-        if (offset + 1 < viewer->decode_target_->size()) {
-          (*viewer->decode_target_)[offset] = rgb565 & 0xFF;
-          (*viewer->decode_target_)[offset + 1] = (rgb565 >> 8) & 0xFF;
+        // if (offset + 1 < viewer->decode_target_->size()) {
+        //   (*viewer->decode_target_)[offset] = rgb565 & 0xFF;
+        //   (*viewer->decode_target_)[offset + 1] = (rgb565 >> 8) & 0xFF;
+        if (offset + 1 < this->decode_target_->size()) {
+          (*this->decode_target_)[offset] = rgb565 & 0xFF;
+          (*this->decode_target_)[offset + 1] = (rgb565 >> 8) & 0xFF;
         }
       }
     }
