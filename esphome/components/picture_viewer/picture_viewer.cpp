@@ -1823,7 +1823,7 @@ bool PictureViewer::decode_png_(const std::vector<uint8_t> &png_data, std::vecto
 
   pngle_set_user_data(pngle, this);
   pngle_set_init_callback(pngle, png_init_callback_);
-  pngle_set_draw_callback(pngle, png_draw_callback_);
+  pngle_set_draw_callback(pngle, reinterpret_cast<pngle_draw_callback_t>(png_draw_callback_));
   pngle_set_done_callback(pngle, png_done_callback_);
 
   // Set decode target for callbacks
