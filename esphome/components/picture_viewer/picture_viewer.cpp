@@ -1746,8 +1746,8 @@ void PictureViewer::png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h) {
   // Dimensions will be set by the decoder
 }
 
-void PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                       uint8_t rgba[4]) {
+pngle_draw_callback_t PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                                        uint8_t rgba[4]) {
   PictureViewer *viewer = (PictureViewer *) pngle_get_user_data(pngle);
   if (viewer->decode_target_ == nullptr) {
     return;
