@@ -1746,8 +1746,8 @@ void PictureViewer::png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h) {
   // Dimensions will be set by the decoder
 }
 
-pngle_draw_callback_t PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                                        uint8_t rgba[4]) {
+void PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                       uint8_t rgba[4]) {
   PictureViewer *viewer = (PictureViewer *) pngle_get_user_data(pngle);
   if (viewer->decode_target_ == nullptr) {
     return;
@@ -1794,7 +1794,7 @@ bool PictureViewer::decode_png_(const std::vector<uint8_t> &png_data, std::vecto
   // Set user data and callbacks
   pngle_set_user_data(pngle, this);
   pngle_set_init_callback(pngle, png_init_callback_);
-  pngle_set_draw_callback(pngle, png_draw_callback_);
+  pngle_set_draw_callback(pngle, reinterpret_cast<pngle_draw_callback_t>(png_draw_callback_));
   pngle_set_done_callback(pngle, png_done_callback_);
 
   // Feed data to decoder to get dimensions first
