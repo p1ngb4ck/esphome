@@ -526,7 +526,8 @@ class PictureViewer : public Component {
   bool decode_png_(const std::vector<uint8_t> &png_data, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                    int target_width = 0, int target_height = 0);
   static void png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h);
-  static void png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t rgba[4]);
+  static pngle_draw_callback_t png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                                  uint8_t rgba[4]);
   static void png_done_callback_(pngle_t *pngle);
 #endif
 
