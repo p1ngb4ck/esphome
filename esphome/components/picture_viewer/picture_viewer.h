@@ -486,6 +486,9 @@ class PictureViewer : public Component {
   bool load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                   int target_width = 0, int target_height = 0);
 
+  std::vector<uint8_t> *decode_target_{nullptr};
+  int decode_width_{0};
+
   /// Load PNG file and decode
 #ifdef USE_PNG_DECODER
   bool load_png_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
@@ -516,8 +519,6 @@ class PictureViewer : public Component {
                             int &height, int target_width = 0, int target_height = 0);
   static int jpeg_decode_callback_(JPEGDRAW *draw);
   JPEGDEC *jpeg_decoder_{nullptr};
-  std::vector<uint8_t> *decode_target_{nullptr};
-  int decode_width_{0};
 #endif
 
   /// Decode PNG using pngle library
