@@ -76,8 +76,8 @@ void PictureViewer::setup() {
 #ifdef USE_HARDWARE_JPEG_DECODER
   jpeg_decoder_handle_t test_handle = this->transcoder_->get_jpeg_decoder();
   ESP_LOGI(TAG, "Using transcoder hardware JPEG decoder (ESP32-P4, handle: %p)", test_handle);
-#elif defined(USE_ESP_JPEG_DECODER)
-  ESP_LOGI(TAG, "Using transcoder ESP-JPEG decoder (ESP32-S2/S3)");
+#elif defined(USE_ESP_NEW_JPEG_DECODER)
+  ESP_LOGI(TAG, "Using transcoder ESP_NEW_JPEG decoder v1.0.0 (ESP32-S2/S3 with SIMD)");
 #endif
 #else
 #ifdef USE_JPEGDEC
@@ -446,8 +446,8 @@ void PictureViewer::dump_config() {
     ESP_LOGCONFIG(TAG, "  Thumbnail Slide: %s (edge: %d)", this->thumbnail_slide_enabled_ ? "enabled" : "disabled",
                   (int) this->thumbnail_slide_edge_);
   }
-#ifdef USE_ESP_JPEG_DECODER
-  ESP_LOGCONFIG(TAG, "  Decoder: esp_jpeg (ESP32-S2/S3)");
+#ifdef USE_ESP_NEW_JPEG_DECODER
+  ESP_LOGCONFIG(TAG, "  Decoder: ESP_NEW_JPEG v1.0.0 (ESP32-S2/S3 with SIMD)");
 #elif defined(USE_HARDWARE_JPEG_DECODER)
   ESP_LOGCONFIG(TAG, "  Decoder: Hardware JPEG (ESP32-P4)");
 #elif defined(USE_JPEGDEC)
@@ -477,7 +477,7 @@ bool PictureViewer::show_image(size_t index) {
   int target_width = this->fullscreen_ ? this->canvas_width_ : 0;
   int target_height = this->fullscreen_ ? this->canvas_height_ : 0;
 
-  if (!this->load_jpeg_(entry.path, rgb565_data, width, height, target_width, target_height)) {
+  if (!this->load_image_(entry.path, rgb565_data, width, height, target_width, target_height)) {
     ESP_LOGE(TAG, "Failed to load image: %s", entry.path.c_str());
     return false;
   }
@@ -697,9 +697,9 @@ void PictureViewer::scan_directory_(const std::vector<storage::FileInfo> &files)
     return;
   }
 
-  ESP_LOGD(TAG, "Scanning %zu files for JPEGs in directory: '%s'", files.size(), current_dir->path.c_str());
+  ESP_LOGD(TAG, "Scanning %zu files for images in directory: '%s'", files.size(), current_dir->path.c_str());
 
-  size_t jpeg_count = 0;
+  size_t image_count = 0;
   size_t matched_count = 0;
 
   for (const auto &file : files) {
@@ -714,13 +714,34 @@ void PictureViewer::scan_directory_(const std::vector<storage::FileInfo> &files)
       }
     }
 
-    // Filter JPEG files
+    // Filter image files (JPEG, PNG, BMP)
     std::string lower_filename = file.filename;
     std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
 
+    bool is_supported_image = false;
+    const char *image_type = nullptr;
+
     if (lower_filename.ends_with(".jpg") || lower_filename.ends_with(".jpeg")) {
-      jpeg_count++;
-      ESP_LOGD(TAG, "  Found JPEG: %s (size: %llu bytes)", file.filename.c_str(), (unsigned long long) file.size);
+      is_supported_image = true;
+      image_type = "JPEG";
+    }
+#ifdef USE_PNG_DECODER
+    else if (lower_filename.ends_with(".png")) {
+      is_supported_image = true;
+      image_type = "PNG";
+    }
+#endif
+#ifdef USE_BMP_DECODER
+    else if (lower_filename.ends_with(".bmp")) {
+      is_supported_image = true;
+      image_type = "BMP";
+    }
+#endif
+
+    if (is_supported_image) {
+      image_count++;
+      ESP_LOGD(TAG, "  Found %s: %s (size: %llu bytes)", image_type, file.filename.c_str(),
+               (unsigned long long) file.size);
       ImageEntry entry;
       entry.path = file.path;
       entry.filename = file.filename;
@@ -730,7 +751,7 @@ void PictureViewer::scan_directory_(const std::vector<storage::FileInfo> &files)
     }
   }
 
-  ESP_LOGD(TAG, "Scan complete: %zu JPEGs found, %zu matched filters", jpeg_count, matched_count);
+  ESP_LOGD(TAG, "Scan complete: %zu images found, %zu matched filters", image_count, matched_count);
 
   // Sort by filename
   std::sort(this->images_.begin(), this->images_.end(),
@@ -1365,6 +1386,31 @@ void PictureViewer::update_thumbnail_highlighting_(int active_image_index) {
 
 #endif  // USE_LVGL
 
+bool PictureViewer::load_image_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                                int target_width, int target_height) {
+  // Detect format from file extension
+  std::string lower_path = path;
+  std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+
+  if (lower_path.ends_with(".jpg") || lower_path.ends_with(".jpeg")) {
+    return this->load_jpeg_(path, rgb565_data, width, height, target_width, target_height);
+  }
+#ifdef USE_PNG_DECODER
+  else if (lower_path.ends_with(".png")) {
+    return this->load_png_(path, rgb565_data, width, height, target_width, target_height);
+  }
+#endif
+#ifdef USE_BMP_DECODER
+  else if (lower_path.ends_with(".bmp")) {
+    return this->load_bmp_(path, rgb565_data, width, height, target_width, target_height);
+  }
+#endif
+  else {
+    ESP_LOGE(TAG, "Unsupported image format: %s", path.c_str());
+    return false;
+  }
+}
+
 bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                                int target_width, int target_height) {
   // Read JPEG file
@@ -1376,8 +1422,8 @@ bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rg
   ESP_LOGD(TAG, "Loaded JPEG file: %s (%zu bytes)", path.c_str(), jpeg_data.size());
 
   // Decode JPEG based on platform
-#ifdef USE_ESP_JPEG_DECODER
-  return this->decode_jpeg_esp_(jpeg_data, rgb565_data, width, height, target_width, target_height);
+#ifdef USE_ESP_NEW_JPEG_DECODER
+  return this->decode_jpeg_esp_new_(jpeg_data, rgb565_data, width, height, target_width, target_height);
 #elif defined(USE_HARDWARE_JPEG_DECODER)
   return this->decode_jpeg_hardware_(jpeg_data, rgb565_data, width, height, target_width, target_height);
 #elif defined(USE_JPEGDEC)
@@ -1387,38 +1433,120 @@ bool PictureViewer::load_jpeg_(const std::string &path, std::vector<uint8_t> &rg
 #endif
 }
 
-#ifdef USE_ESP_JPEG_DECODER
-bool PictureViewer::decode_jpeg_esp_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data,
-                                     int &width, int &height, int target_width, int target_height) {
-  esp_jpeg_image_cfg_t jpeg_cfg = {.indata = jpeg_data.data(),
-                                   .indata_size = static_cast<int>(jpeg_data.size()),
-                                   .outbuf = nullptr,
-                                   .outbuf_size = 0,
-                                   .out_format = JPEG_IMAGE_FORMAT_RGB565,
-                                   .out_scale = JPEG_IMAGE_SCALE_0,
-                                   .flags = {
-                                       .swap_color_bytes = 0,
-                                   }};
-
-  esp_jpeg_image_output_t outimg = {};
-  esp_err_t ret = esp_jpeg_decode(&jpeg_cfg, &outimg);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "JPEG decode failed: %d", ret);
+#ifdef USE_PNG_DECODER
+bool PictureViewer::load_png_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                              int target_width, int target_height) {
+  // Read PNG file
+  std::vector<uint8_t> png_data;
+  if (!this->read_file_(path, png_data)) {
     return false;
   }
 
-  width = outimg.width;
-  height = outimg.height;
+  ESP_LOGD(TAG, "Loaded PNG file: %s (%zu bytes)", path.c_str(), png_data.size());
 
-  // Copy decoded data
-  size_t size = outimg.width * outimg.height * 2;  // RGB565 = 2 bytes per pixel
-  rgb565_data.resize(size);
-  std::memcpy(rgb565_data.data(), outimg.outbuf, size);
+  // Decode PNG
+  return this->decode_png_(png_data, rgb565_data, width, height, target_width, target_height);
+}
+#endif
 
-  // Free decoder output buffer
-  free(outimg.outbuf);
+#ifdef USE_BMP_DECODER
+bool PictureViewer::load_bmp_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                              int target_width, int target_height) {
+  // Read BMP file
+  std::vector<uint8_t> bmp_data;
+  if (!this->read_file_(path, bmp_data)) {
+    return false;
+  }
 
-  ESP_LOGD(TAG, "Decoded JPEG using esp_jpeg: %dx%d", width, height);
+  ESP_LOGD(TAG, "Loaded BMP file: %s (%zu bytes)", path.c_str(), bmp_data.size());
+
+  // Decode BMP
+  return this->decode_bmp_(bmp_data, rgb565_data, width, height, target_width, target_height);
+}
+#endif
+
+#ifdef USE_ESP_NEW_JPEG_DECODER
+bool PictureViewer::decode_jpeg_esp_new_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data,
+                                         int &width, int &height, int target_width, int target_height) {
+  // Get decoder handle from transcoder
+  jpeg_dec_handle_t decoder = this->transcoder_->get_esp_new_jpeg_decoder();
+  if (decoder == nullptr) {
+    ESP_LOGE(TAG, "Failed to get ESP_NEW_JPEG decoder handle");
+    return false;
+  }
+
+  // Configure decoder for RGB565 output
+  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+  config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;  // RGB565 little-endian for ESP32
+  config.rotate = JPEG_ROTATE_0D;
+  config.block_enable = false;
+
+  // Apply scaling if target dimensions provided
+  if (target_width > 0 && target_height > 0) {
+    config.scale.width = (target_width + 7) & ~7;    // Round up to multiple of 8
+    config.scale.height = (target_height + 7) & ~7;  // Round up to multiple of 8
+  }
+
+  // Close old decoder and open new one with updated config
+  this->transcoder_->release_esp_new_jpeg_decoder();
+  jpeg_error_t ret = jpeg_dec_open(&config, &decoder);
+  if (ret != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to reconfigure ESP_NEW_JPEG decoder: %d", ret);
+    return false;
+  }
+
+  // Parse JPEG header
+  jpeg_dec_io_t io = {};
+  io.inbuf = const_cast<uint8_t *>(jpeg_data.data());
+  io.inbuf_len = jpeg_data.size();
+
+  jpeg_dec_header_info_t header_info = {};
+  ret = jpeg_dec_parse_header(decoder, &io, &header_info);
+  if (ret != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to parse JPEG header: %d", ret);
+    jpeg_dec_close(decoder);
+    return false;
+  }
+
+  width = header_info.width;
+  height = header_info.height;
+
+  // Get required output buffer size
+  int outbuf_len = 0;
+  ret = jpeg_dec_get_outbuf_len(decoder, &outbuf_len);
+  if (ret != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to get output buffer size: %d", ret);
+    jpeg_dec_close(decoder);
+    return false;
+  }
+
+  // Allocate aligned output buffer
+  uint8_t *outbuf = static_cast<uint8_t *>(jpeg_calloc_align(outbuf_len, 16));
+  if (outbuf == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate aligned output buffer (%d bytes)", outbuf_len);
+    jpeg_dec_close(decoder);
+    return false;
+  }
+
+  // Decode JPEG
+  io.outbuf = outbuf;
+  ret = jpeg_dec_process(decoder, &io);
+  if (ret != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "JPEG decode failed: %d", ret);
+    jpeg_free_align(outbuf);
+    jpeg_dec_close(decoder);
+    return false;
+  }
+
+  // Copy decoded data to output vector
+  rgb565_data.resize(io.out_size);
+  std::memcpy(rgb565_data.data(), outbuf, io.out_size);
+
+  // Free aligned buffer and close decoder
+  jpeg_free_align(outbuf);
+  jpeg_dec_close(decoder);
+
+  ESP_LOGD(TAG, "Decoded JPEG using ESP_NEW_JPEG v1.0.0: %dx%d (%d bytes)", width, height, io.out_size);
   return true;
 }
 #endif
@@ -1610,6 +1738,210 @@ int PictureViewer::jpeg_decode_callback_(JPEGDRAW *draw) {
 }
 #endif
 
+#ifdef USE_PNG_DECODER
+// Static callbacks for pngle library
+void PictureViewer::png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h) {
+  PictureViewer *viewer = (PictureViewer *) pngle_get_user_data(pngle);
+  ESP_LOGD(TAG, "PNG decoder initialized: %ux%u", w, h);
+  // Dimensions will be set by the decoder
+}
+
+void PictureViewer::png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                       uint8_t rgba[4]) {
+  PictureViewer *viewer = (PictureViewer *) pngle_get_user_data(pngle);
+  if (viewer->decode_target_ == nullptr) {
+    return;
+  }
+
+  // Convert RGBA to RGB565 and write to buffer
+  // RGB565 format: RRRRR GGGGGG BBBBB
+  uint8_t r = rgba[0];
+  uint8_t g = rgba[1];
+  uint8_t b = rgba[2];
+  // Alpha is in rgba[3] but we ignore it for now
+
+  uint16_t rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+
+  // Write pixels to decode_target_ buffer
+  for (uint32_t dy = 0; dy < h; dy++) {
+    for (uint32_t dx = 0; dx < w; dx++) {
+      uint32_t px = x + dx;
+      uint32_t py = y + dy;
+      if (px < viewer->decode_width_ && py < viewer->decode_width_) {  // Use decode_width_ as image width
+        size_t offset = (py * viewer->decode_width_ + px) * 2;
+        if (offset + 1 < viewer->decode_target_->size()) {
+          (*viewer->decode_target_)[offset] = rgb565 & 0xFF;
+          (*viewer->decode_target_)[offset + 1] = (rgb565 >> 8) & 0xFF;
+        }
+      }
+    }
+  }
+}
+
+void PictureViewer::png_done_callback_(pngle_t *pngle) { ESP_LOGD(TAG, "PNG decoding completed"); }
+
+bool PictureViewer::decode_png_(const std::vector<uint8_t> &png_data, std::vector<uint8_t> &rgb565_data, int &width,
+                                int &height, int target_width, int target_height) {
+  ESP_LOGD(TAG, "Decoding PNG image (%zu bytes)", png_data.size());
+
+  // Allocate pngle decoder
+  pngle_t *pngle = pngle_new();
+  if (!pngle) {
+    ESP_LOGE(TAG, "Failed to allocate pngle decoder");
+    return false;
+  }
+
+  // Set user data and callbacks
+  pngle_set_user_data(pngle, this);
+  pngle_set_init_callback(pngle, png_init_callback_);
+  pngle_set_draw_callback(pngle, png_draw_callback_);
+  pngle_set_done_callback(pngle, png_done_callback_);
+
+  // Feed data to decoder to get dimensions first
+  int fed = pngle_feed(pngle, png_data.data(), png_data.size());
+  if (fed < 0) {
+    ESP_LOGE(TAG, "PNG decoding failed: %s", pngle_error(pngle));
+    pngle_destroy(pngle);
+    return false;
+  }
+
+  // Get decoded dimensions
+  width = pngle_get_width(pngle);
+  height = pngle_get_height(pngle);
+  ESP_LOGD(TAG, "PNG dimensions: %dx%d", width, height);
+
+  // Allocate output buffer
+  rgb565_data.resize(width * height * 2);
+
+  // Reset decoder and decode again with buffer
+  pngle_destroy(pngle);
+  pngle = pngle_new();
+  if (!pngle) {
+    ESP_LOGE(TAG, "Failed to re-allocate pngle decoder");
+    return false;
+  }
+
+  pngle_set_user_data(pngle, this);
+  pngle_set_init_callback(pngle, png_init_callback_);
+  pngle_set_draw_callback(pngle, png_draw_callback_);
+  pngle_set_done_callback(pngle, png_done_callback_);
+
+  // Set decode target for callbacks
+  this->decode_target_ = &rgb565_data;
+  this->decode_width_ = width;
+
+  // Decode the image
+  fed = pngle_feed(pngle, png_data.data(), png_data.size());
+  if (fed < 0) {
+    ESP_LOGE(TAG, "PNG decoding failed on second pass: %s", pngle_error(pngle));
+    pngle_destroy(pngle);
+    this->decode_target_ = nullptr;
+    return false;
+  }
+
+  pngle_destroy(pngle);
+  this->decode_target_ = nullptr;
+
+  ESP_LOGD(TAG, "PNG decoded successfully: %dx%d", width, height);
+
+  // Apply scaling if requested
+  if (target_width > 0 && target_height > 0 && (width != target_width || height != target_height)) {
+    std::vector<uint8_t> resized_data;
+    this->resize_image_(rgb565_data, width, height, resized_data, target_width, target_height);
+    rgb565_data = std::move(resized_data);
+    width = target_width;
+    height = target_height;
+    ESP_LOGD(TAG, "Resized PNG to: %dx%d", width, height);
+  }
+
+  return true;
+}
+#endif
+
+#ifdef USE_BMP_DECODER
+bool PictureViewer::decode_bmp_(const std::vector<uint8_t> &bmp_data, std::vector<uint8_t> &rgb565_data, int &width,
+                                int &height, int target_width, int target_height) {
+  ESP_LOGD(TAG, "Decoding BMP image (%zu bytes)", bmp_data.size());
+
+  if (bmp_data.size() < 54) {
+    ESP_LOGE(TAG, "BMP file too small");
+    return false;
+  }
+
+  // Check BMP signature
+  if (bmp_data[0] != 'B' || bmp_data[1] != 'M') {
+    ESP_LOGE(TAG, "Not a BMP file");
+    return false;
+  }
+
+  // Read BMP header
+  uint32_t data_offset = encode_uint32(bmp_data[13], bmp_data[12], bmp_data[11], bmp_data[10]);
+  width = encode_uint32(bmp_data[21], bmp_data[20], bmp_data[19], bmp_data[18]);
+  height = encode_uint32(bmp_data[25], bmp_data[24], bmp_data[23], bmp_data[22]);
+  uint16_t bits_per_pixel = encode_uint16(bmp_data[29], bmp_data[28]);
+  uint32_t compression = encode_uint32(bmp_data[33], bmp_data[32], bmp_data[31], bmp_data[30]);
+
+  ESP_LOGD(TAG, "BMP: %dx%d, %d bpp, compression=%u, offset=%u", width, height, bits_per_pixel, compression,
+           data_offset);
+
+  // Only support uncompressed 24-bit BMP for now
+  if (compression != 0) {
+    ESP_LOGE(TAG, "Compressed BMP not supported");
+    return false;
+  }
+
+  if (bits_per_pixel != 24) {
+    ESP_LOGE(TAG, "Only 24-bit BMP supported (got %d bpp)", bits_per_pixel);
+    return false;
+  }
+
+  // Calculate row size (must be multiple of 4 bytes)
+  uint32_t row_size = ((width * 3 + 3) / 4) * 4;
+  uint32_t padding = row_size - (width * 3);
+
+  // Allocate output buffer
+  rgb565_data.resize(width * height * 2);
+
+  // Decode BMP data (bottom-up)
+  for (int y = 0; y < height; y++) {
+    uint32_t row_offset = data_offset + (height - 1 - y) * row_size;
+    if (row_offset + width * 3 > bmp_data.size()) {
+      ESP_LOGE(TAG, "BMP data truncated at row %d", y);
+      return false;
+    }
+
+    for (int x = 0; x < width; x++) {
+      uint32_t pixel_offset = row_offset + x * 3;
+      uint8_t b = bmp_data[pixel_offset];
+      uint8_t g = bmp_data[pixel_offset + 1];
+      uint8_t r = bmp_data[pixel_offset + 2];
+
+      // Convert RGB888 to RGB565
+      uint16_t rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+
+      // Write to output buffer
+      size_t out_offset = (y * width + x) * 2;
+      rgb565_data[out_offset] = rgb565 & 0xFF;
+      rgb565_data[out_offset + 1] = (rgb565 >> 8) & 0xFF;
+    }
+  }
+
+  ESP_LOGD(TAG, "BMP decoded successfully: %dx%d", width, height);
+
+  // Apply scaling if requested
+  if (target_width > 0 && target_height > 0 && (width != target_width || height != target_height)) {
+    std::vector<uint8_t> resized_data;
+    this->resize_image_(rgb565_data, width, height, resized_data, target_width, target_height);
+    rgb565_data = std::move(resized_data);
+    width = target_width;
+    height = target_height;
+    ESP_LOGD(TAG, "Resized BMP to: %dx%d", width, height);
+  }
+
+  return true;
+}
+#endif
+
 void PictureViewer::resize_image_(const std::vector<uint8_t> &src_data, int src_width, int src_height,
                                   std::vector<uint8_t> &dst_data, int dst_width, int dst_height) {
   // Simple nearest-neighbor scaling for RGB565
@@ -1664,7 +1996,7 @@ bool PictureViewer::generate_thumbnail_(ImageEntry &entry) {
   // Load and decode thumbnail
   std::vector<uint8_t> rgb565_data;
   int width, height;
-  if (!this->load_jpeg_(entry.path, rgb565_data, width, height, this->thumbnail_width_, this->thumbnail_height_)) {
+  if (!this->load_image_(entry.path, rgb565_data, width, height, this->thumbnail_width_, this->thumbnail_height_)) {
     return false;
   }
 
@@ -1748,8 +2080,8 @@ bool PictureViewer::load_thumbnail_(size_t image_index) {
   // Decode thumbnail directly into work buffer
   std::vector<uint8_t> rgb565_data;
   int width, height;
-  if (!this->load_jpeg_(image.path, rgb565_data, width, height, this->thumbnail_config_.width,
-                        this->thumbnail_config_.height)) {
+  if (!this->load_image_(image.path, rgb565_data, width, height, this->thumbnail_config_.width,
+                         this->thumbnail_config_.height)) {
     ESP_LOGW(TAG, "Failed to load thumbnail for image %zu: %s", image_index, image.filename.c_str());
     return false;
   }

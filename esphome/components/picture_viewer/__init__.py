@@ -4,7 +4,11 @@ import logging
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components.transcoder import require_jpeg_decoder
+from esphome.components.transcoder import (
+    require_bmp_decoder,
+    require_jpeg_decoder,
+    require_png_decoder,
+)
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
@@ -273,12 +277,13 @@ CONFIG_SCHEMA = cv.All(
 
 async def to_code(config):
     """Generate code for picture_viewer component"""
-    # Ensure the JPG decoder requirement is asserted during code generation
-    require_jpeg_decoder()  # Picture viewer only needs JPEG decoder, not encoder
+    # Ensure decoder requirements are asserted during code generation
+    require_jpeg_decoder()  # Picture viewer supports JPEG images
+    require_png_decoder()  # Picture viewer supports PNG images
+    require_bmp_decoder()  # Picture viewer supports BMP images
 
     # Set defines FIRST (before component registration)
     # Transcoder is always loaded via AUTO_LOAD and sets decoder defines globally
-    cg.add_define("USE_TRANSCODER")
     cg.add_define("USE_TRANSCODER")
 
     # Add conditional defines based on configuration

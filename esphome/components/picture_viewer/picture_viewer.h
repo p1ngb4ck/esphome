@@ -17,6 +17,10 @@
 #include "esphome/components/transcoder/transcoder.h"
 #endif
 
+#ifdef USE_PNG_DECODER
+#include <pngle.h>
+#endif
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -474,14 +478,30 @@ class PictureViewer : public Component {
   /// Scan directory for images from provided file list
   void scan_directory_(const std::vector<storage::FileInfo> &files);
 #endif
+  /// Load image file (auto-detects format from extension)
+  bool load_image_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                   int target_width = 0, int target_height = 0);
+
   /// Load JPEG file and decode
   bool load_jpeg_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
                   int target_width = 0, int target_height = 0);
 
-  /// Decode JPEG using esp_jpeg (ESP32-S2/S3)
-#ifdef USE_ESP_JPEG_DECODER
-  bool decode_jpeg_esp_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data, int &width,
-                        int &height, int target_width = 0, int target_height = 0);
+  /// Load PNG file and decode
+#ifdef USE_PNG_DECODER
+  bool load_png_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                 int target_width = 0, int target_height = 0);
+#endif
+
+  /// Load BMP file and decode
+#ifdef USE_BMP_DECODER
+  bool load_bmp_(const std::string &path, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                 int target_width = 0, int target_height = 0);
+#endif
+
+  /// Decode JPEG using esp_new_jpeg (ESP32-S2/S3)
+#ifdef USE_ESP_NEW_JPEG_DECODER
+  bool decode_jpeg_esp_new_(const std::vector<uint8_t> &jpeg_data, std::vector<uint8_t> &rgb565_data, int &width,
+                            int &height, int target_width = 0, int target_height = 0);
 #endif
 
   /// Decode JPEG using hardware decoder (ESP32-P4)
@@ -498,6 +518,21 @@ class PictureViewer : public Component {
   JPEGDEC *jpeg_decoder_{nullptr};
   std::vector<uint8_t> *decode_target_{nullptr};
   int decode_width_{0};
+#endif
+
+  /// Decode PNG using pngle library
+#ifdef USE_PNG_DECODER
+  bool decode_png_(const std::vector<uint8_t> &png_data, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                   int target_width = 0, int target_height = 0);
+  static void png_init_callback_(pngle_t *pngle, uint32_t w, uint32_t h);
+  static void png_draw_callback_(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t rgba[4]);
+  static void png_done_callback_(pngle_t *pngle);
+#endif
+
+  /// Decode BMP (built-in decoder)
+#ifdef USE_BMP_DECODER
+  bool decode_bmp_(const std::vector<uint8_t> &bmp_data, std::vector<uint8_t> &rgb565_data, int &width, int &height,
+                   int target_width = 0, int target_height = 0);
 #endif
 
   /// Resize RGB565 image

@@ -1,4 +1,5 @@
 """Transcoder component for managing hardware media codecs (JPEG, H.264, etc.)."""
+
 import logging
 
 import esphome.codegen as cg
@@ -14,6 +15,8 @@ DEPENDENCIES = []
 # Codec requirement keys
 CODEC_JPEG_DECODER = "jpeg_decoder"
 CODEC_JPEG_ENCODER = "jpeg_encoder"
+CODEC_PNG_DECODER = "png_decoder"
+CODEC_BMP_DECODER = "bmp_decoder"
 CODEC_H264_DECODER = "h264_decoder"
 CODEC_H264_ENCODER = "h264_encoder"
 
@@ -28,6 +31,7 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 # ========== Codec Requirement Registration API ==========
+
 
 def _get_requirements() -> set:
     """Get or create transcoder requirements set in CORE.data."""
@@ -48,6 +52,20 @@ def require_jpeg_encoder():
     _LOGGER.debug("Transcoder: JPEG encoder required")
 
 
+def require_png_decoder():
+    """Register requirement for PNG decoder."""
+    reqs = _get_requirements()
+    reqs.add(CODEC_PNG_DECODER)
+    _LOGGER.debug("Transcoder: PNG decoder required")
+
+
+def require_bmp_decoder():
+    """Register requirement for BMP decoder."""
+    reqs = _get_requirements()
+    reqs.add(CODEC_BMP_DECODER)
+    _LOGGER.debug("Transcoder: BMP decoder required")
+
+
 def require_h264_decoder():
     """Register requirement for H.264 decoder."""
     reqs = _get_requirements()
@@ -63,6 +81,7 @@ def require_h264_encoder():
 
 
 # ========== Code Generation ==========
+
 
 async def to_code(config):
     """Configure transcoder component based on platform and requirements."""
@@ -85,8 +104,14 @@ async def to_code(config):
     cg.add_define("USE_TRANSCODER")
 
     # Check what codecs are needed
-    jpeg_needed = CODEC_JPEG_DECODER in requirements or CODEC_JPEG_ENCODER in requirements
-    h264_needed = CODEC_H264_DECODER in requirements or CODEC_H264_ENCODER in requirements
+    jpeg_needed = (
+        CODEC_JPEG_DECODER in requirements or CODEC_JPEG_ENCODER in requirements
+    )
+    png_needed = CODEC_PNG_DECODER in requirements
+    bmp_needed = CODEC_BMP_DECODER in requirements
+    h264_needed = (
+        CODEC_H264_DECODER in requirements or CODEC_H264_ENCODER in requirements
+    )
 
     # Configure codecs based on platform
     if CORE.is_esp32:
@@ -97,16 +122,16 @@ async def to_code(config):
         # JPEG codec configuration
         if jpeg_needed:
             if "S2" in variant or "S3" in variant:
-                # ESP32-S2/S3: esp_jpeg component
-                add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
+                # ESP32-S2/S3: esp_new_jpeg component (optimized with SIMD)
+                add_idf_component(name="espressif/esp_new_jpeg", ref="1.0.0")
                 if CODEC_JPEG_DECODER in requirements:
-                    cg.add_define("USE_ESP_JPEG_DECODER")
+                    cg.add_define("USE_ESP_NEW_JPEG_DECODER")
                     cg.add_define("TRANSCODER_ENABLE_JPEG_DECODER")
                 if CODEC_JPEG_ENCODER in requirements:
-                    cg.add_define("USE_ESP_JPEG_ENCODER")
+                    cg.add_define("USE_ESP_NEW_JPEG_ENCODER")
                     cg.add_define("TRANSCODER_ENABLE_JPEG_ENCODER")
                 cg.add_define("TRANSCODER_JPEG_AVAILABLE")
-                _LOGGER.info("Enabled esp_jpeg codec for %s", variant)
+                _LOGGER.info("Enabled esp_new_jpeg codec for %s", variant)
 
             elif "P4" in variant:
                 # ESP32-P4: Hardware JPEG codec
@@ -128,6 +153,21 @@ async def to_code(config):
                     _LOGGER.info("Using JPEGDec library for %s", variant)
                 if CODEC_JPEG_ENCODER in requirements:
                     _LOGGER.warning("JPEG encoder not available on %s", variant)
+
+        # PNG codec configuration
+        if png_needed:
+            # PNG decoder: pngle library (platform-independent)
+            cg.add_library("pngle", "1.1.0")
+            cg.add_define("USE_PNG_DECODER")
+            cg.add_define("TRANSCODER_ENABLE_PNG_DECODER")
+            _LOGGER.info("Enabled PNG decoder (pngle library)")
+
+        # BMP codec configuration
+        if bmp_needed:
+            # BMP decoder: no external library needed (simple format)
+            cg.add_define("USE_BMP_DECODER")
+            cg.add_define("TRANSCODER_ENABLE_BMP_DECODER")
+            _LOGGER.info("Enabled BMP decoder (built-in)")
 
         # H.264 codec configuration
         if h264_needed:
@@ -154,5 +194,16 @@ async def to_code(config):
             _LOGGER.info("Using JPEGDec library for non-ESP32 platform")
         if jpeg_needed and CODEC_JPEG_ENCODER in requirements:
             _LOGGER.warning("JPEG encoder not available on non-ESP32 platform")
+        if png_needed:
+            # PNG decoder: pngle library (platform-independent)
+            cg.add_library("pngle", "1.1.0")
+            cg.add_define("USE_PNG_DECODER")
+            cg.add_define("TRANSCODER_ENABLE_PNG_DECODER")
+            _LOGGER.info("Enabled PNG decoder for non-ESP32 platform (pngle library)")
+        if bmp_needed:
+            # BMP decoder: no external library needed (simple format)
+            cg.add_define("USE_BMP_DECODER")
+            cg.add_define("TRANSCODER_ENABLE_BMP_DECODER")
+            _LOGGER.info("Enabled BMP decoder for non-ESP32 platform (built-in)")
         if h264_needed:
             _LOGGER.error("H.264 codec not available on non-ESP32 platform")

@@ -6,10 +6,11 @@
 #include "esphome/core/log.h"
 
 // Platform-specific codec headers
-#ifdef USE_ESP_JPEG_DECODER
-// ESP32-S2/S3: esp_jpeg from ESP Component Registry
+#ifdef USE_ESP_NEW_JPEG_DECODER
+// ESP32-S2/S3: esp_new_jpeg from ESP Component Registry (optimized with SIMD)
 #include "esp_jpeg_dec.h"
 #include "esp_jpeg_enc.h"
+#include "esp_jpeg_common.h"
 #endif
 
 #ifdef USE_HARDWARE_JPEG_DECODER
@@ -114,17 +115,23 @@ class Transcoder : public Component {
     return this->jpeg_decoder_ != nullptr;
   }
 
-#elif defined(USE_ESP_JPEG_DECODER)
+#elif defined(USE_ESP_NEW_JPEG_DECODER)
   /**
-   * @brief Get esp_jpeg decoder config (ESP32-S2/S3)
-   * @return Pointer to decoder config, or nullptr if not initialized
+   * @brief Get esp_new_jpeg decoder handle (ESP32-S2/S3)
+   * Lazily initializes decoder on first access
+   * @return Pointer to JPEG decoder handle, or nullptr if initialization fails
    */
-  esp_jpeg_image_cfg_t *get_esp_jpeg_decoder_config() { return &this->esp_jpeg_decoder_cfg_; }
+  jpeg_dec_handle_t get_esp_new_jpeg_decoder();
 
   /**
-   * @brief Check if esp_jpeg decoder is available
+   * @brief Release esp_new_jpeg decoder handle (ESP32-S2/S3)
    */
-  bool is_jpeg_decoder_available() { return this->esp_jpeg_decoder_initialized_; }
+  void release_esp_new_jpeg_decoder();
+
+  /**
+   * @brief Check if esp_new_jpeg decoder is available
+   */
+  bool is_jpeg_decoder_available() { return this->esp_new_jpeg_decoder_ != nullptr; }
 #endif
 
   // ========== JPEG Encoder API ==========
@@ -180,9 +187,8 @@ class Transcoder : public Component {
   const char *jpeg_decoder_owner_{nullptr};
 #endif
 
-#ifdef USE_ESP_JPEG_DECODER
-  esp_jpeg_image_cfg_t esp_jpeg_decoder_cfg_{};
-  bool esp_jpeg_decoder_initialized_{false};
+#ifdef USE_ESP_NEW_JPEG_DECODER
+  jpeg_dec_handle_t esp_new_jpeg_decoder_{nullptr};
 #endif
 
   // JPEG Encoder state

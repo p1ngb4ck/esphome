@@ -23,10 +23,9 @@ void Transcoder::setup() {
   // Note: JPEG decoder now uses lazy initialization (created on first use)
   // This matches the old storage_image behavior and ensures hardware is ready
 #ifdef TRANSCODER_ENABLE_JPEG_DECODER
-#ifdef USE_ESP_JPEG_DECODER
-  // ESP32-S2/S3: esp_jpeg decoder can be marked ready immediately
-  this->esp_jpeg_decoder_initialized_ = true;
-  ESP_LOGI(TAG, "ESP-JPEG decoder ready (ESP32-S2/S3)");
+#ifdef USE_ESP_NEW_JPEG_DECODER
+  // ESP32-S2/S3: esp_new_jpeg decoder will be lazily initialized on first use
+  ESP_LOGI(TAG, "ESP_NEW_JPEG decoder ready for lazy initialization (ESP32-S2/S3)");
 #endif
 #endif
 
@@ -195,6 +194,39 @@ void Transcoder::release_jpeg_decoder_exclusive() {
 }
 #endif
 
+// ESP_NEW_JPEG decoder implementation (ESP32-S2/S3)
+#ifdef USE_ESP_NEW_JPEG_DECODER
+jpeg_dec_handle_t Transcoder::get_esp_new_jpeg_decoder() {
+  // Return existing decoder if already initialized
+  if (this->esp_new_jpeg_decoder_ != nullptr) {
+    return this->esp_new_jpeg_decoder_;
+  }
+
+  // Initialize decoder on first use
+  ESP_LOGI(TAG, "Lazy-initializing ESP_NEW_JPEG decoder (ESP32-S2/S3)...");
+
+  // Default configuration - will be reconfigured by caller
+  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+
+  jpeg_error_t ret = jpeg_dec_open(&config, &this->esp_new_jpeg_decoder_);
+  if (ret != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Failed to create ESP_NEW_JPEG decoder: %d", ret);
+    return nullptr;
+  }
+
+  ESP_LOGI(TAG, "ESP_NEW_JPEG decoder initialized successfully (handle: %p)", this->esp_new_jpeg_decoder_);
+  return this->esp_new_jpeg_decoder_;
+}
+
+void Transcoder::release_esp_new_jpeg_decoder() {
+  if (this->esp_new_jpeg_decoder_ != nullptr) {
+    jpeg_dec_close(this->esp_new_jpeg_decoder_);
+    this->esp_new_jpeg_decoder_ = nullptr;
+    ESP_LOGD(TAG, "ESP_NEW_JPEG decoder released");
+  }
+}
+#endif
+
 void Transcoder::dump_config() {
   ESP_LOGCONFIG(TAG, "Transcoder:");
 
@@ -206,8 +238,11 @@ void Transcoder::dump_config() {
   if (this->jpeg_decoder_) {
     ESP_LOGCONFIG(TAG, "    Handle: %p", this->jpeg_decoder_);
   }
-#elif defined(USE_ESP_JPEG_DECODER)
-  ESP_LOGCONFIG(TAG, "    Type: ESP-JPEG (ESP32-S2/S3)");
+#elif defined(USE_ESP_NEW_JPEG_DECODER)
+  ESP_LOGCONFIG(TAG, "    Type: ESP_NEW_JPEG v1.0.0 (ESP32-S2/S3 with SIMD)");
+  if (this->esp_new_jpeg_decoder_) {
+    ESP_LOGCONFIG(TAG, "    Handle: %p", this->esp_new_jpeg_decoder_);
+  }
 #elif defined(USE_JPEGDEC)
   ESP_LOGCONFIG(TAG, "    Type: JPEGDec (fallback)");
 #endif
