@@ -6,7 +6,7 @@ from pathlib import Path
 
 from esphome import automation, external_files
 import esphome.codegen as cg
-from esphome.components import audio, esp32, media_player, psram, speaker
+from esphome.components import audio, esp32, media_player, network, ota, psram, speaker
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BUFFER_SIZE,
@@ -26,11 +26,13 @@ from esphome.const import (
 from esphome.core import CORE, HexInt
 from esphome.core.entity_helpers import inherit_property_from
 from esphome.external_files import download_content
+from esphome.final_validate import full_config
 
 _LOGGER = logging.getLogger(__name__)
 
 
 AUTO_LOAD = ["audio"]
+DEPENDENCIES = ["network"]
 
 CODEOWNERS = ["@kahrendt", "@synesthesiam"]
 DOMAIN = "media_player"
@@ -217,7 +219,12 @@ def _validate_repeated_speaker(config):
 
 
 def _final_validate(config):
-    use_codec = config.get(CONF_CODEC_SUPPORT_ENABLED, True)
+    # Default to using codec if psram is enabled
+    if (use_codec := config.get(CONF_CODEC_SUPPORT_ENABLED)) is None:
+        use_codec = psram.DOMAIN in full_config.get()
+    conf_id = config[CONF_ID].id
+    core_data = CORE.data.setdefault(DOMAIN, {conf_id: {}})
+    core_data[conf_id][CONF_CODEC_SUPPORT_ENABLED] = use_codec
 
     for file_config in config.get(CONF_FILES, []):
         _, media_file_type = _read_audio_file_and_type(file_config)
@@ -275,6 +282,17 @@ PIPELINE_SCHEMA = cv.Schema(
 )
 
 
+def _request_high_performance_networking(config):
+    """Request high performance networking for streaming media.
+
+    Speaker media player streams audio data, so it always benefits from
+    optimized WiFi and lwip settings regardless of codec support.
+    Called during config validation to ensure flags are set before to_code().
+    """
+    network.require_high_performance_networking()
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     media_player.media_player_schema(SpeakerMediaPlayer).extend(
         {
@@ -299,6 +317,7 @@ CONFIG_SCHEMA = cv.All(
     ),
     cv.only_with_esp_idf,
     _validate_repeated_speaker,
+    _request_high_performance_networking,
 )
 
 
@@ -315,8 +334,7 @@ FINAL_VALIDATE_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    use_codec = config.get(CONF_CODEC_SUPPORT_ENABLED, True)
-    if use_codec:
+    if CORE.data[DOMAIN][config[CONF_ID].id][CONF_CODEC_SUPPORT_ENABLED]:
         # Compile all supported audio codecs
         cg.add_define("USE_AUDIO_FLAC_SUPPORT", True)
         cg.add_define("USE_AUDIO_MP3_SUPPORT", True)
@@ -324,7 +342,7 @@ async def to_code(config):
     var = await media_player.new_media_player(config)
     await cg.register_component(var, config)
 
-    cg.add_define("USE_OTA_STATE_CALLBACK")
+    ota.request_ota_state_listeners()
 
     cg.add(var.set_buffer_size(config[CONF_BUFFER_SIZE]))
 
