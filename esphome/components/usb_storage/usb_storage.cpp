@@ -333,16 +333,7 @@ void USBStorageHost::setup() {
 #endif
 }
 
-void USBStorageDevice::setup() {
-  ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)");
-  // Register with global storage registry
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
-  }
-#endif
-}
+void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device (interface-class based handler)"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
@@ -437,9 +428,10 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
   }
 
 #ifdef USE_STORAGE
-  // Notify storage registry of mount state change
+  // Register with global storage registry now that device is mounted
   if (storage::global_storage != nullptr) {
-    storage::global_storage->notify_device_changed(this);
+    storage::global_storage->register_device(this);
+    ESP_LOGD(TAG, "Registered USB storage device with storage registry");
   }
 #endif
 }
@@ -464,9 +456,10 @@ void USBStorageDevice::on_device_disconnected(usb_device_handle_t device_handle)
   this->slot_ = -1;
 
 #ifdef USE_STORAGE
-  // Notify storage registry of disconnect
+  // Unregister from storage registry on disconnect
   if (storage::global_storage != nullptr) {
-    storage::global_storage->notify_device_changed(this);
+    storage::global_storage->unregister_device(this);
+    ESP_LOGD(TAG, "Unregistered USB storage device from storage registry");
   }
 #endif
 }
