@@ -69,6 +69,21 @@ void USBHost::setup() {
     this->mark_failed();
     return;
   }
+
+  // Coordinator client for interface-class handler dispatch (works on S2/S3 too!)
+  usb_host_client_config_t client_config{
+      .is_synchronous = false,
+      .max_num_event_msg = 5,
+      .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
+
+  // Singleton mode: Use standard client registration
+  esp_err_t client_err = usb_host_client_register(&client_config, &this->coordinator_handle_);
+  if (client_err != ESP_OK) {
+    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
+    // Non-fatal: VID/PID clients will still work
+  } else {
+    ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
+  }
 #endif
 
   // Coordinator client for interface-class handler dispatch (works on all platforms)
