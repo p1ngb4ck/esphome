@@ -15,7 +15,8 @@
 namespace esphome {
 namespace usb_host {
 
-// NEW: Coordinator event callback for interface-class based device dispatch
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+// Coordinator event callback for interface-class based device dispatch
 // This callback receives device events and triggers interface-class matching
 static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, void *ptr) {
   auto *host = static_cast<USBHost *>(ptr);
@@ -35,6 +36,7 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
       break;
   }
 }
+#endif
 
 void USBHost::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
@@ -60,6 +62,22 @@ void USBHost::setup() {
   }
 
   ESP_LOGI(TAG, "USB Host controller %d initialized successfully", this->controller_index_);
+
+  // Coordinator client - only needed for dual-host mode with interface-class handlers
+  usb_host_client_config_t client_config{
+      .is_synchronous = false,
+      .max_num_event_msg = 5,
+      .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
+
+  // Dual host mode: Use controller-specific client registration
+  esp_err_t client_err =
+      usb_host_client_register_controller(this->host_handle_, &client_config, &this->coordinator_handle_);
+  if (client_err != ESP_OK) {
+    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
+    // Non-fatal: VID/PID clients will still work
+  } else {
+    ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
+  }
 #else
   // Singleton mode (ESP32-S2, ESP32-S3)
   usb_host_config_t config{};
@@ -70,26 +88,6 @@ void USBHost::setup() {
     return;
   }
 #endif
-
-  usb_host_client_config_t client_config{
-      .is_synchronous = false,
-      .max_num_event_msg = 5,
-      .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual host mode: Use controller-specific client registration
-  esp_err_t client_err =
-      usb_host_client_register_controller(this->host_handle_, &client_config, &this->coordinator_handle_);
-#else
-  // Singleton mode: Use global client registration
-  esp_err_t client_err = usb_host_client_register(&client_config, &this->coordinator_handle_);
-#endif
-  if (client_err != ESP_OK) {
-    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
-    // Non-fatal: VID/PID clients will still work
-  } else {
-    ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
-  }
 
   // Mark USB Host as fully initialized
   this->initialized_ = true;
@@ -111,6 +109,12 @@ void USBHost::loop() {
   if (event_flags != 0) {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
+
+  // Handle coordinator client events for interface-class handlers
+  // Without this, coordinator_event_cb() is never called!
+  if (this->coordinator_handle_ != nullptr) {
+    usb_host_client_handle_events(this->coordinator_handle_, 0);
+  }
 #else
   // Singleton mode
   int err;
@@ -123,15 +127,10 @@ void USBHost::loop() {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
 #endif
-
-  // NEW: Handle coordinator client events for interface-class handlers
-  // Without this, coordinator_event_cb() is never called!
-  if (this->coordinator_handle_ != nullptr) {
-    usb_host_client_handle_events(this->coordinator_handle_, 0);
-  }
 }
 
-// NEW: Device claiming system implementation
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+// Device claiming system implementation
 bool USBHost::try_claim_device(uint8_t address) {
   if (this->claimed_devices_.count(address) > 0) {
     ESP_LOGV(TAG, "Device %d already claimed", address);
@@ -200,6 +199,7 @@ void USBHost::close_device_handle(usb_device_handle_t device_handle) {
     usb_host_device_close(this->coordinator_handle_, device_handle);
   }
 }
+#endif
 
 void USBHost::add_device_to_whitelist(uint16_t vid, uint16_t pid) {
   this->device_whitelist_.push_back(std::make_pair(vid, pid));
