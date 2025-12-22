@@ -386,9 +386,11 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
     esp_err_t err = usb_host_get_device_descriptor(device_handle, &device_desc);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to get device descriptor for VID/PID check: %s", esp_err_to_name(err));
+#ifdef USE_USB_HOST_DUAL_INSTANCE
       if (this->usb_host_ != nullptr) {
         this->usb_host_->close_device_handle(device_handle);
       }
+#endif
       return;
     }
 
@@ -398,9 +400,11 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
     if (!vid_match || !pid_match) {
       ESP_LOGD(TAG, "Device VID/PID (0x%04X/0x%04X) doesn't match filter (0x%04X/0x%04X) - rejecting",
                device_desc->idVendor, device_desc->idProduct, this->vid_, this->pid_);
+#ifdef USE_USB_HOST_DUAL_INSTANCE
       if (this->usb_host_ != nullptr) {
         this->usb_host_->close_device_handle(device_handle);
       }
+#endif
       return;
     }
 
@@ -410,11 +414,13 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
   this->device_addr_ = addr;
 
   ESP_LOGD(TAG, "Closing device handle from usb_host before calling msc_host_install_device()");
+#ifdef USE_USB_HOST_DUAL_INSTANCE
   if (this->usb_host_ != nullptr) {
     this->usb_host_->close_device_handle(device_handle);
   } else {
     ESP_LOGE(TAG, "usb_host_ is nullptr, cannot close device handle!");
   }
+#endif
 
   esp_err_t err = this->parent_->allocate_new_msc_device(addr, this->mount_path_);
   if (err != ESP_OK) {
