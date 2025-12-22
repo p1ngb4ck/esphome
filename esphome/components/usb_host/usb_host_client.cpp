@@ -1,5 +1,5 @@
 // Should not be needed, but it's required to pass CI clang-tidy checks
-#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
 #include "usb_host.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -182,24 +182,6 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 #endif
 }
 void USBClient::setup() {
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  ESP_LOGI(TAG, "=== USBClient::setup() ENTRY - VID=%04X PID=%04X parent=%p ===", this->vid_, this->pid_,
-           (void *) this->parent_);
-
-  // CRITICAL: Verify parent is set (should be set via constructor parameter in Python codegen)
-  if (this->parent_ == nullptr) {
-    ESP_LOGE(TAG, "Parent is nullptr - this should never happen!");
-    this->mark_failed();
-    return;
-  }
-
-  // Set state to REGISTERING - actual registration will happen in loop()
-  // This is necessary because usb_host_client_register_controller() needs
-  // usb_host_controller_handle_events() to be running to process the registration
-  this->state_ = USB_CLIENT_REGISTERING;
-  ESP_LOGI(TAG, "USBClient::setup() complete - registration deferred to loop()");
-#else
-  // Original singleton mode initialization - register client immediately
   usb_host_client_config_t config{.is_synchronous = false,
                                   .max_num_event_msg = 5,
                                   .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
@@ -210,12 +192,6 @@ void USBClient::setup() {
     this->mark_failed();
     return;
   }
-  // Pre-allocate USB transfer buffers for all slots at startup
-  // This avoids any dynamic allocation during runtime
-  for (auto &request : this->requests_) {
-    usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
-    request.client = this;  // Set once, never changes
-  }
 
   // Create and start USB task
   xTaskCreate(usb_task_fn, "usb_task",
@@ -228,82 +204,6 @@ void USBClient::setup() {
     ESP_LOGE(TAG, "Failed to create USB task");
     this->mark_failed();
   }
-#endif
-}
-
-void USBClient::init_task_fn(void *arg) {
-  auto *client = static_cast<USBClient *>(arg);
-  ESP_LOGE(TAG, "=== init_task_fn STARTED - calling deferred_init() ===");
-  client->deferred_init();
-  ESP_LOGE(TAG, "=== init_task_fn COMPLETED - deleting task ===");
-  // Task deletes itself after init
-  vTaskDelete(nullptr);
-}
-
-void USBClient::deferred_init() {
-  // CRITICAL: Wait for parent to be set (must never be nullptr when we proceed)
-  // Parent is set via constructor parameter in Python codegen
-  uint32_t wait_count = 0;
-  constexpr uint32_t MAX_WAIT_MS = 5000;  // 5 second timeout
-  constexpr uint32_t CHECK_INTERVAL_MS = 10;
-  constexpr uint32_t MAX_ITERATIONS = MAX_WAIT_MS / CHECK_INTERVAL_MS;
-
-  while (this->parent_ == nullptr) {
-    if (wait_count++ >= MAX_ITERATIONS) {
-      ESP_LOGE(TAG, "Timeout waiting for parent to be set - this should never happen!");
-      this->mark_failed();
-      return;
-    }
-    ESP_LOGD(TAG, "Waiting for parent to be set...");
-    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
-  }
-
-  // Now wait for USBHost to be fully initialized
-  wait_count = 0;
-  while (!this->parent_->is_initialized()) {
-    if (wait_count++ >= MAX_ITERATIONS) {
-      ESP_LOGE(TAG, "Timeout waiting for USBHost initialization");
-      this->mark_failed();
-      return;
-    }
-    vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
-  }
-
-  ESP_LOGD(TAG, "USBHost ready, proceeding with client registration");
-
-  usb_host_client_config_t config{.is_synchronous = false,
-                                  .max_num_event_msg = 5,
-                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual host mode: Use controller-specific client registration
-  auto err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
-#else
-  // Singleton mode: Use global client registration
-  auto err = usb_host_client_register(&config, &this->handle_);
-#endif
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
-    this->status_set_error(static_cast<const LogString *>(LOG_STR("Client register failed")));
-    this->mark_failed();
-    return;
-  }
-
-  // Create and start USB task
-  xTaskCreate(usb_task_fn, "usb_task",
-              USB_TASK_STACK_SIZE,  // Stack size
-              this,                 // Task parameter
-              USB_TASK_PRIORITY,    // Priority (higher than main loop)
-              &this->usb_task_handle_);
-
-  if (this->usb_task_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create USB task");
-    this->mark_failed();
-  }
-
-  // Clear init task handle as we're about to exit
-  this->init_task_handle_ = nullptr;
 }
 
 void USBClient::usb_task_fn(void *arg) {
@@ -339,53 +239,6 @@ void USBClient::loop() {
   }
 
   switch (this->state_) {
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-    case USB_CLIENT_REGISTERING: {
-      // Wait for USBHost to be fully initialized before attempting registration
-      if (!this->parent_->is_initialized()) {
-        return;  // Keep waiting, try again next loop
-      }
-
-      ESP_LOGI(TAG, "USBHost initialized, registering client (VID=%04X PID=%04X)", this->vid_, this->pid_);
-
-      // Register client with the controller
-      usb_host_client_config_t config{.is_synchronous = false,
-                                      .max_num_event_msg = 5,
-                                      .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
-
-      esp_err_t err = usb_host_client_register_controller(this->parent_->get_host_handle(), &config, &this->handle_);
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
-        this->status_set_error(LOG_STR("Client register failed"));
-        this->mark_failed();
-        return;
-      }
-
-      ESP_LOGI(TAG, "Client registered successfully");
-
-      // Pre-allocate USB transfer buffers for all slots
-      ESP_LOGI(TAG, "Allocating %d USB transfer buffers...", MAX_REQUESTS);
-      for (auto &request : this->requests_) {
-        usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
-        request.client = this;
-      }
-      ESP_LOGI(TAG, "Transfer buffers allocated");
-
-      // Create and start USB task
-      ESP_LOGI(TAG, "Creating USB task...");
-      xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
-
-      if (this->usb_task_handle_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create USB task");
-        this->mark_failed();
-        return;
-      }
-
-      ESP_LOGI(TAG, "USB task created, moving to INIT state");
-      this->state_ = USB_CLIENT_INIT;
-      break;
-    }
-#endif
     case USB_CLIENT_OPEN: {
       int err;
       ESP_LOGD(TAG, "Open device %d", this->device_addr_);
@@ -451,7 +304,6 @@ void USBClient::loop() {
         }
 
         if ((vid_pid_match || is_wildcard) && !skip_for_specific_driver) {
-#ifdef USE_USB_HOST_DUAL_INSTANCE
           // NEW: Try to claim device (coordinates with USBHost for interface-class handlers)
           ESP_LOGD(TAG, "Attempting to claim device %d (VID=%04X, PID=%04X, parent=%p)", this->device_addr_, this->vid_,
                    this->pid_, (void *) this->parent_);
@@ -463,7 +315,6 @@ void USBClient::loop() {
           }
           ESP_LOGD(TAG, "Device %d successfully claimed (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
                    this->pid_);
-#endif
 
           usb_device_info_t dev_info;
           err = usb_host_device_info(this->device_handle_, &dev_info);
@@ -575,7 +426,7 @@ TransferRequest *USBClient::get_trq_() {
 void USBClient::disconnect() {
   this->on_disconnected();
 
-  // Release device claim - but only if we actually claimed it (state == CONNECTED)
+  // NEW: Release device claim - but only if we actually claimed it (state == CONNECTED)
   // If we opened the device but didn't claim it (e.g., wildcard skipped MSC device),
   // don't release it - the interface-class handler may have claimed it instead
   if (this->parent_ != nullptr && this->device_addr_ != -1 && this->state_ == USB_CLIENT_CONNECTED) {
@@ -744,4 +595,4 @@ void USBClient::release_trq(TransferRequest *trq) {
 
 }  // namespace usb_host
 }  // namespace esphome
-#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
+#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

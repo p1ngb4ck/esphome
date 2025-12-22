@@ -11,7 +11,6 @@ from esphome.components.esp32 import (
 from esphome.components.usb_host import USBHost, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
-from esphome.core import CORE
 
 CODEOWNERS = ["p1ngb4ck"]
 DEPENDENCIES = ["usb_host", "esp32"]
@@ -65,8 +64,9 @@ async def register_usb_storage_handler(device_config, storage_host, usb_host):
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
 
-    # Register as interface-class handler (works on all platforms with coordinator)
-    cg.add(usb_host.register_device_handler(var))
+    cg.add(
+        usb_host.register_device_handler(var)
+    )  # Register as interface-class handler with USBHost
 
     # Register on_mounted trigger
     for conf in device_config.get(CONF_ON_MOUNTED, []):
@@ -106,6 +106,8 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
+    from esphome.core import CORE
+
     # Load appropriate MSC driver based on dual_host_support flag
     dual_host_support = CORE.data.get("usb_host_dual_instance", False)
     if dual_host_support:
@@ -113,7 +115,7 @@ async def to_code(config):
         add_idf_component(
             name="usb_host_msc",
             repo="https://github.com/p1ngb4ck/esp-usb.git",
-            ref="feat/dual-host-support",
+            ref="dual-host-support",
             path="host/class/msc/usb_host_msc",
         )
     else:

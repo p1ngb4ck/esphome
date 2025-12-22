@@ -1,5 +1,5 @@
 // Should not be needed, but it's required to pass CI clang-tidy checks
-#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
 #include "usb_host.h"
 #include <cinttypes>
 #include "esphome/core/log.h"
@@ -7,31 +7,33 @@
 #include "freertos/task.h"
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-// For dual USB Host support on ESP32-P4
-// Use controller-specific ESP-IDF API instead of calling TinyUSB directly
-// This ensures proper USB PHY initialization before hardware access
+// For dual USB Host support, we need direct TinyUSB access
+extern "C" {
+// TinyUSB host mode init function (multi-instance)
+// Returns TinyUSB instance handle for the specified root hub port
+void *tuh_init(uint8_t rhport);
+}
 #endif
 
 namespace esphome {
 namespace usb_host {
 
-// Coordinator event callback for interface-class based device dispatch
+// NEW: Coordinator event callback for interface-class based device dispatch
 // This callback receives device events and triggers interface-class matching
 static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, void *ptr) {
   auto *host = static_cast<USBHost *>(ptr);
 
   switch (event_msg->event) {
     case USB_HOST_CLIENT_EVENT_NEW_DEV:
-      ESP_LOGI(TAG, "Coordinator: New device %d detected", event_msg->new_dev.address);
+      ESP_LOGV(TAG, "Coordinator: New device %d", event_msg->new_dev.address);
       // Try to dispatch to interface-class handlers (if not claimed by VID/PID)
       host->try_dispatch_to_handlers(event_msg->new_dev.address);
       break;
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
-      ESP_LOGI(TAG, "Coordinator: Device %d gone", event_msg->dev_gone.dev_hdl);
+      ESP_LOGV(TAG, "Coordinator: Device gone");
       // Handler disconnection is managed by the handlers themselves
       break;
     default:
-      ESP_LOGI(TAG, "Coordinator: Unknown event %d", event_msg->event);
       break;
   }
 }
@@ -39,29 +41,23 @@ static void coordinator_event_cb(const usb_host_client_event_msg_t *event_msg, v
 void USBHost::setup() {
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host mode (ESP32-P4 only)
-  // Use new controller-specific API from esp-usb that includes PHY initialization
-  // controller_index_ matches TinyUSB array: 0 = FS (USB OTG1), 1 = HS (USB OTG0)
-  ESP_LOGI(TAG, "Initializing USB Host controller %d", this->controller_index_);
-
-  usb_host_config_t config = {};
-  config.skip_phy_setup = false;  // Let ESP-IDF/esp-usb handle PHY init (critical!)
-  config.intr_flags = ESP_INTR_FLAG_LEVEL1;
-  // Invert mapping: controller_index 0 (FS) → OTG1 (BIT1), controller_index 1 (HS) → OTG0 (BIT0)
-  config.peripheral_map = (1U << (1 - this->controller_index_));
-
-  esp_err_t err =
-      usb_host_install_controller(this->controller_index_, &config, &this->tuh_instance_, &this->host_handle_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "usb_host_install_controller failed for controller %d: %s", this->controller_index_,
-             esp_err_to_name(err));
-    this->status_set_error(LOG_STR("usb_host_install_controller failed"));
+  // Initialize TinyUSB directly with the specified controller (rhport)
+  // rhport 0 = Full-Speed (USB0), rhport 1 = High-Speed (USB1)
+  ESP_LOGI(TAG, "Initializing TinyUSB dual host mode, controller type: %d", this->controller_type_);
+  this->tuh_instance_ = tuh_init(this->controller_type_);
+  if (this->tuh_instance_ == nullptr) {
+    ESP_LOGE(TAG, "TinyUSB tuh_init failed for controller %d", this->controller_type_);
+    this->status_set_error(LOG_STR("tuh_init failed"));
     this->mark_failed();
     return;
   }
+  ESP_LOGI(TAG, "TinyUSB instance initialized successfully for controller %d", this->controller_type_);
 
-  ESP_LOGI(TAG, "USB Host controller %d initialized successfully", this->controller_index_);
+  // Still need ESP-IDF USB Host for client registration
+  // In dual mode, this should be called only once globally, not per instance
+  // TODO: Coordinate global usb_host_install() across instances
 #else
-  // Singleton mode (ESP32-S2, ESP32-S3)
+  // Singleton mode (ESP32-S2, ESP32-S3, or ESP32-P4 without dual_host_support)
   usb_host_config_t config{};
 
   if (usb_host_install(&config) != ESP_OK) {
@@ -71,74 +67,40 @@ void USBHost::setup() {
   }
 #endif
 
-  // Coordinator client for interface-class handler dispatch (works on all platforms)
+  // NEW: Register coordinator client for interface-class handler dispatch
+  // This client receives device events and coordinates with VID/PID clients
   usb_host_client_config_t client_config{
       .is_synchronous = false,
       .max_num_event_msg = 5,
       .async = {.client_event_callback = coordinator_event_cb, .callback_arg = this}};
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual host mode: Use controller-specific client registration
-  esp_err_t client_err =
-      usb_host_client_register_controller(this->host_handle_, &client_config, &this->coordinator_handle_);
-#else
-  // Singleton mode: Use global client registration
-  esp_err_t client_err = usb_host_client_register(&client_config, &this->coordinator_handle_);
-#endif
-  if (client_err != ESP_OK) {
-    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(client_err));
+  auto err = usb_host_client_register(&client_config, &this->coordinator_handle_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Coordinator client registration failed: %s", esp_err_to_name(err));
     // Non-fatal: VID/PID clients will still work
   } else {
     ESP_LOGD(TAG, "Coordinator client registered for interface-class handlers");
   }
-
-  // Mark USB Host as fully initialized
-  this->initialized_ = true;
-  ESP_LOGVV(TAG, "=== USBHost::setup() EXIT - initialized=true ===");
 }
 void USBHost::loop() {
-  static uint32_t loop_count = 0;
-  if (loop_count++ < 5) {
-    ESP_LOGI(TAG, "USBHost::loop() called, count=%u", loop_count);
-  }
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual USB Host mode - handle events for this specific controller
-  uint32_t event_flags;
-  esp_err_t err = usb_host_controller_handle_events(this->controller_index_, 0, &event_flags);
-  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-    ESP_LOGD(TAG, "controller_handle_events failed: %s", esp_err_to_name(err));
-  }
-  if (event_flags != 0) {
-    ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
-  }
-
-  // Handle coordinator client events for interface-class handlers
-  // Without this, coordinator_event_cb() is never called!
-  if (this->coordinator_handle_ != nullptr) {
-    usb_host_client_handle_events(this->coordinator_handle_, 0);
-  }
-#else
-  // Singleton mode
   int err;
   uint32_t event_flags;
   err = usb_host_lib_handle_events(0, &event_flags);
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-    ESP_LOGD(TAG, "lib_handle_events failed: %s", esp_err_to_name(err));
+    ESP_LOGD(TAG, "lib_handle_events failed failed: %s", esp_err_to_name(err));
   }
   if (event_flags != 0) {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
 
-  // Handle coordinator client events for interface-class handlers
+  // NEW: Handle coordinator client events for interface-class handlers
   // Without this, coordinator_event_cb() is never called!
   if (this->coordinator_handle_ != nullptr) {
     usb_host_client_handle_events(this->coordinator_handle_, 0);
   }
-#endif
 }
 
-// Device claiming system implementation (works on all platforms with coordinator)
+// NEW: Device claiming system implementation
 bool USBHost::try_claim_device(uint8_t address) {
   if (this->claimed_devices_.count(address) > 0) {
     ESP_LOGV(TAG, "Device %d already claimed", address);
@@ -236,4 +198,4 @@ bool USBHost::is_device_whitelisted(uint16_t vid, uint16_t pid) const {
 }  // namespace usb_host
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
+#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

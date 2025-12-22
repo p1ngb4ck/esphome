@@ -66,8 +66,6 @@ class USBStorageHost : public Component {
 
  public:
   void setup() override;
-  // Run after USBHost (IO=900) to ensure USB host is initialized before MSC driver
-  float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }

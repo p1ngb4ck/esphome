@@ -1,9 +1,8 @@
 #pragma once
 
-#include "esphome/core/defines.h"  // MUST be first to see all defines
-
 // Should not be needed, but it's required to pass CI clang-tidy checks
-#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
+#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+#include "esphome/core/defines.h"
 #include "esphome/core/component.h"
 #include <vector>
 #include <set>
@@ -13,12 +12,6 @@
 #include "esphome/core/lock_free_queue.h"
 #include "esphome/core/event_pool.h"
 #include <atomic>
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-// Forward declare TinyUSB types to avoid including TinyUSB headers in this header file
-// The actual TinyUSB headers are only included in usb_host_component.cpp where they're needed
-struct usbh_instance;
-using tuh_instance_t = usbh_instance *;
-#endif
 
 namespace esphome {
 namespace usb_host {
@@ -99,11 +92,7 @@ static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;  // Size of event queue betwe
 #ifndef USB_TASK_STACK_SIZE
 static constexpr size_t USB_TASK_STACK_SIZE = 4096;  // Stack size for USB task
 #endif
-// USB task priority: Same as main loop (priority 1) to prevent preemption during xTaskCreate()
-// If set higher, FreeRTOS immediately switches to the new task before xTaskCreate() returns,
-// causing the task to block in usb_host_client_handle_events() and preventing the main loop
-// from continuing to create additional USB tasks.
-static constexpr UBaseType_t USB_TASK_PRIORITY = 1;  // Same as main loop priority
+static constexpr UBaseType_t USB_TASK_PRIORITY = 5;  // Higher priority than main loop (tskIDLE_PRIORITY + 5)
 
 // used to report a transfer status
 struct TransferStatus {
@@ -151,7 +140,6 @@ struct UsbEvent {
 
 enum ClientState {
   USB_CLIENT_INIT = 0,
-  USB_CLIENT_REGISTERING,  // Waiting to register client (dual-host mode only)
   USB_CLIENT_OPEN,
   USB_CLIENT_CLOSE,
   USB_CLIENT_GET_DESC,
@@ -162,11 +150,7 @@ class USBClient : public Component, public Parented<USBHost> {
   friend class USBHost;
 
  public:
-  USBClient(uint16_t vid, uint16_t pid, USBHost *parent = nullptr) : vid_(vid), pid_(pid), trq_in_use_(0) {
-    if (parent != nullptr) {
-      this->set_parent(parent);
-    }
-  }
+  USBClient(uint16_t vid, uint16_t pid) : vid_(vid), pid_(pid), trq_in_use_(0) {}
   void setup() override;
   void loop() override;
   // setup must happen after the host bus has been setup
@@ -200,12 +184,7 @@ class USBClient : public Component, public Parented<USBHost> {
   static void usb_task_fn(void *arg);
   [[noreturn]] void usb_task_loop() const;
 
-  // Deferred initialization task - waits for USBHost to be ready
-  static void init_task_fn(void *arg);
-  void deferred_init();
-
   TaskHandle_t usb_task_handle_{nullptr};
-  TaskHandle_t init_task_handle_{nullptr};
 
   usb_host_client_handle_t handle_{};
   usb_device_handle_t device_handle_{};
@@ -222,31 +201,21 @@ class USBClient : public Component, public Parented<USBHost> {
 };
 class USBHost : public Component {
  public:
-#if defined(USE_USB_HOST_DUAL_INSTANCE)
-  USBHost(uint8_t controller_index = 1) : controller_index_{controller_index} {}
-#endif
-  float get_setup_priority() const override {
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-    return setup_priority::IO;  // Deferred init for dual-host mode
-#else
-    return setup_priority::BUS;  // Original behavior for S2/S3
-#endif
-  }
+  float get_setup_priority() const override { return setup_priority::BUS; }
   void loop() override;
   void setup() override;
-  bool is_initialized() const { return this->initialized_; }
 
-  // Device claiming system for coordination between VID/PID clients and interface-class handlers
+  // NEW: Device claiming system for coordination between VID/PID clients and interface-class handlers
   bool try_claim_device(uint8_t address);
   void release_device(uint8_t address);
 
-  // Register interface-class based handlers (e.g., MSC, HID)
+  // NEW: Register interface-class based handlers (e.g., MSC, HID)
   void register_device_handler(USBDeviceHandler *handler);
 
-  // Try to dispatch device to interface-class handlers (called when not claimed by VID/PID)
+  // NEW: Try to dispatch device to interface-class handlers (called when not claimed by VID/PID)
   void try_dispatch_to_handlers(uint8_t address);
 
-  // Close a device handle (for handlers that need to re-open with different client)
+  // NEW: Close a device handle (for handlers that need to re-open with different client)
   void close_device_handle(usb_device_handle_t device_handle);
 
   // Device whitelist management
@@ -255,29 +224,24 @@ class USBHost : public Component {
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host support (ESP32-P4 only)
-  void set_controller_index(uint8_t index) { this->controller_index_ = index; }
-  uint8_t get_controller_type() const { return this->controller_index_; }
-  tuh_instance_t get_tuh_instance() const { return static_cast<tuh_instance_t>(this->tuh_instance_); }
-  usb_host_handle_t get_host_handle() const { return this->host_handle_; }
+  void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
+  void *get_tuh_instance() const { return this->tuh_instance_; }
 #endif
 
  protected:
   std::vector<USBClient *> clients_{};                             // EXISTING: VID/PID based clients
+  std::vector<USBDeviceHandler *> handlers_{};                     // NEW: Interface-class based handlers
+  std::set<uint8_t> claimed_devices_{};                            // NEW: Track devices claimed by VID/PID clients
+  usb_host_client_handle_t coordinator_handle_{};                  // NEW: Handle for handler dispatch
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
-  bool initialized_{false};                                        // Track if USB host is fully initialized
-
-  std::vector<USBDeviceHandler *> handlers_{};     // Interface-class based handlers (works on all platforms)
-  std::set<uint8_t> claimed_devices_{};            // Track devices claimed by VID/PID clients
-  usb_host_client_handle_t coordinator_handle_{};  // Handle for coordinator client dispatch
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_index_{1};      // Index into TinyUSB _dwc2_controller[] array: 0=FS, 1=HS (default HS)
-  void *tuh_instance_{nullptr};      // Opaque handle from ESP-IDF, cast to tuh_instance_t when needed
-  usb_host_handle_t host_handle_{};  // USB Host library handle for controller-specific client registration
+  uint8_t controller_type_{0};   // 0 = FS, 1 = HS
+  void *tuh_instance_{nullptr};  // TinyUSB instance handle (void* to avoid including TinyUSB headers)
 #endif
 };
 
 }  // namespace usb_host
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
+#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

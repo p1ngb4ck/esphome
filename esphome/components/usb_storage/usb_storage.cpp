@@ -304,24 +304,17 @@ static void msc_event_callback(const msc_host_event_t *event, void *arg) {
 
 void USBStorageHost::setup() {
   ESP_LOGCONFIG(TAG, "Registering USB Storage Host Component...");
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual-host mode: Initialize MSC driver with controller-specific handles
   const msc_host_driver_config_t msc_config = {
-      .create_backround_task = false,  // We'll handle events in our loop()
+      .create_backround_task = true,
       .task_priority = 5,
       .stack_size = 4096,
       .callback = msc_event_callback,
   };
 
-  // Get both TinyUSB instance and USB Host handle for dual-host mode
-  tuh_instance_t tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
-  usb_host_handle_t host_handle = (this->usb_host_ != nullptr) ? this->usb_host_->get_host_handle() : nullptr;
-
-  ESP_LOGI(TAG, "Initializing MSC driver: tuh_inst=%p, host_handle=%p", (void *) tuh_inst, (void *) host_handle);
-
-  // Pass both handles to MSC driver - it will use controller-specific client registration
-  this->msc_driver_ = msc_host_driver_init(tuh_inst, host_handle, &msc_config);
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+  // Multi-instance API: Initialize MSC driver with USB Host instance
+  void *tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
+  this->msc_driver_ = msc_host_driver_init(tuh_inst, &msc_config);
   if (this->msc_driver_ == nullptr) {
     ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance)");
     this->mark_failed();
@@ -329,14 +322,6 @@ void USBStorageHost::setup() {
   }
   ESP_LOGI(TAG, "MSC host driver initialized successfully (multi-instance)");
 #else
-  // Singleton mode (S2/S3): Original behavior - MSC driver creates background task
-  const msc_host_driver_config_t msc_config = {
-      .create_backround_task = true,  // MSC driver handles enumeration itself
-      .task_priority = 5,
-      .stack_size = 4096,
-      .callback = msc_event_callback,
-  };
-
   // Singleton API: Use global msc_host_install
   esp_err_t err = msc_host_install(&msc_config);
   if (err != ESP_OK) {
@@ -348,7 +333,16 @@ void USBStorageHost::setup() {
 #endif
 }
 
-void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)"); }
+void USBStorageDevice::setup() {
+  ESP_LOGCONFIG(TAG, "Registering USB Storage Device (interface-class based handler)");
+  // Register with global storage registry
+#ifdef USE_STORAGE
+  if (storage::global_storage != nullptr) {
+    storage::global_storage->register_device(this);
+    ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
+  }
+#endif
+}
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
@@ -442,11 +436,10 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
     callback(this->mount_path_);
   }
 
-// Register with global storage registry
 #ifdef USE_STORAGE
+  // Notify storage registry of mount state change
   if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered USBStorageHost with storage registry");
+    storage::global_storage->notify_device_changed(this);
   }
 #endif
 }
