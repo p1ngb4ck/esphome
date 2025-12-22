@@ -236,7 +236,6 @@ class USBHost : public Component {
   void setup() override;
   bool is_initialized() const { return this->initialized_; }
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
   // Device claiming system for coordination between VID/PID clients and interface-class handlers
   bool try_claim_device(uint8_t address);
   void release_device(uint8_t address);
@@ -249,7 +248,6 @@ class USBHost : public Component {
 
   // Close a device handle (for handlers that need to re-open with different client)
   void close_device_handle(usb_device_handle_t device_handle);
-#endif
 
   // Device whitelist management
   void add_device_to_whitelist(uint16_t vid, uint16_t pid);
@@ -268,11 +266,9 @@ class USBHost : public Component {
   std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
   bool initialized_{false};                                        // Track if USB host is fully initialized
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  std::vector<USBDeviceHandler *> handlers_{};     // NEW: Interface-class based handlers
-  std::set<uint8_t> claimed_devices_{};            // NEW: Track devices claimed by VID/PID clients
-  usb_host_client_handle_t coordinator_handle_{};  // NEW: Handle for handler dispatch
-#endif
+  std::vector<USBDeviceHandler *> handlers_{};     // Interface-class based handlers (works on all platforms)
+  std::set<uint8_t> claimed_devices_{};            // Track devices claimed by VID/PID clients
+  usb_host_client_handle_t coordinator_handle_{};  // Handle for coordinator client dispatch
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   uint8_t controller_index_{1};      // Index into TinyUSB _dwc2_controller[] array: 0=FS, 1=HS (default HS)

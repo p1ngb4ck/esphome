@@ -65,13 +65,8 @@ async def register_usb_storage_handler(device_config, storage_host, usb_host):
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
 
-    # Only register as interface-class handler in dual-host mode
-    # In singleton mode (S2/S3), MSC driver handles enumeration via background task
-    dual_host_support = CORE.data.get("usb_host_dual_instance", False)
-    if dual_host_support:
-        cg.add(
-            usb_host.register_device_handler(var)
-        )  # Register as interface-class handler with USBHost
+    # Register as interface-class handler (works on all platforms with coordinator)
+    cg.add(usb_host.register_device_handler(var))
 
     # Register on_mounted trigger
     for conf in device_config.get(CONF_ON_MOUNTED, []):
