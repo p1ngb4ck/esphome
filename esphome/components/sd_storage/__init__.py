@@ -252,8 +252,10 @@ async def to_code(config):
         cg.add_define("USE_SD_STORAGE_SDMMC")
 
         # Set mode and slot first
-        cg.add(var.set_mode_1bit(config[CONF_MODE_1BIT]))
-        cg.add(var.set_slot(config[CONF_SLOT]))
+        if mode_1bit := config.get(CONF_MODE_1BIT):
+            cg.add(var.set_mode_1bit(mode_1bit))
+        if CONF_SLOT in config:
+            cg.add(var.set_slot(config[CONF_SLOT]))
 
         # Set pins
         cg.add(var.set_clk_pin(config[CONF_CLK_PIN]))
@@ -261,7 +263,7 @@ async def to_code(config):
         cg.add(var.set_data0_pin(config[CONF_DATA0_PIN]))
 
         # Only set data pins if not in 1-bit mode
-        if not config[CONF_MODE_1BIT]:
+        if not mode_1bit:
             if CONF_DATA1_PIN in config:
                 cg.add(var.set_data1_pin(config[CONF_DATA1_PIN]))
             if CONF_DATA2_PIN in config:

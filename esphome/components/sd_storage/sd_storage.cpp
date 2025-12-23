@@ -34,6 +34,14 @@ static sdmmc_card_t *card = nullptr;
 void SdMmc::setup() {
   ESP_LOGI(TAG, "Initializing SD/MMC card");
   ESP_LOGI(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
+  if (!this->mode_1bit_) {
+    ESP_LOGI(TAG, "  DATA1 pin: %d, DATA2 pin: %d, DATA3 pin: %d", this->data1_pin_, this->data2_pin_,
+             this->data3_pin_);
+  } else {
+    ESP_LOGI(TAG, "  Operating in 1-bit mode");
+  }
+  ESP_LOGI(TAG, "  Mount path: %s", this->mount_path_.c_str());
+  ESP_LOGI(TAG, "  Slot: %d", this->slot_);
 
   if (this->cs_pin_ != 0) {
     ESP_LOGI(TAG, "  Power control pin: %d", this->cs_pin_);
