@@ -83,10 +83,10 @@ void ADS1115Component::loop() {}
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
 #ifdef USE_ESP32
-  // Try to acquire burst lock with zero timeout (non-blocking)
-  // If a burst measurement is in progress, return NAN immediately
-  if (xSemaphoreTake(this->burst_mutex_, 0) != pdTRUE) {
-    // Lock is held by burst measurement, return NAN (potentiometer will retry next update)
+  // Acquire burst lock (blocking - safe because called from background task)
+  // Will wait if RMS measurement is in progress
+  if (xSemaphoreTake(this->burst_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to acquire burst lock");
     return NAN;
   }
 
@@ -106,10 +106,10 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
 bool ADS1115Component::do_burst_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate,
                                             std::function<void(float)> sample_callback, uint16_t num_samples) {
-  // Try to acquire lock with zero timeout (non-blocking)
-  if (xSemaphoreTake(this->burst_mutex_, 0) != pdTRUE) {
-    // Another burst measurement in progress, return false
-    ESP_LOGW(TAG, "Burst measurement skipped - ADC busy");
+  // Acquire lock (blocking - safe because called from background task)
+  // Will wait if another measurement is in progress
+  if (xSemaphoreTake(this->burst_mutex_, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to acquire burst lock");
     return false;
   }
 
