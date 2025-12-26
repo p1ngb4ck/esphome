@@ -5,6 +5,11 @@
 
 #include <vector>
 
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
+
 namespace esphome {
 namespace ads1115 {
 

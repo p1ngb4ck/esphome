@@ -7,19 +7,6 @@ namespace zmpt101b {
 
 static const char *const TAG = "zmpt101b.sensor";
 
-#ifdef USE_ESP32
-// Global I2C mutex shared across ALL voltage sampling components (ACS712, ZMPT101B, etc.)
-// MUST be the same mutex instance used by acs712_sensor.cpp
-extern SemaphoreHandle_t global_voltage_sampler_i2c_mutex_;
-
-static SemaphoreHandle_t get_global_i2c_mutex_() {
-  if (global_voltage_sampler_i2c_mutex_ == nullptr) {
-    global_voltage_sampler_i2c_mutex_ = xSemaphoreCreateMutex();
-  }
-  return global_voltage_sampler_i2c_mutex_;
-}
-#endif
-
 void ZMPT101BSensor::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ZMPT101B...");
 
@@ -130,23 +117,7 @@ float ZMPT101BSensor::get_voltage_sample_() {
     return NAN;
   }
 
-#ifdef USE_ESP32
-  // Lock GLOBAL I2C bus for thread-safe ADC access across all sampling components
-  SemaphoreHandle_t i2c_lock = get_global_i2c_mutex_();
-  if (i2c_lock != nullptr && xSemaphoreTake(i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-    float voltage = this->voltage_source_->sample();
-    xSemaphoreGive(i2c_lock);
-
-    // Validate voltage reading
-    if (std::isnan(voltage) || voltage < 0.0f || voltage > 5.5f) {
-      return NAN;
-    }
-
-    return voltage;
-  } else {
-    return NAN;  // Failed to acquire I2C lock
-  }
-#else
+  // Mutex protection is now handled inside ADS1115::request_measurement()
   float voltage = this->voltage_source_->sample();
 
   // Validate voltage reading
@@ -155,7 +126,6 @@ float ZMPT101BSensor::get_voltage_sample_() {
   }
 
   return voltage;
-#endif
 }
 
 float ZMPT101BSensor::calculate_rms_voltage_() {

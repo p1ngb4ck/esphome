@@ -9,6 +9,19 @@ static const char *const TAG = "ads1115";
 static const uint8_t ADS1115_REGISTER_CONVERSION = 0x00;
 static const uint8_t ADS1115_REGISTER_CONFIG = 0x01;
 
+#ifdef USE_ESP32
+// Global mutex for thread-safe ADS1115 sampling across all channels
+// This protects the multi-step request_measurement() sequence from concurrent access
+SemaphoreHandle_t global_ads1115_mutex = nullptr;
+
+SemaphoreHandle_t get_ads1115_mutex() {
+  if (global_ads1115_mutex == nullptr) {
+    global_ads1115_mutex = xSemaphoreCreateMutex();
+  }
+  return global_ads1115_mutex;
+}
+#endif
+
 void ADS1115Component::setup() {
   uint16_t value;
   if (!this->read_byte_16(ADS1115_REGISTER_CONVERSION, &value)) {
@@ -73,6 +86,15 @@ void ADS1115Component::dump_config() {
 }
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
+#ifdef USE_ESP32
+  // Lock mutex to protect entire measurement sequence from concurrent access
+  SemaphoreHandle_t mutex = get_ads1115_mutex();
+  if (mutex != nullptr && xSemaphoreTake(mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    ESP_LOGW(TAG, "Failed to acquire ADS1115 mutex");
+    return NAN;
+  }
+#endif
+
   uint16_t config = this->prev_config_;
   // Multiplexer
   //        0bxBBBxxxxxxxxxxxx
@@ -97,6 +119,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   if (!this->continuous_mode_ || this->prev_config_ != config) {
     if (!this->write_byte_16(ADS1115_REGISTER_CONFIG, config)) {
       this->status_set_warning();
+#ifdef USE_ESP32
+      if (mutex != nullptr) {
+        xSemaphoreGive(mutex);
+      }
+#endif
       return NAN;
     }
     this->prev_config_ = config;
@@ -159,6 +186,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
         if (millis() - start > 100) {
           ESP_LOGW(TAG, "Reading ADS1115 timed out");
           this->status_set_warning();
+#ifdef USE_ESP32
+          if (mutex != nullptr) {
+            xSemaphoreGive(mutex);
+          }
+#endif
           return NAN;
         }
         yield();
@@ -169,6 +201,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   uint16_t raw_conversion;
   if (!this->read_byte_16(ADS1115_REGISTER_CONVERSION, &raw_conversion)) {
     this->status_set_warning();
+#ifdef USE_ESP32
+    if (mutex != nullptr) {
+      xSemaphoreGive(mutex);
+    }
+#endif
     return NAN;
   }
 
@@ -216,7 +253,16 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   }
 
   this->status_clear_warning();
-  return millivolts / 1e3f;
+  float result = millivolts / 1e3f;
+
+#ifdef USE_ESP32
+  // Release mutex after measurement complete
+  if (mutex != nullptr) {
+    xSemaphoreGive(mutex);
+  }
+#endif
+
+  return result;
 }
 
 }  // namespace ads1115
