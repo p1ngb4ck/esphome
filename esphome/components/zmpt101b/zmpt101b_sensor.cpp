@@ -63,7 +63,7 @@ void ZMPT101BSensor::setup() {
                                               this,                            // Task parameter (this pointer)
                                               1,                               // Priority (1 = low priority)
                                               &this->sampling_task_handle_,    // Task handle
-                                              1  // Core ID (1 = app core, 0 = protocol core)
+                                              0  // Core ID (0 = protocol core for I2C safety)
   );
 
   if (result != pdPASS) {
