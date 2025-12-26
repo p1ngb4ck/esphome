@@ -7,6 +7,18 @@ namespace acs712 {
 
 static const char *const TAG = "acs712.sensor";
 
+#ifdef USE_ESP32
+// Global I2C mutex shared across all ACS712 instances
+SemaphoreHandle_t ACS712Sensor::i2c_mutex_ = nullptr;
+
+SemaphoreHandle_t ACS712Sensor::get_i2c_mutex_() {
+  if (i2c_mutex_ == nullptr) {
+    i2c_mutex_ = xSemaphoreCreateMutex();
+  }
+  return i2c_mutex_;
+}
+#endif
+
 void ACS712Sensor::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ACS712...");
 
@@ -159,6 +171,23 @@ float ACS712Sensor::get_voltage_sample_() {
     return NAN;
   }
 
+#ifdef USE_ESP32
+  // Lock I2C bus for thread-safe ADC access
+  SemaphoreHandle_t i2c_lock = get_i2c_mutex_();
+  if (i2c_lock != nullptr && xSemaphoreTake(i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+    float voltage = this->voltage_source_->sample();
+    xSemaphoreGive(i2c_lock);
+
+    // Validate voltage reading
+    if (std::isnan(voltage) || voltage < 0.0f || voltage > 5.5f) {
+      return NAN;
+    }
+
+    return voltage;
+  } else {
+    return NAN;  // Failed to acquire I2C lock
+  }
+#else
   float voltage = this->voltage_source_->sample();
 
   // Validate voltage reading
@@ -167,6 +196,7 @@ float ACS712Sensor::get_voltage_sample_() {
   }
 
   return voltage;
+#endif
 }
 
 float ACS712Sensor::calculate_rms_current_() {

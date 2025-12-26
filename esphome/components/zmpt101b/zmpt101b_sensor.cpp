@@ -7,6 +7,18 @@ namespace zmpt101b {
 
 static const char *const TAG = "zmpt101b.sensor";
 
+#ifdef USE_ESP32
+// Global I2C mutex shared across all ZMPT101B instances
+SemaphoreHandle_t ZMPT101BSensor::i2c_mutex_ = nullptr;
+
+SemaphoreHandle_t ZMPT101BSensor::get_i2c_mutex_() {
+  if (i2c_mutex_ == nullptr) {
+    i2c_mutex_ = xSemaphoreCreateMutex();
+  }
+  return i2c_mutex_;
+}
+#endif
+
 void ZMPT101BSensor::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ZMPT101B...");
 
@@ -117,6 +129,23 @@ float ZMPT101BSensor::get_voltage_sample_() {
     return NAN;
   }
 
+#ifdef USE_ESP32
+  // Lock I2C bus for thread-safe ADC access
+  SemaphoreHandle_t i2c_lock = get_i2c_mutex_();
+  if (i2c_lock != nullptr && xSemaphoreTake(i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+    float voltage = this->voltage_source_->sample();
+    xSemaphoreGive(i2c_lock);
+
+    // Validate voltage reading
+    if (std::isnan(voltage) || voltage < 0.0f || voltage > 5.5f) {
+      return NAN;
+    }
+
+    return voltage;
+  } else {
+    return NAN;  // Failed to acquire I2C lock
+  }
+#else
   float voltage = this->voltage_source_->sample();
 
   // Validate voltage reading
@@ -125,6 +154,7 @@ float ZMPT101BSensor::get_voltage_sample_() {
   }
 
   return voltage;
+#endif
 }
 
 float ZMPT101BSensor::calculate_rms_voltage_() {

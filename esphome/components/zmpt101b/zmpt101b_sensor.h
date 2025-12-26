@@ -61,6 +61,10 @@ class ZMPT101BSensor : public sensor::Sensor, public PollingComponent {
   volatile bool task_running_{false};
   volatile float cached_voltage_{NAN};
   volatile bool new_data_available_{false};
+
+  // Global I2C mutex for thread-safe ADC access
+  static SemaphoreHandle_t i2c_mutex_;
+  static SemaphoreHandle_t get_i2c_mutex_();
 #endif
 };
 
