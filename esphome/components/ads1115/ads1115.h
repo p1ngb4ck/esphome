@@ -76,6 +76,7 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
 #ifdef USE_ESP32
     SemaphoreHandle_t completion_sem{nullptr};  // For synchronous requests
     float *result_ptr{nullptr};                 // Where to store result
+    bool is_burst{false};                       // True for multi-sample burst mode
 #endif
   };
 
@@ -86,6 +87,7 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
     std::queue<MeasurementRequest> request_queue;
     ADS1115Multiplexer channel;
     ADS1115Component *parent{nullptr};
+    volatile bool in_burst_mode{false};  // True when processing burst requests
   };
 
   static void channel_task_func_(void *param);

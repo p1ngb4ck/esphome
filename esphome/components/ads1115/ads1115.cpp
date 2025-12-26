@@ -101,6 +101,11 @@ void ADS1115Component::channel_task_func_(void *param) {
     }
 
     if (has_request) {
+      // Check if this is a burst mode request
+      if (req.is_burst) {
+        task->in_burst_mode = true;
+      }
+
       // Perform measurement (I2C bus has its own locking)
       float result = parent->do_measurement_(req.multiplexer, req.gain, req.resolution, req.samplerate);
 
@@ -118,9 +123,24 @@ void ADS1115Component::channel_task_func_(void *param) {
       if (req.completion_sem != nullptr) {
         // Signal that measurement is complete
         xSemaphoreGive(req.completion_sem);
+
+        // If burst mode, wait briefly to allow next sample to queue before clearing flag
+        if (req.is_burst) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+          // Check if queue is empty - if yes, burst is complete
+          bool queue_empty = false;
+          if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
+            queue_empty = task->request_queue.empty();
+            xSemaphoreGive(task->queue_mutex);
+          }
+          if (queue_empty) {
+            task->in_burst_mode = false;
+          }
+        }
       }
     } else {
-      // No requests, yield to other tasks
+      // No requests, exit burst mode and yield to other tasks
+      task->in_burst_mode = false;
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
@@ -169,6 +189,9 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   MeasurementRequest req{multiplexer, gain, resolution, samplerate, nullptr, millis()};
   req.completion_sem = completion_sem;
   req.result_ptr = &result;
+
+  // Detect burst mode: if task is already in burst mode OR queue has pending requests, mark as burst
+  req.is_burst = task->in_burst_mode || !task->request_queue.empty();
 
   if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
     task->request_queue.push(req);
