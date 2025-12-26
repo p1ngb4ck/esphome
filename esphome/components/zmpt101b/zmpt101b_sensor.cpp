@@ -1,4 +1,6 @@
 #include "zmpt101b_sensor.h"
+#include "esphome/components/ads1115/ads1115.h"
+#include "esphome/components/ads1115/sensor/ads1115_sensor.h"
 #include "esphome/core/log.h"
 #include <cmath>
 
@@ -134,6 +136,20 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
     return NAN;
   }
 
+#ifdef USE_ESP32
+  // Lock ADS1115 for exclusive access during entire RMS calculation
+  // This prevents channel thrashing when multiple sensors sample simultaneously
+  auto *ads_sensor = dynamic_cast<ads1115::ADS1115Sensor *>(this->voltage_source_);
+  bool locked = false;
+  if (ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+    locked = ads_sensor->get_parent()->lock_adc(500);  // 500ms timeout for RMS calculation
+    if (!locked) {
+      ESP_LOGW(TAG, "Failed to acquire ADS1115 lock for RMS calculation");
+      return NAN;
+    }
+  }
+#endif
+
   // Calculate delay between samples to span the desired duration
   uint32_t delay_us = (this->sample_duration_ms_ * 1000) / this->samples_;
 
@@ -178,6 +194,11 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
   // Check if we got enough valid samples
   if (valid_samples < (this->samples_ / 2)) {
     ESP_LOGW(TAG, "Too few valid samples: %d/%d", valid_samples, this->samples_);
+#ifdef USE_ESP32
+    if (locked && ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+      ads_sensor->get_parent()->unlock_adc();
+    }
+#endif
     return NAN;
   }
 
@@ -190,6 +211,13 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
 
   ESP_LOGV(TAG, "RMS Voltage: %.1f V (from %d samples, output RMS: %.3f V)", mains_voltage_rms, valid_samples,
            v_rms_output);
+
+#ifdef USE_ESP32
+  // Unlock ADS1115 after measurement complete
+  if (locked && ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+    ads_sensor->get_parent()->unlock_adc();
+  }
+#endif
 
   return mains_voltage_rms;
 }

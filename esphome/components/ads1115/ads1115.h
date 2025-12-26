@@ -60,6 +60,15 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   float request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                             ADS1115Samplerate samplerate);
 
+#ifdef USE_ESP32
+  /// Lock the ADS1115 for exclusive access (e.g., for multi-sample RMS calculations)
+  /// Returns true if lock acquired, false on timeout
+  bool lock_adc(uint32_t timeout_ms = 200);
+
+  /// Unlock the ADS1115 after exclusive access
+  void unlock_adc();
+#endif
+
  protected:
   uint16_t prev_config_{0};
   bool continuous_mode_;
