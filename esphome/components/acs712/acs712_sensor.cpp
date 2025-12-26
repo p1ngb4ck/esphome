@@ -181,7 +181,7 @@ float ACS712Sensor::calculate_rms_current_() {
 #ifdef USE_ESP32
   // Lock ADS1115 for exclusive access during entire RMS calculation
   // This prevents channel thrashing when multiple sensors sample simultaneously
-  auto *ads_sensor = dynamic_cast<ads1115::ADS1115Sensor *>(this->voltage_source_);
+  auto *ads_sensor = static_cast<ads1115::ADS1115Sensor *>(this->voltage_source_);
   bool locked = false;
   if (ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
     locked = ads_sensor->get_parent()->lock_adc(500);  // 500ms timeout for RMS calculation
