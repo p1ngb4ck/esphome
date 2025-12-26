@@ -63,6 +63,11 @@ void ADS1115Component::setup() {
     return;
   }
   this->prev_config_ = config;
+
+#ifdef USE_ESP32
+  // Create mutex for managing channel tasks
+  this->tasks_mutex_ = xSemaphoreCreateMutex();
+#endif
 }
 void ADS1115Component::dump_config() {
   ESP_LOGCONFIG(TAG, "ADS1115:");
@@ -73,45 +78,114 @@ void ADS1115Component::dump_config() {
 }
 
 void ADS1115Component::loop() {
+  // No longer needed - per-channel tasks handle everything
+}
+
 #ifdef USE_ESP32
-  // Process one queued request per loop iteration (non-blocking)
-  // Only process queue when no RMS measurement is in progress
-  if (!this->request_queue_.empty() && !this->measurement_in_progress_.load()) {
-    MeasurementRequest req = this->request_queue_.front();
-    this->request_queue_.pop();
+void ADS1115Component::channel_task_func_(void *param) {
+  ChannelTask *task = static_cast<ChannelTask *>(param);
+  ADS1115Component *parent = task->parent;
 
-    // Perform the measurement
-    float result = this->do_measurement_(req.multiplexer, req.gain, req.resolution, req.samplerate);
+  while (true) {
+    MeasurementRequest req;
+    bool has_request = false;
 
-    // Call callback with result
-    if (req.callback) {
-      req.callback(result);
+    // Check for pending requests
+    if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
+      if (!task->request_queue.empty()) {
+        req = task->request_queue.front();
+        task->request_queue.pop();
+        has_request = true;
+      }
+      xSemaphoreGive(task->queue_mutex);
+    }
+
+    if (has_request) {
+      // Perform measurement (I2C bus has its own locking)
+      float result = parent->do_measurement_(req.multiplexer, req.gain, req.resolution, req.samplerate);
+
+      // Handle result delivery
+      if (req.callback) {
+        // Asynchronous request with callback
+        req.callback(result);
+      }
+
+      if (req.result_ptr != nullptr) {
+        // Synchronous request - store result and signal completion
+        *req.result_ptr = result;
+      }
+
+      if (req.completion_sem != nullptr) {
+        // Signal that measurement is complete
+        xSemaphoreGive(req.completion_sem);
+      }
+    } else {
+      // No requests, yield to other tasks
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
-#endif
 }
+
+void ADS1115Component::ensure_channel_task_(ADS1115Multiplexer multiplexer) {
+  uint8_t channel = static_cast<uint8_t>(multiplexer);
+
+  if (xSemaphoreTake(this->tasks_mutex_, portMAX_DELAY) == pdTRUE) {
+    // Check if task already exists
+    if (this->channel_tasks_.find(channel) == this->channel_tasks_.end()) {
+      // Create new channel task
+      ChannelTask *task = new ChannelTask();
+      task->channel = multiplexer;
+      task->parent = this;
+      task->queue_mutex = xSemaphoreCreateMutex();
+
+      // Create FreeRTOS task for this channel
+      char task_name[32];
+      snprintf(task_name, sizeof(task_name), "ads1115_ch%d", channel);
+
+      xTaskCreatePinnedToCore(channel_task_func_, task_name, 4096, task, 1, &task->task_handle, 1);
+
+      this->channel_tasks_[channel] = task;
+      ESP_LOGD(TAG, "Created background task for channel %d", channel);
+    }
+    xSemaphoreGive(this->tasks_mutex_);
+  }
+}
+#endif
 
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
 #ifdef USE_ESP32
-  // If RMS measurement in progress, check channel compatibility
-  if (this->measurement_in_progress_.load()) {
-    uint8_t current_channel = static_cast<uint8_t>(multiplexer);
-    uint8_t locked = this->locked_channel_.load();
+  // Ensure background task exists for this channel
+  this->ensure_channel_task_(multiplexer);
 
-    if (locked == 0xFF) {
-      // First sample in RMS measurement - claim this channel
-      this->locked_channel_.store(current_channel);
-    } else if (locked != current_channel) {
-      // Different channel - reject immediately (caller should queue or retry later)
-      return NAN;
-    }
-    // Same channel as locked - allow (part of ongoing RMS measurement)
+  uint8_t channel = static_cast<uint8_t>(multiplexer);
+  ChannelTask *task = this->channel_tasks_[channel];
+
+  // Create semaphore for synchronous wait
+  SemaphoreHandle_t completion_sem = xSemaphoreCreateBinary();
+  float result = NAN;
+
+  // Add request to channel's queue
+  MeasurementRequest req{multiplexer, gain, resolution, samplerate, nullptr, millis()};
+  req.completion_sem = completion_sem;
+  req.result_ptr = &result;
+
+  if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
+    task->request_queue.push(req);
+    xSemaphoreGive(task->queue_mutex);
   }
-#endif
 
-  // Perform direct measurement
+  // Wait for measurement to complete (non-blocking for the main loop, blocking for this caller)
+  if (xSemaphoreTake(completion_sem, portMAX_DELAY) == pdTRUE) {
+    // Result is now in 'result' variable
+  }
+
+  vSemaphoreDelete(completion_sem);
+  return result;
+#else
+  // Non-ESP32: Direct measurement
   return this->do_measurement_(multiplexer, gain, resolution, samplerate);
+#endif
 }
 
 float ADS1115Component::do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
@@ -261,19 +335,6 @@ float ADS1115Component::do_measurement_(ADS1115Multiplexer multiplexer, ADS1115G
   this->status_clear_warning();
   return millivolts / 1e3f;
 }
-
-#ifdef USE_ESP32
-bool ADS1115Component::lock_adc(uint32_t timeout_ms) {
-  // For now, just set the flag - channel will be set by first request_measurement()
-  bool expected = false;
-  return this->measurement_in_progress_.compare_exchange_strong(expected, true);
-}
-
-void ADS1115Component::unlock_adc() {
-  this->measurement_in_progress_.store(false);
-  this->locked_channel_.store(0xFF);  // Clear channel lock
-}
-#endif
 
 }  // namespace ads1115
 }  // namespace esphome

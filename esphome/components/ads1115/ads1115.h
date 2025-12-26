@@ -4,12 +4,13 @@
 #include "esphome/core/component.h"
 
 #include <vector>
-#include <atomic>
 #include <queue>
 #include <functional>
+#include <map>
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <freertos/semphr.h>
 #endif
 
@@ -64,15 +65,6 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   float request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                             ADS1115Samplerate samplerate);
 
-#ifdef USE_ESP32
-  /// Lock the ADS1115 for exclusive access (e.g., for multi-sample RMS calculations)
-  /// Returns true if lock acquired, false on timeout
-  bool lock_adc(uint32_t timeout_ms = 200);
-
-  /// Unlock the ADS1115 after exclusive access
-  void unlock_adc();
-#endif
-
  protected:
   struct MeasurementRequest {
     ADS1115Multiplexer multiplexer;
@@ -81,7 +73,24 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
     ADS1115Samplerate samplerate;
     std::function<void(float)> callback;
     uint32_t request_time;
+#ifdef USE_ESP32
+    SemaphoreHandle_t completion_sem{nullptr};  // For synchronous requests
+    float *result_ptr{nullptr};                 // Where to store result
+#endif
   };
+
+#ifdef USE_ESP32
+  struct ChannelTask {
+    TaskHandle_t task_handle{nullptr};
+    SemaphoreHandle_t queue_mutex{nullptr};
+    std::queue<MeasurementRequest> request_queue;
+    ADS1115Multiplexer channel;
+    ADS1115Component *parent{nullptr};
+  };
+
+  static void channel_task_func_(void *param);
+  void ensure_channel_task_(ADS1115Multiplexer multiplexer);
+#endif
 
   float do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                         ADS1115Samplerate samplerate);
@@ -90,12 +99,9 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   bool continuous_mode_;
 
 #ifdef USE_ESP32
-  // Channel-aware locking for multi-sample measurements
-  std::atomic<bool> measurement_in_progress_{false};
-  std::atomic<uint8_t> locked_channel_{0xFF};  // 0xFF = no lock
-
-  // Request queue for automatic scheduling
-  std::queue<MeasurementRequest> request_queue_;
+  // Per-channel background tasks
+  std::map<uint8_t, ChannelTask *> channel_tasks_;
+  SemaphoreHandle_t tasks_mutex_{nullptr};
 #endif
 };
 
