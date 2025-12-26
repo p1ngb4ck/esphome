@@ -81,24 +81,8 @@ void ZMPT101BSensor::setup() {
 
 void ZMPT101BSensor::update() {
 #ifdef USE_ESP32
-  // First, try to publish any cached data from previous measurement
-  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    float rms_voltage = this->cached_voltage_;
-    bool has_new_data = this->new_data_available_;
-    this->new_data_available_ = false;
-    xSemaphoreGive(this->data_mutex_);
-
-    if (has_new_data) {
-      if (!std::isnan(rms_voltage)) {
-        // Publish voltage to this sensor (inherits from sensor::Sensor)
-        this->publish_state(rms_voltage);
-      } else {
-        ESP_LOGW(TAG, "Failed to read voltage");
-      }
-    }
-  }
-
-  // Trigger background task for next measurement (non-blocking)
+  // Trigger background task to perform measurement (non-blocking, returns immediately)
+  // Result will be published in loop() when ready
   if (this->sampling_task_handle_ != nullptr) {
     xTaskNotifyGive(this->sampling_task_handle_);
   }
@@ -215,6 +199,25 @@ void ZMPT101BSensor::loop() {
   if (this->sampling_task_handle_ != nullptr && !this->task_running_) {
     ESP_LOGE(TAG, "Background sampling task has stopped unexpectedly!");
     this->mark_failed();
+    return;
+  }
+
+  // Check for new measurement data and publish immediately when available
+  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, 0) == pdTRUE) {
+    if (this->new_data_available_) {
+      float rms_voltage = this->cached_voltage_;
+      this->new_data_available_ = false;
+      xSemaphoreGive(this->data_mutex_);
+
+      if (!std::isnan(rms_voltage)) {
+        // Publish voltage to this sensor (inherits from sensor::Sensor)
+        this->publish_state(rms_voltage);
+      } else {
+        ESP_LOGW(TAG, "Failed to read voltage");
+      }
+    } else {
+      xSemaphoreGive(this->data_mutex_);
+    }
   }
 #endif
 }

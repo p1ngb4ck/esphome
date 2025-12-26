@@ -73,38 +73,8 @@ void ACS712Sensor::setup() {
 
 void ACS712Sensor::update() {
 #ifdef USE_ESP32
-  // First, try to publish any cached data from previous measurement
-  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    float rms_current = this->cached_current_;
-    bool has_new_data = this->new_data_available_;
-    this->new_data_available_ = false;
-    xSemaphoreGive(this->data_mutex_);
-
-    if (has_new_data) {
-      if (!std::isnan(rms_current)) {
-        // Publish current to this sensor (inherits from sensor::Sensor)
-        this->publish_state(rms_current);
-
-        // Publish power
-        if (this->power_sensor_ != nullptr) {
-          float power = rms_current * this->line_voltage_;
-          this->power_sensor_->publish_state(power);
-        }
-
-        // Optionally publish average voltage (for debugging)
-        if (this->voltage_sensor_ != nullptr) {
-          float avg_voltage = this->get_voltage_sample_();
-          if (!std::isnan(avg_voltage)) {
-            this->voltage_sensor_->publish_state(avg_voltage);
-          }
-        }
-      } else {
-        ESP_LOGW(TAG, "Failed to read current");
-      }
-    }
-  }
-
-  // Trigger background task for next measurement (non-blocking)
+  // Trigger background task to perform measurement (non-blocking, returns immediately)
+  // Result will be published in loop() when ready
   if (this->sampling_task_handle_ != nullptr) {
     xTaskNotifyGive(this->sampling_task_handle_);
   }
@@ -267,6 +237,39 @@ void ACS712Sensor::loop() {
   if (this->sampling_task_handle_ != nullptr && !this->task_running_) {
     ESP_LOGE(TAG, "Background sampling task has stopped unexpectedly!");
     this->mark_failed();
+    return;
+  }
+
+  // Check for new measurement data and publish immediately when available
+  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, 0) == pdTRUE) {
+    if (this->new_data_available_) {
+      float rms_current = this->cached_current_;
+      this->new_data_available_ = false;
+      xSemaphoreGive(this->data_mutex_);
+
+      if (!std::isnan(rms_current)) {
+        // Publish current to this sensor (inherits from sensor::Sensor)
+        this->publish_state(rms_current);
+
+        // Publish power
+        if (this->power_sensor_ != nullptr) {
+          float power = rms_current * this->line_voltage_;
+          this->power_sensor_->publish_state(power);
+        }
+
+        // Optionally publish average voltage (for debugging)
+        if (this->voltage_sensor_ != nullptr) {
+          float avg_voltage = this->get_voltage_sample_();
+          if (!std::isnan(avg_voltage)) {
+            this->voltage_sensor_->publish_state(avg_voltage);
+          }
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to read current");
+      }
+    } else {
+      xSemaphoreGive(this->data_mutex_);
+    }
   }
 #endif
 }
