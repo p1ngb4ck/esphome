@@ -112,6 +112,7 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   // Per-channel background tasks
   std::map<uint8_t, ChannelTask *> channel_tasks_;
   SemaphoreHandle_t tasks_mutex_{nullptr};
+  volatile uint8_t burst_channel_{0xFF};  // 0xFF = no burst, otherwise channel in burst mode
 #endif
 };
 

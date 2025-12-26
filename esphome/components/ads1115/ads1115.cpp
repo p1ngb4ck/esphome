@@ -90,6 +90,16 @@ void ADS1115Component::channel_task_func_(void *param) {
     MeasurementRequest req;
     bool has_request = false;
 
+    // Check if another channel is in burst mode
+    uint8_t my_channel = static_cast<uint8_t>(task->channel);
+    uint8_t burst_channel = parent->burst_channel_;
+
+    if (burst_channel != 0xFF && burst_channel != my_channel) {
+      // Another channel is in burst mode - yield and wait
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+
     // Check for pending requests
     if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
       if (!task->request_queue.empty()) {
@@ -217,6 +227,7 @@ void ADS1115Component::start_burst_mode(ADS1115Multiplexer multiplexer) {
   uint8_t channel = static_cast<uint8_t>(multiplexer);
   ChannelTask *task = this->channel_tasks_[channel];
   task->in_burst_mode = true;
+  this->burst_channel_ = channel;  // Set global burst lock
 }
 
 void ADS1115Component::end_burst_mode(ADS1115Multiplexer multiplexer) {
@@ -224,6 +235,7 @@ void ADS1115Component::end_burst_mode(ADS1115Multiplexer multiplexer) {
   if (this->channel_tasks_.find(channel) != this->channel_tasks_.end()) {
     this->channel_tasks_[channel]->in_burst_mode = false;
   }
+  this->burst_channel_ = 0xFF;  // Clear global burst lock
 }
 #endif
 
