@@ -16,7 +16,7 @@ SemaphoreHandle_t global_ads1115_mutex = nullptr;
 
 SemaphoreHandle_t get_ads1115_mutex() {
   if (global_ads1115_mutex == nullptr) {
-    global_ads1115_mutex = xSemaphoreCreateMutex();
+    global_ads1115_mutex = xSemaphoreCreateRecursiveMutex();
   }
   return global_ads1115_mutex;
 }
@@ -86,6 +86,20 @@ void ADS1115Component::dump_config() {
 }
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
+#ifdef USE_ESP32
+  // Acquire recursive mutex for thread-safe access
+  // This allows RMS calculations to lock_adc() once and make multiple request_measurement() calls
+  SemaphoreHandle_t mutex = get_ads1115_mutex();
+  bool acquired = false;
+  if (mutex != nullptr) {
+    acquired = (xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(200)) == pdTRUE);
+    if (!acquired) {
+      ESP_LOGW(TAG, "Failed to acquire ADS1115 mutex in request_measurement");
+      return NAN;
+    }
+  }
+#endif
+
   uint16_t config = this->prev_config_;
   // Multiplexer
   //        0bxBBBxxxxxxxxxxxx
@@ -110,6 +124,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   if (!this->continuous_mode_ || this->prev_config_ != config) {
     if (!this->write_byte_16(ADS1115_REGISTER_CONFIG, config)) {
       this->status_set_warning();
+#ifdef USE_ESP32
+      if (acquired && mutex != nullptr) {
+        xSemaphoreGiveRecursive(mutex);
+      }
+#endif
       return NAN;
     }
     this->prev_config_ = config;
@@ -172,6 +191,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
         if (millis() - start > 100) {
           ESP_LOGW(TAG, "Reading ADS1115 timed out");
           this->status_set_warning();
+#ifdef USE_ESP32
+          if (acquired && mutex != nullptr) {
+            xSemaphoreGiveRecursive(mutex);
+          }
+#endif
           return NAN;
         }
         yield();
@@ -182,6 +206,11 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   uint16_t raw_conversion;
   if (!this->read_byte_16(ADS1115_REGISTER_CONVERSION, &raw_conversion)) {
     this->status_set_warning();
+#ifdef USE_ESP32
+    if (acquired && mutex != nullptr) {
+      xSemaphoreGiveRecursive(mutex);
+    }
+#endif
     return NAN;
   }
 
@@ -229,6 +258,14 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   }
 
   this->status_clear_warning();
+
+#ifdef USE_ESP32
+  // Release recursive mutex
+  if (acquired && mutex != nullptr) {
+    xSemaphoreGiveRecursive(mutex);
+  }
+#endif
+
   return millivolts / 1e3f;
 }
 
@@ -236,7 +273,7 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
 bool ADS1115Component::lock_adc(uint32_t timeout_ms) {
   SemaphoreHandle_t mutex = get_ads1115_mutex();
   if (mutex != nullptr) {
-    return xSemaphoreTake(mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    return xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
   }
   return true;  // No mutex means no ESP32, allow access
 }
@@ -244,7 +281,7 @@ bool ADS1115Component::lock_adc(uint32_t timeout_ms) {
 void ADS1115Component::unlock_adc() {
   SemaphoreHandle_t mutex = get_ads1115_mutex();
   if (mutex != nullptr) {
-    xSemaphoreGive(mutex);
+    xSemaphoreGiveRecursive(mutex);
   }
 }
 #endif
