@@ -116,8 +116,21 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
       valid_samples++;
     }
 
-    // Wait before next sample
-    delayMicroseconds(delay_us);
+    // Wait before next sample - yield to other tasks for better FreeRTOS cooperation
+    // For delays >= 100µs, split into chunks with yield() calls
+    if (delay_us >= 100) {
+      uint32_t chunks = delay_us / 100;
+      uint32_t remainder = delay_us % 100;
+      for (uint32_t j = 0; j < chunks; j++) {
+        delayMicroseconds(100);
+        yield();  // Allow other tasks to run every 100µs
+      }
+      if (remainder > 0) {
+        delayMicroseconds(remainder);
+      }
+    } else {
+      delayMicroseconds(delay_us);
+    }
   }
 
   // Check if we got enough valid samples
