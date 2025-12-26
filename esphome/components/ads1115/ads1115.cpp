@@ -9,19 +9,6 @@ static const char *const TAG = "ads1115";
 static const uint8_t ADS1115_REGISTER_CONVERSION = 0x00;
 static const uint8_t ADS1115_REGISTER_CONFIG = 0x01;
 
-#ifdef USE_ESP32
-// Global mutex for thread-safe ADS1115 sampling across all channels
-// This protects the multi-step request_measurement() sequence from concurrent access
-SemaphoreHandle_t global_ads1115_mutex = nullptr;
-
-SemaphoreHandle_t get_ads1115_mutex() {
-  if (global_ads1115_mutex == nullptr) {
-    global_ads1115_mutex = xSemaphoreCreateRecursiveMutex();
-  }
-  return global_ads1115_mutex;
-}
-#endif
-
 void ADS1115Component::setup() {
   uint16_t value;
   if (!this->read_byte_16(ADS1115_REGISTER_CONVERSION, &value)) {
@@ -87,16 +74,19 @@ void ADS1115Component::dump_config() {
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
 #ifdef USE_ESP32
-  // Acquire recursive mutex for thread-safe access
-  // This allows RMS calculations to lock_adc() once and make multiple request_measurement() calls
-  SemaphoreHandle_t mutex = get_ads1115_mutex();
-  bool acquired = false;
-  if (mutex != nullptr) {
-    acquired = (xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(200)) == pdTRUE);
-    if (!acquired) {
-      ESP_LOGW(TAG, "Failed to acquire ADS1115 mutex in request_measurement");
+  // Channel-aware non-blocking check
+  if (this->measurement_in_progress_.load()) {
+    uint8_t current_channel = static_cast<uint8_t>(multiplexer);
+    uint8_t locked = this->locked_channel_.load();
+
+    if (locked == 0xFF) {
+      // First sample in RMS measurement - claim this channel
+      this->locked_channel_.store(current_channel);
+    } else if (locked != current_channel) {
+      // Different channel wants access while RMS measurement in progress - reject immediately
       return NAN;
     }
+    // Same channel as locked - allow (part of ongoing RMS measurement)
   }
 #endif
 
@@ -124,11 +114,6 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   if (!this->continuous_mode_ || this->prev_config_ != config) {
     if (!this->write_byte_16(ADS1115_REGISTER_CONFIG, config)) {
       this->status_set_warning();
-#ifdef USE_ESP32
-      if (acquired && mutex != nullptr) {
-        xSemaphoreGiveRecursive(mutex);
-      }
-#endif
       return NAN;
     }
     this->prev_config_ = config;
@@ -191,11 +176,6 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
         if (millis() - start > 100) {
           ESP_LOGW(TAG, "Reading ADS1115 timed out");
           this->status_set_warning();
-#ifdef USE_ESP32
-          if (acquired && mutex != nullptr) {
-            xSemaphoreGiveRecursive(mutex);
-          }
-#endif
           return NAN;
         }
         yield();
@@ -206,11 +186,6 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   uint16_t raw_conversion;
   if (!this->read_byte_16(ADS1115_REGISTER_CONVERSION, &raw_conversion)) {
     this->status_set_warning();
-#ifdef USE_ESP32
-    if (acquired && mutex != nullptr) {
-      xSemaphoreGiveRecursive(mutex);
-    }
-#endif
     return NAN;
   }
 
@@ -258,31 +233,19 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
   }
 
   this->status_clear_warning();
-
-#ifdef USE_ESP32
-  // Release recursive mutex
-  if (acquired && mutex != nullptr) {
-    xSemaphoreGiveRecursive(mutex);
-  }
-#endif
-
   return millivolts / 1e3f;
 }
 
 #ifdef USE_ESP32
 bool ADS1115Component::lock_adc(uint32_t timeout_ms) {
-  SemaphoreHandle_t mutex = get_ads1115_mutex();
-  if (mutex != nullptr) {
-    return xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-  }
-  return true;  // No mutex means no ESP32, allow access
+  // For now, just set the flag - channel will be set by first request_measurement()
+  bool expected = false;
+  return this->measurement_in_progress_.compare_exchange_strong(expected, true);
 }
 
 void ADS1115Component::unlock_adc() {
-  SemaphoreHandle_t mutex = get_ads1115_mutex();
-  if (mutex != nullptr) {
-    xSemaphoreGiveRecursive(mutex);
-  }
+  this->measurement_in_progress_.store(false);
+  this->locked_channel_.store(0xFF);  // Clear channel lock
 }
 #endif
 

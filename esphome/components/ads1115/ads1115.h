@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 
 #include <vector>
+#include <atomic>
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
@@ -72,6 +73,12 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
  protected:
   uint16_t prev_config_{0};
   bool continuous_mode_;
+
+#ifdef USE_ESP32
+  // Channel-aware locking for multi-sample measurements
+  std::atomic<bool> measurement_in_progress_{false};
+  std::atomic<uint8_t> locked_channel_{0xFF};  // 0xFF = no lock
+#endif
 };
 
 }  // namespace ads1115
