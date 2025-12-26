@@ -67,6 +67,7 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   uint32_t sample_duration_ms_{20};  // Duration to sample over (milliseconds)
 
   // Auto-calibration
+  bool calibration_complete_{false};
   bool auto_zero_{false};
   uint16_t auto_zero_samples_{0};
   float auto_zero_sum_{0.0f};

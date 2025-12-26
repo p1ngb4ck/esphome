@@ -18,27 +18,8 @@ void ACS712Sensor::setup() {
     return;
   }
 
-  // Perform auto-zero calibration on startup
-  ESP_LOGI(TAG, "Performing auto-zero calibration...");
-  float zero_sum = 0.0f;
-  uint16_t valid_samples = 0;
-
-  // Take 50 samples to determine zero point
-  for (uint16_t i = 0; i < 50; i++) {
-    float voltage = this->get_voltage_sample_();
-    if (!std::isnan(voltage)) {
-      zero_sum += voltage;
-      valid_samples++;
-    }
-    delay(10);
-  }
-
-  if (valid_samples > 0) {
-    this->zero_point_ = zero_sum / valid_samples;
-    ESP_LOGI(TAG, "Auto-calibrated zero point: %.3f V (from %d samples)", this->zero_point_, valid_samples);
-  } else {
-    ESP_LOGW(TAG, "Auto-calibration failed, using configured zero point: %.3f V", this->zero_point_);
-  }
+  // Auto-zero calibration will be performed in loop() after ADS1115 is ready
+  ESP_LOGI(TAG, "Auto-zero calibration deferred to loop()");
 
 #ifdef USE_ESP32
   // Create mutex for thread-safe data access
@@ -261,6 +242,32 @@ float ACS712Sensor::calculate_rms_current_() {
 }
 
 void ACS712Sensor::loop() {
+  // Perform auto-zero calibration on first loop() call (after setup() complete and ADS1115 ready)
+  if (!this->calibration_complete_) {
+    ESP_LOGI(TAG, "Performing auto-zero calibration...");
+    float zero_sum = 0.0f;
+    uint16_t valid_samples = 0;
+
+    // Take 50 samples to determine zero point
+    for (uint16_t i = 0; i < 50; i++) {
+      float voltage = this->get_voltage_sample_();
+      if (!std::isnan(voltage)) {
+        zero_sum += voltage;
+        valid_samples++;
+      }
+      delay(10);
+    }
+
+    if (valid_samples > 0) {
+      this->zero_point_ = zero_sum / valid_samples;
+      ESP_LOGI(TAG, "Auto-calibrated zero point: %.3f V (from %d samples)", this->zero_point_, valid_samples);
+    } else {
+      ESP_LOGW(TAG, "Auto-calibration failed, using configured zero point: %.3f V", this->zero_point_);
+    }
+
+    this->calibration_complete_ = true;
+  }
+
 #ifdef USE_ESP32
   // Check if task is still running
   if (this->sampling_task_handle_ != nullptr && !this->task_running_) {

@@ -54,6 +54,9 @@ class ZMPT101BSensor : public sensor::Sensor, public PollingComponent {
   // Runtime calculated values
   float calculated_sensitivity_{8.36};  // Default sensitivity if not specified
 
+  // Auto-calibration
+  bool calibration_complete_{false};
+
 #ifdef USE_ESP32
   // FreeRTOS task management
   TaskHandle_t sampling_task_handle_{nullptr};
