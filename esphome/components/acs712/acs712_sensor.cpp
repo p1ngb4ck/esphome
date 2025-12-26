@@ -37,9 +37,80 @@ void ACS712Sensor::setup() {
   } else {
     ESP_LOGW(TAG, "Auto-calibration failed, using configured zero point: %.3f V", this->zero_point_);
   }
+
+#ifdef USE_ESP32
+  // Create mutex for thread-safe data access
+  this->data_mutex_ = xSemaphoreCreateMutex();
+  if (this->data_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create data mutex!");
+    this->mark_failed();
+    return;
+  }
+
+  // Create background sampling task
+  this->task_running_ = true;
+  BaseType_t result = xTaskCreatePinnedToCore(ACS712Sensor::sampling_task_,  // Task function
+                                              "acs712_sample",               // Task name
+                                              4096,                          // Stack size (bytes)
+                                              this,                          // Task parameter (this pointer)
+                                              1,                             // Priority (1 = low priority)
+                                              &this->sampling_task_handle_,  // Task handle
+                                              1  // Core ID (1 = app core, 0 = protocol core)
+  );
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create sampling task!");
+    this->task_running_ = false;
+    vSemaphoreDelete(this->data_mutex_);
+    this->data_mutex_ = nullptr;
+    this->mark_failed();
+    return;
+  }
+
+  ESP_LOGI(TAG, "Background sampling task started on core 1");
+#endif
 }
 
 void ACS712Sensor::update() {
+#ifdef USE_ESP32
+  // On ESP32, read cached value from background task
+  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+    float rms_current = this->cached_current_;
+    bool has_new_data = this->new_data_available_;
+    this->new_data_available_ = false;
+    xSemaphoreGive(this->data_mutex_);
+
+    if (!has_new_data) {
+      ESP_LOGV(TAG, "No new data available from background task");
+      return;
+    }
+
+    if (std::isnan(rms_current)) {
+      ESP_LOGW(TAG, "Failed to read current");
+      return;
+    }
+
+    // Publish current to this sensor (inherits from sensor::Sensor)
+    this->publish_state(rms_current);
+
+    // Publish power
+    if (this->power_sensor_ != nullptr) {
+      float power = rms_current * this->line_voltage_;
+      this->power_sensor_->publish_state(power);
+    }
+
+    // Optionally publish average voltage (for debugging)
+    if (this->voltage_sensor_ != nullptr) {
+      float avg_voltage = this->get_voltage_sample_();
+      if (!std::isnan(avg_voltage)) {
+        this->voltage_sensor_->publish_state(avg_voltage);
+      }
+    }
+  } else {
+    ESP_LOGW(TAG, "Failed to acquire data mutex");
+  }
+#else
+  // On non-ESP32 platforms, use blocking measurement
   float rms_current = this->calculate_rms_current_();
 
   if (std::isnan(rms_current)) {
@@ -63,6 +134,7 @@ void ACS712Sensor::update() {
       this->voltage_sensor_->publish_state(avg_voltage);
     }
   }
+#endif
 }
 
 void ACS712Sensor::dump_config() {
@@ -189,6 +261,41 @@ float ACS712Sensor::calculate_rms_current_() {
 
   return rms_current;
 }
+
+void ACS712Sensor::loop() {
+#ifdef USE_ESP32
+  // Check if task is still running
+  if (this->sampling_task_handle_ != nullptr && !this->task_running_) {
+    ESP_LOGE(TAG, "Background sampling task has stopped unexpectedly!");
+    this->mark_failed();
+  }
+#endif
+}
+
+#ifdef USE_ESP32
+void ACS712Sensor::sampling_task_(void *param) {
+  auto *sensor = static_cast<ACS712Sensor *>(param);
+  ESP_LOGI(TAG, "Background sampling task started");
+
+  while (sensor->task_running_) {
+    // Calculate RMS current
+    float rms_current = sensor->calculate_rms_current_();
+
+    // Store result with mutex protection
+    if (sensor->data_mutex_ != nullptr && xSemaphoreTake(sensor->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+      sensor->cached_current_ = rms_current;
+      sensor->new_data_available_ = true;
+      xSemaphoreGive(sensor->data_mutex_);
+    }
+
+    // Small delay between measurements to prevent overwhelming the system
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  ESP_LOGI(TAG, "Background sampling task stopped");
+  vTaskDelete(nullptr);
+}
+#endif
 
 }  // namespace acs712
 }  // namespace esphome

@@ -45,9 +45,66 @@ void ZMPT101BSensor::setup() {
   } else {
     ESP_LOGI(TAG, "Using default sensitivity: %.2f mV/V (calibrate for accuracy)", this->calculated_sensitivity_);
   }
+
+#ifdef USE_ESP32
+  // Create mutex for thread-safe data access
+  this->data_mutex_ = xSemaphoreCreateMutex();
+  if (this->data_mutex_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create data mutex!");
+    this->mark_failed();
+    return;
+  }
+
+  // Create background sampling task
+  this->task_running_ = true;
+  BaseType_t result = xTaskCreatePinnedToCore(ZMPT101BSensor::sampling_task_,  // Task function
+                                              "zmpt101b_sample",               // Task name
+                                              4096,                            // Stack size (bytes)
+                                              this,                            // Task parameter (this pointer)
+                                              1,                               // Priority (1 = low priority)
+                                              &this->sampling_task_handle_,    // Task handle
+                                              1  // Core ID (1 = app core, 0 = protocol core)
+  );
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create sampling task!");
+    this->task_running_ = false;
+    vSemaphoreDelete(this->data_mutex_);
+    this->data_mutex_ = nullptr;
+    this->mark_failed();
+    return;
+  }
+
+  ESP_LOGI(TAG, "Background sampling task started on core 1");
+#endif
 }
 
 void ZMPT101BSensor::update() {
+#ifdef USE_ESP32
+  // On ESP32, read cached value from background task
+  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+    float rms_voltage = this->cached_voltage_;
+    bool has_new_data = this->new_data_available_;
+    this->new_data_available_ = false;
+    xSemaphoreGive(this->data_mutex_);
+
+    if (!has_new_data) {
+      ESP_LOGV(TAG, "No new data available from background task");
+      return;
+    }
+
+    if (std::isnan(rms_voltage)) {
+      ESP_LOGW(TAG, "Failed to read voltage");
+      return;
+    }
+
+    // Publish voltage to this sensor (inherits from sensor::Sensor)
+    this->publish_state(rms_voltage);
+  } else {
+    ESP_LOGW(TAG, "Failed to acquire data mutex");
+  }
+#else
+  // On non-ESP32 platforms, use blocking measurement
   float rms_voltage = this->calculate_rms_voltage_();
 
   if (std::isnan(rms_voltage)) {
@@ -57,6 +114,7 @@ void ZMPT101BSensor::update() {
 
   // Publish voltage to this sensor (inherits from sensor::Sensor)
   this->publish_state(rms_voltage);
+#endif
 }
 
 void ZMPT101BSensor::dump_config() {
@@ -151,6 +209,41 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
 
   return mains_voltage_rms;
 }
+
+void ZMPT101BSensor::loop() {
+#ifdef USE_ESP32
+  // Check if task is still running
+  if (this->sampling_task_handle_ != nullptr && !this->task_running_) {
+    ESP_LOGE(TAG, "Background sampling task has stopped unexpectedly!");
+    this->mark_failed();
+  }
+#endif
+}
+
+#ifdef USE_ESP32
+void ZMPT101BSensor::sampling_task_(void *param) {
+  auto *sensor = static_cast<ZMPT101BSensor *>(param);
+  ESP_LOGI(TAG, "Background sampling task started");
+
+  while (sensor->task_running_) {
+    // Calculate RMS voltage
+    float rms_voltage = sensor->calculate_rms_voltage_();
+
+    // Store result with mutex protection
+    if (sensor->data_mutex_ != nullptr && xSemaphoreTake(sensor->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+      sensor->cached_voltage_ = rms_voltage;
+      sensor->new_data_available_ = true;
+      xSemaphoreGive(sensor->data_mutex_);
+    }
+
+    // Small delay between measurements to prevent overwhelming the system
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  ESP_LOGI(TAG, "Background sampling task stopped");
+  vTaskDelete(nullptr);
+}
+#endif
 
 }  // namespace zmpt101b
 }  // namespace esphome

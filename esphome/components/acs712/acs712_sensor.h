@@ -5,6 +5,12 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/voltage_sampler/voltage_sampler.h"
 
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#endif
+
 namespace esphome {
 namespace acs712 {
 
@@ -19,6 +25,7 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   void setup() override;
   void update() override;
   void dump_config() override;
+  void loop() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   // Configuration setters
@@ -35,6 +42,10 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   void set_voltage_sensor(sensor::Sensor *sensor) { this->voltage_sensor_ = sensor; }
 
  protected:
+#ifdef USE_ESP32
+  /// @brief FreeRTOS task function for background sampling
+  static void sampling_task_(void *param);
+#endif
   /// @brief Calculate RMS current from multiple voltage samples
   /// @return RMS current in amperes
   float calculate_rms_current_();
@@ -59,6 +70,15 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   bool auto_zero_{false};
   uint16_t auto_zero_samples_{0};
   float auto_zero_sum_{0.0f};
+
+#ifdef USE_ESP32
+  // FreeRTOS task management
+  TaskHandle_t sampling_task_handle_{nullptr};
+  SemaphoreHandle_t data_mutex_{nullptr};
+  volatile bool task_running_{false};
+  volatile float cached_current_{NAN};
+  volatile bool new_data_available_{false};
+#endif
 };
 
 }  // namespace acs712
