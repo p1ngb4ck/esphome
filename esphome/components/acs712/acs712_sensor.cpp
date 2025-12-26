@@ -8,14 +8,15 @@ namespace acs712 {
 static const char *const TAG = "acs712.sensor";
 
 #ifdef USE_ESP32
-// Global I2C mutex shared across all ACS712 instances
-SemaphoreHandle_t ACS712Sensor::i2c_mutex_ = nullptr;
+// Global I2C mutex shared across ALL voltage sampling components (ACS712, ZMPT101B, etc.)
+// This ensures only ONE component accesses the I2C bus at a time
+SemaphoreHandle_t global_voltage_sampler_i2c_mutex_ = nullptr;
 
-SemaphoreHandle_t ACS712Sensor::get_i2c_mutex_() {
-  if (i2c_mutex_ == nullptr) {
-    i2c_mutex_ = xSemaphoreCreateMutex();
+static SemaphoreHandle_t get_global_i2c_mutex_() {
+  if (global_voltage_sampler_i2c_mutex_ == nullptr) {
+    global_voltage_sampler_i2c_mutex_ = xSemaphoreCreateMutex();
   }
-  return i2c_mutex_;
+  return global_voltage_sampler_i2c_mutex_;
 }
 #endif
 
@@ -172,8 +173,8 @@ float ACS712Sensor::get_voltage_sample_() {
   }
 
 #ifdef USE_ESP32
-  // Lock I2C bus for thread-safe ADC access
-  SemaphoreHandle_t i2c_lock = get_i2c_mutex_();
+  // Lock GLOBAL I2C bus for thread-safe ADC access across all sampling components
+  SemaphoreHandle_t i2c_lock = get_global_i2c_mutex_();
   if (i2c_lock != nullptr && xSemaphoreTake(i2c_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
     float voltage = this->voltage_source_->sample();
     xSemaphoreGive(i2c_lock);
