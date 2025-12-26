@@ -71,10 +71,30 @@ void ADS1115Component::dump_config() {
     ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
   }
 }
+
+void ADS1115Component::loop() {
+#ifdef USE_ESP32
+  // Process one queued request per loop iteration (non-blocking)
+  // Only process queue when no RMS measurement is in progress
+  if (!this->request_queue_.empty() && !this->measurement_in_progress_.load()) {
+    MeasurementRequest req = this->request_queue_.front();
+    this->request_queue_.pop();
+
+    // Perform the measurement
+    float result = this->do_measurement_(req.multiplexer, req.gain, req.resolution, req.samplerate);
+
+    // Call callback with result
+    if (req.callback) {
+      req.callback(result);
+    }
+  }
+#endif
+}
+
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
 #ifdef USE_ESP32
-  // Channel-aware non-blocking check
+  // If RMS measurement in progress, check channel compatibility
   if (this->measurement_in_progress_.load()) {
     uint8_t current_channel = static_cast<uint8_t>(multiplexer);
     uint8_t locked = this->locked_channel_.load();
@@ -83,13 +103,19 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
       // First sample in RMS measurement - claim this channel
       this->locked_channel_.store(current_channel);
     } else if (locked != current_channel) {
-      // Different channel wants access while RMS measurement in progress - reject immediately
+      // Different channel - reject immediately (caller should queue or retry later)
       return NAN;
     }
     // Same channel as locked - allow (part of ongoing RMS measurement)
   }
 #endif
 
+  // Perform direct measurement
+  return this->do_measurement_(multiplexer, gain, resolution, samplerate);
+}
+
+float ADS1115Component::do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
+                                        ADS1115Samplerate samplerate) {
   uint16_t config = this->prev_config_;
   // Multiplexer
   //        0bxBBBxxxxxxxxxxxx

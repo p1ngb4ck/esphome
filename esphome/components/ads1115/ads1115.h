@@ -5,6 +5,8 @@
 
 #include <vector>
 #include <atomic>
+#include <queue>
+#include <functional>
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
@@ -53,6 +55,7 @@ enum ADS1115Samplerate {
 class ADS1115Component : public Component, public i2c::I2CDevice {
  public:
   void setup() override;
+  void loop() override;
   void dump_config() override;
   /// HARDWARE_LATE setup priority
   void set_continuous_mode(bool continuous_mode) { continuous_mode_ = continuous_mode; }
@@ -71,6 +74,18 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
 #endif
 
  protected:
+  struct MeasurementRequest {
+    ADS1115Multiplexer multiplexer;
+    ADS1115Gain gain;
+    ADS1115Resolution resolution;
+    ADS1115Samplerate samplerate;
+    std::function<void(float)> callback;
+    uint32_t request_time;
+  };
+
+  float do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
+                        ADS1115Samplerate samplerate);
+
   uint16_t prev_config_{0};
   bool continuous_mode_;
 
@@ -78,6 +93,9 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   // Channel-aware locking for multi-sample measurements
   std::atomic<bool> measurement_in_progress_{false};
   std::atomic<uint8_t> locked_channel_{0xFF};  // 0xFF = no lock
+
+  // Request queue for automatic scheduling
+  std::queue<MeasurementRequest> request_queue_;
 #endif
 };
 
