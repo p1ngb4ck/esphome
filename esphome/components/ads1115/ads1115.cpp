@@ -211,6 +211,22 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
 #endif
 }
 
+#ifdef USE_ESP32
+void ADS1115Component::start_burst_mode(ADS1115Multiplexer multiplexer) {
+  this->ensure_channel_task_(multiplexer);
+  uint8_t channel = static_cast<uint8_t>(multiplexer);
+  ChannelTask *task = this->channel_tasks_[channel];
+  task->in_burst_mode = true;
+}
+
+void ADS1115Component::end_burst_mode(ADS1115Multiplexer multiplexer) {
+  uint8_t channel = static_cast<uint8_t>(multiplexer);
+  if (this->channel_tasks_.find(channel) != this->channel_tasks_.end()) {
+    this->channel_tasks_[channel]->in_burst_mode = false;
+  }
+}
+#endif
+
 float ADS1115Component::do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                                         ADS1115Samplerate samplerate) {
   uint16_t config = this->prev_config_;

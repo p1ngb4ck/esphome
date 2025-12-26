@@ -65,6 +65,14 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   float request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                             ADS1115Samplerate samplerate);
 
+#ifdef USE_ESP32
+  /// Start burst mode for multi-sample measurements (e.g., RMS calculations)
+  void start_burst_mode(ADS1115Multiplexer multiplexer);
+
+  /// End burst mode
+  void end_burst_mode(ADS1115Multiplexer multiplexer);
+#endif
+
  protected:
   struct MeasurementRequest {
     ADS1115Multiplexer multiplexer;

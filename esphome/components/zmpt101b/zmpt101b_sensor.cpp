@@ -117,6 +117,14 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
     return NAN;
   }
 
+#ifdef USE_ESP32
+  // Enable burst mode to prevent channel thrashing during multi-sample measurement
+  auto *ads_sensor = static_cast<ads1115::ADS1115Sensor *>(this->voltage_source_);
+  if (ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+    ads_sensor->get_parent()->start_burst_mode(ads_sensor->get_multiplexer());
+  }
+#endif
+
   // Calculate delay between samples to span the desired duration
   uint32_t delay_us = (this->sample_duration_ms_ * 1000) / this->samples_;
 
@@ -161,6 +169,12 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
   // Check if we got enough valid samples
   if (valid_samples < (this->samples_ / 2)) {
     ESP_LOGW(TAG, "Too few valid samples: %d/%d", valid_samples, this->samples_);
+#ifdef USE_ESP32
+    // Disable burst mode before returning
+    if (ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+      ads_sensor->get_parent()->end_burst_mode(ads_sensor->get_multiplexer());
+    }
+#endif
     return NAN;
   }
 
@@ -173,6 +187,13 @@ float ZMPT101BSensor::calculate_rms_voltage_() {
 
   ESP_LOGV(TAG, "RMS Voltage: %.1f V (from %d samples, output RMS: %.3f V)", mains_voltage_rms, valid_samples,
            v_rms_output);
+
+#ifdef USE_ESP32
+  // Disable burst mode after successful measurement
+  if (ads_sensor != nullptr && ads_sensor->get_parent() != nullptr) {
+    ads_sensor->get_parent()->end_burst_mode(ads_sensor->get_multiplexer());
+  }
+#endif
 
   return mains_voltage_rms;
 }

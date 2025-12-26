@@ -22,6 +22,7 @@ class ADS1115Sensor : public sensor::Sensor,
   void set_gain(ADS1115Gain gain) { this->gain_ = gain; }
   void set_resolution(ADS1115Resolution resolution) { this->resolution_ = resolution; }
   void set_samplerate(ADS1115Samplerate samplerate) { this->samplerate_ = samplerate; }
+  ADS1115Multiplexer get_multiplexer() const { return this->multiplexer_; }
   float sample() override;
 
   void dump_config() override;
