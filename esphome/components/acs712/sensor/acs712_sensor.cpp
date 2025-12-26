@@ -1,13 +1,13 @@
-#include "acs712.h"
+#include "acs712_sensor.h"
 #include "esphome/core/log.h"
 #include <cmath>
 
 namespace esphome {
 namespace acs712 {
 
-static const char *const TAG = "acs712";
+static const char *const TAG = "acs712.sensor";
 
-void ACS712Component::setup() {
+void ACS712Sensor::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ACS712...");
 
   if (this->voltage_source_ == nullptr) {
@@ -39,7 +39,7 @@ void ACS712Component::setup() {
   }
 }
 
-void ACS712Component::update() {
+void ACS712Sensor::update() {
   float rms_current = this->calculate_rms_current_();
 
   if (std::isnan(rms_current)) {
@@ -47,10 +47,8 @@ void ACS712Component::update() {
     return;
   }
 
-  // Publish current
-  if (this->current_sensor_ != nullptr) {
-    this->current_sensor_->publish_state(rms_current);
-  }
+  // Publish current to this sensor (inherits from sensor::Sensor)
+  this->publish_state(rms_current);
 
   // Publish power
   if (this->power_sensor_ != nullptr) {
@@ -67,9 +65,10 @@ void ACS712Component::update() {
   }
 }
 
-void ACS712Component::dump_config() {
+void ACS712Sensor::dump_config() {
   ESP_LOGCONFIG(TAG, "ACS712:");
   LOG_UPDATE_INTERVAL(this);
+  LOG_SENSOR("  ", "Current", this);
 
   const char *model_str;
   switch (this->model_) {
@@ -91,14 +90,13 @@ void ACS712Component::dump_config() {
   ESP_LOGCONFIG(TAG, "  Zero Point: %.3f V", this->zero_point_);
   ESP_LOGCONFIG(TAG, "  Line Voltage: %.1f V", this->line_voltage_);
   ESP_LOGCONFIG(TAG, "  Samples: %d", this->samples_);
-  ESP_LOGCONFIG(TAG, "  Sample Duration: %d ms", this->sample_duration_ms_);
+  ESP_LOGCONFIG(TAG, "  Sample Duration: %u ms", this->sample_duration_ms_);
 
-  LOG_SENSOR("  ", "Current", this->current_sensor_);
   LOG_SENSOR("  ", "Power", this->power_sensor_);
   LOG_SENSOR("  ", "Voltage", this->voltage_sensor_);
 }
 
-void ACS712Component::set_model(ACS712Model model) {
+void ACS712Sensor::set_model(ACS712Model model) {
   this->model_ = model;
 
   // Set default sensitivity based on model
@@ -115,7 +113,7 @@ void ACS712Component::set_model(ACS712Model model) {
   }
 }
 
-float ACS712Component::get_voltage_sample_() {
+float ACS712Sensor::get_voltage_sample_() {
   if (this->voltage_source_ == nullptr) {
     return NAN;
   }
@@ -130,7 +128,7 @@ float ACS712Component::get_voltage_sample_() {
   return voltage;
 }
 
-float ACS712Component::calculate_rms_current_() {
+float ACS712Sensor::calculate_rms_current_() {
   if (this->voltage_source_ == nullptr) {
     ESP_LOGE(TAG, "No voltage source configured");
     return NAN;

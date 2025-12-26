@@ -14,7 +14,7 @@ enum ACS712Model {
   ACS712_30A,
 };
 
-class ACS712Component : public PollingComponent {
+class ACS712Sensor : public sensor::Sensor, public PollingComponent {
  public:
   void setup() override;
   void update() override;
@@ -22,16 +22,15 @@ class ACS712Component : public PollingComponent {
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   // Configuration setters
-  void set_voltage_source(voltage_sampler::VoltageSampler *source) { this->voltage_source_ = source; }
+  void set_source(voltage_sampler::VoltageSampler *source) { this->voltage_source_ = source; }
   void set_model(ACS712Model model);
   void set_sensitivity(float sensitivity) { this->sensitivity_ = sensitivity; }
   void set_zero_point(float zero_point) { this->zero_point_ = zero_point; }
   void set_line_voltage(float line_voltage) { this->line_voltage_ = line_voltage; }
   void set_samples(uint16_t samples) { this->samples_ = samples; }
-  void set_sample_duration(uint16_t duration_ms) { this->sample_duration_ms_ = duration_ms; }
+  void set_sample_duration(uint32_t duration_ms) { this->sample_duration_ms_ = duration_ms; }
 
-  // Sensor setters
-  void set_current_sensor(sensor::Sensor *sensor) { this->current_sensor_ = sensor; }
+  // Optional sensor setters
   void set_power_sensor(sensor::Sensor *sensor) { this->power_sensor_ = sensor; }
   void set_voltage_sensor(sensor::Sensor *sensor) { this->voltage_sensor_ = sensor; }
 
@@ -46,7 +45,6 @@ class ACS712Component : public PollingComponent {
 
   voltage_sampler::VoltageSampler *voltage_source_{nullptr};
 
-  sensor::Sensor *current_sensor_{nullptr};
   sensor::Sensor *power_sensor_{nullptr};
   sensor::Sensor *voltage_sensor_{nullptr};
 
@@ -55,7 +53,7 @@ class ACS712Component : public PollingComponent {
   float zero_point_{2.5};            // Voltage at zero current
   float line_voltage_{230.0};        // AC line voltage for power calculation
   uint16_t samples_{100};            // Number of samples for RMS calculation
-  uint16_t sample_duration_ms_{20};  // Duration to sample over (milliseconds)
+  uint32_t sample_duration_ms_{20};  // Duration to sample over (milliseconds)
 
   // Auto-calibration
   bool auto_zero_{false};
