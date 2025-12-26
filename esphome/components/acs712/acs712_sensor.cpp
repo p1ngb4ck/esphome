@@ -73,61 +73,40 @@ void ACS712Sensor::setup() {
 
 void ACS712Sensor::update() {
 #ifdef USE_ESP32
-  // Trigger background task to perform measurement
+  // First, try to publish any cached data from previous measurement
+  if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    float rms_current = this->cached_current_;
+    bool has_new_data = this->new_data_available_;
+    this->new_data_available_ = false;
+    xSemaphoreGive(this->data_mutex_);
+
+    if (has_new_data) {
+      if (!std::isnan(rms_current)) {
+        // Publish current to this sensor (inherits from sensor::Sensor)
+        this->publish_state(rms_current);
+
+        // Publish power
+        if (this->power_sensor_ != nullptr) {
+          float power = rms_current * this->line_voltage_;
+          this->power_sensor_->publish_state(power);
+        }
+
+        // Optionally publish average voltage (for debugging)
+        if (this->voltage_sensor_ != nullptr) {
+          float avg_voltage = this->get_voltage_sample_();
+          if (!std::isnan(avg_voltage)) {
+            this->voltage_sensor_->publish_state(avg_voltage);
+          }
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to read current");
+      }
+    }
+  }
+
+  // Trigger background task for next measurement (non-blocking)
   if (this->sampling_task_handle_ != nullptr) {
     xTaskNotifyGive(this->sampling_task_handle_);
-
-    // Wait briefly for task to complete measurement (with timeout)
-    // Typical measurement takes 20-40ms, so wait up to 100ms
-    for (uint8_t i = 0; i < 10; i++) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-
-      if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-        bool has_new_data = this->new_data_available_;
-        xSemaphoreGive(this->data_mutex_);
-
-        if (has_new_data) {
-          break;  // Measurement complete
-        }
-      }
-    }
-
-    // Read cached value from background task
-    if (this->data_mutex_ != nullptr && xSemaphoreTake(this->data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
-      float rms_current = this->cached_current_;
-      bool has_new_data = this->new_data_available_;
-      this->new_data_available_ = false;
-      xSemaphoreGive(this->data_mutex_);
-
-      if (!has_new_data) {
-        ESP_LOGW(TAG, "Background task measurement timeout");
-        return;
-      }
-
-      if (std::isnan(rms_current)) {
-        ESP_LOGW(TAG, "Failed to read current");
-        return;
-      }
-
-      // Publish current to this sensor (inherits from sensor::Sensor)
-      this->publish_state(rms_current);
-
-      // Publish power
-      if (this->power_sensor_ != nullptr) {
-        float power = rms_current * this->line_voltage_;
-        this->power_sensor_->publish_state(power);
-      }
-
-      // Optionally publish average voltage (for debugging)
-      if (this->voltage_sensor_ != nullptr) {
-        float avg_voltage = this->get_voltage_sample_();
-        if (!std::isnan(avg_voltage)) {
-          this->voltage_sensor_->publish_state(avg_voltage);
-        }
-      }
-    } else {
-      ESP_LOGW(TAG, "Failed to acquire data mutex");
-    }
   }
 #else
   // On non-ESP32 platforms, use blocking measurement
