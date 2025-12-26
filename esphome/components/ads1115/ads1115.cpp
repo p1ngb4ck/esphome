@@ -65,10 +65,11 @@ void ADS1115Component::setup() {
   this->prev_config_ = config;
 
 #ifdef USE_ESP32
-  // Create mutex for managing channel tasks
-  this->tasks_mutex_ = xSemaphoreCreateMutex();
+  // Create non-blocking mutex for burst measurements
+  this->burst_mutex_ = xSemaphoreCreateMutex();
 #endif
 }
+
 void ADS1115Component::dump_config() {
   ESP_LOGCONFIG(TAG, "ADS1115:");
   LOG_I2C_DEVICE(this);
@@ -77,143 +78,23 @@ void ADS1115Component::dump_config() {
   }
 }
 
-void ADS1115Component::loop() {
-  // No longer needed - per-channel tasks handle everything
-}
-
-#ifdef USE_ESP32
-void ADS1115Component::channel_task_func_(void *param) {
-  ChannelTask *task = static_cast<ChannelTask *>(param);
-  ADS1115Component *parent = task->parent;
-
-  while (true) {
-    MeasurementRequest req;
-    bool has_request = false;
-
-    // Check if another channel is in burst mode
-    uint8_t my_channel = static_cast<uint8_t>(task->channel);
-    uint8_t burst_channel = parent->burst_channel_;
-
-    if (burst_channel != 0xFF && burst_channel != my_channel) {
-      // Another channel is in burst mode - yield and wait
-      vTaskDelay(pdMS_TO_TICKS(1));
-      continue;
-    }
-
-    // Check for pending requests
-    if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
-      if (!task->request_queue.empty()) {
-        req = task->request_queue.front();
-        task->request_queue.pop();
-        has_request = true;
-      }
-      xSemaphoreGive(task->queue_mutex);
-    }
-
-    if (has_request) {
-      // Check if this is a burst mode request
-      if (req.is_burst) {
-        task->in_burst_mode = true;
-      }
-
-      // Perform measurement (I2C bus has its own locking)
-      float result = parent->do_measurement_(req.multiplexer, req.gain, req.resolution, req.samplerate);
-
-      // Handle result delivery
-      if (req.callback) {
-        // Asynchronous request with callback
-        req.callback(result);
-      }
-
-      if (req.result_ptr != nullptr) {
-        // Synchronous request - store result and signal completion
-        *req.result_ptr = result;
-      }
-
-      if (req.completion_sem != nullptr) {
-        // Signal that measurement is complete
-        xSemaphoreGive(req.completion_sem);
-
-        // If burst mode, wait briefly to allow next sample to queue before clearing flag
-        if (req.is_burst) {
-          vTaskDelay(pdMS_TO_TICKS(1));
-          // Check if queue is empty - if yes, burst is complete
-          bool queue_empty = false;
-          if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
-            queue_empty = task->request_queue.empty();
-            xSemaphoreGive(task->queue_mutex);
-          }
-          if (queue_empty) {
-            task->in_burst_mode = false;
-          }
-        }
-      }
-    } else {
-      // No requests, exit burst mode and yield to other tasks
-      task->in_burst_mode = false;
-      vTaskDelay(pdMS_TO_TICKS(1));
-    }
-  }
-}
-
-void ADS1115Component::ensure_channel_task_(ADS1115Multiplexer multiplexer) {
-  uint8_t channel = static_cast<uint8_t>(multiplexer);
-
-  if (xSemaphoreTake(this->tasks_mutex_, portMAX_DELAY) == pdTRUE) {
-    // Check if task already exists
-    if (this->channel_tasks_.find(channel) == this->channel_tasks_.end()) {
-      // Create new channel task
-      ChannelTask *task = new ChannelTask();
-      task->channel = multiplexer;
-      task->parent = this;
-      task->queue_mutex = xSemaphoreCreateMutex();
-
-      // Create FreeRTOS task for this channel
-      char task_name[32];
-      snprintf(task_name, sizeof(task_name), "ads1115_ch%d", channel);
-
-      xTaskCreatePinnedToCore(channel_task_func_, task_name, 4096, task, 1, &task->task_handle, 1);
-
-      this->channel_tasks_[channel] = task;
-      ESP_LOGD(TAG, "Created background task for channel %d", channel);
-    }
-    xSemaphoreGive(this->tasks_mutex_);
-  }
-}
-#endif
+void ADS1115Component::loop() {}
 
 float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
                                             ADS1115Resolution resolution, ADS1115Samplerate samplerate) {
 #ifdef USE_ESP32
-  // Ensure background task exists for this channel
-  this->ensure_channel_task_(multiplexer);
-
-  uint8_t channel = static_cast<uint8_t>(multiplexer);
-  ChannelTask *task = this->channel_tasks_[channel];
-
-  // Create semaphore for synchronous wait
-  SemaphoreHandle_t completion_sem = xSemaphoreCreateBinary();
-  float result = NAN;
-
-  // Add request to channel's queue
-  MeasurementRequest req{multiplexer, gain, resolution, samplerate, nullptr, millis()};
-  req.completion_sem = completion_sem;
-  req.result_ptr = &result;
-
-  // Detect burst mode: if task is already in burst mode OR queue has pending requests, mark as burst
-  req.is_burst = task->in_burst_mode || !task->request_queue.empty();
-
-  if (xSemaphoreTake(task->queue_mutex, portMAX_DELAY) == pdTRUE) {
-    task->request_queue.push(req);
-    xSemaphoreGive(task->queue_mutex);
+  // Try to acquire burst lock with zero timeout (non-blocking)
+  // If a burst measurement is in progress, return NAN immediately
+  if (xSemaphoreTake(this->burst_mutex_, 0) != pdTRUE) {
+    // Lock is held by burst measurement, return NAN (potentiometer will retry next update)
+    return NAN;
   }
 
-  // Wait for measurement to complete (non-blocking for the main loop, blocking for this caller)
-  if (xSemaphoreTake(completion_sem, portMAX_DELAY) == pdTRUE) {
-    // Result is now in 'result' variable
-  }
+  // Lock acquired, do measurement
+  float result = this->do_measurement_(multiplexer, gain, resolution, samplerate);
 
-  vSemaphoreDelete(completion_sem);
+  // Release lock
+  xSemaphoreGive(this->burst_mutex_);
   return result;
 #else
   // Non-ESP32: Direct measurement
@@ -222,20 +103,39 @@ float ADS1115Component::request_measurement(ADS1115Multiplexer multiplexer, ADS1
 }
 
 #ifdef USE_ESP32
-void ADS1115Component::start_burst_mode(ADS1115Multiplexer multiplexer) {
-  this->ensure_channel_task_(multiplexer);
-  uint8_t channel = static_cast<uint8_t>(multiplexer);
-  ChannelTask *task = this->channel_tasks_[channel];
-  task->in_burst_mode = true;
-  this->burst_channel_ = channel;  // Set global burst lock
-}
-
-void ADS1115Component::end_burst_mode(ADS1115Multiplexer multiplexer) {
-  uint8_t channel = static_cast<uint8_t>(multiplexer);
-  if (this->channel_tasks_.find(channel) != this->channel_tasks_.end()) {
-    this->channel_tasks_[channel]->in_burst_mode = false;
+bool ADS1115Component::do_burst_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain,
+                                            ADS1115Resolution resolution, ADS1115Samplerate samplerate,
+                                            std::function<void(float)> sample_callback, uint16_t num_samples) {
+  // Try to acquire lock with zero timeout (non-blocking)
+  if (xSemaphoreTake(this->burst_mutex_, 0) != pdTRUE) {
+    // Another burst measurement in progress, return false
+    ESP_LOGW(TAG, "Burst measurement skipped - ADC busy");
+    return false;
   }
-  this->burst_channel_ = 0xFF;  // Clear global burst lock
+
+  // Lock acquired, perform all samples consecutively
+  for (uint16_t i = 0; i < num_samples; i++) {
+    float voltage = this->do_measurement_(multiplexer, gain, resolution, samplerate);
+
+    if (std::isnan(voltage)) {
+      // Measurement failed, release lock and return
+      xSemaphoreGive(this->burst_mutex_);
+      ESP_LOGW(TAG, "Burst measurement failed at sample %d/%d", i + 1, num_samples);
+      return false;
+    }
+
+    // Call callback with sample value
+    sample_callback(voltage);
+
+    // Yield every 10 samples to keep system responsive
+    if (i % 10 == 0) {
+      yield();
+    }
+  }
+
+  // All samples complete, release lock
+  xSemaphoreGive(this->burst_mutex_);
+  return true;
 }
 #endif
 

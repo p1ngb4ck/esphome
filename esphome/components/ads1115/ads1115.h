@@ -3,14 +3,8 @@
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/core/component.h"
 
-#include <vector>
-#include <queue>
-#include <functional>
-#include <map>
-
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <freertos/semphr.h>
 #endif
 
@@ -66,42 +60,21 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
                             ADS1115Samplerate samplerate);
 
 #ifdef USE_ESP32
-  /// Start burst mode for multi-sample measurements (e.g., RMS calculations)
-  void start_burst_mode(ADS1115Multiplexer multiplexer);
-
-  /// End burst mode
-  void end_burst_mode(ADS1115Multiplexer multiplexer);
+  /// Perform multiple consecutive measurements on the same channel (for RMS calculations)
+  /// Holds a non-blocking lock during the burst to prevent channel switching
+  /// @param multiplexer The ADC channel to measure
+  /// @param gain The gain setting
+  /// @param resolution The resolution (12 or 16 bits)
+  /// @param samplerate The sample rate
+  /// @param sample_callback Called for each sample with the voltage value
+  /// @param num_samples Number of samples to take
+  /// @return true if burst completed successfully, false if lock couldn't be acquired
+  bool do_burst_measurement(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
+                            ADS1115Samplerate samplerate, std::function<void(float)> sample_callback,
+                            uint16_t num_samples);
 #endif
 
  protected:
-  struct MeasurementRequest {
-    ADS1115Multiplexer multiplexer;
-    ADS1115Gain gain;
-    ADS1115Resolution resolution;
-    ADS1115Samplerate samplerate;
-    std::function<void(float)> callback;
-    uint32_t request_time;
-#ifdef USE_ESP32
-    SemaphoreHandle_t completion_sem{nullptr};  // For synchronous requests
-    float *result_ptr{nullptr};                 // Where to store result
-    bool is_burst{false};                       // True for multi-sample burst mode
-#endif
-  };
-
-#ifdef USE_ESP32
-  struct ChannelTask {
-    TaskHandle_t task_handle{nullptr};
-    SemaphoreHandle_t queue_mutex{nullptr};
-    std::queue<MeasurementRequest> request_queue;
-    ADS1115Multiplexer channel;
-    ADS1115Component *parent{nullptr};
-    volatile bool in_burst_mode{false};  // True when processing burst requests
-  };
-
-  static void channel_task_func_(void *param);
-  void ensure_channel_task_(ADS1115Multiplexer multiplexer);
-#endif
-
   float do_measurement_(ADS1115Multiplexer multiplexer, ADS1115Gain gain, ADS1115Resolution resolution,
                         ADS1115Samplerate samplerate);
 
@@ -109,10 +82,8 @@ class ADS1115Component : public Component, public i2c::I2CDevice {
   bool continuous_mode_;
 
 #ifdef USE_ESP32
-  // Per-channel background tasks
-  std::map<uint8_t, ChannelTask *> channel_tasks_;
-  SemaphoreHandle_t tasks_mutex_{nullptr};
-  volatile uint8_t burst_channel_{0xFF};  // 0xFF = no burst, otherwise channel in burst mode
+  // Non-blocking mutex for burst measurements
+  SemaphoreHandle_t burst_mutex_{nullptr};
 #endif
 };
 
