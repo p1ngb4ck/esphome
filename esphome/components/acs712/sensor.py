@@ -24,6 +24,7 @@ CONF_MODEL = "model"
 CONF_SENSITIVITY = "sensitivity"
 CONF_ZERO_POINT = "zero_point"
 CONF_LINE_VOLTAGE = "line_voltage"
+CONF_LINE_VOLTAGE_SENSOR = "line_voltage_sensor"
 CONF_SAMPLES = "samples"
 CONF_SAMPLE_DURATION = "sample_duration"
 
@@ -48,7 +49,7 @@ def validate_samples(value):
     return value
 
 
-CONFIG_SCHEMA = (
+CONFIG_SCHEMA = cv.All(
     sensor.sensor_schema(
         ACS712Sensor,
         unit_of_measurement=UNIT_AMPERE,
@@ -63,7 +64,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MODEL, default="20A"): cv.enum(ACS712_MODELS, upper=True),
             cv.Optional(CONF_SENSITIVITY): cv.float_range(min=0.001, max=1.0),
             cv.Optional(CONF_ZERO_POINT, default=2.5): cv.float_range(min=0.0, max=5.0),
-            cv.Optional(CONF_LINE_VOLTAGE, default=230.0): cv.positive_float,
+            cv.Optional(CONF_LINE_VOLTAGE): cv.positive_float,
+            cv.Optional(CONF_LINE_VOLTAGE_SENSOR): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_SAMPLES, default=100): cv.All(
                 cv.positive_int, validate_samples
             ),
@@ -85,7 +87,8 @@ CONFIG_SCHEMA = (
             ),
         }
     )
-    .extend(cv.polling_component_schema("60s"))
+    .extend(cv.polling_component_schema("60s")),
+    cv.has_exactly_one_key(CONF_LINE_VOLTAGE, CONF_LINE_VOLTAGE_SENSOR),
 )
 
 
@@ -106,7 +109,14 @@ async def to_code(config):
 
     # Configuration parameters
     cg.add(var.set_zero_point(config[CONF_ZERO_POINT]))
-    cg.add(var.set_line_voltage(config[CONF_LINE_VOLTAGE]))
+
+    # Set line voltage - either static value or sensor reference
+    if CONF_LINE_VOLTAGE in config:
+        cg.add(var.set_line_voltage(config[CONF_LINE_VOLTAGE]))
+    elif CONF_LINE_VOLTAGE_SENSOR in config:
+        line_voltage_sensor = await cg.get_variable(config[CONF_LINE_VOLTAGE_SENSOR])
+        cg.add(var.set_line_voltage_sensor(line_voltage_sensor))
+
     cg.add(var.set_samples(config[CONF_SAMPLES]))
     cg.add(var.set_sample_duration(config[CONF_SAMPLE_DURATION]))
 

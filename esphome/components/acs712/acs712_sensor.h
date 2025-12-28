@@ -34,6 +34,7 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   void set_sensitivity(float sensitivity) { this->sensitivity_ = sensitivity; }
   void set_zero_point(float zero_point) { this->zero_point_ = zero_point; }
   void set_line_voltage(float line_voltage) { this->line_voltage_ = line_voltage; }
+  void set_line_voltage_sensor(sensor::Sensor *sensor) { this->line_voltage_sensor_ = sensor; }
   void set_samples(uint16_t samples) { this->samples_ = samples; }
   void set_sample_duration(uint32_t duration_ms) { this->sample_duration_ms_ = duration_ms; }
 
@@ -54,15 +55,20 @@ class ACS712Sensor : public sensor::Sensor, public PollingComponent {
   /// @return Voltage in volts, or NAN if sample failed
   float get_voltage_sample_();
 
+  /// @brief Get the current line voltage (from static value or sensor)
+  /// @return Line voltage in volts
+  float get_line_voltage_();
+
   voltage_sampler::VoltageSampler *voltage_source_{nullptr};
 
   sensor::Sensor *power_sensor_{nullptr};
   sensor::Sensor *voltage_sensor_{nullptr};
+  sensor::Sensor *line_voltage_sensor_{nullptr};
 
   ACS712Model model_{ACS712_20A};
   float sensitivity_{0.100};         // V/A (default for 20A model)
   float zero_point_{2.5};            // Voltage at zero current
-  float line_voltage_{230.0};        // AC line voltage for power calculation
+  float line_voltage_{0.0};          // AC line voltage for power calculation (static value)
   uint16_t samples_{100};            // Number of samples for RMS calculation
   uint32_t sample_duration_ms_{20};  // Duration to sample over (milliseconds)
 

@@ -75,7 +75,8 @@ void ACS712Sensor::update() {
 
   // Publish power
   if (this->power_sensor_ != nullptr) {
-    float power = rms_current * this->line_voltage_;
+    float line_voltage = this->get_line_voltage_();
+    float power = rms_current * line_voltage;
     this->power_sensor_->publish_state(power);
   }
 
@@ -112,7 +113,13 @@ void ACS712Sensor::dump_config() {
   ESP_LOGCONFIG(TAG, "  Model: ACS712-%s", model_str);
   ESP_LOGCONFIG(TAG, "  Sensitivity: %.3f V/A", this->sensitivity_);
   ESP_LOGCONFIG(TAG, "  Zero Point: %.3f V", this->zero_point_);
-  ESP_LOGCONFIG(TAG, "  Line Voltage: %.1f V", this->line_voltage_);
+
+  if (this->line_voltage_sensor_ != nullptr) {
+    LOG_SENSOR("  ", "Line Voltage Sensor", this->line_voltage_sensor_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Line Voltage: %.1f V (static)", this->line_voltage_);
+  }
+
   ESP_LOGCONFIG(TAG, "  Samples: %d", this->samples_);
   ESP_LOGCONFIG(TAG, "  Sample Duration: %u ms", this->sample_duration_ms_);
 
@@ -151,6 +158,22 @@ float ACS712Sensor::get_voltage_sample_() {
   }
 
   return voltage;
+}
+
+float ACS712Sensor::get_line_voltage_() {
+  // If a sensor is configured, use its current state
+  if (this->line_voltage_sensor_ != nullptr) {
+    float sensor_value = this->line_voltage_sensor_->get_state();
+    // Only use sensor value if it's valid (not NaN)
+    if (!std::isnan(sensor_value) && sensor_value > 0.0f) {
+      return sensor_value;
+    }
+    // If sensor value is invalid, log warning and return 0 (will result in 0 power)
+    ESP_LOGW(TAG, "Line voltage sensor has no valid value, power calculation will be 0");
+    return 0.0f;
+  }
+  // Otherwise use the static configured value
+  return this->line_voltage_;
 }
 
 float ACS712Sensor::calculate_rms_current_() {
@@ -310,7 +333,8 @@ void ACS712Sensor::loop() {
 
         // Publish power
         if (this->power_sensor_ != nullptr) {
-          float power = rms_current * this->line_voltage_;
+          float line_voltage = this->get_line_voltage_();
+          float power = rms_current * line_voltage;
           this->power_sensor_->publish_state(power);
         }
 
