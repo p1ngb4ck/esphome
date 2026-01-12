@@ -90,7 +90,7 @@ def _validate_schema(config):
 
 
 CONFIG_SCHEMA = cv.All(
-    cv.Schema(
+    cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(USBHost),
             cv.Optional(CONF_ENABLE_HUBS, default=False): cv.boolean,
@@ -103,10 +103,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_INSTANCES): cv.ensure_list(USB_HOST_INSTANCE_SCHEMA),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
-    ).extend(cv.COMPONENT_SCHEMA),
+    ),
     _validate_schema,
     cv.only_with_esp_idf,
-    only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
+    only_on_variant(supported=[VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3]),
 )
 
 
