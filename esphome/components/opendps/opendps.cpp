@@ -6,10 +6,6 @@
 #include "esphome/components/storage/storage.h"
 #endif
 
-#ifdef USE_BINARY_STORAGE
-#include "esphome/components/binary_storage/binary_storage.h"
-#endif
-
 namespace esphome {
 namespace opendps {
 
@@ -534,7 +530,6 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
 
   // Determine storage type
   bool is_network_path = storage::global_storage->is_network_path(firmware_path);
-  bool is_device_node = storage::global_storage->is_device_node(firmware_path);
 
   // Check PSRAM availability
   bool has_psram = false;
@@ -553,24 +548,20 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
   // Network paths require PSRAM for buffering
   if (is_network_path && !has_psram) {
     ESP_LOGE(TAG, "Network storage requires PSRAM for firmware buffering");
-    ESP_LOGE(TAG, "This device has no PSRAM - use local storage (USB/SD/binary_storage) instead");
+    ESP_LOGE(TAG, "This device has no PSRAM - use local storage (USB/SD/LittleFS) instead");
     return;
   }
 
-  // Check if file/device exists
+  // Check if file exists
   bool file_exists = false;
   if (is_network_path) {
     file_exists = storage::global_storage->network_file_exists(firmware_path);
-  } else if (is_device_node) {
-    // Device nodes (binary_storage) always "exist" if registered
-    auto *dev_node = storage::global_storage->find_device_node(firmware_path);
-    file_exists = (dev_node != nullptr);
   } else {
     file_exists = storage::global_storage->file_exists(firmware_path);
   }
 
   if (!file_exists) {
-    ESP_LOGE(TAG, "Firmware file/device not found: %s", firmware_path.c_str());
+    ESP_LOGE(TAG, "Firmware file not found: %s", firmware_path.c_str());
     return;
   }
 
@@ -623,75 +614,8 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     this->send_upgrade_start_(chunk_size, firmware_crc);
 
     ESP_LOGI(TAG, "Firmware upgrade initiated from network storage - check logs for progress");
-  } else if (is_device_node) {
-    // Binary storage device (internal flash partition, external SPI flash, etc.)
-    ESP_LOGI(TAG, "Reading firmware from binary_storage device...");
-
-#ifdef USE_BINARY_STORAGE
-    auto *dev_node = storage::global_storage->find_device_node(firmware_path);
-    if (!dev_node || !dev_node->device) {
-      ESP_LOGE(TAG, "Binary storage device not found");
-      return;
-    }
-
-    binary_storage::BinaryStorage *device = dev_node->device;
-    size_t device_size = device->get_size();
-
-    ESP_LOGI(TAG, "Binary storage device: %s (%u bytes)", dev_node->device_type.c_str(), device_size);
-
-    // Read firmware from binary storage
-    std::vector<uint8_t> firmware_data;
-    firmware_data.resize(device_size);
-
-    if (!device->read(0, firmware_data.data(), device_size)) {
-      ESP_LOGE(TAG, "Failed to read from binary storage device");
-      return;
-    }
-
-    // Find actual firmware size (may be less than device size)
-    // Look for 0xFF padding at the end
-    size_t firmware_size = device_size;
-    while (firmware_size > 0 && firmware_data[firmware_size - 1] == 0xFF) {
-      firmware_size--;
-    }
-
-    if (firmware_size == 0) {
-      ESP_LOGE(TAG, "Binary storage device appears empty (all 0xFF)");
-      return;
-    }
-
-    firmware_data.resize(firmware_size);
-    ESP_LOGI(TAG, "Firmware size: %u bytes (device size: %u bytes)", firmware_size, device_size);
-
-    // Validate firmware (check for magic byte at offset 0x06)
-    if (firmware_size > 6) {
-      uint8_t magic = firmware_data[6];
-      if (magic != 0x20) {
-        ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
-        ESP_LOGW(TAG, "Continuing anyway - use with caution!");
-      }
-    }
-
-    // Calculate CRC-16 CCITT (XMODEM) of entire firmware
-    ESP_LOGI(TAG, "Calculating CRC-16...");
-    uint16_t firmware_crc = 0;
-    for (uint8_t byte : firmware_data) {
-      firmware_crc = this->crc16_ccitt_(firmware_crc, byte);
-    }
-    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
-
-    // Send upgrade start command
-    uint16_t chunk_size = 1024;  // Default chunk size
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", chunk_size, firmware_crc);
-    this->send_upgrade_start_(chunk_size, firmware_crc);
-
-    ESP_LOGI(TAG, "Firmware upgrade initiated from binary_storage - check logs for progress");
-#else
-    ESP_LOGE(TAG, "Binary storage support not compiled in");
-    return;
-#endif
   } else {
-    // Local storage (USB/SD) - can work without PSRAM
+    // Local storage (USB/SD/LittleFS) - can work without PSRAM
     ESP_LOGI(TAG, "Reading firmware from local storage...");
     std::string firmware_data = storage::global_storage->read_file(firmware_path);
 

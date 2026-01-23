@@ -212,6 +212,8 @@ button:
           // Search for firmware in common locations
           std::vector<std::string> paths = {
             "/usb/opendps-latest.bin",
+            "/flash/opendps-latest.bin",
+            "/littlefs/opendps.bin",
             "/nfs/firmware/opendps-latest.bin",
             "/sd/opendps.bin"
           };

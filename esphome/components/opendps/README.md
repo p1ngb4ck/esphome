@@ -390,20 +390,19 @@ button:
 
 ### Firmware Upgrade
 
-Upgrade OpenDPS firmware from multiple storage sources: local storage (USB/SD), binary storage devices (internal flash partitions, external SPI flash), or network storage (NFS/SMB/FTP).
+Upgrade OpenDPS firmware from multiple storage sources: local storage (USB/SD), LittleFS filesystems, or network storage (NFS/SMB/FTP).
 
 **Requirements:**
 - Storage component must be configured
 - **For local storage (USB/SD)**: Works on all ESP32 devices (PSRAM not required)
-- **For binary_storage devices**: Works on all ESP32 devices (PSRAM not required)
-  - Supports internal flash partitions (LittleFS)
-  - Supports external SPI flash (e.g., W25Q series)
-  - Device paths like `/dev/flash0`, `/dev/spiflash1`
-  - Firmware size must fit in the binary_storage device
+- **For LittleFS filesystems**: Works on all ESP32 devices (PSRAM not required)
+  - Can be mounted from binary_storage devices (internal flash partitions, external SPI flash)
+  - Access via mount path (e.g., `/flash/firmware.bin`, `/littlefs/firmware.bin`)
+  - Firmware size must fit in the filesystem partition
 - **For network storage (NFS/SMB/FTP)**: Requires ESP32 with PSRAM (firmware buffered in PSRAM)
   - Minimum PSRAM: firmware size + 64KB safety margin
   - Component automatically checks PSRAM availability and free space
-- Firmware file must be accessible via storage paths (e.g., `/usb/firmware.bin`, `/nfs/opendps/v5.bin`, `/dev/flash0`)
+- Firmware file must be accessible via storage paths (e.g., `/usb/firmware.bin`, `/flash/firmware.bin`, `/nfs/opendps/v5.bin`)
 
 **Runtime usage with dynamic paths (recommended):**
 ```yaml
@@ -463,6 +462,8 @@ button:
           std::vector<std::string> possible_paths = {
             "/usb/opendps-latest.bin",
             "/usb/firmware/opendps.bin",
+            "/flash/opendps-latest.bin",
+            "/littlefs/opendps.bin",
             "/nfs/firmware/opendps-latest.bin",
             "/sd/opendps.bin"
           };
