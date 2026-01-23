@@ -528,50 +528,133 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     return;
   }
 
+  // Determine if this is a network path
+  bool is_network_path = storage::global_storage->is_network_path(firmware_path);
+
+  // Check PSRAM availability
+  bool has_psram = false;
+  size_t free_psram = 0;
+  size_t total_psram = 0;
+
+#ifdef USE_ESP32
+  total_psram = ESP.getPsramSize();
+  free_psram = ESP.getFreePsram();
+  has_psram = total_psram > 0;
+#endif
+
+  ESP_LOGI(TAG, "PSRAM: %s (total: %u bytes, free: %u bytes)", has_psram ? "available" : "not available", total_psram,
+           free_psram);
+
+  // Network paths require PSRAM for buffering
+  if (is_network_path && !has_psram) {
+    ESP_LOGE(TAG, "Network storage requires PSRAM for firmware buffering");
+    ESP_LOGE(TAG, "This device has no PSRAM - use local storage (USB/SD) instead");
+    return;
+  }
+
   // Check if file exists
-  if (!storage::global_storage->file_exists(firmware_path)) {
+  bool file_exists = false;
+  if (is_network_path) {
+    file_exists = storage::global_storage->network_file_exists(firmware_path);
+  } else {
+    file_exists = storage::global_storage->file_exists(firmware_path);
+  }
+
+  if (!file_exists) {
     ESP_LOGE(TAG, "Firmware file not found: %s", firmware_path.c_str());
     return;
   }
 
-  // Read firmware file into memory (PSRAM if available)
-  ESP_LOGI(TAG, "Reading firmware file into memory...");
-  std::string firmware_data = storage::global_storage->read_file(firmware_path);
+  // For network paths, we need to load entire file into PSRAM
+  if (is_network_path) {
+    ESP_LOGI(TAG, "Reading firmware from network storage into PSRAM...");
 
-  if (firmware_data.empty()) {
-    ESP_LOGE(TAG, "Failed to read firmware file or file is empty");
-    return;
-  }
-
-  ESP_LOGI(TAG, "Firmware size: %d bytes", firmware_data.size());
-
-  // Validate firmware (check for magic byte at offset 0x06)
-  if (firmware_data.size() > 6) {
-    uint8_t magic = static_cast<uint8_t>(firmware_data[6]);
-    if (magic != 0x20) {
-      ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
-      ESP_LOGW(TAG, "Continuing anyway - use with caution!");
+    // Read file into vector (will use PSRAM via allocator if available)
+    std::vector<uint8_t> firmware_data;
+    if (!storage::global_storage->network_read_file(firmware_path, firmware_data)) {
+      ESP_LOGE(TAG, "Failed to read firmware file from network storage");
+      return;
     }
-  }
 
-  // Calculate CRC-16 CCITT (XMODEM) of entire firmware
-  ESP_LOGI(TAG, "Calculating CRC-16...");
-  uint16_t firmware_crc = 0;
-  for (char byte : firmware_data) {
-    firmware_crc = this->crc16_ccitt_(firmware_crc, static_cast<uint8_t>(byte));
-  }
-  ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+    if (firmware_data.empty()) {
+      ESP_LOGE(TAG, "Firmware file is empty");
+      return;
+    }
 
-  // Send upgrade start command
-  uint16_t chunk_size = 1024;  // Default chunk size
-  ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", chunk_size, firmware_crc);
-  this->send_upgrade_start_(chunk_size, firmware_crc);
+    size_t firmware_size = firmware_data.size();
+    ESP_LOGI(TAG, "Firmware size: %u bytes", firmware_size);
+
+    // Verify we have enough PSRAM (need at least firmware size + safety margin)
+    size_t required_psram = firmware_size + (64 * 1024);  // 64KB safety margin
+    if (free_psram < required_psram) {
+      ESP_LOGE(TAG, "Insufficient PSRAM: need %u bytes, have %u bytes free", required_psram, free_psram);
+      return;
+    }
+
+    // Validate firmware (check for magic byte at offset 0x06)
+    if (firmware_size > 6) {
+      uint8_t magic = firmware_data[6];
+      if (magic != 0x20) {
+        ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
+        ESP_LOGW(TAG, "Continuing anyway - use with caution!");
+      }
+    }
+
+    // Calculate CRC-16 CCITT (XMODEM) of entire firmware
+    ESP_LOGI(TAG, "Calculating CRC-16...");
+    uint16_t firmware_crc = 0;
+    for (uint8_t byte : firmware_data) {
+      firmware_crc = this->crc16_ccitt_(firmware_crc, byte);
+    }
+    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+
+    // Send upgrade start command
+    uint16_t chunk_size = 1024;  // Default chunk size
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", chunk_size, firmware_crc);
+    this->send_upgrade_start_(chunk_size, firmware_crc);
+
+    ESP_LOGI(TAG, "Firmware upgrade initiated from network storage - check logs for progress");
+  } else {
+    // Local storage (USB/SD) - can work without PSRAM
+    ESP_LOGI(TAG, "Reading firmware from local storage...");
+    std::string firmware_data = storage::global_storage->read_file(firmware_path);
+
+    if (firmware_data.empty()) {
+      ESP_LOGE(TAG, "Failed to read firmware file or file is empty");
+      return;
+    }
+
+    size_t firmware_size = firmware_data.size();
+    ESP_LOGI(TAG, "Firmware size: %u bytes", firmware_size);
+
+    // Validate firmware (check for magic byte at offset 0x06)
+    if (firmware_size > 6) {
+      uint8_t magic = static_cast<uint8_t>(firmware_data[6]);
+      if (magic != 0x20) {
+        ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
+        ESP_LOGW(TAG, "Continuing anyway - use with caution!");
+      }
+    }
+
+    // Calculate CRC-16 CCITT (XMODEM) of entire firmware
+    ESP_LOGI(TAG, "Calculating CRC-16...");
+    uint16_t firmware_crc = 0;
+    for (char byte : firmware_data) {
+      firmware_crc = this->crc16_ccitt_(firmware_crc, static_cast<uint8_t>(byte));
+    }
+    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+
+    // Send upgrade start command
+    uint16_t chunk_size = 1024;  // Default chunk size
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", chunk_size, firmware_crc);
+    this->send_upgrade_start_(chunk_size, firmware_crc);
+
+    ESP_LOGI(TAG, "Firmware upgrade initiated from local storage - check logs for progress");
+  }
 
   // Wait for response (this is blocking - might need to make async in the future)
   // For now, we'll process the response in process_frame_ and continue there
   // TODO: Make this fully async with state machine
-
-  ESP_LOGI(TAG, "Firmware upgrade initiated - check logs for progress");
 #endif
 }
 

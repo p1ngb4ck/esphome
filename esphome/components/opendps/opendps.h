@@ -9,6 +9,8 @@
 
 #include <vector>
 #include <queue>
+#include <map>
+#include <functional>
 
 namespace esphome {
 namespace opendps {

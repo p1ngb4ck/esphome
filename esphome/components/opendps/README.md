@@ -390,10 +390,14 @@ button:
 
 ### Firmware Upgrade
 
-Upgrade OpenDPS firmware from a file stored on local storage (USB, SD card, NFS mount, etc.). The firmware file is loaded into memory (PSRAM if available) before flashing.
+Upgrade OpenDPS firmware from a file stored on local storage (USB, SD card) or network storage (NFS, SMB, FTP).
 
 **Requirements:**
 - Storage component must be configured
+- **For local storage (USB/SD)**: Works on all ESP32 devices (PSRAM not required)
+- **For network storage (NFS/SMB/FTP)**: Requires ESP32 with PSRAM (firmware buffered in PSRAM)
+  - Minimum PSRAM: firmware size + 64KB safety margin
+  - Component automatically checks PSRAM availability and free space
 - Firmware file must be accessible via storage paths (e.g., `/usb/firmware.bin`, `/nfs/opendps/v5.bin`)
 
 **Runtime usage with dynamic paths (recommended):**
