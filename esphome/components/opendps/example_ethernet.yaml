@@ -1,0 +1,126 @@
+# OpenDPS Ethernet Example Configuration
+# High-speed updates with Ethernet for maximum reliability
+
+esphome:
+  name: opendps-ethernet
+  platform: ESP32
+  board: esp32dev
+
+logger:
+  level: DEBUG
+
+# Use Ethernet instead of WiFi for more reliability
+ethernet:
+  type: W5500
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  cs_pin: GPIO5
+  interrupt_pin: GPIO4
+  reset_pin: GPIO14
+
+api:
+  encryption:
+    key: "your-encryption-key"
+
+ota:
+  password: "your-ota-password"
+
+# UART for OpenDPS
+uart:
+  id: opendps_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+
+# OpenDPS Component with fast updates
+opendps:
+  id: my_opendps
+  uart_id: opendps_uart
+  update_interval: 50ms  # Very fast updates (20Hz)
+
+# All sensors with per-sensor throttling
+sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    voltage_in:
+      name: "Input Voltage"
+      filters:
+        - throttle: 100ms  # Throttle to Home Assistant
+    voltage_out:
+      name: "Output Voltage"
+      filters:
+        - throttle: 50ms  # Real-time voltage monitoring
+    current_out:
+      name: "Output Current"
+      filters:
+        - throttle: 50ms  # Real-time current monitoring
+    power_out:
+      name: "Output Power"
+      filters:
+        - throttle: 50ms  # Real-time power monitoring
+    temperature_1:
+      name: "Heatsink Temperature"
+      filters:
+        - throttle: 1s
+    temperature_2:
+      name: "Ambient Temperature"
+      filters:
+        - throttle: 1s
+
+binary_sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    output_enabled:
+      name: "Output State"
+
+# Control interface
+number:
+  - platform: template
+    name: "Set Voltage"
+    min_value: 0
+    max_value: 30
+    step: 0.1
+    unit_of_measurement: "V"
+    mode: box
+    optimistic: true
+    set_action:
+      - opendps.set_voltage:
+          id: my_opendps
+          voltage: !lambda "return x;"
+
+  - platform: template
+    name: "Set Current Limit"
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    unit_of_measurement: "A"
+    mode: box
+    optimistic: true
+    set_action:
+      - opendps.set_current:
+          id: my_opendps
+          current: !lambda "return x;"
+
+switch:
+  - platform: template
+    name: "Output Enable"
+    optimistic: true
+    turn_on_action:
+      - opendps.enable_output:
+          id: my_opendps
+          enable: true
+    turn_off_action:
+      - opendps.enable_output:
+          id: my_opendps
+          enable: false
+
+# High-speed current logging for repair work
+interval:
+  - interval: 50ms  # 20Hz logging
+    then:
+      - lambda: |-
+          ESP_LOGD("current", "I=%.3fA V=%.3fV P=%.3fW",
+                   id(opendps_iout).state,
+                   id(opendps_vout).state,
+                   id(opendps_pout).state);

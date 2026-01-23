@@ -1,0 +1,264 @@
+# OpenDPS Full Example Configuration
+# This example shows all available features and options
+
+esphome:
+  name: opendps-controller
+  platform: ESP32
+  board: esp32dev
+
+# Enable logging
+logger:
+  level: DEBUG
+
+# WiFi Configuration
+wifi:
+  ssid: "your-ssid"
+  password: "your-password"
+
+  # Optional: Use static IP for faster connection
+  manual_ip:
+    static_ip: 192.168.1.100
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "your-encryption-key"
+
+# Enable OTA updates
+ota:
+  password: "your-ota-password"
+
+# UART for OpenDPS communication
+uart:
+  id: opendps_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+  debug:
+    direction: BOTH
+    dummy_receiver: false
+    after:
+      delimiter: "\n"
+    sequence:
+      - lambda: UARTDebug::log_hex(direction, bytes, ':');
+
+# OpenDPS Component
+opendps:
+  id: my_opendps
+  uart_id: opendps_uart
+  update_interval: 100ms  # Fast updates (10Hz) - can go as low as 50ms
+
+# Sensors
+sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    voltage_in:
+      name: "OpenDPS Input Voltage"
+      id: opendps_vin
+      filters:
+        - throttle: 1s  # Throttle to Home Assistant
+    voltage_out:
+      name: "OpenDPS Output Voltage"
+      id: opendps_vout
+      filters:
+        - throttle: 100ms
+    current_out:
+      name: "OpenDPS Output Current"
+      id: opendps_iout
+      filters:
+        - throttle: 100ms
+    power_out:
+      name: "OpenDPS Output Power"
+      id: opendps_pout
+      filters:
+        - throttle: 100ms
+    temperature_1:
+      name: "OpenDPS Heatsink Temperature"
+      id: opendps_temp1
+    temperature_2:
+      name: "OpenDPS Ambient Temperature"
+      id: opendps_temp2
+
+# Binary Sensor
+binary_sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    output_enabled:
+      name: "OpenDPS Output State"
+      id: opendps_output_state
+
+# Numbers (for setting voltage and current)
+number:
+  - platform: template
+    name: "OpenDPS Set Voltage"
+    id: opendps_set_voltage
+    min_value: 0
+    max_value: 30
+    step: 0.1
+    unit_of_measurement: "V"
+    mode: box
+    optimistic: true
+    set_action:
+      - opendps.set_voltage:
+          id: my_opendps
+          voltage: !lambda "return x;"
+
+  - platform: template
+    name: "OpenDPS Set Current Limit"
+    id: opendps_set_current
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    unit_of_measurement: "A"
+    mode: box
+    optimistic: true
+    set_action:
+      - opendps.set_current:
+          id: my_opendps
+          current: !lambda "return x;"
+
+  - platform: template
+    name: "OpenDPS Display Brightness"
+    id: opendps_brightness
+    min_value: 0
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: slider
+    optimistic: true
+    set_action:
+      - opendps.set_brightness:
+          id: my_opendps
+          brightness: !lambda "return (uint8_t)x;"
+
+# Select (for operating mode)
+select:
+  - platform: template
+    name: "OpenDPS Operating Mode"
+    id: opendps_mode
+    options:
+      - "cv"  # Constant Voltage
+      - "cc"  # Constant Current
+      - "cp"  # Constant Power
+    optimistic: true
+    set_action:
+      - opendps.set_function:
+          id: my_opendps
+          function: !lambda "return x.c_str();"
+
+# Switches
+switch:
+  - platform: template
+    name: "OpenDPS Output Enable"
+    id: opendps_output_switch
+    optimistic: true
+    turn_on_action:
+      - opendps.enable_output:
+          id: my_opendps
+          enable: true
+    turn_off_action:
+      - opendps.enable_output:
+          id: my_opendps
+          enable: false
+
+  - platform: template
+    name: "OpenDPS Lock"
+    id: opendps_lock_switch
+    optimistic: true
+    turn_on_action:
+      - opendps.lock:
+          id: my_opendps
+          locked: true
+    turn_off_action:
+      - opendps.lock:
+          id: my_opendps
+          locked: false
+
+# Buttons
+button:
+  - platform: template
+    name: "OpenDPS Ping"
+    on_press:
+      - opendps.ping:
+          id: my_opendps
+
+  - platform: template
+    name: "OpenDPS Request Version"
+    on_press:
+      - opendps.request_version:
+          id: my_opendps
+
+  - platform: template
+    name: "OpenDPS Upgrade Firmware"
+    on_press:
+      - opendps.upgrade_firmware:
+          id: my_opendps
+          firmware_url: "http://192.168.1.200/opendps-v5.bin"
+
+# Preset configurations
+  - platform: template
+    name: "Preset: 12V 1A"
+    on_press:
+      - opendps.set_function:
+          id: my_opendps
+          function: "cv"
+      - opendps.set_voltage:
+          id: my_opendps
+          voltage: 12.0
+      - opendps.set_current:
+          id: my_opendps
+          current: 1.0
+      - opendps.enable_output:
+          id: my_opendps
+          enable: true
+
+  - platform: template
+    name: "Preset: 5V 2A"
+    on_press:
+      - opendps.set_function:
+          id: my_opendps
+          function: "cv"
+      - opendps.set_voltage:
+          id: my_opendps
+          voltage: 5.0
+      - opendps.set_current:
+          id: my_opendps
+          current: 2.0
+      - opendps.enable_output:
+          id: my_opendps
+          enable: true
+
+  - platform: template
+    name: "Preset: Battery Charge 4.2V 0.5A"
+    on_press:
+      - opendps.set_function:
+          id: my_opendps
+          function: "cv"
+      - opendps.set_voltage:
+          id: my_opendps
+          voltage: 4.2
+      - opendps.set_current:
+          id: my_opendps
+          current: 0.5
+      - opendps.enable_output:
+          id: my_opendps
+          enable: true
+
+# Automations
+# Example: Auto-shutdown on over-temperature
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(opendps_temp1).state > 60.0) {
+            ESP_LOGW("opendps", "Over-temperature detected! Disabling output.");
+            id(my_opendps).enable_output(false);
+          }
+
+# Example: Log current measurement for debugging
+  - interval: 100ms
+    then:
+      - lambda: |-
+          ESP_LOGD("opendps_debug", "Current: %.3fA", id(opendps_iout).state);

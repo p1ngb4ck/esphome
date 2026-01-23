@@ -1,0 +1,84 @@
+# OpenDPS Basic Example Configuration
+# Minimal setup to get started with OpenDPS control
+
+esphome:
+  name: opendps-basic
+  platform: ESP32
+  board: esp32dev
+
+logger:
+  level: INFO
+
+wifi:
+  ssid: "your-ssid"
+  password: "your-password"
+
+api:
+  encryption:
+    key: "your-encryption-key"
+
+ota:
+  password: "your-ota-password"
+
+# UART for OpenDPS
+uart:
+  id: opendps_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+
+# OpenDPS Component
+opendps:
+  id: my_opendps
+  uart_id: opendps_uart
+  update_interval: 1s  # Default 1Hz updates
+
+# Basic sensors
+sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    voltage_in:
+      name: "Input Voltage"
+    voltage_out:
+      name: "Output Voltage"
+    current_out:
+      name: "Output Current"
+    power_out:
+      name: "Output Power"
+
+# Output state
+binary_sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    output_enabled:
+      name: "Output State"
+
+# Basic controls
+number:
+  - platform: template
+    name: "Set Voltage"
+    min_value: 0
+    max_value: 30
+    step: 0.1
+    unit_of_measurement: "V"
+    mode: box
+    set_action:
+      - lambda: id(my_opendps).set_voltage(x);
+
+  - platform: template
+    name: "Set Current"
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    unit_of_measurement: "A"
+    mode: box
+    set_action:
+      - lambda: id(my_opendps).set_current(x);
+
+switch:
+  - platform: template
+    name: "Output Enable"
+    turn_on_action:
+      - lambda: id(my_opendps).enable_output(true);
+    turn_off_action:
+      - lambda: id(my_opendps).enable_output(false);
