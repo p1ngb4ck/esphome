@@ -2,7 +2,6 @@ import esphome.codegen as cg
 from esphome.components.esp32 import add_idf_component
 import esphome.config_validation as cv
 from esphome.const import CONF_BITS_PER_SAMPLE, CONF_NUM_CHANNELS, CONF_SAMPLE_RATE
-from esphome.core import CORE
 import esphome.final_validate as fv
 
 CODEOWNERS = ["@kahrendt"]
@@ -167,8 +166,7 @@ def final_validate_audio_schema(
 
 
 async def to_code(config):
-    cg.add_library("esphome/esp-audio-libs", "2.0.1")
-
-    # Add esp_audio_codec for AAC support (ESP-IDF only)
-    if CORE.using_esp_idf:
-        add_idf_component(name="espressif/esp_audio_codec", ref="2.3.0")
+    add_idf_component(
+        name="esphome/esp-audio-libs",
+        ref="2.0.3",
+    )
