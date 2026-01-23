@@ -30,6 +30,12 @@ api:
 ota:
   password: "your-ota-password"
 
+# Global variables
+globals:
+  - id: opendps_firmware_path
+    type: std::string
+    initial_value: '"/usb/opendps-latest.bin"'
+
 # UART for OpenDPS communication
 uart:
   id: opendps_uart
@@ -193,9 +199,30 @@ button:
   - platform: template
     name: "OpenDPS Upgrade Firmware"
     on_press:
-      - opendps.upgrade_firmware:
-          id: my_opendps
-          firmware_url: "http://192.168.1.200/opendps-v5.bin"
+      - lambda: |-
+          // Use runtime path from global variable
+          std::string fw_path = id(opendps_firmware_path);
+          ESP_LOGI("opendps", "Starting upgrade from: %s", fw_path.c_str());
+          id(my_opendps).start_firmware_upgrade(fw_path);
+
+  - platform: template
+    name: "Auto-find and Upgrade"
+    on_press:
+      - lambda: |-
+          // Search for firmware in common locations
+          std::vector<std::string> paths = {
+            "/usb/opendps-latest.bin",
+            "/nfs/firmware/opendps-latest.bin",
+            "/sd/opendps.bin"
+          };
+          for (const auto& path : paths) {
+            if (storage::global_storage->file_exists(path)) {
+              ESP_LOGI("opendps", "Found firmware: %s", path.c_str());
+              id(my_opendps).start_firmware_upgrade(path);
+              return;
+            }
+          }
+          ESP_LOGE("opendps", "No firmware found");
 
 # Preset configurations
   - platform: template

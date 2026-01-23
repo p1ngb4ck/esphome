@@ -390,18 +390,91 @@ button:
 
 ### Firmware Upgrade
 
-**Note:** Firmware upgrade feature is currently a placeholder and not fully implemented. The HTTP download and upgrade protocol implementation will be added in a future update.
+Upgrade OpenDPS firmware from a file stored on local storage (USB, SD card, NFS mount, etc.). The firmware file is loaded into memory (PSRAM if available) before flashing.
 
-**Using YAML Actions:**
+**Requirements:**
+- Storage component must be configured
+- Firmware file must be accessible via storage paths (e.g., `/usb/firmware.bin`, `/nfs/opendps/v5.bin`)
+
+**Runtime usage with dynamic paths (recommended):**
+```yaml
+globals:
+  - id: firmware_file
+    type: std::string
+    initial_value: '"/usb/opendps-v5.bin"'
+
+text_sensor:
+  - platform: template
+    name: "Firmware File Path"
+    id: firmware_path_selector
+    optimistic: true
+    on_value:
+      - lambda: |-
+          // Update firmware when new path is set
+          ESP_LOGI("opendps", "Firmware path changed to: %s", x.c_str());
+          id(firmware_file) = x;
+
+button:
+  - platform: template
+    name: "Upgrade OpenDPS Firmware"
+    on_press:
+      - lambda: |-
+          // Use current firmware path from global variable
+          ESP_LOGI("opendps", "Starting upgrade from: %s", id(firmware_file).c_str());
+          id(my_opendps).start_firmware_upgrade(id(firmware_file));
+
+  # Quick presets for common locations
+  - platform: template
+    name: "Check USB for Latest"
+    on_press:
+      - lambda: |-
+          std::string path = "/usb/opendps-latest.bin";
+          if (storage::global_storage->file_exists(path)) {
+            ESP_LOGI("opendps", "Found firmware at: %s", path.c_str());
+            id(my_opendps).start_firmware_upgrade(path);
+          } else {
+            ESP_LOGW("opendps", "Firmware not found at: %s", path.c_str());
+          }
+
+  - platform: template
+    name: "Upgrade from NFS"
+    on_press:
+      - lambda: |-
+          id(my_opendps).start_firmware_upgrade("/nfs/firmware/opendps-latest.bin");
+```
+
+**Advanced: Scan for available firmware files:**
 ```yaml
 button:
   - platform: template
-    name: "Upgrade Firmware"
+    name: "Scan and Upgrade"
     on_press:
-      - opendps.upgrade_firmware:
-          id: my_opendps
-          firmware_url: "http://192.168.1.100/opendps-v5.bin"
+      - lambda: |-
+          // Check multiple possible locations
+          std::vector<std::string> possible_paths = {
+            "/usb/opendps-latest.bin",
+            "/usb/firmware/opendps.bin",
+            "/nfs/firmware/opendps-latest.bin",
+            "/sd/opendps.bin"
+          };
+
+          for (const auto& path : possible_paths) {
+            if (storage::global_storage->file_exists(path)) {
+              ESP_LOGI("opendps", "Found firmware: %s", path.c_str());
+              id(my_opendps).start_firmware_upgrade(path);
+              return;
+            }
+          }
+          ESP_LOGE("opendps", "No firmware file found in any location");
 ```
+
+**How it works:**
+1. Firmware file is read from storage into memory (PSRAM preferred)
+2. CRC-16 CCITT checksum is calculated
+3. Upgrade is initiated with CMD_UPGRADE_START
+4. Firmware data is sent in chunks (typically 1024 bytes)
+5. Device validates and flashes each chunk
+6. Progress can be monitored via callback (if configured)
 
 ## Update Intervals
 

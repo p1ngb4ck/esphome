@@ -147,11 +147,11 @@ template<typename... Ts> class UpgradeFirmwareAction : public Action<Ts...> {
  public:
   explicit UpgradeFirmwareAction(OpenDPS *parent) : parent_(parent) {}
 
-  TEMPLATABLE_VALUE(std::string, firmware_url)
+  TEMPLATABLE_VALUE(std::string, firmware_path)
 
   void play(Ts... x) override {
-    std::string url = this->firmware_url_.value(x...);
-    this->parent_->start_firmware_upgrade(url);
+    std::string path = this->firmware_path_.value(x...);
+    this->parent_->start_firmware_upgrade(path);
   }
 
  protected:

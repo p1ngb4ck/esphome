@@ -20,7 +20,7 @@ CONF_KEY = "key"
 CONF_VALUE = "value"
 CONF_LOCKED = "locked"
 CONF_BRIGHTNESS = "brightness"
-CONF_FIRMWARE_URL = "firmware_url"
+CONF_FIRMWARE_PATH = "firmware_path"
 
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
@@ -191,12 +191,12 @@ async def opendps_request_version_to_code(config, action_id, template_arg, args)
     "opendps.upgrade_firmware",
     UpgradeFirmwareAction,
     OPENDPS_ACTION_SCHEMA.extend(
-        {cv.Required(CONF_FIRMWARE_URL): cv.templatable(cv.string)}
+        {cv.Required(CONF_FIRMWARE_PATH): cv.templatable(cv.string)}
     ),
 )
 async def opendps_upgrade_firmware_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
-    template_ = await cg.templatable(config[CONF_FIRMWARE_URL], args, cg.std_string)
-    cg.add(var.set_firmware_url(template_))
+    template_ = await cg.templatable(config[CONF_FIRMWARE_PATH], args, cg.std_string)
+    cg.add(var.set_firmware_path(template_))
     return var

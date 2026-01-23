@@ -2,6 +2,10 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage.h"
+#endif
+
 namespace esphome {
 namespace opendps {
 
@@ -379,6 +383,62 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         ESP_LOGD(TAG, "Ping response received");
         break;
 
+      case CMD_UPGRADE_START: {
+        uint16_t device_chunk_size = this->unpack16_(payload, pos);
+        ESP_LOGI(TAG, "Upgrade start response - status: %d, chunk_size: %d", status, device_chunk_size);
+
+        if (status == UPGRADE_CONTINUE) {
+          ESP_LOGI(TAG, "Device accepted firmware upgrade");
+          if (this->upgrade_progress_callback_) {
+            this->upgrade_progress_callback_(0);
+          }
+          // TODO: Continue with firmware data transfer
+          // This would need to be implemented with a state machine
+          // to avoid blocking the main loop
+        } else {
+          ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
+        }
+        break;
+      }
+
+      case CMD_UPGRADE_DATA: {
+        ESP_LOGV(TAG, "Upgrade data response - status: %d", status);
+
+        if (status == UPGRADE_CONTINUE) {
+          // Continue sending next chunk
+          if (this->upgrade_progress_callback_) {
+            // Calculate progress percentage
+            // TODO: Track actual progress
+          }
+        } else if (status == UPGRADE_SUCCESS) {
+          ESP_LOGI(TAG, "Firmware upgrade completed successfully!");
+          if (this->upgrade_progress_callback_) {
+            this->upgrade_progress_callback_(100);
+          }
+        } else {
+          const char *error_msg = "Unknown error";
+          switch (status) {
+            case UPGRADE_CRC_ERROR:
+              error_msg = "CRC error";
+              break;
+            case UPGRADE_ERASE_ERROR:
+              error_msg = "Erase error";
+              break;
+            case UPGRADE_FLASH_ERROR:
+              error_msg = "Flash error";
+              break;
+            case UPGRADE_OVERFLOW_ERROR:
+              error_msg = "Overflow error";
+              break;
+            case UPGRADE_BOOTCOM_ERROR:
+              error_msg = "Bootloader communication error";
+              break;
+          }
+          ESP_LOGE(TAG, "Firmware upgrade failed: %s (status: %d)", error_msg, status);
+        }
+        break;
+      }
+
       default:
         ESP_LOGV(TAG, "Response to command 0x%02X (status: %d)", original_cmd, status);
         break;
@@ -455,17 +515,81 @@ void OpenDPS::lock(bool locked) {
   ESP_LOGI(TAG, "Device %s", locked ? "locked" : "unlocked");
 }
 
-void OpenDPS::start_firmware_upgrade(const std::string &firmware_url) {
-  ESP_LOGI(TAG, "Firmware upgrade not yet implemented");
-  ESP_LOGI(TAG, "Firmware URL: %s", firmware_url.c_str());
-  // TODO: Implement firmware download and upgrade
-  // 1. Download firmware from URL using HTTP client
-  // 2. Calculate CRC-16 XMODEM of firmware data
-  // 3. Send CMD_UPGRADE_START with chunk size and CRC
-  // 4. Wait for UPGRADE_CONTINUE response
-  // 5. Send firmware data in chunks using CMD_UPGRADE_DATA
-  // 6. Handle upgrade status responses
-  // 7. Report progress via callback
+void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
+#ifndef USE_STORAGE
+  ESP_LOGE(TAG, "Firmware upgrade requires storage component");
+  return;
+#else
+  ESP_LOGI(TAG, "Starting firmware upgrade from: %s", firmware_path.c_str());
+
+  // Check if storage is available
+  if (storage::global_storage == nullptr) {
+    ESP_LOGE(TAG, "Storage component not initialized");
+    return;
+  }
+
+  // Check if file exists
+  if (!storage::global_storage->file_exists(firmware_path)) {
+    ESP_LOGE(TAG, "Firmware file not found: %s", firmware_path.c_str());
+    return;
+  }
+
+  // Read firmware file into memory (PSRAM if available)
+  ESP_LOGI(TAG, "Reading firmware file into memory...");
+  std::string firmware_data = storage::global_storage->read_file(firmware_path);
+
+  if (firmware_data.empty()) {
+    ESP_LOGE(TAG, "Failed to read firmware file or file is empty");
+    return;
+  }
+
+  ESP_LOGI(TAG, "Firmware size: %d bytes", firmware_data.size());
+
+  // Validate firmware (check for magic byte at offset 0x06)
+  if (firmware_data.size() > 6) {
+    uint8_t magic = static_cast<uint8_t>(firmware_data[6]);
+    if (magic != 0x20) {
+      ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
+      ESP_LOGW(TAG, "Continuing anyway - use with caution!");
+    }
+  }
+
+  // Calculate CRC-16 CCITT (XMODEM) of entire firmware
+  ESP_LOGI(TAG, "Calculating CRC-16...");
+  uint16_t firmware_crc = 0;
+  for (char byte : firmware_data) {
+    firmware_crc = this->crc16_ccitt_(firmware_crc, static_cast<uint8_t>(byte));
+  }
+  ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+
+  // Send upgrade start command
+  uint16_t chunk_size = 1024;  // Default chunk size
+  ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", chunk_size, firmware_crc);
+  this->send_upgrade_start_(chunk_size, firmware_crc);
+
+  // Wait for response (this is blocking - might need to make async in the future)
+  // For now, we'll process the response in process_frame_ and continue there
+  // TODO: Make this fully async with state machine
+
+  ESP_LOGI(TAG, "Firmware upgrade initiated - check logs for progress");
+#endif
+}
+
+void OpenDPS::send_upgrade_start_(uint16_t chunk_size, uint16_t crc) {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_UPGRADE_START);
+  this->pack16_(payload, chunk_size);
+  this->pack16_(payload, crc);
+  this->send_frame_(payload);
+}
+
+void OpenDPS::send_upgrade_data_(const std::vector<uint8_t> &data) {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_UPGRADE_DATA);
+  for (uint8_t byte : data) {
+    this->pack8_(payload, byte);
+  }
+  this->send_frame_(payload);
 }
 
 }  // namespace opendps

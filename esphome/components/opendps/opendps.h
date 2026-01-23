@@ -43,6 +43,17 @@ static const uint8_t FRAME_EOF = 0x7F;
 static const uint8_t FRAME_DLE = 0x7D;
 static const uint8_t FRAME_XOR = 0x20;
 
+// Upgrade status codes
+enum UpgradeStatus : uint8_t {
+  UPGRADE_CONTINUE = 0,
+  UPGRADE_BOOTCOM_ERROR = 1,
+  UPGRADE_CRC_ERROR = 2,
+  UPGRADE_ERASE_ERROR = 3,
+  UPGRADE_FLASH_ERROR = 4,
+  UPGRADE_OVERFLOW_ERROR = 5,
+  UPGRADE_SUCCESS = 16
+};
+
 struct OpenDPSData {
   float v_in{0};
   float v_out{0};
@@ -92,8 +103,10 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void lock(bool locked);
 
   // Firmware upgrade
-  void start_firmware_upgrade(const std::string &firmware_url);
-  void upgrade_progress_callback(std::function<void(uint8_t)> callback) { this->upgrade_progress_callback_ = callback; }
+  void start_firmware_upgrade(const std::string &firmware_path);
+  void set_upgrade_progress_callback(std::function<void(uint8_t)> &&callback) {
+    this->upgrade_progress_callback_ = std::move(callback);
+  }
 
   // Get current data
   const OpenDPSData &get_data() const { return this->data_; }
@@ -124,6 +137,10 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Send commands
   void send_query_();
+
+  // Firmware upgrade helpers
+  void send_upgrade_start_(uint16_t chunk_size, uint16_t crc);
+  void send_upgrade_data_(const std::vector<uint8_t> &data);
   void send_command_(OpenDPSCommand cmd);
 
   // Sensors
@@ -145,6 +162,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
   bool receiving_frame_{false};
   uint32_t frame_start_time_{0};
   static const uint32_t FRAME_TIMEOUT_MS = 500;
+
+  // Firmware upgrade
+  std::function<void(uint8_t)> upgrade_progress_callback_{nullptr};
 };
 
 }  // namespace opendps
