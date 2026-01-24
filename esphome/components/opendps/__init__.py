@@ -21,6 +21,7 @@ CONF_VALUE = "value"
 CONF_LOCKED = "locked"
 CONF_BRIGHTNESS = "brightness"
 CONF_FIRMWARE_PATH = "firmware_path"
+CONF_DEFAULT_BRIGHTNESS = "default_brightness"
 
 CONF_ON_CONNECT = "on_connect"
 
@@ -49,6 +50,9 @@ CONFIG_SCHEMA = (
             cv.Optional(
                 CONF_UPDATE_INTERVAL, default="1s"
             ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_DEFAULT_BRIGHTNESS, default=50): cv.int_range(
+                min=0, max=100
+            ),
             cv.Optional(CONF_ON_CONNECT): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -69,6 +73,7 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
+    cg.add(var.set_default_brightness(config[CONF_DEFAULT_BRIGHTNESS]))
 
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

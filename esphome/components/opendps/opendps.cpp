@@ -13,6 +13,16 @@ static const char *const TAG = "opendps";
 
 void OpenDPS::setup() {
   ESP_LOGCONFIG(TAG, "Setting up OpenDPS...");
+
+  // Load brightness from preferences, use default if not set
+  this->brightness_pref_ = global_preferences->make_preference<uint8_t>(fnv1_hash("opendps_brightness"));
+  if (!this->brightness_pref_.load(&this->brightness_)) {
+    this->brightness_ = this->default_brightness_;
+    ESP_LOGD(TAG, "No stored brightness, using default: %d", this->brightness_);
+  } else {
+    ESP_LOGD(TAG, "Loaded brightness from preferences: %d", this->brightness_);
+  }
+
   // Send initial ping to check connection
   this->send_ping();
 }
@@ -511,6 +521,11 @@ void OpenDPS::set_brightness(uint8_t brightness) {
   this->pack8_(payload, CMD_SET_BRIGHTNESS);
   this->pack8_(payload, brightness);
   this->send_frame_(payload);
+
+  // Store brightness in preferences
+  this->brightness_ = brightness;
+  this->brightness_pref_.save(&this->brightness_);
+
   ESP_LOGI(TAG, "Set brightness: %d", brightness);
 }
 

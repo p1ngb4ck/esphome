@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -82,6 +83,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Configuration
   void set_update_interval(uint32_t interval) { this->update_interval_ = interval; }
+  void set_default_brightness(uint8_t brightness) { this->default_brightness_ = brightness; }
 
   // Sensor registration
   void set_voltage_in_sensor(sensor::Sensor *sensor) { this->voltage_in_sensor_ = sensor; }
@@ -117,6 +119,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Get current settings (from params, in user units)
   float get_voltage_setting() const;
   float get_current_setting() const;
+  uint8_t get_brightness_setting() const { return this->brightness_; }
 
   // Connection trigger
   void add_on_connect_callback(std::function<void()> callback) { this->on_connect_callback_.add(std::move(callback)); }
@@ -166,6 +169,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
   OpenDPSData data_;
   uint32_t update_interval_{1000};  // Default 1Hz, can be set much faster
   uint32_t last_query_{0};
+
+  // Brightness (stored in preferences since device doesn't report it)
+  uint8_t brightness_{50};
+  uint8_t default_brightness_{50};
+  ESPPreferenceObject brightness_pref_;
 
   // Frame reception state
   std::vector<uint8_t> rx_buffer_;
