@@ -4,7 +4,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import uart
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["uart"]
@@ -22,8 +22,13 @@ CONF_LOCKED = "locked"
 CONF_BRIGHTNESS = "brightness"
 CONF_FIRMWARE_PATH = "firmware_path"
 
+CONF_ON_CONNECT = "on_connect"
+
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
+OpenDPSConnectTrigger = opendps_ns.class_(
+    "OpenDPSConnectTrigger", automation.Trigger.template()
+)
 
 # Automation actions
 EnableOutputAction = opendps_ns.class_("EnableOutputAction", automation.Action)
@@ -44,6 +49,13 @@ CONFIG_SCHEMA = (
             cv.Optional(
                 CONF_UPDATE_INTERVAL, default="1s"
             ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ON_CONNECT): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        OpenDPSConnectTrigger
+                    ),
+                }
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -57,6 +69,10 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
+
+    for conf in config.get(CONF_ON_CONNECT, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
 
 
 # Automation Actions

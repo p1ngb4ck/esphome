@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/automation.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -113,6 +114,13 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Get current data
   const OpenDPSData &get_data() const { return this->data_; }
 
+  // Get current settings (from params, in user units)
+  float get_voltage_setting() const;
+  float get_current_setting() const;
+
+  // Connection trigger
+  void add_on_connect_callback(std::function<void()> callback) { this->on_connect_callback_.add(std::move(callback)); }
+
  protected:
   // Frame handling
   void send_frame_(const std::vector<uint8_t> &payload);
@@ -167,6 +175,18 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Firmware upgrade
   std::function<void(uint8_t)> upgrade_progress_callback_{nullptr};
+
+  // Connection state
+  bool connected_{false};
+  CallbackManager<void()> on_connect_callback_;
+};
+
+// Trigger for on_connect
+class OpenDPSConnectTrigger : public Trigger<> {
+ public:
+  explicit OpenDPSConnectTrigger(OpenDPS *parent) {
+    parent->add_on_connect_callback([this]() { this->trigger(); });
+  }
 };
 
 }  // namespace opendps

@@ -369,6 +369,13 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
 
         ESP_LOGD(TAG, "Query: Vin=%.3fV Vout=%.3fV Iout=%.3fA Out=%s", this->data_.v_in, this->data_.v_out,
                  this->data_.i_out, this->data_.output_enabled ? "ON" : "OFF");
+
+        // Fire on_connect trigger on first successful query
+        if (!this->connected_) {
+          this->connected_ = true;
+          ESP_LOGI(TAG, "Connected to OpenDPS device");
+          this->on_connect_callback_.call();
+        }
         break;
       }
 
@@ -513,6 +520,22 @@ void OpenDPS::lock(bool locked) {
   this->pack8_(payload, locked ? 1 : 0);
   this->send_frame_(payload);
   ESP_LOGI(TAG, "Device %s", locked ? "locked" : "unlocked");
+}
+
+float OpenDPS::get_voltage_setting() const {
+  auto it = this->data_.params.find("voltage");
+  if (it != this->data_.params.end()) {
+    return std::stof(it->second) / 1000.0f;  // Convert mV to V
+  }
+  return 0.0f;
+}
+
+float OpenDPS::get_current_setting() const {
+  auto it = this->data_.params.find("current");
+  if (it != this->data_.params.end()) {
+    return std::stof(it->second) / 1000.0f;  // Convert mA to A
+  }
+  return 0.0f;
 }
 
 void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
