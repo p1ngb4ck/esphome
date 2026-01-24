@@ -8,7 +8,7 @@ from esphome.const import CONF_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["sensor", "binary_sensor"]
+AUTO_LOAD = ["sensor", "binary_sensor", "switch"]
 
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_OPENDPS_ID = "opendps_id"
