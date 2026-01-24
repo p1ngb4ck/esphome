@@ -25,6 +25,10 @@ CONF_DEFAULT_BRIGHTNESS = "default_brightness"
 
 CONF_ON_CONNECT = "on_connect"
 
+# TCP Bridge for dpsctl.py access
+CONF_TCP_BRIDGE = "tcp_bridge"
+CONF_TCP_BRIDGE_PORT = "port"
+
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
 OpenDPSConnectTrigger = opendps_ns.class_(
@@ -43,6 +47,12 @@ PingAction = opendps_ns.class_("PingAction", automation.Action)
 RequestVersionAction = opendps_ns.class_("RequestVersionAction", automation.Action)
 UpgradeFirmwareAction = opendps_ns.class_("UpgradeFirmwareAction", automation.Action)
 
+TCP_BRIDGE_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_TCP_BRIDGE_PORT, default=5005): cv.port,
+    }
+)
+
 CONFIG_SCHEMA = (
     cv.Schema(
         {
@@ -60,6 +70,9 @@ CONFIG_SCHEMA = (
                     ),
                 }
             ),
+            # TCP bridge for dpsctl.py access - allows external tools to communicate
+            # directly with OpenDPS via TCP->UART bridge (default port 5005)
+            cv.Optional(CONF_TCP_BRIDGE): TCP_BRIDGE_SCHEMA,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -74,6 +87,12 @@ async def to_code(config):
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
     cg.add(var.set_default_brightness(config[CONF_DEFAULT_BRIGHTNESS]))
+
+    # TCP bridge configuration for dpsctl.py access
+    if CONF_TCP_BRIDGE in config:
+        tcp_bridge_config = config[CONF_TCP_BRIDGE]
+        cg.add(var.set_tcp_bridge_enabled(True))
+        cg.add(var.set_tcp_bridge_port(tcp_bridge_config[CONF_TCP_BRIDGE_PORT]))
 
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

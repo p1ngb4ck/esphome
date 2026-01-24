@@ -28,11 +28,31 @@ void OpenDPS::setup() {
     ESP_LOGD(TAG, "Loaded brightness from preferences: %d", this->brightness_);
   }
 
-  // Send initial ping to check connection
-  this->send_ping();
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  // Setup TCP bridge for dpsctl.py access
+  this->setup_tcp_bridge_();
+#endif
+
+  // Send initial ping to check connection (skip if TCP bridge mode)
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  if (!this->tcp_bridge_enabled_) {
+#endif
+    this->send_ping();
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  }
+#endif
 }
 
 void OpenDPS::loop() {
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  // If TCP bridge is enabled and has a client connected, use bridge mode
+  // which passes raw data between TCP and UART without any protocol processing
+  if (this->tcp_bridge_enabled_) {
+    this->loop_tcp_bridge_();
+    return;  // Skip normal processing when in bridge mode
+  }
+#endif
+
   // Read incoming frames
   while (this->available()) {
     if (this->read_frame_()) {
@@ -73,6 +93,12 @@ void OpenDPS::loop() {
 void OpenDPS::dump_config() {
   ESP_LOGCONFIG(TAG, "OpenDPS:");
   ESP_LOGCONFIG(TAG, "  Update Interval: %dms", this->update_interval_);
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  if (this->tcp_bridge_enabled_) {
+    ESP_LOGCONFIG(TAG, "  TCP Bridge: Enabled on port %d", this->tcp_bridge_port_);
+    ESP_LOGCONFIG(TAG, "    Use: dpsctl.py -d tcp:<esp-ip>");
+  }
+#endif
   LOG_SENSOR("  ", "Voltage In", this->voltage_in_sensor_);
   LOG_SENSOR("  ", "Voltage Out", this->voltage_out_sensor_);
   LOG_SENSOR("  ", "Current Out", this->current_out_sensor_);
@@ -869,6 +895,119 @@ void OpenDPS::send_next_upgrade_chunk_() {
     this->upgrade_progress_callback_(progress);
   }
 }
+
+// ============================================================================
+// TCP Bridge for dpsctl.py access
+// ============================================================================
+
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+
+void OpenDPS::setup_tcp_bridge_() {
+  if (!this->tcp_bridge_enabled_) {
+    return;
+  }
+
+  ESP_LOGI(TAG, "Setting up TCP bridge on port %d for dpsctl.py access", this->tcp_bridge_port_);
+
+  this->tcp_server_socket_ = socket::socket_ip(SOCK_STREAM, 0);
+  if (this->tcp_server_socket_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create TCP server socket");
+    return;
+  }
+
+  int enable = 1;
+  int err = this->tcp_server_socket_->setsockopt(SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
+  if (err != 0) {
+    ESP_LOGW(TAG, "TCP bridge: setsockopt SO_REUSEADDR failed: %d", err);
+  }
+
+  err = this->tcp_server_socket_->setblocking(false);
+  if (err != 0) {
+    ESP_LOGE(TAG, "TCP bridge: setblocking failed: %d", err);
+    this->tcp_server_socket_.reset();
+    return;
+  }
+
+  struct sockaddr_storage server_addr;
+  socklen_t addr_len =
+      socket::set_sockaddr_any((struct sockaddr *) &server_addr, sizeof(server_addr), this->tcp_bridge_port_);
+  if (addr_len == 0) {
+    ESP_LOGE(TAG, "TCP bridge: set_sockaddr_any failed");
+    this->tcp_server_socket_.reset();
+    return;
+  }
+
+  err = this->tcp_server_socket_->bind((struct sockaddr *) &server_addr, addr_len);
+  if (err != 0) {
+    ESP_LOGE(TAG, "TCP bridge: bind failed: %d", errno);
+    this->tcp_server_socket_.reset();
+    return;
+  }
+
+  err = this->tcp_server_socket_->listen(1);
+  if (err != 0) {
+    ESP_LOGE(TAG, "TCP bridge: listen failed: %d", errno);
+    this->tcp_server_socket_.reset();
+    return;
+  }
+
+  ESP_LOGI(TAG, "TCP bridge listening on port %d - use dpsctl.py -d tcp:<esp-ip>", this->tcp_bridge_port_);
+}
+
+void OpenDPS::loop_tcp_bridge_() {
+  if (!this->tcp_bridge_enabled_ || this->tcp_server_socket_ == nullptr) {
+    return;
+  }
+
+  // Accept new connections
+  if (this->tcp_client_socket_ == nullptr) {
+    struct sockaddr_storage client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    auto client = this->tcp_server_socket_->accept((struct sockaddr *) &client_addr, &addr_len);
+    if (client != nullptr) {
+      ESP_LOGI(TAG, "TCP bridge: client connected");
+      client->setblocking(false);
+      this->tcp_client_socket_ = std::move(client);
+    }
+  }
+
+  // Handle connected client - bridge TCP <-> UART
+  if (this->tcp_client_socket_ != nullptr) {
+    // Read from TCP, write to UART
+    uint8_t tcp_buf[256];
+    ssize_t tcp_len = this->tcp_client_socket_->read(tcp_buf, sizeof(tcp_buf));
+    if (tcp_len > 0) {
+      ESP_LOGV(TAG, "TCP->UART: %d bytes", tcp_len);
+      this->write_array(tcp_buf, tcp_len);
+      this->flush();
+    } else if (tcp_len == 0 || (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+      // Connection closed or error
+      ESP_LOGI(TAG, "TCP bridge: client disconnected");
+      this->tcp_client_socket_.reset();
+    }
+
+    // Read from UART, write to TCP
+    while (this->available() && this->tcp_client_socket_ != nullptr) {
+      uint8_t uart_buf[256];
+      size_t uart_len = 0;
+      while (this->available() && uart_len < sizeof(uart_buf)) {
+        uint8_t byte;
+        this->read_byte(&byte);
+        uart_buf[uart_len++] = byte;
+      }
+      if (uart_len > 0) {
+        ESP_LOGV(TAG, "UART->TCP: %d bytes", uart_len);
+        ssize_t written = this->tcp_client_socket_->write(uart_buf, uart_len);
+        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+          ESP_LOGI(TAG, "TCP bridge: write error, disconnecting");
+          this->tcp_client_socket_.reset();
+        }
+      }
+    }
+  }
+}
+
+#endif  // USE_SOCKET_IMPL_LWIP_TCP || USE_SOCKET_IMPL_BSD_SOCKETS
 
 }  // namespace opendps
 }  // namespace esphome

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/preferences.h"
@@ -9,10 +10,18 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/switch/switch.h"
 
+#ifdef USE_SOCKET_IMPL_LWIP_TCP
+#include "esphome/components/socket/socket.h"
+#endif
+#ifdef USE_SOCKET_IMPL_BSD_SOCKETS
+#include "esphome/components/socket/socket.h"
+#endif
+
 #include <vector>
 #include <queue>
 #include <map>
 #include <functional>
+#include <memory>
 
 namespace esphome {
 namespace opendps {
@@ -101,6 +110,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Configuration
   void set_update_interval(uint32_t interval) { this->update_interval_ = interval; }
   void set_default_brightness(uint8_t brightness) { this->default_brightness_ = brightness; }
+  void set_tcp_bridge_enabled(bool enabled) { this->tcp_bridge_enabled_ = enabled; }
+  void set_tcp_bridge_port(uint16_t port) { this->tcp_bridge_port_ = port; }
 
   // Sensor registration
   void set_voltage_in_sensor(sensor::Sensor *sensor) { this->voltage_in_sensor_ = sensor; }
@@ -217,6 +228,17 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();
+
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  // TCP bridge for dpsctl.py access (port 5005 by default)
+  void setup_tcp_bridge_();
+  void loop_tcp_bridge_();
+
+  bool tcp_bridge_enabled_{false};
+  uint16_t tcp_bridge_port_{5005};
+  std::unique_ptr<socket::Socket> tcp_server_socket_;
+  std::unique_ptr<socket::Socket> tcp_client_socket_;
+#endif
 };
 
 // Trigger for on_connect
