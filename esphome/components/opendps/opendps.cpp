@@ -384,6 +384,8 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         if (!this->connected_) {
           this->connected_ = true;
           ESP_LOGI(TAG, "Connected to OpenDPS device");
+          // Send WiFi connected status to update display icon
+          this->send_wifi_status(WIFI_CONNECTED);
           this->on_connect_callback_.call();
         }
         break;
@@ -535,6 +537,14 @@ void OpenDPS::lock(bool locked) {
   this->pack8_(payload, locked ? 1 : 0);
   this->send_frame_(payload);
   ESP_LOGI(TAG, "Device %s", locked ? "locked" : "unlocked");
+}
+
+void OpenDPS::send_wifi_status(WiFiStatus status) {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_WIFI_STATUS);
+  this->pack8_(payload, static_cast<uint8_t>(status));
+  this->send_frame_(payload);
+  ESP_LOGD(TAG, "Sent WiFi status: %d", status);
 }
 
 float OpenDPS::get_voltage_setting() const {
