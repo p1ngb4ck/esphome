@@ -6,6 +6,11 @@
 #include "esphome/components/storage/storage.h"
 #endif
 
+#ifdef USE_ESP32
+#include <esp_heap_caps.h>
+#include <esp_psram.h>
+#endif
+
 namespace esphome {
 namespace opendps {
 
@@ -604,9 +609,11 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
   size_t total_psram = 0;
 
 #ifdef USE_ESP32
-  total_psram = ESP.getPsramSize();
-  free_psram = ESP.getFreePsram();
-  has_psram = total_psram > 0;
+  has_psram = esp_psram_is_initialized();
+  if (has_psram) {
+    total_psram = esp_psram_get_size();
+    free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  }
 #endif
 
   ESP_LOGI(TAG, "PSRAM: %s (total: %u bytes, free: %u bytes)", has_psram ? "available" : "not available", total_psram,
