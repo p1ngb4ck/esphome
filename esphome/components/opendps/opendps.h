@@ -58,8 +58,22 @@ enum UpgradeStatus : uint8_t {
   UPGRADE_SUCCESS = 16
 };
 
-// WiFi status codes (sent to OpenDPS to update display icon)
-enum WiFiStatus : uint8_t { WIFI_OFF = 0, WIFI_CONNECTING = 1, WIFI_CONNECTED = 2, WIFI_ERROR = 3, WIFI_UPGRADING = 4 };
+// Connection status codes (sent to OpenDPS to update display icon)
+enum ConnectionStatus : uint8_t {
+  // WiFi status (original OpenDPS values)
+  CONN_WIFI_OFF = 0,
+  CONN_WIFI_CONNECTING = 1,
+  CONN_WIFI_CONNECTED = 2,
+  CONN_WIFI_ERROR = 3,
+  CONN_WIFI_UPGRADING = 4,
+  // Ethernet status (extended for ESPHome)
+  CONN_ETHERNET_OFF = 10,
+  CONN_ETHERNET_CONNECTING = 11,
+  CONN_ETHERNET_CONNECTED = 12,
+  CONN_ETHERNET_ERROR = 13,
+  // DPS firmware upgrade (shows arrow icon)
+  CONN_DPS_UPGRADING = 20
+};
 
 struct OpenDPSData {
   float v_in{0};
@@ -109,7 +123,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void send_ping();
   void request_version();
   void lock(bool locked);
-  void send_wifi_status(WiFiStatus status);
+  void send_connection_status(ConnectionStatus status);
 
   // Firmware upgrade
   void start_firmware_upgrade(const std::string &firmware_path);

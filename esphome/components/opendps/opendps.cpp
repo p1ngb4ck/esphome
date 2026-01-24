@@ -384,8 +384,12 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         if (!this->connected_) {
           this->connected_ = true;
           ESP_LOGI(TAG, "Connected to OpenDPS device");
-          // Send WiFi connected status to update display icon
-          this->send_wifi_status(WIFI_CONNECTED);
+          // Send connection status to update display icon (ethernet or wifi)
+#ifdef USE_ETHERNET
+          this->send_connection_status(CONN_ETHERNET_CONNECTED);
+#else
+          this->send_connection_status(CONN_WIFI_CONNECTED);
+#endif
           this->on_connect_callback_.call();
         }
         break;
@@ -434,6 +438,12 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->upgrade_progress_callback_) {
             this->upgrade_progress_callback_(100);
           }
+          // Restore connection icon after successful upgrade
+#ifdef USE_ETHERNET
+          this->send_connection_status(CONN_ETHERNET_CONNECTED);
+#else
+          this->send_connection_status(CONN_WIFI_CONNECTED);
+#endif
         } else {
           const char *error_msg = "Unknown error";
           switch (status) {
@@ -454,6 +464,12 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
               break;
           }
           ESP_LOGE(TAG, "Firmware upgrade failed: %s (status: %d)", error_msg, status);
+          // Restore connection icon after failed upgrade
+#ifdef USE_ETHERNET
+          this->send_connection_status(CONN_ETHERNET_CONNECTED);
+#else
+          this->send_connection_status(CONN_WIFI_CONNECTED);
+#endif
         }
         break;
       }
@@ -539,12 +555,12 @@ void OpenDPS::lock(bool locked) {
   ESP_LOGI(TAG, "Device %s", locked ? "locked" : "unlocked");
 }
 
-void OpenDPS::send_wifi_status(WiFiStatus status) {
+void OpenDPS::send_connection_status(ConnectionStatus status) {
   std::vector<uint8_t> payload;
   this->pack8_(payload, CMD_WIFI_STATUS);
   this->pack8_(payload, static_cast<uint8_t>(status));
   this->send_frame_(payload);
-  ESP_LOGD(TAG, "Sent WiFi status: %d", status);
+  ESP_LOGD(TAG, "Sent connection status: %d", status);
 }
 
 float OpenDPS::get_voltage_setting() const {
@@ -569,6 +585,9 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
   return;
 #else
   ESP_LOGI(TAG, "Starting firmware upgrade from: %s", firmware_path.c_str());
+
+  // Show upgrade icon on DPS display
+  this->send_connection_status(CONN_DPS_UPGRADING);
 
   // Check if storage is available
   if (storage::global_storage == nullptr) {
