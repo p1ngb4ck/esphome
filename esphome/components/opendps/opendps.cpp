@@ -380,7 +380,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
       }
 
       case CMD_PING:
-        ESP_LOGD(TAG, "Ping response received");
+        ESP_LOGI(TAG, "Ping response received");
         break;
 
       case CMD_UPGRADE_START: {
@@ -490,13 +490,13 @@ void OpenDPS::set_parameter(const std::string &key, const std::string &value) {
 void OpenDPS::set_voltage(float voltage) {
   // Convert voltage to millivolts
   uint16_t voltage_mv = static_cast<uint16_t>(voltage * 1000.0f);
-  this->set_parameter("vset", std::to_string(voltage_mv));
+  this->set_parameter("voltage", std::to_string(voltage_mv));
 }
 
 void OpenDPS::set_current(float current) {
   // Convert current to milliamps
   uint16_t current_ma = static_cast<uint16_t>(current * 1000.0f);
-  this->set_parameter("iset", std::to_string(current_ma));
+  this->set_parameter("current", std::to_string(current_ma));
 }
 
 void OpenDPS::set_brightness(uint8_t brightness) {
