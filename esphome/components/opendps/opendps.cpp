@@ -669,13 +669,16 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
       return;
     }
 
-    // Validate firmware (check for magic byte at offset 0x06)
-    if (firmware_size > 6) {
-      uint8_t magic = firmware_data[6];
-      if (magic != 0x20) {
-        ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
-        ESP_LOGW(TAG, "Continuing anyway - use with caution!");
-      }
+    // Validate firmware - check for reasonable size (OpenDPS firmware is typically 40-80KB)
+    if (firmware_size < 1024) {
+      ESP_LOGE(TAG, "Firmware file too small (%u bytes) - likely corrupt or empty", firmware_size);
+      return;
+    }
+    // Log first bytes for debugging
+    if (firmware_size >= 8) {
+      ESP_LOGD(TAG, "Firmware header: %02X %02X %02X %02X %02X %02X %02X %02X", firmware_data[0], firmware_data[1],
+               firmware_data[2], firmware_data[3], firmware_data[4], firmware_data[5], firmware_data[6],
+               firmware_data[7]);
     }
 
     // Store firmware data for chunked transfer (move to avoid copy)
@@ -710,13 +713,18 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     size_t firmware_size = firmware_data.size();
     ESP_LOGI(TAG, "Firmware size: %u bytes", firmware_size);
 
-    // Validate firmware (check for magic byte at offset 0x06)
-    if (firmware_size > 6) {
-      uint8_t magic = static_cast<uint8_t>(firmware_data[6]);
-      if (magic != 0x20) {
-        ESP_LOGW(TAG, "Firmware magic byte mismatch (expected 0x20, got 0x%02X)", magic);
-        ESP_LOGW(TAG, "Continuing anyway - use with caution!");
-      }
+    // Validate firmware - check for reasonable size (OpenDPS firmware is typically 40-80KB)
+    if (firmware_size < 1024) {
+      ESP_LOGE(TAG, "Firmware file too small (%u bytes) - likely corrupt or empty", firmware_size);
+      return;
+    }
+    // Log first bytes for debugging
+    if (firmware_size >= 8) {
+      ESP_LOGD(TAG, "Firmware header: %02X %02X %02X %02X %02X %02X %02X %02X", static_cast<uint8_t>(firmware_data[0]),
+               static_cast<uint8_t>(firmware_data[1]), static_cast<uint8_t>(firmware_data[2]),
+               static_cast<uint8_t>(firmware_data[3]), static_cast<uint8_t>(firmware_data[4]),
+               static_cast<uint8_t>(firmware_data[5]), static_cast<uint8_t>(firmware_data[6]),
+               static_cast<uint8_t>(firmware_data[7]));
     }
 
     // Store firmware data for chunked transfer
