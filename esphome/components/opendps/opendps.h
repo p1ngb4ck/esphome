@@ -201,10 +201,17 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Firmware upgrade
   std::function<void(uint8_t)> upgrade_progress_callback_{nullptr};
+  bool upgrade_in_progress_{false};
+  std::vector<uint8_t> upgrade_firmware_data_;
+  size_t upgrade_offset_{0};
+  uint16_t upgrade_chunk_size_{1024};
 
   // Connection state
   bool connected_{false};
   CallbackManager<void()> on_connect_callback_;
+
+  // Firmware upgrade helpers
+  void send_next_upgrade_chunk_();
 };
 
 // Trigger for on_connect
