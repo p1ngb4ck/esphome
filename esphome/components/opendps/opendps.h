@@ -205,6 +205,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
   std::vector<uint8_t> upgrade_firmware_data_;
   size_t upgrade_offset_{0};
   uint16_t upgrade_chunk_size_{1024};
+  uint32_t upgrade_last_chunk_time_{0};
+  uint8_t upgrade_retry_count_{0};
+  uint16_t upgrade_crc_{0};
+  static const uint32_t UPGRADE_CHUNK_TIMEOUT_MS = 3000;
+  static const uint8_t UPGRADE_MAX_RETRIES = 3;
 
   // Connection state
   bool connected_{false};

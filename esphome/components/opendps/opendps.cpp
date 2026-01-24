@@ -40,9 +40,31 @@ void OpenDPS::loop() {
     }
   }
 
-  // Send periodic query based on update interval
   uint32_t now = millis();
-  if (now - this->last_query_ >= this->update_interval_) {
+
+  // Handle upgrade timeout and retry
+  if (this->upgrade_in_progress_ && this->upgrade_last_chunk_time_ > 0) {
+    if (now - this->upgrade_last_chunk_time_ >= UPGRADE_CHUNK_TIMEOUT_MS) {
+      if (this->upgrade_retry_count_ < UPGRADE_MAX_RETRIES) {
+        this->upgrade_retry_count_++;
+        ESP_LOGW(TAG, "Upgrade chunk timeout, retry %d/%d - resending start command", this->upgrade_retry_count_,
+                 UPGRADE_MAX_RETRIES);
+        // Reset offset and resend start command to re-sync with bootloader
+        this->upgrade_offset_ = 0;
+        this->upgrade_last_chunk_time_ = now;
+        this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
+      } else {
+        ESP_LOGE(TAG, "Upgrade failed after %d retries", UPGRADE_MAX_RETRIES);
+        this->upgrade_in_progress_ = false;
+        this->upgrade_firmware_data_.clear();
+        this->upgrade_last_chunk_time_ = 0;
+        this->upgrade_retry_count_ = 0;
+      }
+    }
+  }
+
+  // Send periodic query based on update interval (but not during upgrade)
+  if (!this->upgrade_in_progress_ && now - this->last_query_ >= this->update_interval_) {
     this->send_query_();
     this->last_query_ = now;
   }
@@ -204,11 +226,21 @@ void OpenDPS::send_frame_(const std::vector<uint8_t> &payload) {
   // Escape frame
   std::vector<uint8_t> frame = this->escape_frame_(payload, crc);
 
+  // Log frame details (at DEBUG level for upgrade frames which can be large)
+  if (payload.size() > 100) {
+    ESP_LOGD(TAG, "TX Frame: payload_len=%u, crc=0x%04X, frame_len=%u", payload.size(), crc, frame.size());
+    // Log first few bytes for debugging
+    if (frame.size() >= 10) {
+      ESP_LOGD(TAG, "TX Frame start: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", frame[0], frame[1], frame[2],
+               frame[3], frame[4], frame[5], frame[6], frame[7], frame[8], frame[9]);
+    }
+  } else {
+    ESP_LOGV(TAG, "TX Frame (%u bytes): %s", frame.size(), format_hex_pretty(frame).c_str());
+  }
+
   // Send frame
   this->write_array(frame.data(), frame.size());
   this->flush();
-
-  ESP_LOGV(TAG, "TX Frame (%d bytes): %s", frame.size(), format_hex_pretty(frame).c_str());
 }
 
 // ============================================================================
@@ -413,28 +445,44 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
 
       case CMD_UPGRADE_START: {
         uint16_t device_chunk_size = this->unpack16_(payload, pos);
-        ESP_LOGI(TAG, "Upgrade start response - status: %d, chunk_size: %d", status, device_chunk_size);
+        // Bootloader also sends 'reason' byte, read it if available
+        uint8_t reason = (pos < payload.size()) ? this->unpack8_(payload, pos) : 0;
+        ESP_LOGI(TAG, "Upgrade start response - status: %d, chunk_size: %d, reason: %d", status, device_chunk_size,
+                 reason);
 
         if (status == UPGRADE_CONTINUE) {
           ESP_LOGI(TAG, "Device accepted firmware upgrade, starting data transfer");
+          // Reset retry count on successful response
+          this->upgrade_retry_count_ = 0;
           // Use device's preferred chunk size if smaller than ours
           if (device_chunk_size > 0 && device_chunk_size < this->upgrade_chunk_size_) {
             this->upgrade_chunk_size_ = device_chunk_size;
+            ESP_LOGI(TAG, "Using device chunk size: %d", this->upgrade_chunk_size_);
           }
           if (this->upgrade_progress_callback_) {
             this->upgrade_progress_callback_(0);
           }
-          // Send first chunk
+          // Small delay to ensure bootloader is ready to receive
+          // The bootloader enters its receive loop after sending this response,
+          // but we need to ensure it's fully ready before we start sending data
+          delay(100);
+          // Update timeout tracker and send first chunk
+          this->upgrade_last_chunk_time_ = millis();
           this->send_next_upgrade_chunk_();
         } else {
           ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
+          this->upgrade_last_chunk_time_ = 0;
         }
         break;
       }
 
       case CMD_UPGRADE_DATA: {
+        // Reset timeout on any response
+        this->upgrade_last_chunk_time_ = millis();
+        this->upgrade_retry_count_ = 0;
+
         if (status == UPGRADE_CONTINUE) {
           // Send next chunk
           this->send_next_upgrade_chunk_();
@@ -442,6 +490,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           ESP_LOGI(TAG, "Firmware upgrade completed successfully!");
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
+          this->upgrade_last_chunk_time_ = 0;
           if (this->upgrade_progress_callback_) {
             this->upgrade_progress_callback_(100);
           }
@@ -473,6 +522,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           ESP_LOGE(TAG, "Firmware upgrade failed: %s (status: %d)", error_msg, status);
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
+          this->upgrade_last_chunk_time_ = 0;
           // Restore connection icon after failed upgrade
 #ifdef USE_ETHERNET
           this->send_connection_status(CONN_ETHERNET_CONNECTED);
@@ -686,18 +736,21 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     this->upgrade_offset_ = 0;
     this->upgrade_chunk_size_ = 1024;
     this->upgrade_in_progress_ = true;
+    this->upgrade_retry_count_ = 0;
 
     // Calculate CRC-16 CCITT (XMODEM) of entire firmware
     ESP_LOGI(TAG, "Calculating CRC-16...");
-    uint16_t firmware_crc = 0;
+    this->upgrade_crc_ = 0;
     for (uint8_t byte : this->upgrade_firmware_data_) {
-      firmware_crc = this->crc16_ccitt_(firmware_crc, byte);
+      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, byte);
     }
-    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
     // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_, firmware_crc);
-    this->send_upgrade_start_(this->upgrade_chunk_size_, firmware_crc);
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
+             this->upgrade_crc_);
+    this->upgrade_last_chunk_time_ = millis();
+    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   } else {
@@ -732,18 +785,21 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     this->upgrade_offset_ = 0;
     this->upgrade_chunk_size_ = 1024;
     this->upgrade_in_progress_ = true;
+    this->upgrade_retry_count_ = 0;
 
     // Calculate CRC-16 CCITT (XMODEM) of entire firmware
     ESP_LOGI(TAG, "Calculating CRC-16...");
-    uint16_t firmware_crc = 0;
+    this->upgrade_crc_ = 0;
     for (uint8_t byte : this->upgrade_firmware_data_) {
-      firmware_crc = this->crc16_ccitt_(firmware_crc, byte);
+      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, byte);
     }
-    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", firmware_crc);
+    ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
     // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_, firmware_crc);
-    this->send_upgrade_start_(this->upgrade_chunk_size_, firmware_crc);
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
+             this->upgrade_crc_);
+    this->upgrade_last_chunk_time_ = millis();
+    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   }
@@ -764,7 +820,10 @@ void OpenDPS::send_upgrade_data_(const std::vector<uint8_t> &data) {
   for (uint8_t byte : data) {
     this->pack8_(payload, byte);
   }
+  ESP_LOGD(TAG, "Sending upgrade data frame: cmd=0x%02X, data_len=%u, payload_len=%u", CMD_UPGRADE_DATA, data.size(),
+           payload.size());
   this->send_frame_(payload);
+  ESP_LOGD(TAG, "Upgrade data frame sent, waiting for response...");
 }
 
 void OpenDPS::send_next_upgrade_chunk_() {
