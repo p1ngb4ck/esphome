@@ -43,7 +43,6 @@ CONFIG_SCHEMA = cv.All(
             ): cv.positive_int,
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    cv.only_with_esp_idf,
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
 )
 

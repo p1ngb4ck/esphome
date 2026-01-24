@@ -105,7 +105,6 @@ CONFIG_SCHEMA = cv.All(
         }
     ),
     _validate_schema,
-    cv.only_with_esp_idf,
     only_on_variant(supported=[VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3]),
 )
 

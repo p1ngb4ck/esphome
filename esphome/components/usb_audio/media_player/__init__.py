@@ -162,7 +162,6 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ),
-    cv.only_with_esp_idf,
     _validate_distinct_pipeline_speakers,
 )
 
