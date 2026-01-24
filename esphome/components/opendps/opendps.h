@@ -229,13 +229,16 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();
 
+  // TCP bridge configuration (always present for Python codegen compatibility)
+  bool tcp_bridge_enabled_{false};
+  uint16_t tcp_bridge_port_{5005};
+
 #if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   // TCP bridge for dpsctl.py access (port 5005 by default)
   void setup_tcp_bridge_();
   void loop_tcp_bridge_();
+  bool tcp_bridge_initialized_{false};
 
-  bool tcp_bridge_enabled_{false};
-  uint16_t tcp_bridge_port_{5005};
   std::unique_ptr<socket::Socket> tcp_server_socket_;
   std::unique_ptr<socket::Socket> tcp_client_socket_;
 #endif

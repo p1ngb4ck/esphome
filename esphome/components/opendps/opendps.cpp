@@ -11,6 +11,10 @@
 #include <esp_psram.h>
 #endif
 
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+#include "esphome/components/network/util.h"
+#endif
+
 namespace esphome {
 namespace opendps {
 
@@ -28,26 +32,26 @@ void OpenDPS::setup() {
     ESP_LOGD(TAG, "Loaded brightness from preferences: %d", this->brightness_);
   }
 
-#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
-  // Setup TCP bridge for dpsctl.py access
-  this->setup_tcp_bridge_();
-#endif
+  // Note: TCP bridge setup is deferred to loop() to ensure network is ready
 
   // Send initial ping to check connection (skip if TCP bridge mode)
-#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   if (!this->tcp_bridge_enabled_) {
-#endif
     this->send_ping();
-#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   }
-#endif
 }
 
 void OpenDPS::loop() {
 #if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
-  // If TCP bridge is enabled and has a client connected, use bridge mode
-  // which passes raw data between TCP and UART without any protocol processing
+  // If TCP bridge is enabled, handle bridge mode
   if (this->tcp_bridge_enabled_) {
+    // Defer TCP bridge setup until network is ready
+    if (!this->tcp_bridge_initialized_) {
+      if (network::is_connected()) {
+        this->setup_tcp_bridge_();
+        this->tcp_bridge_initialized_ = true;
+      }
+      return;  // Wait for network before doing anything in bridge mode
+    }
     this->loop_tcp_bridge_();
     return;  // Skip normal processing when in bridge mode
   }
