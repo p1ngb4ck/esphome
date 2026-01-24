@@ -254,9 +254,14 @@ bool OpenDPS::read_frame_() {
     uint8_t byte;
     this->read_byte(&byte);
 
+    // Log raw bytes during upgrade for debugging
+    if (this->upgrade_in_progress_) {
+      ESP_LOGD(TAG, "RX byte: 0x%02X", byte);
+    }
+
     // Check for frame timeout
     if (this->receiving_frame_ && (now - this->frame_start_time_) > FRAME_TIMEOUT_MS) {
-      ESP_LOGW(TAG, "Frame timeout, resetting buffer");
+      ESP_LOGW(TAG, "Frame timeout, resetting buffer (had %u bytes)", this->rx_buffer_.size());
       this->rx_buffer_.clear();
       this->receiving_frame_ = false;
     }
@@ -462,10 +467,13 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->upgrade_progress_callback_) {
             this->upgrade_progress_callback_(0);
           }
-          // Small delay to ensure bootloader is ready to receive
+          // Longer delay to ensure bootloader is ready to receive
           // The bootloader enters its receive loop after sending this response,
-          // but we need to ensure it's fully ready before we start sending data
-          delay(100);
+          // but we need to ensure it's fully ready before we start sending data.
+          // At 9600 baud, the bootloader's response takes ~10ms to send.
+          // We add extra margin for flash operations and loop entry.
+          ESP_LOGI(TAG, "Waiting 500ms for bootloader to be ready...");
+          delay(500);
           // Update timeout tracker and send first chunk
           this->upgrade_last_chunk_time_ = millis();
           this->send_next_upgrade_chunk_();
@@ -820,10 +828,19 @@ void OpenDPS::send_upgrade_data_(const std::vector<uint8_t> &data) {
   for (uint8_t byte : data) {
     this->pack8_(payload, byte);
   }
-  ESP_LOGD(TAG, "Sending upgrade data frame: cmd=0x%02X, data_len=%u, payload_len=%u", CMD_UPGRADE_DATA, data.size(),
-           payload.size());
+
+  // Calculate what the frame will look like
+  uint16_t payload_crc = this->calculate_crc_(payload);
+  ESP_LOGI(TAG, "Sending upgrade data: cmd=0x%02X, data_len=%u, payload_crc=0x%04X", CMD_UPGRADE_DATA, data.size(),
+           payload_crc);
+
+  // Log first few data bytes for debugging
+  if (data.size() >= 8) {
+    ESP_LOGD(TAG, "Data start: %02X %02X %02X %02X %02X %02X %02X %02X", data[0], data[1], data[2], data[3], data[4],
+             data[5], data[6], data[7]);
+  }
+
   this->send_frame_(payload);
-  ESP_LOGD(TAG, "Upgrade data frame sent, waiting for response...");
 }
 
 void OpenDPS::send_next_upgrade_chunk_() {
