@@ -434,11 +434,11 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         }
 
         // Sync brightness from DPS query response (if reported)
-        // Skip sync for 2 seconds after setting brightness to allow DPS to update
+        // Skip sync briefly after setting brightness to allow DPS to update
         auto brightness_it = this->data_.params.find("brightness");
         if (brightness_it != this->data_.params.end()) {
           uint32_t time_since_set = millis() - this->brightness_set_time_;
-          if (time_since_set > 2000) {
+          if (time_since_set > 350) {
             uint8_t dps_brightness = static_cast<uint8_t>(std::atoi(brightness_it->second.c_str()));
             if (dps_brightness != this->brightness_) {
               ESP_LOGD(TAG, "Brightness synced from DPS: %d -> %d", this->brightness_, dps_brightness);
