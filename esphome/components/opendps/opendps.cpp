@@ -1,6 +1,7 @@
 #include "opendps.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include <cstdlib>
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
@@ -432,6 +433,16 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           this->data_.params[key] = value;
         }
 
+        // Sync brightness from DPS query response (if reported)
+        auto brightness_it = this->data_.params.find("brightness");
+        if (brightness_it != this->data_.params.end()) {
+          uint8_t dps_brightness = static_cast<uint8_t>(std::atoi(brightness_it->second.c_str()));
+          if (dps_brightness != this->brightness_) {
+            ESP_LOGD(TAG, "Brightness synced from DPS: %d -> %d", this->brightness_, dps_brightness);
+            this->brightness_ = dps_brightness;
+          }
+        }
+
         this->data_.last_update = millis();
 
         // Publish sensor values
@@ -465,6 +476,12 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
 #else
           this->send_connection_status(CONN_WIFI_CONNECTED);
 #endif
+          // Restore saved brightness to DPS on first connection
+          uint8_t saved_brightness = this->default_brightness_;
+          if (this->brightness_pref_.load(&saved_brightness)) {
+            ESP_LOGI(TAG, "Restoring saved brightness to DPS: %d", saved_brightness);
+            this->set_brightness(saved_brightness);
+          }
           this->on_connect_callback_.call();
         }
         break;
