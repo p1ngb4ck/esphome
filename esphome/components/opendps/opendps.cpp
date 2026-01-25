@@ -984,12 +984,16 @@ void OpenDPS::loop_tcp_bridge_() {
     uint8_t tcp_buf[256];
     ssize_t tcp_len = this->tcp_client_socket_->read(tcp_buf, sizeof(tcp_buf));
     if (tcp_len > 0) {
-      ESP_LOGV(TAG, "TCP->UART: %d bytes", tcp_len);
+      ESP_LOGI(TAG, "TCP->UART: %d bytes: %s", tcp_len, format_hex_pretty(tcp_buf, tcp_len).c_str());
       this->write_array(tcp_buf, tcp_len);
       this->flush();
-    } else if (tcp_len == 0 || (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-      // Connection closed or error
-      ESP_LOGI(TAG, "TCP bridge: client disconnected - resuming normal OpenDPS operation");
+    } else if (tcp_len == 0) {
+      // Connection closed gracefully
+      ESP_LOGI(TAG, "TCP bridge: client disconnected (connection closed) - resuming normal OpenDPS operation");
+      this->tcp_client_socket_.reset();
+    } else if (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+      // Error
+      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - resuming normal OpenDPS operation", errno);
       this->tcp_client_socket_.reset();
     }
 
@@ -1003,7 +1007,7 @@ void OpenDPS::loop_tcp_bridge_() {
         uart_buf[uart_len++] = byte;
       }
       if (uart_len > 0) {
-        ESP_LOGV(TAG, "UART->TCP: %d bytes", uart_len);
+        ESP_LOGI(TAG, "UART->TCP: %d bytes: %s", uart_len, format_hex_pretty(uart_buf, uart_len).c_str());
         ssize_t written = this->tcp_client_socket_->write(uart_buf, uart_len);
         if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
           ESP_LOGI(TAG, "TCP bridge: write error, disconnecting");
