@@ -34,26 +34,29 @@ void OpenDPS::setup() {
 
   // Note: TCP bridge setup is deferred to loop() to ensure network is ready
 
-  // Send initial ping to check connection (skip if TCP bridge mode)
-  if (!this->tcp_bridge_enabled_) {
-    this->send_ping();
-  }
+  // Send initial ping to check connection
+  this->send_ping();
 }
 
 void OpenDPS::loop() {
 #if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
-  // If TCP bridge is enabled, handle bridge mode
+  // If TCP bridge is enabled, set it up when network is ready
   if (this->tcp_bridge_enabled_) {
-    // Defer TCP bridge setup until network is ready
     if (!this->tcp_bridge_initialized_) {
       if (network::is_connected()) {
         this->setup_tcp_bridge_();
         this->tcp_bridge_initialized_ = true;
       }
-      return;  // Wait for network before doing anything in bridge mode
+      // Continue with normal processing while waiting for network
+    } else {
+      // Check for new TCP connections and handle bridge mode
+      this->loop_tcp_bridge_();
+
+      // If a TCP client is connected, skip normal processing (bridge mode active)
+      if (this->tcp_client_socket_ != nullptr) {
+        return;
+      }
     }
-    this->loop_tcp_bridge_();
-    return;  // Skip normal processing when in bridge mode
   }
 #endif
 
@@ -969,7 +972,7 @@ void OpenDPS::loop_tcp_bridge_() {
     socklen_t addr_len = sizeof(client_addr);
     auto client = this->tcp_server_socket_->accept((struct sockaddr *) &client_addr, &addr_len);
     if (client != nullptr) {
-      ESP_LOGI(TAG, "TCP bridge: client connected");
+      ESP_LOGI(TAG, "TCP bridge: client connected - switching to bridge mode (normal OpenDPS queries paused)");
       client->setblocking(false);
       this->tcp_client_socket_ = std::move(client);
     }
@@ -986,7 +989,7 @@ void OpenDPS::loop_tcp_bridge_() {
       this->flush();
     } else if (tcp_len == 0 || (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
       // Connection closed or error
-      ESP_LOGI(TAG, "TCP bridge: client disconnected");
+      ESP_LOGI(TAG, "TCP bridge: client disconnected - resuming normal OpenDPS operation");
       this->tcp_client_socket_.reset();
     }
 
