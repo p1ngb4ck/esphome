@@ -241,6 +241,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   std::unique_ptr<socket::Socket> tcp_server_socket_;
   std::unique_ptr<socket::Socket> tcp_client_socket_;
+  std::vector<uint8_t> tcp_uart_buffer_;  // Buffer for assembling complete UART frames
 #endif
 };
 

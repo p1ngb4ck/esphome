@@ -991,28 +991,40 @@ void OpenDPS::loop_tcp_bridge_() {
       // Connection closed gracefully
       ESP_LOGI(TAG, "TCP bridge: client disconnected (connection closed) - resuming normal OpenDPS operation");
       this->tcp_client_socket_.reset();
+      return;
     } else if (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
       // Error
       ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - resuming normal OpenDPS operation", errno);
       this->tcp_client_socket_.reset();
+      return;
     }
 
-    // Read from UART, write to TCP
-    while (this->available() && this->tcp_client_socket_ != nullptr) {
-      uint8_t uart_buf[256];
-      size_t uart_len = 0;
-      while (this->available() && uart_len < sizeof(uart_buf)) {
-        uint8_t byte;
-        this->read_byte(&byte);
-        uart_buf[uart_len++] = byte;
-      }
-      if (uart_len > 0) {
-        ESP_LOGI(TAG, "UART->TCP: %d bytes: %s", uart_len, format_hex_pretty(uart_buf, uart_len).c_str());
-        ssize_t written = this->tcp_client_socket_->write(uart_buf, uart_len);
+    // Read from UART, write to TCP - buffer complete frames before sending
+    // OpenDPS frames are: SOF (0x7E) ... data ... EOF (0x7F)
+    while (this->available()) {
+      uint8_t byte;
+      this->read_byte(&byte);
+      this->tcp_uart_buffer_.push_back(byte);
+
+      // Check if we have a complete frame (ends with EOF)
+      if (byte == FRAME_EOF && !this->tcp_uart_buffer_.empty() && this->tcp_uart_buffer_[0] == FRAME_SOF) {
+        // Send the complete frame
+        ESP_LOGI(TAG, "UART->TCP: %d bytes: %s", this->tcp_uart_buffer_.size(),
+                 format_hex_pretty(this->tcp_uart_buffer_.data(), this->tcp_uart_buffer_.size()).c_str());
+        ssize_t written = this->tcp_client_socket_->write(this->tcp_uart_buffer_.data(), this->tcp_uart_buffer_.size());
         if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
           ESP_LOGI(TAG, "TCP bridge: write error, disconnecting");
           this->tcp_client_socket_.reset();
+          this->tcp_uart_buffer_.clear();
+          return;
         }
+        this->tcp_uart_buffer_.clear();
+      }
+
+      // Safety: prevent buffer from growing too large
+      if (this->tcp_uart_buffer_.size() > 1024) {
+        ESP_LOGW(TAG, "TCP bridge: UART buffer overflow, clearing");
+        this->tcp_uart_buffer_.clear();
       }
     }
   }
