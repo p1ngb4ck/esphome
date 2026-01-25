@@ -54,6 +54,30 @@ RequestCalibrationReportAction = opendps_ns.class_(
 SetCalibrationAction = opendps_ns.class_("SetCalibrationAction", automation.Action)
 ClearCalibrationAction = opendps_ns.class_("ClearCalibrationAction", automation.Action)
 
+# Calibration Assistant actions
+StartCalibrationAssistantAction = opendps_ns.class_(
+    "StartCalibrationAssistantAction", automation.Action
+)
+CalibrationAssistantStepAction = opendps_ns.class_(
+    "CalibrationAssistantStepAction", automation.Action
+)
+CancelCalibrationAssistantAction = opendps_ns.class_(
+    "CancelCalibrationAssistantAction", automation.Action
+)
+
+# Calibration assistant parameters struct
+CalibrationAssistantParams = opendps_ns.struct("CalibrationAssistantParams")
+
+# Config keys for calibration assistant
+CONF_VIN_LOW_MV = "vin_low_mv"
+CONF_VIN_HIGH_MV = "vin_high_mv"
+CONF_VOUT_LOW_MV = "vout_low_mv"
+CONF_VOUT_HIGH_MV = "vout_high_mv"
+CONF_LOAD_RESISTANCE = "load_resistance"
+CONF_LOAD_MAX_WATTAGE = "load_max_wattage"
+CONF_MAX_DPS_CURRENT = "max_dps_current"
+CONF_MEASURED_VALUE = "measured_value"
+
 TCP_BRIDGE_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_TCP_BRIDGE_PORT, default=5005): cv.port,
@@ -288,5 +312,74 @@ async def opendps_set_calibration_to_code(config, action_id, template_arg, args)
     "opendps.clear_calibration", ClearCalibrationAction, OPENDPS_ACTION_SCHEMA
 )
 async def opendps_clear_calibration_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+# Calibration Assistant Actions
+@automation.register_action(
+    "opendps.start_calibration_assistant",
+    StartCalibrationAssistantAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Required(CONF_VIN_LOW_MV): cv.templatable(cv.float_),
+            cv.Required(CONF_VIN_HIGH_MV): cv.templatable(cv.float_),
+            cv.Optional(CONF_VOUT_LOW_MV, default=0): cv.templatable(cv.float_),
+            cv.Optional(CONF_VOUT_HIGH_MV, default=0): cv.templatable(cv.float_),
+            cv.Optional(CONF_LOAD_RESISTANCE, default=0): cv.templatable(cv.float_),
+            cv.Optional(CONF_LOAD_MAX_WATTAGE, default=0): cv.templatable(cv.float_),
+            cv.Optional(CONF_MAX_DPS_CURRENT, default=5.0): cv.templatable(cv.float_),
+        }
+    ),
+)
+async def opendps_start_calibration_assistant_to_code(
+    config, action_id, template_arg, args
+):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    vin_low = await cg.templatable(config[CONF_VIN_LOW_MV], args, float)
+    vin_high = await cg.templatable(config[CONF_VIN_HIGH_MV], args, float)
+    vout_low = await cg.templatable(config[CONF_VOUT_LOW_MV], args, float)
+    vout_high = await cg.templatable(config[CONF_VOUT_HIGH_MV], args, float)
+    load_r = await cg.templatable(config[CONF_LOAD_RESISTANCE], args, float)
+    load_w = await cg.templatable(config[CONF_LOAD_MAX_WATTAGE], args, float)
+    max_i = await cg.templatable(config[CONF_MAX_DPS_CURRENT], args, float)
+    cg.add(var.set_vin_low_mv(vin_low))
+    cg.add(var.set_vin_high_mv(vin_high))
+    cg.add(var.set_vout_low_mv(vout_low))
+    cg.add(var.set_vout_high_mv(vout_high))
+    cg.add(var.set_load_resistance(load_r))
+    cg.add(var.set_load_max_wattage(load_w))
+    cg.add(var.set_max_dps_current(max_i))
+    return var
+
+
+@automation.register_action(
+    "opendps.calibration_assistant_step",
+    CalibrationAssistantStepAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Optional(CONF_MEASURED_VALUE, default=0): cv.templatable(cv.float_),
+        }
+    ),
+)
+async def opendps_calibration_assistant_step_to_code(
+    config, action_id, template_arg, args
+):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    measured = await cg.templatable(config[CONF_MEASURED_VALUE], args, float)
+    cg.add(var.set_measured_value(measured))
+    return var
+
+
+@automation.register_action(
+    "opendps.cancel_calibration_assistant",
+    CancelCalibrationAssistantAction,
+    OPENDPS_ACTION_SCHEMA,
+)
+async def opendps_cancel_calibration_assistant_to_code(
+    config, action_id, template_arg, args
+):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)

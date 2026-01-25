@@ -198,5 +198,61 @@ template<typename... Ts> class ClearCalibrationAction : public Action<Ts...> {
   OpenDPS *parent_;
 };
 
+// Start Calibration Assistant Action
+template<typename... Ts> class StartCalibrationAssistantAction : public Action<Ts...> {
+ public:
+  explicit StartCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(float, vin_low_mv)
+  TEMPLATABLE_VALUE(float, vin_high_mv)
+  TEMPLATABLE_VALUE(float, vout_low_mv)
+  TEMPLATABLE_VALUE(float, vout_high_mv)
+  TEMPLATABLE_VALUE(float, load_resistance)
+  TEMPLATABLE_VALUE(float, load_max_wattage)
+  TEMPLATABLE_VALUE(float, max_dps_current)
+
+  void play(Ts... x) override {
+    CalibrationAssistantParams params;
+    params.vin_low_mv = this->vin_low_mv_.value(x...);
+    params.vin_high_mv = this->vin_high_mv_.value(x...);
+    params.vout_low_mv = this->vout_low_mv_.value(x...);
+    params.vout_high_mv = this->vout_high_mv_.value(x...);
+    params.load_resistance = this->load_resistance_.value(x...);
+    params.load_max_wattage = this->load_max_wattage_.value(x...);
+    params.max_dps_current = this->max_dps_current_.value(x...);
+    this->parent_->start_calibration_assistant(params);
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Calibration Assistant Step Action
+template<typename... Ts> class CalibrationAssistantStepAction : public Action<Ts...> {
+ public:
+  explicit CalibrationAssistantStepAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(float, measured_value)
+
+  void play(Ts... x) override {
+    float value = this->measured_value_.value(x...);
+    this->parent_->calibration_assistant_step(value);
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Cancel Calibration Assistant Action
+template<typename... Ts> class CancelCalibrationAssistantAction : public Action<Ts...> {
+ public:
+  explicit CancelCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->cancel_calibration_assistant(); }
+
+ protected:
+  OpenDPS *parent_;
+};
+
 }  // namespace opendps
 }  // namespace esphome

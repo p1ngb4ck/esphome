@@ -661,6 +661,11 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
 
         // Fire calibration callback
         this->on_calibration_callback_.call();
+
+        // If calibration assistant is running, collect sample
+        if (this->cal_assistant_state_ != CAL_IDLE) {
+          this->cal_assistant_collect_sample_();
+        }
         break;
       }
 
@@ -790,6 +795,558 @@ void OpenDPS::clear_calibration() {
   this->pack8_(payload, CMD_CLEAR_CALIBRATION);
   this->send_frame_(payload);
   ESP_LOGI(TAG, "Cleared calibration (reset to defaults)");
+}
+
+// ============================================================================
+// Calibration Assistant
+// ============================================================================
+
+std::pair<float, float> OpenDPS::cal_best_fit_(const std::vector<float> &x, const std::vector<float> &y) {
+  // Linear regression: y = k*x + c
+  // Returns (k, c)
+  if (x.size() < 2 || x.size() != y.size()) {
+    return {1.0f, 0.0f};
+  }
+
+  float sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+  size_t n = x.size();
+
+  for (size_t i = 0; i < n; i++) {
+    sum_x += x[i];
+    sum_y += y[i];
+    sum_xy += x[i] * y[i];
+    sum_xx += x[i] * x[i];
+  }
+
+  float x_bar = sum_x / n;
+  float y_bar = sum_y / n;
+
+  float ss_xy = sum_xy - n * x_bar * y_bar;
+  float ss_xx = sum_xx - n * x_bar * x_bar;
+
+  if (ss_xx == 0) {
+    return {1.0f, 0.0f};
+  }
+
+  float k = ss_xy / ss_xx;
+  float c = y_bar - k * x_bar;
+
+  return {k, c};
+}
+
+void OpenDPS::start_calibration_assistant(const CalibrationAssistantParams &params) {
+  if (this->cal_assistant_state_ != CAL_IDLE) {
+    ESP_LOGW(TAG, "Calibration assistant already running, cancelling previous");
+    this->cancel_calibration_assistant();
+  }
+
+  this->cal_assistant_params_ = params;
+  this->cal_samples_x_.clear();
+  this->cal_samples_y_.clear();
+  this->cal_sweep_step_ = 0;
+  this->cal_max_v_dac_ = 4095;
+  this->cal_last_action_time_ = millis();
+
+  ESP_LOGI(TAG, "========================================");
+  ESP_LOGI(TAG, "CALIBRATION ASSISTANT STARTED");
+  ESP_LOGI(TAG, "========================================");
+  ESP_LOGI(TAG, "Parameters:");
+  ESP_LOGI(TAG, "  Vin Low: %.0f mV", params.vin_low_mv);
+  ESP_LOGI(TAG, "  Vin High: %.0f mV", params.vin_high_mv);
+  ESP_LOGI(TAG, "  Vout Low: %.0f mV", params.vout_low_mv);
+  ESP_LOGI(TAG, "  Vout High: %.0f mV", params.vout_high_mv);
+  ESP_LOGI(TAG, "  Load Resistance: %.2f ohm", params.load_resistance);
+  ESP_LOGI(TAG, "  Load Max Wattage: %.1f W", params.load_max_wattage);
+  ESP_LOGI(TAG, "  Max DPS Current: %.1f A", params.max_dps_current);
+
+  // Start with input voltage calibration
+  this->cal_assistant_state_ = CAL_VIN_START;
+  this->cal_assistant_process_();
+}
+
+void OpenDPS::calibration_assistant_step(float measured_value) {
+  ESP_LOGI(TAG, "Calibration step received value: %.3f", measured_value);
+
+  switch (this->cal_assistant_state_) {
+    case CAL_VIN_MEASURE_LOW:
+      // User confirmed low input voltage is connected
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
+      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_low_mv);
+      ESP_LOGI(TAG, "Recorded Vin low: ADC=%d, mV=%.0f", this->calibration_data_.vin_adc,
+               this->cal_assistant_params_.vin_low_mv);
+      this->cal_assistant_state_ = CAL_VIN_WAIT_HIGH;
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_VIN_MEASURE_HIGH:
+      // User confirmed high input voltage is connected
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
+      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_high_mv);
+      ESP_LOGI(TAG, "Recorded Vin high: ADC=%d, mV=%.0f", this->calibration_data_.vin_adc,
+               this->cal_assistant_params_.vin_high_mv);
+      this->cal_assistant_state_ = CAL_VIN_CALCULATE;
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_VOUT_MEASURE_LOW:
+      // User provided measured output voltage at 10% DAC
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vout_adc));
+      this->cal_samples_y_.push_back(measured_value);
+      ESP_LOGI(TAG, "Recorded Vout low: ADC=%d, measured=%.0f mV, DAC=%d", this->calibration_data_.vout_adc,
+               measured_value, static_cast<int>(this->cal_max_v_dac_ * 0.1f));
+      this->cal_assistant_state_ = CAL_VOUT_WAIT_HIGH;
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_VOUT_MEASURE_HIGH:
+      // User provided measured output voltage at 90% DAC
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vout_adc));
+      this->cal_samples_y_.push_back(measured_value);
+      ESP_LOGI(TAG, "Recorded Vout high: ADC=%d, measured=%.0f mV, DAC=%d", this->calibration_data_.vout_adc,
+               measured_value, static_cast<int>(this->cal_max_v_dac_ * 0.9f));
+      this->cal_assistant_state_ = CAL_VOUT_CALCULATE;
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_IOUT_START:
+      // User confirmed load is connected, start current calibration
+      this->cal_assistant_state_ = CAL_IOUT_SWEEP;
+      this->cal_sweep_step_ = 0;
+      this->cal_samples_x_.clear();
+      this->cal_samples_y_.clear();
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_ILIMIT_START:
+      // User confirmed output is shorted, start current limit calibration
+      this->cal_assistant_state_ = CAL_ILIMIT_SWEEP;
+      this->cal_sweep_step_ = 0;
+      this->cal_samples_x_.clear();
+      this->cal_samples_y_.clear();
+      this->cal_assistant_process_();
+      break;
+
+    default:
+      ESP_LOGW(TAG, "Unexpected calibration step call in state %d", this->cal_assistant_state_);
+      break;
+  }
+}
+
+void OpenDPS::cancel_calibration_assistant() {
+  ESP_LOGI(TAG, "Calibration assistant cancelled");
+  this->cal_assistant_state_ = CAL_IDLE;
+  this->enable_output(false);
+  this->cal_samples_x_.clear();
+  this->cal_samples_y_.clear();
+}
+
+const char *OpenDPS::get_calibration_assistant_prompt() const {
+  switch (this->cal_assistant_state_) {
+    case CAL_IDLE:
+      return "Calibration not started";
+    case CAL_VIN_START:
+    case CAL_VIN_MEASURE_LOW:
+      return "Connect LOW input voltage, then call step()";
+    case CAL_VIN_WAIT_HIGH:
+    case CAL_VIN_MEASURE_HIGH:
+      return "Connect HIGH input voltage, then call step()";
+    case CAL_VIN_CALCULATE:
+      return "Calculating input voltage calibration...";
+    case CAL_VOUT_START:
+    case CAL_VOUT_SWEEP:
+      return "Finding maximum V_DAC...";
+    case CAL_VOUT_MEASURE_LOW:
+      return "Measure output voltage with multimeter (10% point), call step(mV)";
+    case CAL_VOUT_WAIT_HIGH:
+    case CAL_VOUT_MEASURE_HIGH:
+      return "Measure output voltage with multimeter (90% point), call step(mV)";
+    case CAL_VOUT_CALCULATE:
+      return "Calculating output voltage calibration...";
+    case CAL_IOUT_START:
+      return "Connect load resistor, then call step()";
+    case CAL_IOUT_SWEEP:
+      return "Measuring output current at various voltages...";
+    case CAL_IOUT_CALCULATE:
+      return "Calculating output current calibration...";
+    case CAL_ILIMIT_START:
+      return "SHORT the output with thick wire, then call step()";
+    case CAL_ILIMIT_SWEEP:
+      return "Sweeping A_DAC range...";
+    case CAL_ILIMIT_MEASURE:
+      return "Measuring current limit DAC points...";
+    case CAL_ILIMIT_CALCULATE:
+      return "Calculating current limit calibration...";
+    case CAL_COMPLETE:
+      return "Calibration complete!";
+    case CAL_ERROR:
+      return "Calibration error occurred";
+    default:
+      return "Unknown state";
+  }
+}
+
+void OpenDPS::cal_assistant_process_() {
+  ESP_LOGI(TAG, "Processing calibration state: %d", this->cal_assistant_state_);
+
+  switch (this->cal_assistant_state_) {
+    case CAL_VIN_START:
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "STEP 1: Input Voltage Calibration");
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "Connect the LOWER input voltage (%.0f mV) to the DPS", this->cal_assistant_params_.vin_low_mv);
+      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
+      this->request_calibration_report();
+      this->cal_assistant_state_ = CAL_VIN_MEASURE_LOW;
+      break;
+
+    case CAL_VIN_WAIT_HIGH:
+      ESP_LOGI(TAG, "Connect the HIGHER input voltage (%.0f mV) to the DPS", this->cal_assistant_params_.vin_high_mv);
+      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
+      this->request_calibration_report();
+      this->cal_assistant_state_ = CAL_VIN_MEASURE_HIGH;
+      break;
+
+    case CAL_VIN_CALCULATE: {
+      auto [k, c] = this->cal_best_fit_(this->cal_samples_x_, this->cal_samples_y_);
+      ESP_LOGI(TAG, "Input voltage calibration: VIN_ADC_K=%.6f, VIN_ADC_C=%.6f", k, c);
+      this->set_calibration("VIN_ADC_K", k);
+      this->set_calibration("VIN_ADC_C", c);
+
+      // Move to output voltage calibration
+      this->cal_samples_x_.clear();
+      this->cal_samples_y_.clear();
+      this->cal_assistant_state_ = CAL_VOUT_START;
+      this->cal_assistant_process_();
+      break;
+    }
+
+    case CAL_VOUT_START:
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "STEP 2: Output Voltage Calibration");
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "Finding maximum V_DAC value...");
+
+      // Set up for sweep: V_DAC=0, A_DAC=4095 (max current limit)
+      this->set_parameter("V_DAC", "0");
+      this->set_parameter("A_DAC", "4095");
+      this->enable_output(true);
+      this->cal_sweep_step_ = 0;
+      this->cal_samples_x_.clear();
+      this->cal_samples_y_.clear();
+      this->cal_last_action_time_ = millis();
+      this->cal_assistant_state_ = CAL_VOUT_SWEEP;
+      break;
+
+    case CAL_VOUT_SWEEP: {
+      // Sweep V_DAC from 0 to 4095 in 100 steps
+      if (this->cal_sweep_step_ <= 100) {
+        uint16_t v_dac = (this->cal_sweep_step_ * 4095) / 100;
+        this->set_parameter("V_DAC", std::to_string(v_dac));
+        this->request_calibration_report();
+
+        // Store the DAC value and wait for ADC reading
+        this->cal_samples_x_.push_back(static_cast<float>(v_dac));
+        this->cal_sweep_step_++;
+        this->cal_last_action_time_ = millis();
+
+        if (this->cal_sweep_step_ % 20 == 0) {
+          ESP_LOGI(TAG, "V_DAC sweep: %d%%", this->cal_sweep_step_);
+        }
+      } else {
+        // Analyze sweep results to find max linear V_DAC
+        ESP_LOGI(TAG, "V_DAC sweep complete, analyzing...");
+
+        // Find where gradient drops to near zero (output saturates)
+        this->cal_max_v_dac_ = 4095;
+        for (size_t i = 1; i < this->cal_samples_y_.size(); i++) {
+          float gradient = this->cal_samples_y_[i] - this->cal_samples_y_[i - 1];
+          if (gradient < 0.1f && i > 10) {
+            this->cal_max_v_dac_ = static_cast<uint16_t>(this->cal_samples_x_[i - 1]);
+            break;
+          }
+        }
+        ESP_LOGI(TAG, "Maximum usable V_DAC: %d", this->cal_max_v_dac_);
+
+        // Now measure at 10% and 90% of max
+        this->cal_samples_x_.clear();
+        this->cal_samples_y_.clear();
+
+        uint16_t v_dac_low = static_cast<uint16_t>(this->cal_max_v_dac_ * 0.1f);
+        this->set_parameter("V_DAC", std::to_string(v_dac_low));
+        this->cal_samples_x_.push_back(static_cast<float>(v_dac_low));  // Store DAC value for V_DAC calibration
+        this->request_calibration_report();
+
+        ESP_LOGI(TAG, "Set V_DAC to 10%% (%d)", v_dac_low);
+        ESP_LOGI(TAG, "Measure the OUTPUT VOLTAGE with a multimeter (in mV)");
+        ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with the measured value");
+        this->cal_assistant_state_ = CAL_VOUT_MEASURE_LOW;
+      }
+      break;
+    }
+
+    case CAL_VOUT_WAIT_HIGH: {
+      uint16_t v_dac_high = static_cast<uint16_t>(this->cal_max_v_dac_ * 0.9f);
+      this->set_parameter("V_DAC", std::to_string(v_dac_high));
+      this->cal_samples_x_.push_back(static_cast<float>(v_dac_high));  // Store DAC value
+      this->request_calibration_report();
+
+      ESP_LOGI(TAG, "Set V_DAC to 90%% (%d)", v_dac_high);
+      ESP_LOGI(TAG, "Measure the OUTPUT VOLTAGE with a multimeter (in mV)");
+      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with the measured value");
+      this->cal_assistant_state_ = CAL_VOUT_MEASURE_HIGH;
+      break;
+    }
+
+    case CAL_VOUT_CALCULATE: {
+      this->enable_output(false);
+
+      // We have: DAC values in cal_samples_x_[0,2] and measured voltages in cal_samples_y_[0,1]
+      // ADC values in cal_samples_x_[1,3] (stored when we recorded the measurements)
+      // Actually we need to track this better - let me fix the data collection
+
+      // For V_DAC: measured_voltage -> DAC  (we want to set voltage, get DAC)
+      // For V_ADC: ADC -> measured_voltage (we want to read ADC, get voltage)
+
+      std::vector<float> dac_values = {this->cal_samples_x_[0], this->cal_samples_x_[2]};  // DAC values
+      std::vector<float> adc_values = {this->cal_samples_x_[1], this->cal_samples_x_[3]};  // ADC values
+      std::vector<float> measured = {this->cal_samples_y_[0], this->cal_samples_y_[1]};    // Measured voltages
+
+      // V_DAC: measured_mV -> DAC value
+      auto [v_dac_k, v_dac_c] = this->cal_best_fit_(measured, dac_values);
+      this->cal_v_dac_k_ = v_dac_k;
+      this->cal_v_dac_c_ = v_dac_c;
+      ESP_LOGI(TAG, "Output voltage DAC calibration: V_DAC_K=%.6f, V_DAC_C=%.6f", v_dac_k, v_dac_c);
+      this->set_calibration("V_DAC_K", v_dac_k);
+      this->set_calibration("V_DAC_C", v_dac_c);
+
+      // V_ADC: ADC -> measured_mV
+      auto [v_adc_k, v_adc_c] = this->cal_best_fit_(adc_values, measured);
+      this->cal_v_adc_k_ = v_adc_k;
+      this->cal_v_adc_c_ = v_adc_c;
+      ESP_LOGI(TAG, "Output voltage ADC calibration: V_ADC_K=%.6f, V_ADC_C=%.6f", v_adc_k, v_adc_c);
+      this->set_calibration("V_ADC_K", v_adc_k);
+      this->set_calibration("V_ADC_C", v_adc_c);
+
+      // Check if we should do current calibration
+      if (this->cal_assistant_params_.load_resistance > 0) {
+        this->cal_samples_x_.clear();
+        this->cal_samples_y_.clear();
+        this->cal_assistant_state_ = CAL_IOUT_START;
+        ESP_LOGI(TAG, "----------------------------------------");
+        ESP_LOGI(TAG, "STEP 3: Output Current Calibration");
+        ESP_LOGI(TAG, "----------------------------------------");
+        ESP_LOGI(TAG, "Connect a %.2f ohm load to the output", this->cal_assistant_params_.load_resistance);
+        ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
+      } else {
+        ESP_LOGI(TAG, "Skipping current calibration (no load specified)");
+        this->cal_assistant_state_ = CAL_COMPLETE;
+        this->cal_assistant_process_();
+      }
+      break;
+    }
+
+    case CAL_IOUT_SWEEP: {
+      // Calculate max safe voltage based on constraints
+      float v_max_input = this->cal_assistant_params_.vin_high_mv * 0.9f;
+      float v_max_wattage =
+          sqrtf(this->cal_assistant_params_.load_max_wattage * this->cal_assistant_params_.load_resistance) * 1000.0f;
+      float v_max_current =
+          this->cal_assistant_params_.max_dps_current * this->cal_assistant_params_.load_resistance * 1000.0f;
+      float max_output_mv = std::min({v_max_input, v_max_wattage, v_max_current});
+
+      ESP_LOGI(TAG, "Max safe output voltage: %.0f mV", max_output_mv);
+
+      // Sweep output voltage and measure current
+      uint8_t num_steps = 15;
+      if (this->cal_sweep_step_ < num_steps) {
+        float output_voltage = max_output_mv * (static_cast<float>(this->cal_sweep_step_) / num_steps);
+        uint16_t output_dac = static_cast<uint16_t>(this->cal_v_dac_k_ * output_voltage + this->cal_v_dac_c_);
+
+        this->set_parameter("V_DAC", std::to_string(output_dac));
+        this->enable_output(true);
+        this->request_calibration_report();
+
+        this->cal_sweep_step_++;
+        ESP_LOGI(TAG, "Current calibration sweep: %d/%d (V_DAC=%d)", this->cal_sweep_step_, num_steps, output_dac);
+      } else {
+        this->cal_assistant_state_ = CAL_IOUT_CALCULATE;
+        this->cal_assistant_process_();
+      }
+      break;
+    }
+
+    case CAL_IOUT_CALCULATE: {
+      this->enable_output(false);
+
+      // Calculate A_ADC calibration
+      auto [a_adc_k, a_adc_c] = this->cal_best_fit_(this->cal_samples_x_, this->cal_samples_y_);
+      this->cal_a_adc_k_ = a_adc_k;
+      this->cal_a_adc_c_ = a_adc_c;
+      ESP_LOGI(TAG, "Output current ADC calibration: A_ADC_K=%.6f, A_ADC_C=%.6f", a_adc_k, a_adc_c);
+      this->set_calibration("A_ADC_K", a_adc_k);
+      this->set_calibration("A_ADC_C", a_adc_c);
+
+      // Move to current limit calibration
+      this->cal_samples_x_.clear();
+      this->cal_samples_y_.clear();
+      this->cal_assistant_state_ = CAL_ILIMIT_START;
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "STEP 4: Current Limit Calibration");
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "SHORT the output with a thick wire capable of %.1f A",
+               this->cal_assistant_params_.max_dps_current);
+      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
+      break;
+    }
+
+    case CAL_ILIMIT_SWEEP: {
+      // Set V_DAC to max
+      this->set_parameter("V_DAC", "4095");
+
+      // Sweep A_DAC to find workable range
+      uint8_t num_steps = 100;
+      if (this->cal_sweep_step_ <= num_steps) {
+        uint16_t a_dac = (this->cal_sweep_step_ * 4095) / num_steps;
+        this->set_parameter("A_DAC", std::to_string(a_dac));
+        this->enable_output(true);
+        this->request_calibration_report();
+
+        this->cal_samples_x_.push_back(static_cast<float>(a_dac));
+        this->cal_sweep_step_++;
+
+        if (this->cal_sweep_step_ % 20 == 0) {
+          ESP_LOGI(TAG, "A_DAC sweep: %d%%", this->cal_sweep_step_);
+        }
+      } else {
+        this->enable_output(false);
+
+        // Analyze sweep to find linear range
+        this->cal_a_dac_lower_ = 0;
+        this->cal_a_dac_upper_ = 4095;
+
+        for (size_t i = 1; i < this->cal_samples_y_.size(); i++) {
+          float gradient = this->cal_samples_y_[i] - this->cal_samples_y_[i - 1];
+          if (gradient > 0.1f && this->cal_a_dac_lower_ == 0) {
+            this->cal_a_dac_lower_ = static_cast<uint16_t>(this->cal_samples_x_[i]);
+          }
+          if (gradient < 0.1f && this->cal_a_dac_lower_ > 0) {
+            this->cal_a_dac_upper_ = static_cast<uint16_t>(this->cal_samples_x_[i - 1]);
+            break;
+          }
+        }
+
+        // Trim by 10% on each side
+        uint16_t range = this->cal_a_dac_upper_ - this->cal_a_dac_lower_;
+        this->cal_a_dac_lower_ += range / 10;
+        this->cal_a_dac_upper_ -= range / 10;
+
+        ESP_LOGI(TAG, "A_DAC linear range: %d - %d", this->cal_a_dac_lower_, this->cal_a_dac_upper_);
+
+        // Now measure current at points in this range
+        this->cal_samples_x_.clear();
+        this->cal_samples_y_.clear();
+        this->cal_sweep_step_ = 0;
+        this->cal_assistant_state_ = CAL_ILIMIT_MEASURE;
+        this->cal_assistant_process_();
+      }
+      break;
+    }
+
+    case CAL_ILIMIT_MEASURE: {
+      uint8_t num_steps = 15;
+      if (this->cal_sweep_step_ < num_steps) {
+        float ratio = static_cast<float>(this->cal_sweep_step_) / num_steps;
+        uint16_t a_dac =
+            this->cal_a_dac_lower_ + static_cast<uint16_t>((this->cal_a_dac_upper_ - this->cal_a_dac_lower_) * ratio);
+
+        this->set_parameter("A_DAC", std::to_string(a_dac));
+        this->enable_output(true);
+        this->request_calibration_report();
+
+        // Calculate current from ADC reading using previously calibrated A_ADC
+        float i_out = this->calibration_data_.iout_adc * this->cal_a_adc_k_ + this->cal_a_adc_c_;
+        this->cal_samples_x_.push_back(i_out);
+        this->cal_samples_y_.push_back(static_cast<float>(a_dac));
+
+        this->cal_sweep_step_++;
+        ESP_LOGI(TAG, "Current limit calibration: %d/%d (A_DAC=%d, I=%.3f)", this->cal_sweep_step_, num_steps, a_dac,
+                 i_out);
+      } else {
+        this->cal_assistant_state_ = CAL_ILIMIT_CALCULATE;
+        this->cal_assistant_process_();
+      }
+      break;
+    }
+
+    case CAL_ILIMIT_CALCULATE: {
+      this->enable_output(false);
+
+      // Calculate A_DAC calibration: current -> DAC
+      auto [a_dac_k, a_dac_c] = this->cal_best_fit_(this->cal_samples_x_, this->cal_samples_y_);
+      ESP_LOGI(TAG, "Current limit DAC calibration: A_DAC_K=%.6f, A_DAC_C=%.6f", a_dac_k, a_dac_c);
+      this->set_calibration("A_DAC_K", a_dac_k);
+      this->set_calibration("A_DAC_C", a_dac_c);
+
+      this->cal_assistant_state_ = CAL_COMPLETE;
+      this->cal_assistant_process_();
+      break;
+    }
+
+    case CAL_COMPLETE:
+      ESP_LOGI(TAG, "========================================");
+      ESP_LOGI(TAG, "CALIBRATION COMPLETE!");
+      ESP_LOGI(TAG, "========================================");
+      ESP_LOGI(TAG, "To reset to defaults, use: opendps.clear_calibration");
+      this->cal_assistant_state_ = CAL_IDLE;
+      break;
+
+    case CAL_ERROR:
+      ESP_LOGE(TAG, "Calibration error occurred");
+      this->enable_output(false);
+      this->cal_assistant_state_ = CAL_IDLE;
+      break;
+
+    default:
+      break;
+  }
+}
+
+void OpenDPS::cal_assistant_collect_sample_() {
+  // Called when a calibration report is received during calibration
+  // Store the relevant ADC value based on current state
+  switch (this->cal_assistant_state_) {
+    case CAL_VOUT_SWEEP:
+      // Store vout_adc for sweep analysis
+      this->cal_samples_y_.push_back(static_cast<float>(this->calibration_data_.vout_adc));
+      // Continue sweep
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_VOUT_MEASURE_LOW:
+    case CAL_VOUT_MEASURE_HIGH:
+      // Store ADC value - the measured voltage will be provided by user
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vout_adc));
+      break;
+
+    case CAL_IOUT_SWEEP: {
+      // Calculate current from voltage across known resistance
+      float v_out = this->calibration_data_.vout_adc * this->cal_v_adc_k_ + this->cal_v_adc_c_;
+      float i_out = v_out / this->cal_assistant_params_.load_resistance;
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.iout_adc));
+      this->cal_samples_y_.push_back(i_out);
+      this->cal_assistant_process_();
+      break;
+    }
+
+    case CAL_ILIMIT_SWEEP:
+      // Store iout_adc for sweep analysis
+      this->cal_samples_y_.push_back(static_cast<float>(this->calibration_data_.iout_adc));
+      this->cal_assistant_process_();
+      break;
+
+    default:
+      break;
+  }
 }
 
 float OpenDPS::get_voltage_setting() const {

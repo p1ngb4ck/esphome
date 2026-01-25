@@ -97,6 +97,47 @@ struct OpenDPSData {
   uint32_t last_update{0};
 };
 
+// Calibration assistant parameters
+struct CalibrationAssistantParams {
+  float vin_low_mv{0};         // First (lower) input voltage in mV
+  float vin_high_mv{0};        // Second (higher) input voltage in mV
+  float vout_low_mv{0};        // First measured output voltage in mV
+  float vout_high_mv{0};       // Second measured output voltage in mV
+  float load_resistance{0};    // Load resistance in ohms for current calibration
+  float load_max_wattage{0};   // Load max wattage for current calibration
+  float max_dps_current{5.0};  // Max output current of DPS model (default 5A)
+};
+
+// Calibration assistant states
+enum CalibrationAssistantState : uint8_t {
+  CAL_IDLE = 0,
+  // Input voltage calibration
+  CAL_VIN_START,
+  CAL_VIN_MEASURE_LOW,
+  CAL_VIN_WAIT_HIGH,
+  CAL_VIN_MEASURE_HIGH,
+  CAL_VIN_CALCULATE,
+  // Output voltage calibration
+  CAL_VOUT_START,
+  CAL_VOUT_SWEEP,
+  CAL_VOUT_MEASURE_LOW,
+  CAL_VOUT_WAIT_HIGH,
+  CAL_VOUT_MEASURE_HIGH,
+  CAL_VOUT_CALCULATE,
+  // Output current calibration (requires load)
+  CAL_IOUT_START,
+  CAL_IOUT_SWEEP,
+  CAL_IOUT_CALCULATE,
+  // Current limit calibration (requires short)
+  CAL_ILIMIT_START,
+  CAL_ILIMIT_SWEEP,
+  CAL_ILIMIT_MEASURE,
+  CAL_ILIMIT_CALCULATE,
+  // Done
+  CAL_COMPLETE,
+  CAL_ERROR
+};
+
 // Calibration report data (raw ADC/DAC readings and calibration coefficients)
 struct CalibrationData {
   // Raw ADC/DAC readings
@@ -162,6 +203,16 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void request_calibration_report();
   void set_calibration(const std::string &name, float value);
   void clear_calibration();
+
+  // Calibration Assistant - interactive calibration like dpsctl.py -C
+  // Call start_calibration_assistant() to begin, then call calibration_assistant_step()
+  // with user-provided measurements at each step. Check get_calibration_assistant_state()
+  // for current state and get_calibration_assistant_prompt() for user instructions.
+  void start_calibration_assistant(const CalibrationAssistantParams &params);
+  void calibration_assistant_step(float measured_value);
+  void cancel_calibration_assistant();
+  CalibrationAssistantState get_calibration_assistant_state() const { return this->cal_assistant_state_; }
+  const char *get_calibration_assistant_prompt() const;
 
   // Firmware upgrade
   void start_firmware_upgrade(const std::string &firmware_path);
@@ -263,6 +314,24 @@ class OpenDPS : public Component, public uart::UARTDevice {
   bool connected_{false};
   CallbackManager<void()> on_connect_callback_;
   CallbackManager<void()> on_calibration_callback_;
+
+  // Calibration assistant state
+  CalibrationAssistantState cal_assistant_state_{CAL_IDLE};
+  CalibrationAssistantParams cal_assistant_params_;
+  std::vector<float> cal_samples_x_;  // X values for linear regression
+  std::vector<float> cal_samples_y_;  // Y values for linear regression
+  uint16_t cal_sweep_step_{0};
+  uint16_t cal_max_v_dac_{4095};
+  float cal_v_adc_k_{0}, cal_v_adc_c_{0};
+  float cal_v_dac_k_{0}, cal_v_dac_c_{0};
+  float cal_a_adc_k_{0}, cal_a_adc_c_{0};
+  uint16_t cal_a_dac_lower_{0}, cal_a_dac_upper_{4095};
+  uint32_t cal_last_action_time_{0};
+
+  // Calibration assistant helpers
+  void cal_assistant_process_();
+  void cal_assistant_collect_sample_();
+  std::pair<float, float> cal_best_fit_(const std::vector<float> &x, const std::vector<float> &y);
 
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();
