@@ -203,6 +203,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   uint8_t brightness_{50};
   uint8_t default_brightness_{50};
   ESPPreferenceObject brightness_pref_;
+  uint32_t brightness_set_time_{0};  // Time when brightness was last set (to skip sync briefly)
 
   // Frame reception state
   std::vector<uint8_t> rx_buffer_;

@@ -434,12 +434,16 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         }
 
         // Sync brightness from DPS query response (if reported)
+        // Skip sync for 2 seconds after setting brightness to allow DPS to update
         auto brightness_it = this->data_.params.find("brightness");
         if (brightness_it != this->data_.params.end()) {
-          uint8_t dps_brightness = static_cast<uint8_t>(std::atoi(brightness_it->second.c_str()));
-          if (dps_brightness != this->brightness_) {
-            ESP_LOGD(TAG, "Brightness synced from DPS: %d -> %d", this->brightness_, dps_brightness);
-            this->brightness_ = dps_brightness;
+          uint32_t time_since_set = millis() - this->brightness_set_time_;
+          if (time_since_set > 2000) {
+            uint8_t dps_brightness = static_cast<uint8_t>(std::atoi(brightness_it->second.c_str()));
+            if (dps_brightness != this->brightness_) {
+              ESP_LOGD(TAG, "Brightness synced from DPS: %d -> %d", this->brightness_, dps_brightness);
+              this->brightness_ = dps_brightness;
+            }
           }
         }
 
@@ -657,9 +661,10 @@ void OpenDPS::set_brightness(uint8_t brightness) {
   this->pack8_(payload, brightness);
   this->send_frame_(payload);
 
-  // Store brightness in preferences
+  // Store brightness in preferences and record set time
   this->brightness_ = brightness;
   this->brightness_pref_.save(&this->brightness_);
+  this->brightness_set_time_ = millis();
 
   ESP_LOGI(TAG, "Set brightness: %d", brightness);
 }
