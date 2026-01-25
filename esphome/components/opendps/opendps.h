@@ -97,6 +97,28 @@ struct OpenDPSData {
   uint32_t last_update{0};
 };
 
+// Calibration report data (raw ADC/DAC readings and calibration coefficients)
+struct CalibrationData {
+  // Raw ADC/DAC readings
+  uint16_t vout_adc{0};
+  uint16_t vin_adc{0};
+  uint16_t iout_adc{0};
+  uint16_t iout_dac{0};
+  uint16_t vout_dac{0};
+  // Calibration coefficients
+  float a_adc_k{0};
+  float a_adc_c{0};
+  float a_dac_k{0};
+  float a_dac_c{0};
+  float v_adc_k{0};
+  float v_adc_c{0};
+  float v_dac_k{0};
+  float v_dac_c{0};
+  float vin_adc_k{0};
+  float vin_adc_c{0};
+  uint32_t last_update{0};
+};
+
 class OpenDPS;
 
 /// Component to communicate with OpenDPS power supply via UART
@@ -136,6 +158,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void lock(bool locked);
   void send_connection_status(ConnectionStatus status);
 
+  // Calibration
+  void request_calibration_report();
+  void set_calibration(const std::string &name, float value);
+  void clear_calibration();
+
   // Firmware upgrade
   void start_firmware_upgrade(const std::string &firmware_path);
   void set_upgrade_progress_callback(std::function<void(uint8_t)> &&callback) {
@@ -144,6 +171,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Get current data
   const OpenDPSData &get_data() const { return this->data_; }
+  const CalibrationData &get_calibration_data() const { return this->calibration_data_; }
 
   // Get current settings (from params, in user units)
   float get_voltage_setting() const;
@@ -152,6 +180,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Connection trigger
   void add_on_connect_callback(std::function<void()> callback) { this->on_connect_callback_.add(std::move(callback)); }
+
+  // Calibration data callback
+  void add_on_calibration_callback(std::function<void()> callback) {
+    this->on_calibration_callback_.add(std::move(callback));
+  }
 
  protected:
   // Frame handling
@@ -167,6 +200,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Frame parsing helpers
   uint8_t unpack8_(const std::vector<uint8_t> &frame, size_t &pos);
   uint16_t unpack16_(const std::vector<uint8_t> &frame, size_t &pos);
+  uint32_t unpack32_(const std::vector<uint8_t> &frame, size_t &pos);
+  float unpack_float_(const std::vector<uint8_t> &frame, size_t &pos);
   std::string unpack_cstr_(const std::vector<uint8_t> &frame, size_t &pos);
 
   // CRC calculation
@@ -196,6 +231,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // State
   OpenDPSData data_;
+  CalibrationData calibration_data_;
   uint32_t update_interval_{1000};  // Default 1Hz, can be set much faster
   uint32_t last_query_{0};
 
@@ -226,6 +262,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // Connection state
   bool connected_{false};
   CallbackManager<void()> on_connect_callback_;
+  CallbackManager<void()> on_calibration_callback_;
 
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();

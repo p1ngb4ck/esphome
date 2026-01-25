@@ -238,6 +238,26 @@ uint16_t OpenDPS::unpack16_(const std::vector<uint8_t> &frame, size_t &pos) {
   return value;
 }
 
+uint32_t OpenDPS::unpack32_(const std::vector<uint8_t> &frame, size_t &pos) {
+  uint32_t value = static_cast<uint32_t>(this->unpack8_(frame, pos)) << 24;
+  value |= static_cast<uint32_t>(this->unpack8_(frame, pos)) << 16;
+  value |= static_cast<uint32_t>(this->unpack8_(frame, pos)) << 8;
+  value |= static_cast<uint32_t>(this->unpack8_(frame, pos));
+  return value;
+}
+
+float OpenDPS::unpack_float_(const std::vector<uint8_t> &frame, size_t &pos) {
+  // Little-endian float (4 bytes)
+  union {
+    float f;
+    uint8_t bytes[4];
+  } float_bytes;
+  for (int i = 0; i < 4; i++) {
+    float_bytes.bytes[i] = this->unpack8_(frame, pos);
+  }
+  return float_bytes.f;
+}
+
 std::string OpenDPS::unpack_cstr_(const std::vector<uint8_t> &frame, size_t &pos) {
   std::string str;
   while (pos < frame.size()) {
@@ -595,6 +615,55 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         break;
       }
 
+      case CMD_CAL_REPORT: {
+        // Parse calibration report response
+        // Format: status, vout_adc(16), vin_adc(16), iout_adc(16), iout_dac(16), vout_dac(16),
+        //         a_adc_k(f), a_adc_c(f), a_dac_k(f), a_dac_c(f), v_adc_k(f), v_adc_c(f),
+        //         v_dac_k(f), v_dac_c(f), vin_adc_k(f), vin_adc_c(f)
+        if (status != 0) {
+          ESP_LOGW(TAG, "Calibration report failed with status: %d", status);
+          break;
+        }
+
+        // Raw ADC/DAC readings
+        this->calibration_data_.vout_adc = this->unpack16_(payload, pos);
+        this->calibration_data_.vin_adc = this->unpack16_(payload, pos);
+        this->calibration_data_.iout_adc = this->unpack16_(payload, pos);
+        this->calibration_data_.iout_dac = this->unpack16_(payload, pos);
+        this->calibration_data_.vout_dac = this->unpack16_(payload, pos);
+
+        // Calibration coefficients (10 floats, little-endian)
+        this->calibration_data_.a_adc_k = this->unpack_float_(payload, pos);
+        this->calibration_data_.a_adc_c = this->unpack_float_(payload, pos);
+        this->calibration_data_.a_dac_k = this->unpack_float_(payload, pos);
+        this->calibration_data_.a_dac_c = this->unpack_float_(payload, pos);
+        this->calibration_data_.v_adc_k = this->unpack_float_(payload, pos);
+        this->calibration_data_.v_adc_c = this->unpack_float_(payload, pos);
+        this->calibration_data_.v_dac_k = this->unpack_float_(payload, pos);
+        this->calibration_data_.v_dac_c = this->unpack_float_(payload, pos);
+        this->calibration_data_.vin_adc_k = this->unpack_float_(payload, pos);
+        this->calibration_data_.vin_adc_c = this->unpack_float_(payload, pos);
+
+        this->calibration_data_.last_update = millis();
+
+        ESP_LOGI(TAG, "Calibration report received:");
+        ESP_LOGI(TAG, "  ADC/DAC: vout_adc=%d, vin_adc=%d, iout_adc=%d, iout_dac=%d, vout_dac=%d",
+                 this->calibration_data_.vout_adc, this->calibration_data_.vin_adc, this->calibration_data_.iout_adc,
+                 this->calibration_data_.iout_dac, this->calibration_data_.vout_dac);
+        ESP_LOGI(TAG, "  Current: A_ADC_K=%.6f, A_ADC_C=%.6f, A_DAC_K=%.6f, A_DAC_C=%.6f",
+                 this->calibration_data_.a_adc_k, this->calibration_data_.a_adc_c, this->calibration_data_.a_dac_k,
+                 this->calibration_data_.a_dac_c);
+        ESP_LOGI(TAG, "  Voltage: V_ADC_K=%.6f, V_ADC_C=%.6f, V_DAC_K=%.6f, V_DAC_C=%.6f",
+                 this->calibration_data_.v_adc_k, this->calibration_data_.v_adc_c, this->calibration_data_.v_dac_k,
+                 this->calibration_data_.v_dac_c);
+        ESP_LOGI(TAG, "  Vin: VIN_ADC_K=%.6f, VIN_ADC_C=%.6f", this->calibration_data_.vin_adc_k,
+                 this->calibration_data_.vin_adc_c);
+
+        // Fire calibration callback
+        this->on_calibration_callback_.call();
+        break;
+      }
+
       default:
         ESP_LOGV(TAG, "Response to command 0x%02X (status: %d)", original_cmd, status);
         break;
@@ -683,6 +752,44 @@ void OpenDPS::send_connection_status(ConnectionStatus status) {
   this->pack8_(payload, static_cast<uint8_t>(status));
   this->send_frame_(payload);
   ESP_LOGD(TAG, "Sent connection status: %d", status);
+}
+
+void OpenDPS::request_calibration_report() {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_CAL_REPORT);
+  this->send_frame_(payload);
+  ESP_LOGI(TAG, "Requested calibration report");
+}
+
+void OpenDPS::set_calibration(const std::string &name, float value) {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_SET_CALIBRATION);
+
+  // Pack calibration name as C string
+  this->pack_cstr_(payload, name);
+
+  // Pack float value as 4 bytes (little-endian, IEEE 754)
+  union {
+    float f;
+    uint8_t bytes[4];
+  } float_bytes;
+  float_bytes.f = value;
+  for (int i = 0; i < 4; i++) {
+    this->pack8_(payload, float_bytes.bytes[i]);
+  }
+
+  // Null terminator to indicate end of parameters
+  this->pack8_(payload, 0);
+
+  this->send_frame_(payload);
+  ESP_LOGI(TAG, "Set calibration %s = %f", name.c_str(), value);
+}
+
+void OpenDPS::clear_calibration() {
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_CLEAR_CALIBRATION);
+  this->send_frame_(payload);
+  ESP_LOGI(TAG, "Cleared calibration (reset to defaults)");
 }
 
 float OpenDPS::get_voltage_setting() const {

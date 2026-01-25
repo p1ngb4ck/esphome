@@ -22,6 +22,8 @@ CONF_LOCKED = "locked"
 CONF_BRIGHTNESS = "brightness"
 CONF_FIRMWARE_PATH = "firmware_path"
 CONF_DEFAULT_BRIGHTNESS = "default_brightness"
+CONF_CALIBRATION_NAME = "calibration_name"
+CONF_CALIBRATION_VALUE = "calibration_value"
 
 CONF_ON_CONNECT = "on_connect"
 
@@ -46,6 +48,11 @@ SetBrightnessAction = opendps_ns.class_("SetBrightnessAction", automation.Action
 PingAction = opendps_ns.class_("PingAction", automation.Action)
 RequestVersionAction = opendps_ns.class_("RequestVersionAction", automation.Action)
 UpgradeFirmwareAction = opendps_ns.class_("UpgradeFirmwareAction", automation.Action)
+RequestCalibrationReportAction = opendps_ns.class_(
+    "RequestCalibrationReportAction", automation.Action
+)
+SetCalibrationAction = opendps_ns.class_("SetCalibrationAction", automation.Action)
+ClearCalibrationAction = opendps_ns.class_("ClearCalibrationAction", automation.Action)
 
 TCP_BRIDGE_SCHEMA = cv.Schema(
     {
@@ -240,3 +247,46 @@ async def opendps_upgrade_firmware_to_code(config, action_id, template_arg, args
     template_ = await cg.templatable(config[CONF_FIRMWARE_PATH], args, cg.std_string)
     cg.add(var.set_firmware_path(template_))
     return var
+
+
+# Calibration Actions
+@automation.register_action(
+    "opendps.request_calibration_report",
+    RequestCalibrationReportAction,
+    OPENDPS_ACTION_SCHEMA,
+)
+async def opendps_request_calibration_report_to_code(
+    config, action_id, template_arg, args
+):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+@automation.register_action(
+    "opendps.set_calibration",
+    SetCalibrationAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Required(CONF_CALIBRATION_NAME): cv.templatable(cv.string),
+            cv.Required(CONF_CALIBRATION_VALUE): cv.templatable(cv.float_),
+        }
+    ),
+)
+async def opendps_set_calibration_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_name = await cg.templatable(
+        config[CONF_CALIBRATION_NAME], args, cg.std_string
+    )
+    template_value = await cg.templatable(config[CONF_CALIBRATION_VALUE], args, float)
+    cg.add(var.set_name(template_name))
+    cg.add(var.set_value(template_value))
+    return var
+
+
+@automation.register_action(
+    "opendps.clear_calibration", ClearCalibrationAction, OPENDPS_ACTION_SCHEMA
+)
+async def opendps_clear_calibration_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)

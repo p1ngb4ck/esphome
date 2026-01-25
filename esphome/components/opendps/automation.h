@@ -158,5 +158,45 @@ template<typename... Ts> class UpgradeFirmwareAction : public Action<Ts...> {
   OpenDPS *parent_;
 };
 
+// Request Calibration Report Action
+template<typename... Ts> class RequestCalibrationReportAction : public Action<Ts...> {
+ public:
+  explicit RequestCalibrationReportAction(OpenDPS *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->request_calibration_report(); }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Set Calibration Action
+template<typename... Ts> class SetCalibrationAction : public Action<Ts...> {
+ public:
+  explicit SetCalibrationAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, name)
+  TEMPLATABLE_VALUE(float, value)
+
+  void play(Ts... x) override {
+    std::string name = this->name_.value(x...);
+    float value = this->value_.value(x...);
+    this->parent_->set_calibration(name, value);
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Clear Calibration Action
+template<typename... Ts> class ClearCalibrationAction : public Action<Ts...> {
+ public:
+  explicit ClearCalibrationAction(OpenDPS *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->clear_calibration(); }
+
+ protected:
+  OpenDPS *parent_;
+};
+
 }  // namespace opendps
 }  // namespace esphome
