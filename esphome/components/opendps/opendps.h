@@ -31,12 +31,6 @@
 namespace esphome {
 namespace opendps {
 
-// Datalogger output format
-enum class DatalogFormat : uint8_t {
-  CSV = 0,     // CSV format (timestamp,vin,vout,iout,power,enabled)
-  BINARY = 1,  // Binary format (compact, faster writes)
-};
-
 // Datalogger column flags (bitmask)
 enum DatalogColumn : uint16_t {
   DATALOG_COL_TIMESTAMP = (1 << 0),
@@ -58,7 +52,7 @@ struct DataloggerConfig {
   std::string filename_format;           // strftime format, e.g., "dps_%Y%m%d_%H%M%S.csv"
   std::string filename_id;               // Fixed filename ID, e.g., "session1" -> "session1.csv"
   uint32_t buffer_size{65536};           // Buffer size in bytes (default 64KB)
-  DatalogFormat format{DatalogFormat::CSV};
+  const char *format{0};
   uint16_t columns{DATALOG_COL_DEFAULT};
   uint32_t flush_interval_ms{5000};  // Auto-flush interval (0 = disabled)
 };

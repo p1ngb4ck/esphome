@@ -1421,7 +1421,7 @@ std::string OpenDPS::datalog_generate_filename_() {
   if (!this->datalog_config_.filename_id.empty()) {
     // Use fixed ID with appropriate extension
     filename = this->datalog_config_.filename_id;
-    if (this->datalog_config_.format == DatalogFormat::CSV) {
+    if (this->datalog_config_.format == "csv") {
       if (filename.find(".csv") == std::string::npos) {
         filename += ".csv";
       }
@@ -1440,7 +1440,7 @@ std::string OpenDPS::datalog_generate_filename_() {
     // Default format: dps_YYYYMMDD_HHMMSS.csv
     ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
     char time_buffer[ESPTime::STRFTIME_BUFFER_SIZE];
-    if (this->datalog_config_.format == DatalogFormat::CSV) {
+    if (this->datalog_config_.format == "csv") {
       now.strftime(time_buffer, sizeof(time_buffer), "dps_%Y%m%d_%H%M%S.csv");
     } else {
       now.strftime(time_buffer, sizeof(time_buffer), "dps_%Y%m%d_%H%M%S.bin");
@@ -1625,7 +1625,7 @@ void OpenDPS::datalog_write_sample_() {
   char row_buffer[256];
   size_t row_len;
 
-  if (this->datalog_config_.format == DatalogFormat::CSV) {
+  if (this->datalog_config_.format == "csv") {
     row_len = this->datalog_format_csv_row_(row_buffer, sizeof(row_buffer));
   } else {
     row_len = this->datalog_format_binary_row_(reinterpret_cast<uint8_t *>(row_buffer), sizeof(row_buffer));
@@ -1752,7 +1752,7 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   this->datalog_active_ = true;
 
   // Write CSV header if using CSV format
-  if (this->datalog_config_.format == DatalogFormat::CSV) {
+  if (this->datalog_config_.format == "csv") {
     this->datalog_write_csv_header_();
   }
 
