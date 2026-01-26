@@ -1833,9 +1833,11 @@ void OpenDPS::datalog_write_sample_() {
   uint8_t *active_buffer = this->datalog_buffers_[this->datalog_write_idx_];
   size_t &buffer_pos = this->datalog_buffer_sizes_[this->datalog_write_idx_];
 
-  // Check if we need to rotate buffers first
+  // Check if we need to rotate buffers first (buffer full)
+  bool just_rotated = false;
   if (buffer_pos + row_len > this->datalog_buffer_capacity_) {
     this->datalog_request_flush_();
+    just_rotated = true;
     // After rotation, update active buffer reference
     active_buffer = this->datalog_buffers_[this->datalog_write_idx_];
     buffer_pos = this->datalog_buffer_sizes_[this->datalog_write_idx_];
@@ -1849,20 +1851,23 @@ void OpenDPS::datalog_write_sample_() {
   }
 
   // Auto-flush if buffer is 75% full or flush interval elapsed
-  uint32_t now = millis();
-  bool should_flush = false;
+  // Skip if we just rotated to avoid double-rotation
+  if (!just_rotated) {
+    uint32_t now = millis();
+    bool should_flush = false;
 
-  if (buffer_pos > (this->datalog_buffer_capacity_ * 3 / 4)) {
-    should_flush = true;
-  }
+    if (buffer_pos > (this->datalog_buffer_capacity_ * 3 / 4)) {
+      should_flush = true;
+    }
 
-  if (this->datalog_config_.flush_interval_ms > 0 &&
-      (now - this->datalog_last_flush_) >= this->datalog_config_.flush_interval_ms) {
-    should_flush = true;
-  }
+    if (this->datalog_config_.flush_interval_ms > 0 &&
+        (now - this->datalog_last_flush_) >= this->datalog_config_.flush_interval_ms) {
+      should_flush = true;
+    }
 
-  if (should_flush && buffer_pos > 0) {
-    this->datalog_request_flush_();
+    if (should_flush && buffer_pos > 0) {
+      this->datalog_request_flush_();
+    }
   }
 }
 
