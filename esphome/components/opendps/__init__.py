@@ -198,6 +198,11 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TCP_BRIDGE): TCP_BRIDGE_SCHEMA,
             # Datalogger for high-speed data logging to storage with PSRAM buffering
             cv.Optional(CONF_DATALOGGER): DATALOGGER_SCHEMA,
+            # Bootloader baud rate - dpsboot may use different rate than main firmware
+            # Set to 0 (default) to use same rate as UART, or specify explicit rate (e.g., 9600)
+            cv.Optional(CONF_BOOTLOADER_BAUD_RATE, default=0): cv.int_range(
+                min=0, max=921600
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -212,6 +217,10 @@ async def to_code(config):
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
     cg.add(var.set_default_brightness(config[CONF_DEFAULT_BRIGHTNESS]))
+
+    # Bootloader baud rate for firmware upgrades
+    if config[CONF_BOOTLOADER_BAUD_RATE] > 0:
+        cg.add(var.set_bootloader_baud_rate(config[CONF_BOOTLOADER_BAUD_RATE]))
 
     # TCP bridge configuration for dpsctl.py access
     if CONF_TCP_BRIDGE in config:

@@ -128,9 +128,7 @@ enum ConnectionStatus : uint8_t {
   CONN_ETHERNET_OFF = 10,
   CONN_ETHERNET_CONNECTING = 11,
   CONN_ETHERNET_CONNECTED = 12,
-  CONN_ETHERNET_ERROR = 13,
-  // DPS firmware upgrade (shows arrow icon)
-  CONN_DPS_UPGRADING = 20
+  CONN_ETHERNET_ERROR = 13
 };
 
 struct OpenDPSData {
@@ -219,6 +217,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_default_brightness(uint8_t brightness) { this->default_brightness_ = brightness; }
   void set_tcp_bridge_enabled(bool enabled) { this->tcp_bridge_enabled_ = enabled; }
   void set_tcp_bridge_port(uint16_t port) { this->tcp_bridge_port_ = port; }
+  void set_bootloader_baud_rate(uint32_t baud_rate) { this->bootloader_baud_rate_ = baud_rate; }
 
   // Sensor registration
   void set_voltage_in_sensor(sensor::Sensor *sensor) { this->voltage_in_sensor_ = sensor; }
@@ -383,6 +382,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
   uint32_t upgrade_last_chunk_time_{0};
   uint8_t upgrade_retry_count_{0};
   uint16_t upgrade_crc_{0};
+  uint32_t bootloader_baud_rate_{0};        // Bootloader baud rate (0 = use same as UART)
+  uint32_t firmware_baud_rate_{0};          // Saved firmware baud rate to restore after upgrade
+  ESPPreferenceObject upgrade_state_pref_;  // Persists upgrade state across reboots
   static const uint32_t UPGRADE_CHUNK_TIMEOUT_MS = 3000;
   static const uint8_t UPGRADE_MAX_RETRIES = 3;
 
