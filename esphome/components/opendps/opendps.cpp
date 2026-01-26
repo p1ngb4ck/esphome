@@ -1565,21 +1565,28 @@ void OpenDPS::datalog_write_csv_header_() {
 
   // Write header directly to file using StorageDevice
   storage::StorageDevice *device = this->datalog_storage_device_;
+  ESP_LOGI(TAG, "Datalogger: writing CSV header, device=%p, relative_path=%s", device,
+           this->datalog_relative_path_.c_str());
   if (device != nullptr && device->is_available()) {
     // Use write_file to create file with header
-    if (!device->write_file(this->datalog_relative_path_.c_str(), reinterpret_cast<const uint8_t *>(header.data()),
-                            header.size())) {
+    ESP_LOGI(TAG, "Datalogger: calling device->write_file(%s, %d bytes)", this->datalog_relative_path_.c_str(),
+             header.size());
+    bool result = device->write_file(this->datalog_relative_path_.c_str(),
+                                     reinterpret_cast<const uint8_t *>(header.data()), header.size());
+    ESP_LOGI(TAG, "Datalogger: write_file returned %d", result);
+    if (!result) {
       ESP_LOGW(TAG, "Failed to write CSV header to %s", this->datalog_filepath_.c_str());
       return;
     }
   } else {
     // Fall back to global storage POSIX methods
+    ESP_LOGI(TAG, "Datalogger: using POSIX fallback for %s", this->datalog_filepath_.c_str());
     if (!storage::global_storage->write_file(this->datalog_filepath_, header)) {
       ESP_LOGW(TAG, "Failed to write CSV header via POSIX to %s", this->datalog_filepath_.c_str());
       return;
     }
   }
-  ESP_LOGD(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
+  ESP_LOGI(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
 #endif
 }
 
@@ -1890,11 +1897,22 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   std::string mount_point;
   std::string storage_path = this->datalog_config_.storage_path;
 
+  ESP_LOGI(TAG, "Datalogger: looking for storage device for path: %s", storage_path.c_str());
+  ESP_LOGI(TAG, "Datalogger: full filepath will be: %s", this->datalog_filepath_.c_str());
+
   // Find mount point by checking registered devices
   this->datalog_storage_device_ = nullptr;
-  for (auto *device : storage::global_storage->get_all_devices()) {
-    if (device->supports_filesystem() && device->is_available()) {
-      std::string device_mount = device->get_mount_path();
+  auto all_devices = storage::global_storage->get_all_devices();
+  ESP_LOGI(TAG, "Datalogger: found %d storage devices", all_devices.size());
+
+  for (auto *device : all_devices) {
+    std::string device_mount = device->get_mount_path();
+    bool supports_fs = device->supports_filesystem();
+    bool is_avail = device->is_available();
+    ESP_LOGI(TAG, "Datalogger: device mount=%s, supports_fs=%d, available=%d", device_mount.c_str(), supports_fs,
+             is_avail);
+
+    if (supports_fs && is_avail) {
       // Check if storage_path starts with this mount point
       if (!device_mount.empty() && storage_path.find(device_mount) == 0) {
         // Found a matching device
@@ -1902,6 +1920,7 @@ bool OpenDPS::start_datalog(const std::string &filename) {
           // Prefer longer (more specific) mount paths
           mount_point = device_mount;
           this->datalog_storage_device_ = device;
+          ESP_LOGI(TAG, "Datalogger: selected device with mount: %s", mount_point.c_str());
         }
       }
     }
@@ -1954,11 +1973,13 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   this->datalog_active_ = true;
 
   // Write CSV header if using CSV format (this also creates the file)
+  ESP_LOGI(TAG, "Datalogger: format=%s, writing header", this->datalog_config_.format.c_str());
   if (this->datalog_config_.format == "csv") {
     this->datalog_write_csv_header_();
   } else {
     // For binary format, create empty file first
     if (this->datalog_storage_device_ != nullptr) {
+      ESP_LOGI(TAG, "Datalogger: creating empty binary file: %s", this->datalog_relative_path_.c_str());
       this->datalog_storage_device_->write_file(this->datalog_relative_path_.c_str(), nullptr, 0);
     }
   }
