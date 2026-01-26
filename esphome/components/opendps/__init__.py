@@ -21,6 +21,9 @@ CONF_COLUMNS = "columns"
 CONF_FLUSH_INTERVAL = "flush_interval"
 CONF_FILENAME = "filename"
 
+DATALOG_FORMAT_CSV = "csv"
+DATALOG_FORMAT_BINARY = "binary"
+
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_OPENDPS_ID = "opendps_id"
 CONF_ENABLE = "enable"
@@ -79,11 +82,9 @@ CancelCalibrationAssistantAction = opendps_ns.class_(
 # Calibration assistant parameters struct
 CalibrationAssistantParams = opendps_ns.struct("CalibrationAssistantParams")
 
-# Datalogger enums and struct
-DatalogFormat = opendps_ns.enum("DatalogFormat")
 DATALOG_FORMATS = {
-    "csv": DatalogFormat.CSV,
-    "binary": DatalogFormat.BINARY,
+    "csv": DATALOG_FORMAT_CSV,
+    "bin": DATALOG_FORMAT_BINARY,
 }
 
 DataloggerConfig = opendps_ns.struct("DataloggerConfig")
@@ -128,6 +129,13 @@ TCP_BRIDGE_SCHEMA = cv.Schema(
 )
 
 
+def validate_format(value):
+    """Validate datalogger forma"""
+    if value not in DATALOG_FORMATS:
+        raise cv.Invalid(f"Unknown value '{value}'. Valid formats are csv and binary.")
+    return value
+
+
 def validate_columns(value):
     """Validate and convert column list to bitmask."""
     if isinstance(value, list):
@@ -150,7 +158,7 @@ DATALOGGER_SCHEMA = cv.Schema(
         cv.Optional(CONF_BUFFER_SIZE, default=65536): cv.int_range(
             min=1024, max=1048576
         ),
-        cv.Optional(CONF_FORMAT, default="csv"): cv.enum(DATALOG_FORMATS, lower=True),
+        cv.Optional(CONF_FORMAT, default="csv"): validate_format,
         cv.Optional(CONF_COLUMNS): validate_columns,
         cv.Optional(
             CONF_FLUSH_INTERVAL, default="5s"
