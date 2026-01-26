@@ -125,10 +125,10 @@ enum ConnectionStatus : uint8_t {
   CONN_WIFI_ERROR = 3,
   CONN_WIFI_UPGRADING = 4,
   // Ethernet status (extended for ESPHome)
-  CONN_ETHERNET_OFF = 10,
-  CONN_ETHERNET_CONNECTING = 11,
-  CONN_ETHERNET_CONNECTED = 12,
-  CONN_ETHERNET_ERROR = 13
+  CONN_ETHERNET_OFF = 5,
+  CONN_ETHERNET_CONNECTING = 6,
+  CONN_ETHERNET_CONNECTED = 7,
+  CONN_ETHERNET_ERROR = 8
 };
 
 struct OpenDPSData {
@@ -433,23 +433,25 @@ class OpenDPS : public Component, public uart::UARTDevice {
   uint32_t datalog_start_time_{0};
   uint32_t datalog_last_flush_{0};
 
-  // Double-buffer system for async writes (main loop writes to one, task writes other to SD)
-  uint8_t *datalog_buffer_a_{nullptr};  // Primary buffer (written by main loop)
-  uint8_t *datalog_buffer_b_{nullptr};  // Secondary buffer (written to storage by task)
-  size_t datalog_buffer_size_{0};
-  size_t datalog_buffer_pos_{0};    // Current write position in active buffer
-  size_t datalog_pending_size_{0};  // Size of data pending write in inactive buffer
+  // Triple-buffer system for async writes (main loop always has a buffer to write to)
+  // Buffer states: WRITING (main loop), QUEUED (waiting for flush), FLUSHING (being written to SD)
+  static const uint8_t DATALOG_NUM_BUFFERS = 3;
+  uint8_t *datalog_buffers_[DATALOG_NUM_BUFFERS]{nullptr, nullptr, nullptr};
+  size_t datalog_buffer_sizes_[DATALOG_NUM_BUFFERS]{0, 0, 0};  // Data size in each buffer
+  size_t datalog_buffer_capacity_{0};                          // Capacity of each buffer
+  uint8_t datalog_write_idx_{0};                               // Buffer currently being written by main loop
+  uint8_t datalog_queue_idx_{0xFF};                            // Buffer queued for flushing (or 0xFF if none)
+  uint8_t datalog_flush_idx_{0xFF};                            // Buffer currently being flushed (0xFF if none)
   bool datalog_buffer_in_psram_{false};
-  bool datalog_use_buffer_a_{true};  // Which buffer is currently active for writing
 
 #ifdef USE_ESP32
   // FreeRTOS synchronization for async writes
-  SemaphoreHandle_t datalog_mutex_{nullptr};      // Protects buffer swap
+  SemaphoreHandle_t datalog_mutex_{nullptr};      // Protects buffer state changes
   SemaphoreHandle_t datalog_write_sem_{nullptr};  // Signals write task
   TaskHandle_t datalog_task_handle_{nullptr};     // Background write task
   bool datalog_task_running_{false};
   static void datalog_write_task_(void *arg);  // FreeRTOS task function
-  void datalog_swap_buffers_();                // Swap active/pending buffers
+  void datalog_rotate_buffers_();              // Rotate buffers for triple-buffering
 #endif
 
   // Datalogger helper methods
