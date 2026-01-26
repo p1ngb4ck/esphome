@@ -452,8 +452,11 @@ The calibration assistant provides a step-by-step guided calibration process sim
 
 **Requirements:**
 - A calibrated multimeter
-- A known load resistor (for current calibration)
-- Variable input power supply (to provide two different input voltages)
+- A known load resistor (for current calibration, optional)
+- Your fixed DC power supply (typically 48V for DPS modules)
+
+**How it works:**
+The OpenDPS is typically powered by a single fixed DC power supply (e.g., 48V). Before starting calibration, measure your actual input voltage with a multimeter and provide this value. The calibration assistant uses this single-point measurement along with the ADC reading to calibrate the input voltage sensor.
 
 ```yaml
 # Global to store measured value for calibration steps
@@ -478,20 +481,16 @@ number:
 
 button:
   # Start calibration assistant
-  # Provide the two input voltages you'll use (measure with multimeter!)
-  # and optionally a load resistor for current calibration
+  # Measure your input voltage with a multimeter first!
   - platform: template
     name: "Start Calibration"
     on_press:
       - opendps.start_calibration_assistant:
           id: my_opendps
-          vin_low_mv: 12000      # First input voltage in mV (e.g., 12V)
-          vin_high_mv: 24000     # Second input voltage in mV (e.g., 24V)
-          vout_low_mv: 5000      # First output test voltage in mV
-          vout_high_mv: 20000    # Second output test voltage in mV
-          load_resistance: 10.0  # Load resistor in ohms (0 to skip current cal)
-          load_max_wattage: 50   # Load resistor max power in watts
-          max_dps_current: 5.0   # DPS model max current (5A for DPS5005)
+          vin_measured_mv: 48000  # Your measured input voltage in mV (e.g., 48V)
+          load_resistance: 10.0   # Load resistor in ohms (0 to skip current cal)
+          load_max_wattage: 50    # Load resistor max power in watts
+          max_dps_current: 5.0    # DPS model max current (5A for DPS5005)
 
   # Advance to next calibration step (provide measured value)
   - platform: template
@@ -511,22 +510,29 @@ button:
 
 **Calibration Workflow:**
 
-1. Press "Start Calibration" - watch logs for instructions
-2. The assistant will guide you through each step:
-   - **Input Voltage Calibration**: Apply low voltage, then high voltage to input
-   - **Output Voltage Calibration**: Measure output at two voltage points
+1. Measure your DC input voltage with a calibrated multimeter
+2. Press "Start Calibration" with your measured input voltage - watch logs for instructions
+3. The assistant will guide you through each step:
+   - **Input Voltage Calibration**: Uses your measured input voltage + ADC reading
+   - **Output Voltage Calibration**: Measure output at two voltage points (10% and 90%)
    - **Output Current Calibration** (if load provided): Measure current through load
    - **Current Limit Calibration**: Short output, measure current at limit
-3. At each step, enter the measured value and press "Submit Measurement"
-4. Watch the logs for prompts and results
-5. Calibration coefficients are automatically saved to the DPS
+4. At each step, enter the measured value and press "Submit Measurement"
+5. Watch the logs for prompts and results
+6. Calibration coefficients are automatically saved to the DPS
 
 **Example Log Output:**
 ```
-[I][opendps:xxx]: === CALIBRATION ASSISTANT ===
-[I][opendps:xxx]: Step 1: Input Voltage Calibration
-[I][opendps:xxx]: Apply 12.000V to DPS input and enter measured value
-[I][opendps:xxx]: Waiting for measurement...
+[I][opendps:xxx]: ========================================
+[I][opendps:xxx]: CALIBRATION ASSISTANT STARTED
+[I][opendps:xxx]: ========================================
+[I][opendps:xxx]: Parameters:
+[I][opendps:xxx]:   Vin Measured: 48000 mV
+[I][opendps:xxx]:   Load Resistance: 10.00 ohm
+[I][opendps:xxx]: ----------------------------------------
+[I][opendps:xxx]: STEP 1: Input Voltage Calibration
+[I][opendps:xxx]: Using measured input voltage: 48000 mV
+[I][opendps:xxx]: Reading ADC value from DPS...
 ```
 
 ### Home Assistant Integration Example

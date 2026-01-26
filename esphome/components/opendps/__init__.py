@@ -10,6 +10,17 @@ CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["sensor", "binary_sensor", "switch"]
 
+# Datalogger configuration keys
+CONF_DATALOGGER = "datalogger"
+CONF_STORAGE_PATH = "storage_path"
+CONF_FILENAME_FORMAT = "filename_format"
+CONF_FILENAME_ID = "filename_id"
+CONF_BUFFER_SIZE = "buffer_size"
+CONF_FORMAT = "format"
+CONF_COLUMNS = "columns"
+CONF_FLUSH_INTERVAL = "flush_interval"
+CONF_FILENAME = "filename"
+
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_OPENDPS_ID = "opendps_id"
 CONF_ENABLE = "enable"
@@ -68,11 +79,43 @@ CancelCalibrationAssistantAction = opendps_ns.class_(
 # Calibration assistant parameters struct
 CalibrationAssistantParams = opendps_ns.struct("CalibrationAssistantParams")
 
+# Datalogger enums and struct
+DatalogFormat = opendps_ns.enum("DatalogFormat")
+DATALOG_FORMATS = {
+    "csv": DatalogFormat.CSV,
+    "binary": DatalogFormat.BINARY,
+}
+
+DataloggerConfig = opendps_ns.struct("DataloggerConfig")
+
+# Datalogger column flags
+DATALOG_COL_TIMESTAMP = 1 << 0
+DATALOG_COL_VOLTAGE_IN = 1 << 1
+DATALOG_COL_VOLTAGE_OUT = 1 << 2
+DATALOG_COL_CURRENT_OUT = 1 << 3
+DATALOG_COL_POWER_OUT = 1 << 4
+DATALOG_COL_OUTPUT_ENABLED = 1 << 5
+DATALOG_COL_TEMP1 = 1 << 6
+DATALOG_COL_TEMP2 = 1 << 7
+
+DATALOG_COLUMNS = {
+    "timestamp": DATALOG_COL_TIMESTAMP,
+    "voltage_in": DATALOG_COL_VOLTAGE_IN,
+    "voltage_out": DATALOG_COL_VOLTAGE_OUT,
+    "current_out": DATALOG_COL_CURRENT_OUT,
+    "power_out": DATALOG_COL_POWER_OUT,
+    "output_enabled": DATALOG_COL_OUTPUT_ENABLED,
+    "temp1": DATALOG_COL_TEMP1,
+    "temp2": DATALOG_COL_TEMP2,
+}
+
+# Datalogger actions
+StartDatalogAction = opendps_ns.class_("StartDatalogAction", automation.Action)
+StopDatalogAction = opendps_ns.class_("StopDatalogAction", automation.Action)
+FlushDatalogAction = opendps_ns.class_("FlushDatalogAction", automation.Action)
+
 # Config keys for calibration assistant
-CONF_VIN_LOW_MV = "vin_low_mv"
-CONF_VIN_HIGH_MV = "vin_high_mv"
-CONF_VOUT_LOW_MV = "vout_low_mv"
-CONF_VOUT_HIGH_MV = "vout_high_mv"
+CONF_VIN_MEASURED_MV = "vin_measured_mv"
 CONF_LOAD_RESISTANCE = "load_resistance"
 CONF_LOAD_MAX_WATTAGE = "load_max_wattage"
 CONF_MAX_DPS_CURRENT = "max_dps_current"
@@ -81,6 +124,37 @@ CONF_MEASURED_VALUE = "measured_value"
 TCP_BRIDGE_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_TCP_BRIDGE_PORT, default=5005): cv.port,
+    }
+)
+
+
+def validate_columns(value):
+    """Validate and convert column list to bitmask."""
+    if isinstance(value, list):
+        result = 0
+        for col in value:
+            if col not in DATALOG_COLUMNS:
+                raise cv.Invalid(
+                    f"Unknown column '{col}'. Valid columns: {list(DATALOG_COLUMNS.keys())}"
+                )
+            result |= DATALOG_COLUMNS[col]
+        return result
+    raise cv.Invalid("columns must be a list")
+
+
+DATALOGGER_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_STORAGE_PATH, default="/sd/logs"): cv.string,
+        cv.Optional(CONF_FILENAME_FORMAT): cv.string,
+        cv.Optional(CONF_FILENAME_ID): cv.string,
+        cv.Optional(CONF_BUFFER_SIZE, default=65536): cv.int_range(
+            min=1024, max=1048576
+        ),
+        cv.Optional(CONF_FORMAT, default="csv"): cv.enum(DATALOG_FORMATS, lower=True),
+        cv.Optional(CONF_COLUMNS): validate_columns,
+        cv.Optional(
+            CONF_FLUSH_INTERVAL, default="5s"
+        ): cv.positive_time_period_milliseconds,
     }
 )
 
@@ -104,6 +178,8 @@ CONFIG_SCHEMA = (
             # TCP bridge for dpsctl.py access - allows external tools to communicate
             # directly with OpenDPS via TCP->UART bridge (default port 5005)
             cv.Optional(CONF_TCP_BRIDGE): TCP_BRIDGE_SCHEMA,
+            # Datalogger for high-speed data logging to storage with PSRAM buffering
+            cv.Optional(CONF_DATALOGGER): DATALOGGER_SCHEMA,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -128,6 +204,36 @@ async def to_code(config):
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
+
+    # Datalogger configuration
+    if CONF_DATALOGGER in config:
+        datalog_config = config[CONF_DATALOGGER]
+        # Create DataloggerConfig struct
+        config_struct = cg.StructInitializer(
+            DataloggerConfig,
+            ("storage_path", datalog_config[CONF_STORAGE_PATH]),
+            (
+                "filename_format",
+                datalog_config.get(CONF_FILENAME_FORMAT, ""),
+            ),
+            ("filename_id", datalog_config.get(CONF_FILENAME_ID, "")),
+            ("buffer_size", datalog_config[CONF_BUFFER_SIZE]),
+            ("format", datalog_config[CONF_FORMAT]),
+            (
+                "columns",
+                datalog_config.get(
+                    CONF_COLUMNS,
+                    DATALOG_COL_TIMESTAMP
+                    | DATALOG_COL_VOLTAGE_IN
+                    | DATALOG_COL_VOLTAGE_OUT
+                    | DATALOG_COL_CURRENT_OUT
+                    | DATALOG_COL_POWER_OUT
+                    | DATALOG_COL_OUTPUT_ENABLED,
+                ),
+            ),
+            ("flush_interval_ms", datalog_config[CONF_FLUSH_INTERVAL]),
+        )
+        cg.add(var.set_datalogger_config(config_struct))
 
 
 # Automation Actions
@@ -322,10 +428,7 @@ async def opendps_clear_calibration_to_code(config, action_id, template_arg, arg
     StartCalibrationAssistantAction,
     OPENDPS_ACTION_SCHEMA.extend(
         {
-            cv.Required(CONF_VIN_LOW_MV): cv.templatable(cv.float_),
-            cv.Required(CONF_VIN_HIGH_MV): cv.templatable(cv.float_),
-            cv.Optional(CONF_VOUT_LOW_MV, default=0): cv.templatable(cv.float_),
-            cv.Optional(CONF_VOUT_HIGH_MV, default=0): cv.templatable(cv.float_),
+            cv.Required(CONF_VIN_MEASURED_MV): cv.templatable(cv.float_),
             cv.Optional(CONF_LOAD_RESISTANCE, default=0): cv.templatable(cv.float_),
             cv.Optional(CONF_LOAD_MAX_WATTAGE, default=0): cv.templatable(cv.float_),
             cv.Optional(CONF_MAX_DPS_CURRENT, default=5.0): cv.templatable(cv.float_),
@@ -337,17 +440,11 @@ async def opendps_start_calibration_assistant_to_code(
 ):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
-    vin_low = await cg.templatable(config[CONF_VIN_LOW_MV], args, float)
-    vin_high = await cg.templatable(config[CONF_VIN_HIGH_MV], args, float)
-    vout_low = await cg.templatable(config[CONF_VOUT_LOW_MV], args, float)
-    vout_high = await cg.templatable(config[CONF_VOUT_HIGH_MV], args, float)
+    vin_measured = await cg.templatable(config[CONF_VIN_MEASURED_MV], args, float)
     load_r = await cg.templatable(config[CONF_LOAD_RESISTANCE], args, float)
     load_w = await cg.templatable(config[CONF_LOAD_MAX_WATTAGE], args, float)
     max_i = await cg.templatable(config[CONF_MAX_DPS_CURRENT], args, float)
-    cg.add(var.set_vin_low_mv(vin_low))
-    cg.add(var.set_vin_high_mv(vin_high))
-    cg.add(var.set_vout_low_mv(vout_low))
-    cg.add(var.set_vout_high_mv(vout_high))
+    cg.add(var.set_vin_measured_mv(vin_measured))
     cg.add(var.set_load_resistance(load_r))
     cg.add(var.set_load_max_wattage(load_w))
     cg.add(var.set_max_dps_current(max_i))
@@ -381,5 +478,43 @@ async def opendps_calibration_assistant_step_to_code(
 async def opendps_cancel_calibration_assistant_to_code(
     config, action_id, template_arg, args
 ):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+# Datalogger Actions
+@automation.register_action(
+    "opendps.start_datalog",
+    StartDatalogAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Optional(CONF_FILENAME, default=""): cv.templatable(cv.string),
+        }
+    ),
+)
+async def opendps_start_datalog_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_ = await cg.templatable(config[CONF_FILENAME], args, cg.std_string)
+    cg.add(var.set_filename(template_))
+    return var
+
+
+@automation.register_action(
+    "opendps.stop_datalog",
+    StopDatalogAction,
+    OPENDPS_ACTION_SCHEMA,
+)
+async def opendps_stop_datalog_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+@automation.register_action(
+    "opendps.flush_datalog",
+    FlushDatalogAction,
+    OPENDPS_ACTION_SCHEMA,
+)
+async def opendps_flush_datalog_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)

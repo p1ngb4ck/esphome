@@ -1,7 +1,10 @@
 #include "opendps.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/time.h"
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
@@ -490,6 +493,11 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         ESP_LOGD(TAG, "Query: Vin=%.3fV Vout=%.3fV Iout=%.3fA Out=%s", this->data_.v_in, this->data_.v_out,
                  this->data_.i_out, this->data_.output_enabled ? "ON" : "OFF");
 
+        // Write sample to datalogger if active
+        if (this->datalog_active_) {
+          this->datalog_write_sample_();
+        }
+
         // Fire on_connect trigger on first successful query
         if (!this->connected_) {
           this->connected_ = true;
@@ -851,10 +859,7 @@ void OpenDPS::start_calibration_assistant(const CalibrationAssistantParams &para
   ESP_LOGI(TAG, "CALIBRATION ASSISTANT STARTED");
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "Parameters:");
-  ESP_LOGI(TAG, "  Vin Low: %.0f mV", params.vin_low_mv);
-  ESP_LOGI(TAG, "  Vin High: %.0f mV", params.vin_high_mv);
-  ESP_LOGI(TAG, "  Vout Low: %.0f mV", params.vout_low_mv);
-  ESP_LOGI(TAG, "  Vout High: %.0f mV", params.vout_high_mv);
+  ESP_LOGI(TAG, "  Vin Measured: %.0f mV", params.vin_measured_mv);
   ESP_LOGI(TAG, "  Load Resistance: %.2f ohm", params.load_resistance);
   ESP_LOGI(TAG, "  Load Max Wattage: %.1f W", params.load_max_wattage);
   ESP_LOGI(TAG, "  Max DPS Current: %.1f A", params.max_dps_current);
@@ -868,22 +873,12 @@ void OpenDPS::calibration_assistant_step(float measured_value) {
   ESP_LOGI(TAG, "Calibration step received value: %.3f", measured_value);
 
   switch (this->cal_assistant_state_) {
-    case CAL_VIN_MEASURE_LOW:
-      // User confirmed low input voltage is connected
+    case CAL_VIN_MEASURE:
+      // User confirmed input voltage reading - we have ADC value and measured voltage
       this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
-      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_low_mv);
-      ESP_LOGI(TAG, "Recorded Vin low: ADC=%d, mV=%.0f", this->calibration_data_.vin_adc,
-               this->cal_assistant_params_.vin_low_mv);
-      this->cal_assistant_state_ = CAL_VIN_WAIT_HIGH;
-      this->cal_assistant_process_();
-      break;
-
-    case CAL_VIN_MEASURE_HIGH:
-      // User confirmed high input voltage is connected
-      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
-      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_high_mv);
-      ESP_LOGI(TAG, "Recorded Vin high: ADC=%d, mV=%.0f", this->calibration_data_.vin_adc,
-               this->cal_assistant_params_.vin_high_mv);
+      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_measured_mv);
+      ESP_LOGI(TAG, "Recorded Vin: ADC=%d, measured=%.0f mV", this->calibration_data_.vin_adc,
+               this->cal_assistant_params_.vin_measured_mv);
       this->cal_assistant_state_ = CAL_VIN_CALCULATE;
       this->cal_assistant_process_();
       break;
@@ -945,11 +940,8 @@ const char *OpenDPS::get_calibration_assistant_prompt() const {
     case CAL_IDLE:
       return "Calibration not started";
     case CAL_VIN_START:
-    case CAL_VIN_MEASURE_LOW:
-      return "Connect LOW input voltage, then call step()";
-    case CAL_VIN_WAIT_HIGH:
-    case CAL_VIN_MEASURE_HIGH:
-      return "Connect HIGH input voltage, then call step()";
+    case CAL_VIN_MEASURE:
+      return "Reading input voltage ADC, then call step()";
     case CAL_VIN_CALCULATE:
       return "Calculating input voltage calibration...";
     case CAL_VOUT_START:
@@ -993,22 +985,34 @@ void OpenDPS::cal_assistant_process_() {
       ESP_LOGI(TAG, "----------------------------------------");
       ESP_LOGI(TAG, "STEP 1: Input Voltage Calibration");
       ESP_LOGI(TAG, "----------------------------------------");
-      ESP_LOGI(TAG, "Connect the LOWER input voltage (%.0f mV) to the DPS", this->cal_assistant_params_.vin_low_mv);
+      ESP_LOGI(TAG, "Using measured input voltage: %.0f mV", this->cal_assistant_params_.vin_measured_mv);
+      ESP_LOGI(TAG, "Reading ADC value from DPS...");
       ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
       this->request_calibration_report();
-      this->cal_assistant_state_ = CAL_VIN_MEASURE_LOW;
-      break;
-
-    case CAL_VIN_WAIT_HIGH:
-      ESP_LOGI(TAG, "Connect the HIGHER input voltage (%.0f mV) to the DPS", this->cal_assistant_params_.vin_high_mv);
-      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
-      this->request_calibration_report();
-      this->cal_assistant_state_ = CAL_VIN_MEASURE_HIGH;
+      this->cal_assistant_state_ = CAL_VIN_MEASURE;
       break;
 
     case CAL_VIN_CALCULATE: {
-      auto [k, c] = this->cal_best_fit_(this->cal_samples_x_, this->cal_samples_y_);
-      ESP_LOGI(TAG, "Input voltage calibration: VIN_ADC_K=%.6f, VIN_ADC_C=%.6f", k, c);
+      // Single-point calibration using the measured voltage and ADC reading
+      // We assume the ADC is linear and passes through (0, 0), so we calculate:
+      // VIN_ADC_K = measured_mV / adc_reading
+      // VIN_ADC_C = 0 (assuming linear ADC with zero offset)
+      float adc_reading = this->cal_samples_x_[0];
+      float measured_mv = this->cal_samples_y_[0];
+
+      if (adc_reading <= 0) {
+        ESP_LOGE(TAG, "Invalid ADC reading: %.0f - cannot calibrate", adc_reading);
+        this->cal_assistant_state_ = CAL_ERROR;
+        this->cal_assistant_process_();
+        break;
+      }
+
+      float k = measured_mv / adc_reading;
+      float c = 0.0f;  // Assuming linear through origin
+
+      ESP_LOGI(TAG, "Input voltage calibration (single-point):");
+      ESP_LOGI(TAG, "  ADC reading: %.0f, Measured: %.0f mV", adc_reading, measured_mv);
+      ESP_LOGI(TAG, "  VIN_ADC_K=%.6f, VIN_ADC_C=%.6f", k, c);
       this->set_calibration("VIN_ADC_K", k);
       this->set_calibration("VIN_ADC_C", c);
 
@@ -1147,7 +1151,7 @@ void OpenDPS::cal_assistant_process_() {
 
     case CAL_IOUT_SWEEP: {
       // Calculate max safe voltage based on constraints
-      float v_max_input = this->cal_assistant_params_.vin_high_mv * 0.9f;
+      float v_max_input = this->cal_assistant_params_.vin_measured_mv * 0.9f;
       float v_max_wattage =
           sqrtf(this->cal_assistant_params_.load_max_wattage * this->cal_assistant_params_.load_resistance) * 1000.0f;
       float v_max_current =
@@ -1363,6 +1367,420 @@ float OpenDPS::get_current_setting() const {
     return std::stof(it->second) / 1000.0f;  // Convert mA to A
   }
   return 0.0f;
+}
+
+// ============================================================================
+// Datalogger Implementation
+// ============================================================================
+
+bool OpenDPS::datalog_ensure_buffer_() {
+  if (this->datalog_buffer_ != nullptr) {
+    return true;  // Already allocated
+  }
+
+  size_t requested_size = this->datalog_config_.buffer_size;
+  if (requested_size == 0) {
+    requested_size = 65536;  // Default 64KB
+  }
+
+#ifdef USE_ESP32
+  // Try to allocate in PSRAM first
+  if (esp_psram_is_initialized()) {
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (free_psram >= requested_size + 4096) {  // Leave some margin
+      this->datalog_buffer_ = static_cast<uint8_t *>(heap_caps_malloc(requested_size, MALLOC_CAP_SPIRAM));
+      if (this->datalog_buffer_ != nullptr) {
+        this->datalog_buffer_size_ = requested_size;
+        this->datalog_buffer_in_psram_ = true;
+        ESP_LOGI(TAG, "Datalogger buffer allocated in PSRAM: %u bytes", requested_size);
+        return true;
+      }
+    }
+    ESP_LOGW(TAG, "PSRAM allocation failed, falling back to regular heap");
+  }
+#endif
+
+  // Fall back to regular heap with smaller buffer
+  size_t heap_size = std::min(requested_size, static_cast<size_t>(8192));  // Max 8KB in regular heap
+  this->datalog_buffer_ = static_cast<uint8_t *>(malloc(heap_size));
+  if (this->datalog_buffer_ != nullptr) {
+    this->datalog_buffer_size_ = heap_size;
+    this->datalog_buffer_in_psram_ = false;
+    ESP_LOGI(TAG, "Datalogger buffer allocated in heap: %u bytes", heap_size);
+    return true;
+  }
+
+  ESP_LOGE(TAG, "Failed to allocate datalogger buffer");
+  return false;
+}
+
+std::string OpenDPS::datalog_generate_filename_() {
+  std::string filename;
+
+  // Priority: explicit filename > filename_id > filename_format > default
+  if (!this->datalog_config_.filename_id.empty()) {
+    // Use fixed ID with appropriate extension
+    filename = this->datalog_config_.filename_id;
+    if (this->datalog_config_.format == DatalogFormat::CSV) {
+      if (filename.find(".csv") == std::string::npos) {
+        filename += ".csv";
+      }
+    } else {
+      if (filename.find(".bin") == std::string::npos) {
+        filename += ".bin";
+      }
+    }
+  } else if (!this->datalog_config_.filename_format.empty()) {
+    // Use strftime format with ESPTime
+    ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
+    char time_buffer[ESPTime::STRFTIME_BUFFER_SIZE];
+    now.strftime(time_buffer, sizeof(time_buffer), this->datalog_config_.filename_format.c_str());
+    filename = time_buffer;
+  } else {
+    // Default format: dps_YYYYMMDD_HHMMSS.csv
+    ESPTime now = ESPTime::from_epoch_local(::time(nullptr));
+    char time_buffer[ESPTime::STRFTIME_BUFFER_SIZE];
+    if (this->datalog_config_.format == DatalogFormat::CSV) {
+      now.strftime(time_buffer, sizeof(time_buffer), "dps_%Y%m%d_%H%M%S.csv");
+    } else {
+      now.strftime(time_buffer, sizeof(time_buffer), "dps_%Y%m%d_%H%M%S.bin");
+    }
+    filename = time_buffer;
+  }
+
+  // Combine with storage path
+  std::string full_path = this->datalog_config_.storage_path;
+  if (!full_path.empty() && full_path.back() != '/') {
+    full_path += '/';
+  }
+  full_path += filename;
+
+  return full_path;
+}
+
+void OpenDPS::datalog_write_csv_header_() {
+#ifdef USE_STORAGE
+  if (storage::global_storage == nullptr) {
+    return;
+  }
+
+  std::string header;
+  uint16_t cols = this->datalog_config_.columns;
+
+  if (cols & DATALOG_COL_TIMESTAMP)
+    header += "timestamp_ms";
+  if (cols & DATALOG_COL_VOLTAGE_IN) {
+    if (!header.empty())
+      header += ",";
+    header += "voltage_in_v";
+  }
+  if (cols & DATALOG_COL_VOLTAGE_OUT) {
+    if (!header.empty())
+      header += ",";
+    header += "voltage_out_v";
+  }
+  if (cols & DATALOG_COL_CURRENT_OUT) {
+    if (!header.empty())
+      header += ",";
+    header += "current_out_a";
+  }
+  if (cols & DATALOG_COL_POWER_OUT) {
+    if (!header.empty())
+      header += ",";
+    header += "power_out_w";
+  }
+  if (cols & DATALOG_COL_OUTPUT_ENABLED) {
+    if (!header.empty())
+      header += ",";
+    header += "output_enabled";
+  }
+  if (cols & DATALOG_COL_TEMP1) {
+    if (!header.empty())
+      header += ",";
+    header += "temp1_c";
+  }
+  if (cols & DATALOG_COL_TEMP2) {
+    if (!header.empty())
+      header += ",";
+    header += "temp2_c";
+  }
+  header += "\n";
+
+  // Write header directly to file
+  storage::global_storage->write_file(this->datalog_filepath_, header);
+  ESP_LOGD(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
+#endif
+}
+
+size_t OpenDPS::datalog_format_csv_row_(char *buffer, size_t max_len) {
+  size_t pos = 0;
+  uint16_t cols = this->datalog_config_.columns;
+  bool first = true;
+
+  uint32_t timestamp = millis() - this->datalog_start_time_;
+
+  if (cols & DATALOG_COL_TIMESTAMP) {
+    pos += snprintf(buffer + pos, max_len - pos, "%lu", (unsigned long) timestamp);
+    first = false;
+  }
+  if (cols & DATALOG_COL_VOLTAGE_IN) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.3f" : ",%.3f", this->data_.v_in);
+    first = false;
+  }
+  if (cols & DATALOG_COL_VOLTAGE_OUT) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.3f" : ",%.3f", this->data_.v_out);
+    first = false;
+  }
+  if (cols & DATALOG_COL_CURRENT_OUT) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.3f" : ",%.3f", this->data_.i_out);
+    first = false;
+  }
+  if (cols & DATALOG_COL_POWER_OUT) {
+    float power = this->data_.v_out * this->data_.i_out;
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.3f" : ",%.3f", power);
+    first = false;
+  }
+  if (cols & DATALOG_COL_OUTPUT_ENABLED) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%d" : ",%d", this->data_.output_enabled ? 1 : 0);
+    first = false;
+  }
+  if (cols & DATALOG_COL_TEMP1) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.1f" : ",%.1f", this->data_.temp1);
+    first = false;
+  }
+  if (cols & DATALOG_COL_TEMP2) {
+    pos += snprintf(buffer + pos, max_len - pos, first ? "%.1f" : ",%.1f", this->data_.temp2);
+    first = false;
+  }
+
+  // Add newline
+  if (pos < max_len - 1) {
+    buffer[pos++] = '\n';
+  }
+
+  return pos;
+}
+
+size_t OpenDPS::datalog_format_binary_row_(uint8_t *buffer, size_t max_len) {
+  // Binary format: fixed-size struct for fast parsing
+  // Header byte (0xAA) + timestamp(4) + vin(4) + vout(4) + iout(4) + power(4) + enabled(1) + temp1(4) + temp2(4)
+  // Total: 30 bytes per sample (all columns)
+
+  if (max_len < 30) {
+    return 0;
+  }
+
+  size_t pos = 0;
+  uint16_t cols = this->datalog_config_.columns;
+
+  // Start marker
+  buffer[pos++] = 0xAA;
+
+  // Column presence flags (1 byte)
+  buffer[pos++] = static_cast<uint8_t>(cols & 0xFF);
+
+  if (cols & DATALOG_COL_TIMESTAMP) {
+    uint32_t timestamp = millis() - this->datalog_start_time_;
+    memcpy(buffer + pos, &timestamp, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_VOLTAGE_IN) {
+    memcpy(buffer + pos, &this->data_.v_in, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_VOLTAGE_OUT) {
+    memcpy(buffer + pos, &this->data_.v_out, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_CURRENT_OUT) {
+    memcpy(buffer + pos, &this->data_.i_out, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_POWER_OUT) {
+    float power = this->data_.v_out * this->data_.i_out;
+    memcpy(buffer + pos, &power, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_OUTPUT_ENABLED) {
+    buffer[pos++] = this->data_.output_enabled ? 1 : 0;
+  }
+  if (cols & DATALOG_COL_TEMP1) {
+    memcpy(buffer + pos, &this->data_.temp1, 4);
+    pos += 4;
+  }
+  if (cols & DATALOG_COL_TEMP2) {
+    memcpy(buffer + pos, &this->data_.temp2, 4);
+    pos += 4;
+  }
+
+  return pos;
+}
+
+void OpenDPS::datalog_write_sample_() {
+  if (!this->datalog_active_ || this->datalog_buffer_ == nullptr) {
+    return;
+  }
+
+  // Format the row into a temporary buffer
+  char row_buffer[256];
+  size_t row_len;
+
+  if (this->datalog_config_.format == DatalogFormat::CSV) {
+    row_len = this->datalog_format_csv_row_(row_buffer, sizeof(row_buffer));
+  } else {
+    row_len = this->datalog_format_binary_row_(reinterpret_cast<uint8_t *>(row_buffer), sizeof(row_buffer));
+  }
+
+  if (row_len == 0) {
+    return;
+  }
+
+  // Check if we need to flush first
+  if (this->datalog_buffer_pos_ + row_len > this->datalog_buffer_size_) {
+    this->datalog_flush_buffer_();
+  }
+
+  // Copy row to buffer
+  if (this->datalog_buffer_pos_ + row_len <= this->datalog_buffer_size_) {
+    memcpy(this->datalog_buffer_ + this->datalog_buffer_pos_, row_buffer, row_len);
+    this->datalog_buffer_pos_ += row_len;
+    this->datalog_sample_count_++;
+  }
+
+  // Auto-flush if buffer is 75% full or flush interval elapsed
+  uint32_t now = millis();
+  bool should_flush = false;
+
+  if (this->datalog_buffer_pos_ > (this->datalog_buffer_size_ * 3 / 4)) {
+    should_flush = true;
+  }
+
+  if (this->datalog_config_.flush_interval_ms > 0 &&
+      (now - this->datalog_last_flush_) >= this->datalog_config_.flush_interval_ms) {
+    should_flush = true;
+  }
+
+  if (should_flush && this->datalog_buffer_pos_ > 0) {
+    this->datalog_flush_buffer_();
+  }
+}
+
+void OpenDPS::datalog_flush_buffer_() {
+#ifdef USE_STORAGE
+  if (storage::global_storage == nullptr || this->datalog_buffer_pos_ == 0) {
+    return;
+  }
+
+  ESP_LOGD(TAG, "Flushing datalog buffer: %u bytes to %s", this->datalog_buffer_pos_, this->datalog_filepath_.c_str());
+
+  // Find the storage device for our path
+  storage::StorageDevice *device =
+      storage::global_storage->get_device_by_mount_path(this->datalog_config_.storage_path);
+  if (device != nullptr && device->is_available()) {
+    // Use append_file for efficient appending
+    if (!device->append_file(this->datalog_filepath_.c_str(), this->datalog_buffer_, this->datalog_buffer_pos_)) {
+      ESP_LOGW(TAG, "Failed to append to datalog file");
+    }
+  } else {
+    // Fall back to network storage or POSIX
+    std::string existing;
+    if (storage::global_storage->file_exists(this->datalog_filepath_)) {
+      existing = storage::global_storage->read_file(this->datalog_filepath_);
+    }
+    existing.append(reinterpret_cast<char *>(this->datalog_buffer_), this->datalog_buffer_pos_);
+    if (!storage::global_storage->write_file(this->datalog_filepath_, existing)) {
+      ESP_LOGW(TAG, "Failed to write datalog file");
+    }
+  }
+
+  this->datalog_buffer_pos_ = 0;
+  this->datalog_last_flush_ = millis();
+#endif
+}
+
+bool OpenDPS::start_datalog(const std::string &filename) {
+#ifndef USE_STORAGE
+  ESP_LOGE(TAG, "Datalogger requires storage component");
+  return false;
+#else
+  if (storage::global_storage == nullptr) {
+    ESP_LOGE(TAG, "Storage component not initialized");
+    return false;
+  }
+
+  if (this->datalog_active_) {
+    ESP_LOGW(TAG, "Datalogger already active, stopping previous session");
+    this->stop_datalog();
+  }
+
+  // Allocate buffer
+  if (!this->datalog_ensure_buffer_()) {
+    return false;
+  }
+
+  // Generate or use provided filename
+  if (!filename.empty()) {
+    this->datalog_filepath_ = filename;
+    // Ensure path is absolute
+    if (this->datalog_filepath_[0] != '/') {
+      std::string path = this->datalog_config_.storage_path;
+      if (!path.empty() && path.back() != '/') {
+        path += '/';
+      }
+      this->datalog_filepath_ = path + this->datalog_filepath_;
+    }
+  } else {
+    this->datalog_filepath_ = this->datalog_generate_filename_();
+  }
+
+  // Ensure the directory exists
+  std::string dir_path = this->datalog_filepath_.substr(0, this->datalog_filepath_.rfind('/'));
+  if (!dir_path.empty()) {
+    storage::StorageDevice *device = storage::global_storage->get_device_by_mount_path(dir_path);
+    if (device != nullptr && device->is_available()) {
+      if (!device->dir_exists(dir_path.c_str())) {
+        device->create_dir(dir_path.c_str());
+      }
+    }
+  }
+
+  // Initialize state
+  this->datalog_buffer_pos_ = 0;
+  this->datalog_sample_count_ = 0;
+  this->datalog_start_time_ = millis();
+  this->datalog_last_flush_ = millis();
+  this->datalog_active_ = true;
+
+  // Write CSV header if using CSV format
+  if (this->datalog_config_.format == DatalogFormat::CSV) {
+    this->datalog_write_csv_header_();
+  }
+
+  ESP_LOGI(TAG, "Datalogger started: %s (buffer: %u bytes in %s)", this->datalog_filepath_.c_str(),
+           this->datalog_buffer_size_, this->datalog_buffer_in_psram_ ? "PSRAM" : "heap");
+
+  return true;
+#endif
+}
+
+void OpenDPS::stop_datalog() {
+  if (!this->datalog_active_) {
+    return;
+  }
+
+  // Flush remaining buffer
+  this->datalog_flush_buffer_();
+
+  this->datalog_active_ = false;
+
+  ESP_LOGI(TAG, "Datalogger stopped: %u samples logged to %s", this->datalog_sample_count_,
+           this->datalog_filepath_.c_str());
+}
+
+void OpenDPS::flush_datalog() {
+  if (this->datalog_active_) {
+    this->datalog_flush_buffer_();
+  }
 }
 
 void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {

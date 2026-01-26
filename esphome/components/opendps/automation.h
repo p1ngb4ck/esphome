@@ -203,20 +203,14 @@ template<typename... Ts> class StartCalibrationAssistantAction : public Action<T
  public:
   explicit StartCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
 
-  TEMPLATABLE_VALUE(float, vin_low_mv)
-  TEMPLATABLE_VALUE(float, vin_high_mv)
-  TEMPLATABLE_VALUE(float, vout_low_mv)
-  TEMPLATABLE_VALUE(float, vout_high_mv)
+  TEMPLATABLE_VALUE(float, vin_measured_mv)
   TEMPLATABLE_VALUE(float, load_resistance)
   TEMPLATABLE_VALUE(float, load_max_wattage)
   TEMPLATABLE_VALUE(float, max_dps_current)
 
   void play(Ts... x) override {
     CalibrationAssistantParams params;
-    params.vin_low_mv = this->vin_low_mv_.value(x...);
-    params.vin_high_mv = this->vin_high_mv_.value(x...);
-    params.vout_low_mv = this->vout_low_mv_.value(x...);
-    params.vout_high_mv = this->vout_high_mv_.value(x...);
+    params.vin_measured_mv = this->vin_measured_mv_.value(x...);
     params.load_resistance = this->load_resistance_.value(x...);
     params.load_max_wattage = this->load_max_wattage_.value(x...);
     params.max_dps_current = this->max_dps_current_.value(x...);
@@ -249,6 +243,48 @@ template<typename... Ts> class CancelCalibrationAssistantAction : public Action<
   explicit CancelCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
 
   void play(Ts... x) override { this->parent_->cancel_calibration_assistant(); }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// ============================================================================
+// Datalogger Actions
+// ============================================================================
+
+// Start Datalog Action
+template<typename... Ts> class StartDatalogAction : public Action<Ts...> {
+ public:
+  explicit StartDatalogAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, filename)
+
+  void play(Ts... x) override {
+    std::string filename = this->filename_.value(x...);
+    this->parent_->start_datalog(filename);
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Stop Datalog Action
+template<typename... Ts> class StopDatalogAction : public Action<Ts...> {
+ public:
+  explicit StopDatalogAction(OpenDPS *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->stop_datalog(); }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Flush Datalog Action
+template<typename... Ts> class FlushDatalogAction : public Action<Ts...> {
+ public:
+  explicit FlushDatalogAction(OpenDPS *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->flush_datalog(); }
 
  protected:
   OpenDPS *parent_;

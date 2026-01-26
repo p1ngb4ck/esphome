@@ -23,8 +23,45 @@
 #include <functional>
 #include <memory>
 
+#ifdef USE_ESP32
+#include <esp_heap_caps.h>
+#include <esp_psram.h>
+#endif
+
 namespace esphome {
 namespace opendps {
+
+// Datalogger output format
+enum class DatalogFormat : uint8_t {
+  CSV = 0,     // CSV format (timestamp,vin,vout,iout,power,enabled)
+  BINARY = 1,  // Binary format (compact, faster writes)
+};
+
+// Datalogger column flags (bitmask)
+enum DatalogColumn : uint16_t {
+  DATALOG_COL_TIMESTAMP = (1 << 0),
+  DATALOG_COL_VOLTAGE_IN = (1 << 1),
+  DATALOG_COL_VOLTAGE_OUT = (1 << 2),
+  DATALOG_COL_CURRENT_OUT = (1 << 3),
+  DATALOG_COL_POWER_OUT = (1 << 4),
+  DATALOG_COL_OUTPUT_ENABLED = (1 << 5),
+  DATALOG_COL_TEMP1 = (1 << 6),
+  DATALOG_COL_TEMP2 = (1 << 7),
+  // Default: all columns except temperature
+  DATALOG_COL_DEFAULT = DATALOG_COL_TIMESTAMP | DATALOG_COL_VOLTAGE_IN | DATALOG_COL_VOLTAGE_OUT |
+                        DATALOG_COL_CURRENT_OUT | DATALOG_COL_POWER_OUT | DATALOG_COL_OUTPUT_ENABLED,
+};
+
+// Datalogger configuration
+struct DataloggerConfig {
+  std::string storage_path{"/sd/logs"};  // Base path for log files
+  std::string filename_format;           // strftime format, e.g., "dps_%Y%m%d_%H%M%S.csv"
+  std::string filename_id;               // Fixed filename ID, e.g., "session1" -> "session1.csv"
+  uint32_t buffer_size{65536};           // Buffer size in bytes (default 64KB)
+  DatalogFormat format{DatalogFormat::CSV};
+  uint16_t columns{DATALOG_COL_DEFAULT};
+  uint32_t flush_interval_ms{5000};  // Auto-flush interval (0 = disabled)
+};
 
 // OpenDPS Protocol Commands
 enum OpenDPSCommand : uint8_t {
@@ -99,10 +136,7 @@ struct OpenDPSData {
 
 // Calibration assistant parameters
 struct CalibrationAssistantParams {
-  float vin_low_mv{0};         // First (lower) input voltage in mV
-  float vin_high_mv{0};        // Second (higher) input voltage in mV
-  float vout_low_mv{0};        // First measured output voltage in mV
-  float vout_high_mv{0};       // Second measured output voltage in mV
+  float vin_measured_mv{0};    // Measured input voltage in mV (from multimeter)
   float load_resistance{0};    // Load resistance in ohms for current calibration
   float load_max_wattage{0};   // Load max wattage for current calibration
   float max_dps_current{5.0};  // Max output current of DPS model (default 5A)
@@ -111,11 +145,9 @@ struct CalibrationAssistantParams {
 // Calibration assistant states
 enum CalibrationAssistantState : uint8_t {
   CAL_IDLE = 0,
-  // Input voltage calibration
+  // Input voltage calibration (single-point with measured value)
   CAL_VIN_START,
-  CAL_VIN_MEASURE_LOW,
-  CAL_VIN_WAIT_HIGH,
-  CAL_VIN_MEASURE_HIGH,
+  CAL_VIN_MEASURE,
   CAL_VIN_CALCULATE,
   // Output voltage calibration
   CAL_VOUT_START,
@@ -237,6 +269,33 @@ class OpenDPS : public Component, public uart::UARTDevice {
     this->on_calibration_callback_.add(std::move(callback));
   }
 
+  //========================================================================
+  // Datalogger - High-speed data logging with PSRAM buffering
+  //========================================================================
+
+  /// Configure datalogger settings (call before start_datalog)
+  void set_datalogger_config(const DataloggerConfig &config) { this->datalog_config_ = config; }
+
+  /// Start data logging
+  /// @param filename Optional filename (uses config format/id if empty)
+  /// @return true if logging started successfully
+  bool start_datalog(const std::string &filename = "");
+
+  /// Stop data logging and flush remaining buffer
+  void stop_datalog();
+
+  /// Force flush buffer to storage
+  void flush_datalog();
+
+  /// Check if datalogger is active
+  bool is_datalog_active() const { return this->datalog_active_; }
+
+  /// Get current log file path
+  const std::string &get_datalog_filepath() const { return this->datalog_filepath_; }
+
+  /// Get number of samples logged in current session
+  uint32_t get_datalog_sample_count() const { return this->datalog_sample_count_; }
+
  protected:
   // Frame handling
   void send_frame_(const std::vector<uint8_t> &payload);
@@ -339,6 +398,31 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // TCP bridge configuration (always present for Python codegen compatibility)
   bool tcp_bridge_enabled_{false};
   uint16_t tcp_bridge_port_{5005};
+
+  //========================================================================
+  // Datalogger state
+  //========================================================================
+  DataloggerConfig datalog_config_;
+  bool datalog_active_{false};
+  std::string datalog_filepath_;
+  uint32_t datalog_sample_count_{0};
+  uint32_t datalog_start_time_{0};
+  uint32_t datalog_last_flush_{0};
+
+  // PSRAM buffer for high-speed logging
+  uint8_t *datalog_buffer_{nullptr};
+  size_t datalog_buffer_size_{0};
+  size_t datalog_buffer_pos_{0};
+  bool datalog_buffer_in_psram_{false};
+
+  // Datalogger helper methods
+  void datalog_write_sample_();
+  void datalog_write_csv_header_();
+  bool datalog_ensure_buffer_();
+  void datalog_flush_buffer_();
+  std::string datalog_generate_filename_();
+  size_t datalog_format_csv_row_(char *buffer, size_t max_len);
+  size_t datalog_format_binary_row_(uint8_t *buffer, size_t max_len);
 
 #if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   // TCP bridge for dpsctl.py access (port 5005 by default)
