@@ -8,6 +8,7 @@
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
+#include "esphome/components/storage/storage_device.h"
 #endif
 
 #ifdef USE_ESP32
@@ -1374,7 +1375,7 @@ float OpenDPS::get_current_setting() const {
 // ============================================================================
 
 bool OpenDPS::datalog_ensure_buffer_() {
-  if (this->datalog_buffer_ != nullptr) {
+  if (this->datalog_buffer_a_ != nullptr) {
     return true;  // Already allocated
   }
 
@@ -1383,32 +1384,88 @@ bool OpenDPS::datalog_ensure_buffer_() {
     requested_size = 65536;  // Default 64KB
   }
 
+  // We need two buffers for double-buffering
+  size_t total_size = requested_size * 2;
+
 #ifdef USE_ESP32
   // Try to allocate in PSRAM first
   if (esp_psram_is_initialized()) {
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    if (free_psram >= requested_size + 4096) {  // Leave some margin
-      this->datalog_buffer_ = static_cast<uint8_t *>(heap_caps_malloc(requested_size, MALLOC_CAP_SPIRAM));
-      if (this->datalog_buffer_ != nullptr) {
+    if (free_psram >= total_size + 8192) {  // Leave some margin
+      this->datalog_buffer_a_ = static_cast<uint8_t *>(heap_caps_malloc(requested_size, MALLOC_CAP_SPIRAM));
+      this->datalog_buffer_b_ = static_cast<uint8_t *>(heap_caps_malloc(requested_size, MALLOC_CAP_SPIRAM));
+      if (this->datalog_buffer_a_ != nullptr && this->datalog_buffer_b_ != nullptr) {
         this->datalog_buffer_size_ = requested_size;
         this->datalog_buffer_in_psram_ = true;
-        ESP_LOGI(TAG, "Datalogger buffer allocated in PSRAM: %u bytes", requested_size);
+
+        // Create FreeRTOS synchronization primitives
+        this->datalog_mutex_ = xSemaphoreCreateMutex();
+        this->datalog_write_sem_ = xSemaphoreCreateBinary();
+
+        if (this->datalog_mutex_ == nullptr || this->datalog_write_sem_ == nullptr) {
+          ESP_LOGE(TAG, "Failed to create FreeRTOS semaphores");
+          heap_caps_free(this->datalog_buffer_a_);
+          heap_caps_free(this->datalog_buffer_b_);
+          this->datalog_buffer_a_ = nullptr;
+          this->datalog_buffer_b_ = nullptr;
+          return false;
+        }
+
+        // Create background write task with lower priority than main loop
+        this->datalog_task_running_ = true;
+        BaseType_t result = xTaskCreatePinnedToCore(datalog_write_task_, "datalog_write", 4096, this,
+                                                    1,  // Priority 1 (low, main loop is higher)
+                                                    &this->datalog_task_handle_,
+                                                    1  // Run on core 1 (app core)
+        );
+        if (result != pdPASS) {
+          ESP_LOGE(TAG, "Failed to create datalog write task");
+          vSemaphoreDelete(this->datalog_mutex_);
+          vSemaphoreDelete(this->datalog_write_sem_);
+          heap_caps_free(this->datalog_buffer_a_);
+          heap_caps_free(this->datalog_buffer_b_);
+          this->datalog_buffer_a_ = nullptr;
+          this->datalog_buffer_b_ = nullptr;
+          this->datalog_mutex_ = nullptr;
+          this->datalog_write_sem_ = nullptr;
+          return false;
+        }
+
+        ESP_LOGI(TAG, "Datalogger double-buffer allocated in PSRAM: 2x%u bytes, async task started", requested_size);
         return true;
       }
+      // Cleanup partial allocation
+      if (this->datalog_buffer_a_ != nullptr)
+        heap_caps_free(this->datalog_buffer_a_);
+      if (this->datalog_buffer_b_ != nullptr)
+        heap_caps_free(this->datalog_buffer_b_);
+      this->datalog_buffer_a_ = nullptr;
+      this->datalog_buffer_b_ = nullptr;
     }
-    ESP_LOGW(TAG, "PSRAM allocation failed, falling back to regular heap");
+    ESP_LOGW(TAG, "PSRAM allocation failed, falling back to regular heap (synchronous writes)");
   }
-#endif
 
-  // Fall back to regular heap with smaller buffer
+  // Fall back to regular heap with single smaller buffer (synchronous writes)
   size_t heap_size = std::min(requested_size, static_cast<size_t>(8192));  // Max 8KB in regular heap
-  this->datalog_buffer_ = static_cast<uint8_t *>(malloc(heap_size));
-  if (this->datalog_buffer_ != nullptr) {
+  this->datalog_buffer_a_ = static_cast<uint8_t *>(malloc(heap_size));
+  if (this->datalog_buffer_a_ != nullptr) {
     this->datalog_buffer_size_ = heap_size;
     this->datalog_buffer_in_psram_ = false;
-    ESP_LOGI(TAG, "Datalogger buffer allocated in heap: %u bytes", heap_size);
+    this->datalog_buffer_b_ = nullptr;  // No double-buffering without PSRAM
+    ESP_LOGI(TAG, "Datalogger single-buffer allocated in heap: %u bytes (synchronous writes)", heap_size);
     return true;
   }
+#else
+  // Non-ESP32: single buffer, synchronous writes
+  size_t heap_size = std::min(requested_size, static_cast<size_t>(8192));
+  this->datalog_buffer_a_ = static_cast<uint8_t *>(malloc(heap_size));
+  if (this->datalog_buffer_a_ != nullptr) {
+    this->datalog_buffer_size_ = heap_size;
+    this->datalog_buffer_in_psram_ = false;
+    ESP_LOGI(TAG, "Datalogger buffer allocated: %u bytes", heap_size);
+    return true;
+  }
+#endif
 
   ESP_LOGE(TAG, "Failed to allocate datalogger buffer");
   return false;
@@ -1506,8 +1563,22 @@ void OpenDPS::datalog_write_csv_header_() {
   }
   header += "\n";
 
-  // Write header directly to file
-  storage::global_storage->write_file(this->datalog_filepath_, header);
+  // Write header directly to file using StorageDevice
+  storage::StorageDevice *device = this->datalog_storage_device_;
+  if (device != nullptr && device->is_available()) {
+    // Use write_file to create file with header
+    if (!device->write_file(this->datalog_relative_path_.c_str(), reinterpret_cast<const uint8_t *>(header.data()),
+                            header.size())) {
+      ESP_LOGW(TAG, "Failed to write CSV header to %s", this->datalog_filepath_.c_str());
+      return;
+    }
+  } else {
+    // Fall back to global storage POSIX methods
+    if (!storage::global_storage->write_file(this->datalog_filepath_, header)) {
+      ESP_LOGW(TAG, "Failed to write CSV header via POSIX to %s", this->datalog_filepath_.c_str());
+      return;
+    }
+  }
   ESP_LOGD(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
 #endif
 }
@@ -1617,7 +1688,7 @@ size_t OpenDPS::datalog_format_binary_row_(uint8_t *buffer, size_t max_len) {
 }
 
 void OpenDPS::datalog_write_sample_() {
-  if (!this->datalog_active_ || this->datalog_buffer_ == nullptr) {
+  if (!this->datalog_active_ || this->datalog_buffer_a_ == nullptr) {
     return;
   }
 
@@ -1635,14 +1706,20 @@ void OpenDPS::datalog_write_sample_() {
     return;
   }
 
-  // Check if we need to flush first
-  if (this->datalog_buffer_pos_ + row_len > this->datalog_buffer_size_) {
-    this->datalog_flush_buffer_();
+  // Get the active buffer (buffer_b may be nullptr on non-ESP32 or without PSRAM)
+  uint8_t *active_buffer = this->datalog_buffer_a_;
+  if (!this->datalog_use_buffer_a_ && this->datalog_buffer_b_ != nullptr) {
+    active_buffer = this->datalog_buffer_b_;
   }
 
-  // Copy row to buffer
+  // Check if we need to swap/flush first
+  if (this->datalog_buffer_pos_ + row_len > this->datalog_buffer_size_) {
+    this->datalog_request_flush_();
+  }
+
+  // Copy row to active buffer
   if (this->datalog_buffer_pos_ + row_len <= this->datalog_buffer_size_) {
-    memcpy(this->datalog_buffer_ + this->datalog_buffer_pos_, row_buffer, row_len);
+    memcpy(active_buffer + this->datalog_buffer_pos_, row_buffer, row_len);
     this->datalog_buffer_pos_ += row_len;
     this->datalog_sample_count_++;
   }
@@ -1661,8 +1738,75 @@ void OpenDPS::datalog_write_sample_() {
   }
 
   if (should_flush && this->datalog_buffer_pos_ > 0) {
-    this->datalog_flush_buffer_();
+    this->datalog_request_flush_();
   }
+}
+
+#if defined(USE_ESP32) && defined(USE_STORAGE)
+void OpenDPS::datalog_swap_buffers_() {
+  // Swap active buffer (called with mutex held or from main thread before task signal)
+  this->datalog_pending_size_ = this->datalog_buffer_pos_;
+  this->datalog_buffer_pos_ = 0;
+  this->datalog_use_buffer_a_ = !this->datalog_use_buffer_a_;
+}
+
+void OpenDPS::datalog_write_task_(void *arg) {
+  OpenDPS *self = static_cast<OpenDPS *>(arg);
+
+  while (self->datalog_task_running_) {
+    // Wait for signal to write (with timeout for graceful shutdown)
+    if (xSemaphoreTake(self->datalog_write_sem_, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      if (!self->datalog_task_running_) {
+        break;
+      }
+
+      // Get the buffer that needs writing (the one we just swapped away from)
+      uint8_t *write_buffer = self->datalog_use_buffer_a_ ? self->datalog_buffer_b_ : self->datalog_buffer_a_;
+      size_t write_size = self->datalog_pending_size_;
+
+      if (write_size > 0 && storage::global_storage != nullptr) {
+        storage::StorageDevice *device = self->datalog_storage_device_;
+        if (device != nullptr && device->is_available()) {
+          if (!device->append_file(self->datalog_relative_path_.c_str(), write_buffer, write_size)) {
+            ESP_LOGW(TAG, "Async write failed: %s", self->datalog_relative_path_.c_str());
+          }
+        } else {
+          // POSIX fallback
+          FILE *f = fopen(self->datalog_filepath_.c_str(), "ab");
+          if (f != nullptr) {
+            fwrite(write_buffer, 1, write_size, f);
+            fclose(f);
+          }
+        }
+        self->datalog_pending_size_ = 0;
+        self->datalog_last_flush_ = millis();
+      }
+    }
+  }
+
+  // Task cleanup
+  vTaskDelete(nullptr);
+}
+#endif
+
+void OpenDPS::datalog_request_flush_() {
+#if defined(USE_ESP32) && defined(USE_STORAGE)
+  // If we have double-buffering with async task, swap and signal
+  if (this->datalog_buffer_b_ != nullptr && this->datalog_write_sem_ != nullptr) {
+    // Only swap if pending buffer is empty (previous write completed)
+    if (this->datalog_pending_size_ == 0) {
+      this->datalog_swap_buffers_();
+      xSemaphoreGive(this->datalog_write_sem_);
+    } else {
+      // Previous write still pending - drop samples or wait?
+      // For now, just log a warning (data will accumulate until next flush succeeds)
+      ESP_LOGW(TAG, "Datalog write still pending, skipping flush request");
+    }
+    return;
+  }
+#endif
+  // Fallback to synchronous flush
+  this->datalog_flush_buffer_();
 }
 
 void OpenDPS::datalog_flush_buffer_() {
@@ -1671,25 +1815,33 @@ void OpenDPS::datalog_flush_buffer_() {
     return;
   }
 
+  // Get the active buffer for synchronous flush
+  uint8_t *active_buffer = this->datalog_use_buffer_a_ ? this->datalog_buffer_a_ : this->datalog_buffer_b_;
+  if (active_buffer == nullptr) {
+    active_buffer = this->datalog_buffer_a_;  // Fallback for single-buffer mode
+  }
+
   ESP_LOGD(TAG, "Flushing datalog buffer: %u bytes to %s", this->datalog_buffer_pos_, this->datalog_filepath_.c_str());
 
-  // Find the storage device for our path
-  storage::StorageDevice *device =
-      storage::global_storage->get_device_by_mount_path(this->datalog_config_.storage_path);
+  // Use cached storage device with relative path
+  storage::StorageDevice *device = this->datalog_storage_device_;
   if (device != nullptr && device->is_available()) {
-    // Use append_file for efficient appending
-    if (!device->append_file(this->datalog_filepath_.c_str(), this->datalog_buffer_, this->datalog_buffer_pos_)) {
-      ESP_LOGW(TAG, "Failed to append to datalog file");
+    // Use append_file with relative path for efficient appending
+    if (!device->append_file(this->datalog_relative_path_.c_str(), active_buffer, this->datalog_buffer_pos_)) {
+      ESP_LOGW(TAG, "Failed to append to datalog file: %s", this->datalog_relative_path_.c_str());
     }
   } else {
-    // Fall back to network storage or POSIX
-    std::string existing;
-    if (storage::global_storage->file_exists(this->datalog_filepath_)) {
-      existing = storage::global_storage->read_file(this->datalog_filepath_);
-    }
-    existing.append(reinterpret_cast<char *>(this->datalog_buffer_), this->datalog_buffer_pos_);
-    if (!storage::global_storage->write_file(this->datalog_filepath_, existing)) {
-      ESP_LOGW(TAG, "Failed to write datalog file");
+    // Fall back to POSIX with full path (e.g., for network storage)
+    // POSIX append mode
+    FILE *f = fopen(this->datalog_filepath_.c_str(), "ab");
+    if (f != nullptr) {
+      size_t written = fwrite(active_buffer, 1, this->datalog_buffer_pos_, f);
+      fclose(f);
+      if (written != this->datalog_buffer_pos_) {
+        ESP_LOGW(TAG, "Partial write to datalog file: %u/%u bytes", written, this->datalog_buffer_pos_);
+      }
+    } else {
+      ESP_LOGW(TAG, "Failed to open datalog file for append: %s", this->datalog_filepath_.c_str());
     }
   }
 
@@ -1733,13 +1885,63 @@ bool OpenDPS::start_datalog(const std::string &filename) {
     this->datalog_filepath_ = this->datalog_generate_filename_();
   }
 
+  // Extract mount point from storage_path (e.g., "/sd" from "/sd/logs")
+  // and find the corresponding storage device
+  std::string mount_point;
+  std::string storage_path = this->datalog_config_.storage_path;
+
+  // Find mount point by checking registered devices
+  this->datalog_storage_device_ = nullptr;
+  for (auto *device : storage::global_storage->get_all_devices()) {
+    if (device->supports_filesystem() && device->is_available()) {
+      std::string device_mount = device->get_mount_path();
+      // Check if storage_path starts with this mount point
+      if (!device_mount.empty() && storage_path.find(device_mount) == 0) {
+        // Found a matching device
+        if (device_mount.length() > mount_point.length()) {
+          // Prefer longer (more specific) mount paths
+          mount_point = device_mount;
+          this->datalog_storage_device_ = device;
+        }
+      }
+    }
+  }
+
+  // Calculate relative path from mount point
+  if (this->datalog_storage_device_ != nullptr && !mount_point.empty()) {
+    // datalog_filepath_ is like "/sd/logs/file.csv", mount_point is "/sd"
+    // relative path should be "logs/file.csv"
+    if (this->datalog_filepath_.find(mount_point) == 0) {
+      this->datalog_relative_path_ = this->datalog_filepath_.substr(mount_point.length());
+      // Remove leading slash if present
+      if (!this->datalog_relative_path_.empty() && this->datalog_relative_path_[0] == '/') {
+        this->datalog_relative_path_ = this->datalog_relative_path_.substr(1);
+      }
+    } else {
+      this->datalog_relative_path_ = this->datalog_filepath_;
+    }
+    ESP_LOGD(TAG, "Using storage device at %s, relative path: %s", mount_point.c_str(),
+             this->datalog_relative_path_.c_str());
+  } else {
+    // No device found, will use POSIX fallback
+    this->datalog_relative_path_ = this->datalog_filepath_;
+    ESP_LOGD(TAG, "No storage device found for %s, using POSIX fallback", storage_path.c_str());
+  }
+
   // Ensure the directory exists
   std::string dir_path = this->datalog_filepath_.substr(0, this->datalog_filepath_.rfind('/'));
-  if (!dir_path.empty()) {
-    storage::StorageDevice *device = storage::global_storage->get_device_by_mount_path(dir_path);
-    if (device != nullptr && device->is_available()) {
-      if (!device->dir_exists(dir_path.c_str())) {
-        device->create_dir(dir_path.c_str());
+  if (!dir_path.empty() && this->datalog_storage_device_ != nullptr) {
+    // Calculate relative directory path
+    std::string rel_dir = this->datalog_relative_path_;
+    size_t last_slash = rel_dir.rfind('/');
+    if (last_slash != std::string::npos) {
+      rel_dir = rel_dir.substr(0, last_slash);
+      if (!this->datalog_storage_device_->dir_exists(rel_dir.c_str())) {
+        if (this->datalog_storage_device_->create_dir(rel_dir.c_str())) {
+          ESP_LOGD(TAG, "Created directory: %s", rel_dir.c_str());
+        } else {
+          ESP_LOGW(TAG, "Failed to create directory: %s", rel_dir.c_str());
+        }
       }
     }
   }
@@ -1751,9 +1953,14 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   this->datalog_last_flush_ = millis();
   this->datalog_active_ = true;
 
-  // Write CSV header if using CSV format
+  // Write CSV header if using CSV format (this also creates the file)
   if (this->datalog_config_.format == "csv") {
     this->datalog_write_csv_header_();
+  } else {
+    // For binary format, create empty file first
+    if (this->datalog_storage_device_ != nullptr) {
+      this->datalog_storage_device_->write_file(this->datalog_relative_path_.c_str(), nullptr, 0);
+    }
   }
 
   ESP_LOGI(TAG, "Datalogger started: %s (buffer: %u bytes in %s)", this->datalog_filepath_.c_str(),
@@ -1768,7 +1975,17 @@ void OpenDPS::stop_datalog() {
     return;
   }
 
-  // Flush remaining buffer
+#if defined(USE_ESP32) && defined(USE_STORAGE)
+  // If using async task, wait for pending write to complete first
+  if (this->datalog_write_sem_ != nullptr && this->datalog_pending_size_ > 0) {
+    // Signal task and wait for it to complete current write
+    xSemaphoreGive(this->datalog_write_sem_);
+    // Brief delay to let task complete
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+#endif
+
+  // Flush remaining buffer (synchronous for final flush)
   this->datalog_flush_buffer_();
 
   this->datalog_active_ = false;
@@ -1779,7 +1996,7 @@ void OpenDPS::stop_datalog() {
 
 void OpenDPS::flush_datalog() {
   if (this->datalog_active_) {
-    this->datalog_flush_buffer_();
+    this->datalog_request_flush_();
   }
 }
 

@@ -26,9 +26,18 @@
 #ifdef USE_ESP32
 #include <esp_heap_caps.h>
 #include <esp_psram.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #endif
 
 namespace esphome {
+
+// Forward declaration for storage
+namespace storage {
+class StorageDevice;
+}  // namespace storage
+
 namespace opendps {
 
 // Datalogger column flags (bitmask)
@@ -52,7 +61,7 @@ struct DataloggerConfig {
   std::string filename_format;           // strftime format, e.g., "dps_%Y%m%d_%H%M%S.csv"
   std::string filename_id;               // Fixed filename ID, e.g., "session1" -> "session1.csv"
   uint32_t buffer_size{65536};           // Buffer size in bytes (default 64KB)
-  const char *format{0};
+  std::string format{"csv"};             // "csv" or "bin"
   uint16_t columns{DATALOG_COL_DEFAULT};
   uint32_t flush_interval_ms{5000};  // Auto-flush interval (0 = disabled)
 };
@@ -398,22 +407,38 @@ class OpenDPS : public Component, public uart::UARTDevice {
   //========================================================================
   DataloggerConfig datalog_config_;
   bool datalog_active_{false};
-  std::string datalog_filepath_;
+  std::string datalog_filepath_;                             // Full absolute path (e.g., "/sd/logs/file.csv")
+  std::string datalog_relative_path_;                        // Path relative to mount point (e.g., "logs/file.csv")
+  storage::StorageDevice *datalog_storage_device_{nullptr};  // Cached storage device
   uint32_t datalog_sample_count_{0};
   uint32_t datalog_start_time_{0};
   uint32_t datalog_last_flush_{0};
 
-  // PSRAM buffer for high-speed logging
-  uint8_t *datalog_buffer_{nullptr};
+  // Double-buffer system for async writes (main loop writes to one, task writes other to SD)
+  uint8_t *datalog_buffer_a_{nullptr};  // Primary buffer (written by main loop)
+  uint8_t *datalog_buffer_b_{nullptr};  // Secondary buffer (written to storage by task)
   size_t datalog_buffer_size_{0};
-  size_t datalog_buffer_pos_{0};
+  size_t datalog_buffer_pos_{0};    // Current write position in active buffer
+  size_t datalog_pending_size_{0};  // Size of data pending write in inactive buffer
   bool datalog_buffer_in_psram_{false};
+  bool datalog_use_buffer_a_{true};  // Which buffer is currently active for writing
+
+#ifdef USE_ESP32
+  // FreeRTOS synchronization for async writes
+  SemaphoreHandle_t datalog_mutex_{nullptr};      // Protects buffer swap
+  SemaphoreHandle_t datalog_write_sem_{nullptr};  // Signals write task
+  TaskHandle_t datalog_task_handle_{nullptr};     // Background write task
+  bool datalog_task_running_{false};
+  static void datalog_write_task_(void *arg);  // FreeRTOS task function
+  void datalog_swap_buffers_();                // Swap active/pending buffers
+#endif
 
   // Datalogger helper methods
   void datalog_write_sample_();
   void datalog_write_csv_header_();
   bool datalog_ensure_buffer_();
   void datalog_flush_buffer_();
+  void datalog_request_flush_();  // Non-blocking: signals write task
   std::string datalog_generate_filename_();
   size_t datalog_format_csv_row_(char *buffer, size_t max_len);
   size_t datalog_format_binary_row_(uint8_t *buffer, size_t max_len);
