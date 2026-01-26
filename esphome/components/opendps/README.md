@@ -486,6 +486,151 @@ button:
 5. Device validates and flashes each chunk
 6. Progress can be monitored via callback (if configured)
 
+## Datalogger
+
+The datalogger feature allows high-speed data logging to storage (SD card, USB drive, or network storage) with PSRAM-backed triple-buffering for continuous capture without data loss.
+
+### Configuration
+
+```yaml
+opendps:
+  id: my_opendps
+  uart_id: opendps_uart
+  update_interval: 50ms  # Fast updates for logging
+  datalogger:
+    storage_path: "/sd/logs"  # Base directory for log files
+    filename_id: "opendps"    # Prefix for generated filenames
+    buffer_size: 65536        # 64KB per buffer (x3 for triple buffering)
+    format: csv               # csv or bin
+    flush_interval: 5s        # How often to flush to storage
+    columns:                  # Optional: select specific columns
+      - elapsed_ms
+      - system_time
+      - voltage_in
+      - voltage_out
+      - current_out
+      - power_out
+      - output_enabled
+    time_id: sntp_time        # Optional: time component for system_time column
+```
+
+### Available Columns
+
+| Column | Description |
+|--------|-------------|
+| `elapsed_ms` | Milliseconds since logging started |
+| `system_time` | ISO8601 timestamp from time component (requires `time_id`) |
+| `timestamp` | Legacy alias for `elapsed_ms` |
+| `voltage_in` | Input voltage (V) |
+| `voltage_out` | Output voltage (V) |
+| `current_out` | Output current (A) |
+| `power_out` | Output power (W) |
+| `output_enabled` | Output state (1/0) |
+| `temp1` | Temperature sensor 1 |
+| `temp2` | Temperature sensor 2 |
+
+### Datalogger Actions
+
+**Start/Stop Logging:**
+```yaml
+button:
+  - platform: template
+    name: "Start Logging"
+    on_press:
+      - opendps.start_datalog:
+          id: my_opendps
+          filename: "experiment1.csv"  # Optional custom filename
+
+  - platform: template
+    name: "Stop Logging"
+    on_press:
+      - opendps.stop_datalog:
+          id: my_opendps
+
+  - platform: template
+    name: "Flush Buffer Now"
+    on_press:
+      - opendps.flush_datalog:
+          id: my_opendps
+```
+
+**Using Lambda:**
+```yaml
+button:
+  - platform: template
+    name: "Start Logging"
+    on_press:
+      - lambda: |-
+          id(my_opendps).start_datalog("experiment1.csv");
+
+  - platform: template
+    name: "Stop Logging"
+    on_press:
+      - lambda: |-
+          id(my_opendps).stop_datalog();
+```
+
+### Triple-Buffer System
+
+The datalogger uses a triple-buffer system for continuous, non-blocking operation:
+
+- **Buffer 0**: Currently being written by main loop
+- **Buffer 1**: Queued waiting for flush
+- **Buffer 2**: Being written to storage by background task
+
+This ensures the main loop always has a buffer available for writing, even during slow SD card writes. With 64KB buffers, the system can buffer ~192KB of data, allowing for brief storage hiccups without data loss.
+
+**Memory Requirements:**
+- With PSRAM: 3 × buffer_size (default 3 × 64KB = 192KB in PSRAM)
+- Without PSRAM: Falls back to single 8KB buffer with synchronous writes
+
+### Example: Automated Logging
+
+```yaml
+# Start logging when output is enabled, stop when disabled
+binary_sensor:
+  - platform: opendps
+    opendps_id: my_opendps
+    output_enabled:
+      name: "Output Enabled"
+      on_press:
+        - opendps.start_datalog:
+            id: my_opendps
+      on_release:
+        - opendps.stop_datalog:
+            id: my_opendps
+```
+
+### Example: Time-based Logging with SNTP
+
+```yaml
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "Europe/Berlin"
+
+opendps:
+  id: my_opendps
+  datalogger:
+    storage_path: "/sd/logs"
+    format: csv
+    columns:
+      - system_time
+      - voltage_out
+      - current_out
+      - power_out
+    time_id: sntp_time  # Use SNTP for timestamps
+```
+
+### CSV Output Example
+
+```csv
+system_time,voltage_out,current_out,power_out
+2025-01-15T14:30:01,12.05,1.234,14.87
+2025-01-15T14:30:01,12.04,1.235,14.87
+2025-01-15T14:30:01,12.05,1.233,14.86
+```
+
 ## Update Intervals
 
 The `update_interval` parameter controls how often the component queries the OpenDPS device:
