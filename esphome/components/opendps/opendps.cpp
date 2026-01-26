@@ -1524,8 +1524,13 @@ void OpenDPS::datalog_write_csv_header_() {
   std::string header;
   uint16_t cols = this->datalog_config_.columns;
 
-  if (cols & DATALOG_COL_TIMESTAMP)
-    header += "timestamp_ms";
+  if (cols & DATALOG_COL_ELAPSED_MS)
+    header += "elapsed_ms";
+  if (cols & DATALOG_COL_SYSTEM_TIME) {
+    if (!header.empty())
+      header += ",";
+    header += "system_time";
+  }
   if (cols & DATALOG_COL_VOLTAGE_IN) {
     if (!header.empty())
       header += ",";
@@ -1565,28 +1570,28 @@ void OpenDPS::datalog_write_csv_header_() {
 
   // Write header directly to file using StorageDevice
   storage::StorageDevice *device = this->datalog_storage_device_;
-  ESP_LOGI(TAG, "Datalogger: writing CSV header, device=%p, relative_path=%s", device,
+  ESP_LOGV(TAG, "Datalogger: writing CSV header, device=%p, relative_path=%s", device,
            this->datalog_relative_path_.c_str());
   if (device != nullptr && device->is_available()) {
     // Use write_file to create file with header
-    ESP_LOGI(TAG, "Datalogger: calling device->write_file(%s, %d bytes)", this->datalog_relative_path_.c_str(),
+    ESP_LOGV(TAG, "Datalogger: calling device->write_file(%s, %d bytes)", this->datalog_relative_path_.c_str(),
              header.size());
     bool result = device->write_file(this->datalog_relative_path_.c_str(),
                                      reinterpret_cast<const uint8_t *>(header.data()), header.size());
-    ESP_LOGI(TAG, "Datalogger: write_file returned %d", result);
+    ESP_LOGV(TAG, "Datalogger: write_file returned %d", result);
     if (!result) {
-      ESP_LOGW(TAG, "Failed to write CSV header to %s", this->datalog_filepath_.c_str());
+      ESP_LOGE(TAG, "Failed to write CSV header to %s", this->datalog_filepath_.c_str());
       return;
     }
   } else {
     // Fall back to global storage POSIX methods
-    ESP_LOGI(TAG, "Datalogger: using POSIX fallback for %s", this->datalog_filepath_.c_str());
+    ESP_LOGV(TAG, "Datalogger: using POSIX fallback for %s", this->datalog_filepath_.c_str());
     if (!storage::global_storage->write_file(this->datalog_filepath_, header)) {
-      ESP_LOGW(TAG, "Failed to write CSV header via POSIX to %s", this->datalog_filepath_.c_str());
+      ESP_LOGE(TAG, "Failed to write CSV header via POSIX to %s", this->datalog_filepath_.c_str());
       return;
     }
   }
-  ESP_LOGI(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
+  ESP_LOGD(TAG, "Wrote CSV header to %s", this->datalog_filepath_.c_str());
 #endif
 }
 
@@ -1595,12 +1600,38 @@ size_t OpenDPS::datalog_format_csv_row_(char *buffer, size_t max_len) {
   uint16_t cols = this->datalog_config_.columns;
   bool first = true;
 
-  uint32_t timestamp = millis() - this->datalog_start_time_;
-
-  if (cols & DATALOG_COL_TIMESTAMP) {
-    pos += snprintf(buffer + pos, max_len - pos, "%lu", (unsigned long) timestamp);
+  // Elapsed time since log start (milliseconds)
+  if (cols & DATALOG_COL_ELAPSED_MS) {
+    uint32_t elapsed = millis() - this->datalog_start_time_;
+    pos += snprintf(buffer + pos, max_len - pos, "%lu", (unsigned long) elapsed);
     first = false;
   }
+
+  // System time from time component (ISO8601 format: YYYY-MM-DD HH:MM:SS)
+  if (cols & DATALOG_COL_SYSTEM_TIME) {
+    if (!first && pos < max_len - 1) {
+      buffer[pos++] = ',';
+    }
+#ifdef USE_TIME
+    if (this->datalog_time_ != nullptr) {
+      ESPTime now = this->datalog_time_->now();
+      if (now.is_valid()) {
+        pos += snprintf(buffer + pos, max_len - pos, "%04d-%02d-%02d %02d:%02d:%02d", now.year, now.month,
+                        now.day_of_month, now.hour, now.minute, now.second);
+      } else {
+        // Time not yet synchronized
+        pos += snprintf(buffer + pos, max_len - pos, "----");
+      }
+    } else {
+      // No time component configured
+      pos += snprintf(buffer + pos, max_len - pos, "N/A");
+    }
+#else
+    pos += snprintf(buffer + pos, max_len - pos, "N/A");
+#endif
+    first = false;
+  }
+
   if (cols & DATALOG_COL_VOLTAGE_IN) {
     pos += snprintf(buffer + pos, max_len - pos, first ? "%.3f" : ",%.3f", this->data_.v_in);
     first = false;
@@ -1641,10 +1672,10 @@ size_t OpenDPS::datalog_format_csv_row_(char *buffer, size_t max_len) {
 
 size_t OpenDPS::datalog_format_binary_row_(uint8_t *buffer, size_t max_len) {
   // Binary format: fixed-size struct for fast parsing
-  // Header byte (0xAA) + timestamp(4) + vin(4) + vout(4) + iout(4) + power(4) + enabled(1) + temp1(4) + temp2(4)
-  // Total: 30 bytes per sample (all columns)
+  // Header byte (0xAA) + column_flags(2) + elapsed_ms(4) + system_time(4) + vin(4) + vout(4) + iout(4) + power(4) +
+  // enabled(1) + temp1(4) + temp2(4) Total: ~36 bytes per sample (all columns)
 
-  if (max_len < 30) {
+  if (max_len < 40) {
     return 0;
   }
 
@@ -1654,14 +1685,32 @@ size_t OpenDPS::datalog_format_binary_row_(uint8_t *buffer, size_t max_len) {
   // Start marker
   buffer[pos++] = 0xAA;
 
-  // Column presence flags (1 byte)
+  // Column presence flags (2 bytes for extended columns)
   buffer[pos++] = static_cast<uint8_t>(cols & 0xFF);
+  buffer[pos++] = static_cast<uint8_t>((cols >> 8) & 0xFF);
 
-  if (cols & DATALOG_COL_TIMESTAMP) {
-    uint32_t timestamp = millis() - this->datalog_start_time_;
-    memcpy(buffer + pos, &timestamp, 4);
+  // Elapsed time since log start (milliseconds)
+  if (cols & DATALOG_COL_ELAPSED_MS) {
+    uint32_t elapsed = millis() - this->datalog_start_time_;
+    memcpy(buffer + pos, &elapsed, 4);
     pos += 4;
   }
+
+  // System time as Unix timestamp (seconds since epoch)
+  if (cols & DATALOG_COL_SYSTEM_TIME) {
+    uint32_t unix_time = 0;
+#ifdef USE_TIME
+    if (this->datalog_time_ != nullptr) {
+      ESPTime now = this->datalog_time_->now();
+      if (now.is_valid()) {
+        unix_time = static_cast<uint32_t>(now.timestamp);
+      }
+    }
+#endif
+    memcpy(buffer + pos, &unix_time, 4);
+    pos += 4;
+  }
+
   if (cols & DATALOG_COL_VOLTAGE_IN) {
     memcpy(buffer + pos, &this->data_.v_in, 4);
     pos += 4;
@@ -1897,31 +1946,38 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   std::string mount_point;
   std::string storage_path = this->datalog_config_.storage_path;
 
-  ESP_LOGI(TAG, "Datalogger: looking for storage device for path: %s", storage_path.c_str());
-  ESP_LOGI(TAG, "Datalogger: full filepath will be: %s", this->datalog_filepath_.c_str());
+  ESP_LOGV(TAG, "Datalogger: looking for storage device for path: %s", storage_path.c_str());
+  ESP_LOGV(TAG, "Datalogger: full filepath will be: %s", this->datalog_filepath_.c_str());
 
   // Find mount point by checking registered devices
   this->datalog_storage_device_ = nullptr;
   auto all_devices = storage::global_storage->get_all_devices();
-  ESP_LOGI(TAG, "Datalogger: found %d storage devices", all_devices.size());
+  ESP_LOGV(TAG, "Datalogger: found %d storage devices", all_devices.size());
 
   for (auto *device : all_devices) {
     std::string device_mount = device->get_mount_path();
     bool supports_fs = device->supports_filesystem();
     bool is_avail = device->is_available();
-    ESP_LOGI(TAG, "Datalogger: device mount=%s, supports_fs=%d, available=%d", device_mount.c_str(), supports_fs,
+    ESP_LOGV(TAG, "Datalogger: device mount=%s, supports_fs=%d, available=%d", device_mount.c_str(), supports_fs,
              is_avail);
 
-    if (supports_fs && is_avail) {
-      // Check if storage_path starts with this mount point
-      if (!device_mount.empty() && storage_path.find(device_mount) == 0) {
-        // Found a matching device
-        if (device_mount.length() > mount_point.length()) {
-          // Prefer longer (more specific) mount paths
-          mount_point = device_mount;
-          this->datalog_storage_device_ = device;
-          ESP_LOGI(TAG, "Datalogger: selected device with mount: %s", mount_point.c_str());
-        }
+    if (!supports_fs) {
+      ESP_LOGW(TAG, "Datalogger: device %s does not support filesystem", device_mount.c_str());
+      continue;
+    }
+    if (!is_avail) {
+      ESP_LOGW(TAG, "Datalogger: device %s is not available", device_mount.c_str());
+      continue;
+    }
+
+    // Check if storage_path starts with this mount point
+    if (!device_mount.empty() && storage_path.find(device_mount) == 0) {
+      // Found a matching device
+      if (device_mount.length() > mount_point.length()) {
+        // Prefer longer (more specific) mount paths
+        mount_point = device_mount;
+        this->datalog_storage_device_ = device;
+        ESP_LOGV(TAG, "Datalogger: selected device with mount: %s", mount_point.c_str());
       }
     }
   }
@@ -1973,13 +2029,13 @@ bool OpenDPS::start_datalog(const std::string &filename) {
   this->datalog_active_ = true;
 
   // Write CSV header if using CSV format (this also creates the file)
-  ESP_LOGI(TAG, "Datalogger: format=%s, writing header", this->datalog_config_.format.c_str());
+  ESP_LOGV(TAG, "Datalogger: format=%s, writing header", this->datalog_config_.format.c_str());
   if (this->datalog_config_.format == "csv") {
     this->datalog_write_csv_header_();
   } else {
     // For binary format, create empty file first
     if (this->datalog_storage_device_ != nullptr) {
-      ESP_LOGI(TAG, "Datalogger: creating empty binary file: %s", this->datalog_relative_path_.c_str());
+      ESP_LOGV(TAG, "Datalogger: creating empty binary file: %s", this->datalog_relative_path_.c_str());
       this->datalog_storage_device_->write_file(this->datalog_relative_path_.c_str(), nullptr, 0);
     }
   }

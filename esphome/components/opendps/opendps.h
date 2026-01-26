@@ -10,6 +10,11 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/switch/switch.h"
 
+#ifdef USE_TIME
+#include "esphome/components/time/real_time_clock.h"
+#include "esphome/core/time.h"
+#endif
+
 #ifdef USE_SOCKET_IMPL_LWIP_TCP
 #include "esphome/components/socket/socket.h"
 #endif
@@ -42,17 +47,21 @@ namespace opendps {
 
 // Datalogger column flags (bitmask)
 enum DatalogColumn : uint16_t {
-  DATALOG_COL_TIMESTAMP = (1 << 0),
-  DATALOG_COL_VOLTAGE_IN = (1 << 1),
-  DATALOG_COL_VOLTAGE_OUT = (1 << 2),
-  DATALOG_COL_CURRENT_OUT = (1 << 3),
-  DATALOG_COL_POWER_OUT = (1 << 4),
-  DATALOG_COL_OUTPUT_ENABLED = (1 << 5),
-  DATALOG_COL_TEMP1 = (1 << 6),
-  DATALOG_COL_TEMP2 = (1 << 7),
-  // Default: all columns except temperature
-  DATALOG_COL_DEFAULT = DATALOG_COL_TIMESTAMP | DATALOG_COL_VOLTAGE_IN | DATALOG_COL_VOLTAGE_OUT |
-                        DATALOG_COL_CURRENT_OUT | DATALOG_COL_POWER_OUT | DATALOG_COL_OUTPUT_ENABLED,
+  DATALOG_COL_ELAPSED_MS = (1 << 0),   // Time since log start (milliseconds)
+  DATALOG_COL_SYSTEM_TIME = (1 << 1),  // System time (from time component, ISO8601 format)
+  DATALOG_COL_VOLTAGE_IN = (1 << 2),
+  DATALOG_COL_VOLTAGE_OUT = (1 << 3),
+  DATALOG_COL_CURRENT_OUT = (1 << 4),
+  DATALOG_COL_POWER_OUT = (1 << 5),
+  DATALOG_COL_OUTPUT_ENABLED = (1 << 6),
+  DATALOG_COL_TEMP1 = (1 << 7),
+  DATALOG_COL_TEMP2 = (1 << 8),
+  // Legacy alias for backwards compatibility
+  DATALOG_COL_TIMESTAMP = DATALOG_COL_ELAPSED_MS,
+  // Default: elapsed time + system time + measurements (no temperature)
+  DATALOG_COL_DEFAULT = DATALOG_COL_ELAPSED_MS | DATALOG_COL_SYSTEM_TIME | DATALOG_COL_VOLTAGE_IN |
+                        DATALOG_COL_VOLTAGE_OUT | DATALOG_COL_CURRENT_OUT | DATALOG_COL_POWER_OUT |
+                        DATALOG_COL_OUTPUT_ENABLED,
 };
 
 // Datalogger configuration
@@ -279,6 +288,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
   /// Configure datalogger settings (call before start_datalog)
   void set_datalogger_config(const DataloggerConfig &config) { this->datalog_config_ = config; }
 
+#ifdef USE_TIME
+  /// Set time component for system_time column in datalogger
+  void set_datalog_time(time::RealTimeClock *rtc) { this->datalog_time_ = rtc; }
+#endif
+
   /// Start data logging
   /// @param filename Optional filename (uses config format/id if empty)
   /// @return true if logging started successfully
@@ -407,6 +421,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
   //========================================================================
   DataloggerConfig datalog_config_;
   bool datalog_active_{false};
+#ifdef USE_TIME
+  time::RealTimeClock *datalog_time_{nullptr};  // Optional time component for system_time column
+#endif
   std::string datalog_filepath_;                             // Full absolute path (e.g., "/sd/logs/file.csv")
   std::string datalog_relative_path_;                        // Path relative to mount point (e.g., "logs/file.csv")
   storage::StorageDevice *datalog_storage_device_{nullptr};  // Cached storage device

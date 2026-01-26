@@ -2,9 +2,9 @@
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import uart
+from esphome.components import time as time_component, uart
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TRIGGER_ID
+from esphome.const import CONF_ID, CONF_TIME_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["uart"]
@@ -44,6 +44,9 @@ CONF_ON_CONNECT = "on_connect"
 # TCP Bridge for dpsctl.py access
 CONF_TCP_BRIDGE = "tcp_bridge"
 CONF_TCP_BRIDGE_PORT = "port"
+
+# Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
+CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
 
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
@@ -89,18 +92,23 @@ DATALOG_FORMATS = {
 
 DataloggerConfig = opendps_ns.struct("DataloggerConfig")
 
-# Datalogger column flags
-DATALOG_COL_TIMESTAMP = 1 << 0
-DATALOG_COL_VOLTAGE_IN = 1 << 1
-DATALOG_COL_VOLTAGE_OUT = 1 << 2
-DATALOG_COL_CURRENT_OUT = 1 << 3
-DATALOG_COL_POWER_OUT = 1 << 4
-DATALOG_COL_OUTPUT_ENABLED = 1 << 5
-DATALOG_COL_TEMP1 = 1 << 6
-DATALOG_COL_TEMP2 = 1 << 7
+# Datalogger column flags - must match C++ enum DatalogColumn in opendps.h
+DATALOG_COL_ELAPSED_MS = 1 << 0  # Time since log start (milliseconds)
+DATALOG_COL_SYSTEM_TIME = 1 << 1  # System time (from time component, ISO8601 format)
+DATALOG_COL_VOLTAGE_IN = 1 << 2
+DATALOG_COL_VOLTAGE_OUT = 1 << 3
+DATALOG_COL_CURRENT_OUT = 1 << 4
+DATALOG_COL_POWER_OUT = 1 << 5
+DATALOG_COL_OUTPUT_ENABLED = 1 << 6
+DATALOG_COL_TEMP1 = 1 << 7
+DATALOG_COL_TEMP2 = 1 << 8
+# Legacy alias
+DATALOG_COL_TIMESTAMP = DATALOG_COL_ELAPSED_MS
 
 DATALOG_COLUMNS = {
-    "timestamp": DATALOG_COL_TIMESTAMP,
+    "elapsed_ms": DATALOG_COL_ELAPSED_MS,
+    "system_time": DATALOG_COL_SYSTEM_TIME,
+    "timestamp": DATALOG_COL_TIMESTAMP,  # Legacy alias for elapsed_ms
     "voltage_in": DATALOG_COL_VOLTAGE_IN,
     "voltage_out": DATALOG_COL_VOLTAGE_OUT,
     "current_out": DATALOG_COL_CURRENT_OUT,
@@ -163,6 +171,8 @@ DATALOGGER_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_FLUSH_INTERVAL, default="5s"
         ): cv.positive_time_period_milliseconds,
+        # Time component for system_time column (sntp, homeassistant, ds1307, etc.)
+        cv.Optional(CONF_TIME_ID): cv.use_id(time_component.RealTimeClock),
     }
 )
 
@@ -231,7 +241,8 @@ async def to_code(config):
                 "columns",
                 datalog_config.get(
                     CONF_COLUMNS,
-                    DATALOG_COL_TIMESTAMP
+                    DATALOG_COL_ELAPSED_MS
+                    | DATALOG_COL_SYSTEM_TIME
                     | DATALOG_COL_VOLTAGE_IN
                     | DATALOG_COL_VOLTAGE_OUT
                     | DATALOG_COL_CURRENT_OUT
@@ -242,6 +253,11 @@ async def to_code(config):
             ("flush_interval_ms", datalog_config[CONF_FLUSH_INTERVAL]),
         )
         cg.add(var.set_datalogger_config(config_struct))
+
+        # Time component for system_time column
+        if CONF_TIME_ID in datalog_config:
+            time_var = await cg.get_variable(datalog_config[CONF_TIME_ID])
+            cg.add(var.set_datalog_time(time_var))
 
 
 # Automation Actions

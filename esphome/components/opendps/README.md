@@ -110,7 +110,7 @@ uart:
   id: opendps_uart
   tx_pin: GPIO17
   rx_pin: GPIO16
-  baud_rate: 115200
+  baud_rate: 9600
 
 opendps:
   id: my_opendps
@@ -509,7 +509,7 @@ The component implements the OpenDPS serial protocol:
 
 1. **Full ESPHome integration**: Use all ESPHome components (WiFi, Ethernet, MQTT, Home Assistant API, etc.)
 2. **Modern hardware**: Use ESP32 with better performance and more GPIO
-3. **Flexible connectivity**: WiFi, Ethernet, or both
+3. **Flexible connectivity**: Standalone, WiFi or Ethernet
 4. **Built-in monitoring**: All ESPHome sensors and diagnostic features
 5. **OTA updates**: Easy firmware updates
 6. **Automation**: Full Home Assistant integration with automations
@@ -518,7 +518,7 @@ The component implements the OpenDPS serial protocol:
 
 **No communication:**
 - Check UART wiring (TX/RX might be swapped)
-- Verify baud rate matches (115200)
+- Verify baud rate matches (9600/19200)
 - Check logic levels (3.3V vs 5V)
 - Enable debug logging to see frames
 
@@ -531,7 +531,6 @@ The component implements the OpenDPS serial protocol:
 - Check for electrical noise
 - Ensure good ground connection
 - Try lower baud rate
-- Add pull-up resistors on TX/RX lines
 
 ## License
 
