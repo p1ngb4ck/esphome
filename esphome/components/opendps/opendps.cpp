@@ -1915,53 +1915,48 @@ void OpenDPS::datalog_write_task_(void *arg) {
         break;
       }
 
-      // Take mutex to safely read buffer indices
-      if (xSemaphoreTake(self->datalog_mutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
-        continue;  // Failed to get mutex, try again on next signal
+      // Take mutex for entire operation - task is on separate core so won't block main loop
+      if (xSemaphoreTake(self->datalog_mutex_, portMAX_DELAY) != pdTRUE) {
+        continue;
       }
 
       // Check if there's a buffer to flush
-      if (self->datalog_flush_idx_ != 0xFF) {
-        uint8_t flush_idx = self->datalog_flush_idx_;
-        uint8_t *write_buffer = self->datalog_buffers_[flush_idx];
-        size_t write_size = self->datalog_buffer_sizes_[flush_idx];
-
-        // Release mutex during actual I/O (slow operation)
+      if (self->datalog_flush_idx_ == 0xFF) {
         xSemaphoreGive(self->datalog_mutex_);
+        continue;  // Nothing to flush
+      }
 
-        if (write_size > 0 && storage::global_storage != nullptr) {
-          storage::StorageDevice *device = self->datalog_storage_device_;
-          if (device != nullptr && device->is_available()) {
-            if (!device->append_file(self->datalog_relative_path_.c_str(), write_buffer, write_size)) {
-              ESP_LOGW(TAG, "Async write failed: %s", self->datalog_relative_path_.c_str());
-            }
-          } else {
-            // POSIX fallback
-            FILE *f = fopen(self->datalog_filepath_.c_str(), "ab");
-            if (f != nullptr) {
-              fwrite(write_buffer, 1, write_size, f);
-              fclose(f);
-            }
+      uint8_t flush_idx = self->datalog_flush_idx_;
+      uint8_t *write_buffer = self->datalog_buffers_[flush_idx];
+      size_t write_size = self->datalog_buffer_sizes_[flush_idx];
+
+      if (write_size > 0 && storage::global_storage != nullptr) {
+        storage::StorageDevice *device = self->datalog_storage_device_;
+        if (device != nullptr && device->is_available()) {
+          if (!device->append_file(self->datalog_relative_path_.c_str(), write_buffer, write_size)) {
+            ESP_LOGW(TAG, "Async write failed: %s", self->datalog_relative_path_.c_str());
           }
-          self->datalog_last_flush_ = millis();
+        } else {
+          // POSIX fallback
+          FILE *f = fopen(self->datalog_filepath_.c_str(), "ab");
+          if (f != nullptr) {
+            fwrite(write_buffer, 1, write_size, f);
+            fclose(f);
+          }
         }
+        self->datalog_last_flush_ = millis();
+      }
 
-        // Re-take mutex to update indices after I/O
-        if (xSemaphoreTake(self->datalog_mutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
-          continue;  // Failed to get mutex, will retry
-        }
+      // Mark buffer as free (clear size and flush index)
+      self->datalog_buffer_sizes_[flush_idx] = 0;
+      self->datalog_flush_idx_ = 0xFF;
 
-        // Mark buffer as free (clear size and flush index)
-        self->datalog_buffer_sizes_[flush_idx] = 0;
-        self->datalog_flush_idx_ = 0xFF;
-
-        // If there's a queued buffer, move it to flushing
-        if (self->datalog_queue_idx_ != 0xFF) {
-          self->datalog_flush_idx_ = self->datalog_queue_idx_;
-          self->datalog_queue_idx_ = 0xFF;
-          // Signal ourselves to process the newly queued buffer
-          xSemaphoreGive(self->datalog_write_sem_);
-        }
+      // If there's a queued buffer, move it to flushing
+      if (self->datalog_queue_idx_ != 0xFF) {
+        self->datalog_flush_idx_ = self->datalog_queue_idx_;
+        self->datalog_queue_idx_ = 0xFF;
+        // Signal ourselves to process the newly queued buffer
+        xSemaphoreGive(self->datalog_write_sem_);
       }
 
       xSemaphoreGive(self->datalog_mutex_);
