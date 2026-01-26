@@ -119,16 +119,15 @@ enum UpgradeStatus : uint8_t {
 // Connection status codes (sent to OpenDPS to update display icon)
 enum ConnectionStatus : uint8_t {
   // WiFi status (original OpenDPS values)
-  CONN_WIFI_OFF = 0,
+  CONN_NETWORK_OFF = 0,
   CONN_WIFI_CONNECTING = 1,
   CONN_WIFI_CONNECTED = 2,
   CONN_WIFI_ERROR = 3,
   CONN_WIFI_UPGRADING = 4,
   // Ethernet status (extended for ESPHome)
-  CONN_ETHERNET_OFF = 5,
-  CONN_ETHERNET_CONNECTING = 6,
-  CONN_ETHERNET_CONNECTED = 7,
-  CONN_ETHERNET_ERROR = 8
+  CONN_ETHERNET_CONNECTING = 5,
+  CONN_ETHERNET_CONNECTED = 6,
+  CONN_ETHERNET_ERROR = 7
 };
 
 struct OpenDPSData {
