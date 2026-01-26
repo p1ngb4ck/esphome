@@ -1875,6 +1875,7 @@ void OpenDPS::datalog_write_sample_() {
 void OpenDPS::datalog_rotate_buffers_() {
   // Triple-buffer rotation: move current write buffer to queue, get a free buffer for writing
   // Called from main thread when requesting a flush
+  // Mutex must be held by caller
 
   // Current write buffer becomes queued (if no queue, or queue becomes flush target)
   uint8_t old_write_idx = this->datalog_write_idx_;
@@ -1914,11 +1915,19 @@ void OpenDPS::datalog_write_task_(void *arg) {
         break;
       }
 
+      // Take mutex to safely read buffer indices
+      if (xSemaphoreTake(self->datalog_mutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
+        continue;  // Failed to get mutex, try again on next signal
+      }
+
       // Check if there's a buffer to flush
       if (self->datalog_flush_idx_ != 0xFF) {
         uint8_t flush_idx = self->datalog_flush_idx_;
         uint8_t *write_buffer = self->datalog_buffers_[flush_idx];
         size_t write_size = self->datalog_buffer_sizes_[flush_idx];
+
+        // Release mutex during actual I/O (slow operation)
+        xSemaphoreGive(self->datalog_mutex_);
 
         if (write_size > 0 && storage::global_storage != nullptr) {
           storage::StorageDevice *device = self->datalog_storage_device_;
@@ -1937,6 +1946,11 @@ void OpenDPS::datalog_write_task_(void *arg) {
           self->datalog_last_flush_ = millis();
         }
 
+        // Re-take mutex to update indices after I/O
+        if (xSemaphoreTake(self->datalog_mutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
+          continue;  // Failed to get mutex, will retry
+        }
+
         // Mark buffer as free (clear size and flush index)
         self->datalog_buffer_sizes_[flush_idx] = 0;
         self->datalog_flush_idx_ = 0xFF;
@@ -1949,6 +1963,8 @@ void OpenDPS::datalog_write_task_(void *arg) {
           xSemaphoreGive(self->datalog_write_sem_);
         }
       }
+
+      xSemaphoreGive(self->datalog_mutex_);
     }
   }
 
@@ -1960,7 +1976,12 @@ void OpenDPS::datalog_write_task_(void *arg) {
 void OpenDPS::datalog_request_flush_() {
 #if defined(USE_ESP32) && defined(USE_STORAGE)
   // If we have triple-buffering with async task, rotate and signal
-  if (this->datalog_buffers_[1] != nullptr && this->datalog_write_sem_ != nullptr) {
+  if (this->datalog_buffers_[1] != nullptr && this->datalog_write_sem_ != nullptr && this->datalog_mutex_ != nullptr) {
+    // Take mutex to safely modify buffer indices
+    if (xSemaphoreTake(this->datalog_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+      return;  // Failed to get mutex, skip this flush cycle
+    }
+
     // Rotate buffers - main loop gets a fresh buffer, current buffer goes to queue
     this->datalog_rotate_buffers_();
 
@@ -1970,6 +1991,8 @@ void OpenDPS::datalog_request_flush_() {
       this->datalog_queue_idx_ = 0xFF;
       xSemaphoreGive(this->datalog_write_sem_);
     }
+
+    xSemaphoreGive(this->datalog_mutex_);
     return;
   }
 #endif
