@@ -1471,12 +1471,12 @@ bool OpenDPS::datalog_ensure_buffer_() {
           return false;
         }
 
-        // Create background write task with lower priority than main loop
+        // Create background write task on core 0 to avoid blocking main loop on core 1
         this->datalog_task_running_ = true;
         BaseType_t result = xTaskCreatePinnedToCore(datalog_write_task_, "datalog_write", 4096, this,
-                                                    1,  // Priority 1 (low, main loop is higher)
+                                                    5,  // Priority 5 (runs when semaphore given)
                                                     &this->datalog_task_handle_,
-                                                    1  // Run on core 1 (app core)
+                                                    0  // Run on core 0 (separate from main loop)
         );
         if (result != pdPASS) {
           ESP_LOGE(TAG, "Failed to create datalog write task");
