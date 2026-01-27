@@ -5,10 +5,79 @@ esphome:
   name: opendps-controller
   platform: ESP32
   board: esp32dev
+  min_version: 2026.1.0-dev
+  platformio_options:
+    build_flags: "-DBOARD_HAS_PSRAM"
+    board_upload.maximum_ram_size: 524288
+  on_boot:
+    - priority: 900
+      then:
+        - lambda: |-
+            App.set_loop_interval(0);
+    - priority: 100
+      then:
+        - lambda: |-
+            auto call = id(opendps_fw_path_input).make_call();
+            call.set_value(id(opendps_firmware_path));
+            call.perform();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 32MB
+  cpu_frequency: 240MHZ
+  framework:
+    type: esp-idf
+    version: recommended
+    advanced:
+      disable_vfs_support_termios: false
+      disable_vfs_support_select: false
+      disable_vfs_support_dir: false
+      enable_idf_experimental_features: True
+    sdkconfig_options:
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y
+      CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1: y
+      CONFIG_SDMMC_HOST_DEFAULT: "y"
+      CONFIG_USB_TRANSFER_FLAG_ZERO_PACK: "y"
+      CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE: "1024"
+      CONFIG_USB_HOST_HW_BUFFER_BIAS_BALANCED: "y"
+      CONFIG_USB_HOST_HW_BUFFER_BIAS_IN: "n"
+      CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT: "n"
+      CONFIG_COMPILER_CXX_EXCEPTIONS: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_FATFS_LFN_STACK: "y"
+      CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED: "y"
+      CONFIG_IDF_TARGET: "esp32s3"
+      CONFIG_ESPTOOLPY_FLASHSIZE_16MB: "y"
+      CONFIG_PARTITION_TABLE_CUSTOM: "y"
+      CONFIG_HTTPD_MAX_REQ_HDR_LEN: "800"
+      CONFIG_HTTPD_WS_SUPPORT: "y"
+      CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=: "n"
+      CONFIG_ESP_WIFI_SLP_IRAM_OPT: "n"
+      CONFIG_FATFS_LFN_HEAP: "y"
+      CONFIG_FREERTOS_HZ: "1000"
+      CONFIG_USB_TASK_STACK_SIZE: "16384"
+      CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM: "y"
+      CONFIG_SLAVE_IDF_TARGET_ESP32C6: "y"
+      CONFIG_SDMMC_FREQ_HIGHSPEED: "y"
+
+external_components:
+  - source: github://p1ngb4ck/esphome@dev
+    components: [http_file_browser, opendps, storage, sd_storage, webdav_server]
+    refresh: 0s
 
 # Enable logging
 logger:
-  level: DEBUG
+  level: INFO
 
 # WiFi Configuration
 wifi:
@@ -34,27 +103,110 @@ ota:
 globals:
   - id: opendps_firmware_path
     type: std::string
-    initial_value: '"/usb/opendps-latest.bin"'
+    initial_value: '"/sdcard/opendps_DPS5005.bin"'
 
 # UART for OpenDPS communication
 uart:
   id: opendps_uart
   tx_pin: GPIO17
   rx_pin: GPIO16
-  baud_rate: 115200
-  debug:
-    direction: BOTH
-    dummy_receiver: false
-    after:
-      delimiter: "\n"
-    sequence:
-      - lambda: UARTDebug::log_hex(direction, bytes, ':');
+  baud_rate: 19200
+
+time:
+  - platform: host
+    id: host_time
+    timezone: Europe/Berlin
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Berlin
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+    update_interval: 3h
+  - platform: homeassistant
+    id: homeassistant_time
+    update_interval: 3h
+
+# Storage config for sd card as example - for use with datalogger and firmware upgrades
+storage:
+  - id: storage_id
+
+sd_storage:
+  spi_id: spi_bus_1
+  id: sd_storage_id
+  type: sd_spi
+  cs_pin: GPIO48
+  path: "/sdcard"
+  slot: 0
+
+webdav_server:
+  id: webdav_sdcard
+  storage_id: storage_id
+  root_path: "/"
+  url_prefix: "/"
+  port: 81
+  username: !secret web_access_username
+  password: !secret web_access_password
+
+http_file_browser:
+  storage_id: storage_id
+  url_prefix: "/files"
+  root_path: "/"
+  auth_enabled: true
+  username: !secret web_access_username
+  password: !secret web_access_password
+  enable_upload: true
+  enable_download: true
+  enable_deletion: true
+
+web_server:
+  id: webserver_id
+  version: 3
+  sorting_groups:
+    - id: opendps_sensors
+      name: "OpenDPS sensors"
+      sorting_weight: 10
+    - id: opendps_control
+      name: "OpenDPS control"
+      sorting_weight: 20
+    - id: esphome_device_control
+      name: "ESPHome device controls"
+      sorting_weight: 30
 
 # OpenDPS Component
 opendps:
-  id: my_opendps
-  uart_id: opendps_uart
-  update_interval: 100ms  # Fast updates (10Hz) - can go as low as 50ms
+  id: opendps_id
+  uart_id: uart1_id
+  update_interval: 50ms
+  default_brightness: 80
+  bootloader_baud_rate: 19200
+  tcp_bridge:
+    port: 5005
+  on_connect:
+    - lambda: |-
+        id(voltage_number).publish_state(id(opendps_id).get_voltage_setting());
+        id(current_number).publish_state(id(opendps_id).get_current_setting());
+    - light.turn_on:
+        id: display_backlight
+        brightness: !lambda |-
+          return (float)id(opendps_id).get_brightness_setting();
+
+  datalogger:
+    storage_path: "/sdcard/logs"
+    filename_format: "dps_%Y%m%d_%H%M%S.csv"
+    buffer_size: 524288
+    format: csv
+    time_id: host_time
+    columns:
+      - system_time
+      - elapsed_ms
+      - voltage_in
+      - voltage_out
+      - current_out
+      - power_out
+      - output_enabled
+    flush_interval: 10s
 
 # Sensors
 sensor:
@@ -86,6 +238,16 @@ sensor:
     temperature_2:
       name: "OpenDPS Ambient Temperature"
       id: opendps_temp2
+
+text:
+  - platform: template
+    mode: TEXT
+    name: "OpenDPS firmware path"
+    id: opendps_fw_path_input
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(opendps_firmware_path) = x;
 
 # Binary Sensor
 binary_sensor:
@@ -125,19 +287,23 @@ number:
           id: my_opendps
           current: !lambda "return x;"
 
+light:
+  - platform: monochromatic
+    id: display_backlight
+    name: "Display backlight brightness"
+    output: brightness_output
+    restore_mode: ALWAYS_ON
+    gamma_correct: 1.0
+    default_transition_length: 0s
+    icon: mdi:television-ambient-light
+
+output:
   - platform: template
-    name: "OpenDPS Display Brightness"
-    id: opendps_brightness
-    min_value: 0
-    max_value: 100
-    step: 1
-    unit_of_measurement: "%"
-    mode: slider
-    optimistic: true
-    set_action:
-      - opendps.set_brightness:
-          id: my_opendps
-          brightness: !lambda "return (uint8_t)x;"
+    type: float
+    id: brightness_output
+    write_action:
+      - lambda: |-
+          id(opendps_id).set_brightness(static_cast<uint8_t>(state*100));
 
 # Select (for operating mode)
 select:
@@ -153,6 +319,13 @@ select:
       - opendps.set_function:
           id: my_opendps
           function: !lambda "return x.c_str();"
+
+spi:
+  - id: spi_bus_1
+    interface: spi3
+    mosi_pin: GPIO41
+    miso_pin: GPIO40
+    clk_pin: GPIO39
 
 # Switches
 switch:
