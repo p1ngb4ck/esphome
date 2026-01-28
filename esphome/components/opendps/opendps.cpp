@@ -2310,6 +2310,12 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
+    // Send upgrade start command
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
+             this->upgrade_crc_);
+    this->upgrade_last_chunk_time_ = millis();
+    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
+
     // Switch to bootloader baud rate if configured (before sending upgrade_start)
     // The DPS will reboot into bootloader after receiving this command
     if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != this->parent_->get_baud_rate()) {
@@ -2323,12 +2329,6 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
       this->upgrade_state_pref_.save(&this->bootloader_baud_rate_);
       global_preferences->sync();
     }
-
-    // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
-             this->upgrade_crc_);
-    this->upgrade_last_chunk_time_ = millis();
-    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   } else {
@@ -2373,6 +2373,12 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
+    // Send upgrade start command
+    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
+             this->upgrade_crc_);
+    this->upgrade_last_chunk_time_ = millis();
+    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
+
     // Switch to bootloader baud rate if configured (before sending upgrade_start)
     // The DPS will reboot into bootloader after receiving this command
     if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != this->parent_->get_baud_rate()) {
@@ -2386,12 +2392,6 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
       this->upgrade_state_pref_.save(&this->bootloader_baud_rate_);
       global_preferences->sync();
     }
-
-    // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
-             this->upgrade_crc_);
-    this->upgrade_last_chunk_time_ = millis();
-    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   }
