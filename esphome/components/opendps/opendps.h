@@ -471,7 +471,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   std::unique_ptr<socket::Socket> tcp_server_socket_;
   std::unique_ptr<socket::Socket> tcp_client_socket_;
-  std::vector<uint8_t> tcp_uart_buffer_;  // Buffer for assembling complete UART frames
+  std::vector<uint8_t> tcp_uart_buffer_;                       // Buffer for assembling complete UART frames
+  uint32_t tcp_uart_buffer_start_time_{0};                     // Timeout tracking for UART frame buffering
+  uint32_t tcp_client_disconnect_time_{0};                     // When client disconnected (for grace period)
+  static const uint32_t TCP_BRIDGE_DISCONNECT_DELAY_MS = 500;  // Grace period before exiting bridge mode
+  static const uint32_t TCP_UART_BUFFER_TIMEOUT_MS = 500;      // Timeout for incomplete UART frames
 #endif
 };
 

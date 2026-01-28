@@ -71,8 +71,8 @@ void OpenDPS::loop() {
       // Check for new TCP connections and handle bridge mode
       this->loop_tcp_bridge_();
 
-      // If a TCP client is connected, skip normal processing (bridge mode active)
-      if (this->tcp_client_socket_ != nullptr) {
+      // If a TCP client is connected or in disconnect grace period, skip normal processing (bridge mode active)
+      if (this->tcp_client_socket_ != nullptr || this->tcp_client_disconnect_time_ > 0) {
         return;
       }
     }
@@ -300,6 +300,14 @@ std::string OpenDPS::unpack_cstr_(const std::vector<uint8_t> &frame, size_t &pos
 // ============================================================================
 
 void OpenDPS::send_frame_(const std::vector<uint8_t> &payload) {
+#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+  // Don't send frames while TCP bridge client is connected - would interfere with dpsctl.py
+  if (this->tcp_client_socket_ != nullptr) {
+    ESP_LOGW(TAG, "Ignoring frame send - TCP bridge active (dpsctl.py has exclusive UART access)");
+    return;
+  }
+#endif
+
   // Calculate CRC
   uint16_t crc = this->calculate_crc_(payload);
 
@@ -2517,6 +2525,36 @@ void OpenDPS::loop_tcp_bridge_() {
     return;
   }
 
+  uint32_t now = millis();
+
+  // Handle disconnect grace period - stay in bridge mode briefly to allow reconnection
+  // This helps tools like dpsctl.py that may send multiple commands in sequence (e.g., calibration)
+  if (this->tcp_client_disconnect_time_ > 0) {
+    if (now - this->tcp_client_disconnect_time_ < TCP_BRIDGE_DISCONNECT_DELAY_MS) {
+      // Still in grace period - check for new connection
+      struct sockaddr_storage client_addr;
+      socklen_t addr_len = sizeof(client_addr);
+      auto client = this->tcp_server_socket_->accept((struct sockaddr *) &client_addr, &addr_len);
+      if (client != nullptr) {
+        ESP_LOGI(TAG, "TCP bridge: client reconnected during grace period");
+        client->setblocking(false);
+        this->tcp_client_socket_ = std::move(client);
+        this->tcp_client_disconnect_time_ = 0;
+        // Clear buffers for clean start
+        this->tcp_uart_buffer_.clear();
+        this->tcp_uart_buffer_start_time_ = 0;
+      }
+      return;  // Stay in bridge mode during grace period
+    } else {
+      // Grace period expired - fully exit bridge mode
+      ESP_LOGI(TAG, "TCP bridge: grace period expired - resuming normal OpenDPS operation");
+      this->tcp_client_disconnect_time_ = 0;
+      this->tcp_uart_buffer_.clear();
+      this->tcp_uart_buffer_start_time_ = 0;
+      return;
+    }
+  }
+
   // Accept new connections
   if (this->tcp_client_socket_ == nullptr) {
     struct sockaddr_storage client_addr;
@@ -2526,6 +2564,18 @@ void OpenDPS::loop_tcp_bridge_() {
       ESP_LOGI(TAG, "TCP bridge: client connected - switching to bridge mode (normal OpenDPS queries paused)");
       client->setblocking(false);
       this->tcp_client_socket_ = std::move(client);
+
+      // Clear any partial frame state from normal operation to ensure clean start
+      this->rx_buffer_.clear();
+      this->receiving_frame_ = false;
+      this->tcp_uart_buffer_.clear();
+      this->tcp_uart_buffer_start_time_ = 0;
+
+      // Drain any pending UART data that might be from previous operations
+      while (this->available()) {
+        uint8_t dummy;
+        this->read_byte(&dummy);
+      }
     }
   }
 
@@ -2539,14 +2589,17 @@ void OpenDPS::loop_tcp_bridge_() {
       this->write_array(tcp_buf, tcp_len);
       this->flush();
     } else if (tcp_len == 0) {
-      // Connection closed gracefully
-      ESP_LOGI(TAG, "TCP bridge: client disconnected (connection closed) - resuming normal OpenDPS operation");
+      // Connection closed gracefully - start grace period
+      ESP_LOGI(TAG, "TCP bridge: client disconnected - starting %dms grace period", TCP_BRIDGE_DISCONNECT_DELAY_MS);
       this->tcp_client_socket_.reset();
+      this->tcp_client_disconnect_time_ = now;
       return;
     } else if (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-      // Error
-      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - resuming normal OpenDPS operation", errno);
+      // Error - start grace period
+      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - starting %dms grace period", errno,
+               TCP_BRIDGE_DISCONNECT_DELAY_MS);
       this->tcp_client_socket_.reset();
+      this->tcp_client_disconnect_time_ = now;
       return;
     }
 
@@ -2555,6 +2608,12 @@ void OpenDPS::loop_tcp_bridge_() {
     while (this->available()) {
       uint8_t byte;
       this->read_byte(&byte);
+
+      // Start of new frame - track time for timeout
+      if (this->tcp_uart_buffer_.empty() && byte == FRAME_SOF) {
+        this->tcp_uart_buffer_start_time_ = now;
+      }
+
       this->tcp_uart_buffer_.push_back(byte);
 
       // Check if we have a complete frame (ends with EOF)
@@ -2567,15 +2626,28 @@ void OpenDPS::loop_tcp_bridge_() {
           ESP_LOGI(TAG, "TCP bridge: write error, disconnecting");
           this->tcp_client_socket_.reset();
           this->tcp_uart_buffer_.clear();
+          this->tcp_uart_buffer_start_time_ = 0;
+          this->tcp_client_disconnect_time_ = now;
           return;
         }
         this->tcp_uart_buffer_.clear();
+        this->tcp_uart_buffer_start_time_ = 0;
       }
 
       // Safety: prevent buffer from growing too large
       if (this->tcp_uart_buffer_.size() > 1024) {
         ESP_LOGW(TAG, "TCP bridge: UART buffer overflow, clearing");
         this->tcp_uart_buffer_.clear();
+        this->tcp_uart_buffer_start_time_ = 0;
+      }
+    }
+
+    // Check for UART buffer timeout (incomplete frame)
+    if (!this->tcp_uart_buffer_.empty() && this->tcp_uart_buffer_start_time_ > 0) {
+      if (now - this->tcp_uart_buffer_start_time_ > TCP_UART_BUFFER_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "TCP bridge: UART frame timeout (%u bytes), clearing buffer", this->tcp_uart_buffer_.size());
+        this->tcp_uart_buffer_.clear();
+        this->tcp_uart_buffer_start_time_ = 0;
       }
     }
   }
