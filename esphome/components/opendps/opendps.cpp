@@ -1082,13 +1082,14 @@ void OpenDPS::start_calibration_assistant(const CalibrationAssistantParams &para
   ESP_LOGI(TAG, "CALIBRATION ASSISTANT STARTED");
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "Parameters:");
-  ESP_LOGI(TAG, "  Vin Measured: %.0f mV", params.vin_measured_mv);
+  ESP_LOGI(TAG, "  Vin Low Measured: %.0f mV", params.vin_low_measured_mv);
+  ESP_LOGI(TAG, "  Vin High Measured: %.0f mV", params.vin_high_measured_mv);
   ESP_LOGI(TAG, "  Load Resistance: %.2f ohm", params.load_resistance);
   ESP_LOGI(TAG, "  Load Max Wattage: %.1f W", params.load_max_wattage);
   ESP_LOGI(TAG, "  Max DPS Current: %.1f A", params.max_dps_current);
 
-  // Start with input voltage calibration
-  this->cal_assistant_state_ = CAL_VIN_START;
+  // Start with input voltage calibration (two-point like dpsctl.py)
+  this->cal_assistant_state_ = CAL_VIN_LOW_START;
   this->cal_assistant_process_();
 }
 
@@ -1096,12 +1097,22 @@ void OpenDPS::calibration_assistant_step(float measured_value) {
   ESP_LOGI(TAG, "Calibration step received value: %.3f", measured_value);
 
   switch (this->cal_assistant_state_) {
-    case CAL_VIN_MEASURE:
-      // User confirmed input voltage reading - we have ADC value and measured voltage
+    case CAL_VIN_LOW_MEASURE:
+      // User confirmed first (lower) input voltage reading
       this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
-      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_measured_mv);
-      ESP_LOGI(TAG, "Recorded Vin: ADC=%d, measured=%.0f mV", this->calibration_data_.vin_adc,
-               this->cal_assistant_params_.vin_measured_mv);
+      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_low_measured_mv);
+      ESP_LOGI(TAG, "Recorded Vin LOW: ADC=%d, measured=%.0f mV", this->calibration_data_.vin_adc,
+               this->cal_assistant_params_.vin_low_measured_mv);
+      this->cal_assistant_state_ = CAL_VIN_HIGH_START;
+      this->cal_assistant_process_();
+      break;
+
+    case CAL_VIN_HIGH_MEASURE:
+      // User confirmed second (higher) input voltage reading
+      this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
+      this->cal_samples_y_.push_back(this->cal_assistant_params_.vin_high_measured_mv);
+      ESP_LOGI(TAG, "Recorded Vin HIGH: ADC=%d, measured=%.0f mV", this->calibration_data_.vin_adc,
+               this->cal_assistant_params_.vin_high_measured_mv);
       this->cal_assistant_state_ = CAL_VIN_CALCULATE;
       this->cal_assistant_process_();
       break;
@@ -1162,9 +1173,12 @@ const char *OpenDPS::get_calibration_assistant_prompt() const {
   switch (this->cal_assistant_state_) {
     case CAL_IDLE:
       return "Calibration not started";
-    case CAL_VIN_START:
-    case CAL_VIN_MEASURE:
-      return "Reading input voltage ADC, then call step()";
+    case CAL_VIN_LOW_START:
+    case CAL_VIN_LOW_MEASURE:
+      return "Connect LOWER input voltage, then call step()";
+    case CAL_VIN_HIGH_START:
+    case CAL_VIN_HIGH_MEASURE:
+      return "Connect HIGHER input voltage, then call step()";
     case CAL_VIN_CALCULATE:
       return "Calculating input voltage calibration...";
     case CAL_VOUT_START:
@@ -1204,37 +1218,43 @@ void OpenDPS::cal_assistant_process_() {
   ESP_LOGI(TAG, "Processing calibration state: %d", this->cal_assistant_state_);
 
   switch (this->cal_assistant_state_) {
-    case CAL_VIN_START:
+    case CAL_VIN_LOW_START:
       ESP_LOGI(TAG, "----------------------------------------");
-      ESP_LOGI(TAG, "STEP 1: Input Voltage Calibration");
+      ESP_LOGI(TAG, "STEP 1a: Input Voltage Calibration (Low Point)");
       ESP_LOGI(TAG, "----------------------------------------");
-      ESP_LOGI(TAG, "Using measured input voltage: %.0f mV", this->cal_assistant_params_.vin_measured_mv);
+      ESP_LOGI(TAG, "Connect LOWER input voltage: %.0f mV", this->cal_assistant_params_.vin_low_measured_mv);
       ESP_LOGI(TAG, "Reading ADC value from DPS...");
       ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
       this->request_calibration_report();
-      this->cal_assistant_state_ = CAL_VIN_MEASURE;
+      this->cal_assistant_state_ = CAL_VIN_LOW_MEASURE;
+      break;
+
+    case CAL_VIN_HIGH_START:
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "STEP 1b: Input Voltage Calibration (High Point)");
+      ESP_LOGI(TAG, "----------------------------------------");
+      ESP_LOGI(TAG, "Connect HIGHER input voltage: %.0f mV", this->cal_assistant_params_.vin_high_measured_mv);
+      ESP_LOGI(TAG, "Reading ADC value from DPS...");
+      ESP_LOGI(TAG, "Then call: opendps.calibration_assistant_step with value 0");
+      this->request_calibration_report();
+      this->cal_assistant_state_ = CAL_VIN_HIGH_MEASURE;
       break;
 
     case CAL_VIN_CALCULATE: {
-      // Single-point calibration using the measured voltage and ADC reading
-      // We assume the ADC is linear and passes through (0, 0), so we calculate:
-      // VIN_ADC_K = measured_mV / adc_reading
-      // VIN_ADC_C = 0 (assuming linear ADC with zero offset)
-      float adc_reading = this->cal_samples_x_[0];
-      float measured_mv = this->cal_samples_y_[0];
-
-      if (adc_reading <= 0) {
-        ESP_LOGE(TAG, "Invalid ADC reading: %.0f - cannot calibrate", adc_reading);
+      // Two-point calibration using linear regression (like dpsctl.py)
+      // y = k * x + c, where x is ADC reading and y is measured voltage in mV
+      if (this->cal_samples_x_.size() < 2) {
+        ESP_LOGE(TAG, "Not enough samples for two-point calibration");
         this->cal_assistant_state_ = CAL_ERROR;
         this->cal_assistant_process_();
         break;
       }
 
-      float k = measured_mv / adc_reading;
-      float c = 0.0f;  // Assuming linear through origin
+      auto [k, c] = this->cal_best_fit_(this->cal_samples_x_, this->cal_samples_y_);
 
-      ESP_LOGI(TAG, "Input voltage calibration (single-point):");
-      ESP_LOGI(TAG, "  ADC reading: %.0f, Measured: %.0f mV", adc_reading, measured_mv);
+      ESP_LOGI(TAG, "Input voltage calibration (two-point):");
+      ESP_LOGI(TAG, "  Point 1: ADC=%.0f, Measured=%.0f mV", this->cal_samples_x_[0], this->cal_samples_y_[0]);
+      ESP_LOGI(TAG, "  Point 2: ADC=%.0f, Measured=%.0f mV", this->cal_samples_x_[1], this->cal_samples_y_[1]);
       ESP_LOGI(TAG, "  VIN_ADC_K=%.6f, VIN_ADC_C=%.6f", k, c);
       this->set_calibration("VIN_ADC_K", k);
       this->set_calibration("VIN_ADC_C", c);
@@ -1374,7 +1394,8 @@ void OpenDPS::cal_assistant_process_() {
 
     case CAL_IOUT_SWEEP: {
       // Calculate max safe voltage based on constraints
-      float v_max_input = this->cal_assistant_params_.vin_measured_mv * 0.9f;
+      // Use the higher input voltage (90% of it) as the limit
+      float v_max_input = this->cal_assistant_params_.vin_high_measured_mv * 0.9f;
       float v_max_wattage =
           sqrtf(this->cal_assistant_params_.load_max_wattage * this->cal_assistant_params_.load_resistance) * 1000.0f;
       float v_max_current =

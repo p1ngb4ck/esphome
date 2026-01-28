@@ -145,18 +145,21 @@ struct OpenDPSData {
 
 // Calibration assistant parameters
 struct CalibrationAssistantParams {
-  float vin_measured_mv{0};    // Measured input voltage in mV (from multimeter)
-  float load_resistance{0};    // Load resistance in ohms for current calibration
-  float load_max_wattage{0};   // Load max wattage for current calibration
-  float max_dps_current{5.0};  // Max output current of DPS model (default 5A)
+  float vin_low_measured_mv{0};   // First (lower) measured input voltage in mV
+  float vin_high_measured_mv{0};  // Second (higher) measured input voltage in mV
+  float load_resistance{0};       // Load resistance in ohms for current calibration
+  float load_max_wattage{0};      // Load max wattage for current calibration
+  float max_dps_current{5.0};     // Max output current of DPS model (default 5A)
 };
 
 // Calibration assistant states
 enum CalibrationAssistantState : uint8_t {
   CAL_IDLE = 0,
-  // Input voltage calibration (single-point with measured value)
-  CAL_VIN_START,
-  CAL_VIN_MEASURE,
+  // Input voltage calibration (two-point like dpsctl.py)
+  CAL_VIN_LOW_START,
+  CAL_VIN_LOW_MEASURE,
+  CAL_VIN_HIGH_START,
+  CAL_VIN_HIGH_MEASURE,
   CAL_VIN_CALCULATE,
   // Output voltage calibration
   CAL_VOUT_START,

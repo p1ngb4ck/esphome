@@ -137,7 +137,8 @@ StopDatalogAction = opendps_ns.class_("StopDatalogAction", automation.Action)
 FlushDatalogAction = opendps_ns.class_("FlushDatalogAction", automation.Action)
 
 # Config keys for calibration assistant
-CONF_VIN_MEASURED_MV = "vin_measured_mv"
+CONF_VIN_LOW_MEASURED_MV = "vin_low_measured_mv"
+CONF_VIN_HIGH_MEASURED_MV = "vin_high_measured_mv"
 CONF_LOAD_RESISTANCE = "load_resistance"
 CONF_LOAD_MAX_WATTAGE = "load_max_wattage"
 CONF_MAX_DPS_CURRENT = "max_dps_current"
@@ -560,7 +561,8 @@ async def opendps_restore_calibration_to_code(config, action_id, template_arg, a
     StartCalibrationAssistantAction,
     OPENDPS_ACTION_SCHEMA.extend(
         {
-            cv.Required(CONF_VIN_MEASURED_MV): cv.templatable(cv.float_),
+            cv.Required(CONF_VIN_LOW_MEASURED_MV): cv.templatable(cv.float_),
+            cv.Required(CONF_VIN_HIGH_MEASURED_MV): cv.templatable(cv.float_),
             cv.Optional(CONF_LOAD_RESISTANCE, default=0): cv.templatable(cv.float_),
             cv.Optional(CONF_LOAD_MAX_WATTAGE, default=0): cv.templatable(cv.float_),
             cv.Optional(CONF_MAX_DPS_CURRENT, default=5.0): cv.templatable(cv.float_),
@@ -572,11 +574,13 @@ async def opendps_start_calibration_assistant_to_code(
 ):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
-    vin_measured = await cg.templatable(config[CONF_VIN_MEASURED_MV], args, float)
+    vin_low = await cg.templatable(config[CONF_VIN_LOW_MEASURED_MV], args, float)
+    vin_high = await cg.templatable(config[CONF_VIN_HIGH_MEASURED_MV], args, float)
     load_r = await cg.templatable(config[CONF_LOAD_RESISTANCE], args, float)
     load_w = await cg.templatable(config[CONF_LOAD_MAX_WATTAGE], args, float)
     max_i = await cg.templatable(config[CONF_MAX_DPS_CURRENT], args, float)
-    cg.add(var.set_vin_measured_mv(vin_measured))
+    cg.add(var.set_vin_low_measured_mv(vin_low))
+    cg.add(var.set_vin_high_measured_mv(vin_high))
     cg.add(var.set_load_resistance(load_r))
     cg.add(var.set_load_max_wattage(load_w))
     cg.add(var.set_max_dps_current(max_i))
