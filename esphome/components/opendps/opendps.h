@@ -423,7 +423,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   std::pair<float, float> cal_best_fit_(const std::vector<float> &x, const std::vector<float> &y);
 
   // Calibration backup/restore
-  std::string calibration_backup_path_{"/sd/opendps_calibration.bin"};  // Default path for calibration backup
+  std::string calibration_backup_path_{"/sd/opendps_calibration.cfg"};  // Default path for calibration backup
   bool auto_restore_calibration_{false};  // Auto-restore calibration after successful firmware upgrade
 
   // Firmware upgrade helpers

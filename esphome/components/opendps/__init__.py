@@ -160,9 +160,9 @@ TCP_BRIDGE_SCHEMA = cv.Schema(
 
 CALIBRATION_BACKUP_SCHEMA = cv.Schema(
     {
-        # Path to store calibration backup file
+        # Path to store calibration backup file (text format, human readable)
         cv.Optional(
-            CONF_CALIBRATION_BACKUP_PATH, default="/sd/opendps_calibration.bin"
+            CONF_CALIBRATION_BACKUP_PATH, default="/sd/opendps_calibration.cfg"
         ): cv.string,
         # Automatically restore calibration after successful firmware upgrade
         cv.Optional(CONF_CALIBRATION_AUTO_RESTORE, default=False): cv.boolean,

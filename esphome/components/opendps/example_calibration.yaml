@@ -70,7 +70,7 @@ opendps:
 
   # Calibration backup configuration
   calibration_backup:
-    path: "/sd/opendps_calibration.bin"
+    path: "/sd/opendps_calibration.cfg"
     auto_restore: true        # Restore calibration after successful firmware upgrade
 
   # Bootloader baud rate for firmware upgrades
@@ -108,7 +108,7 @@ globals:
   # Calibration backup path override
   - id: cal_backup_path
     type: std::string
-    initial_value: '"/sd/opendps_calibration.bin"'
+    initial_value: '"/sd/opendps_calibration.cfg"'
 
 # ==============================================================================
 # Sensors
@@ -214,7 +214,7 @@ text:
     id: input_backup_path
     mode: text
     optimistic: true
-    initial_value: "/sd/opendps_calibration.bin"
+    initial_value: "/sd/opendps_calibration.cfg"
     on_value:
       - lambda: |-
           id(cal_backup_path) = x;
