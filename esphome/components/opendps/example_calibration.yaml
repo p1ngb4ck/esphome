@@ -1,0 +1,419 @@
+# OpenDPS Calibration Example Configuration
+# This example demonstrates the complete calibration workflow using ESPHome UI
+# including text inputs for parameters and buttons for control.
+#
+# IMPORTANT: The TCP bridge fix ensures dpsctl.py calibration works reliably.
+# The "status 04" errors were caused by ESPHome sending frames while dpsctl.py
+# was communicating. This has been fixed by blocking ESPHome frame sends during
+# TCP bridge mode.
+
+esphome:
+  name: opendps-calibration
+  platform: ESP32
+  board: esp32dev
+
+external_components:
+  - source: github://p1ngb4ck/esphome@dev
+    components: [opendps, storage, sd_storage]
+    refresh: 0s
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  password: !secret ota_password
+
+# Storage for calibration backup
+storage:
+  - id: storage_id
+
+sd_storage:
+  spi_id: spi_bus
+  id: sd_storage_id
+  type: sd_spi
+  cs_pin: GPIO5
+  path: "/sd"
+
+spi:
+  id: spi_bus
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  clk_pin: GPIO18
+
+uart:
+  id: opendps_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+
+# ==============================================================================
+# OpenDPS Component with calibration backup
+# ==============================================================================
+opendps:
+  id: opendps_id
+  uart_id: opendps_uart
+  update_interval: 100ms
+
+  # TCP bridge for dpsctl.py access (calibration via external tool)
+  tcp_bridge:
+    port: 5005
+    disconnect_delay: 1s      # Grace period for dpsctl.py reconnection
+    frame_timeout: 500ms
+
+  # Calibration backup configuration
+  calibration_backup:
+    path: "/sd/opendps_calibration.bin"
+    auto_restore: true        # Restore calibration after successful firmware upgrade
+
+  # Bootloader baud rate for firmware upgrades
+  bootloader_baud_rate: 9600
+
+# ==============================================================================
+# Globals for calibration parameters
+# ==============================================================================
+globals:
+  # Calibration assistant parameters
+  - id: cal_vin_measured_mv
+    type: float
+    initial_value: "0"
+  - id: cal_load_resistance
+    type: float
+    initial_value: "10.0"
+  - id: cal_load_max_wattage
+    type: float
+    initial_value: "50.0"
+  - id: cal_max_dps_current
+    type: float
+    initial_value: "5.0"
+  - id: cal_measured_value
+    type: float
+    initial_value: "0"
+
+  # Manual calibration parameters
+  - id: cal_name
+    type: std::string
+    initial_value: '""'
+  - id: cal_value
+    type: float
+    initial_value: "0"
+
+  # Calibration backup path override
+  - id: cal_backup_path
+    type: std::string
+    initial_value: '"/sd/opendps_calibration.bin"'
+
+# ==============================================================================
+# Sensors
+# ==============================================================================
+sensor:
+  - platform: opendps
+    opendps_id: opendps_id
+    voltage_in:
+      name: "Input Voltage"
+      id: vin
+    voltage_out:
+      name: "Output Voltage"
+      id: vout
+    current_out:
+      name: "Output Current"
+      id: iout
+    power_out:
+      name: "Output Power"
+      id: pout
+
+# ==============================================================================
+# Text Inputs for Calibration Parameters
+# ==============================================================================
+text:
+  # --- Calibration Assistant Parameters ---
+  - platform: template
+    name: "Cal: Measured Vin (mV)"
+    id: input_vin_measured
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(cal_vin_measured_mv) = atof(x.c_str());
+          ESP_LOGI("cal", "Vin measured set to: %.0f mV", id(cal_vin_measured_mv));
+
+  - platform: template
+    name: "Cal: Load Resistance (Ohm)"
+    id: input_load_resistance
+    mode: text
+    optimistic: true
+    initial_value: "10.0"
+    on_value:
+      - lambda: |-
+          id(cal_load_resistance) = atof(x.c_str());
+          ESP_LOGI("cal", "Load resistance set to: %.2f Ohm", id(cal_load_resistance));
+
+  - platform: template
+    name: "Cal: Load Max Wattage (W)"
+    id: input_load_wattage
+    mode: text
+    optimistic: true
+    initial_value: "50.0"
+    on_value:
+      - lambda: |-
+          id(cal_load_max_wattage) = atof(x.c_str());
+          ESP_LOGI("cal", "Load max wattage set to: %.1f W", id(cal_load_max_wattage));
+
+  - platform: template
+    name: "Cal: Max DPS Current (A)"
+    id: input_max_current
+    mode: text
+    optimistic: true
+    initial_value: "5.0"
+    on_value:
+      - lambda: |-
+          id(cal_max_dps_current) = atof(x.c_str());
+          ESP_LOGI("cal", "Max DPS current set to: %.1f A", id(cal_max_dps_current));
+
+  - platform: template
+    name: "Cal: Measured Value (for step)"
+    id: input_measured_value
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(cal_measured_value) = atof(x.c_str());
+          ESP_LOGI("cal", "Measured value set to: %.3f", id(cal_measured_value));
+
+  # --- Manual Calibration Parameters ---
+  - platform: template
+    name: "Manual Cal: Parameter Name"
+    id: input_cal_name
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(cal_name) = x;
+          ESP_LOGI("cal", "Calibration parameter name: %s", x.c_str());
+
+  - platform: template
+    name: "Manual Cal: Value"
+    id: input_cal_value
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(cal_value) = atof(x.c_str());
+          ESP_LOGI("cal", "Calibration value: %.6f", id(cal_value));
+
+  # --- Backup Path ---
+  - platform: template
+    name: "Calibration Backup Path"
+    id: input_backup_path
+    mode: text
+    optimistic: true
+    initial_value: "/sd/opendps_calibration.bin"
+    on_value:
+      - lambda: |-
+          id(cal_backup_path) = x;
+          ESP_LOGI("cal", "Backup path: %s", x.c_str());
+
+# ==============================================================================
+# Text Sensors for Calibration Status
+# ==============================================================================
+text_sensor:
+  - platform: template
+    name: "Calibration Status"
+    id: cal_status
+    update_interval: 1s
+    lambda: |-
+      auto state = id(opendps_id).get_calibration_assistant_state();
+      const char* prompt = id(opendps_id).get_calibration_assistant_prompt();
+      if (state == opendps::CAL_IDLE) {
+        return std::string("Idle - Ready to calibrate");
+      }
+      return std::string(prompt);
+
+# ==============================================================================
+# Buttons for Calibration Control
+# ==============================================================================
+button:
+  # --- Calibration Data ---
+  - platform: template
+    name: "Request Calibration Report"
+    on_press:
+      - opendps.request_calibration_report:
+          id: opendps_id
+      - logger.log: "Requested calibration report from OpenDPS"
+
+  # --- Calibration Assistant ---
+  - platform: template
+    name: "Start Calibration Assistant"
+    on_press:
+      - lambda: |-
+          ESP_LOGI("cal", "Starting calibration assistant with:");
+          ESP_LOGI("cal", "  Vin measured: %.0f mV", id(cal_vin_measured_mv));
+          ESP_LOGI("cal", "  Load resistance: %.2f Ohm", id(cal_load_resistance));
+          ESP_LOGI("cal", "  Load max wattage: %.1f W", id(cal_load_max_wattage));
+          ESP_LOGI("cal", "  Max DPS current: %.1f A", id(cal_max_dps_current));
+      - opendps.start_calibration_assistant:
+          id: opendps_id
+          vin_measured_mv: !lambda "return id(cal_vin_measured_mv);"
+          load_resistance: !lambda "return id(cal_load_resistance);"
+          load_max_wattage: !lambda "return id(cal_load_max_wattage);"
+          max_dps_current: !lambda "return id(cal_max_dps_current);"
+
+  - platform: template
+    name: "Calibration Step (with measured value)"
+    on_press:
+      - lambda: |-
+          ESP_LOGI("cal", "Calibration step with measured value: %.3f", id(cal_measured_value));
+      - opendps.calibration_assistant_step:
+          id: opendps_id
+          measured_value: !lambda "return id(cal_measured_value);"
+
+  - platform: template
+    name: "Calibration Step (confirm/continue)"
+    on_press:
+      - opendps.calibration_assistant_step:
+          id: opendps_id
+          measured_value: 0
+
+  - platform: template
+    name: "Cancel Calibration"
+    on_press:
+      - opendps.cancel_calibration_assistant:
+          id: opendps_id
+      - logger.log: "Calibration cancelled"
+
+  # --- Manual Calibration ---
+  - platform: template
+    name: "Set Calibration Parameter"
+    on_press:
+      - lambda: |-
+          if (id(cal_name).empty()) {
+            ESP_LOGW("cal", "No parameter name set!");
+            return;
+          }
+          ESP_LOGI("cal", "Setting %s = %.6f", id(cal_name).c_str(), id(cal_value));
+      - opendps.set_calibration:
+          id: opendps_id
+          calibration_name: !lambda "return id(cal_name);"
+          calibration_value: !lambda "return id(cal_value);"
+
+  - platform: template
+    name: "Clear All Calibration"
+    on_press:
+      - opendps.clear_calibration:
+          id: opendps_id
+      - logger.log: "Cleared all calibration (reset to defaults)"
+
+  # --- Calibration Backup/Restore ---
+  - platform: template
+    name: "Save Calibration to Storage"
+    on_press:
+      - opendps.request_calibration_report:
+          id: opendps_id
+      - delay: 500ms
+      - opendps.save_calibration:
+          id: opendps_id
+          path: !lambda "return id(cal_backup_path);"
+      - logger.log:
+          format: "Calibration saved to %s"
+          args: ['id(cal_backup_path).c_str()']
+
+  - platform: template
+    name: "Restore Calibration from Storage"
+    on_press:
+      - opendps.restore_calibration:
+          id: opendps_id
+          path: !lambda "return id(cal_backup_path);"
+      - logger.log:
+          format: "Calibration restored from %s"
+          args: ['id(cal_backup_path).c_str()']
+
+  # --- Quick Presets for Manual Calibration ---
+  - platform: template
+    name: "Preset: Set V_ADC_K"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("V_ADC_K");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set V_ADC_C"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("V_ADC_C");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set V_DAC_K"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("V_DAC_K");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set V_DAC_C"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("V_DAC_C");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set A_ADC_K"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("A_ADC_K");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set A_ADC_C"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("A_ADC_C");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set A_DAC_K"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("A_DAC_K");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set A_DAC_C"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("A_DAC_C");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set VIN_ADC_K"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("VIN_ADC_K");
+          call.perform();
+
+  - platform: template
+    name: "Preset: Set VIN_ADC_C"
+    on_press:
+      - lambda: |-
+          auto call = id(input_cal_name).make_call();
+          call.set_value("VIN_ADC_C");
+          call.perform();
+
+web_server:
+  version: 3

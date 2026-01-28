@@ -50,6 +50,11 @@ CONF_TCP_BRIDGE_FRAME_TIMEOUT = "frame_timeout"
 # Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
 CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
 
+# Calibration backup/restore
+CONF_CALIBRATION_BACKUP = "calibration_backup"
+CONF_CALIBRATION_BACKUP_PATH = "path"
+CONF_CALIBRATION_AUTO_RESTORE = "auto_restore"
+
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
 OpenDPSConnectTrigger = opendps_ns.class_(
@@ -72,6 +77,12 @@ RequestCalibrationReportAction = opendps_ns.class_(
 )
 SetCalibrationAction = opendps_ns.class_("SetCalibrationAction", automation.Action)
 ClearCalibrationAction = opendps_ns.class_("ClearCalibrationAction", automation.Action)
+
+# Calibration backup/restore actions
+SaveCalibrationAction = opendps_ns.class_("SaveCalibrationAction", automation.Action)
+RestoreCalibrationAction = opendps_ns.class_(
+    "RestoreCalibrationAction", automation.Action
+)
 
 # Calibration Assistant actions
 StartCalibrationAssistantAction = opendps_ns.class_(
@@ -147,6 +158,17 @@ TCP_BRIDGE_SCHEMA = cv.Schema(
     }
 )
 
+CALIBRATION_BACKUP_SCHEMA = cv.Schema(
+    {
+        # Path to store calibration backup file
+        cv.Optional(
+            CONF_CALIBRATION_BACKUP_PATH, default="/sd/opendps_calibration.bin"
+        ): cv.string,
+        # Automatically restore calibration after successful firmware upgrade
+        cv.Optional(CONF_CALIBRATION_AUTO_RESTORE, default=False): cv.boolean,
+    }
+)
+
 
 def validate_format(value):
     """Validate datalogger forma"""
@@ -214,6 +236,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_BOOTLOADER_BAUD_RATE, default=0): cv.int_range(
                 min=0, max=921600
             ),
+            # Calibration backup/restore configuration
+            cv.Optional(CONF_CALIBRATION_BACKUP): CALIBRATION_BACKUP_SCHEMA,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -252,6 +276,20 @@ async def to_code(config):
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
+
+    # Calibration backup configuration
+    if CONF_CALIBRATION_BACKUP in config:
+        cal_backup_config = config[CONF_CALIBRATION_BACKUP]
+        cg.add(
+            var.set_calibration_backup_path(
+                cal_backup_config[CONF_CALIBRATION_BACKUP_PATH]
+            )
+        )
+        cg.add(
+            var.set_auto_restore_calibration(
+                cal_backup_config[CONF_CALIBRATION_AUTO_RESTORE]
+            )
+        )
 
     # Datalogger configuration
     if CONF_DATALOGGER in config:
@@ -474,6 +512,46 @@ async def opendps_set_calibration_to_code(config, action_id, template_arg, args)
 async def opendps_clear_calibration_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+# Calibration backup path config key for actions
+CONF_PATH = "path"
+
+
+@automation.register_action(
+    "opendps.save_calibration",
+    SaveCalibrationAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Optional(CONF_PATH): cv.templatable(cv.string),
+        }
+    ),
+)
+async def opendps_save_calibration_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    if CONF_PATH in config:
+        template_path = await cg.templatable(config[CONF_PATH], args, cg.std_string)
+        cg.add(var.set_path(template_path))
+    return var
+
+
+@automation.register_action(
+    "opendps.restore_calibration",
+    RestoreCalibrationAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {
+            cv.Optional(CONF_PATH): cv.templatable(cv.string),
+        }
+    ),
+)
+async def opendps_restore_calibration_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    if CONF_PATH in config:
+        template_path = await cg.templatable(config[CONF_PATH], args, cg.std_string)
+        cg.add(var.set_path(template_path))
+    return var
 
 
 # Calibration Assistant Actions

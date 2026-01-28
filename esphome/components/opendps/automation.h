@@ -198,6 +198,44 @@ template<typename... Ts> class ClearCalibrationAction : public Action<Ts...> {
   OpenDPS *parent_;
 };
 
+// Save Calibration Action
+template<typename... Ts> class SaveCalibrationAction : public Action<Ts...> {
+ public:
+  explicit SaveCalibrationAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, path)
+
+  void play(Ts... x) override {
+    if (this->path_.has_value()) {
+      this->parent_->save_calibration_to_storage(this->path_.value(x...));
+    } else {
+      this->parent_->save_calibration_to_storage();
+    }
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
+// Restore Calibration Action
+template<typename... Ts> class RestoreCalibrationAction : public Action<Ts...> {
+ public:
+  explicit RestoreCalibrationAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, path)
+
+  void play(Ts... x) override {
+    if (this->path_.has_value()) {
+      this->parent_->restore_calibration_from_storage(this->path_.value(x...));
+    } else {
+      this->parent_->restore_calibration_from_storage();
+    }
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
 // Start Calibration Assistant Action
 template<typename... Ts> class StartCalibrationAssistantAction : public Action<Ts...> {
  public:

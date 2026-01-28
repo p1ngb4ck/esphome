@@ -248,6 +248,16 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_calibration(const std::string &name, float value);
   void clear_calibration();
 
+  // Calibration backup/restore to storage
+  void set_calibration_backup_path(const std::string &path) { this->calibration_backup_path_ = path; }
+  void set_auto_restore_calibration(bool enabled) { this->auto_restore_calibration_ = enabled; }
+  bool save_calibration_to_storage();
+  bool save_calibration_to_storage(const std::string &path);
+  bool restore_calibration_from_storage();
+  bool restore_calibration_from_storage(const std::string &path);
+  bool has_calibration_backup() const;
+  bool has_calibration_backup(const std::string &path) const;
+
   // Calibration Assistant - interactive calibration like dpsctl.py -C
   // Call start_calibration_assistant() to begin, then call calibration_assistant_step()
   // with user-provided measurements at each step. Check get_calibration_assistant_state()
@@ -411,6 +421,10 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void cal_assistant_process_();
   void cal_assistant_collect_sample_();
   std::pair<float, float> cal_best_fit_(const std::vector<float> &x, const std::vector<float> &y);
+
+  // Calibration backup/restore
+  std::string calibration_backup_path_{"/sd/opendps_calibration.bin"};  // Default path for calibration backup
+  bool auto_restore_calibration_{false};  // Auto-restore calibration after successful firmware upgrade
 
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();

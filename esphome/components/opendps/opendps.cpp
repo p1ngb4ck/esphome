@@ -634,6 +634,17 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
             this->upgrade_state_pref_.save(&zero);
             global_preferences->sync();
           }
+          // Auto-restore calibration if enabled and backup exists
+          if (this->auto_restore_calibration_ && this->has_calibration_backup()) {
+            ESP_LOGI(TAG, "Auto-restoring calibration from backup...");
+            // Small delay to let new firmware fully initialize
+            delay(500);
+            if (this->restore_calibration_from_storage()) {
+              ESP_LOGI(TAG, "Calibration auto-restored successfully after firmware upgrade");
+            } else {
+              ESP_LOGW(TAG, "Failed to auto-restore calibration after firmware upgrade");
+            }
+          }
           // Restore connection icon after successful upgrade
 #ifdef USE_ETHERNET
           this->send_connection_status(CONN_ETHERNET_CONNECTED);
@@ -859,6 +870,167 @@ void OpenDPS::clear_calibration() {
   this->pack8_(payload, CMD_CLEAR_CALIBRATION);
   this->send_frame_(payload);
   ESP_LOGI(TAG, "Cleared calibration (reset to defaults)");
+}
+
+// ============================================================================
+// Calibration Backup/Restore
+// ============================================================================
+
+bool OpenDPS::has_calibration_backup() const { return this->has_calibration_backup(this->calibration_backup_path_); }
+
+bool OpenDPS::has_calibration_backup(const std::string &path) const {
+  if (storage::global_storage == nullptr) {
+    return false;
+  }
+  return storage::global_storage->file_exists(path);
+}
+
+bool OpenDPS::save_calibration_to_storage() {
+  return this->save_calibration_to_storage(this->calibration_backup_path_);
+}
+
+bool OpenDPS::save_calibration_to_storage(const std::string &path) {
+  if (storage::global_storage == nullptr) {
+    ESP_LOGE(TAG, "Cannot save calibration: storage not available");
+    return false;
+  }
+
+  // Check if we have valid calibration data
+  if (this->calibration_data_.last_update == 0) {
+    ESP_LOGW(TAG, "No calibration data to save - request calibration report first");
+    return false;
+  }
+
+  // Binary format: magic (4 bytes) + version (1 byte) + calibration floats
+  // Magic: "DCAL" (0x44 0x43 0x41 0x4C)
+  const uint8_t MAGIC[4] = {0x44, 0x43, 0x41, 0x4C};
+  const uint8_t VERSION = 1;
+
+  std::vector<uint8_t> data;
+  data.reserve(4 + 1 + 10 * sizeof(float));
+
+  // Write magic
+  data.insert(data.end(), MAGIC, MAGIC + 4);
+
+  // Write version
+  data.push_back(VERSION);
+
+  // Write calibration coefficients (10 floats = 40 bytes)
+  auto write_float = [&data](float value) {
+    uint8_t *bytes = reinterpret_cast<uint8_t *>(&value);
+    data.insert(data.end(), bytes, bytes + sizeof(float));
+  };
+
+  write_float(this->calibration_data_.a_adc_k);
+  write_float(this->calibration_data_.a_adc_c);
+  write_float(this->calibration_data_.a_dac_k);
+  write_float(this->calibration_data_.a_dac_c);
+  write_float(this->calibration_data_.v_adc_k);
+  write_float(this->calibration_data_.v_adc_c);
+  write_float(this->calibration_data_.v_dac_k);
+  write_float(this->calibration_data_.v_dac_c);
+  write_float(this->calibration_data_.vin_adc_k);
+  write_float(this->calibration_data_.vin_adc_c);
+
+  // Write to storage (convert to string for Storage API)
+  std::string data_str(reinterpret_cast<const char *>(data.data()), data.size());
+  if (!storage::global_storage->write_file(path, data_str)) {
+    ESP_LOGE(TAG, "Failed to write calibration backup to %s", path.c_str());
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Calibration saved to %s (%u bytes)", path.c_str(), data.size());
+  ESP_LOGI(TAG, "  A: ADC_K=%.6f, ADC_C=%.6f, DAC_K=%.6f, DAC_C=%.6f", this->calibration_data_.a_adc_k,
+           this->calibration_data_.a_adc_c, this->calibration_data_.a_dac_k, this->calibration_data_.a_dac_c);
+  ESP_LOGI(TAG, "  V: ADC_K=%.6f, ADC_C=%.6f, DAC_K=%.6f, DAC_C=%.6f", this->calibration_data_.v_adc_k,
+           this->calibration_data_.v_adc_c, this->calibration_data_.v_dac_k, this->calibration_data_.v_dac_c);
+  ESP_LOGI(TAG, "  Vin: ADC_K=%.6f, ADC_C=%.6f", this->calibration_data_.vin_adc_k, this->calibration_data_.vin_adc_c);
+
+  return true;
+}
+
+bool OpenDPS::restore_calibration_from_storage() {
+  return this->restore_calibration_from_storage(this->calibration_backup_path_);
+}
+
+bool OpenDPS::restore_calibration_from_storage(const std::string &path) {
+  if (storage::global_storage == nullptr) {
+    ESP_LOGE(TAG, "Cannot restore calibration: storage not available");
+    return false;
+  }
+
+  if (!storage::global_storage->file_exists(path)) {
+    ESP_LOGW(TAG, "Calibration backup not found: %s", path.c_str());
+    return false;
+  }
+
+  // Read file
+  std::string file_data = storage::global_storage->read_file(path);
+  if (file_data.empty()) {
+    ESP_LOGE(TAG, "Failed to read calibration backup from %s", path.c_str());
+    return false;
+  }
+
+  const uint8_t *data = reinterpret_cast<const uint8_t *>(file_data.data());
+  size_t size = file_data.size();
+
+  // Verify magic and version
+  const uint8_t MAGIC[4] = {0x44, 0x43, 0x41, 0x4C};
+  if (size < 5 + 40) {  // 4 magic + 1 version + 10 floats
+    ESP_LOGE(TAG, "Calibration backup file too small: %u bytes", size);
+    return false;
+  }
+
+  if (memcmp(data, MAGIC, 4) != 0) {
+    ESP_LOGE(TAG, "Invalid calibration backup magic");
+    return false;
+  }
+
+  uint8_t version = data[4];
+  if (version != 1) {
+    ESP_LOGE(TAG, "Unsupported calibration backup version: %d", version);
+    return false;
+  }
+
+  // Read calibration coefficients
+  size_t pos = 5;
+  auto read_float = [&data, &pos]() -> float {
+    float value;
+    memcpy(&value, data + pos, sizeof(float));
+    pos += sizeof(float);
+    return value;
+  };
+
+  float a_adc_k = read_float();
+  float a_adc_c = read_float();
+  float a_dac_k = read_float();
+  float a_dac_c = read_float();
+  float v_adc_k = read_float();
+  float v_adc_c = read_float();
+  float v_dac_k = read_float();
+  float v_dac_c = read_float();
+  float vin_adc_k = read_float();
+  float vin_adc_c = read_float();
+
+  ESP_LOGI(TAG, "Restoring calibration from %s", path.c_str());
+  ESP_LOGI(TAG, "  A: ADC_K=%.6f, ADC_C=%.6f, DAC_K=%.6f, DAC_C=%.6f", a_adc_k, a_adc_c, a_dac_k, a_dac_c);
+  ESP_LOGI(TAG, "  V: ADC_K=%.6f, ADC_C=%.6f, DAC_K=%.6f, DAC_C=%.6f", v_adc_k, v_adc_c, v_dac_k, v_dac_c);
+  ESP_LOGI(TAG, "  Vin: ADC_K=%.6f, ADC_C=%.6f", vin_adc_k, vin_adc_c);
+
+  // Apply calibration values to OpenDPS
+  this->set_calibration("A_ADC_K", a_adc_k);
+  this->set_calibration("A_ADC_C", a_adc_c);
+  this->set_calibration("A_DAC_K", a_dac_k);
+  this->set_calibration("A_DAC_C", a_dac_c);
+  this->set_calibration("V_ADC_K", v_adc_k);
+  this->set_calibration("V_ADC_C", v_adc_c);
+  this->set_calibration("V_DAC_K", v_dac_k);
+  this->set_calibration("V_DAC_C", v_dac_c);
+  this->set_calibration("VIN_ADC_K", vin_adc_k);
+  this->set_calibration("VIN_ADC_C", vin_adc_c);
+
+  ESP_LOGI(TAG, "Calibration restored successfully");
+  return true;
 }
 
 // ============================================================================
