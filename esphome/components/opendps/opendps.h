@@ -216,6 +216,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_default_brightness(uint8_t brightness) { this->default_brightness_ = brightness; }
   void set_tcp_bridge_enabled(bool enabled) { this->tcp_bridge_enabled_ = enabled; }
   void set_tcp_bridge_port(uint16_t port) { this->tcp_bridge_port_ = port; }
+  void set_tcp_bridge_disconnect_delay(uint32_t delay_ms) { this->tcp_bridge_disconnect_delay_ms_ = delay_ms; }
+  void set_tcp_bridge_frame_timeout(uint32_t timeout_ms) { this->tcp_bridge_frame_timeout_ms_ = timeout_ms; }
   void set_bootloader_baud_rate(uint32_t baud_rate) { this->bootloader_baud_rate_ = baud_rate; }
 
   // Sensor registration
@@ -416,6 +418,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   // TCP bridge configuration (always present for Python codegen compatibility)
   bool tcp_bridge_enabled_{false};
   uint16_t tcp_bridge_port_{5005};
+  uint32_t tcp_bridge_disconnect_delay_ms_{500};  // Grace period before exiting bridge mode
+  uint32_t tcp_bridge_frame_timeout_ms_{500};     // Timeout for incomplete UART frames
 
   //========================================================================
   // Datalogger state
@@ -471,11 +475,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   std::unique_ptr<socket::Socket> tcp_server_socket_;
   std::unique_ptr<socket::Socket> tcp_client_socket_;
-  std::vector<uint8_t> tcp_uart_buffer_;                       // Buffer for assembling complete UART frames
-  uint32_t tcp_uart_buffer_start_time_{0};                     // Timeout tracking for UART frame buffering
-  uint32_t tcp_client_disconnect_time_{0};                     // When client disconnected (for grace period)
-  static const uint32_t TCP_BRIDGE_DISCONNECT_DELAY_MS = 500;  // Grace period before exiting bridge mode
-  static const uint32_t TCP_UART_BUFFER_TIMEOUT_MS = 500;      // Timeout for incomplete UART frames
+  std::vector<uint8_t> tcp_uart_buffer_;    // Buffer for assembling complete UART frames
+  uint32_t tcp_uart_buffer_start_time_{0};  // Timeout tracking for UART frame buffering
+  uint32_t tcp_client_disconnect_time_{0};  // When client disconnected (for grace period)
 #endif
 };
 

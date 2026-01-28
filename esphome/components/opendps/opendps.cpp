@@ -2530,7 +2530,7 @@ void OpenDPS::loop_tcp_bridge_() {
   // Handle disconnect grace period - stay in bridge mode briefly to allow reconnection
   // This helps tools like dpsctl.py that may send multiple commands in sequence (e.g., calibration)
   if (this->tcp_client_disconnect_time_ > 0) {
-    if (now - this->tcp_client_disconnect_time_ < TCP_BRIDGE_DISCONNECT_DELAY_MS) {
+    if (now - this->tcp_client_disconnect_time_ < this->tcp_bridge_disconnect_delay_ms_) {
       // Still in grace period - check for new connection
       struct sockaddr_storage client_addr;
       socklen_t addr_len = sizeof(client_addr);
@@ -2590,14 +2590,15 @@ void OpenDPS::loop_tcp_bridge_() {
       this->flush();
     } else if (tcp_len == 0) {
       // Connection closed gracefully - start grace period
-      ESP_LOGI(TAG, "TCP bridge: client disconnected - starting %dms grace period", TCP_BRIDGE_DISCONNECT_DELAY_MS);
+      ESP_LOGI(TAG, "TCP bridge: client disconnected - starting %ums grace period",
+               this->tcp_bridge_disconnect_delay_ms_);
       this->tcp_client_socket_.reset();
       this->tcp_client_disconnect_time_ = now;
       return;
     } else if (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
       // Error - start grace period
-      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - starting %dms grace period", errno,
-               TCP_BRIDGE_DISCONNECT_DELAY_MS);
+      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - starting %ums grace period", errno,
+               this->tcp_bridge_disconnect_delay_ms_);
       this->tcp_client_socket_.reset();
       this->tcp_client_disconnect_time_ = now;
       return;
@@ -2644,7 +2645,7 @@ void OpenDPS::loop_tcp_bridge_() {
 
     // Check for UART buffer timeout (incomplete frame)
     if (!this->tcp_uart_buffer_.empty() && this->tcp_uart_buffer_start_time_ > 0) {
-      if (now - this->tcp_uart_buffer_start_time_ > TCP_UART_BUFFER_TIMEOUT_MS) {
+      if (now - this->tcp_uart_buffer_start_time_ > this->tcp_bridge_frame_timeout_ms_) {
         ESP_LOGW(TAG, "TCP bridge: UART frame timeout (%u bytes), clearing buffer", this->tcp_uart_buffer_.size());
         this->tcp_uart_buffer_.clear();
         this->tcp_uart_buffer_start_time_ = 0;

@@ -44,6 +44,8 @@ CONF_ON_CONNECT = "on_connect"
 # TCP Bridge for dpsctl.py access
 CONF_TCP_BRIDGE = "tcp_bridge"
 CONF_TCP_BRIDGE_PORT = "port"
+CONF_TCP_BRIDGE_DISCONNECT_DELAY = "disconnect_delay"
+CONF_TCP_BRIDGE_FRAME_TIMEOUT = "frame_timeout"
 
 # Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
 CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
@@ -133,6 +135,15 @@ CONF_MEASURED_VALUE = "measured_value"
 TCP_BRIDGE_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_TCP_BRIDGE_PORT, default=5005): cv.port,
+        # Grace period after client disconnect before resuming normal operation
+        # Allows tools like dpsctl.py to reconnect between commands (e.g., during calibration)
+        cv.Optional(
+            CONF_TCP_BRIDGE_DISCONNECT_DELAY, default="500ms"
+        ): cv.positive_time_period_milliseconds,
+        # Timeout for incomplete UART frames - clears buffer if no EOF received
+        cv.Optional(
+            CONF_TCP_BRIDGE_FRAME_TIMEOUT, default="500ms"
+        ): cv.positive_time_period_milliseconds,
     }
 )
 
@@ -227,6 +238,16 @@ async def to_code(config):
         tcp_bridge_config = config[CONF_TCP_BRIDGE]
         cg.add(var.set_tcp_bridge_enabled(True))
         cg.add(var.set_tcp_bridge_port(tcp_bridge_config[CONF_TCP_BRIDGE_PORT]))
+        cg.add(
+            var.set_tcp_bridge_disconnect_delay(
+                tcp_bridge_config[CONF_TCP_BRIDGE_DISCONNECT_DELAY]
+            )
+        )
+        cg.add(
+            var.set_tcp_bridge_frame_timeout(
+                tcp_bridge_config[CONF_TCP_BRIDGE_FRAME_TIMEOUT]
+            )
+        )
 
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
