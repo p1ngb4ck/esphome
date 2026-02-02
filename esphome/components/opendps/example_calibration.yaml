@@ -1,52 +1,28 @@
 # OpenDPS Calibration Example Configuration
-# This example demonstrates the complete calibration workflow using ESPHome UI
-# with text input fields for each calibration parameter.
+# This example demonstrates the complete calibration workflow using ESPHome UI.
 #
-# Features:
-# - Text input fields for each calibration coefficient (V_ADC_K, V_ADC_C, etc.)
-# - On-boot loading of current calibration values from the device
-# - Single "Set All Calibration" button to apply all values at once
-# - Calibration Assistant for guided calibration (requires two input voltages)
-# - Calibration backup/restore to SD storage
+# The calibration assistant follows the same flow as dpsctl.py -C:
+# 1. Input Voltage Calibration (two-point)
+#    - Connect lower supply voltage, enter measured mV, step
+#    - Connect higher supply voltage, enter measured mV, step
+# 2. Output Voltage Calibration
+#    - Automatic V_DAC sweep to find max
+#    - Measure output at 10%, enter mV, step
+#    - Measure output at 90%, enter mV, step
+# 3. Output Current Calibration
+#    - Enter max DPS current (A), step
+#    - Enter load resistance (Ohm), step
+#    - Enter load max wattage (W), step
+#    - Connect load, step to start sweep
+# 4. Constant Current Calibration
+#    - Short output, step to start sweep
+#
+# Monitor the logs (INFO level) for prompts at each step.
 
 esphome:
   name: opendps-calibration
   platform: ESP32
   board: esp32dev
-  on_boot:
-    priority: -100  # Run after everything is initialized
-    then:
-      - delay: 2s  # Wait for OpenDPS connection
-      - opendps.request_calibration_report:
-          id: opendps_id
-      - delay: 500ms  # Wait for report
-      - lambda: |-
-          // Load current calibration values into text inputs
-          auto &cal = id(opendps_id).get_calibration_data();
-
-          char buf[32];
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);
-          id(input_v_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);
-          id(input_v_adc_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);
-          id(input_v_dac_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);
-          id(input_v_dac_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);
-          id(input_a_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);
-          id(input_a_adc_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);
-          id(input_a_dac_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);
-          id(input_a_dac_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k);
-          id(input_vin_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c);
-          id(input_vin_adc_c).publish_state(buf);
-
-          ESP_LOGI("cal", "Loaded calibration values from device");
 
 external_components:
   - source: github://p1ngb4ck/esphome@dev
@@ -54,7 +30,7 @@ external_components:
     refresh: 0s
 
 logger:
-  level: DEBUG
+  level: INFO
 
 wifi:
   ssid: !secret wifi_ssid
@@ -112,25 +88,12 @@ opendps:
   bootloader_baud_rate: 9600
 
 # ==============================================================================
-# Globals for Calibration Assistant parameters
+# Global for calibration assistant input value
 # ==============================================================================
 globals:
-  # Two input voltages for two-point VIN calibration (like dpsctl.py)
-  - id: cal_vin_low_mv
+  - id: cal_input_value
     type: float
-    initial_value: "12000"  # e.g., 12V
-  - id: cal_vin_high_mv
-    type: float
-    initial_value: "48000"  # e.g., 48V
-  - id: cal_load_resistance
-    type: float
-    initial_value: "10.0"
-  - id: cal_load_max_wattage
-    type: float
-    initial_value: "50.0"
-  - id: cal_max_dps_current
-    type: float
-    initial_value: "5.0"
+    initial_value: "0"
 
 # ==============================================================================
 # Sensors
@@ -152,228 +115,65 @@ sensor:
       id: pout
 
 # ==============================================================================
-# Text Inputs for Calibration Coefficients
+# Text Input for Calibration Assistant
 # ==============================================================================
 text:
-  # --- Voltage Calibration ---
+  # Single input field for ALL calibration assistant steps
+  # The value entered here is used when "Calibration Step" button is pressed
   - platform: template
-    name: "Cal: V_ADC_K"
-    id: input_v_adc_k
+    name: "Calibration Input"
+    id: cal_input
     mode: text
     optimistic: true
-
-  - platform: template
-    name: "Cal: V_ADC_C"
-    id: input_v_adc_c
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: V_DAC_K"
-    id: input_v_dac_k
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: V_DAC_C"
-    id: input_v_dac_c
-    mode: text
-    optimistic: true
-
-  # --- Current Calibration ---
-  - platform: template
-    name: "Cal: A_ADC_K"
-    id: input_a_adc_k
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: A_ADC_C"
-    id: input_a_adc_c
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: A_DAC_K"
-    id: input_a_dac_k
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: A_DAC_C"
-    id: input_a_dac_c
-    mode: text
-    optimistic: true
-
-  # --- Input Voltage Calibration ---
-  - platform: template
-    name: "Cal: VIN_ADC_K"
-    id: input_vin_adc_k
-    mode: text
-    optimistic: true
-
-  - platform: template
-    name: "Cal: VIN_ADC_C"
-    id: input_vin_adc_c
-    mode: text
-    optimistic: true
-
-  # --- Calibration Assistant Parameters ---
-  - platform: template
-    name: "Cal Assist: Vin Low (mV)"
-    id: input_vin_low
-    mode: text
-    optimistic: true
-    initial_value: "12000"
+    initial_value: "0"
     on_value:
       - lambda: |-
-          id(cal_vin_low_mv) = atof(x.c_str());
-          ESP_LOGI("cal", "Vin LOW set to: %.0f mV", id(cal_vin_low_mv));
-
-  - platform: template
-    name: "Cal Assist: Vin High (mV)"
-    id: input_vin_high
-    mode: text
-    optimistic: true
-    initial_value: "48000"
-    on_value:
-      - lambda: |-
-          id(cal_vin_high_mv) = atof(x.c_str());
-          ESP_LOGI("cal", "Vin HIGH set to: %.0f mV", id(cal_vin_high_mv));
-
-  - platform: template
-    name: "Cal Assist: Load Resistance (Ohm)"
-    id: input_load_resistance
-    mode: text
-    optimistic: true
-    initial_value: "10.0"
-    on_value:
-      - lambda: |-
-          id(cal_load_resistance) = atof(x.c_str());
-          ESP_LOGI("cal", "Load resistance set to: %.2f Ohm", id(cal_load_resistance));
-
-  - platform: template
-    name: "Cal Assist: Load Max Wattage (W)"
-    id: input_load_wattage
-    mode: text
-    optimistic: true
-    initial_value: "50.0"
-    on_value:
-      - lambda: |-
-          id(cal_load_max_wattage) = atof(x.c_str());
-          ESP_LOGI("cal", "Load max wattage set to: %.1f W", id(cal_load_max_wattage));
-
-  - platform: template
-    name: "Cal Assist: Max DPS Current (A)"
-    id: input_max_current
-    mode: text
-    optimistic: true
-    initial_value: "5.0"
-    on_value:
-      - lambda: |-
-          id(cal_max_dps_current) = atof(x.c_str());
-          ESP_LOGI("cal", "Max DPS current set to: %.1f A", id(cal_max_dps_current));
-
-# ==============================================================================
-# Text Sensors for Calibration Status
-# ==============================================================================
-text_sensor:
-  - platform: template
-    name: "Calibration Status"
-    id: cal_status
-    update_interval: 1s
-    lambda: |-
-      auto state = id(opendps_id).get_calibration_assistant_state();
-      const char* prompt = id(opendps_id).get_calibration_assistant_prompt();
-      if (state == opendps::CAL_IDLE) {
-        return std::string("Idle - Ready to calibrate");
-      }
-      return std::string(prompt);
+          id(cal_input_value) = atof(x.c_str());
+          ESP_LOGI("cal", "Calibration input set to: %.3f", id(cal_input_value));
 
 # ==============================================================================
 # Buttons for Calibration Control
 # ==============================================================================
 button:
-  # --- Request/Refresh Calibration Values ---
+  # --- Start Calibration Assistant ---
+  # This begins the guided calibration process.
+  # Follow the prompts in the logs (INFO level).
+  - platform: template
+    name: "Start Calibration Assistant"
+    on_press:
+      - logger.log:
+          level: INFO
+          format: "Starting calibration assistant..."
+      - opendps.start_calibration_assistant:
+          id: opendps_id
+
+  # --- Submit Value and Advance to Next Step ---
+  # Enter your measurement in the "Calibration Input" field,
+  # then press this button to submit and advance.
+  - platform: template
+    name: "Calibration Step"
+    on_press:
+      - lambda: |-
+          ESP_LOGI("cal", "Submitting calibration value: %.3f", id(cal_input_value));
+      - opendps.calibration_assistant_step:
+          id: opendps_id
+          measured_value: !lambda "return id(cal_input_value);"
+
+  # --- Cancel Calibration ---
+  - platform: template
+    name: "Cancel Calibration"
+    on_press:
+      - opendps.cancel_calibration_assistant:
+          id: opendps_id
+      - logger.log: "Calibration cancelled"
+
+  # --- Request Calibration Report ---
+  # Displays current calibration values in logs
   - platform: template
     name: "Request Calibration Report"
     on_press:
       - opendps.request_calibration_report:
           id: opendps_id
-      - delay: 500ms
-      - lambda: |-
-          // Update text inputs with current values
-          auto &cal = id(opendps_id).get_calibration_data();
-          char buf[32];
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);
-          id(input_v_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);
-          id(input_v_adc_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);
-          id(input_v_dac_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);
-          id(input_v_dac_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);
-          id(input_a_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);
-          id(input_a_adc_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);
-          id(input_a_dac_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);
-          id(input_a_dac_c).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k);
-          id(input_vin_adc_k).publish_state(buf);
-          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c);
-          id(input_vin_adc_c).publish_state(buf);
-          ESP_LOGI("cal", "Updated text inputs with current calibration values");
-
-  # --- Set All Calibration Parameters ---
-  - platform: template
-    name: "Set All Calibration"
-    on_press:
-      - lambda: |-
-          ESP_LOGI("cal", "Setting all calibration parameters from text inputs");
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "V_ADC_K"
-          calibration_value: !lambda "return atof(id(input_v_adc_k).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "V_ADC_C"
-          calibration_value: !lambda "return atof(id(input_v_adc_c).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "V_DAC_K"
-          calibration_value: !lambda "return atof(id(input_v_dac_k).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "V_DAC_C"
-          calibration_value: !lambda "return atof(id(input_v_dac_c).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "A_ADC_K"
-          calibration_value: !lambda "return atof(id(input_a_adc_k).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "A_ADC_C"
-          calibration_value: !lambda "return atof(id(input_a_adc_c).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "A_DAC_K"
-          calibration_value: !lambda "return atof(id(input_a_dac_k).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "A_DAC_C"
-          calibration_value: !lambda "return atof(id(input_a_dac_c).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "VIN_ADC_K"
-          calibration_value: !lambda "return atof(id(input_vin_adc_k).state.c_str());"
-      - opendps.set_calibration:
-          id: opendps_id
-          calibration_name: "VIN_ADC_C"
-          calibration_value: !lambda "return atof(id(input_vin_adc_c).state.c_str());"
-      - logger.log: "All calibration parameters set"
 
   # --- Clear All Calibration ---
   - platform: template
@@ -383,7 +183,7 @@ button:
           id: opendps_id
       - logger.log: "Cleared all calibration (reset to defaults)"
 
-  # --- Calibration Backup/Restore ---
+  # --- Save Calibration to Storage ---
   - platform: template
     name: "Save Calibration to Storage"
     on_press:
@@ -394,45 +194,13 @@ button:
           id: opendps_id
       - logger.log: "Calibration saved to storage"
 
+  # --- Restore Calibration from Storage ---
   - platform: template
     name: "Restore Calibration from Storage"
     on_press:
       - opendps.restore_calibration:
           id: opendps_id
       - logger.log: "Calibration restored from storage"
-
-  # --- Calibration Assistant (Two-Point VIN like dpsctl.py) ---
-  - platform: template
-    name: "Start Calibration Assistant"
-    on_press:
-      - lambda: |-
-          ESP_LOGI("cal", "Starting calibration assistant with:");
-          ESP_LOGI("cal", "  Vin LOW: %.0f mV", id(cal_vin_low_mv));
-          ESP_LOGI("cal", "  Vin HIGH: %.0f mV", id(cal_vin_high_mv));
-          ESP_LOGI("cal", "  Load resistance: %.2f Ohm", id(cal_load_resistance));
-          ESP_LOGI("cal", "  Load max wattage: %.1f W", id(cal_load_max_wattage));
-          ESP_LOGI("cal", "  Max DPS current: %.1f A", id(cal_max_dps_current));
-      - opendps.start_calibration_assistant:
-          id: opendps_id
-          vin_low_measured_mv: !lambda "return id(cal_vin_low_mv);"
-          vin_high_measured_mv: !lambda "return id(cal_vin_high_mv);"
-          load_resistance: !lambda "return id(cal_load_resistance);"
-          load_max_wattage: !lambda "return id(cal_load_max_wattage);"
-          max_dps_current: !lambda "return id(cal_max_dps_current);"
-
-  - platform: template
-    name: "Calibration Step (confirm/continue)"
-    on_press:
-      - opendps.calibration_assistant_step:
-          id: opendps_id
-          measured_value: 0
-
-  - platform: template
-    name: "Cancel Calibration"
-    on_press:
-      - opendps.cancel_calibration_assistant:
-          id: opendps_id
-      - logger.log: "Calibration cancelled"
 
 web_server:
   version: 3

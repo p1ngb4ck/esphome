@@ -143,41 +143,43 @@ struct OpenDPSData {
   uint32_t last_update{0};
 };
 
-// Calibration assistant parameters
-struct CalibrationAssistantParams {
-  float vin_low_measured_mv{0};   // First (lower) measured input voltage in mV
-  float vin_high_measured_mv{0};  // Second (higher) measured input voltage in mV
-  float load_resistance{0};       // Load resistance in ohms for current calibration
-  float load_max_wattage{0};      // Load max wattage for current calibration
-  float max_dps_current{5.0};     // Max output current of DPS model (default 5A)
-};
-
-// Calibration assistant states
+// Calibration assistant states - matches dpsctl.py -C flow exactly
+// All user inputs are collected via calibration_assistant_step(value)
 enum CalibrationAssistantState : uint8_t {
   CAL_IDLE = 0,
-  // Input voltage calibration (two-point like dpsctl.py)
-  CAL_VIN_LOW_START,
-  CAL_VIN_LOW_MEASURE,
-  CAL_VIN_HIGH_START,
-  CAL_VIN_HIGH_MEASURE,
-  CAL_VIN_CALCULATE,
-  // Output voltage calibration
-  CAL_VOUT_START,
-  CAL_VOUT_SWEEP,
-  CAL_VOUT_MEASURE_LOW,
-  CAL_VOUT_WAIT_HIGH,
-  CAL_VOUT_MEASURE_HIGH,
-  CAL_VOUT_CALCULATE,
-  // Output current calibration (requires load)
-  CAL_IOUT_START,
-  CAL_IOUT_SWEEP,
-  CAL_IOUT_CALCULATE,
-  // Current limit calibration (requires short)
-  CAL_ILIMIT_START,
-  CAL_ILIMIT_SWEEP,
-  CAL_ILIMIT_MEASURE,
-  CAL_ILIMIT_CALCULATE,
-  // Done
+
+  // === Input Voltage Calibration (two-point) ===
+  // User connects lower supply voltage, enters measured mV
+  CAL_VIN_LOW_WAIT_INPUT,  // Waiting for user to enter measured Vin LOW in mV
+  CAL_VIN_LOW_RECORD,      // Record ADC reading for low point
+  // User connects higher supply voltage, enters measured mV
+  CAL_VIN_HIGH_WAIT_INPUT,  // Waiting for user to enter measured Vin HIGH in mV
+  CAL_VIN_HIGH_RECORD,      // Record ADC reading for high point
+  CAL_VIN_CALCULATE,        // Calculate VIN_ADC_K and VIN_ADC_C
+
+  // === Output Voltage Calibration ===
+  CAL_VOUT_SWEEP,            // Auto-sweep to find max V_DAC (no user input)
+  CAL_VOUT_LOW_WAIT_INPUT,   // Set V_DAC to 10%, wait for user measured mV
+  CAL_VOUT_LOW_RECORD,       // Record V_ADC for low point
+  CAL_VOUT_HIGH_WAIT_INPUT,  // Set V_DAC to 90%, wait for user measured mV
+  CAL_VOUT_HIGH_RECORD,      // Record V_ADC for high point
+  CAL_VOUT_CALCULATE,        // Calculate V_ADC_K/C and V_DAC_K/C
+
+  // === Output Current Calibration (requires load) ===
+  CAL_IOUT_MAX_CURRENT_INPUT,      // User enters max DPS current (A)
+  CAL_IOUT_LOAD_RESISTANCE_INPUT,  // User enters load resistance (Ohm)
+  CAL_IOUT_LOAD_WATTAGE_INPUT,     // User enters load max wattage (W)
+  CAL_IOUT_CONNECT_LOAD,           // User connects load, presses step to confirm
+  CAL_IOUT_SWEEP,                  // Auto-sweep current readings (no user input)
+  CAL_IOUT_CALCULATE,              // Calculate A_ADC_K and A_ADC_C
+
+  // === Constant Current (CC) Calibration (requires short) ===
+  CAL_CC_SHORT_OUTPUT,   // User shorts output, presses step to confirm
+  CAL_CC_SWEEP,          // Auto-sweep A_DAC range to find linear region (no user input)
+  CAL_CC_MEASURE_SWEEP,  // Measure current at points in linear range (no user input)
+  CAL_CC_CALCULATE,      // Calculate A_DAC_K and A_DAC_C
+
+  // === Done ===
   CAL_COMPLETE,
   CAL_ERROR
 };
@@ -263,13 +265,11 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Calibration Assistant - interactive calibration like dpsctl.py -C
   // Call start_calibration_assistant() to begin, then call calibration_assistant_step()
-  // with user-provided measurements at each step. Check get_calibration_assistant_state()
-  // for current state and get_calibration_assistant_prompt() for user instructions.
-  void start_calibration_assistant(const CalibrationAssistantParams &params);
-  void calibration_assistant_step(float measured_value);
+  // with user-provided values at each step. Monitor logs for prompts/instructions.
+  void start_calibration_assistant();
+  void calibration_assistant_step(float value);
   void cancel_calibration_assistant();
   CalibrationAssistantState get_calibration_assistant_state() const { return this->cal_assistant_state_; }
-  const char *get_calibration_assistant_prompt() const;
 
   // Firmware upgrade
   void start_firmware_upgrade(const std::string &firmware_path);
@@ -409,20 +409,26 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Calibration assistant state
   CalibrationAssistantState cal_assistant_state_{CAL_IDLE};
-  CalibrationAssistantParams cal_assistant_params_;
   std::vector<float> cal_samples_x_;  // X values for linear regression
   std::vector<float> cal_samples_y_;  // Y values for linear regression
   uint16_t cal_sweep_step_{0};
   uint16_t cal_max_v_dac_{4095};
+  // Intermediate calibration coefficients (calculated during calibration)
   float cal_v_adc_k_{0}, cal_v_adc_c_{0};
   float cal_v_dac_k_{0}, cal_v_dac_c_{0};
   float cal_a_adc_k_{0}, cal_a_adc_c_{0};
   uint16_t cal_a_dac_lower_{0}, cal_a_dac_upper_{4095};
+  // User-provided calibration parameters (collected during assistant)
+  float cal_vin_low_mv_{0};          // Measured input voltage LOW (mV)
+  float cal_vin_high_mv_{0};         // Measured input voltage HIGH (mV)
+  float cal_max_dps_current_{5.0f};  // Max output current of DPS model (A)
+  float cal_load_resistance_{0};     // Load resistance (Ohm)
+  float cal_load_max_wattage_{0};    // Load max wattage (W)
   uint32_t cal_last_action_time_{0};
+  void cal_assistant_collect_sample_();
 
   // Calibration assistant helpers
   void cal_assistant_process_();
-  void cal_assistant_collect_sample_();
   std::pair<float, float> cal_best_fit_(const std::vector<float> &x, const std::vector<float> &y);
 
   // Calibration backup/restore

@@ -95,9 +95,6 @@ CancelCalibrationAssistantAction = opendps_ns.class_(
     "CancelCalibrationAssistantAction", automation.Action
 )
 
-# Calibration assistant parameters struct
-CalibrationAssistantParams = opendps_ns.struct("CalibrationAssistantParams")
-
 DATALOG_FORMATS = {
     "csv": DATALOG_FORMAT_CSV,
     "bin": DATALOG_FORMAT_BINARY,
@@ -137,11 +134,6 @@ StopDatalogAction = opendps_ns.class_("StopDatalogAction", automation.Action)
 FlushDatalogAction = opendps_ns.class_("FlushDatalogAction", automation.Action)
 
 # Config keys for calibration assistant
-CONF_VIN_LOW_MEASURED_MV = "vin_low_measured_mv"
-CONF_VIN_HIGH_MEASURED_MV = "vin_high_measured_mv"
-CONF_LOAD_RESISTANCE = "load_resistance"
-CONF_LOAD_MAX_WATTAGE = "load_max_wattage"
-CONF_MAX_DPS_CURRENT = "max_dps_current"
 CONF_MEASURED_VALUE = "measured_value"
 
 TCP_BRIDGE_SCHEMA = cv.Schema(
@@ -559,32 +551,13 @@ async def opendps_restore_calibration_to_code(config, action_id, template_arg, a
 @automation.register_action(
     "opendps.start_calibration_assistant",
     StartCalibrationAssistantAction,
-    OPENDPS_ACTION_SCHEMA.extend(
-        {
-            cv.Required(CONF_VIN_LOW_MEASURED_MV): cv.templatable(cv.float_),
-            cv.Required(CONF_VIN_HIGH_MEASURED_MV): cv.templatable(cv.float_),
-            cv.Optional(CONF_LOAD_RESISTANCE, default=0): cv.templatable(cv.float_),
-            cv.Optional(CONF_LOAD_MAX_WATTAGE, default=0): cv.templatable(cv.float_),
-            cv.Optional(CONF_MAX_DPS_CURRENT, default=5.0): cv.templatable(cv.float_),
-        }
-    ),
+    OPENDPS_ACTION_SCHEMA,
 )
 async def opendps_start_calibration_assistant_to_code(
     config, action_id, template_arg, args
 ):
     parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    vin_low = await cg.templatable(config[CONF_VIN_LOW_MEASURED_MV], args, float)
-    vin_high = await cg.templatable(config[CONF_VIN_HIGH_MEASURED_MV], args, float)
-    load_r = await cg.templatable(config[CONF_LOAD_RESISTANCE], args, float)
-    load_w = await cg.templatable(config[CONF_LOAD_MAX_WATTAGE], args, float)
-    max_i = await cg.templatable(config[CONF_MAX_DPS_CURRENT], args, float)
-    cg.add(var.set_vin_low_measured_mv(vin_low))
-    cg.add(var.set_vin_high_measured_mv(vin_high))
-    cg.add(var.set_load_resistance(load_r))
-    cg.add(var.set_load_max_wattage(load_w))
-    cg.add(var.set_max_dps_current(max_i))
-    return var
+    return cg.new_Pvariable(action_id, template_arg, parent)
 
 
 @automation.register_action(

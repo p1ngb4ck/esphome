@@ -241,21 +241,7 @@ template<typename... Ts> class StartCalibrationAssistantAction : public Action<T
  public:
   explicit StartCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
 
-  TEMPLATABLE_VALUE(float, vin_low_measured_mv)
-  TEMPLATABLE_VALUE(float, vin_high_measured_mv)
-  TEMPLATABLE_VALUE(float, load_resistance)
-  TEMPLATABLE_VALUE(float, load_max_wattage)
-  TEMPLATABLE_VALUE(float, max_dps_current)
-
-  void play(Ts... x) override {
-    CalibrationAssistantParams params;
-    params.vin_low_measured_mv = this->vin_low_measured_mv_.value(x...);
-    params.vin_high_measured_mv = this->vin_high_measured_mv_.value(x...);
-    params.load_resistance = this->load_resistance_.value(x...);
-    params.load_max_wattage = this->load_max_wattage_.value(x...);
-    params.max_dps_current = this->max_dps_current_.value(x...);
-    this->parent_->start_calibration_assistant(params);
-  }
+  void play(Ts... x) override { this->parent_->start_calibration_assistant(); }
 
  protected:
   OpenDPS *parent_;
