@@ -1118,7 +1118,8 @@ void OpenDPS::calibration_assistant_step(float value) {
       break;
 
     case CAL_UART_PAUSED:
-      // User confirms device is back online — resume UART and drain garbage
+      // User swapped supply, entered high voltage mV, and pressed Step
+      // Resume UART, drain garbage, then use value as high voltage input
       ESP_LOGI(TAG, "Resuming UART communication...");
       this->rx_buffer_.clear();
       this->receiving_frame_ = false;
@@ -1127,12 +1128,6 @@ void OpenDPS::calibration_assistant_step(float value) {
         this->read_byte(&dummy);
       }
       this->connected_ = false;  // Force re-detection via next ping/query
-      this->cal_assistant_state_ = CAL_VIN_HIGH_WAIT_INPUT;
-      this->cal_assistant_process_();
-      break;
-
-    case CAL_VIN_HIGH_WAIT_INPUT:
-      // User entered measured input voltage HIGH in mV
       this->cal_vin_high_mv_ = value;
       ESP_LOGI(TAG, "Vin HIGH set to: %.0f mV", value);
       this->cal_assistant_state_ = CAL_VIN_HIGH_RECORD;
@@ -1243,22 +1238,19 @@ void OpenDPS::cal_assistant_process_() {
 
     case CAL_UART_PAUSED:
       ESP_LOGI(TAG, "========================================");
-      ESP_LOGI(TAG, "UART PAUSED - OpenDPS device offline");
-      ESP_LOGI(TAG, "========================================");
-      ESP_LOGI(TAG, "1. Power OFF the OpenDPS device");
-      ESP_LOGI(TAG, "2. Switch to the HIGHER supply voltage");
-      ESP_LOGI(TAG, "3. Power the OpenDPS device back ON");
-      ESP_LOGI(TAG, "4. Press Step (any value) to resume");
-      break;
-
-    case CAL_VIN_HIGH_WAIT_INPUT:
-      ESP_LOGI(TAG, "----------------------------------------");
       ESP_LOGI(TAG, "STEP 1b: Input Voltage Calibration (High Point)");
-      ESP_LOGI(TAG, "----------------------------------------");
-      ESP_LOGI(TAG, "Connect the HIGHER supply voltage to the DPS");
-      ESP_LOGI(TAG, "Measure the input voltage with a multimeter");
-      ESP_LOGI(TAG, "Enter the measured value in mV using:");
-      ESP_LOGI(TAG, "  opendps.calibration_assistant_step: <measured_mV>");
+      ESP_LOGI(TAG, "========================================");
+      ESP_LOGI(TAG, "UART communication paused - OpenDPS can be powered off safely.");
+      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, "  1. Power OFF the OpenDPS device");
+      ESP_LOGI(TAG, "  2. Disconnect the lower supply voltage");
+      ESP_LOGI(TAG, "  3. Connect the HIGHER supply voltage");
+      ESP_LOGI(TAG, "  4. Power the OpenDPS device back ON");
+      ESP_LOGI(TAG, "  5. Measure the higher supply voltage with a multimeter");
+      ESP_LOGI(TAG, "  6. Enter the measured voltage (mV) in the Calibration Input field");
+      ESP_LOGI(TAG, "  7. Press the Calibration Step button");
+      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, "UART will resume automatically when Step is pressed.");
       break;
 
     case CAL_VIN_HIGH_RECORD:
