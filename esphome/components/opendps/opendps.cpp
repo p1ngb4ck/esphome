@@ -79,6 +79,11 @@ void OpenDPS::loop() {
   }
 #endif
 
+  // When UART is paused (e.g., during calibration supply swap), skip all UART I/O
+  if (this->cal_assistant_state_ == CAL_UART_PAUSED) {
+    return;
+  }
+
   // Read incoming frames
   while (this->available()) {
     if (this->read_frame_()) {
@@ -1112,6 +1117,20 @@ void OpenDPS::calibration_assistant_step(float value) {
       this->cal_assistant_process_();
       break;
 
+    case CAL_UART_PAUSED:
+      // User confirms device is back online — resume UART and drain garbage
+      ESP_LOGI(TAG, "Resuming UART communication...");
+      this->rx_buffer_.clear();
+      this->receiving_frame_ = false;
+      while (this->available()) {
+        uint8_t dummy;
+        this->read_byte(&dummy);
+      }
+      this->connected_ = false;  // Force re-detection via next ping/query
+      this->cal_assistant_state_ = CAL_VIN_HIGH_WAIT_INPUT;
+      this->cal_assistant_process_();
+      break;
+
     case CAL_VIN_HIGH_WAIT_INPUT:
       // User entered measured input voltage HIGH in mV
       this->cal_vin_high_mv_ = value;
@@ -1220,6 +1239,16 @@ void OpenDPS::cal_assistant_process_() {
       this->request_calibration_report();
       this->cal_last_action_time_ = millis();
       // Don't proceed here - callback will handle recording and state transition
+      break;
+
+    case CAL_UART_PAUSED:
+      ESP_LOGI(TAG, "========================================");
+      ESP_LOGI(TAG, "UART PAUSED - OpenDPS device offline");
+      ESP_LOGI(TAG, "========================================");
+      ESP_LOGI(TAG, "1. Power OFF the OpenDPS device");
+      ESP_LOGI(TAG, "2. Switch to the HIGHER supply voltage");
+      ESP_LOGI(TAG, "3. Power the OpenDPS device back ON");
+      ESP_LOGI(TAG, "4. Press Step (any value) to resume");
       break;
 
     case CAL_VIN_HIGH_WAIT_INPUT:
@@ -1592,12 +1621,12 @@ void OpenDPS::cal_assistant_collect_sample_() {
   // Store the relevant ADC value based on current state and continue the sweep
   switch (this->cal_assistant_state_) {
     case CAL_VIN_LOW_RECORD:
-      // Record ADC reading for low point and advance to high point
+      // Record ADC reading for low point, then pause UART for supply swap
       this->cal_samples_x_.push_back(static_cast<float>(this->calibration_data_.vin_adc));
       this->cal_samples_y_.push_back(this->cal_vin_low_mv_);
       ESP_LOGI(TAG, "Recorded Vin LOW: ADC=%d, measured=%.0f mV", this->calibration_data_.vin_adc,
                this->cal_vin_low_mv_);
-      this->cal_assistant_state_ = CAL_VIN_HIGH_WAIT_INPUT;
+      this->cal_assistant_state_ = CAL_UART_PAUSED;
       this->cal_assistant_process_();
       break;
 

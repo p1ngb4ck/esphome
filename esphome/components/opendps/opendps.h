@@ -152,6 +152,7 @@ enum CalibrationAssistantState : uint8_t {
   // User connects lower supply voltage, enters measured mV
   CAL_VIN_LOW_WAIT_INPUT,  // Waiting for user to enter measured Vin LOW in mV
   CAL_VIN_LOW_RECORD,      // Record ADC reading for low point
+  CAL_UART_PAUSED,         // UART reading suspended, waiting for user to press step to resume
   // User connects higher supply voltage, enters measured mV
   CAL_VIN_HIGH_WAIT_INPUT,  // Waiting for user to enter measured Vin HIGH in mV
   CAL_VIN_HIGH_RECORD,      // Record ADC reading for high point
