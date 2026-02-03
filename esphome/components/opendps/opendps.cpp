@@ -695,7 +695,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         // Format: status, vout_adc(16), vin_adc(16), iout_adc(16), iout_dac(16), vout_dac(16),
         //         a_adc_k(f), a_adc_c(f), a_dac_k(f), a_dac_c(f), v_adc_k(f), v_adc_c(f),
         //         v_dac_k(f), v_dac_c(f), vin_adc_k(f), vin_adc_c(f)
-        if (status != 0) {
+        if (!status) {
           ESP_LOGW(TAG, "Calibration report failed with status: %d", status);
           break;
         }
