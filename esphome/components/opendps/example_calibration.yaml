@@ -88,14 +88,6 @@ opendps:
   bootloader_baud_rate: 9600
 
 # ==============================================================================
-# Global for calibration assistant input value
-# ==============================================================================
-globals:
-  - id: cal_input_value
-    type: float
-    initial_value: "0"
-
-# ==============================================================================
 # Sensors
 # ==============================================================================
 sensor:
@@ -118,18 +110,14 @@ sensor:
 # Text Input for Calibration Assistant
 # ==============================================================================
 text:
-  # Single input field for ALL calibration assistant steps
-  # The value entered here is used when "Calibration Step" button is pressed
+  # Single input field for ALL calibration assistant steps.
+  # Enter your measurement value here, then press "Calibration Step" to submit.
   - platform: template
     name: "Calibration Input"
     id: cal_input
     mode: text
     optimistic: true
     initial_value: "0"
-    on_value:
-      - lambda: |-
-          id(cal_input_value) = atof(x.c_str());
-          ESP_LOGI("cal", "Calibration input set to: %.3f", id(cal_input_value));
 
 # ==============================================================================
 # Buttons for Calibration Control
@@ -154,10 +142,11 @@ button:
     name: "Calibration Step"
     on_press:
       - lambda: |-
-          ESP_LOGI("cal", "Submitting calibration value: %.3f", id(cal_input_value));
+          float val = atof(id(cal_input).state.c_str());
+          ESP_LOGI("cal", "Submitting calibration value: %.3f", val);
       - opendps.calibration_assistant_step:
           id: opendps_id
-          measured_value: !lambda "return id(cal_input_value);"
+          measured_value: !lambda "return atof(id(cal_input).state.c_str());"
 
   # --- Cancel Calibration ---
   - platform: template
