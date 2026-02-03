@@ -273,15 +273,13 @@ uint32_t OpenDPS::unpack32_(const std::vector<uint8_t> &frame, size_t &pos) {
 }
 
 float OpenDPS::unpack_float_(const std::vector<uint8_t> &frame, size_t &pos) {
-  // Little-endian float (4 bytes)
+  // Float is packed as big-endian uint32 via pack32() in OpenDPS firmware
   union {
     float f;
-    uint8_t bytes[4];
-  } float_bytes;
-  for (int i = 0; i < 4; i++) {
-    float_bytes.bytes[i] = this->unpack8_(frame, pos);
-  }
-  return float_bytes.f;
+    uint32_t u32;
+  } float_union;
+  float_union.u32 = this->unpack32_(frame, pos);
+  return float_union.f;
 }
 
 std::string OpenDPS::unpack_cstr_(const std::vector<uint8_t> &frame, size_t &pos) {
@@ -848,7 +846,7 @@ void OpenDPS::set_calibration(const std::string &name, float value) {
   // Pack calibration name as C string
   this->pack_cstr_(payload, name);
 
-  // Pack float value as 4 bytes (little-endian, IEEE 754)
+  // Pack float value as raw bytes (native byte order, matching firmware's direct cast)
   union {
     float f;
     uint8_t bytes[4];
