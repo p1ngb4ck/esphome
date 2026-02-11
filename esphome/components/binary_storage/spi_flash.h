@@ -160,6 +160,56 @@ class SPIFlash : public BinaryStorage,
    */
   void wake_up();
 
+  //========================================================================
+  // Status Register & Write Protection
+  //========================================================================
+
+  /**
+   * @brief Read status register 1
+   *
+   * @return Status register 1 value
+   */
+  uint8_t read_status_register();
+
+  /**
+   * @brief Read status register 2 (for quad enable bit)
+   *
+   * @return Status register 2 value
+   */
+  uint8_t read_status_register2();
+
+  /**
+   * @brief Write status registers (SR1 + SR2)
+   *
+   * Writes both status registers together (required by Winbond/Macronix).
+   * Automatically handles write enable and wait for completion.
+   *
+   * @param sr1 Status register 1 value
+   * @param sr2 Status register 2 value
+   * @return true on success
+   */
+  bool write_status_registers(uint8_t sr1, uint8_t sr2);
+
+  /**
+   * @brief Wait for flash to become ready (not busy)
+   *
+   * @param timeout_ms Maximum time to wait (default 5000ms)
+   * @return true if ready, false if timeout
+   */
+  bool wait_ready(uint32_t timeout_ms = 5000);
+
+  /**
+   * @brief Enable writes (must be called before any write/erase operation)
+   *
+   * @return true on success
+   */
+  bool write_enable();
+
+  /**
+   * @brief Disable writes
+   */
+  void write_disable();
+
  protected:
   //========================================================================
   // Device Configuration
@@ -224,20 +274,6 @@ class SPIFlash : public BinaryStorage,
   //========================================================================
 
   /**
-   * @brief Read status register
-   *
-   * @return Status register value
-   */
-  uint8_t read_status_register();
-
-  /**
-   * @brief Read status register 2 (for quad enable bit)
-   *
-   * @return Status register 2 value
-   */
-  uint8_t read_status_register2();
-
-  /**
    * @brief Enable quad mode in status register
    *
    * Sets the QE (Quad Enable) bit in status register 2
@@ -254,26 +290,6 @@ class SPIFlash : public BinaryStorage,
    * @return true on success
    */
   bool disable_quad_mode();
-
-  /**
-   * @brief Wait for flash to become ready (not busy)
-   *
-   * @param timeout_ms Maximum time to wait (default 5000ms)
-   * @return true if ready, false if timeout
-   */
-  bool wait_ready(uint32_t timeout_ms = 5000);
-
-  /**
-   * @brief Enable writes (must be called before any write/erase operation)
-   *
-   * @return true on success
-   */
-  bool write_enable();
-
-  /**
-   * @brief Disable writes
-   */
-  void write_disable();
 
   /**
    * @brief Write a page (up to 256 bytes, must not cross page boundary)

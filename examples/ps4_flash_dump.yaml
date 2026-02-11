@@ -245,6 +245,110 @@ button:
             ESP_LOGI("jedec", "========================================");
 
   # =====================================================================
+  # BUTTON 1b: Read/Clear Status Register (diagnose write protection)
+  # Reads SR1 and SR2, logs all bits, clears block protection if set.
+  # Must run before write operations if BP bits are blocking writes.
+  # =====================================================================
+  - platform: template
+    name: "Read/Clear Status Reg"
+    id: btn_status_reg
+    icon: mdi:shield-lock-open-outline
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+
+            id(op_status).publish_state("Reading status regs...");
+            id(op_progress).publish_state(0.0f);
+
+            if (flash->is_failed()) {
+              ESP_LOGE("sreg", "Flash component failed - check wiring!");
+              id(op_status).publish_state("FAILED: Check wiring");
+              return;
+            }
+
+            // Read both status registers
+            uint8_t sr1 = flash->read_status_register();
+            uint8_t sr2 = flash->read_status_register2();
+
+            ESP_LOGI("sreg", "========================================");
+            ESP_LOGI("sreg", "  STATUS REGISTER 1: 0x%02X (binary: %c%c%c%c%c%c%c%c)",
+                     sr1,
+                     (sr1 & 0x80) ? '1' : '0',  // SRP0
+                     (sr1 & 0x40) ? '1' : '0',  // SEC
+                     (sr1 & 0x20) ? '1' : '0',  // TB
+                     (sr1 & 0x10) ? '1' : '0',  // BP2
+                     (sr1 & 0x08) ? '1' : '0',  // BP1
+                     (sr1 & 0x04) ? '1' : '0',  // BP0
+                     (sr1 & 0x02) ? '1' : '0',  // WEL
+                     (sr1 & 0x01) ? '1' : '0'); // BUSY
+            ESP_LOGI("sreg", "  Bit 7 SRP0 (SR Protect):  %s", (sr1 & 0x80) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 6 SEC  (Sector/Block): %s", (sr1 & 0x40) ? "SET (sector)" : "clear (block)");
+            ESP_LOGI("sreg", "  Bit 5 TB   (Top/Bottom):   %s", (sr1 & 0x20) ? "SET (bottom)" : "clear (top)");
+            ESP_LOGI("sreg", "  Bit 4 BP2:                 %s", (sr1 & 0x10) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 3 BP1:                 %s", (sr1 & 0x08) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 2 BP0:                 %s", (sr1 & 0x04) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 1 WEL (Write Enable):  %s", (sr1 & 0x02) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 0 BUSY:                %s", (sr1 & 0x01) ? "SET" : "clear");
+
+            ESP_LOGI("sreg", "  STATUS REGISTER 2: 0x%02X", sr2);
+            ESP_LOGI("sreg", "  Bit 1 QE  (Quad Enable):   %s", (sr2 & 0x02) ? "SET" : "clear");
+            ESP_LOGI("sreg", "  Bit 0 SRP1:                %s", (sr2 & 0x01) ? "SET" : "clear");
+            ESP_LOGI("sreg", "========================================");
+
+            // Check if any block protection bits are set
+            uint8_t bp_bits = sr1 & 0x7C;  // BP0(2), BP1(3), BP2(4), TB(5), SEC(6)
+            if (bp_bits != 0) {
+              ESP_LOGW("sreg", "  BLOCK PROTECTION IS ACTIVE! (BP bits: 0x%02X)", bp_bits);
+              ESP_LOGW("sreg", "  Clearing all block protection bits...");
+
+              char det[48];
+              snprintf(det, sizeof(det), "SR1:0x%02X BP active! Clearing...", sr1);
+              id(op_detail).publish_state(det);
+
+              // Clear BP0, BP1, BP2, TB, SEC bits - keep SRP0 as-is
+              uint8_t new_sr1 = sr1 & 0x83;  // Keep SRP0(7), WEL(1), BUSY(0) - clear bits 2-6
+
+              // Write status registers (handles write_enable + wait internally)
+              if (!flash->write_status_registers(new_sr1, sr2)) {
+                ESP_LOGE("sreg", "  Failed to write status registers!");
+                ESP_LOGE("sreg", "  Check: WP# must be VCC (3.3V)!");
+                id(op_status).publish_state("FAILED: SR write failed");
+                id(op_detail).publish_state("Check WP# is on VCC!");
+                return;
+              }
+
+              // Verify the change
+              uint8_t verify_sr1 = flash->read_status_register();
+              uint8_t verify_bp = verify_sr1 & 0x7C;
+
+              ESP_LOGI("sreg", "  After clear: SR1 = 0x%02X", verify_sr1);
+
+              if (verify_bp == 0) {
+                ESP_LOGI("sreg", "  Block protection CLEARED successfully!");
+                char msg[48];
+                snprintf(msg, sizeof(msg), "BP cleared! 0x%02X -> 0x%02X", sr1, verify_sr1);
+                id(op_status).publish_state(msg);
+                id(op_detail).publish_state("All blocks now writable");
+              } else {
+                ESP_LOGE("sreg", "  Failed to clear BP bits! SR1 still 0x%02X", verify_sr1);
+                ESP_LOGE("sreg", "  Check: WP# must be VCC, SRP0 may be locking SR");
+                char msg[48];
+                snprintf(msg, sizeof(msg), "BP clear FAILED! SR1=0x%02X", verify_sr1);
+                id(op_status).publish_state(msg);
+                id(op_detail).publish_state("Check WP#=VCC and SRP0");
+              }
+            } else {
+              ESP_LOGI("sreg", "  No block protection - all sectors writable!");
+              char msg[48];
+              snprintf(msg, sizeof(msg), "SR1:0x%02X SR2:0x%02X - No BP", sr1, sr2);
+              id(op_status).publish_state(msg);
+              id(op_detail).publish_state("All blocks writable");
+            }
+
+            id(op_progress).publish_state(100.0f);
+
+  # =====================================================================
   # BUTTON 2: Dump flash to SD card
   # Reads the entire flash content and writes it to the configured file
   # =====================================================================

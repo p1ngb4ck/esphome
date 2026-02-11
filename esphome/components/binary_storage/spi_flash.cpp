@@ -280,6 +280,26 @@ void SPIFlash::write_disable() {
   this->disable();
 }
 
+bool SPIFlash::write_status_registers(uint8_t sr1, uint8_t sr2) {
+  if (!this->write_enable()) {
+    ESP_LOGE(TAG, "Write enable failed for status register write");
+    return false;
+  }
+
+  this->enable();
+  this->write_byte(CMD_WRITE_STATUS_REG);
+  this->write_byte(sr1);
+  this->write_byte(sr2);
+  this->disable();
+
+  if (!this->wait_ready(1000)) {
+    ESP_LOGE(TAG, "Timeout writing status registers");
+    return false;
+  }
+
+  return true;
+}
+
 void SPIFlash::write_address_(uint32_t address) {
   if (this->four_byte_mode_) {
     this->write_byte((address >> 24) & 0xFF);
