@@ -170,7 +170,8 @@ class SPIFlash : public BinaryStorage,
   uint32_t page_size_{256};     // Standard page size
   uint32_t sector_size_{4096};  // Standard sector size (4KB)
   uint32_t jedec_id_{0};
-  bool quad_mode_{false};  // Quad SPI mode for faster reads
+  bool quad_mode_{false};       // Quad SPI mode for faster reads
+  bool four_byte_mode_{false};  // 4-byte addressing for chips > 16MB
 
   //========================================================================
   // SPI Flash Commands (JEDEC standard)
@@ -196,6 +197,10 @@ class SPIFlash : public BinaryStorage,
   static constexpr uint8_t CMD_READ_DATA = 0x03;
   static constexpr uint8_t CMD_FAST_READ = 0x0B;
   static constexpr uint8_t CMD_READ_UNIQUE_ID = 0x4B;
+
+  // 4-byte address mode commands (for chips > 16MB)
+  static constexpr uint8_t CMD_ENTER_4BYTE_ADDR_MODE = 0xB7;
+  static constexpr uint8_t CMD_EXIT_4BYTE_ADDR_MODE = 0xE9;
 
   // Quad SPI commands (4x faster reads)
   static constexpr uint8_t CMD_FAST_READ_QUAD_OUTPUT = 0x6B;  // Address on 1 line, data on 4 lines
@@ -303,6 +308,27 @@ class SPIFlash : public BinaryStorage,
    * @brief Auto-configure from JEDEC ID
    */
   void auto_configure_from_jedec_id_();
+
+  /**
+   * @brief Write address bytes (3 or 4 depending on addressing mode)
+   *
+   * @param address Address to write
+   */
+  void write_address_(uint32_t address);
+
+  /**
+   * @brief Enter 4-byte address mode for chips > 16MB
+   *
+   * @return true on success
+   */
+  bool enter_4byte_mode_();
+
+  /**
+   * @brief Exit 4-byte address mode
+   *
+   * @return true on success
+   */
+  bool exit_4byte_mode_();
 
   /**
    * @brief Get number of bytes remaining in current page

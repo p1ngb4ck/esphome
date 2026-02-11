@@ -1,0 +1,485 @@
+# =============================================================================
+# PS4 SPI Flash Dump & Verify - MX25L25635F (32MB)
+# =============================================================================
+#
+# PURPOSE: Safely read and verify the full contents of a Macronix MX25L25635F
+#          SPI NOR flash (256Mbit / 32MB) and dump it to an SD card.
+#
+# SAFETY:
+#   - WP# (Write Protect) pin on the flash should be tied to GND
+#   - This config NEVER issues write/erase commands to the flash
+#   - The flash is opened in raw read-only mode
+#   - Multiple verification passes compare byte-by-byte
+#
+# WIRING (Flash SOP16 to ESP32-S3):
+#   Flash Pin 15 (SIO0/MOSI) -> ESP32-S3 GPIO11 (SPI MOSI)
+#   Flash Pin 8  (SIO1/MISO) -> ESP32-S3 GPIO13 (SPI MISO)
+#   Flash Pin 16 (SCLK)      -> ESP32-S3 GPIO12 (SPI CLK)
+#   Flash Pin 7  (CS#)       -> ESP32-S3 GPIO10 (CS)
+#   Flash Pin 2  (VCC)       -> 3.3V
+#   Flash Pin 10 (GND)       -> GND
+#   Flash Pin 9  (WP#)       -> GND (write protect ACTIVE = safe)
+#   Flash Pin 3  (RESET#)    -> 3.3V (or leave floating, has internal pullup)
+#   Flash Pin 1  (SIO3/HOLD) -> 3.3V (disable HOLD function)
+#
+# SD CARD (SD-MMC 1-bit mode):
+#   SD CLK  -> GPIO39
+#   SD CMD  -> GPIO38
+#   SD DAT0 -> GPIO40
+#
+# ADJUST PINS TO YOUR ACTUAL WIRING BEFORE COMPILING!
+# =============================================================================
+
+esphome:
+  name: ps4-flash-dumper
+  friendly_name: PS4 Flash Dumper
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+# Enable logging at DEBUG level to see all flash detection messages
+logger:
+  level: DEBUG
+
+# WiFi not strictly needed for dump - but useful for monitoring logs remotely
+# Comment out if you want to run fully offline
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+# --- SPI Bus for the external flash chip ---
+# This is the bus shared between ESP32 and the MX25L25635F
+# IMPORTANT: This must be a DIFFERENT SPI bus than the SD card if using SD-SPI
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+
+# --- SD Card (SD-MMC 1-bit mode, no SPI bus needed) ---
+sd_storage:
+  id: sd_card
+  type: sd_mmc
+  clk_pin: GPIO39
+  cmd_pin: GPIO38
+  data0_pin: GPIO40
+  mode_1bit: true
+  path: /sdcard
+
+# --- External SPI Flash (MX25L25635F) ---
+# mode: raw = pure binary access, NO filesystem/littlefs
+# Capacity will be auto-detected from JEDEC ID (0xC22019 = 32MB)
+# 4-byte addressing is auto-enabled when capacity > 16MB
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components:
+      - binary_storage
+      - storage
+
+binary_storage:
+  - type: SPI_FLASH
+    id: ps4_flash
+    model: "MX25L25635F"
+    mode: raw
+    cs_pin: GPIO10
+
+# --- Status Sensor: shows dump progress percentage ---
+sensor:
+  - platform: template
+    name: "Dump Progress"
+    id: dump_progress
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: mdi:progress-download
+
+# --- Status Text: shows current operation ---
+text_sensor:
+  - platform: template
+    name: "Dump Status"
+    id: dump_status
+    icon: mdi:information-outline
+
+# --- Buttons to trigger operations ---
+button:
+  # =====================================================================
+  # BUTTON 1: Dump flash to SD card
+  # Reads the entire flash content and writes it to /sdcard/ps4_dump.bin
+  # =====================================================================
+  - platform: template
+    name: "Dump Flash to SD"
+    id: btn_dump
+    icon: mdi:content-save
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+            uint32_t capacity = flash->get_capacity();
+
+            if (capacity == 0) {
+              ESP_LOGE("dump", "Flash capacity is 0 - chip not detected!");
+              id(dump_status).publish_state("FAILED: No chip detected");
+              return;
+            }
+
+            ESP_LOGI("dump", "Starting flash dump: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
+            id(dump_status).publish_state("Dumping...");
+            id(dump_progress).publish_state(0.0f);
+
+            // Open output file on SD card
+            FILE *f = fopen("/sdcard/ps4_dump.bin", "wb");
+            if (f == nullptr) {
+              ESP_LOGE("dump", "Failed to open /sdcard/ps4_dump.bin for writing!");
+              id(dump_status).publish_state("FAILED: SD write error");
+              return;
+            }
+
+            // Allocate read buffer in PSRAM (8MB available at 80MHz)
+            const size_t chunk_size = 16384;  // 16KB chunks
+            RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *buf = allocator.allocate(chunk_size);
+            if (buf == nullptr) {
+              ESP_LOGE("dump", "Failed to allocate read buffer in PSRAM!");
+              id(dump_status).publish_state("FAILED: Out of memory");
+              fclose(f);
+              return;
+            }
+
+            uint32_t address = 0;
+            uint32_t total_read = 0;
+            bool success = true;
+            uint32_t last_progress_report = 0;
+
+            while (address < capacity) {
+              size_t len = chunk_size;
+              if (address + len > capacity) {
+                len = capacity - address;
+              }
+
+              if (!flash->read(address, buf, len)) {
+                ESP_LOGE("dump", "Read failed at address 0x%08X!", address);
+                id(dump_status).publish_state("FAILED: Read error");
+                success = false;
+                break;
+              }
+
+              size_t written = fwrite(buf, 1, len, f);
+              if (written != len) {
+                ESP_LOGE("dump", "SD write failed at address 0x%08X! (wrote %u of %u)", address, written, len);
+                id(dump_status).publish_state("FAILED: SD write error");
+                success = false;
+                break;
+              }
+
+              address += len;
+              total_read += len;
+
+              // Report progress every 1MB
+              if (total_read - last_progress_report >= 1024 * 1024) {
+                float pct = (float) total_read / (float) capacity * 100.0f;
+                id(dump_progress).publish_state(pct);
+                ESP_LOGI("dump", "Progress: %.1f%% (%u / %u bytes)", pct, total_read, capacity);
+                last_progress_report = total_read;
+                App.feed_wdt();
+              }
+            }
+
+            allocator.deallocate(buf, chunk_size);
+            fclose(f);
+
+            if (success) {
+              id(dump_progress).publish_state(100.0f);
+              ESP_LOGI("dump", "========================================");
+              ESP_LOGI("dump", "  DUMP COMPLETE: %u bytes written", total_read);
+              ESP_LOGI("dump", "  File: /sdcard/ps4_dump.bin");
+              ESP_LOGI("dump", "========================================");
+              id(dump_status).publish_state("DUMP OK - Run verify!");
+            }
+
+  # =====================================================================
+  # BUTTON 2: Verify dump against flash (re-reads and compares)
+  # Reads the flash again and compares byte-by-byte against the dump file
+  # Run this MULTIPLE TIMES to be sure!
+  # =====================================================================
+  - platform: template
+    name: "Verify Dump"
+    id: btn_verify
+    icon: mdi:check-decagram
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+            uint32_t capacity = flash->get_capacity();
+
+            if (capacity == 0) {
+              ESP_LOGE("verify", "Flash capacity is 0 - chip not detected!");
+              id(dump_status).publish_state("VERIFY FAILED: No chip");
+              return;
+            }
+
+            // Open dump file for reading
+            FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
+            if (f == nullptr) {
+              ESP_LOGE("verify", "Failed to open /sdcard/ps4_dump.bin - dump first!");
+              id(dump_status).publish_state("VERIFY FAILED: No dump file");
+              return;
+            }
+
+            // Check file size matches capacity
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+
+            if ((uint32_t) file_size != capacity) {
+              ESP_LOGE("verify", "File size mismatch! File: %ld, Flash: %u", file_size, capacity);
+              id(dump_status).publish_state("VERIFY FAILED: Size mismatch");
+              fclose(f);
+              return;
+            }
+
+            ESP_LOGI("verify", "Starting verification: %u bytes", capacity);
+            id(dump_status).publish_state("Verifying...");
+            id(dump_progress).publish_state(0.0f);
+
+            // Allocate both buffers in PSRAM
+            const size_t chunk_size = 16384;  // 16KB chunks
+            RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *flash_buf = allocator.allocate(chunk_size);
+            uint8_t *file_buf = allocator.allocate(chunk_size);
+            if (flash_buf == nullptr || file_buf == nullptr) {
+              ESP_LOGE("verify", "Failed to allocate buffers in PSRAM!");
+              id(dump_status).publish_state("VERIFY FAILED: Out of memory");
+              if (flash_buf) allocator.deallocate(flash_buf, chunk_size);
+              if (file_buf) allocator.deallocate(file_buf, chunk_size);
+              fclose(f);
+              return;
+            }
+
+            uint32_t address = 0;
+            uint32_t total_verified = 0;
+            uint32_t mismatch_count = 0;
+            uint32_t last_progress_report = 0;
+            bool read_error = false;
+
+            while (address < capacity) {
+              size_t len = chunk_size;
+              if (address + len > capacity) {
+                len = capacity - address;
+              }
+
+              // Read from flash
+              if (!flash->read(address, flash_buf, len)) {
+                ESP_LOGE("verify", "Flash read failed at 0x%08X!", address);
+                id(dump_status).publish_state("VERIFY FAILED: Read error");
+                read_error = true;
+                break;
+              }
+
+              // Read from file
+              size_t file_read = fread(file_buf, 1, len, f);
+              if (file_read != len) {
+                ESP_LOGE("verify", "File read failed at 0x%08X!", address);
+                id(dump_status).publish_state("VERIFY FAILED: File read error");
+                read_error = true;
+                break;
+              }
+
+              // Compare byte-by-byte
+              for (size_t i = 0; i < len; i++) {
+                if (flash_buf[i] != file_buf[i]) {
+                  if (mismatch_count < 10) {
+                    // Log first 10 mismatches with details
+                    ESP_LOGE("verify", "MISMATCH at 0x%08X: flash=0x%02X file=0x%02X",
+                             address + i, flash_buf[i], file_buf[i]);
+                  }
+                  mismatch_count++;
+                }
+              }
+
+              address += len;
+              total_verified += len;
+
+              // Report progress every 1MB
+              if (total_verified - last_progress_report >= 1024 * 1024) {
+                float pct = (float) total_verified / (float) capacity * 100.0f;
+                id(dump_progress).publish_state(pct);
+                ESP_LOGI("verify", "Verified: %.1f%% (%u / %u bytes), mismatches: %u",
+                         pct, total_verified, capacity, mismatch_count);
+                last_progress_report = total_verified;
+                App.feed_wdt();
+              }
+            }
+
+            allocator.deallocate(flash_buf, chunk_size);
+            allocator.deallocate(file_buf, chunk_size);
+            fclose(f);
+
+            if (!read_error) {
+              id(dump_progress).publish_state(100.0f);
+              if (mismatch_count == 0) {
+                ESP_LOGI("verify", "========================================");
+                ESP_LOGI("verify", "  VERIFICATION PASSED");
+                ESP_LOGI("verify", "  %u bytes verified, 0 mismatches", total_verified);
+                ESP_LOGI("verify", "========================================");
+                id(dump_status).publish_state("VERIFY PASSED!");
+              } else {
+                ESP_LOGE("verify", "========================================");
+                ESP_LOGE("verify", "  VERIFICATION FAILED!");
+                ESP_LOGE("verify", "  %u mismatches in %u bytes!", mismatch_count, total_verified);
+                ESP_LOGE("verify", "  DO NOT TRUST THIS DUMP!");
+                ESP_LOGE("verify", "========================================");
+                char msg[64];
+                snprintf(msg, sizeof(msg), "VERIFY FAILED: %u mismatches!", mismatch_count);
+                id(dump_status).publish_state(msg);
+              }
+            }
+
+  # =====================================================================
+  # BUTTON 3: Sanity check the dump file
+  # Checks that the dump is not all 0x00 or all 0xFF (blank/erased chip)
+  # and reports basic statistics
+  # =====================================================================
+  - platform: template
+    name: "Sanity Check Dump"
+    id: btn_sanity
+    icon: mdi:stethoscope
+    on_press:
+      then:
+        - lambda: |-
+            FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
+            if (f == nullptr) {
+              ESP_LOGE("sanity", "No dump file found!");
+              id(dump_status).publish_state("SANITY: No dump file");
+              return;
+            }
+
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+
+            ESP_LOGI("sanity", "Analyzing dump: %ld bytes (%.1f MB)", file_size, file_size / (1024.0f * 1024.0f));
+            id(dump_status).publish_state("Analyzing...");
+
+            // Allocate buffer in PSRAM
+            const size_t chunk_size = 16384;  // 16KB chunks
+            RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *buf = allocator.allocate(chunk_size);
+            if (buf == nullptr) {
+              ESP_LOGE("sanity", "Failed to allocate buffer in PSRAM!");
+              id(dump_status).publish_state("SANITY: Out of memory");
+              fclose(f);
+              return;
+            }
+
+            uint32_t count_00 = 0;
+            uint32_t count_ff = 0;
+            uint32_t total = 0;
+
+            // Check first 16 bytes for display
+            fread(buf, 1, 16, f);
+            fseek(f, 0, SEEK_SET);
+
+            ESP_LOGI("sanity", "First 16 bytes:");
+            ESP_LOGI("sanity", "  %02X %02X %02X %02X %02X %02X %02X %02X  %02X %02X %02X %02X %02X %02X %02X %02X",
+                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                     buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
+
+            // Scan entire file
+            while (total < (uint32_t) file_size) {
+              size_t len = chunk_size;
+              if (total + len > (uint32_t) file_size) {
+                len = file_size - total;
+              }
+
+              size_t bytes_read = fread(buf, 1, len, f);
+              if (bytes_read != len) break;
+
+              for (size_t i = 0; i < len; i++) {
+                if (buf[i] == 0x00) count_00++;
+                if (buf[i] == 0xFF) count_ff++;
+              }
+
+              total += len;
+
+              if (total % (4 * 1024 * 1024) == 0) {
+                App.feed_wdt();
+              }
+            }
+
+            allocator.deallocate(buf, chunk_size);
+
+            fclose(f);
+
+            float pct_00 = (float) count_00 / (float) total * 100.0f;
+            float pct_ff = (float) count_ff / (float) total * 100.0f;
+            float pct_data = 100.0f - pct_00 - pct_ff;
+
+            ESP_LOGI("sanity", "========================================");
+            ESP_LOGI("sanity", "  DUMP ANALYSIS RESULTS");
+            ESP_LOGI("sanity", "  Total size: %u bytes (%.1f MB)", total, total / (1024.0f * 1024.0f));
+            ESP_LOGI("sanity", "  0x00 bytes: %u (%.1f%%)", count_00, pct_00);
+            ESP_LOGI("sanity", "  0xFF bytes: %u (%.1f%%)", count_ff, pct_ff);
+            ESP_LOGI("sanity", "  Other data: %.1f%%", pct_data);
+
+            if (pct_ff > 99.0f) {
+              ESP_LOGW("sanity", "  WARNING: Dump appears BLANK/ERASED (>99%% 0xFF)!");
+              id(dump_status).publish_state("SANITY: Looks BLANK!");
+            } else if (pct_00 > 99.0f) {
+              ESP_LOGW("sanity", "  WARNING: Dump appears ALL ZEROS (>99%% 0x00)!");
+              id(dump_status).publish_state("SANITY: All zeros!");
+            } else if (pct_00 > 90.0f || pct_ff > 90.0f) {
+              ESP_LOGW("sanity", "  WARNING: Suspiciously uniform content");
+              id(dump_status).publish_state("SANITY: Suspicious!");
+            } else {
+              ESP_LOGI("sanity", "  Content looks reasonable");
+              id(dump_status).publish_state("SANITY: Looks good!");
+            }
+            ESP_LOGI("sanity", "========================================");
+
+  # =====================================================================
+  # BUTTON 4: Read JEDEC ID only (quick connectivity test)
+  # Use this first to verify wiring is correct before attempting a dump
+  # =====================================================================
+  - platform: template
+    name: "Read JEDEC ID"
+    id: btn_jedec
+    icon: mdi:chip
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+
+            if (flash->is_failed()) {
+              ESP_LOGE("jedec", "Flash component failed during setup - check wiring!");
+              id(dump_status).publish_state("FAILED: Check wiring");
+              return;
+            }
+
+            uint32_t jedec = flash->read_jedec_id();
+            uint32_t capacity = flash->get_capacity();
+
+            ESP_LOGI("jedec", "========================================");
+            ESP_LOGI("jedec", "  JEDEC ID: 0x%06X", jedec);
+            ESP_LOGI("jedec", "  Manufacturer: 0x%02X", (jedec >> 16) & 0xFF);
+            ESP_LOGI("jedec", "  Device ID: 0x%04X", jedec & 0xFFFF);
+            ESP_LOGI("jedec", "  Capacity: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
+
+            if (jedec == 0xC22019) {
+              ESP_LOGI("jedec", "  >>> MX25L25635F detected! <<<");
+              id(dump_status).publish_state("MX25L25635F detected!");
+            } else if (jedec == 0x000000 || jedec == 0xFFFFFF) {
+              ESP_LOGE("jedec", "  NO CHIP DETECTED! Check wiring!");
+              id(dump_status).publish_state("NO CHIP - check wiring!");
+            } else {
+              char msg[48];
+              snprintf(msg, sizeof(msg), "Chip: 0x%06X (%u MB)", jedec, capacity / (1024 * 1024));
+              id(dump_status).publish_state(msg);
+            }
+            ESP_LOGI("jedec", "========================================");

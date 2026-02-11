@@ -33,6 +33,12 @@ void SPIFlash::setup() {
     ESP_LOGW(TAG, "Could not auto-detect capacity, set it in config!");
   }
 
+  // Enter 4-byte address mode if capacity exceeds 16MB (24-bit address limit)
+  if (this->capacity_ > (1UL << 24)) {
+    ESP_LOGCONFIG(TAG, "  Capacity > 16MB, entering 4-byte address mode...");
+    this->enter_4byte_mode_();
+  }
+
   // Verify device is accessible
   if (!this->is_ready()) {
     ESP_LOGE(TAG, "Flash device not responding!");
@@ -61,12 +67,17 @@ void SPIFlash::dump_config() {
   ESP_LOGCONFIG(TAG, "SPI Flash:");
   LOG_PIN("  CS Pin: ", this->cs_);
   ESP_LOGCONFIG(TAG, "  Model: %s", this->model_.c_str());
-  ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+  if (this->capacity_ >= 1024 * 1024) {
+    ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f MB)", this->capacity_, this->capacity_ / (1024.0f * 1024.0f));
+  } else {
+    ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+  }
   ESP_LOGCONFIG(TAG, "  Page Size: %u bytes", this->page_size_);
   ESP_LOGCONFIG(TAG, "  Sector Size: %u bytes", this->sector_size_);
   ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06X", this->jedec_id_);
   ESP_LOGCONFIG(TAG, "  Manufacturer: 0x%02X", this->get_manufacturer_id());
   ESP_LOGCONFIG(TAG, "  Quad Mode: %s", this->quad_mode_ ? "Enabled (4x faster)" : "Disabled");
+  ESP_LOGCONFIG(TAG, "  4-Byte Addressing: %s", this->four_byte_mode_ ? "Enabled (>16MB)" : "Disabled");
 
   if (this->is_failed()) {
     ESP_LOGE(TAG, "  Communication failed!");
@@ -81,12 +92,25 @@ void SPIFlash::auto_configure_from_jedec_id_() {
   uint8_t capacity_code = (dev_id >> 8) & 0xFF;
 
   // Standard: capacity = 2^capacity_code bytes
-  if (capacity_code >= 11 && capacity_code <= 24) {
+  // Codes 11-25 cover 2KB to 32MB (code 25 = 32MB for 256Mbit chips)
+  if (capacity_code >= 11 && capacity_code <= 25) {
     this->capacity_ = 1UL << capacity_code;
-    ESP_LOGI(TAG, "Auto-detected capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+    ESP_LOGI(TAG, "Auto-detected capacity: %u bytes (%.1f MB)", this->capacity_, this->capacity_ / (1024.0f * 1024.0f));
   }
 
-  // Manufacturer-specific adjustments
+  // Known chip identification
+  if (this->jedec_id_ == 0xC22019) {
+    // Macronix MX25L25635F - 256Mbit (32MB) 3.3V SPI NOR Flash
+    // Commonly found in PlayStation 4 consoles (SAA-001, SAB-001)
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Detected: Macronix MX25L25635F");
+    ESP_LOGI(TAG, "  256Mbit (32MB) 3.3V SPI NOR Flash");
+    ESP_LOGI(TAG, "  4-byte addressing required");
+    ESP_LOGI(TAG, "========================================");
+    return;
+  }
+
+  // Manufacturer-specific logging
   switch (mfg) {
     case 0xEF:  // Winbond
       ESP_LOGD(TAG, "Detected Winbond flash");
@@ -256,6 +280,35 @@ void SPIFlash::write_disable() {
   this->disable();
 }
 
+void SPIFlash::write_address_(uint32_t address) {
+  if (this->four_byte_mode_) {
+    this->write_byte((address >> 24) & 0xFF);
+  }
+  this->write_byte((address >> 16) & 0xFF);
+  this->write_byte((address >> 8) & 0xFF);
+  this->write_byte(address & 0xFF);
+}
+
+bool SPIFlash::enter_4byte_mode_() {
+  this->enable();
+  this->write_byte(CMD_ENTER_4BYTE_ADDR_MODE);
+  this->disable();
+
+  this->four_byte_mode_ = true;
+  ESP_LOGI(TAG, "Entered 4-byte address mode (>16MB addressing)");
+  return true;
+}
+
+bool SPIFlash::exit_4byte_mode_() {
+  this->enable();
+  this->write_byte(CMD_EXIT_4BYTE_ADDR_MODE);
+  this->disable();
+
+  this->four_byte_mode_ = false;
+  ESP_LOGI(TAG, "Exited 4-byte address mode");
+  return true;
+}
+
 bool SPIFlash::read_data_(uint32_t address, uint8_t *data, size_t length) {
   if (!this->wait_ready()) {
     return false;
@@ -267,18 +320,14 @@ bool SPIFlash::read_data_(uint32_t address, uint8_t *data, size_t length) {
     // Use Fast Read Quad Output command (0x6B)
     // Command and address on 1 line, data on 4 lines
     this->write_byte(CMD_FAST_READ_QUAD_OUTPUT);
-    this->write_byte((address >> 16) & 0xFF);
-    this->write_byte((address >> 8) & 0xFF);
-    this->write_byte(address & 0xFF);
+    this->write_address_(address);
     this->write_byte(0xFF);  // Dummy byte required for fast read
     // Note: Data is now read on 4 SPI lines (hardware handles this automatically)
     this->read_array(data, length);
   } else {
     // Standard read command (single SPI line)
     this->write_byte(CMD_READ_DATA);
-    this->write_byte((address >> 16) & 0xFF);
-    this->write_byte((address >> 8) & 0xFF);
-    this->write_byte(address & 0xFF);
+    this->write_address_(address);
     this->read_array(data, length);
   }
 
@@ -327,9 +376,7 @@ bool SPIFlash::write_page_(uint32_t address, const uint8_t *data, size_t length)
 
   this->enable();
   this->write_byte(CMD_PAGE_PROGRAM);
-  this->write_byte((address >> 16) & 0xFF);
-  this->write_byte((address >> 8) & 0xFF);
-  this->write_byte(address & 0xFF);
+  this->write_address_(address);
   this->write_array(data, length);
   this->disable();
 
@@ -372,9 +419,7 @@ bool SPIFlash::erase_(uint32_t address, uint8_t cmd) {
 
   this->enable();
   this->write_byte(cmd);
-  this->write_byte((address >> 16) & 0xFF);
-  this->write_byte((address >> 8) & 0xFF);
-  this->write_byte(address & 0xFF);
+  this->write_address_(address);
   this->disable();
 
   // Wait for erase to complete (can take several seconds for large blocks)
