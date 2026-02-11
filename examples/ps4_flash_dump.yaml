@@ -7,10 +7,10 @@
 #
 # OPERATIONS:
 #   1. Read JEDEC ID   - Quick connectivity test
-#   2. Dump Flash      - Read entire flash to /sdcard/ps4_dump.bin
-#   3. Verify Dump     - Re-read and compare byte-by-byte
-#   4. Sanity Check    - Analyze dump for blank/erased patterns
-#   5. Write to Flash  - Write /sdcard/ps4_write.bin to flash (full overwrite)
+#   2. Dump Flash      - Read entire flash to file (configurable via File Name input)
+#   3. Verify Dump     - Re-read and compare byte-by-byte against file
+#   4. Sanity Check    - Analyze dump file for blank/erased patterns
+#   5. Write to Flash  - Write file to flash (full overwrite, must match capacity)
 #   6. Smart Write     - Compare file vs flash, only erase+write changed sectors
 #
 # SAFETY:
@@ -181,6 +181,18 @@ text_sensor:
     id: op_detail
     icon: mdi:text-box-outline
 
+# --- File name input (changeable from HA or API) ---
+text:
+  - platform: template
+    name: "File Name"
+    id: file_name
+    icon: mdi:file
+    optimistic: true
+    initial_value: "/sdcard/ps4_dump.bin"
+    min_length: 1
+    max_length: 64
+    mode: text
+
 # --- Buttons to trigger operations ---
 button:
   # =====================================================================
@@ -234,7 +246,7 @@ button:
 
   # =====================================================================
   # BUTTON 2: Dump flash to SD card
-  # Reads the entire flash content and writes it to /sdcard/ps4_dump.bin
+  # Reads the entire flash content and writes it to the configured file
   # =====================================================================
   - platform: template
     name: "Dump Flash to SD"
@@ -245,6 +257,7 @@ button:
         - lambda: |-
             auto *flash = id(ps4_flash);
             uint32_t capacity = flash->get_capacity();
+            std::string filepath = id(file_name).state;
 
             if (capacity == 0) {
               ESP_LOGE("dump", "Flash capacity is 0 - chip not detected!");
@@ -252,15 +265,15 @@ button:
               return;
             }
 
-            ESP_LOGI("dump", "Starting flash dump: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
+            ESP_LOGI("dump", "Starting flash dump: %u bytes to %s", capacity, filepath.c_str());
             id(op_status).publish_state("Dumping...");
             id(op_progress).publish_state(0.0f);
-            id(op_detail).publish_state("Reading flash to SD");
+            id(op_detail).publish_state(filepath.c_str());
 
             // Open output file on SD card
-            FILE *f = fopen("/sdcard/ps4_dump.bin", "wb");
+            FILE *f = fopen(filepath.c_str(), "wb");
             if (f == nullptr) {
-              ESP_LOGE("dump", "Failed to open /sdcard/ps4_dump.bin for writing!");
+              ESP_LOGE("dump", "Failed to open %s for writing!", filepath.c_str());
               id(op_status).publish_state("FAILED: SD write error");
               return;
             }
@@ -328,10 +341,10 @@ button:
               id(op_progress).publish_state(100.0f);
               ESP_LOGI("dump", "========================================");
               ESP_LOGI("dump", "  DUMP COMPLETE: %u bytes written", total_read);
-              ESP_LOGI("dump", "  File: /sdcard/ps4_dump.bin");
+              ESP_LOGI("dump", "  File: %s", filepath.c_str());
               ESP_LOGI("dump", "========================================");
               id(op_status).publish_state("DUMP OK - Run verify!");
-              id(op_detail).publish_state("/sdcard/ps4_dump.bin");
+              id(op_detail).publish_state(filepath.c_str());
             }
 
   # =====================================================================
@@ -346,6 +359,7 @@ button:
         - lambda: |-
             auto *flash = id(ps4_flash);
             uint32_t capacity = flash->get_capacity();
+            std::string filepath = id(file_name).state;
 
             if (capacity == 0) {
               ESP_LOGE("verify", "Flash capacity is 0 - chip not detected!");
@@ -354,9 +368,9 @@ button:
             }
 
             // Open dump file for reading
-            FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
+            FILE *f = fopen(filepath.c_str(), "rb");
             if (f == nullptr) {
-              ESP_LOGE("verify", "Failed to open /sdcard/ps4_dump.bin - dump first!");
+              ESP_LOGE("verify", "Failed to open %s - dump first!", filepath.c_str());
               id(op_status).publish_state("VERIFY FAILED: No dump file");
               return;
             }
@@ -484,13 +498,14 @@ button:
     on_press:
       then:
         - lambda: |-
+            std::string filepath = id(file_name).state;
             id(op_status).publish_state("Analyzing dump...");
             id(op_progress).publish_state(0.0f);
-            id(op_detail).publish_state("");
+            id(op_detail).publish_state(filepath.c_str());
 
-            FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
+            FILE *f = fopen(filepath.c_str(), "rb");
             if (f == nullptr) {
-              ESP_LOGE("sanity", "No dump file found!");
+              ESP_LOGE("sanity", "No dump file found: %s", filepath.c_str());
               id(op_status).publish_state("SANITY: No dump file");
               return;
             }
@@ -586,7 +601,8 @@ button:
 
   # =====================================================================
   # BUTTON 5: Write SD file to Flash (full overwrite)
-  # Reads /sdcard/ps4_write.bin and writes entire contents to flash.
+  # Reads configured file and writes entire contents to flash.
+  # File size must exactly match flash capacity.
   # Erases sector-by-sector, then writes page-aligned.
   # Auto-verifies after write.
   # =====================================================================
@@ -600,6 +616,7 @@ button:
             auto *flash = id(ps4_flash);
             uint32_t capacity = flash->get_capacity();
             uint32_t sector_size = flash->get_erase_size();  // 4KB sectors
+            std::string filepath = id(file_name).state;
 
             if (capacity == 0) {
               id(op_status).publish_state("FAILED: No chip detected");
@@ -608,11 +625,11 @@ button:
 
             id(op_status).publish_state("Write: Opening file...");
             id(op_progress).publish_state(0.0f);
-            id(op_detail).publish_state("/sdcard/ps4_write.bin");
+            id(op_detail).publish_state(filepath.c_str());
 
-            FILE *f = fopen("/sdcard/ps4_write.bin", "rb");
+            FILE *f = fopen(filepath.c_str(), "rb");
             if (f == nullptr) {
-              ESP_LOGE("write", "Failed to open /sdcard/ps4_write.bin!");
+              ESP_LOGE("write", "Failed to open %s!", filepath.c_str());
               id(op_status).publish_state("FAILED: No write file");
               return;
             }
@@ -621,9 +638,11 @@ button:
             long file_size = ftell(f);
             fseek(f, 0, SEEK_SET);
 
-            if (file_size == 0 || (uint32_t) file_size > capacity) {
-              ESP_LOGE("write", "Invalid file size: %ld (capacity: %u)", file_size, capacity);
-              id(op_status).publish_state("FAILED: Bad file size");
+            if ((uint32_t) file_size != capacity) {
+              ESP_LOGE("write", "File size mismatch! File: %ld, Flash: %u - must be exact!", file_size, capacity);
+              char msg[64];
+              snprintf(msg, sizeof(msg), "FAILED: Size %ldB != %uB", file_size, capacity);
+              id(op_status).publish_state(msg);
               fclose(f);
               return;
             }
@@ -720,9 +739,9 @@ button:
             id(op_status).publish_state("Write done, verifying...");
             id(op_progress).publish_state(0.0f);
 
-            f = fopen("/sdcard/ps4_write.bin", "rb");
+            f = fopen(filepath.c_str(), "rb");
             if (f == nullptr) {
-              ESP_LOGE("write", "Cannot reopen file for verification!");
+              ESP_LOGE("write", "Cannot reopen %s for verification!", filepath.c_str());
               id(op_status).publish_state("WRITE OK but verify failed");
               allocator.deallocate(buf, chunk_size);
               return;
@@ -822,6 +841,7 @@ button:
             auto *flash = id(ps4_flash);
             uint32_t capacity = flash->get_capacity();
             uint32_t sector_size = flash->get_erase_size();  // 4KB sectors
+            std::string filepath = id(file_name).state;
 
             if (capacity == 0) {
               id(op_status).publish_state("FAILED: No chip detected");
@@ -830,11 +850,11 @@ button:
 
             id(op_status).publish_state("Smart Write: Scanning...");
             id(op_progress).publish_state(0.0f);
-            id(op_detail).publish_state("Comparing file vs flash");
+            id(op_detail).publish_state(filepath.c_str());
 
-            FILE *f = fopen("/sdcard/ps4_write.bin", "rb");
+            FILE *f = fopen(filepath.c_str(), "rb");
             if (f == nullptr) {
-              ESP_LOGE("smart", "Failed to open /sdcard/ps4_write.bin!");
+              ESP_LOGE("smart", "Failed to open %s!", filepath.c_str());
               id(op_status).publish_state("FAILED: No write file");
               return;
             }
@@ -843,9 +863,11 @@ button:
             long file_size = ftell(f);
             fseek(f, 0, SEEK_SET);
 
-            if (file_size == 0 || (uint32_t) file_size > capacity) {
-              ESP_LOGE("smart", "Invalid file size: %ld (capacity: %u)", file_size, capacity);
-              id(op_status).publish_state("FAILED: Bad file size");
+            if ((uint32_t) file_size != capacity) {
+              ESP_LOGE("smart", "File size mismatch! File: %ld, Flash: %u - must be exact!", file_size, capacity);
+              char msg[64];
+              snprintf(msg, sizeof(msg), "FAILED: Size %ldB != %uB", file_size, capacity);
+              id(op_status).publish_state(msg);
               fclose(f);
               return;
             }
