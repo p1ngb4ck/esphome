@@ -1,15 +1,23 @@
 # =============================================================================
-# PS4 SPI Flash Dump & Verify - MX25L25635F (32MB)
+# PS4 SPI Flash Dump, Verify & Write - MX25L25635F (32MB)
 # =============================================================================
 #
-# PURPOSE: Safely read and verify the full contents of a Macronix MX25L25635F
-#          SPI NOR flash (256Mbit / 32MB) and dump it to an SD card.
+# PURPOSE: Safely read, verify, write and smart-patch the contents of a
+#          Macronix MX25L25635F SPI NOR flash (256Mbit / 32MB) using SD card.
+#
+# OPERATIONS:
+#   1. Read JEDEC ID   - Quick connectivity test
+#   2. Dump Flash      - Read entire flash to /sdcard/ps4_dump.bin
+#   3. Verify Dump     - Re-read and compare byte-by-byte
+#   4. Sanity Check    - Analyze dump for blank/erased patterns
+#   5. Write to Flash  - Write /sdcard/ps4_write.bin to flash (full overwrite)
+#   6. Smart Write     - Compare file vs flash, only erase+write changed sectors
 #
 # SAFETY:
-#   - WP# (Write Protect) pin on the flash should be tied to GND
-#   - This config NEVER issues write/erase commands to the flash
-#   - The flash is opened in raw read-only mode
-#   - Multiple verification passes compare byte-by-byte
+#   - For READ-ONLY operations: tie WP# to GND
+#   - For WRITE operations: tie WP# to VCC (3.3V)
+#   - Smart Write minimizes modifications (sector-level diff)
+#   - All write operations include post-write verification
 #
 # WIRING (Flash SOP16 to ESP32-S3):
 #   Flash Pin 15 (SIO0/MOSI) -> ESP32-S3 GPIO11 (SPI MOSI)
@@ -18,7 +26,7 @@
 #   Flash Pin 7  (CS#)       -> ESP32-S3 GPIO10 (CS)
 #   Flash Pin 2  (VCC)       -> 3.3V
 #   Flash Pin 10 (GND)       -> GND
-#   Flash Pin 9  (WP#)       -> GND (write protect ACTIVE = safe)
+#   Flash Pin 9  (WP#)       -> GND (read-only) or VCC (read-write)
 #   Flash Pin 3  (RESET#)    -> 3.3V (or leave floating, has internal pullup)
 #   Flash Pin 1  (SIO3/HOLD) -> 3.3V (disable HOLD function)
 #
@@ -26,6 +34,10 @@
 #   SD CLK  -> GPIO39
 #   SD CMD  -> GPIO38
 #   SD DAT0 -> GPIO40
+#
+# I2C OLED Display (SSD1306 128x64):
+#   SDA -> GPIO8
+#   SCL -> GPIO9
 #
 # ADJUST PINS TO YOUR ACTUAL WIRING BEFORE COMPILING!
 # =============================================================================
@@ -54,9 +66,12 @@ wifi:
 
 api:
 
+# --- I2C Bus (for OLED display) ---
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+
 # --- SPI Bus for the external flash chip ---
-# This is the bus shared between ESP32 and the MX25L25635F
-# IMPORTANT: This must be a DIFFERENT SPI bus than the SD card if using SD-SPI
 spi:
   clk_pin: GPIO12
   mosi_pin: GPIO11
@@ -91,26 +106,134 @@ binary_storage:
     mode: raw
     cs_pin: GPIO10
 
-# --- Status Sensor: shows dump progress percentage ---
+# --- OLED Display (128x64) ---
+# NOTE: Font with id "my_font" must be defined elsewhere in your config
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    id: i2c_screen
+    address: 0x3C
+    update_interval: 500ms
+    lambda: |-
+      // --- Top bar: Flash info with JEDEC ID ---
+      auto *flash = id(ps4_flash);
+      uint32_t cap = flash->get_capacity();
+      uint8_t mfg = flash->get_manufacturer_id();
+      uint16_t dev = flash->get_device_id();
+
+      // Flash info line: model + JEDEC + capacity
+      if (cap > 0) {
+        it.printf(0, 0, id(my_font), "%02X:%04X %s %.0fMB",
+                  mfg, dev, flash->get_device_name(), cap / (1024.0f * 1024.0f));
+      } else {
+        it.print(0, 0, id(my_font), "No flash detected");
+      }
+
+      // Divider line
+      it.line(0, 12, 127, 12);
+
+      // --- Operation name ---
+      if (id(op_status).has_state()) {
+        it.print(0, 15, id(my_font), id(op_status).state.c_str());
+      } else {
+        it.print(0, 15, id(my_font), "Idle");
+      }
+
+      // --- Progress bar (visual) ---
+      float pct = 0.0f;
+      if (id(op_progress).has_state()) {
+        pct = id(op_progress).state;
+      }
+
+      // Bar outline: x=0, y=30, w=128, h=10
+      it.rectangle(0, 30, 128, 10);
+      // Bar fill
+      int fill_w = (int)(pct / 100.0f * 126.0f);
+      if (fill_w > 0) {
+        it.filled_rectangle(1, 31, fill_w, 8);
+      }
+
+      // Percentage text right of bar
+      it.printf(0, 42, id(my_font), "%.1f%%", pct);
+
+      // --- Operation detail line ---
+      if (id(op_detail).has_state()) {
+        it.print(0, 56, id(my_font), id(op_detail).state.c_str());
+      }
+
+# --- Generalized operation progress sensor ---
 sensor:
   - platform: template
-    name: "Dump Progress"
-    id: dump_progress
+    name: "Operation Progress"
+    id: op_progress
     unit_of_measurement: "%"
     accuracy_decimals: 1
     icon: mdi:progress-download
 
-# --- Status Text: shows current operation ---
+# --- Generalized operation status text sensors ---
 text_sensor:
   - platform: template
-    name: "Dump Status"
-    id: dump_status
+    name: "Operation Status"
+    id: op_status
     icon: mdi:information-outline
+  - platform: template
+    name: "Operation Detail"
+    id: op_detail
+    icon: mdi:text-box-outline
 
 # --- Buttons to trigger operations ---
 button:
   # =====================================================================
-  # BUTTON 1: Dump flash to SD card
+  # BUTTON 1: Read JEDEC ID (quick connectivity test)
+  # =====================================================================
+  - platform: template
+    name: "Read JEDEC ID"
+    id: btn_jedec
+    icon: mdi:chip
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+
+            id(op_status).publish_state("Reading JEDEC ID...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("");
+
+            if (flash->is_failed()) {
+              ESP_LOGE("jedec", "Flash component failed during setup - check wiring!");
+              id(op_status).publish_state("FAILED: Check wiring");
+              return;
+            }
+
+            uint32_t jedec = flash->read_jedec_id();
+            uint32_t capacity = flash->get_capacity();
+
+            ESP_LOGI("jedec", "========================================");
+            ESP_LOGI("jedec", "  JEDEC ID: 0x%06X", jedec);
+            ESP_LOGI("jedec", "  Manufacturer: 0x%02X", (jedec >> 16) & 0xFF);
+            ESP_LOGI("jedec", "  Device ID: 0x%04X", jedec & 0xFFFF);
+            ESP_LOGI("jedec", "  Capacity: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
+
+            id(op_progress).publish_state(100.0f);
+
+            if (jedec == 0xC22019) {
+              ESP_LOGI("jedec", "  >>> MX25L25635F detected! <<<");
+              id(op_status).publish_state("MX25L25635F detected!");
+              char det[48];
+              snprintf(det, sizeof(det), "JEDEC:0x%06X %uMB", jedec, capacity / (1024 * 1024));
+              id(op_detail).publish_state(det);
+            } else if (jedec == 0x000000 || jedec == 0xFFFFFF) {
+              ESP_LOGE("jedec", "  NO CHIP DETECTED! Check wiring!");
+              id(op_status).publish_state("NO CHIP - check wiring!");
+            } else {
+              char msg[48];
+              snprintf(msg, sizeof(msg), "Chip: 0x%06X (%u MB)", jedec, capacity / (1024 * 1024));
+              id(op_status).publish_state(msg);
+            }
+            ESP_LOGI("jedec", "========================================");
+
+  # =====================================================================
+  # BUTTON 2: Dump flash to SD card
   # Reads the entire flash content and writes it to /sdcard/ps4_dump.bin
   # =====================================================================
   - platform: template
@@ -125,29 +248,30 @@ button:
 
             if (capacity == 0) {
               ESP_LOGE("dump", "Flash capacity is 0 - chip not detected!");
-              id(dump_status).publish_state("FAILED: No chip detected");
+              id(op_status).publish_state("FAILED: No chip detected");
               return;
             }
 
             ESP_LOGI("dump", "Starting flash dump: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
-            id(dump_status).publish_state("Dumping...");
-            id(dump_progress).publish_state(0.0f);
+            id(op_status).publish_state("Dumping...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Reading flash to SD");
 
             // Open output file on SD card
             FILE *f = fopen("/sdcard/ps4_dump.bin", "wb");
             if (f == nullptr) {
               ESP_LOGE("dump", "Failed to open /sdcard/ps4_dump.bin for writing!");
-              id(dump_status).publish_state("FAILED: SD write error");
+              id(op_status).publish_state("FAILED: SD write error");
               return;
             }
 
-            // Allocate read buffer in PSRAM (8MB available at 80MHz)
+            // Allocate read buffer in PSRAM
             const size_t chunk_size = 16384;  // 16KB chunks
             RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
             uint8_t *buf = allocator.allocate(chunk_size);
             if (buf == nullptr) {
               ESP_LOGE("dump", "Failed to allocate read buffer in PSRAM!");
-              id(dump_status).publish_state("FAILED: Out of memory");
+              id(op_status).publish_state("FAILED: Out of memory");
               fclose(f);
               return;
             }
@@ -165,15 +289,18 @@ button:
 
               if (!flash->read(address, buf, len)) {
                 ESP_LOGE("dump", "Read failed at address 0x%08X!", address);
-                id(dump_status).publish_state("FAILED: Read error");
+                id(op_status).publish_state("FAILED: Read error");
+                char det[32];
+                snprintf(det, sizeof(det), "Fail @ 0x%08X", address);
+                id(op_detail).publish_state(det);
                 success = false;
                 break;
               }
 
               size_t written = fwrite(buf, 1, len, f);
               if (written != len) {
-                ESP_LOGE("dump", "SD write failed at address 0x%08X! (wrote %u of %u)", address, written, len);
-                id(dump_status).publish_state("FAILED: SD write error");
+                ESP_LOGE("dump", "SD write failed at address 0x%08X!", address);
+                id(op_status).publish_state("FAILED: SD write error");
                 success = false;
                 break;
               }
@@ -184,8 +311,11 @@ button:
               // Report progress every 1MB
               if (total_read - last_progress_report >= 1024 * 1024) {
                 float pct = (float) total_read / (float) capacity * 100.0f;
-                id(dump_progress).publish_state(pct);
+                id(op_progress).publish_state(pct);
                 ESP_LOGI("dump", "Progress: %.1f%% (%u / %u bytes)", pct, total_read, capacity);
+                char det[32];
+                snprintf(det, sizeof(det), "%uMB / %uMB", total_read / (1024*1024), capacity / (1024*1024));
+                id(op_detail).publish_state(det);
                 last_progress_report = total_read;
                 App.feed_wdt();
               }
@@ -195,18 +325,17 @@ button:
             fclose(f);
 
             if (success) {
-              id(dump_progress).publish_state(100.0f);
+              id(op_progress).publish_state(100.0f);
               ESP_LOGI("dump", "========================================");
               ESP_LOGI("dump", "  DUMP COMPLETE: %u bytes written", total_read);
               ESP_LOGI("dump", "  File: /sdcard/ps4_dump.bin");
               ESP_LOGI("dump", "========================================");
-              id(dump_status).publish_state("DUMP OK - Run verify!");
+              id(op_status).publish_state("DUMP OK - Run verify!");
+              id(op_detail).publish_state("/sdcard/ps4_dump.bin");
             }
 
   # =====================================================================
-  # BUTTON 2: Verify dump against flash (re-reads and compares)
-  # Reads the flash again and compares byte-by-byte against the dump file
-  # Run this MULTIPLE TIMES to be sure!
+  # BUTTON 3: Verify dump against flash (re-reads and compares)
   # =====================================================================
   - platform: template
     name: "Verify Dump"
@@ -220,7 +349,7 @@ button:
 
             if (capacity == 0) {
               ESP_LOGE("verify", "Flash capacity is 0 - chip not detected!");
-              id(dump_status).publish_state("VERIFY FAILED: No chip");
+              id(op_status).publish_state("VERIFY FAILED: No chip");
               return;
             }
 
@@ -228,7 +357,7 @@ button:
             FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
             if (f == nullptr) {
               ESP_LOGE("verify", "Failed to open /sdcard/ps4_dump.bin - dump first!");
-              id(dump_status).publish_state("VERIFY FAILED: No dump file");
+              id(op_status).publish_state("VERIFY FAILED: No dump file");
               return;
             }
 
@@ -239,14 +368,15 @@ button:
 
             if ((uint32_t) file_size != capacity) {
               ESP_LOGE("verify", "File size mismatch! File: %ld, Flash: %u", file_size, capacity);
-              id(dump_status).publish_state("VERIFY FAILED: Size mismatch");
+              id(op_status).publish_state("VERIFY FAILED: Size mismatch");
               fclose(f);
               return;
             }
 
             ESP_LOGI("verify", "Starting verification: %u bytes", capacity);
-            id(dump_status).publish_state("Verifying...");
-            id(dump_progress).publish_state(0.0f);
+            id(op_status).publish_state("Verifying...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Comparing flash vs dump");
 
             // Allocate both buffers in PSRAM
             const size_t chunk_size = 16384;  // 16KB chunks
@@ -255,7 +385,7 @@ button:
             uint8_t *file_buf = allocator.allocate(chunk_size);
             if (flash_buf == nullptr || file_buf == nullptr) {
               ESP_LOGE("verify", "Failed to allocate buffers in PSRAM!");
-              id(dump_status).publish_state("VERIFY FAILED: Out of memory");
+              id(op_status).publish_state("VERIFY FAILED: Out of memory");
               if (flash_buf) allocator.deallocate(flash_buf, chunk_size);
               if (file_buf) allocator.deallocate(file_buf, chunk_size);
               fclose(f);
@@ -277,7 +407,7 @@ button:
               // Read from flash
               if (!flash->read(address, flash_buf, len)) {
                 ESP_LOGE("verify", "Flash read failed at 0x%08X!", address);
-                id(dump_status).publish_state("VERIFY FAILED: Read error");
+                id(op_status).publish_state("VERIFY FAILED: Read error");
                 read_error = true;
                 break;
               }
@@ -286,7 +416,7 @@ button:
               size_t file_read = fread(file_buf, 1, len, f);
               if (file_read != len) {
                 ESP_LOGE("verify", "File read failed at 0x%08X!", address);
-                id(dump_status).publish_state("VERIFY FAILED: File read error");
+                id(op_status).publish_state("VERIFY FAILED: File read error");
                 read_error = true;
                 break;
               }
@@ -295,7 +425,6 @@ button:
               for (size_t i = 0; i < len; i++) {
                 if (flash_buf[i] != file_buf[i]) {
                   if (mismatch_count < 10) {
-                    // Log first 10 mismatches with details
                     ESP_LOGE("verify", "MISMATCH at 0x%08X: flash=0x%02X file=0x%02X",
                              address + i, flash_buf[i], file_buf[i]);
                   }
@@ -309,9 +438,12 @@ button:
               // Report progress every 1MB
               if (total_verified - last_progress_report >= 1024 * 1024) {
                 float pct = (float) total_verified / (float) capacity * 100.0f;
-                id(dump_progress).publish_state(pct);
+                id(op_progress).publish_state(pct);
                 ESP_LOGI("verify", "Verified: %.1f%% (%u / %u bytes), mismatches: %u",
                          pct, total_verified, capacity, mismatch_count);
+                char det[48];
+                snprintf(det, sizeof(det), "%uMB verified, %u bad", total_verified / (1024*1024), mismatch_count);
+                id(op_detail).publish_state(det);
                 last_progress_report = total_verified;
                 App.feed_wdt();
               }
@@ -322,13 +454,14 @@ button:
             fclose(f);
 
             if (!read_error) {
-              id(dump_progress).publish_state(100.0f);
+              id(op_progress).publish_state(100.0f);
               if (mismatch_count == 0) {
                 ESP_LOGI("verify", "========================================");
                 ESP_LOGI("verify", "  VERIFICATION PASSED");
                 ESP_LOGI("verify", "  %u bytes verified, 0 mismatches", total_verified);
                 ESP_LOGI("verify", "========================================");
-                id(dump_status).publish_state("VERIFY PASSED!");
+                id(op_status).publish_state("VERIFY PASSED!");
+                id(op_detail).publish_state("0 mismatches - perfect");
               } else {
                 ESP_LOGE("verify", "========================================");
                 ESP_LOGE("verify", "  VERIFICATION FAILED!");
@@ -337,14 +470,12 @@ button:
                 ESP_LOGE("verify", "========================================");
                 char msg[64];
                 snprintf(msg, sizeof(msg), "VERIFY FAILED: %u mismatches!", mismatch_count);
-                id(dump_status).publish_state(msg);
+                id(op_status).publish_state(msg);
               }
             }
 
   # =====================================================================
-  # BUTTON 3: Sanity check the dump file
-  # Checks that the dump is not all 0x00 or all 0xFF (blank/erased chip)
-  # and reports basic statistics
+  # BUTTON 4: Sanity check the dump file
   # =====================================================================
   - platform: template
     name: "Sanity Check Dump"
@@ -353,10 +484,14 @@ button:
     on_press:
       then:
         - lambda: |-
+            id(op_status).publish_state("Analyzing dump...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("");
+
             FILE *f = fopen("/sdcard/ps4_dump.bin", "rb");
             if (f == nullptr) {
               ESP_LOGE("sanity", "No dump file found!");
-              id(dump_status).publish_state("SANITY: No dump file");
+              id(op_status).publish_state("SANITY: No dump file");
               return;
             }
 
@@ -365,7 +500,6 @@ button:
             fseek(f, 0, SEEK_SET);
 
             ESP_LOGI("sanity", "Analyzing dump: %ld bytes (%.1f MB)", file_size, file_size / (1024.0f * 1024.0f));
-            id(dump_status).publish_state("Analyzing...");
 
             // Allocate buffer in PSRAM
             const size_t chunk_size = 16384;  // 16KB chunks
@@ -373,7 +507,7 @@ button:
             uint8_t *buf = allocator.allocate(chunk_size);
             if (buf == nullptr) {
               ESP_LOGE("sanity", "Failed to allocate buffer in PSRAM!");
-              id(dump_status).publish_state("SANITY: Out of memory");
+              id(op_status).publish_state("SANITY: Out of memory");
               fclose(f);
               return;
             }
@@ -409,13 +543,16 @@ button:
               total += len;
 
               if (total % (4 * 1024 * 1024) == 0) {
+                float pct = (float) total / (float) file_size * 100.0f;
+                id(op_progress).publish_state(pct);
                 App.feed_wdt();
               }
             }
 
             allocator.deallocate(buf, chunk_size);
-
             fclose(f);
+
+            id(op_progress).publish_state(100.0f);
 
             float pct_00 = (float) count_00 / (float) total * 100.0f;
             float pct_ff = (float) count_ff / (float) total * 100.0f;
@@ -428,58 +565,603 @@ button:
             ESP_LOGI("sanity", "  0xFF bytes: %u (%.1f%%)", count_ff, pct_ff);
             ESP_LOGI("sanity", "  Other data: %.1f%%", pct_data);
 
+            char det[48];
+            snprintf(det, sizeof(det), "00:%.0f%% FF:%.0f%% data:%.0f%%", pct_00, pct_ff, pct_data);
+            id(op_detail).publish_state(det);
+
             if (pct_ff > 99.0f) {
               ESP_LOGW("sanity", "  WARNING: Dump appears BLANK/ERASED (>99%% 0xFF)!");
-              id(dump_status).publish_state("SANITY: Looks BLANK!");
+              id(op_status).publish_state("SANITY: Looks BLANK!");
             } else if (pct_00 > 99.0f) {
               ESP_LOGW("sanity", "  WARNING: Dump appears ALL ZEROS (>99%% 0x00)!");
-              id(dump_status).publish_state("SANITY: All zeros!");
+              id(op_status).publish_state("SANITY: All zeros!");
             } else if (pct_00 > 90.0f || pct_ff > 90.0f) {
               ESP_LOGW("sanity", "  WARNING: Suspiciously uniform content");
-              id(dump_status).publish_state("SANITY: Suspicious!");
+              id(op_status).publish_state("SANITY: Suspicious!");
             } else {
               ESP_LOGI("sanity", "  Content looks reasonable");
-              id(dump_status).publish_state("SANITY: Looks good!");
+              id(op_status).publish_state("SANITY: Looks good!");
             }
             ESP_LOGI("sanity", "========================================");
 
   # =====================================================================
-  # BUTTON 4: Read JEDEC ID only (quick connectivity test)
-  # Use this first to verify wiring is correct before attempting a dump
+  # BUTTON 5: Write SD file to Flash (full overwrite)
+  # Reads /sdcard/ps4_write.bin and writes entire contents to flash.
+  # Erases sector-by-sector, then writes page-aligned.
+  # Auto-verifies after write.
   # =====================================================================
   - platform: template
-    name: "Read JEDEC ID"
-    id: btn_jedec
-    icon: mdi:chip
+    name: "Write SD to Flash"
+    id: btn_write
+    icon: mdi:content-copy
     on_press:
       then:
         - lambda: |-
             auto *flash = id(ps4_flash);
+            uint32_t capacity = flash->get_capacity();
+            uint32_t sector_size = flash->get_erase_size();  // 4KB sectors
 
-            if (flash->is_failed()) {
-              ESP_LOGE("jedec", "Flash component failed during setup - check wiring!");
-              id(dump_status).publish_state("FAILED: Check wiring");
+            if (capacity == 0) {
+              id(op_status).publish_state("FAILED: No chip detected");
               return;
             }
 
-            uint32_t jedec = flash->read_jedec_id();
-            uint32_t capacity = flash->get_capacity();
+            id(op_status).publish_state("Write: Opening file...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("/sdcard/ps4_write.bin");
 
-            ESP_LOGI("jedec", "========================================");
-            ESP_LOGI("jedec", "  JEDEC ID: 0x%06X", jedec);
-            ESP_LOGI("jedec", "  Manufacturer: 0x%02X", (jedec >> 16) & 0xFF);
-            ESP_LOGI("jedec", "  Device ID: 0x%04X", jedec & 0xFFFF);
-            ESP_LOGI("jedec", "  Capacity: %u bytes (%.1f MB)", capacity, capacity / (1024.0f * 1024.0f));
-
-            if (jedec == 0xC22019) {
-              ESP_LOGI("jedec", "  >>> MX25L25635F detected! <<<");
-              id(dump_status).publish_state("MX25L25635F detected!");
-            } else if (jedec == 0x000000 || jedec == 0xFFFFFF) {
-              ESP_LOGE("jedec", "  NO CHIP DETECTED! Check wiring!");
-              id(dump_status).publish_state("NO CHIP - check wiring!");
-            } else {
-              char msg[48];
-              snprintf(msg, sizeof(msg), "Chip: 0x%06X (%u MB)", jedec, capacity / (1024 * 1024));
-              id(dump_status).publish_state(msg);
+            FILE *f = fopen("/sdcard/ps4_write.bin", "rb");
+            if (f == nullptr) {
+              ESP_LOGE("write", "Failed to open /sdcard/ps4_write.bin!");
+              id(op_status).publish_state("FAILED: No write file");
+              return;
             }
-            ESP_LOGI("jedec", "========================================");
+
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+
+            if (file_size == 0 || (uint32_t) file_size > capacity) {
+              ESP_LOGE("write", "Invalid file size: %ld (capacity: %u)", file_size, capacity);
+              id(op_status).publish_state("FAILED: Bad file size");
+              fclose(f);
+              return;
+            }
+
+            ESP_LOGW("write", "========================================");
+            ESP_LOGW("write", "  WRITING %ld bytes to flash!", file_size);
+            ESP_LOGW("write", "  This will ERASE and OVERWRITE data!");
+            ESP_LOGW("write", "========================================");
+
+            // Allocate 16KB chunk buffer in PSRAM (for SD reads)
+            const size_t chunk_size = 16384;  // 16KB SD read chunks
+            RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *buf = allocator.allocate(chunk_size);
+            if (buf == nullptr) {
+              ESP_LOGE("write", "Failed to allocate buffer in PSRAM!");
+              id(op_status).publish_state("FAILED: Out of memory");
+              fclose(f);
+              return;
+            }
+
+            uint32_t address = 0;
+            uint32_t total_written = 0;
+            uint32_t total_size = (uint32_t) file_size;
+            uint32_t last_progress_report = 0;
+            bool success = true;
+
+            id(op_status).publish_state("Writing...");
+
+            while (address < total_size) {
+              // Read 16KB chunk from SD
+              size_t chunk_len = chunk_size;
+              if (address + chunk_len > total_size) {
+                chunk_len = total_size - address;
+              }
+
+              size_t file_read = fread(buf, 1, chunk_len, f);
+              if (file_read != chunk_len) {
+                ESP_LOGE("write", "File read failed at 0x%08X!", address);
+                id(op_status).publish_state("FAILED: File read error");
+                success = false;
+                break;
+              }
+
+              // Write this 16KB chunk in 4KB sector-sized pieces
+              for (size_t offset = 0; offset < chunk_len; offset += sector_size) {
+                size_t sector_len = sector_size;
+                if (offset + sector_len > chunk_len) {
+                  sector_len = chunk_len - offset;
+                }
+
+                // Erase the sector
+                if (!flash->erase_sector(address + offset)) {
+                  ESP_LOGE("write", "Erase failed at sector 0x%08X!", address + offset);
+                  id(op_status).publish_state("FAILED: Erase error");
+                  success = false;
+                  break;
+                }
+
+                // Write the sector (page-aligned internally by flash->write())
+                if (!flash->write(address + offset, buf + offset, sector_len)) {
+                  ESP_LOGE("write", "Write failed at 0x%08X!", address + offset);
+                  id(op_status).publish_state("FAILED: Write error");
+                  success = false;
+                  break;
+                }
+              }
+
+              if (!success) break;
+
+              address += chunk_len;
+              total_written += chunk_len;
+
+              // Report progress every 1MB
+              if (total_written - last_progress_report >= 1024 * 1024) {
+                float pct = (float) total_written / (float) total_size * 100.0f;
+                id(op_progress).publish_state(pct);
+                ESP_LOGI("write", "Write progress: %.1f%% (%u / %u)", pct, total_written, total_size);
+                char det[32];
+                snprintf(det, sizeof(det), "W: %uMB / %uMB", total_written / (1024*1024), total_size / (1024*1024));
+                id(op_detail).publish_state(det);
+                last_progress_report = total_written;
+                App.feed_wdt();
+              }
+            }
+
+            fclose(f);
+
+            if (!success) {
+              allocator.deallocate(buf, chunk_size);
+              return;
+            }
+
+            // --- Post-write verification (16KB chunks) ---
+            id(op_status).publish_state("Write done, verifying...");
+            id(op_progress).publish_state(0.0f);
+
+            f = fopen("/sdcard/ps4_write.bin", "rb");
+            if (f == nullptr) {
+              ESP_LOGE("write", "Cannot reopen file for verification!");
+              id(op_status).publish_state("WRITE OK but verify failed");
+              allocator.deallocate(buf, chunk_size);
+              return;
+            }
+
+            uint8_t *verify_buf = allocator.allocate(chunk_size);
+            if (verify_buf == nullptr) {
+              ESP_LOGE("write", "Cannot allocate verify buffer!");
+              id(op_status).publish_state("WRITE OK but verify failed");
+              allocator.deallocate(buf, chunk_size);
+              fclose(f);
+              return;
+            }
+
+            address = 0;
+            uint32_t mismatch_count = 0;
+            last_progress_report = 0;
+            uint32_t verified = 0;
+
+            while (address < total_size) {
+              size_t len = chunk_size;
+              if (address + len > total_size) {
+                len = total_size - address;
+              }
+
+              // Read from file
+              fread(buf, 1, len, f);
+
+              // Read from flash
+              if (!flash->read(address, verify_buf, len)) {
+                ESP_LOGE("write", "Verify read failed at 0x%08X!", address);
+                id(op_status).publish_state("WRITE: Verify read error");
+                break;
+              }
+
+              // Compare
+              for (size_t i = 0; i < len; i++) {
+                if (buf[i] != verify_buf[i]) {
+                  if (mismatch_count < 10) {
+                    ESP_LOGE("write", "Verify MISMATCH at 0x%08X: expected=0x%02X got=0x%02X",
+                             address + i, buf[i], verify_buf[i]);
+                  }
+                  mismatch_count++;
+                }
+              }
+
+              address += len;
+              verified += len;
+
+              if (verified - last_progress_report >= 1024 * 1024) {
+                float pct = (float) verified / (float) total_size * 100.0f;
+                id(op_progress).publish_state(pct);
+                last_progress_report = verified;
+                App.feed_wdt();
+              }
+            }
+
+            allocator.deallocate(buf, chunk_size);
+            allocator.deallocate(verify_buf, chunk_size);
+            fclose(f);
+
+            id(op_progress).publish_state(100.0f);
+
+            if (mismatch_count == 0) {
+              ESP_LOGI("write", "========================================");
+              ESP_LOGI("write", "  WRITE + VERIFY PASSED");
+              ESP_LOGI("write", "  %u bytes written and verified", total_written);
+              ESP_LOGI("write", "========================================");
+              id(op_status).publish_state("WRITE+VERIFY PASSED!");
+              char det[32];
+              snprintf(det, sizeof(det), "%u bytes OK", total_written);
+              id(op_detail).publish_state(det);
+            } else {
+              ESP_LOGE("write", "========================================");
+              ESP_LOGE("write", "  WRITE VERIFICATION FAILED!");
+              ESP_LOGE("write", "  %u mismatches!", mismatch_count);
+              ESP_LOGE("write", "========================================");
+              char msg[64];
+              snprintf(msg, sizeof(msg), "WRITE VERIFY FAILED: %u bad!", mismatch_count);
+              id(op_status).publish_state(msg);
+            }
+
+  # =====================================================================
+  # BUTTON 6: Smart Write (minimal modification)
+  # Compares /sdcard/ps4_write.bin against current flash content
+  # sector-by-sector (4KB). Only erases + rewrites sectors that differ.
+  # Ideal for PS4 UART debug flag patching - minimal flash wear.
+  # Auto-verifies all modified sectors after write.
+  # =====================================================================
+  - platform: template
+    name: "Smart Write"
+    id: btn_smart_write
+    icon: mdi:delta
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_flash);
+            uint32_t capacity = flash->get_capacity();
+            uint32_t sector_size = flash->get_erase_size();  // 4KB sectors
+
+            if (capacity == 0) {
+              id(op_status).publish_state("FAILED: No chip detected");
+              return;
+            }
+
+            id(op_status).publish_state("Smart Write: Scanning...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Comparing file vs flash");
+
+            FILE *f = fopen("/sdcard/ps4_write.bin", "rb");
+            if (f == nullptr) {
+              ESP_LOGE("smart", "Failed to open /sdcard/ps4_write.bin!");
+              id(op_status).publish_state("FAILED: No write file");
+              return;
+            }
+
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+
+            if (file_size == 0 || (uint32_t) file_size > capacity) {
+              ESP_LOGE("smart", "Invalid file size: %ld (capacity: %u)", file_size, capacity);
+              id(op_status).publish_state("FAILED: Bad file size");
+              fclose(f);
+              return;
+            }
+
+            uint32_t total_size = (uint32_t) file_size;
+            uint32_t total_sectors = (total_size + sector_size - 1) / sector_size;
+
+            ESP_LOGI("smart", "========================================");
+            ESP_LOGI("smart", "  Smart Write: %u bytes, %u sectors", total_size, total_sectors);
+            ESP_LOGI("smart", "  Sector size: %u bytes (4KB)", sector_size);
+            ESP_LOGI("smart", "========================================");
+
+            // Allocate 16KB buffers in PSRAM (for SD/flash reads in chunks)
+            const size_t chunk_size = 16384;  // 16KB read chunks
+            RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *file_buf = allocator.allocate(chunk_size);
+            uint8_t *flash_buf = allocator.allocate(chunk_size);
+            if (file_buf == nullptr || flash_buf == nullptr) {
+              ESP_LOGE("smart", "Failed to allocate buffers in PSRAM!");
+              id(op_status).publish_state("FAILED: Out of memory");
+              if (file_buf) allocator.deallocate(file_buf, chunk_size);
+              if (flash_buf) allocator.deallocate(flash_buf, chunk_size);
+              fclose(f);
+              return;
+            }
+
+            // --- Phase 1: Compare and identify changed sectors ---
+            // Read 16KB at a time from SD + flash, compare per 4KB sector
+            uint32_t address = 0;
+            uint32_t sectors_differ = 0;
+            uint32_t sectors_same = 0;
+            uint32_t sectors_processed = 0;
+            bool scan_error = false;
+
+            // Dirty sector bitfield in PSRAM
+            // For 32MB / 4KB = 8192 sectors = 1024 bytes for the bitfield
+            uint32_t bitfield_size = (total_sectors + 7) / 8;
+            uint8_t *dirty_sectors = allocator.allocate(bitfield_size);
+            if (dirty_sectors == nullptr) {
+              ESP_LOGE("smart", "Failed to allocate dirty sector bitfield!");
+              id(op_status).publish_state("FAILED: Out of memory");
+              allocator.deallocate(file_buf, chunk_size);
+              allocator.deallocate(flash_buf, chunk_size);
+              fclose(f);
+              return;
+            }
+            memset(dirty_sectors, 0, bitfield_size);
+
+            id(op_status).publish_state("Scanning differences...");
+
+            while (address < total_size) {
+              // Read 16KB chunk from both file and flash
+              size_t chunk_len = chunk_size;
+              if (address + chunk_len > total_size) {
+                chunk_len = total_size - address;
+              }
+
+              size_t file_read = fread(file_buf, 1, chunk_len, f);
+              if (file_read != chunk_len) {
+                ESP_LOGE("smart", "File read failed at 0x%08X!", address);
+                scan_error = true;
+                break;
+              }
+
+              if (!flash->read(address, flash_buf, chunk_len)) {
+                ESP_LOGE("smart", "Flash read failed at 0x%08X!", address);
+                scan_error = true;
+                break;
+              }
+
+              // Compare per sector within this 16KB chunk
+              for (size_t offset = 0; offset < chunk_len; offset += sector_size) {
+                size_t sector_len = sector_size;
+                if (offset + sector_len > chunk_len) {
+                  sector_len = chunk_len - offset;
+                }
+
+                bool differs = (memcmp(file_buf + offset, flash_buf + offset, sector_len) != 0);
+                uint32_t sector_idx = (address + offset) / sector_size;
+
+                if (differs) {
+                  dirty_sectors[sector_idx / 8] |= (1 << (sector_idx % 8));
+                  sectors_differ++;
+
+                  if (sectors_differ <= 5) {
+                    uint32_t first_diff = 0;
+                    for (size_t i = 0; i < sector_len; i++) {
+                      if (file_buf[offset + i] != flash_buf[offset + i]) {
+                        first_diff = i;
+                        break;
+                      }
+                    }
+                    ESP_LOGI("smart", "  Sector %u (0x%08X) DIFFERS - first diff at offset %u",
+                             sector_idx, address + offset, first_diff);
+                  }
+                } else {
+                  sectors_same++;
+                }
+                sectors_processed++;
+              }
+
+              address += chunk_len;
+
+              // Progress every 1MB
+              if (address % (1024 * 1024) < chunk_size) {
+                float pct = (float) address / (float) total_size * 50.0f;  // 0-50% for scan phase
+                id(op_progress).publish_state(pct);
+                char det[48];
+                snprintf(det, sizeof(det), "Scan: %u/%u sec, %u differ",
+                         sectors_processed, total_sectors, sectors_differ);
+                id(op_detail).publish_state(det);
+                App.feed_wdt();
+              }
+            }
+
+            if (scan_error) {
+              id(op_status).publish_state("FAILED: Scan error");
+              allocator.deallocate(file_buf, chunk_size);
+              allocator.deallocate(flash_buf, chunk_size);
+              allocator.deallocate(dirty_sectors, bitfield_size);
+              fclose(f);
+              return;
+            }
+
+            ESP_LOGI("smart", "========================================");
+            ESP_LOGI("smart", "  Scan complete:");
+            ESP_LOGI("smart", "  Total sectors: %u", total_sectors);
+            ESP_LOGI("smart", "  Sectors to write: %u (%.1f KB)", sectors_differ,
+                     sectors_differ * sector_size / 1024.0f);
+            ESP_LOGI("smart", "  Sectors unchanged: %u", sectors_same);
+            ESP_LOGI("smart", "========================================");
+
+            if (sectors_differ == 0) {
+              ESP_LOGI("smart", "Flash already matches file - nothing to do!");
+              id(op_status).publish_state("Already up to date!");
+              id(op_progress).publish_state(100.0f);
+              id(op_detail).publish_state("0 sectors differ");
+              allocator.deallocate(file_buf, sector_size);
+              allocator.deallocate(flash_buf, sector_size);
+              allocator.deallocate(dirty_sectors, bitfield_size);
+              fclose(f);
+              return;
+            }
+
+            char det_msg[48];
+            snprintf(det_msg, sizeof(det_msg), "%u of %u sectors to write", sectors_differ, total_sectors);
+            id(op_detail).publish_state(det_msg);
+
+            // --- Phase 2: Erase + write only dirty sectors ---
+            // For write phase we need sector-sized buffer (4KB) for precise writes
+            // But we still read from SD in 16KB chunks when consecutive sectors are dirty
+            id(op_status).publish_state("Writing changed sectors...");
+
+            uint32_t sectors_written = 0;
+            bool write_error = false;
+
+            for (uint32_t sector_idx = 0; sector_idx < total_sectors; sector_idx++) {
+              // Check if this sector is dirty
+              if (!(dirty_sectors[sector_idx / 8] & (1 << (sector_idx % 8)))) {
+                continue;  // Skip - sector matches
+              }
+
+              address = sector_idx * sector_size;
+              size_t len = sector_size;
+              if (address + len > total_size) {
+                len = total_size - address;
+              }
+
+              // Seek to sector position in file and read one sector
+              fseek(f, address, SEEK_SET);
+              size_t file_read = fread(file_buf, 1, len, f);
+              if (file_read != len) {
+                ESP_LOGE("smart", "File re-read failed at sector %u (0x%08X)!", sector_idx, address);
+                write_error = true;
+                break;
+              }
+
+              // Erase the sector
+              if (!flash->erase_sector(address)) {
+                ESP_LOGE("smart", "Erase failed at sector %u (0x%08X)!", sector_idx, address);
+                write_error = true;
+                break;
+              }
+
+              // Write the new data (page-aligned internally)
+              if (!flash->write(address, file_buf, len)) {
+                ESP_LOGE("smart", "Write failed at sector %u (0x%08X)!", sector_idx, address);
+                write_error = true;
+                break;
+              }
+
+              sectors_written++;
+
+              // Progress: 50-80% for write phase
+              float pct = 50.0f + (float) sectors_written / (float) sectors_differ * 30.0f;
+              id(op_progress).publish_state(pct);
+
+              if (sectors_written % 16 == 0 || sectors_written == sectors_differ) {
+                ESP_LOGI("smart", "  Written %u / %u sectors", sectors_written, sectors_differ);
+                char det[48];
+                snprintf(det, sizeof(det), "Write: %u/%u sectors", sectors_written, sectors_differ);
+                id(op_detail).publish_state(det);
+                App.feed_wdt();
+              }
+            }
+
+            if (write_error) {
+              char msg[64];
+              snprintf(msg, sizeof(msg), "WRITE ERROR after %u/%u sectors!", sectors_written, sectors_differ);
+              id(op_status).publish_state(msg);
+              allocator.deallocate(file_buf, chunk_size);
+              allocator.deallocate(flash_buf, chunk_size);
+              allocator.deallocate(dirty_sectors, bitfield_size);
+              fclose(f);
+              return;
+            }
+
+            // --- Phase 3: Verify written sectors (16KB reads) ---
+            id(op_status).publish_state("Verifying written sectors...");
+
+            // Re-verify using 16KB reads - check all dirty sectors within each chunk
+            fseek(f, 0, SEEK_SET);
+            address = 0;
+            uint32_t sectors_verified = 0;
+            uint32_t verify_mismatches = 0;
+
+            while (address < total_size) {
+              // Check if any sector in this 16KB range is dirty
+              bool any_dirty = false;
+              uint32_t chunk_end = address + chunk_size;
+              if (chunk_end > total_size) chunk_end = total_size;
+
+              for (uint32_t a = address; a < chunk_end; a += sector_size) {
+                uint32_t si = a / sector_size;
+                if (dirty_sectors[si / 8] & (1 << (si % 8))) {
+                  any_dirty = true;
+                  break;
+                }
+              }
+
+              if (!any_dirty) {
+                // Skip this 16KB range entirely - no dirty sectors
+                fseek(f, chunk_end - address, SEEK_CUR);
+                address = chunk_end;
+                continue;
+              }
+
+              size_t chunk_len = chunk_end - address;
+
+              // Read 16KB from both file and flash
+              fread(file_buf, 1, chunk_len, f);
+              if (!flash->read(address, flash_buf, chunk_len)) {
+                ESP_LOGE("smart", "Verify read failed at 0x%08X!", address);
+                verify_mismatches++;
+                address = chunk_end;
+                continue;
+              }
+
+              // Compare only dirty sectors within this chunk
+              for (size_t offset = 0; offset < chunk_len; offset += sector_size) {
+                uint32_t si = (address + offset) / sector_size;
+                if (!(dirty_sectors[si / 8] & (1 << (si % 8)))) {
+                  continue;
+                }
+
+                size_t sector_len = sector_size;
+                if (offset + sector_len > chunk_len) sector_len = chunk_len - offset;
+
+                for (size_t i = 0; i < sector_len; i++) {
+                  if (file_buf[offset + i] != flash_buf[offset + i]) {
+                    if (verify_mismatches < 10) {
+                      ESP_LOGE("smart", "Verify MISMATCH at 0x%08X: expected=0x%02X got=0x%02X",
+                               address + offset + i, file_buf[offset + i], flash_buf[offset + i]);
+                    }
+                    verify_mismatches++;
+                  }
+                }
+                sectors_verified++;
+              }
+
+              address = chunk_end;
+
+              // Progress: 80-100% for verify phase
+              float pct = 80.0f + (float) sectors_verified / (float) sectors_differ * 20.0f;
+              id(op_progress).publish_state(pct);
+
+              if (sectors_verified % 64 == 0) {
+                App.feed_wdt();
+              }
+            }
+
+            allocator.deallocate(file_buf, chunk_size);
+            allocator.deallocate(flash_buf, chunk_size);
+            allocator.deallocate(dirty_sectors, bitfield_size);
+            fclose(f);
+
+            id(op_progress).publish_state(100.0f);
+
+            if (verify_mismatches == 0) {
+              ESP_LOGI("smart", "========================================");
+              ESP_LOGI("smart", "  SMART WRITE COMPLETE");
+              ESP_LOGI("smart", "  %u sectors modified, %u unchanged", sectors_differ, sectors_same);
+              ESP_LOGI("smart", "  All written sectors verified OK");
+              ESP_LOGI("smart", "========================================");
+              char msg[64];
+              snprintf(msg, sizeof(msg), "SMART WRITE OK! %u/%u sectors", sectors_differ, total_sectors);
+              id(op_status).publish_state(msg);
+              char det[48];
+              snprintf(det, sizeof(det), "%u written, %u skipped, verified", sectors_differ, sectors_same);
+              id(op_detail).publish_state(det);
+            } else {
+              ESP_LOGE("smart", "========================================");
+              ESP_LOGE("smart", "  SMART WRITE VERIFICATION FAILED!");
+              ESP_LOGE("smart", "  %u byte mismatches in written sectors!", verify_mismatches);
+              ESP_LOGE("smart", "========================================");
+              char msg[64];
+              snprintf(msg, sizeof(msg), "SMART WRITE VERIFY FAIL: %u bad!", verify_mismatches);
+              id(op_status).publish_state(msg);
+            }
