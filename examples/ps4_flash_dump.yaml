@@ -826,8 +826,9 @@ button:
 
   # =====================================================================
   # BUTTON 6: Smart Write (minimal modification)
-  # Compares /sdcard/ps4_write.bin against current flash content
+  # Compares configured file against current flash content
   # sector-by-sector (4KB). Only erases + rewrites sectors that differ.
+  # File size must exactly match flash capacity.
   # Ideal for PS4 UART debug flag patching - minimal flash wear.
   # Auto-verifies all modified sectors after write.
   # =====================================================================
