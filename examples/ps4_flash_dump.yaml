@@ -435,6 +435,7 @@ button:
                 id(op_detail).publish_state(det);
                 last_progress_report = total_read;
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -564,6 +565,7 @@ button:
                 id(op_detail).publish_state(det);
                 last_progress_report = total_verified;
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -665,6 +667,7 @@ button:
                 float pct = (float) total / (float) file_size * 100.0f;
                 id(op_progress).publish_state(pct);
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -829,6 +832,7 @@ button:
                 id(op_detail).publish_state(det);
                 last_progress_report = total_written;
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -900,6 +904,7 @@ button:
                 id(op_progress).publish_state(pct);
                 last_progress_report = verified;
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -1085,6 +1090,7 @@ button:
                          sectors_processed, total_sectors, sectors_differ);
                 id(op_detail).publish_state(det);
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -1176,6 +1182,7 @@ button:
                 snprintf(det, sizeof(det), "Write: %u/%u sectors", sectors_written, sectors_differ);
                 id(op_detail).publish_state(det);
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 
@@ -1261,6 +1268,7 @@ button:
 
               if (sectors_verified % 64 == 0) {
                 App.feed_wdt();
+                id(i2c_screen).update();
               }
             }
 

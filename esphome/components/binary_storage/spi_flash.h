@@ -251,6 +251,7 @@ class SPIFlash : public BinaryStorage,
   // 4-byte address mode commands (for chips > 16MB)
   static constexpr uint8_t CMD_ENTER_4BYTE_ADDR_MODE = 0xB7;
   static constexpr uint8_t CMD_EXIT_4BYTE_ADDR_MODE = 0xE9;
+  static constexpr uint8_t CMD_READ_CONFIG_REG = 0x15;  // Macronix: bit 5 (ADP) = 4-byte mode active
 
   // Quad SPI commands (4x faster reads)
   static constexpr uint8_t CMD_FAST_READ_QUAD_OUTPUT = 0x6B;  // Address on 1 line, data on 4 lines

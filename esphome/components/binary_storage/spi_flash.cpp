@@ -36,7 +36,11 @@ void SPIFlash::setup() {
   // Enter 4-byte address mode if capacity exceeds 16MB (24-bit address limit)
   if (this->capacity_ > (1UL << 24)) {
     ESP_LOGCONFIG(TAG, "  Capacity > 16MB, entering 4-byte address mode...");
-    this->enter_4byte_mode_();
+    if (!this->enter_4byte_mode_()) {
+      ESP_LOGE(TAG, "Failed to enter 4-byte address mode - cannot access full capacity!");
+      this->mark_failed();
+      return;
+    }
   }
 
   // Verify device is accessible
@@ -315,7 +319,22 @@ bool SPIFlash::enter_4byte_mode_() {
   this->disable();
 
   this->four_byte_mode_ = true;
-  ESP_LOGI(TAG, "Entered 4-byte address mode (>16MB addressing)");
+
+  // Verify 4-byte mode is active via Configuration Register (Macronix: bit 5 = ADP)
+  this->enable();
+  this->write_byte(CMD_READ_CONFIG_REG);
+  uint8_t config_reg = this->read_byte();
+  this->disable();
+
+  if (config_reg & 0x20) {
+    ESP_LOGI(TAG, "Entered 4-byte address mode (verified, CR=0x%02X)", config_reg);
+  } else {
+    ESP_LOGE(TAG, "4-byte address mode NOT confirmed! CR=0x%02X (bit 5 not set)", config_reg);
+    ESP_LOGE(TAG, "Operations above 16MB will fail! Check chip compatibility.");
+    this->four_byte_mode_ = false;
+    return false;
+  }
+
   return true;
 }
 
