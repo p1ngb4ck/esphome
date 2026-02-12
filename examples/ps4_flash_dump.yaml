@@ -392,7 +392,7 @@ button:
               fclose(f);
               return;
             }
-
+            id(i2c_screen).update();
             uint32_t address = 0;
             uint32_t total_read = 0;
             bool success = true;
@@ -491,7 +491,7 @@ button:
               fclose(f);
               return;
             }
-
+            id(i2c_screen).update();
             ESP_LOGI("verify", "Starting verification: %u bytes", capacity);
             id(op_status).publish_state("Verifying...");
             id(op_progress).publish_state(0.0f);
@@ -632,7 +632,7 @@ button:
               fclose(f);
               return;
             }
-
+            id(i2c_screen).update();
             uint32_t count_00 = 0;
             uint32_t count_ff = 0;
             uint32_t total = 0;
@@ -775,7 +775,7 @@ button:
             uint32_t total_size = (uint32_t) file_size;
             uint32_t last_progress_report = 0;
             bool success = true;
-
+            id(i2c_screen).update();
             id(op_status).publish_state("Writing...");
 
             while (address < total_size) {
@@ -1025,7 +1025,7 @@ button:
               return;
             }
             memset(dirty_sectors, 0, bitfield_size);
-
+            id(i2c_screen).update();
             id(op_status).publish_state("Scanning differences...");
 
             while (address < total_size) {
