@@ -7,12 +7,13 @@ A skeuomorphic Home Assistant dashboard card that looks and feels like a real be
 - **Seven-segment LCD displays** with configurable color (green, amber, blue, white)
 - **Rotary encoder knobs** for voltage and current adjustment (drag or scroll)
 - **Illuminated power button** with glow effect when output is active
-- **CV/CC/CP mode indicator LEDs** showing current operating mode
+- **Clickable CV/CC/CP mode LEDs** - click to switch operating mode
 - **Temperature bar gauges** for heatsink and ambient monitoring
 - **Input voltage display** in the top panel
-- **Click-to-edit** - click any LCD display to type a value directly
+- **Click-to-edit** - click SET V or SET A displays to type a value directly
 - **Brushed metal chassis** with ventilation slots and realistic styling
 - **Secondary LCD row** showing power, set voltage, and set current
+- **Datalog controls** with start/stop/flush buttons and filename input
 
 ## Installation
 
@@ -77,6 +78,12 @@ entities:
   temp1: sensor.opendps_heatsink_temperature
   temp2: sensor.opendps_ambient_temperature
 
+  # Datalog controls (button entities from ESPHome template buttons)
+  datalog_start: button.opendps_start_datalog
+  datalog_stop: button.opendps_stop_datalog
+  datalog_flush: button.opendps_flush_datalog
+  datalog_filename: text.opendps_datalog_filename
+
 # Display options
 show_temperatures: true
 show_input_voltage: true
@@ -101,6 +108,7 @@ current_step: 0.01
 | `show_temperatures` | boolean | true | Show temperature bar gauges |
 | `show_input_voltage` | boolean | true | Show input voltage in top panel |
 | `show_power` | boolean | true | Show secondary LCD row (power + setpoints) |
+| `show_datalog` | boolean | true | Show datalog control panel |
 | `voltage_step` | number | 0.1 | Voltage increment per knob/scroll step |
 | `current_step` | number | 0.01 | Current increment per knob/scroll step |
 | `decimal_places_voltage` | number | 2 | Decimal places for voltage displays |
@@ -122,6 +130,10 @@ current_step: 0.01
 | `operating_mode` | select | No | CV/CC/CP mode selector |
 | `temp1` | sensor | No | Heatsink temperature |
 | `temp2` | sensor | No | Ambient temperature |
+| `datalog_start` | button | No | Start datalog button |
+| `datalog_stop` | button | No | Stop datalog button |
+| `datalog_flush` | button | No | Flush datalog buffer button |
+| `datalog_filename` | text | No | Filename text input for log file |
 
 ## Usage
 
@@ -131,8 +143,8 @@ current_step: 0.01
 - The red indicator line shows the current position
 
 ### LCD Displays
-- **Click** the main voltage or current LCD to type a value directly
-- **Click** the SET V or SET A displays in the secondary row to edit setpoints
+- The main VOLTAGE and CURRENT displays show read-only measured values
+- **Click** the SET V or SET A displays to type a setpoint value directly
 - Press **Enter** to confirm, **Escape** to cancel
 
 ### Power Button
@@ -140,10 +152,18 @@ current_step: 0.01
 - The ring glows green when the output is active
 
 ### Mode LEDs
+- **Click** a mode LED to switch operating mode
 - **CV** (green) - Constant Voltage mode
 - **CC** (amber) - Constant Current mode
 - **CP** (red) - Constant Power mode
-- **OUT** - Output active indicator
+- **OUT** - Output active indicator (not clickable)
+
+### Datalog Controls
+- **REC** - Start recording data to file
+- **STOP** - Stop recording
+- **FLUSH** - Flush buffer to storage
+- The filename input lets you specify a custom log filename
+- Requires ESPHome template button entities for each action
 
 ## Troubleshooting
 

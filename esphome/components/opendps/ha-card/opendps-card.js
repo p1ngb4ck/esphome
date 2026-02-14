@@ -3,7 +3,7 @@
  *
  * A skeuomorphic lab power supply card with:
  * - LCD seven-segment displays (voltage, current, power)
- * - Rotary encoder knobs for V/I adjustment
+ * - Vintage stereo-style horizontal sliders for V/I adjustment
  * - Illuminated power button
  * - CV/CC/CP mode indicator LEDs
  * - Temperature gauge
@@ -72,23 +72,16 @@ class OpenDPSCard extends HTMLElement {
     this._config = {};
     this._hass = null;
 
-    // Knob interaction state
-    this._voltageKnobAngle = 0;
-    this._currentKnobAngle = 0;
-    this._activeKnob = null;
-    this._knobStartAngle = 0;
-    this._knobStartValue = 0;
+    // Slider interaction state
+    this._activeSlider = null;
+    this._sliderTrackRect = null;
     this._pendingVoltage = null;
     this._pendingCurrent = null;
-    this._knobTimer = null;
+    this._sliderTimer = null;
 
     // Direct input state
     this._editingVoltage = false;
     this._editingCurrent = false;
-
-    // Bind handlers once
-    this._onPointerMove = this._onPointerMove.bind(this);
-    this._onPointerUp = this._onPointerUp.bind(this);
   }
 
   setConfig(config) {
@@ -101,6 +94,7 @@ class OpenDPSCard extends HTMLElement {
       show_temperatures: config.show_temperatures !== false,
       show_input_voltage: config.show_input_voltage !== false,
       show_power: config.show_power !== false,
+      show_datalog: config.show_datalog !== false,
       lcd_color: config.lcd_color || 'green',   // green, amber, blue, white
       voltage_step: config.voltage_step || 0.1,
       current_step: config.current_step || 0.01,
@@ -195,81 +189,28 @@ class OpenDPSCard extends HTMLElement {
     return { svg: svgContent, width: x };
   }
 
-  // ── Rotary knob SVG ────────────────────────────────────────────────
+  // ── Horizontal slider (vintage stereo fader style) ─────────────────
 
-  _buildKnobSVG(id, label, size) {
-    const r = size / 2;
-    const cx = r;
-    const cy = r;
+  _buildSlider(id, label) {
     return `
-      <svg class="knob-svg" id="knob-${id}" viewBox="0 0 ${size} ${size}"
-           width="${size}" height="${size}" style="cursor:grab;">
-        <defs>
-          <radialGradient id="knob-grad-${id}" cx="40%" cy="35%">
-            <stop offset="0%" stop-color="#888"/>
-            <stop offset="50%" stop-color="#555"/>
-            <stop offset="100%" stop-color="#222"/>
-          </radialGradient>
-          <radialGradient id="knob-ring-${id}" cx="50%" cy="50%">
-            <stop offset="85%" stop-color="transparent"/>
-            <stop offset="90%" stop-color="#333"/>
-            <stop offset="95%" stop-color="#666"/>
-            <stop offset="100%" stop-color="#333"/>
-          </radialGradient>
-          <filter id="knob-shadow-${id}">
-            <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.5"/>
-          </filter>
-        </defs>
-        <!-- Outer ring with tick marks -->
-        <circle cx="${cx}" cy="${cy}" r="${r - 2}" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
-        ${this._buildTickMarks(cx, cy, r - 4, 30)}
-        <!-- Knob body -->
-        <circle cx="${cx}" cy="${cy}" r="${r - 14}" fill="url(#knob-grad-${id})"
-                stroke="#222" stroke-width="1.5" filter="url(#knob-shadow-${id})"/>
-        <!-- Grip lines -->
-        ${this._buildGripLines(cx, cy, r - 18)}
-        <!-- Indicator line (rotated by JS) -->
-        <line class="knob-indicator" id="knob-indicator-${id}"
-              x1="${cx}" y1="${cy - r + 20}" x2="${cx}" y2="${cy - r + 30}"
-              stroke="#ff3333" stroke-width="2.5" stroke-linecap="round"
-              transform="rotate(0, ${cx}, ${cy})"/>
-        <!-- Label -->
-        <text x="${cx}" y="${size + 16}" text-anchor="middle"
-              font-size="11" fill="#999" font-family="Arial, sans-serif">${label}</text>
-      </svg>`;
-  }
-
-  _buildTickMarks(cx, cy, r, count) {
-    let marks = '';
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * 360 - 135;
-      const rad = (angle * Math.PI) / 180;
-      const isMajor = i % 5 === 0;
-      const innerR = r - (isMajor ? 8 : 4);
-      const x1 = cx + innerR * Math.cos(rad);
-      const y1 = cy + innerR * Math.sin(rad);
-      const x2 = cx + r * Math.cos(rad);
-      const y2 = cy + r * Math.sin(rad);
-      marks += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
-                      stroke="${isMajor ? '#888' : '#555'}"
-                      stroke-width="${isMajor ? 1.5 : 0.8}"/>`;
-    }
-    return marks;
-  }
-
-  _buildGripLines(cx, cy, r) {
-    let lines = '';
-    for (let i = 0; i < 12; i++) {
-      const angle = (i / 12) * 360;
-      const rad = (angle * Math.PI) / 180;
-      const x1 = cx + (r - 8) * Math.cos(rad);
-      const y1 = cy + (r - 8) * Math.sin(rad);
-      const x2 = cx + r * Math.cos(rad);
-      const y2 = cy + r * Math.sin(rad);
-      lines += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
-                      stroke="#2a2a2a" stroke-width="1.5" stroke-linecap="round"/>`;
-    }
-    return lines;
+      <div class="slider-group">
+        <div class="slider-label">${label}</div>
+        <div class="slider-track-container" id="slider-${id}">
+          <div class="slider-track">
+            <div class="slider-track-fill" id="slider-fill-${id}"></div>
+            <div class="slider-tick-marks">
+              ${Array(11).fill(0).map((_, i) =>
+                `<div class="slider-tick${i % 5 === 0 ? ' slider-tick-major' : ''}"></div>`
+              ).join('')}
+            </div>
+          </div>
+          <div class="slider-thumb" id="slider-thumb-${id}">
+            <div class="slider-thumb-grip"></div>
+            <div class="slider-thumb-grip"></div>
+            <div class="slider-thumb-grip"></div>
+          </div>
+        </div>
+      </div>`;
   }
 
   // ── Power button SVG ───────────────────────────────────────────────
@@ -304,16 +245,18 @@ class OpenDPSCard extends HTMLElement {
 
   // ── LED indicator ──────────────────────────────────────────────────
 
-  _buildLED(color, isOn, label) {
+  _buildLED(color, isOn, label, clickable) {
     const fill = isOn ? color : '#333';
-    const glow = isOn ? `drop-shadow(0 0 4px ${color})` : 'none';
+    const glow = isOn ? `drop-shadow(0 0 6px ${color})` : 'none';
+    const cls = clickable ? 'led-indicator led-clickable' : 'led-indicator';
+    const dataAttr = clickable ? ` data-mode="${label.toLowerCase()}"` : '';
     return `
-      <div class="led-indicator">
-        <svg width="14" height="14" viewBox="0 0 14 14">
-          <circle cx="7" cy="7" r="5" fill="${fill}"
+      <div class="${cls}"${dataAttr}>
+        <svg width="20" height="20" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="7" fill="${fill}"
                   stroke="#222" stroke-width="1.5"
                   style="filter:${glow}; transition: all 0.3s;"/>
-          <circle cx="5" cy="5" r="1.5" fill="rgba(255,255,255,${isOn ? 0.4 : 0.1})"/>
+          <circle cx="7.5" cy="7.5" r="2" fill="rgba(255,255,255,${isOn ? 0.4 : 0.1})"/>
         </svg>
         <span class="led-label">${label}</span>
       </div>`;
@@ -361,14 +304,14 @@ class OpenDPSCard extends HTMLElement {
             <div class="lcd-row">
               <div class="lcd-display-group">
                 <div class="lcd-label" style="color:${lcd.on};">VOLTAGE</div>
-                <div class="lcd-digits" id="lcd-voltage" title="Click to edit">
+                <div class="lcd-digits lcd-digits-readonly" id="lcd-voltage">
                   <!-- filled by JS -->
                 </div>
                 <div class="lcd-unit" style="color:${lcd.on};">V</div>
               </div>
               <div class="lcd-display-group">
                 <div class="lcd-label" style="color:${lcd.on};">CURRENT</div>
-                <div class="lcd-digits" id="lcd-current" title="Click to edit">
+                <div class="lcd-digits lcd-digits-readonly" id="lcd-current">
                   <!-- filled by JS -->
                 </div>
                 <div class="lcd-unit" style="color:${lcd.on};">A</div>
@@ -383,12 +326,12 @@ class OpenDPSCard extends HTMLElement {
                 </div>
                 <div class="lcd-display-group lcd-small">
                   <div class="lcd-label lcd-label-sm" style="color:${lcd.on};">SET V</div>
-                  <div class="lcd-digits lcd-digits-sm" id="lcd-set-voltage"></div>
+                  <div class="lcd-digits lcd-digits-sm" id="lcd-set-voltage" title="Click to edit"></div>
                   <div class="lcd-unit lcd-unit-sm" style="color:${lcd.on};">V</div>
                 </div>
                 <div class="lcd-display-group lcd-small">
                   <div class="lcd-label lcd-label-sm" style="color:${lcd.on};">SET A</div>
-                  <div class="lcd-digits lcd-digits-sm" id="lcd-set-current"></div>
+                  <div class="lcd-digits lcd-digits-sm" id="lcd-set-current" title="Click to edit"></div>
                   <div class="lcd-unit lcd-unit-sm" style="color:${lcd.on};">A</div>
                 </div>
               </div>
@@ -402,16 +345,12 @@ class OpenDPSCard extends HTMLElement {
 
           <!-- Controls panel -->
           <div class="controls-panel">
-            <div class="knob-area" id="knob-voltage-area">
-              ${this._buildKnobSVG('voltage', 'VOLTAGE', 90)}
-            </div>
+            ${this._buildSlider('voltage', 'VOLTAGE')}
             <div class="power-button-area" id="power-button">
               ${this._buildPowerButton(false)}
               <div class="pwr-label" id="pwr-label">OUTPUT</div>
             </div>
-            <div class="knob-area" id="knob-current-area">
-              ${this._buildKnobSVG('current', 'CURRENT', 90)}
-            </div>
+            ${this._buildSlider('current', 'CURRENT')}
           </div>
 
           <!-- Temperature gauges -->
@@ -421,19 +360,44 @@ class OpenDPSCard extends HTMLElement {
             </div>
           ` : ''}
 
+          <!-- Datalog controls -->
+          ${this._config.show_datalog && this._config.entities.datalog_start ? `
+            <div class="datalog-panel" id="datalog-panel">
+              <div class="datalog-header">
+                <svg width="14" height="14" viewBox="0 0 14 14" style="vertical-align:middle;">
+                  <circle cx="7" cy="7" r="5" fill="#333" stroke="#222" stroke-width="1.5" id="datalog-led"/>
+                </svg>
+                <span class="datalog-title">DATALOG</span>
+              </div>
+              ${this._config.entities.datalog_filename ? `
+                <div class="datalog-filename-row">
+                  <input type="text" id="datalog-filename-input" class="datalog-filename"
+                         placeholder="filename.csv" value="">
+                </div>
+              ` : ''}
+              <div class="datalog-buttons">
+                <button class="datalog-btn datalog-btn-start" id="datalog-btn-start">REC</button>
+                <button class="datalog-btn datalog-btn-stop" id="datalog-btn-stop">STOP</button>
+                ${this._config.entities.datalog_flush ? `
+                  <button class="datalog-btn datalog-btn-flush" id="datalog-btn-flush">FLUSH</button>
+                ` : ''}
+              </div>
+            </div>
+          ` : ''}
+
           <!-- Bottom trim -->
           <div class="bottom-trim">
             <div class="ventilation">
               ${Array(12).fill('<div class="vent-slot"></div>').join('')}
             </div>
           </div>
-        </div>
 
-        <!-- Hidden inputs for direct value entry -->
-        <input type="number" id="voltage-edit-input" class="hidden-input"
-               step="${this._config.voltage_step}" min="0">
-        <input type="number" id="current-edit-input" class="hidden-input"
-               step="${this._config.current_step}" min="0">
+          <!-- Hidden inputs for direct value entry (inside psu-chassis for positioning) -->
+          <input type="number" id="voltage-edit-input" class="hidden-input"
+                 step="${this._config.voltage_step}" min="0">
+          <input type="number" id="current-edit-input" class="hidden-input"
+                 step="${this._config.current_step}" min="0">
+        </div>
       </ha-card>
     `;
 
@@ -487,17 +451,19 @@ class OpenDPSCard extends HTMLElement {
     }
 
     // ── Power button ──
-    // Update SVG and label inside the stable #power-button container
-    // without replacing its innerHTML (which would break event delegation targets)
+    // Update color/glow of existing SVG elements in-place (no DOM replacement)
     const pwrBtn = this.shadowRoot.getElementById('power-button');
     if (pwrBtn) {
-      // Update SVG: replace only the SVG element
-      const oldSvg = pwrBtn.querySelector('.power-btn-svg');
-      if (oldSvg) {
-        const temp = document.createElement('div');
-        temp.innerHTML = this._buildPowerButton(isOn);
-        const newSvg = temp.firstElementChild;
-        oldSvg.replaceWith(newSvg);
+      const color = isOn ? '#39ff14' : '#555';
+      const glow = isOn ? 'drop-shadow(0 0 8px rgba(57,255,20,0.8))' : 'none';
+      const svg = pwrBtn.querySelector('.power-btn-svg');
+      if (svg) {
+        // Outer ring
+        const circles = svg.querySelectorAll('circle');
+        if (circles[0]) { circles[0].setAttribute('stroke', color); circles[0].style.filter = glow; }
+        // Power icon paths
+        const paths = svg.querySelectorAll('path');
+        for (const p of paths) { p.setAttribute('stroke', color); p.style.filter = glow; }
       }
       // Update label text
       const pwrLabel = pwrBtn.querySelector('.pwr-label');
@@ -511,10 +477,10 @@ class OpenDPSCard extends HTMLElement {
     if (ledRow) {
       const modeStr = (mode || '').toLowerCase();
       ledRow.innerHTML =
-        this._buildLED('#39ff14', modeStr === 'cv', 'CV') +
-        this._buildLED('#ffbf00', modeStr === 'cc', 'CC') +
-        this._buildLED('#ff3333', modeStr === 'cp', 'CP') +
-        this._buildLED(isOn ? '#39ff14' : '#555', isOn, 'OUT');
+        this._buildLED('#39ff14', modeStr === 'cv', 'CV', true) +
+        this._buildLED('#ffbf00', modeStr === 'cc', 'CC', true) +
+        this._buildLED('#ff3333', modeStr === 'cp', 'CP', true) +
+        this._buildLED(isOn ? '#39ff14' : '#555', isOn, 'OUT', false);
     }
 
     // ── Temperature ──
@@ -528,12 +494,22 @@ class OpenDPSCard extends HTMLElement {
       }
     }
 
-    // ── Update knob indicators ──
-    if (setV !== null && this._activeKnob !== 'voltage') {
-      this._updateKnobAngle('voltage', setV);
+    // ── Datalog filename sync ──
+    const fnInput = this.shadowRoot.getElementById('datalog-filename-input');
+    if (fnInput && this.shadowRoot.activeElement !== fnInput) {
+      const fnEntity = ent.datalog_filename;
+      const fnVal = this._getState(fnEntity);
+      if (fnVal && fnVal !== 'unknown' && fnVal !== 'unavailable') {
+        fnInput.value = fnVal;
+      }
     }
-    if (setI !== null && this._activeKnob !== 'current') {
-      this._updateKnobAngle('current', setI);
+
+    // ── Update slider positions ──
+    if (setV !== null && this._activeSlider !== 'voltage') {
+      this._updateSliderPosition('voltage', setV);
+    }
+    if (setI !== null && this._activeSlider !== 'current') {
+      this._updateSliderPosition('current', setI);
     }
   }
 
@@ -552,131 +528,168 @@ class OpenDPSCard extends HTMLElement {
                    </svg>`;
   }
 
-  _updateKnobAngle(which, value) {
-    // Map value to angle: 0 -> -135°, max -> +135°
+  _updateSliderPosition(which, value) {
+    const { min, max } = this._getSliderRange(which);
+    const pct = Math.max(0, Math.min(1, (value - min) / (max - min))) * 100;
+
+    const fill = this.shadowRoot.getElementById(`slider-fill-${which}`);
+    const thumb = this.shadowRoot.getElementById(`slider-thumb-${which}`);
+    if (fill) fill.style.width = `${pct}%`;
+    if (thumb) thumb.style.left = `${pct}%`;
+  }
+
+  _getSliderRange(which) {
     const ent = this._config.entities;
-    let min = 0, max = 30;
+    let min = 0, max = which === 'voltage' ? 30 : 5;
     if (this._hass) {
       const entityId = which === 'voltage' ? ent.set_voltage : ent.set_current;
       if (entityId && this._hass.states[entityId]) {
         const attrs = this._hass.states[entityId].attributes;
         min = attrs.min || 0;
-        max = attrs.max || (which === 'voltage' ? 30 : 5);
+        max = attrs.max || max;
       }
     }
-    const pct = Math.max(0, Math.min(1, (value - min) / (max - min)));
-    const angle = -135 + pct * 270;
-
-    const indicator = this.shadowRoot.getElementById(`knob-indicator-${which}`);
-    if (indicator) {
-      indicator.setAttribute('transform', `rotate(${angle}, 45, 45)`);
-    }
+    return { min, max };
   }
 
   // ── Event listeners ────────────────────────────────────────────────
-  // Uses event delegation on .psu-chassis so innerHTML replacements
-  // on children (power button, LCD digits, LEDs) don't destroy listeners.
 
   _attachEventListeners() {
-    const chassis = this.shadowRoot.querySelector('.psu-chassis');
-    if (!chassis) return;
+    // Attach directly to individual elements for reliability.
+    // This avoids issues with ha-card shadow DOM swallowing events
+    // and SVG→HTML namespace boundary problems with delegation.
 
-    // Single delegated click handler for all interactive elements
-    chassis.addEventListener('click', (e) => {
-      const target = e.target;
-
-      // Power button - check if click is inside #power-button
-      if (target.closest('#power-button')) {
+    // ── Power button: direct click on the area container ──
+    const pwrBtn = this.shadowRoot.getElementById('power-button');
+    if (pwrBtn) {
+      pwrBtn.addEventListener('click', () => {
+        console.log('[OpenDPS] Power button clicked');
         this._toggleOutput();
-        return;
-      }
-
-      // LCD click-to-edit - check by id, walking up from target
-      const lcdDigits = target.closest('.lcd-digits');
-      if (lcdDigits) {
-        const id = lcdDigits.id;
-        if (id === 'lcd-voltage' || id === 'lcd-set-voltage') {
-          this._startEdit('voltage');
-        } else if (id === 'lcd-current' || id === 'lcd-set-current') {
-          this._startEdit('current');
-        }
-        return;
-      }
-    });
-
-    // Knob interactions (these attach to stable container elements)
-    this._setupKnob('voltage');
-    this._setupKnob('current');
-
-    // Hidden inputs - these are never replaced by innerHTML so direct listeners are fine
-    const vInput = this.shadowRoot.getElementById('voltage-edit-input');
-    if (vInput) {
-      vInput.addEventListener('change', (e) => {
-        this._setVoltage(parseFloat(e.target.value));
-        this._endEdit('voltage');
       });
-      vInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          this._setVoltage(parseFloat(e.target.value));
-          this._endEdit('voltage');
-        } else if (e.key === 'Escape') {
-          this._endEdit('voltage');
-        }
-      });
-      vInput.addEventListener('blur', () => this._endEdit('voltage'));
+    } else {
+      console.warn('[OpenDPS] Power button element not found!');
     }
 
-    const iInput = this.shadowRoot.getElementById('current-edit-input');
-    if (iInput) {
-      iInput.addEventListener('change', (e) => {
-        this._setCurrent(parseFloat(e.target.value));
-        this._endEdit('current');
-      });
-      iInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          this._setCurrent(parseFloat(e.target.value));
-          this._endEdit('current');
-        } else if (e.key === 'Escape') {
-          this._endEdit('current');
+    // ── LCD click-to-edit: only on SET V / SET A displays (actual values are read-only) ──
+    const lcdTargets = [
+      { id: 'lcd-set-voltage', which: 'voltage' },
+      { id: 'lcd-set-current', which: 'current' },
+    ];
+    for (const { id, which } of lcdTargets) {
+      const el = this.shadowRoot.getElementById(id);
+      if (el) {
+        el.addEventListener('click', () => {
+          this._startEdit(which);
+        });
+      }
+    }
+
+    // ── Mode LED clicks (delegated on stable #led-row since children are rebuilt) ──
+    const ledRow = this.shadowRoot.getElementById('led-row');
+    if (ledRow) {
+      ledRow.addEventListener('click', (e) => {
+        const led = e.target.closest('.led-clickable');
+        if (led && led.dataset.mode) {
+          this._setMode(led.dataset.mode);
         }
       });
-      iInput.addEventListener('blur', () => this._endEdit('current'));
+    }
+
+    // ── Slider interactions ──
+    this._setupSlider('voltage');
+    this._setupSlider('current');
+
+    // ── Hidden inputs for direct value entry ──
+    this._setupEditInput('voltage-edit-input', 'voltage');
+    this._setupEditInput('current-edit-input', 'current');
+
+    // ── Datalog buttons ──
+    const btnStart = this.shadowRoot.getElementById('datalog-btn-start');
+    if (btnStart) {
+      btnStart.addEventListener('click', () => this._datalogStart());
+    }
+    const btnStop = this.shadowRoot.getElementById('datalog-btn-stop');
+    if (btnStop) {
+      btnStop.addEventListener('click', () => this._datalogStop());
+    }
+    const btnFlush = this.shadowRoot.getElementById('datalog-btn-flush');
+    if (btnFlush) {
+      btnFlush.addEventListener('click', () => this._datalogFlush());
+    }
+
+    // ── Datalog filename: sync text input → HA text entity ──
+    const fnInput = this.shadowRoot.getElementById('datalog-filename-input');
+    if (fnInput) {
+      fnInput.addEventListener('change', () => {
+        this._setDatalogFilename(fnInput.value);
+      });
     }
   }
 
-  _setupKnob(which) {
-    const area = this.shadowRoot.getElementById(`knob-${which}-area`);
-    if (!area) return;
+  _setupEditInput(inputId, which) {
+    const input = this.shadowRoot.getElementById(inputId);
+    if (!input) return;
 
-    // Pointer down to start drag
-    area.addEventListener('pointerdown', (e) => {
+    const commit = () => {
+      const val = parseFloat(input.value);
+      if (!isNaN(val)) {
+        if (which === 'voltage') this._setVoltage(val);
+        else this._setCurrent(val);
+      }
+      this._endEdit(which);
+    };
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      } else if (e.key === 'Escape') {
+        this._endEdit(which);
+      }
+    });
+    input.addEventListener('blur', () => this._endEdit(which));
+  }
+
+  _setupSlider(which) {
+    const container = this.shadowRoot.getElementById(`slider-${which}`);
+    if (!container) return;
+
+    const thumb = this.shadowRoot.getElementById(`slider-thumb-${which}`);
+    if (!thumb) return;
+
+    // Pointer down on thumb to start drag
+    thumb.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      this._activeKnob = which;
-      const rect = area.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      this._knobCenter = { x: cx, y: cy };
-      this._knobStartAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
+      e.stopPropagation();
+      this._activeSlider = which;
+      const track = container.querySelector('.slider-track');
+      this._sliderTrackRect = track.getBoundingClientRect();
 
-      const ent = this._config.entities;
-      const entityId = which === 'voltage' ? ent.set_voltage : ent.set_current;
-      this._knobStartValue = this._getNumber(entityId) || 0;
+      thumb.setPointerCapture(e.pointerId);
+      thumb.classList.add('slider-thumb-active');
 
-      area.setPointerCapture(e.pointerId);
-      area.style.cursor = 'grabbing';
-
+      const onMove = (ev) => this._onSliderMove(ev, which);
       const onUp = () => {
-        this._onPointerUp();
-        area.style.cursor = 'grab';
-        area.removeEventListener('pointermove', this._onPointerMove);
-        area.removeEventListener('pointerup', onUp);
+        this._onSliderUp(which);
+        thumb.classList.remove('slider-thumb-active');
+        thumb.removeEventListener('pointermove', onMove);
+        thumb.removeEventListener('pointerup', onUp);
       };
-      area.addEventListener('pointermove', this._onPointerMove);
-      area.addEventListener('pointerup', onUp);
+      thumb.addEventListener('pointermove', onMove);
+      thumb.addEventListener('pointerup', onUp);
+    });
+
+    // Click on track to jump to position
+    container.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.slider-thumb')) return;
+      const track = container.querySelector('.slider-track');
+      const rect = track.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      this._setSliderValue(which, pct);
     });
 
     // Mouse wheel for fine adjustment
-    area.addEventListener('wheel', (e) => {
+    container.addEventListener('wheel', (e) => {
       e.preventDefault();
       const ent = this._config.entities;
       const entityId = which === 'voltage' ? ent.set_voltage : ent.set_current;
@@ -693,63 +706,15 @@ class OpenDPSCard extends HTMLElement {
     }, { passive: false });
   }
 
-  _onPointerMove(e) {
-    if (!this._activeKnob || !this._knobCenter) return;
+  _onSliderMove(e, which) {
+    if (!this._activeSlider || !this._sliderTrackRect) return;
 
-    const angle = Math.atan2(
-      e.clientY - this._knobCenter.y,
-      e.clientX - this._knobCenter.x
-    );
-    const deltaAngle = angle - this._knobStartAngle;
-
-    // Convert angle delta to value delta
-    // Full rotation (2π) = full range
-    const ent = this._config.entities;
-    const entityId = this._activeKnob === 'voltage'
-      ? ent.set_voltage : ent.set_current;
-
-    let max = this._activeKnob === 'voltage' ? 30 : 5;
-    let min = 0;
-    if (this._hass && entityId && this._hass.states[entityId]) {
-      const attrs = this._hass.states[entityId].attributes;
-      min = attrs.min || 0;
-      max = attrs.max || max;
-    }
-
-    const range = max - min;
-    const sensitivity = range / (1.5 * Math.PI); // 270° = full range
-    const delta = deltaAngle * sensitivity;
-    const step = this._activeKnob === 'voltage'
-      ? this._config.voltage_step : this._config.current_step;
-
-    let newVal = this._knobStartValue + delta;
-    newVal = Math.round(newVal / step) * step;
-    newVal = Math.max(min, Math.min(max, newVal));
-
-    // Update visual immediately
-    this._updateKnobAngle(this._activeKnob, newVal);
-
-    // Debounce the service call
-    if (this._activeKnob === 'voltage') {
-      this._pendingVoltage = newVal;
-    } else {
-      this._pendingCurrent = newVal;
-    }
-
-    clearTimeout(this._knobTimer);
-    this._knobTimer = setTimeout(() => {
-      if (this._pendingVoltage !== null) {
-        this._setVoltage(this._pendingVoltage);
-        this._pendingVoltage = null;
-      }
-      if (this._pendingCurrent !== null) {
-        this._setCurrent(this._pendingCurrent);
-        this._pendingCurrent = null;
-      }
-    }, 100);
+    const rect = this._sliderTrackRect;
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    this._setSliderValue(which, pct, true);
   }
 
-  _onPointerUp() {
+  _onSliderUp(which) {
     // Commit any pending value
     if (this._pendingVoltage !== null) {
       this._setVoltage(this._pendingVoltage);
@@ -759,24 +724,66 @@ class OpenDPSCard extends HTMLElement {
       this._setCurrent(this._pendingCurrent);
       this._pendingCurrent = null;
     }
-    this._activeKnob = null;
-    this._knobCenter = null;
+    this._activeSlider = null;
+    this._sliderTrackRect = null;
+  }
+
+  _setSliderValue(which, pct, debounce) {
+    const { min, max } = this._getSliderRange(which);
+    const step = which === 'voltage' ? this._config.voltage_step : this._config.current_step;
+    let newVal = min + pct * (max - min);
+    newVal = Math.round(newVal / step) * step;
+    newVal = Math.max(min, Math.min(max, newVal));
+
+    // Update visual immediately
+    this._updateSliderPosition(which, newVal);
+
+    if (debounce) {
+      // Debounce during drag
+      if (which === 'voltage') {
+        this._pendingVoltage = newVal;
+      } else {
+        this._pendingCurrent = newVal;
+      }
+      clearTimeout(this._sliderTimer);
+      this._sliderTimer = setTimeout(() => {
+        if (this._pendingVoltage !== null) {
+          this._setVoltage(this._pendingVoltage);
+          this._pendingVoltage = null;
+        }
+        if (this._pendingCurrent !== null) {
+          this._setCurrent(this._pendingCurrent);
+          this._pendingCurrent = null;
+        }
+      }, 100);
+    } else {
+      // Immediate (click on track)
+      if (which === 'voltage') {
+        this._setVoltage(newVal);
+      } else {
+        this._setCurrent(newVal);
+      }
+    }
   }
 
   // ── Direct edit mode ───────────────────────────────────────────────
 
   _startEdit(which) {
+    console.log('[OpenDPS] Starting edit for:', which);
     const ent = this._config.entities;
     const entityId = which === 'voltage' ? ent.set_voltage : ent.set_current;
     const currentVal = this._getNumber(entityId);
 
     const inputId = which === 'voltage' ? 'voltage-edit-input' : 'current-edit-input';
     const input = this.shadowRoot.getElementById(inputId);
-    if (!input) return;
+    if (!input) {
+      console.warn('[OpenDPS] Edit input not found:', inputId);
+      return;
+    }
 
-    // Position over the LCD
+    // Position over the SET V / SET A display (not the actual value display)
     const lcdEl = this.shadowRoot.getElementById(
-      which === 'voltage' ? 'lcd-voltage' : 'lcd-current'
+      which === 'voltage' ? 'lcd-set-voltage' : 'lcd-set-current'
     );
     if (!lcdEl) return;
 
@@ -819,16 +826,31 @@ class OpenDPSCard extends HTMLElement {
 
   _toggleOutput() {
     const entityId = this._config.entities.output_switch;
-    if (!entityId || !this._hass) return;
+    if (!entityId || !this._hass) {
+      console.warn('[OpenDPS] toggleOutput: missing entity or hass', { entityId, hass: !!this._hass });
+      return;
+    }
     const isOn = this._isOn(entityId);
+    console.log('[OpenDPS] Calling switch service:', isOn ? 'turn_off' : 'turn_on', entityId);
     this._hass.callService('switch', isOn ? 'turn_off' : 'turn_on', {
       entity_id: entityId
+    });
+  }
+
+  _setMode(mode) {
+    const entityId = this._config.entities.operating_mode;
+    if (!entityId || !this._hass) return;
+    console.log('[OpenDPS] Setting mode:', mode, entityId);
+    this._hass.callService('select', 'select_option', {
+      entity_id: entityId,
+      option: mode
     });
   }
 
   _setVoltage(value) {
     const entityId = this._config.entities.set_voltage;
     if (!entityId || !this._hass || isNaN(value)) return;
+    console.log('[OpenDPS] Setting voltage:', value, entityId);
     this._hass.callService('number', 'set_value', {
       entity_id: entityId,
       value: parseFloat(value.toFixed(this._config.decimal_places_voltage))
@@ -838,9 +860,43 @@ class OpenDPSCard extends HTMLElement {
   _setCurrent(value) {
     const entityId = this._config.entities.set_current;
     if (!entityId || !this._hass || isNaN(value)) return;
+    console.log('[OpenDPS] Setting current:', value, entityId);
     this._hass.callService('number', 'set_value', {
       entity_id: entityId,
       value: parseFloat(value.toFixed(this._config.decimal_places_current))
+    });
+  }
+
+  // ── Datalog controls ─────────────────────────────────────────────
+
+  _datalogStart() {
+    const entityId = this._config.entities.datalog_start;
+    if (!entityId || !this._hass) return;
+    console.log('[OpenDPS] Pressing datalog start:', entityId);
+    this._hass.callService('button', 'press', { entity_id: entityId });
+  }
+
+  _datalogStop() {
+    const entityId = this._config.entities.datalog_stop;
+    if (!entityId || !this._hass) return;
+    console.log('[OpenDPS] Pressing datalog stop:', entityId);
+    this._hass.callService('button', 'press', { entity_id: entityId });
+  }
+
+  _datalogFlush() {
+    const entityId = this._config.entities.datalog_flush;
+    if (!entityId || !this._hass) return;
+    console.log('[OpenDPS] Pressing datalog flush:', entityId);
+    this._hass.callService('button', 'press', { entity_id: entityId });
+  }
+
+  _setDatalogFilename(value) {
+    const entityId = this._config.entities.datalog_filename;
+    if (!entityId || !this._hass) return;
+    console.log('[OpenDPS] Setting datalog filename:', value, entityId);
+    this._hass.callService('text', 'set_value', {
+      entity_id: entityId,
+      value: value
     });
   }
 
@@ -853,9 +909,10 @@ class OpenDPSCard extends HTMLElement {
       }
 
       ha-card {
-        overflow: hidden;
+        overflow: visible;
         background: transparent !important;
         box-shadow: none !important;
+        pointer-events: auto;
       }
 
       .psu-chassis {
@@ -970,20 +1027,27 @@ class OpenDPSCard extends HTMLElement {
       }
 
       .lcd-digits {
-        cursor: pointer;
         transition: opacity 0.2s;
         min-height: 40px;
         display: flex;
         align-items: center;
       }
 
-      .lcd-digits:hover {
-        opacity: 0.85;
+      .lcd-digits-readonly {
+        cursor: default;
+      }
+
+      .lcd-digits svg {
+        pointer-events: none;
       }
 
       .lcd-digits-sm {
         min-height: 26px;
         cursor: pointer;
+      }
+
+      .lcd-digits-sm:hover {
+        opacity: 0.85;
       }
 
       .lcd-unit {
@@ -1017,6 +1081,19 @@ class OpenDPSCard extends HTMLElement {
         gap: 3px;
       }
 
+      .led-clickable {
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .led-clickable:hover svg circle:first-child {
+        filter: brightness(1.3);
+      }
+
+      .led-clickable svg {
+        pointer-events: none;
+      }
+
       .led-label {
         font-size: 9px;
         color: #888;
@@ -1033,21 +1110,128 @@ class OpenDPSCard extends HTMLElement {
         margin-bottom: 8px;
       }
 
-      .knob-area {
+      /* ── Slider (vintage fader) ── */
+      .slider-group {
+        flex: 1;
         display: flex;
         flex-direction: column;
         align-items: center;
+        gap: 6px;
         user-select: none;
+        touch-action: none;
+        min-width: 0;
+      }
+
+      .slider-label {
+        font-size: 9px;
+        color: #888;
+        letter-spacing: 2px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .slider-track-container {
+        position: relative;
+        width: 100%;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+        padding: 0 14px;
+        box-sizing: border-box;
+      }
+
+      .slider-track {
+        position: relative;
+        width: 100%;
+        height: 6px;
+        background: linear-gradient(to bottom, #111, #222);
+        border-radius: 3px;
+        border: 1px solid #444;
+        box-shadow: inset 0 1px 3px rgba(0,0,0,0.6);
+        overflow: hidden;
+      }
+
+      .slider-track-fill {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background: linear-gradient(to right, ${lcd.on}44, ${lcd.on}aa);
+        border-radius: 2px;
+        transition: width 0.1s ease-out;
+      }
+
+      .slider-tick-marks {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0 1px;
+        pointer-events: none;
+      }
+
+      .slider-tick {
+        width: 1px;
+        height: 3px;
+        background: rgba(255,255,255,0.15);
+        border-radius: 0.5px;
+      }
+
+      .slider-tick-major {
+        height: 5px;
+        background: rgba(255,255,255,0.25);
+      }
+
+      .slider-thumb {
+        position: absolute;
+        top: 50%;
+        left: 0%;
+        transform: translate(-50%, -50%);
+        width: 28px;
+        height: 34px;
+        background: linear-gradient(170deg, #555 0%, #333 50%, #2a2a2a 100%);
+        border: 1px solid #666;
+        border-radius: 4px;
+        box-shadow:
+          0 2px 6px rgba(0,0,0,0.5),
+          inset 0 1px 0 rgba(255,255,255,0.15),
+          inset 0 -1px 0 rgba(0,0,0,0.2);
+        cursor: grab;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        transition: left 0.1s ease-out, box-shadow 0.15s;
         touch-action: none;
       }
 
-      .knob-svg {
-        cursor: grab;
-        transition: filter 0.2s;
+      .slider-thumb:hover {
+        border-color: #888;
+        box-shadow:
+          0 2px 8px rgba(0,0,0,0.6),
+          inset 0 1px 0 rgba(255,255,255,0.2),
+          0 0 6px ${lcd.glow};
       }
 
-      .knob-svg:hover {
-        filter: brightness(1.1);
+      .slider-thumb-active {
+        cursor: grabbing !important;
+        border-color: ${lcd.on} !important;
+        box-shadow:
+          0 2px 10px rgba(0,0,0,0.6),
+          0 0 10px ${lcd.glow} !important;
+      }
+
+      .slider-thumb-grip {
+        width: 14px;
+        height: 1px;
+        background: rgba(255,255,255,0.2);
+        border-radius: 0.5px;
       }
 
       .power-button-area {
@@ -1057,6 +1241,7 @@ class OpenDPSCard extends HTMLElement {
         gap: 6px;
         cursor: pointer;
         user-select: none;
+        -webkit-tap-highlight-color: transparent;
       }
 
       .power-button-area:active .power-btn-svg {
@@ -1065,6 +1250,7 @@ class OpenDPSCard extends HTMLElement {
 
       .power-btn-svg {
         transition: transform 0.15s;
+        pointer-events: none;
       }
 
       .pwr-label {
@@ -1119,6 +1305,99 @@ class OpenDPSCard extends HTMLElement {
         font-family: 'Courier New', monospace;
         min-width: 48px;
         text-align: right;
+      }
+
+      /* ── Datalog panel ── */
+      .datalog-panel {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+      }
+
+      .datalog-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+
+      .datalog-title {
+        font-size: 9px;
+        color: #888;
+        letter-spacing: 2px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .datalog-filename-row {
+        margin-bottom: 8px;
+      }
+
+      .datalog-filename {
+        width: 100%;
+        background: #111;
+        color: #ccc;
+        border: 1px solid #444;
+        border-radius: 3px;
+        padding: 5px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+        box-sizing: border-box;
+        outline: none;
+      }
+
+      .datalog-filename:focus {
+        border-color: #666;
+      }
+
+      .datalog-buttons {
+        display: flex;
+        gap: 8px;
+      }
+
+      .datalog-btn {
+        flex: 1;
+        padding: 6px 0;
+        border: 1px solid #444;
+        border-radius: 4px;
+        background: #2a2a2a;
+        color: #aaa;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        cursor: pointer;
+        transition: all 0.15s;
+        text-transform: uppercase;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .datalog-btn:hover {
+        background: #333;
+        color: #ddd;
+      }
+
+      .datalog-btn:active {
+        transform: scale(0.97);
+      }
+
+      .datalog-btn-start {
+        border-color: #a33;
+        color: #f55;
+      }
+
+      .datalog-btn-start:hover {
+        background: #3a1a1a;
+        color: #ff6666;
+      }
+
+      .datalog-btn-stop {
+        border-color: #555;
+      }
+
+      .datalog-btn-flush {
+        border-color: #555;
       }
 
       /* ── Bottom trim ── */
@@ -1280,6 +1559,14 @@ class OpenDPSCardEditor extends HTMLElement {
           ${this._entityRow('set_current', 'Set Current Number', ent)}
           ${this._entityRow('operating_mode', 'Operating Mode Select', ent)}
         </div>
+
+        <div class="section">
+          <div class="section-title">Datalog Entities</div>
+          ${this._entityRow('datalog_start', 'Start Datalog Button', ent)}
+          ${this._entityRow('datalog_stop', 'Stop Datalog Button', ent)}
+          ${this._entityRow('datalog_flush', 'Flush Datalog Button', ent)}
+          ${this._entityRow('datalog_filename', 'Filename Text Input', ent)}
+        </div>
       </div>
     `;
 
@@ -1287,7 +1574,8 @@ class OpenDPSCardEditor extends HTMLElement {
     const fields = ['name', 'lcd_color',
       'voltage_out', 'current_out', 'power_out', 'voltage_in',
       'temp1', 'temp2', 'output_switch', 'output_enabled',
-      'set_voltage', 'set_current', 'operating_mode'];
+      'set_voltage', 'set_current', 'operating_mode',
+      'datalog_start', 'datalog_stop', 'datalog_flush', 'datalog_filename'];
 
     fields.forEach(id => {
       const el = this.shadowRoot.getElementById(id);
@@ -1316,7 +1604,8 @@ class OpenDPSCardEditor extends HTMLElement {
     const entities = {};
     ['voltage_out', 'current_out', 'power_out', 'voltage_in',
      'temp1', 'temp2', 'output_switch', 'output_enabled',
-     'set_voltage', 'set_current', 'operating_mode'].forEach(id => {
+     'set_voltage', 'set_current', 'operating_mode',
+     'datalog_start', 'datalog_stop', 'datalog_flush', 'datalog_filename'].forEach(id => {
       const v = g(id);
       if (v) entities[id] = v;
     });
