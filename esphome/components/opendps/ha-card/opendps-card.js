@@ -487,12 +487,22 @@ class OpenDPSCard extends HTMLElement {
     }
 
     // ── Power button ──
+    // Update SVG and label inside the stable #power-button container
+    // without replacing its innerHTML (which would break event delegation targets)
     const pwrBtn = this.shadowRoot.getElementById('power-button');
     if (pwrBtn) {
-      const svgContainer = pwrBtn.querySelector('.power-btn-svg');
-      if (svgContainer) {
-        pwrBtn.innerHTML = this._buildPowerButton(isOn) +
-          `<div class="pwr-label" id="pwr-label">${isOn ? 'OUTPUT ON' : 'OUTPUT'}</div>`;
+      // Update SVG: replace only the SVG element
+      const oldSvg = pwrBtn.querySelector('.power-btn-svg');
+      if (oldSvg) {
+        const temp = document.createElement('div');
+        temp.innerHTML = this._buildPowerButton(isOn);
+        const newSvg = temp.firstElementChild;
+        oldSvg.replaceWith(newSvg);
+      }
+      // Update label text
+      const pwrLabel = pwrBtn.querySelector('.pwr-label');
+      if (pwrLabel) {
+        pwrLabel.textContent = isOn ? 'OUTPUT ON' : 'OUTPUT';
       }
     }
 
@@ -564,43 +574,41 @@ class OpenDPSCard extends HTMLElement {
   }
 
   // ── Event listeners ────────────────────────────────────────────────
+  // Uses event delegation on .psu-chassis so innerHTML replacements
+  // on children (power button, LCD digits, LEDs) don't destroy listeners.
 
   _attachEventListeners() {
-    // Power button
-    const pwrBtn = this.shadowRoot.getElementById('power-button');
-    if (pwrBtn) {
-      pwrBtn.addEventListener('click', () => this._toggleOutput());
-    }
+    const chassis = this.shadowRoot.querySelector('.psu-chassis');
+    if (!chassis) return;
 
-    // Knob interactions
+    // Single delegated click handler for all interactive elements
+    chassis.addEventListener('click', (e) => {
+      const target = e.target;
+
+      // Power button - check if click is inside #power-button
+      if (target.closest('#power-button')) {
+        this._toggleOutput();
+        return;
+      }
+
+      // LCD click-to-edit - check by id, walking up from target
+      const lcdDigits = target.closest('.lcd-digits');
+      if (lcdDigits) {
+        const id = lcdDigits.id;
+        if (id === 'lcd-voltage' || id === 'lcd-set-voltage') {
+          this._startEdit('voltage');
+        } else if (id === 'lcd-current' || id === 'lcd-set-current') {
+          this._startEdit('current');
+        }
+        return;
+      }
+    });
+
+    // Knob interactions (these attach to stable container elements)
     this._setupKnob('voltage');
     this._setupKnob('current');
 
-    // LCD click-to-edit: voltage
-    const lcdV = this.shadowRoot.getElementById('lcd-voltage');
-    if (lcdV) {
-      lcdV.addEventListener('click', () => this._startEdit('voltage'));
-    }
-
-    // LCD click-to-edit: current
-    const lcdC = this.shadowRoot.getElementById('lcd-current');
-    if (lcdC) {
-      lcdC.addEventListener('click', () => this._startEdit('current'));
-    }
-
-    // Set-voltage LCD click-to-edit
-    const lcdSV = this.shadowRoot.getElementById('lcd-set-voltage');
-    if (lcdSV) {
-      lcdSV.addEventListener('click', () => this._startEdit('voltage'));
-    }
-
-    // Set-current LCD click-to-edit
-    const lcdSC = this.shadowRoot.getElementById('lcd-set-current');
-    if (lcdSC) {
-      lcdSC.addEventListener('click', () => this._startEdit('current'));
-    }
-
-    // Hidden inputs
+    // Hidden inputs - these are never replaced by innerHTML so direct listeners are fine
     const vInput = this.shadowRoot.getElementById('voltage-edit-input');
     if (vInput) {
       vInput.addEventListener('change', (e) => {
@@ -657,12 +665,14 @@ class OpenDPSCard extends HTMLElement {
       area.setPointerCapture(e.pointerId);
       area.style.cursor = 'grabbing';
 
-      area.addEventListener('pointermove', this._onPointerMove);
-      area.addEventListener('pointerup', (evt) => {
-        this._onPointerUp(evt);
+      const onUp = () => {
+        this._onPointerUp();
         area.style.cursor = 'grab';
         area.removeEventListener('pointermove', this._onPointerMove);
-      }, { once: true });
+        area.removeEventListener('pointerup', onUp);
+      };
+      area.addEventListener('pointermove', this._onPointerMove);
+      area.addEventListener('pointerup', onUp);
     });
 
     // Mouse wheel for fine adjustment
