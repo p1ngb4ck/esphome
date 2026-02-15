@@ -391,7 +391,7 @@ void NetworkSerialServer::send_com_port_response_(uint8_t command, const uint8_t
   std::vector<uint8_t> subneg_data;
   subneg_data.reserve(2 + length);
   subneg_data.push_back(TELNET_COM_PORT);
-  subneg_data.push_back(command);  // Server command (1-12)
+  subneg_data.push_back(command);  // Server response (101-112)
   if (data && length > 0) {
     subneg_data.insert(subneg_data.end(), data, data + length);
   }
@@ -418,8 +418,13 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
 
   ESP_LOGD(TAG_SERVER, "RFC2217 client command: %u, params: %zu bytes", command, param_length);
 
+  // RFC 2217 command numbering:
+  //   Client sends commands 1-12 (RFC2217ServerCommand values)
+  //   Server responds with commands 101-112 (RFC2217ClientCommand values)
+  // The naming in our enums is misleading but the values are correct.
+
   switch (command) {
-    case RFC2217_SET_BAUDRATE_CS:
+    case RFC2217_SET_BAUDRATE:  // Client sends 1
       if (param_length >= 4) {
         uint32_t baudrate = (param_data[0] << 24) | (param_data[1] << 16) | (param_data[2] << 8) | param_data[3];
         if (baudrate == 0) {
@@ -430,16 +435,15 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           this->uart_->set_baud_rate(baudrate);
           this->apply_uart_config_();
         }
-        // Respond with actual baud rate
-        this->send_com_port_response_uint32_(RFC2217_SET_BAUDRATE, this->uart_->get_baud_rate());
+        // Respond with 101 + actual baud rate
+        this->send_com_port_response_uint32_(RFC2217_SET_BAUDRATE_CS, this->uart_->get_baud_rate());
       }
       break;
 
-    case RFC2217_SET_DATASIZE_CS:
+    case RFC2217_SET_DATASIZE:  // Client sends 2
       if (param_length >= 1) {
         uint8_t data_size = param_data[0];
         if (data_size == 0) {
-          // Request: report current
           data_size = this->uart_->get_data_bits();
         } else {
           ESP_LOGI(TAG_SERVER, "Client set data size: %u", data_size);
@@ -447,18 +451,17 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           this->apply_uart_config_();
         }
         uint8_t resp = this->uart_->get_data_bits();
-        this->send_com_port_response_(RFC2217_SET_DATASIZE, &resp, 1);
+        this->send_com_port_response_(RFC2217_SET_DATASIZE_CS, &resp, 1);  // Respond with 102
       }
       break;
 
-    case RFC2217_SET_PARITY_CS:
+    case RFC2217_SET_PARITY:  // Client sends 3
       if (param_length >= 1) {
         uint8_t parity = param_data[0];
         if (parity == 0) {
           // Request current
         } else {
           ESP_LOGI(TAG_SERVER, "Client set parity: %u", parity);
-          // Map RFC2217 parity to UARTParityOptions
           switch (parity) {
             case PARITY_NONE:
               this->uart_->set_parity(uart::UART_CONFIG_PARITY_NONE);
@@ -476,7 +479,6 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           }
           this->apply_uart_config_();
         }
-        // Respond with current parity
         uint8_t resp;
         switch (this->uart_->get_parity()) {
           case uart::UART_CONFIG_PARITY_NONE:
@@ -492,15 +494,14 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
             resp = PARITY_NONE;
             break;
         }
-        this->send_com_port_response_(RFC2217_SET_PARITY, &resp, 1);
+        this->send_com_port_response_(RFC2217_SET_PARITY_CS, &resp, 1);  // Respond with 103
       }
       break;
 
-    case RFC2217_SET_STOPSIZE_CS:
+    case RFC2217_SET_STOPSIZE:  // Client sends 4
       if (param_length >= 1) {
         uint8_t stop_bits = param_data[0];
         if (stop_bits == 0) {
-          // Request current
           stop_bits = this->uart_->get_stop_bits();
         } else {
           ESP_LOGI(TAG_SERVER, "Client set stop bits: %u", stop_bits);
@@ -508,22 +509,17 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           this->apply_uart_config_();
         }
         uint8_t resp = this->uart_->get_stop_bits();
-        this->send_com_port_response_(RFC2217_SET_STOPSIZE, &resp, 1);
+        this->send_com_port_response_(RFC2217_SET_STOPSIZE_CS, &resp, 1);  // Respond with 104
       }
       break;
 
-    case RFC2217_SET_CONTROL_CS:
+    case RFC2217_SET_CONTROL:  // Client sends 5
       if (param_length >= 1) {
         uint8_t control = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set control: %u", control);
-        // Flow control settings
-        // 0 = request current, 1 = none, 2 = xon/xoff, 3 = hardware
-        // DTR: 8 = on, 9 = off
-        // RTS: 11 = on, 12 = off
         uint8_t resp = control;
         switch (control) {
           case 0:
-            // Report current flow control
             resp = FLOW_NONE;
             break;
           case 1:  // No flow control
@@ -554,42 +550,41 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           default:
             break;
         }
-        this->send_com_port_response_(RFC2217_SET_CONTROL, &resp, 1);
+        this->send_com_port_response_(RFC2217_SET_CONTROL_CS, &resp, 1);  // Respond with 105
       }
       break;
 
-    case RFC2217_SET_LINESTATE_MASK_CS:
+    case RFC2217_SET_LINESTATE_MASK:  // Client sends 10
       if (param_length >= 1) {
         this->line_state_mask_ = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set line state mask: 0x%02X", this->line_state_mask_);
-        this->send_com_port_response_(RFC2217_SET_LINESTATE_MASK, &this->line_state_mask_, 1);
+        this->send_com_port_response_(RFC2217_SET_LINESTATE_MASK_CS, &this->line_state_mask_, 1);
       }
       break;
 
-    case RFC2217_SET_MODEMSTATE_MASK_CS:
+    case RFC2217_SET_MODEMSTATE_MASK:  // Client sends 11
       if (param_length >= 1) {
         this->modem_state_mask_ = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set modem state mask: 0x%02X", this->modem_state_mask_);
-        this->send_com_port_response_(RFC2217_SET_MODEMSTATE_MASK, &this->modem_state_mask_, 1);
+        this->send_com_port_response_(RFC2217_SET_MODEMSTATE_MASK_CS, &this->modem_state_mask_, 1);
       }
       break;
 
-    case RFC2217_PURGE_DATA_CS:
+    case RFC2217_PURGE_DATA:  // Client sends 12
       if (param_length >= 1) {
         ESP_LOGD(TAG_SERVER, "Client purge: %u", param_data[0]);
-        // Acknowledge purge
-        this->send_com_port_response_(RFC2217_PURGE_DATA, param_data, 1);
+        this->send_com_port_response_(RFC2217_PURGE_DATA_CS, param_data, 1);
       }
       break;
 
-    case RFC2217_FLOWCONTROL_SUSPEND_CS:
+    case RFC2217_FLOWCONTROL_SUSPEND:  // Client sends 8
       ESP_LOGD(TAG_SERVER, "Client flow control suspend");
-      this->send_com_port_response_(RFC2217_FLOWCONTROL_SUSPEND, nullptr, 0);
+      this->send_com_port_response_(RFC2217_FLOWCONTROL_SUSPEND_CS, nullptr, 0);
       break;
 
-    case RFC2217_FLOWCONTROL_RESUME_CS:
+    case RFC2217_FLOWCONTROL_RESUME:  // Client sends 9
       ESP_LOGD(TAG_SERVER, "Client flow control resume");
-      this->send_com_port_response_(RFC2217_FLOWCONTROL_RESUME, nullptr, 0);
+      this->send_com_port_response_(RFC2217_FLOWCONTROL_RESUME_CS, nullptr, 0);
       break;
 
     default:
@@ -609,7 +604,7 @@ void NetworkSerialServer::apply_uart_config_() {
 
 void NetworkSerialServer::send_modem_state_() {
   uint8_t masked = this->modem_state_ & this->modem_state_mask_;
-  this->send_com_port_response_(RFC2217_NOTIFY_MODEMSTATE, &masked, 1);
+  this->send_com_port_response_(RFC2217_NOTIFY_MODEMSTATE_CS, &masked, 1);
 }
 
 void NetworkSerialServer::send_initial_modem_state_() {

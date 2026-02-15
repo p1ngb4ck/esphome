@@ -562,51 +562,51 @@ void NetworkSerialClient::handle_com_port_control_(const uint8_t *data, size_t l
 
   ESP_LOGVV(TAG, "RFC2217 command: %u, params: %zu bytes", command, param_length);
 
+  // RFC 2217: server responds with commands 101-112 (_CS values)
   switch (command) {
-    case RFC2217_SET_BAUDRATE:
+    case RFC2217_SET_BAUDRATE_CS:  // Server responds with 101
       if (param_length >= 4) {
         uint32_t baudrate = (param_data[0] << 24) | (param_data[1] << 16) | (param_data[2] << 8) | param_data[3];
-        ESP_LOGD(TAG, "Server set baudrate: %u", baudrate);
+        ESP_LOGD(TAG, "Server confirmed baudrate: %u", baudrate);
         this->config_.baudrate = baudrate;
       }
       break;
 
-    case RFC2217_SET_DATASIZE:
+    case RFC2217_SET_DATASIZE_CS:  // Server responds with 102
       if (param_length >= 1) {
-        ESP_LOGD(TAG, "Server set data size: %u", param_data[0]);
+        ESP_LOGD(TAG, "Server confirmed data size: %u", param_data[0]);
         this->config_.data_size = static_cast<DataSize>(param_data[0]);
       }
       break;
 
-    case RFC2217_SET_PARITY:
+    case RFC2217_SET_PARITY_CS:  // Server responds with 103
       if (param_length >= 1) {
-        ESP_LOGD(TAG, "Server set parity: %u", param_data[0]);
+        ESP_LOGD(TAG, "Server confirmed parity: %u", param_data[0]);
         this->config_.parity = static_cast<ParityMode>(param_data[0]);
       }
       break;
 
-    case RFC2217_SET_STOPSIZE:
+    case RFC2217_SET_STOPSIZE_CS:  // Server responds with 104
       if (param_length >= 1) {
-        ESP_LOGD(TAG, "Server set stop bits: %u", param_data[0]);
+        ESP_LOGD(TAG, "Server confirmed stop bits: %u", param_data[0]);
         this->config_.stop_bits = static_cast<StopBits>(param_data[0]);
       }
       break;
 
-    case RFC2217_SET_CONTROL:
+    case RFC2217_SET_CONTROL_CS:  // Server responds with 105
       if (param_length >= 1) {
-        ESP_LOGD(TAG, "Server set control: 0x%02X", param_data[0]);
-        this->config_.flow_control = static_cast<FlowControl>(param_data[0]);
+        ESP_LOGD(TAG, "Server confirmed control: 0x%02X", param_data[0]);
       }
       break;
 
-    case RFC2217_NOTIFY_LINESTATE:
+    case RFC2217_NOTIFY_LINESTATE_CS:  // Server sends 106
       if (param_length >= 1) {
         this->line_state_ = param_data[0];
         ESP_LOGVV(TAG, "Line state: 0x%02X", this->line_state_);
       }
       break;
 
-    case RFC2217_NOTIFY_MODEMSTATE:
+    case RFC2217_NOTIFY_MODEMSTATE_CS:  // Server sends 107
       if (param_length >= 1) {
         this->modem_state_ = param_data[0];
         ESP_LOGVV(TAG, "Modem state: 0x%02X (CTS=%d DSR=%d RI=%d DCD=%d)", this->modem_state_,
@@ -615,12 +615,12 @@ void NetworkSerialClient::handle_com_port_control_(const uint8_t *data, size_t l
       }
       break;
 
-    case RFC2217_FLOWCONTROL_SUSPEND:
+    case RFC2217_FLOWCONTROL_SUSPEND_CS:  // Server sends 108
       ESP_LOGD(TAG, "Flow control suspended");
       this->flow_suspended_ = true;
       break;
 
-    case RFC2217_FLOWCONTROL_RESUME:
+    case RFC2217_FLOWCONTROL_RESUME_CS:  // Server sends 109
       ESP_LOGD(TAG, "Flow control resumed");
       this->flow_suspended_ = false;
       break;
@@ -636,40 +636,43 @@ void NetworkSerialClient::apply_serial_config_() {
     return;
   }
 
+  // RFC 2217: client sends commands 1-12, server responds with 101-112
   ESP_LOGD(TAG, "Applying serial configuration...");
 
-  // Set baudrate
-  this->send_com_port_command_uint32_(RFC2217_SET_BAUDRATE_CS, this->config_.baudrate);
+  // Set baudrate (client sends 1)
+  this->send_com_port_command_uint32_(RFC2217_SET_BAUDRATE, this->config_.baudrate);
 
-  // Set data size
+  // Set data size (client sends 2)
   uint8_t data_size = this->config_.data_size;
-  this->send_com_port_command_(RFC2217_SET_DATASIZE_CS, &data_size, 1);
+  this->send_com_port_command_(RFC2217_SET_DATASIZE, &data_size, 1);
 
-  // Set parity
+  // Set parity (client sends 3)
   uint8_t parity = this->config_.parity;
-  this->send_com_port_command_(RFC2217_SET_PARITY_CS, &parity, 1);
+  this->send_com_port_command_(RFC2217_SET_PARITY, &parity, 1);
 
-  // Set stop bits
+  // Set stop bits (client sends 4)
   uint8_t stop_bits = this->config_.stop_bits;
-  this->send_com_port_command_(RFC2217_SET_STOPSIZE_CS, &stop_bits, 1);
+  this->send_com_port_command_(RFC2217_SET_STOPSIZE, &stop_bits, 1);
 
-  // Set flow control
+  // Set flow control (client sends 5)
   uint8_t flow_control = this->config_.flow_control;
-  this->send_com_port_command_(RFC2217_SET_CONTROL_CS, &flow_control, 1);
+  this->send_com_port_command_(RFC2217_SET_CONTROL, &flow_control, 1);
 
-  // Set DTR/RTS
-  uint8_t control = 0;
+  // Set DTR/RTS via SET_CONTROL (client sends 5)
   if (this->config_.dtr) {
-    control |= CONTROL_DTR_ON;
+    uint8_t control = 8;  // DTR ON
+    this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   } else {
-    control |= CONTROL_DTR_OFF;
+    uint8_t control = 9;  // DTR OFF
+    this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   }
   if (this->config_.rts) {
-    control |= CONTROL_RTS_ON;
+    uint8_t control = 11;  // RTS ON
+    this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   } else {
-    control |= CONTROL_RTS_OFF;
+    uint8_t control = 12;  // RTS OFF
+    this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   }
-  this->send_com_port_command_(RFC2217_NOTIFY_MODEMSTATE_CS, &control, 1);
 
   ESP_LOGD(TAG, "Serial configuration applied");
 }
@@ -681,7 +684,7 @@ void NetworkSerialClient::apply_serial_config_() {
 bool NetworkSerialClient::set_baudrate_runtime(uint32_t baudrate) {
   this->config_.baudrate = baudrate;
   if (this->connected_ && this->telnet_negotiated_) {
-    return this->send_com_port_command_uint32_(RFC2217_SET_BAUDRATE_CS, baudrate);
+    return this->send_com_port_command_uint32_(RFC2217_SET_BAUDRATE, baudrate);
   }
   return false;
 }
@@ -690,7 +693,7 @@ bool NetworkSerialClient::set_data_size_runtime(DataSize data_size) {
   this->config_.data_size = data_size;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t value = data_size;
-    return this->send_com_port_command_(RFC2217_SET_DATASIZE_CS, &value, 1);
+    return this->send_com_port_command_(RFC2217_SET_DATASIZE, &value, 1);
   }
   return false;
 }
@@ -699,7 +702,7 @@ bool NetworkSerialClient::set_parity_runtime(ParityMode parity) {
   this->config_.parity = parity;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t value = parity;
-    return this->send_com_port_command_(RFC2217_SET_PARITY_CS, &value, 1);
+    return this->send_com_port_command_(RFC2217_SET_PARITY, &value, 1);
   }
   return false;
 }
@@ -708,7 +711,7 @@ bool NetworkSerialClient::set_stop_bits_runtime(StopBits stop_bits) {
   this->config_.stop_bits = stop_bits;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t value = stop_bits;
-    return this->send_com_port_command_(RFC2217_SET_STOPSIZE_CS, &value, 1);
+    return this->send_com_port_command_(RFC2217_SET_STOPSIZE, &value, 1);
   }
   return false;
 }
@@ -717,7 +720,7 @@ bool NetworkSerialClient::set_flow_control_runtime(FlowControl flow_control) {
   this->config_.flow_control = flow_control;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t value = flow_control;
-    return this->send_com_port_command_(RFC2217_SET_CONTROL_CS, &value, 1);
+    return this->send_com_port_command_(RFC2217_SET_CONTROL, &value, 1);
   }
   return false;
 }
@@ -729,8 +732,8 @@ bool NetworkSerialClient::set_flow_control_runtime(FlowControl flow_control) {
 bool NetworkSerialClient::set_dtr_runtime(bool state) {
   this->config_.dtr = state;
   if (this->connected_ && this->telnet_negotiated_) {
-    uint8_t control = state ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
-    return this->send_com_port_command_(RFC2217_NOTIFY_MODEMSTATE_CS, &control, 1);
+    uint8_t control = state ? 8 : 9;  // DTR ON=8, DTR OFF=9 via SET_CONTROL
+    return this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   }
   return false;
 }
@@ -738,8 +741,8 @@ bool NetworkSerialClient::set_dtr_runtime(bool state) {
 bool NetworkSerialClient::set_rts_runtime(bool state) {
   this->config_.rts = state;
   if (this->connected_ && this->telnet_negotiated_) {
-    uint8_t control = state ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
-    return this->send_com_port_command_(RFC2217_NOTIFY_MODEMSTATE_CS, &control, 1);
+    uint8_t control = state ? 11 : 12;  // RTS ON=11, RTS OFF=12 via SET_CONTROL
+    return this->send_com_port_command_(RFC2217_SET_CONTROL, &control, 1);
   }
   return false;
 }
