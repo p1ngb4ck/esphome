@@ -6,6 +6,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S3,
     add_idf_component,
     add_idf_sdkconfig_option,
+    get_esp32_variant,
 )
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
@@ -59,3 +60,10 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID", False)
     add_idf_sdkconfig_option("CONFIG_TINYUSB_DESC_USE_DEFAULT_PID", False)
     add_idf_sdkconfig_option("CONFIG_TINYUSB_DESC_BCD_DEVICE", 0x0100)
+
+    # ESP32-P4 has two USB controllers: OTG2.0 (High Speed) and OTG1.1 (Full Speed).
+    # Explicitly select the High Speed port and ensure TinyUSB stack init happens on the
+    # same core as the TinyUSB task (required for correct interrupt routing on multicore P4).
+    if get_esp32_variant() == VARIANT_ESP32P4:
+        add_idf_sdkconfig_option("CONFIG_TINYUSB_RHPORT_HS", True)
+        add_idf_sdkconfig_option("CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK", True)
