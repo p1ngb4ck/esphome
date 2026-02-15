@@ -834,7 +834,7 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
   }
 }
 
-void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint8_t len, bool extended) {
+void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint16_t len, bool extended) {
   // Params: BLOCK_NUM[2] + DATA[SYSCON_BLOCK_SIZE]
   uint16_t block_num = (params[0] << 8) | params[1];
   const uint8_t *data = params + 2;

@@ -227,7 +227,7 @@ class SysGlitch : public Component {
   void scf_handle_init_();
   void scf_handle_uninit_();
   void scf_handle_read_block_(const uint8_t *params, uint8_t len);
-  void scf_handle_write_block_(const uint8_t *params, uint8_t len, bool extended);
+  void scf_handle_write_block_(const uint8_t *params, uint16_t len, bool extended);
   void scf_handle_erase_block_(const uint8_t *params, uint8_t len);
   void scf_handle_erase_chip_();
   void scf_handle_reset_();
