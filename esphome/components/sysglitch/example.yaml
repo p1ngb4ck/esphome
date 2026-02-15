@@ -1,0 +1,170 @@
+# ══════════════════════════════════════════════════════════════════
+# SysGlitch - RL78/G13 OCD Voltage Glitcher for PS4/PSVITA Syscon
+# ══════════════════════════════════════════════════════════════════
+#
+# This component turns an ESP32-P4 into a syscon flasher replacement,
+# capable of dumping and writing back the RL78/G13 syscon flash via
+# voltage glitch attack on the OCD (On-Chip Debugger) interface.
+#
+# Hardware connections:
+#   TOOL0 (syscon debug wire) → ESP32 UART TX/RX (half-duplex, 1-wire)
+#   RESET (syscon reset)      → ESP32 GPIO (active low)
+#   GLITCH (to MOSFET/relay)  → ESP32 GPIO (pulls VCC low briefly)
+#   RX_PULLDOWN               → ESP32 GPIO (holds TOOL0 low for mode entry)
+#
+# Three operational modes:
+#   dump_sd   - Standalone: glitch → dump 512KB flash → save to SD card
+#   dump_uart - Bridge: glitch → dump flash → stream over pc_uart
+#   flasher   - Full flasher: scflasher.py-compatible protocol over pc_uart
+#               (supports read/write/erase via ps4-wee-tools)
+#
+# ══════════════════════════════════════════════════════════════════
+
+esphome:
+  name: sysglitch
+  friendly_name: "PS4 Syscon Glitcher"
+
+esp32:
+  board: esp32-p4-function-ev-board
+  variant: ESP32P4
+  framework:
+    type: esp-idf
+
+# ── Logging ──
+logger:
+  level: DEBUG
+
+# ── WiFi (optional, for HA integration) ──
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  platform: esphome
+
+# ── SD Card Storage (required for dump_sd mode) ──
+# Uncomment and adjust for your SD card wiring
+# storage:
+#
+# sd_storage:
+#   id: sd_card
+#   mode_1bit: false  # Set true for 1-bit SD mode
+
+# ══════════════════════════════════════════════════════════════════
+# UART Configuration
+# ══════════════════════════════════════════════════════════════════
+
+uart:
+  # TOOL0: Half-duplex 1-wire UART to syscon debug port
+  # TX and RX are the same physical wire (TOOL0)
+  - id: uart_tool0
+    tx_pin: GPIO14
+    rx_pin: GPIO15
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+
+  # PC UART: Connection to host PC running ps4-wee-tools
+  # (Required for dump_uart and flasher modes)
+  - id: uart_pc
+    tx_pin: GPIO17
+    rx_pin: GPIO18
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+
+# ══════════════════════════════════════════════════════════════════
+# Example 1: Dump to SD card (standalone, no PC needed)
+# ══════════════════════════════════════════════════════════════════
+
+# sysglitch:
+#   id: glitcher
+#   tool0_uart: uart_tool0
+#   reset_pin: GPIO4
+#   glitch_pin: GPIO5
+#   rx_pulldown_pin: GPIO6
+#   mode: dump_sd
+#   dump_path: "/sd/syscon_dump.bin"
+#   # Timing parameters (defaults work for most syscons)
+#   glitch_delay_min: 1500    # us - start of glitch window
+#   glitch_delay_max: 7500    # us - end of glitch window
+#   glitch_width_max: 6300    # ns - max glitch pulse width
+#   # OCD passcode (default is ":Not:Used:" for standard PS4 syscons)
+#   passcode: [0x3A, 0x4E, 0x6F, 0x74, 0x3A, 0x55, 0x73, 0x65, 0x64, 0x3A]
+#   max_attempts: 0           # 0 = infinite, keep trying until success
+
+# ══════════════════════════════════════════════════════════════════
+# Example 2: Dump over UART to PC (legacy syscon_reader mode)
+# ══════════════════════════════════════════════════════════════════
+
+# sysglitch:
+#   id: glitcher
+#   tool0_uart: uart_tool0
+#   pc_uart: uart_pc
+#   reset_pin: GPIO4
+#   glitch_pin: GPIO5
+#   rx_pulldown_pin: GPIO6
+#   mode: dump_uart
+
+# ══════════════════════════════════════════════════════════════════
+# Example 3: Full flasher (scflasher.py-compatible, read/write/erase)
+# ══════════════════════════════════════════════════════════════════
+
+sysglitch:
+  id: glitcher
+  tool0_uart: uart_tool0
+  pc_uart: uart_pc
+  reset_pin: GPIO4
+  glitch_pin: GPIO5
+  rx_pulldown_pin: GPIO6
+  mode: flasher
+
+# ══════════════════════════════════════════════════════════════════
+# Home Assistant Automation Triggers
+# ══════════════════════════════════════════════════════════════════
+
+# Physical button to start/stop the glitch attack
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Start Glitch Button"
+    on_press:
+      then:
+        - sysglitch.start_glitch:
+            id: glitcher
+
+  - platform: gpio
+    pin:
+      number: GPIO1
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Stop Glitch Button"
+    on_press:
+      then:
+        - sysglitch.stop:
+            id: glitcher
+
+# HA-triggered buttons
+button:
+  - platform: template
+    name: "Start Syscon Glitch"
+    on_press:
+      then:
+        - sysglitch.start_glitch:
+            id: glitcher
+
+  - platform: template
+    name: "Stop Syscon Glitch"
+    on_press:
+      then:
+        - sysglitch.stop:
+            id: glitcher
