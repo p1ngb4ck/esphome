@@ -31,8 +31,6 @@ int constexpr SD_OCR_SDHC_CAP = (1 << 30);
 namespace esphome {
 namespace sd_storage {
 
-static constexpr size_t FILE_PATH_MAX = ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN;
-
 std::string SdSpi::build_full_path(const char *path) {
   std::string full_path = this->mount_path_;
   if (path[0] != '/') {
