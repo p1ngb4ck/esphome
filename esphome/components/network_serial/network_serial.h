@@ -3,12 +3,14 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include "esphome/components/uart/uart_component.h"
 
 #ifdef USE_ESP_IDF
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #else
 #include <WiFiClient.h>
+#include <WiFiServer.h>
 #endif
 
 #include <string>
@@ -402,6 +404,139 @@ class NetworkSerialClient : public Component {
   bool send_com_port_command_uint32_(uint8_t command, uint32_t value);
   void handle_com_port_control_(const uint8_t *data, size_t length);
   void apply_serial_config_();
+};
+
+//========================================================================
+// Network Serial Server Component
+//========================================================================
+
+/**
+ * @brief RFC 2217 Network Serial Server
+ *
+ * Exposes a local UART as an RFC 2217 server over TCP.
+ * Remote clients (e.g. pyserial's rfc2217:// or ser2net) can connect
+ * and interact with the UART as if it were a local serial port.
+ *
+ * Features:
+ * - Listens on configurable TCP port
+ * - Full RFC 2217 Com Port Control (baud, parity, data bits, stop bits)
+ * - Telnet protocol negotiation (RFC 854)
+ * - Bidirectional UART <-> TCP bridging with IAC escaping
+ * - Flow control support
+ * - Modem signal control (DTR, RTS)
+ * - Single client at a time (rejects additional connections)
+ *
+ * Example configuration:
+ * @code
+ * network_serial:
+ *   - id: my_server
+ *     mode: server
+ *     uart_id: my_uart
+ *     port: 2217
+ * @endcode
+ */
+class NetworkSerialServer : public Component {
+ public:
+  NetworkSerialServer() = default;
+  ~NetworkSerialServer() override;
+
+  // Component lifecycle
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+
+  //========================================================================
+  // Configuration
+  //========================================================================
+
+  void set_port(uint16_t port) { this->port_ = port; }
+  void set_uart(uart::UARTComponent *uart) { this->uart_ = uart; }
+
+  //========================================================================
+  // Connection State
+  //========================================================================
+
+  bool has_client() const { return this->client_connected_; }
+
+ protected:
+  //========================================================================
+  // Configuration
+  //========================================================================
+
+  uint16_t port_{2217};
+  uart::UARTComponent *uart_{nullptr};
+
+  //========================================================================
+  // Server State
+  //========================================================================
+
+#ifdef USE_ESP_IDF
+  int listen_socket_{-1};
+  int client_socket_{-1};
+#else
+  std::unique_ptr<WiFiServer> server_;
+  std::unique_ptr<WiFiClient> client_;
+#endif
+
+  bool client_connected_{false};
+  bool telnet_negotiated_{false};
+
+  //========================================================================
+  // Serial State (tracks what client requested)
+  //========================================================================
+
+  SerialConfig client_config_;
+  uint8_t modem_state_{0};
+  uint8_t line_state_{0};
+  uint8_t modem_state_mask_{0xFF};
+  uint8_t line_state_mask_{0};
+
+  //========================================================================
+  // Buffers
+  //========================================================================
+
+  std::vector<uint8_t> telnet_parse_buf_;
+  static constexpr size_t BRIDGE_BUF_SIZE = 256;
+
+  //========================================================================
+  // Internal Operations
+  //========================================================================
+
+  bool start_listening_();
+  void stop_listening_();
+  void accept_client_();
+  void disconnect_client_();
+  bool send_to_client_(const uint8_t *data, size_t length);
+  size_t receive_from_client_(uint8_t *buffer, size_t length);
+
+  //========================================================================
+  // Telnet Protocol (server side)
+  //========================================================================
+
+  void send_telnet_negotiation_();
+  void send_telnet_command_(TelnetCommand cmd, TelnetOption option);
+  void send_telnet_subnegotiation_(const uint8_t *data, size_t length);
+  void process_client_data_(const uint8_t *data, size_t length);
+  void handle_telnet_command_(TelnetCommand cmd, TelnetOption option);
+  void handle_telnet_subnegotiation_(const uint8_t *data, size_t length);
+
+  //========================================================================
+  // RFC 2217 Protocol (server side)
+  //========================================================================
+
+  void send_com_port_response_(uint8_t command, const uint8_t *data, size_t length);
+  void send_com_port_response_uint32_(uint8_t command, uint32_t value);
+  void handle_com_port_command_(const uint8_t *data, size_t length);
+  void apply_uart_config_();
+  void send_modem_state_();
+  void send_initial_modem_state_();
+
+  //========================================================================
+  // UART Bridging
+  //========================================================================
+
+  void bridge_uart_to_client_();
 };
 
 }  // namespace network_serial

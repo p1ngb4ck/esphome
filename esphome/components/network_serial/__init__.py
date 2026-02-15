@@ -1,9 +1,17 @@
-"""RFC 2217 Network Serial component for ESPHome."""
+"""RFC 2217 Network Serial component for ESPHome.
+
+Supports two modes:
+  - client: Connect to a remote RFC 2217 server
+  - server: Expose a local UART as an RFC 2217 server
+"""
 
 import esphome.codegen as cg
+from esphome.components import uart
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PORT
-from esphome.components import network
+from esphome.const import CONF_ID, CONF_MODE, CONF_PORT, CONF_UART_ID
+
+DEPENDENCIES = ["uart"]
+MULTI_CONF = True
 
 # Constants
 CONF_HOST = "host"
@@ -19,6 +27,7 @@ CONF_DEVICE_NODE = "device_node"
 # Namespace
 network_serial_ns = cg.esphome_ns.namespace("network_serial")
 NetworkSerialClient = network_serial_ns.class_("NetworkSerialClient", cg.Component)
+NetworkSerialServer = network_serial_ns.class_("NetworkSerialServer", cg.Component)
 
 # Enums
 ParityMode = network_serial_ns.enum("ParityMode")
@@ -47,7 +56,8 @@ DEFAULT_PARITY = "NONE"
 DEFAULT_STOP_BITS = 1
 DEFAULT_FLOW_CONTROL = "NONE"
 
-CONFIG_SCHEMA = cv.Schema(
+# Client mode schema (connects to remote RFC 2217 server)
+CLIENT_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(NetworkSerialClient),
         cv.Required(CONF_HOST): cv.string,
@@ -61,7 +71,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PARITY, default=DEFAULT_PARITY): cv.enum(
             PARITY_OPTIONS, upper=True
         ),
-        cv.Optional(CONF_STOP_BITS, default=DEFAULT_STOP_BITS): cv.one_of(1, 2, int=True),
+        cv.Optional(CONF_STOP_BITS, default=DEFAULT_STOP_BITS): cv.one_of(
+            1, 2, int=True
+        ),
         cv.Optional(CONF_FLOW_CONTROL, default=DEFAULT_FLOW_CONTROL): cv.enum(
             FLOW_CONTROL_OPTIONS, upper=True
         ),
@@ -71,16 +83,55 @@ CONFIG_SCHEMA = cv.Schema(
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
+# Server mode schema (exposes local UART over RFC 2217)
+SERVER_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(NetworkSerialServer),
+        cv.Required(CONF_UART_ID): cv.use_id(uart.UARTComponent),
+        cv.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    }
+).extend(cv.COMPONENT_SCHEMA)
+
+
+def _validate_mode(config):
+    """Select client or server schema based on mode field."""
+    mode = config.get(CONF_MODE, "client")
+    if mode == "server":
+        return SERVER_SCHEMA(config)
+    return CLIENT_SCHEMA(config)
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Optional(CONF_MODE, default="client"): cv.one_of(
+                "client", "server", lower=True
+            ),
+        },
+        extra=cv.ALLOW_EXTRA,
+    ),
+    _validate_mode,
+)
+
 
 async def to_code(config):
     """Generate code for network serial component."""
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
+    mode = config.get(CONF_MODE, "client")
 
     # Add network dependency
     cg.add_define("USE_NETWORK")
 
-    # Configure network serial client
+    if mode == "server":
+        await _to_code_server(config)
+    else:
+        await _to_code_client(config)
+
+
+async def _to_code_client(config):
+    """Generate code for client mode."""
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+
     cg.add(var.set_host(config[CONF_HOST]))
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_baudrate(config[CONF_BAUDRATE]))
@@ -91,6 +142,15 @@ async def to_code(config):
     cg.add(var.set_dtr(config[CONF_DTR]))
     cg.add(var.set_rts(config[CONF_RTS]))
 
-    # Set device node if specified
     if CONF_DEVICE_NODE in config:
         cg.add(var.set_device_node(config[CONF_DEVICE_NODE]))
+
+
+async def _to_code_server(config):
+    """Generate code for server mode."""
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+
+    uart_component = await cg.get_variable(config[CONF_UART_ID])
+    cg.add(var.set_uart(uart_component))
+    cg.add(var.set_port(config[CONF_PORT]))

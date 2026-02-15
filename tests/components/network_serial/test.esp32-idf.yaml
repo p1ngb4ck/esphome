@@ -1,3 +1,9 @@
+uart:
+  - id: test_uart
+    tx_pin: 17
+    rx_pin: 16
+    baud_rate: 115200
+
 network_serial:
   - id: my_serial
     host: 192.168.1.100
@@ -10,3 +16,7 @@ network_serial:
     dtr: false
     rts: false
     device_node: /dev/ttyNET0
+  - id: my_serial_server
+    mode: server
+    uart_id: test_uart
+    port: 2218
