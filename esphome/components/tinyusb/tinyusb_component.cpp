@@ -20,6 +20,7 @@ void TinyUSB::setup() {
       .string_descriptor = this->string_descriptor_,
       .string_descriptor_count = SIZE,
       .external_phy = false,
+      .port = TINYUSB_PORT_HIGH_SPEED_0,
   };
 
   esp_err_t result = tinyusb_driver_install(&this->tusb_cfg_);
