@@ -107,8 +107,12 @@ async def to_code(config):
     cg.add(var.set_max_attempts(config[CONF_MAX_ATTEMPTS]))
 
     passcode = config[CONF_PASSCODE]
-    passcode_arr = cg.std_array.template(cg.uint8).template(10)
-    cg.add(var.set_passcode(passcode_arr(*passcode)))
+    passcode_hex = ", ".join(f"0x{x:02X}" for x in passcode)
+    cg.add(
+        var.set_passcode(
+            cg.RawExpression(f"std::array<uint8_t, 10>{{{{{passcode_hex}}}}}")
+        )
+    )
 
 
 # Automation Actions
