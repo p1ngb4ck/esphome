@@ -7,16 +7,24 @@
 # voltage glitch attack on the OCD (On-Chip Debugger) interface.
 #
 # Hardware connections:
-#   TOOL0 (syscon debug wire) → ESP32 UART TX/RX (half-duplex, 1-wire)
-#   RESET (syscon reset)      → ESP32 GPIO (active low)
-#   GLITCH (to MOSFET/relay)  → ESP32 GPIO (pulls VCC low briefly)
-#   RX_PULLDOWN               → ESP32 GPIO (holds TOOL0 low for mode entry)
+#   TOOL0 (syscon debug wire) → ESP32 GPIO32/GPIO33 UART (half-duplex, 1-wire)
+#   RESET (syscon reset)      → ESP32 GPIO2 (active low)
+#   GLITCH (to MOSFET/relay)  → ESP32 GPIO3 (pulls VCC low briefly)
+#   RX_PULLDOWN               → ESP32 GPIO4 (holds TOOL0 low for mode entry)
 #
 # Three operational modes:
 #   dump_sd   - Standalone: glitch → dump 512KB flash → save to SD card
 #   dump_uart - Bridge: glitch → dump flash → stream over pc_uart
 #   flasher   - Full flasher: scflasher.py-compatible protocol over pc_uart
 #               (supports read/write/erase via ps4-wee-tools)
+#
+# PC UART via USB CDC:
+#   ESP32-P4 has two independent USB interfaces:
+#     - USB_SERIAL_JTAG: built-in debug serial (used by logger, default)
+#     - USB_CDC: full USB CDC-ACM via TinyUSB (usb_cdc_acm component)
+#   We use usb_cdc_acm for pc_uart, so ps4-wee-tools talks over USB.
+#   Logger stays on USB_SERIAL_JTAG — no conflict, both work in parallel.
+#   The PC sees two COM ports: one for logs, one for scflasher protocol.
 #
 # ══════════════════════════════════════════════════════════════════
 
@@ -31,10 +39,14 @@ esp32:
     type: esp-idf
 
 # ── Logging ──
+# Logger defaults to USB_SERIAL_JTAG on ESP32-P4.
+# This is a separate USB interface from USB_CDC, so no conflict.
+# Logs available on one COM port, scflasher protocol on the other.
 logger:
   level: DEBUG
+  # hardware_uart: USB_SERIAL_JTAG  # Default on P4, no need to set explicitly
 
-# ── WiFi (optional, for HA integration) ──
+# ── WiFi (optional, for HA integration and wireless logs) ──
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -55,25 +67,31 @@ ota:
 #   mode_1bit: false  # Set true for 1-bit SD mode
 
 # ══════════════════════════════════════════════════════════════════
+# USB CDC ACM — provides a UART interface over USB
+# ══════════════════════════════════════════════════════════════════
+# This uses the TinyUSB stack to create a USB CDC-ACM serial port.
+# The PC sees it as a second COM port (separate from USB_SERIAL_JTAG).
+# ps4-wee-tools connects to this port for the scflasher protocol.
+
+tinyusb:
+
+usb_cdc_acm:
+  rx_buffer_size: 2048
+  tx_buffer_size: 2048
+  interfaces:
+    - id: uart_pc
+
+# ══════════════════════════════════════════════════════════════════
 # UART Configuration
 # ══════════════════════════════════════════════════════════════════
 
 uart:
   # TOOL0: Half-duplex 1-wire UART to syscon debug port
   # TX and RX are the same physical wire (TOOL0)
+  # Pins chosen from Guition JC-ESP32P4-M3-Dev Expand IO header (JP1)
   - id: uart_tool0
-    tx_pin: GPIO14
-    rx_pin: GPIO15
-    baud_rate: 115200
-    data_bits: 8
-    parity: NONE
-    stop_bits: 1
-
-  # PC UART: Connection to host PC running ps4-wee-tools
-  # (Required for dump_uart and flasher modes)
-  - id: uart_pc
-    tx_pin: GPIO17
-    rx_pin: GPIO18
+    tx_pin: GPIO32
+    rx_pin: GPIO33
     baud_rate: 115200
     data_bits: 8
     parity: NONE
@@ -100,7 +118,7 @@ uart:
 #   max_attempts: 0           # 0 = infinite, keep trying until success
 
 # ══════════════════════════════════════════════════════════════════
-# Example 2: Dump over UART to PC (legacy syscon_reader mode)
+# Example 2: Dump over USB CDC to PC (legacy syscon_reader mode)
 # ══════════════════════════════════════════════════════════════════
 
 # sysglitch:
@@ -114,15 +132,17 @@ uart:
 
 # ══════════════════════════════════════════════════════════════════
 # Example 3: Full flasher (scflasher.py-compatible, read/write/erase)
+#   Uses USB CDC as pc_uart — connect to PC via USB, run ps4-wee-tools
+#   PC sees two COM ports: one for ESPHome logs, one for scflasher
 # ══════════════════════════════════════════════════════════════════
 
 sysglitch:
   id: glitcher
   tool0_uart: uart_tool0
   pc_uart: uart_pc
-  reset_pin: GPIO4
-  glitch_pin: GPIO5
-  rx_pulldown_pin: GPIO6
+  reset_pin: GPIO2
+  glitch_pin: GPIO3
+  rx_pulldown_pin: GPIO4
   mode: flasher
 
 # ══════════════════════════════════════════════════════════════════
@@ -133,7 +153,7 @@ sysglitch:
 binary_sensor:
   - platform: gpio
     pin:
-      number: GPIO0
+      number: GPIO5
       mode: INPUT_PULLUP
       inverted: true
     name: "Start Glitch Button"
@@ -144,7 +164,7 @@ binary_sensor:
 
   - platform: gpio
     pin:
-      number: GPIO1
+      number: GPIO20
       mode: INPUT_PULLUP
       inverted: true
     name: "Stop Glitch Button"
