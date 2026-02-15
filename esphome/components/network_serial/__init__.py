@@ -56,10 +56,16 @@ DEFAULT_PARITY = "NONE"
 DEFAULT_STOP_BITS = 1
 DEFAULT_FLOW_CONTROL = "NONE"
 
+MODE_CLIENT = "client"
+MODE_SERVER = "server"
+
 # Client mode schema (connects to remote RFC 2217 server)
 CLIENT_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(NetworkSerialClient),
+        cv.Optional(CONF_MODE, default=MODE_CLIENT): cv.one_of(
+            MODE_CLIENT, MODE_SERVER, lower=True
+        ),
         cv.Required(CONF_HOST): cv.string,
         cv.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
         cv.Optional(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): cv.int_range(
@@ -87,16 +93,19 @@ CLIENT_SCHEMA = cv.Schema(
 SERVER_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(NetworkSerialServer),
+        cv.Optional(CONF_MODE, default=MODE_CLIENT): cv.one_of(
+            MODE_CLIENT, MODE_SERVER, lower=True
+        ),
         cv.Required(CONF_UART_ID): cv.use_id(uart.UARTComponent),
         cv.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
 
-def _validate_mode(config):
-    """Select client or server schema based on mode field."""
-    mode = config.get(CONF_MODE, "client")
-    if mode == "server":
+def _validate_config(config):
+    """Route to the correct schema based on mode."""
+    mode = config.get(CONF_MODE, MODE_CLIENT)
+    if mode == MODE_SERVER:
         return SERVER_SCHEMA(config)
     return CLIENT_SCHEMA(config)
 
@@ -104,13 +113,13 @@ def _validate_mode(config):
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
-            cv.Optional(CONF_MODE, default="client"): cv.one_of(
-                "client", "server", lower=True
+            cv.Optional(CONF_MODE, default=MODE_CLIENT): cv.one_of(
+                MODE_CLIENT, MODE_SERVER, lower=True
             ),
         },
         extra=cv.ALLOW_EXTRA,
     ),
-    _validate_mode,
+    _validate_config,
 )
 
 
