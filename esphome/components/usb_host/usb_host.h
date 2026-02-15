@@ -171,7 +171,7 @@ class USBClient : public Component, public Parented<USBHost> {
   EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE> event_pool;
 
  protected:
-  bool register_();
+  void handle_open_state_();
   TransferRequest *get_trq_();  // Lock-free allocation using atomic bitmask (multi-consumer safe)
   virtual void disconnect();
   virtual void on_connected() {}

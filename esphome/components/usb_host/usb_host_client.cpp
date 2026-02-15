@@ -9,6 +9,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <atomic>
+#include <span>
 namespace esphome {
 namespace usb_host {
 
@@ -142,18 +143,23 @@ static void usb_client_print_config_descriptor(const usb_config_desc_t *cfg_desc
   } while (next_desc != NULL);
 }
 #endif
-static std::string get_descriptor_string(const usb_str_desc_t *desc) {
-  char buffer[256];
-  if (desc == nullptr)
+// USB string descriptors: bLength (uint8_t, max 255) includes the 2-byte header (bLength and bDescriptorType).
+// Character count = (bLength - 2) / 2, max 126 chars + null terminator.
+static constexpr size_t DESC_STRING_BUF_SIZE = 128;
+
+static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer) {
+  if (desc == nullptr || desc->bLength < 2)
     return "(unspecified)";
-  char *p = buffer;
-  for (int i = 0; i != desc->bLength / 2; i++) {
+  int char_count = (desc->bLength - 2) / 2;
+  char *p = buffer.data();
+  char *end = p + buffer.size() - 1;
+  for (int i = 0; i != char_count && p < end; i++) {
     auto c = desc->wData[i];
     if (c < 0x100)
       *p++ = static_cast<char>(c);
   }
   *p = '\0';
-  return {buffer};
+  return buffer.data();
 }
 
 // CALLBACK CONTEXT: USB task (called from usb_host_client_handle_events in USB task)
@@ -253,122 +259,126 @@ void USBClient::loop() {
     ESP_LOGW(TAG, "Dropped %u USB events due to queue overflow", dropped);
   }
 
-  switch (this->state_) {
-    case USB_CLIENT_OPEN: {
-      int err;
-      ESP_LOGD(TAG, "Open device %d", this->device_addr_);
-      err = usb_host_device_open(this->handle_, this->device_addr_, &this->device_handle_);
-      if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Device open failed: %s", esp_err_to_name(err));
-        this->state_ = USB_CLIENT_INIT;
-        break;
-      }
-      ESP_LOGD(TAG, "Get descriptor device %d", this->device_addr_);
-      const usb_device_desc_t *desc;
-      err = usb_host_get_device_descriptor(this->device_handle_, &desc);
-      if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Device get_desc failed: %s", esp_err_to_name(err));
-        this->disconnect();
-      } else {
-        ESP_LOGD(TAG, "Device descriptor: vid %X pid %X", desc->idVendor, desc->idProduct);
-        bool vid_pid_match = (desc->idVendor == this->vid_ && desc->idProduct == this->pid_);
-        bool is_wildcard = (this->vid_ == 0 && this->pid_ == 0);
+  if (this->state_ == USB_CLIENT_OPEN) {
+    this->handle_open_state_();
+  }
+}
 
-        // For wildcard VID/PID, check if device should be skipped for specific handlers
-        // Skip if device has MSC interface (let MSC handler claim it)
-        // Skip if device is CH934X/CH9344/CH348 (let specific CH934X driver claim it)
-        bool skip_for_specific_driver = false;
-        if (is_wildcard) {
-          ESP_LOGD(TAG, "Wildcard client checking device %d: VID=%04X, PID=%04X", this->device_addr_, desc->idVendor,
-                   desc->idProduct);
-          // Check VID/PID for known multi-UART chips that should use specific drivers
-          if ((desc->idVendor == 0x1A86 && desc->idProduct == 0x55D9) ||  // CH934X
-              (desc->idVendor == 0x1A86 && desc->idProduct == 0xE018) ||  // CH9344
-              (desc->idVendor == 0x1A86 && desc->idProduct == 0x55D5)) {  // CH34X
-            skip_for_specific_driver = true;
-            ESP_LOGD(TAG, "Device %d is CH934X/CH9344/CH34X (VID=%04X, PID=%04X), skipping wildcard VID/PID match",
-                     this->device_addr_, desc->idVendor, desc->idProduct);
-          } else {
-            ESP_LOGD(TAG, "Device %d (VID=%04X, PID=%04X) not in skip list, checking for MSC...", this->device_addr_,
-                     desc->idVendor, desc->idProduct);
-          }
+void USBClient::handle_open_state_() {
+  int err;
+  ESP_LOGD(TAG, "Open device %d", this->device_addr_);
+  err = usb_host_device_open(this->handle_, this->device_addr_, &this->device_handle_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device open failed: %s", esp_err_to_name(err));
+    this->state_ = USB_CLIENT_INIT;
+    return;
+  }
+  ESP_LOGD(TAG, "Get descriptor device %d", this->device_addr_);
+  const usb_device_desc_t *desc;
+  err = usb_host_get_device_descriptor(this->device_handle_, &desc);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device get_desc failed: %s", esp_err_to_name(err));
+    this->disconnect();
+    return;
+  }
+  ESP_LOGD(TAG, "Device descriptor: vid %X pid %X", desc->idVendor, desc->idProduct);
+  bool vid_pid_match = (desc->idVendor == this->vid_ && desc->idProduct == this->pid_);
+  bool is_wildcard = (this->vid_ == 0 && this->pid_ == 0);
 
-          // Check for MSC interface
-          if (!skip_for_specific_driver) {
-            const usb_config_desc_t *config_desc;
-            err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
-            if (err == ESP_OK) {
-              // Check if device has MSC interface (Class=0x08, SubClass=0x06, Protocol=0x50)
-              size_t offset = 0;
-              const usb_standard_desc_t *next_desc = (const usb_standard_desc_t *) config_desc;
-              while ((next_desc = usb_parse_next_descriptor_of_type(next_desc, config_desc->wTotalLength,
-                                                                    USB_W_VALUE_DT_INTERFACE, (int *) &offset)) !=
-                     nullptr) {
-                const usb_intf_desc_t *ifc_desc = (const usb_intf_desc_t *) next_desc;
-                if (ifc_desc->bInterfaceClass == USB_CLASS_MASS_STORAGE && ifc_desc->bInterfaceSubClass == 0x06 &&
-                    ifc_desc->bInterfaceProtocol == 0x50) {
-                  skip_for_specific_driver = true;
-                  ESP_LOGD(TAG,
-                           "Device %d has MSC interface, skipping wildcard VID/PID match (let MSC handler claim it)",
-                           this->device_addr_);
-                  break;
-                }
-              }
-            }
-          }
-        }
-
-        if ((vid_pid_match || is_wildcard) && !skip_for_specific_driver) {
-          // NEW: Try to claim device (coordinates with USBHost for interface-class handlers)
-          ESP_LOGD(TAG, "Attempting to claim device %d (VID=%04X, PID=%04X, parent=%p)", this->device_addr_, this->vid_,
-                   this->pid_, (void *) this->parent_);
-          if (this->parent_ != nullptr && !this->parent_->try_claim_device(this->device_addr_)) {
-            ESP_LOGD(TAG, "Device %d already claimed by another client (VID=%04X, PID=%04X)", this->device_addr_,
-                     this->vid_, this->pid_);
-            this->disconnect();
-            break;
-          }
-          ESP_LOGD(TAG, "Device %d successfully claimed (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
-                   this->pid_);
-
-          usb_device_info_t dev_info;
-          err = usb_host_device_info(this->device_handle_, &dev_info);
-          if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Device info failed: %s", esp_err_to_name(err));
-            this->disconnect();
-            break;
-          }
-          this->state_ = USB_CLIENT_CONNECTED;
-          ESP_LOGD(TAG, "Device connected: Manuf: %s; Prod: %s; Serial: %s",
-                   get_descriptor_string(dev_info.str_desc_manufacturer).c_str(),
-                   get_descriptor_string(dev_info.str_desc_product).c_str(),
-                   get_descriptor_string(dev_info.str_desc_serial_num).c_str());
-
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
-          const usb_device_desc_t *device_desc;
-          err = usb_host_get_device_descriptor(this->device_handle_, &device_desc);
-          if (err == ESP_OK)
-            usb_client_print_device_descriptor(device_desc);
-          const usb_config_desc_t *config_desc;
-          err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
-          if (err == ESP_OK)
-            usb_client_print_config_descriptor(config_desc, nullptr);
-#endif
-          ESP_LOGD(TAG, "Calling on_connected() for device %d (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
-                   this->pid_);
-          this->on_connected();
-          ESP_LOGD(TAG, "on_connected() returned for device %d", this->device_addr_);
-        } else {
-          ESP_LOGD(TAG, "Not our device, closing");
-          this->disconnect();
-        }
-      }
-      break;
+  // For wildcard VID/PID, check if device should be skipped for specific handlers
+  // Skip if device has MSC interface (let MSC handler claim it)
+  // Skip if device is CH934X/CH9344/CH348 (let specific CH934X driver claim it)
+  bool skip_for_specific_driver = false;
+  if (is_wildcard) {
+    ESP_LOGD(TAG, "Wildcard client checking device %d: VID=%04X, PID=%04X", this->device_addr_, desc->idVendor,
+             desc->idProduct);
+    // Check VID/PID for known multi-UART chips that should use specific drivers
+    if ((desc->idVendor == 0x1A86 && desc->idProduct == 0x55D9) ||  // CH934X
+        (desc->idVendor == 0x1A86 && desc->idProduct == 0xE018) ||  // CH9344
+        (desc->idVendor == 0x1A86 && desc->idProduct == 0x55D5)) {  // CH34X
+      skip_for_specific_driver = true;
+      ESP_LOGD(TAG, "Device %d is CH934X/CH9344/CH34X (VID=%04X, PID=%04X), skipping wildcard VID/PID match",
+               this->device_addr_, desc->idVendor, desc->idProduct);
+    } else {
+      ESP_LOGD(TAG, "Device %d (VID=%04X, PID=%04X) not in skip list, checking for MSC...", this->device_addr_,
+               desc->idVendor, desc->idProduct);
     }
 
-    default:
-      break;
+    // Check for MSC interface
+    if (!skip_for_specific_driver) {
+      const usb_config_desc_t *config_desc;
+      err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
+      if (err == ESP_OK) {
+        // Check if device has MSC interface (Class=0x08, SubClass=0x06, Protocol=0x50)
+        size_t offset = 0;
+        const usb_standard_desc_t *next_desc = (const usb_standard_desc_t *) config_desc;
+        while ((next_desc = usb_parse_next_descriptor_of_type(next_desc, config_desc->wTotalLength,
+                                                              USB_W_VALUE_DT_INTERFACE, (int *) &offset)) != nullptr) {
+          const usb_intf_desc_t *ifc_desc = (const usb_intf_desc_t *) next_desc;
+          if (ifc_desc->bInterfaceClass == USB_CLASS_MASS_STORAGE && ifc_desc->bInterfaceSubClass == 0x06 &&
+              ifc_desc->bInterfaceProtocol == 0x50) {
+            skip_for_specific_driver = true;
+            ESP_LOGD(TAG, "Device %d has MSC interface, skipping wildcard VID/PID match (let MSC handler claim it)",
+                     this->device_addr_);
+            break;
+          }
+        }
+      }
+    }
   }
+
+  if (!vid_pid_match && !is_wildcard) {
+    ESP_LOGD(TAG, "Not our device, closing");
+    this->disconnect();
+    return;
+  }
+
+  if (skip_for_specific_driver) {
+    ESP_LOGD(TAG, "Device %d skipped for specific driver", this->device_addr_);
+    this->disconnect();
+    return;
+  }
+
+  // Try to claim device (coordinates with USBHost for interface-class handlers)
+  ESP_LOGD(TAG, "Attempting to claim device %d (VID=%04X, PID=%04X)", this->device_addr_, this->vid_, this->pid_);
+  if (this->parent_ != nullptr && !this->parent_->try_claim_device(this->device_addr_)) {
+    ESP_LOGD(TAG, "Device %d already claimed by another client (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
+             this->pid_);
+    this->disconnect();
+    return;
+  }
+  ESP_LOGD(TAG, "Device %d successfully claimed (VID=%04X, PID=%04X)", this->device_addr_, this->vid_, this->pid_);
+
+  usb_device_info_t dev_info;
+  err = usb_host_device_info(this->device_handle_, &dev_info);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device info failed: %s", esp_err_to_name(err));
+    this->disconnect();
+    return;
+  }
+  this->state_ = USB_CLIENT_CONNECTED;
+  char buf_manuf[DESC_STRING_BUF_SIZE];
+  char buf_product[DESC_STRING_BUF_SIZE];
+  char buf_serial[DESC_STRING_BUF_SIZE];
+  ESP_LOGD(TAG, "Device connected: Manuf: %s; Prod: %s; Serial: %s",
+           get_descriptor_string(dev_info.str_desc_manufacturer, buf_manuf),
+           get_descriptor_string(dev_info.str_desc_product, buf_product),
+           get_descriptor_string(dev_info.str_desc_serial_num, buf_serial));
+
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  const usb_device_desc_t *device_desc;
+  err = usb_host_get_device_descriptor(this->device_handle_, &device_desc);
+  if (err == ESP_OK)
+    usb_client_print_device_descriptor(device_desc);
+  const usb_config_desc_t *config_desc;
+  err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
+  if (err == ESP_OK)
+    usb_client_print_config_descriptor(config_desc, nullptr);
+#endif
+  ESP_LOGD(TAG, "Calling on_connected() for device %d (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
+           this->pid_);
+  this->on_connected();
+  ESP_LOGD(TAG, "on_connected() returned for device %d", this->device_addr_);
 }
 
 void USBClient::on_opened(uint8_t addr) {
