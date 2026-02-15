@@ -87,9 +87,9 @@ static const uint8_t SCF_ERR_CMD_EXEC = 0xFE;
 static const uint8_t SCF_ERR_UNKNOWN = 0xFF;
 
 // ── Syscon flash geometry ──
-static const uint32_t BLOCK_SIZE = 0x400;                     // 1KB per block
-static const uint32_t BLOCK_COUNT = 512;                      // 512 blocks
-static const uint32_t FLASH_SIZE = BLOCK_SIZE * BLOCK_COUNT;  // 512KB total
+static const uint32_t SYSCON_BLOCK_SIZE = 0x400;                                   // 1KB per block
+static const uint32_t SYSCON_BLOCK_COUNT = 512;                                    // 512 blocks
+static const uint32_t SYSCON_FLASH_SIZE = SYSCON_BLOCK_SIZE * SYSCON_BLOCK_COUNT;  // 512KB total
 
 // ── Scflasher version (we emulate v2.05) ──
 static const uint8_t SCF_VERSION_MAJOR = 2;

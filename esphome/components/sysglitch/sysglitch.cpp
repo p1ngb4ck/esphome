@@ -665,17 +665,17 @@ void SysGlitch::handle_flasher_protocol_() {
 
     case SCF_WRITE_BLOCK:
     case SCF_WRITE_BLOCK_EX: {
-      // Params: BLOCK_NUM[2] + DATA[BLOCK_SIZE] = 2 + 1024 bytes
+      // Params: BLOCK_NUM[2] + DATA[SYSCON_BLOCK_SIZE] = 2 + 1024 bytes
       uint8_t params[2];
       if (this->read_bytes_timeout_(this->pc_uart_, params, 2, 1000)) {
         // Allocate block buffer on stack (1KB)
-        uint8_t block_data[BLOCK_SIZE];
-        if (this->read_bytes_timeout_(this->pc_uart_, block_data, BLOCK_SIZE, 5000)) {
+        uint8_t block_data[SYSCON_BLOCK_SIZE];
+        if (this->read_bytes_timeout_(this->pc_uart_, block_data, SYSCON_BLOCK_SIZE, 5000)) {
           // Pack params + data reference for handler
-          uint8_t full_params[2 + BLOCK_SIZE];
+          uint8_t full_params[2 + SYSCON_BLOCK_SIZE];
           memcpy(full_params, params, 2);
-          memcpy(full_params + 2, block_data, BLOCK_SIZE);
-          this->scf_handle_write_block_(full_params, 2 + BLOCK_SIZE, cmd == SCF_WRITE_BLOCK_EX);
+          memcpy(full_params + 2, block_data, SYSCON_BLOCK_SIZE);
+          this->scf_handle_write_block_(full_params, 2 + SYSCON_BLOCK_SIZE, cmd == SCF_WRITE_BLOCK_EX);
         } else {
           this->pc_uart_->write_byte(SCF_ERR_CMD_LEN);
         }
@@ -734,7 +734,7 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
   uint16_t start_block = (params[0] << 8) | params[1];
   uint16_t end_block = (params[2] << 8) | params[3];
 
-  if (start_block >= BLOCK_COUNT || end_block >= BLOCK_COUNT || start_block > end_block) {
+  if (start_block >= SYSCON_BLOCK_COUNT || end_block >= SYSCON_BLOCK_COUNT || start_block > end_block) {
     ESP_LOGW(TAG, "SCF READ: invalid block range %u-%u", start_block, end_block);
     this->pc_uart_->write_byte(SCF_ERR_READ);
     this->pc_uart_->flush();
@@ -783,8 +783,8 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
     esp_rom_delay_us(10000);
 
     // The shellcode streams ALL flash. We need to skip to the right block.
-    // Skip (block * BLOCK_SIZE) bytes, then read BLOCK_SIZE bytes.
-    uint32_t skip_bytes = block * BLOCK_SIZE;
+    // Skip (block * SYSCON_BLOCK_SIZE) bytes, then read SYSCON_BLOCK_SIZE bytes.
+    uint32_t skip_bytes = block * SYSCON_BLOCK_SIZE;
     uint32_t total_read = 0;
 
     // Skip bytes before our block
@@ -801,8 +801,8 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
     }
 
     // Read the block data
-    uint8_t block_data[BLOCK_SIZE];
-    if (!this->read_bytes_timeout_(this->tool0_uart_, block_data, BLOCK_SIZE, 10000)) {
+    uint8_t block_data[SYSCON_BLOCK_SIZE];
+    if (!this->read_bytes_timeout_(this->tool0_uart_, block_data, SYSCON_BLOCK_SIZE, 10000)) {
       ESP_LOGW(TAG, "SCF READ: timeout reading block %u", block);
       this->pc_uart_->write_byte(SCF_ERR_READ);
       this->pc_uart_->flush();
@@ -817,9 +817,9 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
     }
 
     // Send status + data to PC
-    // scflasher expects: STATUS[1] + DATA[BLOCK_SIZE]
+    // scflasher expects: STATUS[1] + DATA[SYSCON_BLOCK_SIZE]
     this->pc_uart_->write_byte(SCF_STATUS_OK);
-    this->pc_uart_->write_array(block_data, BLOCK_SIZE);
+    this->pc_uart_->write_array(block_data, SYSCON_BLOCK_SIZE);
     this->pc_uart_->flush();
 
     // Re-glitch for next block (OCD session is consumed by exec)
@@ -835,18 +835,18 @@ void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
 }
 
 void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint8_t len, bool extended) {
-  // Params: BLOCK_NUM[2] + DATA[BLOCK_SIZE]
+  // Params: BLOCK_NUM[2] + DATA[SYSCON_BLOCK_SIZE]
   uint16_t block_num = (params[0] << 8) | params[1];
   const uint8_t *data = params + 2;
 
-  if (block_num >= BLOCK_COUNT) {
+  if (block_num >= SYSCON_BLOCK_COUNT) {
     ESP_LOGW(TAG, "SCF WRITE: invalid block %u", block_num);
     this->pc_uart_->write_byte(SCF_ERR_WRITE);
     this->pc_uart_->flush();
     return;
   }
 
-  uint32_t addr = block_num * BLOCK_SIZE;
+  uint32_t addr = block_num * SYSCON_BLOCK_SIZE;
   ESP_LOGI(TAG, "SCF WRITE block %u (addr 0x%05X)%s", block_num, addr, extended ? " [EX]" : "");
 
   // Enter ProtoA mode for write operations
@@ -866,7 +866,7 @@ void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint8_t len, bool
   }
 
   // Program the block (256 bytes at a time)
-  for (uint16_t offset = 0; offset < BLOCK_SIZE; offset += 0x100) {
+  for (uint16_t offset = 0; offset < SYSCON_BLOCK_SIZE; offset += 0x100) {
     if (!this->pa_program_block_(addr + offset, data + offset, 0x100)) {
       ESP_LOGE(TAG, "SCF WRITE: program failed at offset 0x%X", offset);
       this->pc_uart_->write_byte(SCF_ERR_WRITE);
@@ -876,7 +876,7 @@ void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint8_t len, bool
   }
 
   // Verify
-  if (!this->pa_verify_block_(addr, data, BLOCK_SIZE)) {
+  if (!this->pa_verify_block_(addr, data, SYSCON_BLOCK_SIZE)) {
     ESP_LOGW(TAG, "SCF WRITE: verify failed for block %u", block_num);
     // Continue anyway — verify failure is a warning, not fatal
   }
@@ -893,7 +893,7 @@ void SysGlitch::scf_handle_erase_block_(const uint8_t *params, uint8_t len) {
   uint16_t start_block = (params[0] << 8) | params[1];
   uint16_t end_block = (params[2] << 8) | params[3];
 
-  if (start_block >= BLOCK_COUNT || end_block >= BLOCK_COUNT || start_block > end_block) {
+  if (start_block >= SYSCON_BLOCK_COUNT || end_block >= SYSCON_BLOCK_COUNT || start_block > end_block) {
     ESP_LOGW(TAG, "SCF ERASE: invalid block range %u-%u", start_block, end_block);
     this->pc_uart_->write_byte(SCF_ERR_ERASE);
     this->pc_uart_->flush();
@@ -911,7 +911,7 @@ void SysGlitch::scf_handle_erase_block_(const uint8_t *params, uint8_t len) {
   }
 
   for (uint16_t block = start_block; block <= end_block; block++) {
-    uint32_t addr = block * BLOCK_SIZE;
+    uint32_t addr = block * SYSCON_BLOCK_SIZE;
     if (!this->pa_erase_block_(addr)) {
       ESP_LOGE(TAG, "SCF ERASE: failed at block %u", block);
       this->pc_uart_->write_byte(SCF_ERR_ERASE);
@@ -936,8 +936,8 @@ void SysGlitch::scf_handle_erase_chip_() {
     return;
   }
 
-  for (uint16_t block = 0; block < BLOCK_COUNT; block++) {
-    uint32_t addr = block * BLOCK_SIZE;
+  for (uint16_t block = 0; block < SYSCON_BLOCK_COUNT; block++) {
+    uint32_t addr = block * SYSCON_BLOCK_SIZE;
     if (!this->pa_erase_block_(addr)) {
       ESP_LOGE(TAG, "SCF ERASE CHIP: failed at block %u", block);
       this->pc_uart_->write_byte(SCF_ERR_ERASE);
@@ -992,11 +992,11 @@ void SysGlitch::bridge_uarts_() {
 
   // Log progress periodically
   if (this->dump_bytes_received_ > 0 && (this->dump_bytes_received_ % (64 * 1024)) < 256) {
-    ESP_LOGI(TAG, "UART dump: %u / %u KB", this->dump_bytes_received_ / 1024, FLASH_SIZE / 1024);
+    ESP_LOGI(TAG, "UART dump: %u / %u KB", this->dump_bytes_received_ / 1024, SYSCON_FLASH_SIZE / 1024);
   }
 
   // Check if dump is complete (full flash = 512KB)
-  if (this->dump_bytes_received_ >= FLASH_SIZE) {
+  if (this->dump_bytes_received_ >= SYSCON_FLASH_SIZE) {
     ESP_LOGI(TAG, "UART dump complete: %u bytes received", this->dump_bytes_received_);
     this->state_.store(STATE_DONE, std::memory_order_release);
   }
@@ -1104,12 +1104,12 @@ void SysGlitch::dump_to_sd_() {
 
     // Log progress every 64KB
     if ((this->dump_bytes_received_ % (64 * 1024)) < 256) {
-      ESP_LOGI(TAG, "SD dump: %u / %u KB", this->dump_bytes_received_ / 1024, FLASH_SIZE / 1024);
+      ESP_LOGI(TAG, "SD dump: %u / %u KB", this->dump_bytes_received_ / 1024, SYSCON_FLASH_SIZE / 1024);
     }
   }
 
   // Check if dump is complete
-  if (this->dump_bytes_received_ >= FLASH_SIZE) {
+  if (this->dump_bytes_received_ >= SYSCON_FLASH_SIZE) {
     ESP_LOGI(TAG, "SD dump complete: %u bytes saved to %s", this->dump_bytes_received_, this->dump_path_.c_str());
     this->state_.store(STATE_DONE, std::memory_order_release);
   }
