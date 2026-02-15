@@ -223,7 +223,7 @@ struct SerialConfig {
 class NetworkSerialClient : public Component {
  public:
   NetworkSerialClient() = default;
-  ~NetworkSerialClient() override;
+  ~NetworkSerialClient();
 
   // Component lifecycle
   void setup() override;
@@ -308,8 +308,8 @@ class NetworkSerialClient : public Component {
   // Modem Control
   //========================================================================
 
-  bool set_dtr(bool state);
-  bool set_rts(bool state);
+  bool set_dtr_runtime(bool state);
+  bool set_rts_runtime(bool state);
   uint8_t get_modem_state() const { return this->modem_state_; }
   uint8_t get_line_state() const { return this->line_state_; }
 
@@ -438,7 +438,7 @@ class NetworkSerialClient : public Component {
 class NetworkSerialServer : public Component {
  public:
   NetworkSerialServer() = default;
-  ~NetworkSerialServer() override;
+  ~NetworkSerialServer();
 
   // Component lifecycle
   void setup() override;

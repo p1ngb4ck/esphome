@@ -67,7 +67,7 @@ void NetworkSerialServer::dump_config() {
 
 bool NetworkSerialServer::start_listening_() {
 #ifdef USE_ESP_IDF
-  this->listen_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  this->listen_socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (this->listen_socket_ < 0) {
     ESP_LOGE(TAG_SERVER, "Failed to create socket: errno %d", errno);
     return false;

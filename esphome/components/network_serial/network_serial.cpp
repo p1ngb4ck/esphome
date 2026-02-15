@@ -232,7 +232,7 @@ void NetworkSerialClient::disconnect() {
 bool NetworkSerialClient::connect_socket_() {
 #ifdef USE_ESP_IDF
   // Create TCP socket
-  this->socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  this->socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (this->socket_ < 0) {
     ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
     return false;
@@ -726,7 +726,7 @@ bool NetworkSerialClient::set_flow_control_runtime(FlowControl flow_control) {
 // Modem Control
 //========================================================================
 
-bool NetworkSerialClient::set_dtr(bool state) {
+bool NetworkSerialClient::set_dtr_runtime(bool state) {
   this->config_.dtr = state;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t control = state ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
@@ -735,7 +735,7 @@ bool NetworkSerialClient::set_dtr(bool state) {
   return false;
 }
 
-bool NetworkSerialClient::set_rts(bool state) {
+bool NetworkSerialClient::set_rts_runtime(bool state) {
   this->config_.rts = state;
   if (this->connected_ && this->telnet_negotiated_) {
     uint8_t control = state ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
