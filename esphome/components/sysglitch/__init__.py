@@ -45,17 +45,13 @@ def validate_mode_config(config):
     mode = config[CONF_MODE]
 
     # pc_uart required for dump_uart and flasher modes
-    needs_pc_uart = mode in (
-        MODES["dump_uart"],
-        MODES["flasher"],
-    )
-    if needs_pc_uart and CONF_PC_UART not in config:
+    if mode in ("dump_uart", "flasher") and CONF_PC_UART not in config:
         raise cv.Invalid(
             "Modes 'dump_uart' and 'flasher' require 'pc_uart' to be configured"
         )
 
     # write_path required for write mode
-    if mode == MODES["write"] and CONF_WRITE_PATH not in config:
+    if mode == "write" and CONF_WRITE_PATH not in config:
         raise cv.Invalid("Mode 'write' requires 'write_path' to be configured")
 
     # glitch_pin and rx_pulldown_pin are optional for all modes.
@@ -74,7 +70,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_RESET_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_GLITCH_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_RX_PULLDOWN_PIN): pins.gpio_output_pin_schema,
-            cv.Optional(CONF_MODE, default="dump_sd"): cv.enum(MODES, lower=True),
+            cv.Optional(CONF_MODE, default="dump_sd"): cv.one_of(*MODES, lower=True),
             cv.Optional(CONF_DUMP_PATH, default="/sd/syscon_dump.bin"): cv.string,
             cv.Optional(CONF_WRITE_PATH): cv.string,
             cv.Optional(CONF_GLITCH_DELAY_MIN, default=1500): cv.uint32_t,
@@ -117,7 +113,7 @@ async def to_code(config):
         rx_pulldown_pin = await cg.gpio_pin_expression(config[CONF_RX_PULLDOWN_PIN])
         cg.add(var.set_rx_pulldown_pin(rx_pulldown_pin))
 
-    cg.add(var.set_mode(config[CONF_MODE]))
+    cg.add(var.set_mode(MODES[config[CONF_MODE]]))
     cg.add(var.set_dump_path(config[CONF_DUMP_PATH]))
     if CONF_WRITE_PATH in config:
         cg.add(var.set_write_path(config[CONF_WRITE_PATH]))
