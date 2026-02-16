@@ -25,4 +25,14 @@ template<typename... Ts> class StopGlitchAction : public Action<Ts...> {
   SysGlitch *parent_;
 };
 
+template<typename... Ts> class StartWriteAction : public Action<Ts...> {
+ public:
+  explicit StartWriteAction(SysGlitch *parent) : parent_(parent) {}
+
+  void play(Ts... x) override { this->parent_->start_write(); }
+
+ protected:
+  SysGlitch *parent_;
+};
+
 }  // namespace esphome::sysglitch

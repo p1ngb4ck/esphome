@@ -108,6 +108,7 @@ enum SysGlitchMode : uint8_t {
   MODE_DUMP_SD = 0,  // Dump flash to SD card (standalone, no PC needed)
   MODE_DUMP_UART,    // Dump flash over pc_uart (bridge mode)
   MODE_FLASHER,      // Scflasher-compatible protocol over pc_uart (read/write/erase)
+  MODE_WRITE,        // Write .bin file from SD to syscon via ProtoA (no glitch needed)
 };
 
 enum SysGlitchState : uint8_t {
@@ -116,6 +117,7 @@ enum SysGlitchState : uint8_t {
   STATE_UPLOADING_SHELLCODE,
   STATE_DUMPING,
   STATE_FLASHER,  // scflasher-compatible protocol handler
+  STATE_WRITING,  // ProtoA write in progress
   STATE_DONE,
   STATE_FAILED,
 };
@@ -144,10 +146,12 @@ class SysGlitch : public Component {
   void set_max_attempts(uint32_t max) { this->max_attempts_ = max; }
   void set_mode(SysGlitchMode mode) { this->mode_ = mode; }
   void set_dump_path(const std::string &path) { this->dump_path_ = path; }
+  void set_write_path(const std::string &path) { this->write_path_ = path; }
 
   // Action entry points (called from main loop / automations)
   void start_glitch();
   void stop_glitch();
+  void start_write();
 
   SysGlitchState get_state() const { return this->state_.load(std::memory_order_relaxed); }
   uint32_t get_attempt_count() const { return this->attempt_count_.load(std::memory_order_relaxed); }
@@ -182,6 +186,9 @@ class SysGlitch : public Component {
   // Dump file path (for SD mode, e.g. "/sd/syscon_dump.bin")
   std::string dump_path_{"/sd/syscon_dump.bin"};
 
+  // Write source file path (for write mode, e.g. "/sdcard/modified.bin")
+  std::string write_path_{"/sdcard/modified.bin"};
+
   // Whether OCD session is active (glitch succeeded, chip is unlocked)
   bool ocd_active_{false};
 
@@ -199,6 +206,10 @@ class SysGlitch : public Component {
 
   // The actual glitch loop running on the dedicated core
   void run_glitch_loop_();
+
+  // Write task entry point and loop (ProtoA flash write)
+  static void write_task_func_(void *param);
+  void run_write_loop_();
 #endif
 
   // ── OCD operations ──

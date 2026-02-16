@@ -33,22 +33,20 @@ static const BaseType_t GLITCH_TASK_CORE = 1;
 void SysGlitch::setup() {
   // Configure GPIO pins
   this->reset_pin_->setup();
-  this->glitch_pin_->setup();
-  this->rx_pulldown_pin_->setup();
+  this->reset_pin_->digital_write(true);  // Reset HIGH (inactive)
 
-  // Set initial pin states (matching reference firmware)
-  this->reset_pin_->digital_write(true);         // Reset HIGH (inactive)
-  this->rx_pulldown_pin_->digital_write(false);  // RX pulldown LOW
-  this->glitch_pin_->digital_write(true);        // Glitch pin HIGH (inactive)
-
-  // Pre-calculate fast GPIO path for timing-critical glitch pulse
-  this->isr_glitch_pin_ = this->glitch_pin_->to_isr();
+  // Glitch and RX pulldown pins are optional (not needed for write mode)
+  if (this->glitch_pin_ != nullptr) {
+    this->glitch_pin_->setup();
+    this->glitch_pin_->digital_write(true);  // Glitch pin HIGH (inactive)
+    this->isr_glitch_pin_ = this->glitch_pin_->to_isr();
+  }
+  if (this->rx_pulldown_pin_ != nullptr) {
+    this->rx_pulldown_pin_->setup();
+    this->rx_pulldown_pin_->digital_write(false);  // RX pulldown LOW
+  }
 
   ESP_LOGI(TAG, "SysGlitch initialized");
-  ESP_LOGI(TAG, "  Glitch delay: %u-%u us", this->glitch_delay_min_us_, this->glitch_delay_max_us_);
-  ESP_LOGI(TAG, "  Glitch width max: %u ns", this->glitch_width_max_ns_);
-  ESP_LOGI(TAG, "  Max attempts: %u (0=infinite)", this->max_attempts_);
-  ESP_LOGI(TAG, "  Glitch task pinned to core %d", GLITCH_TASK_CORE);
 
   const char *mode_str = "unknown";
   switch (this->mode_) {
@@ -60,22 +58,35 @@ void SysGlitch::setup() {
       break;
     case MODE_FLASHER:
       mode_str = "flasher";
+      break;
+    case MODE_WRITE:
+      mode_str = "write";
       break;
   }
   ESP_LOGI(TAG, "  Mode: %s", mode_str);
   if (this->mode_ == MODE_DUMP_SD) {
     ESP_LOGI(TAG, "  Dump path: %s", this->dump_path_.c_str());
   }
+  if (this->mode_ == MODE_WRITE) {
+    ESP_LOGI(TAG, "  Write path: %s", this->write_path_.c_str());
+  }
+  if (this->mode_ != MODE_WRITE) {
+    ESP_LOGI(TAG, "  Glitch delay: %u-%u us", this->glitch_delay_min_us_, this->glitch_delay_max_us_);
+    ESP_LOGI(TAG, "  Glitch width max: %u ns", this->glitch_width_max_ns_);
+    ESP_LOGI(TAG, "  Max attempts: %u (0=infinite)", this->max_attempts_);
+    ESP_LOGI(TAG, "  Glitch task pinned to core %d", GLITCH_TASK_CORE);
+  }
 }
 
 void SysGlitch::dump_config() {
   ESP_LOGCONFIG(TAG, "SysGlitch:");
   LOG_PIN("  Reset Pin: ", this->reset_pin_);
-  LOG_PIN("  Glitch Pin: ", this->glitch_pin_);
-  LOG_PIN("  RX Pulldown Pin: ", this->rx_pulldown_pin_);
-  ESP_LOGCONFIG(TAG, "  Glitch delay: %u-%u us", this->glitch_delay_min_us_, this->glitch_delay_max_us_);
-  ESP_LOGCONFIG(TAG, "  Glitch width max: %u ns", this->glitch_width_max_ns_);
-  ESP_LOGCONFIG(TAG, "  Max attempts: %u", this->max_attempts_);
+  if (this->glitch_pin_ != nullptr) {
+    LOG_PIN("  Glitch Pin: ", this->glitch_pin_);
+  }
+  if (this->rx_pulldown_pin_ != nullptr) {
+    LOG_PIN("  RX Pulldown Pin: ", this->rx_pulldown_pin_);
+  }
   const char *mode_str = "unknown";
   switch (this->mode_) {
     case MODE_DUMP_SD:
@@ -87,13 +98,23 @@ void SysGlitch::dump_config() {
     case MODE_FLASHER:
       mode_str = "flasher";
       break;
+    case MODE_WRITE:
+      mode_str = "write";
+      break;
   }
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_str);
+  if (this->mode_ == MODE_WRITE) {
+    ESP_LOGCONFIG(TAG, "  Write path: %s", this->write_path_.c_str());
+  } else {
+    ESP_LOGCONFIG(TAG, "  Glitch delay: %u-%u us", this->glitch_delay_min_us_, this->glitch_delay_max_us_);
+    ESP_LOGCONFIG(TAG, "  Glitch width max: %u ns", this->glitch_width_max_ns_);
+    ESP_LOGCONFIG(TAG, "  Max attempts: %u", this->max_attempts_);
+    ESP_LOGCONFIG(TAG, "  Glitch core: %d", GLITCH_TASK_CORE);
+  }
   if (this->mode_ == MODE_DUMP_SD) {
     ESP_LOGCONFIG(TAG, "  Dump path: %s", this->dump_path_.c_str());
   }
   ESP_LOGCONFIG(TAG, "  PC UART: %s", this->pc_uart_ != nullptr ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "  Glitch core: %d", GLITCH_TASK_CORE);
 }
 
 void SysGlitch::loop() {
@@ -133,6 +154,10 @@ void SysGlitch::loop() {
       this->handle_flasher_protocol_();
       break;
 
+    case STATE_WRITING:
+      // Write runs on dedicated FreeRTOS task — just log progress here
+      break;
+
     case STATE_DONE:
       ESP_LOGI(TAG, "Operation complete.");
       this->state_.store(STATE_IDLE, std::memory_order_release);
@@ -162,8 +187,12 @@ void SysGlitch::start_glitch() {
 
   // Reset pin states
   this->reset_pin_->digital_write(true);
-  this->rx_pulldown_pin_->digital_write(false);
-  this->glitch_pin_->digital_write(true);
+  if (this->rx_pulldown_pin_ != nullptr) {
+    this->rx_pulldown_pin_->digital_write(false);
+  }
+  if (this->glitch_pin_ != nullptr) {
+    this->glitch_pin_->digital_write(true);
+  }
 
 #ifdef USE_ESP32
   // Spawn glitch task on dedicated core
@@ -212,8 +241,10 @@ void SysGlitch::run_glitch_loop_() {
       ESP_LOGW(TAG, "Max attempts (%u) reached", this->max_attempts_);
       this->state_.store(STATE_FAILED, std::memory_order_release);
       this->reset_pin_->digital_write(true);
-      this->glitch_pin_->digital_write(true);
-      this->rx_pulldown_pin_->digital_write(false);
+      if (this->glitch_pin_ != nullptr)
+        this->glitch_pin_->digital_write(true);
+      if (this->rx_pulldown_pin_ != nullptr)
+        this->rx_pulldown_pin_->digital_write(false);
       return;
     }
 
@@ -276,35 +307,46 @@ void SysGlitch::run_glitch_loop_() {
     this->tool0_uart_->write_byte(this->compute_passcode_checksum_());
     this->tool0_uart_->flush();
 
-    // Step 11: Check for ACK (glitch success!)
+    // Step 11: Check for OCD unlock response
+    // 0xF0 = already unlocked, 0xF2 = unlock success, 0xF1 = locked/failed
     esp_rom_delay_us(5000);
 
-    bool got_ack = false;
+    bool got_unlock = false;
     while (this->tool0_uart_->available()) {
       uint8_t rx_byte;
       if (this->tool0_uart_->read_byte(&rx_byte)) {
-        if (rx_byte == ACK) {
-          got_ack = true;
+        if (rx_byte == OCD_UNLOCK_ALREADY || rx_byte == OCD_UNLOCK_OK) {
+          ESP_LOGI(TAG, "OCD response: 0x%02X (%s)", rx_byte,
+                   rx_byte == OCD_UNLOCK_ALREADY ? "already unlocked" : "unlock OK");
+          got_unlock = true;
           break;
+        } else if (rx_byte == OCD_UNLOCK_LOCKED) {
+          ESP_LOGD(TAG, "OCD response: 0xF1 (locked - glitch needed)");
+        } else if ((attempt % 100) == 0) {
+          ESP_LOGD(TAG, "OCD response byte: 0x%02X", rx_byte);
         }
       }
     }
 
-    if (got_ack) {
+    if (got_unlock) {
       ESP_LOGI(TAG, "*** GLITCH SUCCESS after %u attempts! ***", attempt + 1);
       this->ocd_active_ = true;
 
       if (this->mode_ == MODE_FLASHER) {
         // Flasher mode: enter scflasher-compatible protocol handler
         // The PC tool (ps4-wee-tools) will send commands over pc_uart
-        this->rx_pulldown_pin_->digital_write(true);
+        if (this->rx_pulldown_pin_ != nullptr) {
+          this->rx_pulldown_pin_->digital_write(true);
+        }
         ESP_LOGI(TAG, "OCD unlocked. Entering flasher mode.");
         this->state_.store(STATE_FLASHER, std::memory_order_release);
       } else {
         // Dump mode (SD or UART): upload shellcode and stream flash dump
         this->state_.store(STATE_UPLOADING_SHELLCODE, std::memory_order_release);
         this->upload_and_execute_();
-        this->rx_pulldown_pin_->digital_write(true);
+        if (this->rx_pulldown_pin_ != nullptr) {
+          this->rx_pulldown_pin_->digital_write(true);
+        }
         this->dump_bytes_received_ = 0;
         ESP_LOGI(TAG, "Shellcode uploaded. Entering dump mode (%s).", this->mode_ == MODE_DUMP_SD ? "SD" : "UART");
         this->state_.store(STATE_DUMPING, std::memory_order_release);
@@ -328,11 +370,168 @@ void SysGlitch::run_glitch_loop_() {
   this->state_.store(STATE_IDLE, std::memory_order_release);
 
   this->reset_pin_->digital_write(true);
-  this->glitch_pin_->digital_write(true);
-  this->rx_pulldown_pin_->digital_write(false);
+  if (this->glitch_pin_ != nullptr)
+    this->glitch_pin_->digital_write(true);
+  if (this->rx_pulldown_pin_ != nullptr)
+    this->rx_pulldown_pin_->digital_write(false);
+}
+
+// ════════════════════════════════════════════════════════════════
+// ProtoA Write mode
+// ════════════════════════════════════════════════════════════════
+
+void SysGlitch::write_task_func_(void *param) {
+  auto *self = static_cast<SysGlitch *>(param);
+  self->run_write_loop_();
+  self->glitch_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void SysGlitch::run_write_loop_() {
+  ESP_LOGI(TAG, "Write task started on core %d", xPortGetCoreID());
+  ESP_LOGI(TAG, "Opening file: %s", this->write_path_.c_str());
+
+  // Open the source file using VFS (works with /sdcard/, /usb/, etc.)
+  FILE *f = fopen(this->write_path_.c_str(), "rb");
+  if (f == nullptr) {
+    ESP_LOGE(TAG, "Failed to open file: %s", this->write_path_.c_str());
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  // Check file size
+  fseek(f, 0, SEEK_END);
+  long file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  if (file_size != SYSCON_FLASH_SIZE) {
+    ESP_LOGE(TAG, "File size mismatch: expected %u bytes, got %ld", SYSCON_FLASH_SIZE, file_size);
+    fclose(f);
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  ESP_LOGI(TAG, "File size OK: %ld bytes (%u blocks)", file_size, SYSCON_BLOCK_COUNT);
+
+  // Enter ProtoA mode (serial bootloader)
+  ESP_LOGI(TAG, "Entering ProtoA mode...");
+  if (!this->enter_proto_a_()) {
+    ESP_LOGE(TAG, "Failed to enter ProtoA mode!");
+    fclose(f);
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  ESP_LOGI(TAG, "ProtoA mode active. Starting flash write...");
+
+  // Write all blocks
+  uint8_t block_data[SYSCON_BLOCK_SIZE];
+  uint32_t blocks_written = 0;
+  uint32_t blocks_failed = 0;
+
+  for (uint16_t block = 0; block < SYSCON_BLOCK_COUNT; block++) {
+    // Check for stop request
+    if (this->stop_requested_.load(std::memory_order_acquire)) {
+      ESP_LOGW(TAG, "Write stopped by user at block %u/%u", block, SYSCON_BLOCK_COUNT);
+      break;
+    }
+
+    // Read block from file
+    size_t bytes_read = fread(block_data, 1, SYSCON_BLOCK_SIZE, f);
+    if (bytes_read != SYSCON_BLOCK_SIZE) {
+      ESP_LOGE(TAG, "File read error at block %u: got %u bytes", block, (uint32_t) bytes_read);
+      fclose(f);
+      this->state_.store(STATE_FAILED, std::memory_order_release);
+      return;
+    }
+
+    uint32_t addr = block * SYSCON_BLOCK_SIZE;
+
+    // Erase block
+    if (!this->pa_erase_block_(addr)) {
+      ESP_LOGE(TAG, "Erase failed at block %u (addr 0x%05X)", block, addr);
+      blocks_failed++;
+      continue;
+    }
+
+    // Program block (256 bytes at a time, 4 chunks per 1KB block)
+    bool program_ok = true;
+    for (uint16_t offset = 0; offset < SYSCON_BLOCK_SIZE; offset += 0x100) {
+      if (!this->pa_program_block_(addr + offset, block_data + offset, 0x100)) {
+        ESP_LOGE(TAG, "Program failed at block %u offset 0x%X", block, offset);
+        program_ok = false;
+        break;
+      }
+    }
+
+    if (!program_ok) {
+      blocks_failed++;
+      continue;
+    }
+
+    // Verify block
+    if (!this->pa_verify_block_(addr, block_data, SYSCON_BLOCK_SIZE)) {
+      ESP_LOGW(TAG, "Verify failed at block %u — data may still be correct", block);
+    }
+
+    blocks_written++;
+
+    // Progress log every 16 blocks (~16KB)
+    if ((block % 16) == 0 || block == SYSCON_BLOCK_COUNT - 1) {
+      ESP_LOGI(TAG, "Write progress: block %u/%u (%u KB / %u KB)", block + 1, SYSCON_BLOCK_COUNT,
+               (block + 1) * SYSCON_BLOCK_SIZE / 1024, SYSCON_FLASH_SIZE / 1024);
+    }
+
+    // Yield every 8 blocks to feed the watchdog
+    if ((block % 8) == 7) {
+      vTaskDelay(1);
+    }
+  }
+
+  fclose(f);
+
+  // Reset the chip
+  ESP_LOGI(TAG, "Write complete. Resetting chip...");
+  this->reset_pin_->digital_write(false);
+  esp_rom_delay_us(50000);
+  this->reset_pin_->digital_write(true);
+
+  ESP_LOGI(TAG, "Flash write finished: %u blocks written, %u failed", blocks_written, blocks_failed);
+
+  if (blocks_failed > 0) {
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+  } else {
+    this->state_.store(STATE_DONE, std::memory_order_release);
+  }
 }
 
 #endif  // USE_ESP32
+
+void SysGlitch::start_write() {
+  auto current = this->state_.load(std::memory_order_acquire);
+  if (current != STATE_IDLE) {
+    ESP_LOGW(TAG, "Cannot start write - not idle (state=%u)", current);
+    return;
+  }
+
+  ESP_LOGI(TAG, "Starting ProtoA flash write from: %s", this->write_path_.c_str());
+  this->stop_requested_.store(false, std::memory_order_release);
+  this->state_.store(STATE_WRITING, std::memory_order_release);
+
+#ifdef USE_ESP32
+  // Spawn write task on dedicated core (needs enough stack for file I/O + ProtoA frames)
+  BaseType_t result = xTaskCreatePinnedToCore(write_task_func_, "syswrite", 8192, this, GLITCH_TASK_PRIORITY,
+                                              &this->glitch_task_handle_, GLITCH_TASK_CORE);
+
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create write task!");
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+  }
+#else
+  ESP_LOGE(TAG, "SysGlitch write requires ESP32 platform");
+  this->state_.store(STATE_FAILED, std::memory_order_release);
+#endif
+}
 
 // ════════════════════════════════════════════════════════════════
 // OCD operations
@@ -378,7 +577,9 @@ bool SysGlitch::enter_proto_a_() {
 
   // Reset sequence: RESET=LOW, TOOL0=LOW
   this->reset_pin_->digital_write(false);
-  this->rx_pulldown_pin_->digital_write(false);
+  if (this->rx_pulldown_pin_ != nullptr) {
+    this->rx_pulldown_pin_->digital_write(false);
+  }
   esp_rom_delay_us(40000);  // 40ms
 
   // Release RESET with TOOL0 HIGH (ProtoA mode — NOT OCD mode)
