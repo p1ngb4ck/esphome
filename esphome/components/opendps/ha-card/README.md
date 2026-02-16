@@ -137,10 +137,12 @@ current_step: 0.01
 
 ## Usage
 
-### Rotary Knobs
-- **Click and drag** in a circular motion to adjust voltage or current
-- **Scroll wheel** over a knob for fine-step adjustment
-- The red indicator line shows the current position
+### Sliders
+- **Click and drag** the slider thumb to adjust voltage or current
+- **Click on the track** to jump to a position
+- **Scroll wheel** over a slider for fine-step adjustment
+- Scale labels show min/quarter/mid/three-quarter/max values from entity attributes
+- The SET V / SET A displays update live during drag
 
 ### LCD Displays
 - The main VOLTAGE and CURRENT displays show read-only measured values
@@ -178,9 +180,15 @@ current_step: 0.01
 2. Verify your ESPHome device is online and connected
 3. Entity names depend on your ESPHome YAML configuration
 
-### Knobs not responding
+### Sliders not responding
 1. Make sure `set_voltage` and `set_current` entities are configured
 2. These must be `number` entities (not sensors)
+
+## Full Dashboard Example
+
+See `example_dashboard.yaml` in this directory for a complete HA dashboard
+configuration including the PSU card, preset buttons, history graphs,
+device controls, and the full ESPHome datalogger setup reference.
 
 ## License
 

@@ -78,6 +78,7 @@ class OpenDPSCard extends HTMLElement {
     this._pendingVoltage = null;
     this._pendingCurrent = null;
     this._sliderTimer = null;
+    this._sliderSettleUntil = { voltage: 0, current: 0 };
 
     // Direct input state
     this._editingVoltage = false;
@@ -191,15 +192,22 @@ class OpenDPSCard extends HTMLElement {
 
   // ── Horizontal slider (vintage stereo fader style) ─────────────────
 
-  _buildSlider(id, label) {
+  _buildSlider(id, label, unit) {
     return `
       <div class="slider-group">
         <div class="slider-label">${label}</div>
+        <div class="slider-scale" id="slider-scale-${id}">
+          <span class="slider-scale-label" id="slider-scale-min-${id}">0</span>
+          <span class="slider-scale-label" id="slider-scale-q1-${id}"></span>
+          <span class="slider-scale-label" id="slider-scale-mid-${id}"></span>
+          <span class="slider-scale-label" id="slider-scale-q3-${id}"></span>
+          <span class="slider-scale-label" id="slider-scale-max-${id}">${unit}</span>
+        </div>
         <div class="slider-track-container" id="slider-${id}">
           <div class="slider-track">
             <div class="slider-track-fill" id="slider-fill-${id}"></div>
             <div class="slider-tick-marks">
-              ${Array(11).fill(0).map((_, i) =>
+              ${Array(21).fill(0).map((_, i) =>
                 `<div class="slider-tick${i % 5 === 0 ? ' slider-tick-major' : ''}"></div>`
               ).join('')}
             </div>
@@ -345,12 +353,12 @@ class OpenDPSCard extends HTMLElement {
 
           <!-- Controls panel -->
           <div class="controls-panel">
-            ${this._buildSlider('voltage', 'VOLTAGE')}
+            ${this._buildSlider('voltage', 'VOLTAGE', 'V')}
             <div class="power-button-area" id="power-button">
               ${this._buildPowerButton(false)}
               <div class="pwr-label" id="pwr-label">OUTPUT</div>
             </div>
-            ${this._buildSlider('current', 'CURRENT')}
+            ${this._buildSlider('current', 'CURRENT', 'A')}
           </div>
 
           <!-- Temperature gauges -->
@@ -440,8 +448,14 @@ class OpenDPSCard extends HTMLElement {
 
     if (dp.show_power) {
       this._updateLCD('lcd-power', pOut, 4, dp.decimal_places_power, lcd, true);
-      this._updateLCD('lcd-set-voltage', setV, 4, dp.decimal_places_voltage, lcd, true);
-      this._updateLCD('lcd-set-current', setI, 4, dp.decimal_places_current, lcd, true);
+      // Only update SET displays when not actively dragging or settling
+      const now2 = Date.now();
+      if (this._activeSlider !== 'voltage' && now2 > this._sliderSettleUntil.voltage) {
+        this._updateLCD('lcd-set-voltage', setV, 4, dp.decimal_places_voltage, lcd, true);
+      }
+      if (this._activeSlider !== 'current' && now2 > this._sliderSettleUntil.current) {
+        this._updateLCD('lcd-set-current', setI, 4, dp.decimal_places_current, lcd, true);
+      }
     }
 
     // ── Input voltage ──
@@ -504,13 +518,18 @@ class OpenDPSCard extends HTMLElement {
       }
     }
 
-    // ── Update slider positions ──
-    if (setV !== null && this._activeSlider !== 'voltage') {
+    // ── Update slider positions (skip during drag or settle period) ──
+    const now = Date.now();
+    if (setV !== null && this._activeSlider !== 'voltage' && now > this._sliderSettleUntil.voltage) {
       this._updateSliderPosition('voltage', setV);
     }
-    if (setI !== null && this._activeSlider !== 'current') {
+    if (setI !== null && this._activeSlider !== 'current' && now > this._sliderSettleUntil.current) {
       this._updateSliderPosition('current', setI);
     }
+
+    // ── Update slider scale labels (min/q1/mid/q3/max from entity attributes) ──
+    this._updateSliderScale('voltage');
+    this._updateSliderScale('current');
   }
 
   _updateLCD(id, value, totalDigits, decimals, lcd, small) {
@@ -536,6 +555,26 @@ class OpenDPSCard extends HTMLElement {
     const thumb = this.shadowRoot.getElementById(`slider-thumb-${which}`);
     if (fill) fill.style.width = `${pct}%`;
     if (thumb) thumb.style.left = `${pct}%`;
+  }
+
+  _updateSliderScale(which) {
+    const { min, max } = this._getSliderRange(which);
+    const unit = which === 'voltage' ? 'V' : 'A';
+    const decimals = which === 'voltage' ? 1 : 2;
+    const q1 = min + (max - min) * 0.25;
+    const mid = min + (max - min) * 0.5;
+    const q3 = min + (max - min) * 0.75;
+
+    const setLabel = (id, text) => {
+      const el = this.shadowRoot.getElementById(id);
+      if (el) el.textContent = text;
+    };
+
+    setLabel(`slider-scale-min-${which}`, min.toFixed(decimals));
+    setLabel(`slider-scale-q1-${which}`, q1.toFixed(decimals));
+    setLabel(`slider-scale-mid-${which}`, mid.toFixed(decimals));
+    setLabel(`slider-scale-q3-${which}`, q3.toFixed(decimals));
+    setLabel(`slider-scale-max-${which}`, max.toFixed(decimals) + unit);
   }
 
   _getSliderRange(which) {
@@ -686,6 +725,7 @@ class OpenDPSCard extends HTMLElement {
       const rect = track.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       this._setSliderValue(which, pct);
+      this._sliderSettleUntil[which] = Date.now() + 1500;
     });
 
     // Mouse wheel for fine adjustment
@@ -696,13 +736,24 @@ class OpenDPSCard extends HTMLElement {
       const current = this._getNumber(entityId) || 0;
       const step = which === 'voltage' ? this._config.voltage_step : this._config.current_step;
       const delta = e.deltaY < 0 ? step : -step;
-      const newVal = Math.max(0, current + delta);
+      const { min, max } = this._getSliderRange(which);
+      const newVal = Math.max(min, Math.min(max, current + delta));
 
       if (which === 'voltage') {
         this._setVoltage(newVal);
       } else {
         this._setCurrent(newVal);
       }
+      this._updateSliderPosition(which, newVal);
+      // Update SET display immediately for wheel
+      const lcd = this._getLCDColors();
+      const dp = this._config;
+      if (which === 'voltage') {
+        this._updateLCD('lcd-set-voltage', newVal, 4, dp.decimal_places_voltage, lcd, true);
+      } else {
+        this._updateLCD('lcd-set-current', newVal, 4, dp.decimal_places_current, lcd, true);
+      }
+      this._sliderSettleUntil[which] = Date.now() + 1500;
     }, { passive: false });
   }
 
@@ -724,6 +775,8 @@ class OpenDPSCard extends HTMLElement {
       this._setCurrent(this._pendingCurrent);
       this._pendingCurrent = null;
     }
+    // Prevent HA state from snapping slider back while the new value propagates
+    this._sliderSettleUntil[which] = Date.now() + 1500;
     this._activeSlider = null;
     this._sliderTrackRect = null;
   }
@@ -737,6 +790,15 @@ class OpenDPSCard extends HTMLElement {
 
     // Update visual immediately
     this._updateSliderPosition(which, newVal);
+
+    // Update SET V / SET A LCD display live during drag
+    const lcd = this._getLCDColors();
+    const dp = this._config;
+    if (which === 'voltage') {
+      this._updateLCD('lcd-set-voltage', newVal, 4, dp.decimal_places_voltage, lcd, true);
+    } else {
+      this._updateLCD('lcd-set-current', newVal, 4, dp.decimal_places_current, lcd, true);
+    }
 
     if (debounce) {
       // Debounce during drag
@@ -1185,6 +1247,30 @@ class OpenDPSCard extends HTMLElement {
       .slider-tick-major {
         height: 5px;
         background: rgba(255,255,255,0.25);
+      }
+
+      .slider-scale {
+        display: flex;
+        justify-content: space-between;
+        padding: 0 14px;
+        margin-bottom: 2px;
+      }
+
+      .slider-scale-label {
+        font-size: 8px;
+        color: #666;
+        font-family: 'Courier New', monospace;
+        font-weight: 600;
+        min-width: 0;
+        text-align: center;
+      }
+
+      .slider-scale-label:first-child {
+        text-align: left;
+      }
+
+      .slider-scale-label:last-child {
+        text-align: right;
       }
 
       .slider-thumb {
@@ -1641,7 +1727,7 @@ window.customCards.push({
 });
 
 console.info(
-  '%c OPENDPS-CARD %c v2.0.0 %c Virtual Lab PSU ',
+  '%c OPENDPS-CARD %c v2.1.0 %c Virtual Lab PSU ',
   'color: white; background: #39ff14; font-weight: bold;',
   'color: #39ff14; background: #222; font-weight: bold;',
   'color: #888; background: #222;'

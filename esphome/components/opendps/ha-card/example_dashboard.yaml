@@ -1,0 +1,222 @@
+# ═══════════════════════════════════════════════════════════════════════
+# OpenDPS Home Assistant Dashboard - Complete Example
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Prerequisites:
+# 1. Copy opendps-card.js to your HA config/www/ directory
+# 2. Add the resource (see README.md for instructions)
+# 3. Your ESPHome OpenDPS device must be connected to Home Assistant
+#
+# Entity names below assume default ESPHome naming. Adjust to match
+# your actual entity IDs (check Developer Tools -> States in HA).
+#
+# ── How to use this file ──
+# Option A: Paste into a manual dashboard YAML view
+# Option B: Use individual cards from the sections below
+# ═══════════════════════════════════════════════════════════════════════
+
+title: Lab Power Supply
+views:
+  - title: OpenDPS
+    path: opendps
+    icon: mdi:flash
+    cards:
+
+      # ────────────────────────────────────────────────────────────────
+      # Main PSU Card (virtual lab power supply with all controls)
+      # ────────────────────────────────────────────────────────────────
+      - type: custom:opendps-card
+        name: "DPS5005"
+        lcd_color: green          # green | amber | blue | white
+
+        entities:
+          # ── Measurement Sensors ──
+          voltage_out: sensor.opendps_output_voltage
+          current_out: sensor.opendps_output_current
+          power_out: sensor.opendps_output_power
+          voltage_in: sensor.opendps_input_voltage
+
+          # ── Output Control ──
+          output_switch: switch.opendps_output_enable
+          output_enabled: binary_sensor.opendps_output_state
+
+          # ── Setpoint Controls (number entities with sliders) ──
+          set_voltage: number.opendps_set_voltage
+          set_current: number.opendps_set_current_limit
+
+          # ── Operating Mode (CV/CC/CP) ──
+          operating_mode: select.opendps_operating_mode
+
+          # ── Temperature Sensors ──
+          temp1: sensor.opendps_heatsink_temperature
+          temp2: sensor.opendps_ambient_temperature
+
+          # ── Datalog Controls ──
+          # These require template button/text entities in your ESPHome config
+          datalog_start: button.opendps_start_datalog
+          datalog_stop: button.opendps_stop_datalog
+          datalog_flush: button.opendps_flush_datalog
+          datalog_filename: text.opendps_datalog_filename
+
+        # ── Display Options ──
+        show_temperatures: true
+        show_input_voltage: true
+        show_power: true
+        show_datalog: true
+
+        # ── Precision ──
+        decimal_places_voltage: 2
+        decimal_places_current: 3
+        decimal_places_power: 2
+
+        # ── Slider Step Sizes ──
+        voltage_step: 0.1
+        current_step: 0.01
+
+      # ────────────────────────────────────────────────────────────────
+      # Quick Preset Buttons
+      # ────────────────────────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: "5V 2A"
+            icon: mdi:flash
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.opendps_preset_5v_2a
+          - type: button
+            name: "12V 1A"
+            icon: mdi:flash
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.opendps_preset_12v_1a
+          - type: button
+            name: "4.2V 0.5A"
+            icon: mdi:battery-charging
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.opendps_preset_battery_charge_4_2v_0_5a
+
+      # ────────────────────────────────────────────────────────────────
+      # History Graphs (voltage, current, power over time)
+      # ────────────────────────────────────────────────────────────────
+      - type: history-graph
+        title: Output History
+        hours_to_show: 1
+        entities:
+          - entity: sensor.opendps_output_voltage
+            name: Voltage
+          - entity: sensor.opendps_output_current
+            name: Current
+          - entity: sensor.opendps_output_power
+            name: Power
+
+      # ────────────────────────────────────────────────────────────────
+      # Temperature History
+      # ────────────────────────────────────────────────────────────────
+      - type: history-graph
+        title: Temperature
+        hours_to_show: 4
+        entities:
+          - entity: sensor.opendps_heatsink_temperature
+            name: Heatsink
+          - entity: sensor.opendps_ambient_temperature
+            name: Ambient
+
+      # ────────────────────────────────────────────────────────────────
+      # Device Info & Diagnostics
+      # ────────────────────────────────────────────────────────────────
+      - type: entities
+        title: Device Controls
+        entities:
+          - entity: switch.opendps_lock
+            name: Panel Lock
+            icon: mdi:lock
+          - entity: light.display_backlight_brightness
+            name: Display Brightness
+          - type: divider
+          - entity: button.opendps_ping
+            name: Ping Device
+          - entity: button.opendps_request_version
+            name: Request Version
+          - type: divider
+          - entity: text.opendps_firmware_path
+            name: Firmware Path
+          - entity: button.opendps_upgrade_firmware
+            name: Upgrade Firmware
+            icon: mdi:upload
+
+# ═══════════════════════════════════════════════════════════════════════
+# ESPHome YAML Configuration Reference
+# ═══════════════════════════════════════════════════════════════════════
+#
+# The entities above are created by the following ESPHome configuration.
+# Add this to your ESPHome device YAML.
+#
+# ── Datalog Template Entities ──
+# These template entities expose datalog controls to Home Assistant
+# so the HA card's DATALOG panel can start/stop/flush recording.
+#
+# button:
+#   - platform: template
+#     name: "OpenDPS Start Datalog"
+#     id: opendps_datalog_start_btn
+#     on_press:
+#       - opendps.start_datalog:
+#           id: my_opendps
+#           filename: !lambda |-
+#             return id(opendps_datalog_filename_text).state;
+#
+#   - platform: template
+#     name: "OpenDPS Stop Datalog"
+#     id: opendps_datalog_stop_btn
+#     on_press:
+#       - opendps.stop_datalog:
+#           id: my_opendps
+#
+#   - platform: template
+#     name: "OpenDPS Flush Datalog"
+#     id: opendps_datalog_flush_btn
+#     on_press:
+#       - opendps.flush_datalog:
+#           id: my_opendps
+#
+# text:
+#   - platform: template
+#     name: "OpenDPS Datalog Filename"
+#     id: opendps_datalog_filename_text
+#     mode: TEXT
+#     optimistic: true
+#     initial_value: "recording.csv"
+#
+# ── Datalogger Component Config ──
+# Add this under your opendps: config block:
+#
+# opendps:
+#   id: my_opendps
+#   uart_id: opendps_uart
+#   update_interval: 50ms
+#   datalogger:
+#     storage_path: "/sdcard/logs"
+#     filename_format: "dps_%Y%m%d_%H%M%S.csv"   # Auto-timestamped filenames
+#     # filename_id: "session1"                    # OR use a fixed filename ID
+#     buffer_size: 524288                          # 512KB PSRAM buffer (triple-buffered)
+#     format: csv                                  # csv or binary
+#     time_id: host_time                           # Time component for system_time column
+#     columns:                                     # Which data columns to log
+#       - system_time       # ISO8601 timestamp from time component
+#       - elapsed_ms        # Milliseconds since log start
+#       - voltage_in        # Input voltage
+#       - voltage_out       # Output voltage
+#       - current_out       # Output current
+#       - power_out         # Output power (V*I)
+#       - output_enabled    # Output on/off state
+#       - temp1             # Heatsink temperature
+#       - temp2             # Ambient temperature
+#     flush_interval: 10s                          # Auto-flush buffer to SD every 10s
