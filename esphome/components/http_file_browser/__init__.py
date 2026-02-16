@@ -1,6 +1,10 @@
 import esphome.codegen as cg
 from esphome.components import storage, web_server_base
-from esphome.components.esp32 import add_idf_component, require_vfs_dir
+from esphome.components.esp32 import (
+    add_idf_component,
+    include_builtin_idf_component,
+    require_vfs_dir,
+)
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 from esphome.core import CORE, coroutine_with_priority
@@ -11,6 +15,8 @@ DEPENDENCIES = ["storage", "web_server_base"]
 # http_file_browser uses VFS directory functions (opendir, readdir, mkdir, rmdir)
 # Ensure CONFIG_VFS_SUPPORT_DIR is enabled
 require_vfs_dir()
+# http_file_browser uses esp_vfs_fat_info() for disk space queries
+include_builtin_idf_component("fatfs")
 AUTO_LOAD = []
 
 http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")

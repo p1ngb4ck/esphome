@@ -5,6 +5,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
     add_idf_component,
+    include_builtin_idf_component,
     only_on_variant,
     require_vfs_dir,
 )
@@ -23,6 +24,8 @@ CONF_PID = "pid"
 CONF_ON_MOUNTED = "on_mounted"
 
 require_vfs_dir()
+# usb_storage uses esp_vfs_fat for FAT filesystem mounting
+include_builtin_idf_component("fatfs")
 
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)

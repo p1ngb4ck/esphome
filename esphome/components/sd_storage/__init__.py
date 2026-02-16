@@ -21,6 +21,8 @@ AUTO_LOAD = []
 # Mark that this component requires VFS directory support
 # This must be set early so ESP32 component can check it during its own to_code()
 esp32.require_vfs_dir()
+# sd_storage uses esp_vfs_fat for FAT filesystem mounting
+esp32.include_builtin_idf_component("fatfs")
 
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
 SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component)
