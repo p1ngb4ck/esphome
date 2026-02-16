@@ -15,8 +15,6 @@ DEPENDENCIES = ["storage", "web_server_base"]
 # http_file_browser uses VFS directory functions (opendir, readdir, mkdir, rmdir)
 # Ensure CONFIG_VFS_SUPPORT_DIR is enabled
 require_vfs_dir()
-# http_file_browser uses esp_vfs_fat_info() for disk space queries
-include_builtin_idf_component("fatfs")
 AUTO_LOAD = []
 
 http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")
@@ -80,6 +78,8 @@ CONFIG_SCHEMA = cv.All(
 
 @coroutine_with_priority(45.0)
 async def to_code(config):
+    # Re-enable fatfs IDF component (excluded by default) - needed for esp_vfs_fat_info()
+    include_builtin_idf_component("fatfs")
     cg.add_define("USE_HTTP_FILE_BROWSER")
     cg.add_define("USE_WEBSERVER_OTA")  # Enable multipart upload support
     if CORE.is_esp32:
