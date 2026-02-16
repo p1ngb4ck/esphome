@@ -276,25 +276,28 @@ void SysGlitch::run_glitch_loop_() {
     this->tool0_uart_->write_array(baud_frame, sizeof(baud_frame));
     this->tool0_uart_->flush();
 
-    // Step 7: Random delay in glitch window
-    uint32_t delay_range = this->glitch_delay_max_us_ - this->glitch_delay_min_us_;
-    uint32_t random_delay_us = this->glitch_delay_min_us_;
-    if (delay_range > 0) {
-      random_delay_us += esp_random() % delay_range;
-    }
-    esp_rom_delay_us(random_delay_us);
+    // Steps 7-8: Glitch pulse (only if glitch_pin is configured)
+    if (this->glitch_pin_ != nullptr) {
+      // Step 7: Random delay in glitch window
+      uint32_t delay_range = this->glitch_delay_max_us_ - this->glitch_delay_min_us_;
+      uint32_t random_delay_us = this->glitch_delay_min_us_;
+      if (delay_range > 0) {
+        random_delay_us += esp_random() % delay_range;
+      }
+      esp_rom_delay_us(random_delay_us);
 
-    // Step 8: Glitch pulse — nanosecond precision via cycle counter
-    uint32_t glitch_width_ns = 0;
-    if (this->glitch_width_max_ns_ > 0) {
-      glitch_width_ns = esp_random() % this->glitch_width_max_ns_;
-    }
+      // Step 8: Glitch pulse — nanosecond precision via cycle counter
+      uint32_t glitch_width_ns = 0;
+      if (this->glitch_width_max_ns_ > 0) {
+        glitch_width_ns = esp_random() % this->glitch_width_max_ns_;
+      }
 
-    this->isr_glitch_pin_.digital_write(false);
-    if (glitch_width_ns > 0) {
-      delay_ns_(glitch_width_ns);
+      this->isr_glitch_pin_.digital_write(false);
+      if (glitch_width_ns > 0) {
+        delay_ns_(glitch_width_ns);
+      }
+      this->isr_glitch_pin_.digital_write(true);
     }
-    this->isr_glitch_pin_.digital_write(true);
 
     // Step 9: Wait for chip to process the glitch, then attempt OCD connect
     esp_rom_delay_us(15000);

@@ -58,16 +58,9 @@ def validate_mode_config(config):
     if mode == MODES["write"] and CONF_WRITE_PATH not in config:
         raise cv.Invalid("Mode 'write' requires 'write_path' to be configured")
 
-    # glitch_pin and rx_pulldown_pin required for non-write modes
-    if mode != MODES["write"]:
-        if CONF_GLITCH_PIN not in config:
-            raise cv.Invalid(
-                f"'{CONF_GLITCH_PIN}' is required for modes other than 'write'"
-            )
-        if CONF_RX_PULLDOWN_PIN not in config:
-            raise cv.Invalid(
-                f"'{CONF_RX_PULLDOWN_PIN}' is required for modes other than 'write'"
-            )
+    # glitch_pin and rx_pulldown_pin are optional for all modes.
+    # When security code is already known (e.g. overwritten to :Not:Used:),
+    # OCD connect succeeds without a VDD glitch pulse, so these pins aren't needed.
 
     return config
 
