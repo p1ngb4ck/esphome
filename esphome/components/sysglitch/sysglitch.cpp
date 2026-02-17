@@ -179,6 +179,24 @@ void SysGlitch::start_glitch() {
     return;
   }
 
+  // Flasher mode: enter ProtoA directly, no glitch needed
+  if (this->mode_ == MODE_FLASHER) {
+    ESP_LOGI(TAG, "Flasher mode: entering ProtoA directly (no glitch)...");
+    this->proto_a_active_ = false;
+    this->ocd_active_ = false;
+
+    // Enter ProtoA now so flasher is ready immediately
+    if (this->enter_proto_a_()) {
+      this->proto_a_active_ = true;
+      ESP_LOGI(TAG, "ProtoA active. Flasher ready on pc_uart.");
+      this->state_.store(STATE_FLASHER, std::memory_order_release);
+    } else {
+      ESP_LOGE(TAG, "Failed to enter ProtoA mode!");
+      this->state_.store(STATE_FAILED, std::memory_order_release);
+    }
+    return;
+  }
+
   ESP_LOGI(TAG, "Starting glitch attack...");
   this->attempt_count_.store(0, std::memory_order_relaxed);
   this->stop_requested_.store(false, std::memory_order_release);
@@ -619,6 +637,7 @@ bool SysGlitch::enter_proto_a_() {
 
   ESP_LOGI(TAG, "ProtoA mode active");
   this->ocd_active_ = false;
+  this->proto_a_active_ = true;
   return true;
 #else
   return false;
@@ -914,14 +933,20 @@ void SysGlitch::scf_handle_ping2_() {
 }
 
 void SysGlitch::scf_handle_init_() {
-  // INIT: if OCD is already active from the glitch, just report success.
-  // If not, we'd need to re-glitch (but we should already be glitched).
-  if (this->ocd_active_) {
-    ESP_LOGI(TAG, "SCF INIT: OCD already active");
+  // INIT: enter ProtoA mode if not already active
+  if (this->proto_a_active_) {
+    ESP_LOGI(TAG, "SCF INIT: ProtoA already active");
     this->pc_uart_->write_byte(SCF_STATUS_OK);
   } else {
-    ESP_LOGW(TAG, "SCF INIT: OCD not active, glitch first!");
-    this->pc_uart_->write_byte(SCF_ERR_INIT);
+    ESP_LOGI(TAG, "SCF INIT: entering ProtoA mode...");
+    if (this->enter_proto_a_()) {
+      this->proto_a_active_ = true;
+      ESP_LOGI(TAG, "SCF INIT: ProtoA active");
+      this->pc_uart_->write_byte(SCF_STATUS_OK);
+    } else {
+      ESP_LOGE(TAG, "SCF INIT: failed to enter ProtoA");
+      this->pc_uart_->write_byte(SCF_ERR_INIT);
+    }
   }
   this->pc_uart_->flush();
 }
@@ -929,113 +954,20 @@ void SysGlitch::scf_handle_init_() {
 void SysGlitch::scf_handle_uninit_() {
   ESP_LOGI(TAG, "SCF UNINIT");
   this->ocd_active_ = false;
+  this->proto_a_active_ = false;
   this->pc_uart_->write_byte(SCF_STATUS_OK);
   this->pc_uart_->flush();
 }
 
 void SysGlitch::scf_handle_read_block_(const uint8_t *params, uint8_t len) {
-  // Params: START_BLOCK[2] + END_BLOCK[2]
+  // ProtoA does not support reading flash data — only OCD mode can do that.
+  // In ProtoA-based flasher mode, reads are not available.
+  // Use dump_sd or dump_uart mode to read flash contents.
   uint16_t start_block = (params[0] << 8) | params[1];
   uint16_t end_block = (params[2] << 8) | params[3];
-
-  if (start_block >= SYSCON_BLOCK_COUNT || end_block >= SYSCON_BLOCK_COUNT || start_block > end_block) {
-    ESP_LOGW(TAG, "SCF READ: invalid block range %u-%u", start_block, end_block);
-    this->pc_uart_->write_byte(SCF_ERR_READ);
-    this->pc_uart_->flush();
-    return;
-  }
-
-  ESP_LOGI(TAG, "SCF READ blocks %u-%u", start_block, end_block);
-
-  // For reading, we use the OCD dump shellcode approach.
-  // Upload a shellcode that reads a specific block range and streams it.
-  // For now, use the full dump shellcode and the PC just reads what it needs.
-  //
-  // The scflasher protocol sends STATUS first, then DATA.
-  // We upload the dump shellcode, exec it, then forward the data stream to PC.
-  //
-  // NOTE: The dump shellcode reads ALL flash (0x0-0xFFFFF).
-  // For block-level reads, we'd need a parameterized shellcode.
-  // As a practical approach: do a full dump, and the PC reads the blocks it wants.
-  // The scflasher protocol expects one block at a time with status per block.
-
-  // Send status OK for each block, then stream the data.
-  // We re-enter OCD mode for each read (or keep OCD connection alive).
-
-  if (!this->ocd_active_) {
-    this->pc_uart_->write_byte(SCF_ERR_INIT);
-    this->pc_uart_->flush();
-    return;
-  }
-
-  // For each block in range:
-  for (uint16_t block = start_block; block <= end_block; block++) {
-    // Upload a modified shellcode that reads just this one block
-    // For now: upload full dump shellcode and skip to the right offset
-    // This is inefficient but functional until we have a parameterized read shellcode
-
-    // Upload dump shellcode
-    this->tool0_uart_->write_byte(OCD_WRITE_CMD);
-    esp_rom_delay_us(1000);
-    this->tool0_uart_->write_array(SHELLCODE_DUMP, sizeof(SHELLCODE_DUMP));
-    this->tool0_uart_->flush();
-    esp_rom_delay_us(5000);
-
-    // Execute
-    this->tool0_uart_->write_byte(OCD_EXEC_CMD);
-    this->tool0_uart_->flush();
-    esp_rom_delay_us(10000);
-
-    // The shellcode streams ALL flash. We need to skip to the right block.
-    // Skip (block * SYSCON_BLOCK_SIZE) bytes, then read SYSCON_BLOCK_SIZE bytes.
-    uint32_t skip_bytes = block * SYSCON_BLOCK_SIZE;
-    uint32_t total_read = 0;
-
-    // Skip bytes before our block
-    while (total_read < skip_bytes) {
-      uint8_t discard;
-      if (this->read_bytes_timeout_(this->tool0_uart_, &discard, 1, 5000)) {
-        total_read++;
-      } else {
-        ESP_LOGW(TAG, "SCF READ: timeout skipping to block %u", block);
-        this->pc_uart_->write_byte(SCF_ERR_READ);
-        this->pc_uart_->flush();
-        return;
-      }
-    }
-
-    // Read the block data
-    uint8_t block_data[SYSCON_BLOCK_SIZE];
-    if (!this->read_bytes_timeout_(this->tool0_uart_, block_data, SYSCON_BLOCK_SIZE, 10000)) {
-      ESP_LOGW(TAG, "SCF READ: timeout reading block %u", block);
-      this->pc_uart_->write_byte(SCF_ERR_READ);
-      this->pc_uart_->flush();
-      return;
-    }
-
-    // Drain remaining dump data (we don't need the rest)
-    esp_rom_delay_us(1000);
-    while (this->tool0_uart_->available()) {
-      uint8_t discard;
-      this->tool0_uart_->read_byte(&discard);
-    }
-
-    // Send status + data to PC
-    // scflasher expects: STATUS[1] + DATA[SYSCON_BLOCK_SIZE]
-    this->pc_uart_->write_byte(SCF_STATUS_OK);
-    this->pc_uart_->write_array(block_data, SYSCON_BLOCK_SIZE);
-    this->pc_uart_->flush();
-
-    // Re-glitch for next block (OCD session is consumed by exec)
-    // Actually — after EXEC, the RL78 is running the shellcode.
-    // We need to reset and re-glitch for the next block.
-    // This is very slow but functional.
-    if (block < end_block) {
-      ESP_LOGI(TAG, "Re-glitching for next block...");
-      // TODO: implement re-glitch or use a smarter shellcode
-      // For now, this only works for single-block reads efficiently
-    }
-  }
+  ESP_LOGW(TAG, "SCF READ blocks %u-%u: not supported in ProtoA mode (use dump mode to read)", start_block, end_block);
+  this->pc_uart_->write_byte(SCF_ERR_READ);
+  this->pc_uart_->flush();
 }
 
 void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint16_t len, bool extended) {
@@ -1053,12 +985,15 @@ void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint16_t len, boo
   uint32_t addr = block_num * SYSCON_BLOCK_SIZE;
   ESP_LOGI(TAG, "SCF WRITE block %u (addr 0x%05X)%s", block_num, addr, extended ? " [EX]" : "");
 
-  // Enter ProtoA mode for write operations
-  if (!this->enter_proto_a_()) {
-    ESP_LOGE(TAG, "SCF WRITE: failed to enter ProtoA");
-    this->pc_uart_->write_byte(SCF_ERR_WRITE);
-    this->pc_uart_->flush();
-    return;
+  // Re-enter ProtoA if session was lost
+  if (!this->proto_a_active_) {
+    if (!this->enter_proto_a_()) {
+      ESP_LOGE(TAG, "SCF WRITE: failed to enter ProtoA");
+      this->pc_uart_->write_byte(SCF_ERR_WRITE);
+      this->pc_uart_->flush();
+      return;
+    }
+    this->proto_a_active_ = true;
   }
 
   // Erase the block first
@@ -1082,15 +1017,10 @@ void SysGlitch::scf_handle_write_block_(const uint8_t *params, uint16_t len, boo
   // Verify
   if (!this->pa_verify_block_(addr, data, SYSCON_BLOCK_SIZE)) {
     ESP_LOGW(TAG, "SCF WRITE: verify failed for block %u", block_num);
-    // Continue anyway — verify failure is a warning, not fatal
   }
 
   this->pc_uart_->write_byte(SCF_STATUS_OK);
   this->pc_uart_->flush();
-
-  // Note: after ProtoA operations, we need to re-glitch to get back into OCD mode
-  // The next INIT command from the PC will trigger a re-glitch
-  this->ocd_active_ = false;
 }
 
 void SysGlitch::scf_handle_erase_block_(const uint8_t *params, uint8_t len) {
@@ -1106,12 +1036,15 @@ void SysGlitch::scf_handle_erase_block_(const uint8_t *params, uint8_t len) {
 
   ESP_LOGI(TAG, "SCF ERASE blocks %u-%u", start_block, end_block);
 
-  // Enter ProtoA mode for erase operations
-  if (!this->enter_proto_a_()) {
-    ESP_LOGE(TAG, "SCF ERASE: failed to enter ProtoA");
-    this->pc_uart_->write_byte(SCF_ERR_ERASE);
-    this->pc_uart_->flush();
-    return;
+  // Re-enter ProtoA if session was lost
+  if (!this->proto_a_active_) {
+    if (!this->enter_proto_a_()) {
+      ESP_LOGE(TAG, "SCF ERASE: failed to enter ProtoA");
+      this->pc_uart_->write_byte(SCF_ERR_ERASE);
+      this->pc_uart_->flush();
+      return;
+    }
+    this->proto_a_active_ = true;
   }
 
   for (uint16_t block = start_block; block <= end_block; block++) {
@@ -1126,18 +1059,20 @@ void SysGlitch::scf_handle_erase_block_(const uint8_t *params, uint8_t len) {
 
   this->pc_uart_->write_byte(SCF_STATUS_OK);
   this->pc_uart_->flush();
-
-  this->ocd_active_ = false;
 }
 
 void SysGlitch::scf_handle_erase_chip_() {
   ESP_LOGI(TAG, "SCF ERASE CHIP");
 
-  if (!this->enter_proto_a_()) {
-    ESP_LOGE(TAG, "SCF ERASE CHIP: failed to enter ProtoA");
-    this->pc_uart_->write_byte(SCF_ERR_ERASE);
-    this->pc_uart_->flush();
-    return;
+  // Re-enter ProtoA if session was lost
+  if (!this->proto_a_active_) {
+    if (!this->enter_proto_a_()) {
+      ESP_LOGE(TAG, "SCF ERASE CHIP: failed to enter ProtoA");
+      this->pc_uart_->write_byte(SCF_ERR_ERASE);
+      this->pc_uart_->flush();
+      return;
+    }
+    this->proto_a_active_ = true;
   }
 
   for (uint16_t block = 0; block < SYSCON_BLOCK_COUNT; block++) {
@@ -1152,13 +1087,12 @@ void SysGlitch::scf_handle_erase_chip_() {
 
   this->pc_uart_->write_byte(SCF_STATUS_OK);
   this->pc_uart_->flush();
-
-  this->ocd_active_ = false;
 }
 
 void SysGlitch::scf_handle_reset_() {
   ESP_LOGI(TAG, "SCF RESET");
   this->ocd_active_ = false;
+  this->proto_a_active_ = false;
   this->reset_pin_->digital_write(false);
   esp_rom_delay_us(50000);
   this->reset_pin_->digital_write(true);

@@ -192,6 +192,9 @@ class SysGlitch : public Component {
   // Whether OCD session is active (glitch succeeded, chip is unlocked)
   bool ocd_active_{false};
 
+  // Whether ProtoA session is active (entered serial bootloader mode)
+  bool proto_a_active_{false};
+
   // ── Shared state between cores (atomic for lock-free access) ──
   std::atomic<SysGlitchState> state_{STATE_IDLE};
   std::atomic<uint32_t> attempt_count_{0};
