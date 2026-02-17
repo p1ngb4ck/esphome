@@ -120,6 +120,11 @@ void SysGlitch::dump_config() {
 void SysGlitch::loop() {
   auto state = this->state_.load(std::memory_order_acquire);
 
+  // Flasher mode: always handle PC protocol, regardless of state
+  if (this->mode_ == MODE_FLASHER && this->pc_uart_ != nullptr) {
+    this->handle_flasher_protocol_();
+  }
+
   switch (state) {
     case STATE_IDLE:
       break;
@@ -150,8 +155,7 @@ void SysGlitch::loop() {
       break;
 
     case STATE_FLASHER:
-      // Scflasher-compatible protocol handler
-      this->handle_flasher_protocol_();
+      // Handled above the switch — always active in flasher mode
       break;
 
     case STATE_WRITING:
@@ -176,24 +180,6 @@ void SysGlitch::start_glitch() {
   auto current = this->state_.load(std::memory_order_acquire);
   if (current != STATE_IDLE) {
     ESP_LOGW(TAG, "Cannot start glitch - not idle (state=%u)", current);
-    return;
-  }
-
-  // Flasher mode: enter ProtoA directly, no glitch needed
-  if (this->mode_ == MODE_FLASHER) {
-    ESP_LOGI(TAG, "Flasher mode: entering ProtoA directly (no glitch)...");
-    this->proto_a_active_ = false;
-    this->ocd_active_ = false;
-
-    // Enter ProtoA now so flasher is ready immediately
-    if (this->enter_proto_a_()) {
-      this->proto_a_active_ = true;
-      ESP_LOGI(TAG, "ProtoA active. Flasher ready on pc_uart.");
-      this->state_.store(STATE_FLASHER, std::memory_order_release);
-    } else {
-      ESP_LOGE(TAG, "Failed to enter ProtoA mode!");
-      this->state_.store(STATE_FAILED, std::memory_order_release);
-    }
     return;
   }
 
