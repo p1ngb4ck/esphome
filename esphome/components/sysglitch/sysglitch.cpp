@@ -4,6 +4,7 @@
 #include "esphome/core/hal.h"
 
 #ifdef USE_ESP32
+#include <driver/gpio.h>
 #include <driver/uart.h>
 #include <esp_cpu.h>
 #include <esp_random.h>
@@ -591,25 +592,35 @@ bool SysGlitch::enter_proto_a_() {
   // 6. Wait 3ms (chip startup)
   // 7. Send mode byte 0x3A
 
-  // Step 1: RESET=LOW, TOOL0=LOW
+  // Step 1: RESET=LOW
   this->reset_pin_->digital_write(false);
+  esp_rom_delay_us(1000);
+
+  // Step 2: TOOL0=LOW (delete UART driver, then explicitly drive TX pin LOW via GPIO)
   uart_driver_delete(uart_num);
-  esp_rom_delay_us(1000);  // 1ms settle
+  gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
+  gpio_reset_pin(tx_gpio);
+  gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
+  gpio_set_level(tx_gpio, 0);
+  ESP_LOGD(TAG, "ProtoA: TX GPIO%d driven LOW (TOOL0=LOW)", this->tool0_tx_gpio_);
   if (this->rx_pulldown_pin_ != nullptr) {
     this->rx_pulldown_pin_->digital_write(false);
   }
-  esp_rom_delay_us(40000);  // 40ms reset hold
+  esp_rom_delay_us(40000);  // 40ms reset hold with TOOL0 actively LOW
 
-  // Step 2: TOOL0=HIGH first (reinit UART — TX idle = HIGH)
+  // Step 3: TOOL0=HIGH (reinit UART driver — TX idle = HIGH)
+  // gpio_reset_pin releases our manual control, then load_settings reconfigures for UART
   idf_uart->load_settings(false);
-  esp_rom_delay_us(1000);  // 1ms settle
+  esp_rom_delay_us(1000);  // 1ms settle — TOOL0 now HIGH via UART idle
+  ESP_LOGD(TAG, "ProtoA: UART reinited (TOOL0=HIGH)");
   if (this->rx_pulldown_pin_ != nullptr) {
     this->rx_pulldown_pin_->digital_write(true);
   }
 
-  // Step 3: Release RESET — chip boots with TOOL0=HIGH → ProtoA mode
+  // Step 4: Release RESET — chip boots, samples TOOL0=HIGH → ProtoA serial bootloader mode
   this->reset_pin_->digital_write(true);
   esp_rom_delay_us(3000);  // 3ms chip startup
+  ESP_LOGD(TAG, "ProtoA: RESET released (chip booting into ProtoA)");
 
   // Flush any garbage in RX buffer
   while (this->tool0_uart_->available()) {

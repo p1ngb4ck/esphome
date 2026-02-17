@@ -147,6 +147,7 @@ class SysGlitch : public Component {
   void set_mode(SysGlitchMode mode) { this->mode_ = mode; }
   void set_dump_path(const std::string &path) { this->dump_path_ = path; }
   void set_write_path(const std::string &path) { this->write_path_ = path; }
+  void set_tool0_tx_gpio(uint8_t pin) { this->tool0_tx_gpio_ = pin; }
 
   // Action entry points (called from main loop / automations)
   void start_glitch();
@@ -188,6 +189,9 @@ class SysGlitch : public Component {
 
   // Write source file path (for write mode, e.g. "/sdcard/modified.bin")
   std::string write_path_{"/sdcard/modified.bin"};
+
+  // TOOL0 UART TX GPIO number (needed to explicitly drive pin LOW during reset sequence)
+  uint8_t tool0_tx_gpio_{0};
 
   // Whether OCD session is active (glitch succeeded, chip is unlocked)
   bool ocd_active_{false};

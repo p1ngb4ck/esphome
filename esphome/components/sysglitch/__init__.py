@@ -21,6 +21,7 @@ CONF_PASSCODE = "passcode"
 CONF_MAX_ATTEMPTS = "max_attempts"
 CONF_DUMP_PATH = "dump_path"
 CONF_WRITE_PATH = "write_path"
+CONF_TOOL0_TX_PIN = "tool0_tx_pin"
 
 sysglitch_ns = cg.esphome_ns.namespace("sysglitch")
 SysGlitch = sysglitch_ns.class_("SysGlitch", cg.Component)
@@ -84,6 +85,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.Length(min=10, max=10),
             ),
             cv.Optional(CONF_MAX_ATTEMPTS, default=0): cv.uint32_t,
+            cv.Required(CONF_TOOL0_TX_PIN): cv.int_range(min=0, max=48),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_mode_config,
@@ -121,6 +123,7 @@ async def to_code(config):
     cg.add(var.set_glitch_delay_max(config[CONF_GLITCH_DELAY_MAX]))
     cg.add(var.set_glitch_width_max(config[CONF_GLITCH_WIDTH_MAX]))
     cg.add(var.set_max_attempts(config[CONF_MAX_ATTEMPTS]))
+    cg.add(var.set_tool0_tx_gpio(config[CONF_TOOL0_TX_PIN]))
 
     passcode = config[CONF_PASSCODE]
     passcode_hex = ", ".join(f"0x{x:02X}" for x in passcode)
