@@ -596,39 +596,60 @@ bool SysGlitch::enter_proto_a_() {
 
   ESP_LOGI(TAG, "Entering ProtoA mode...");
 
-  // Reset sequence: RESET=LOW, TOOL0=LOW
+  // Step 1: RESET=LOW
   this->reset_pin_->digital_write(false);
+
+  // Step 2: TOOL0=LOW — delete UART driver so TX pin goes low
+  uart_driver_delete(uart_num);
+  esp_rom_delay_us(1000);  // 1ms settle
+
+  // Also pull down via rx_pulldown if available
   if (this->rx_pulldown_pin_ != nullptr) {
     this->rx_pulldown_pin_->digital_write(false);
   }
-  esp_rom_delay_us(40000);  // 40ms
+  esp_rom_delay_us(40000);  // 40ms with RESET LOW + TOOL0 LOW
 
-  // Release RESET with TOOL0 HIGH (ProtoA mode — NOT OCD mode)
+  // Step 3: Release RESET (HIGH) — TOOL0 still LOW
   this->reset_pin_->digital_write(true);
-  esp_rom_delay_us(1000);  // 1ms
+  esp_rom_delay_us(3000);  // 3ms — chip samples TOOL0
 
-  // Reinit UART
+  // Step 4: TOOL0=HIGH — reinit UART (TX idle = HIGH = ProtoA mode)
   idf_uart->load_settings(false);
-  esp_rom_delay_us(10000);  // 10ms
+  esp_rom_delay_us(1000);  // 1ms settle
 
-  // Send mode byte for 1-wire ProtoA
-  this->tool0_uart_->write_byte(MODE_A_1WIRE);
-  this->tool0_uart_->flush();
+  // Release rx_pulldown
+  if (this->rx_pulldown_pin_ != nullptr) {
+    this->rx_pulldown_pin_->digital_write(true);
+  }
 
-  // Discard loopback + reset null byte (1-wire sees its own TX)
-  esp_rom_delay_us(5000);
+  // Flush any garbage in RX buffer
   while (this->tool0_uart_->available()) {
     uint8_t discard;
     this->tool0_uart_->read_byte(&discard);
   }
 
-  // Set baud rate (required by ProtoA before any commands)
+  // Step 5: Send mode byte for 1-wire ProtoA (raw, unframed)
+  this->tool0_uart_->write_byte(MODE_A_1WIRE);
+  this->tool0_uart_->flush();
+
+  // Discard loopback echo of mode byte (1-wire sees its own TX)
+  esp_rom_delay_us(5000);
+  uint8_t echo_count = 0;
+  while (this->tool0_uart_->available()) {
+    uint8_t discard;
+    this->tool0_uart_->read_byte(&discard);
+    ESP_LOGD(TAG, "ProtoA mode echo: 0x%02X", discard);
+    echo_count++;
+  }
+  ESP_LOGD(TAG, "ProtoA mode echo bytes discarded: %u", echo_count);
+
+  // Step 6: Set baud rate (first framed ProtoA command)
   if (!this->pa_set_baudrate_()) {
     ESP_LOGE(TAG, "ProtoA baud rate set failed");
     return false;
   }
 
-  // Send ProtoA RESET command (required before operations)
+  // Step 7: Send ProtoA RESET command (required before operations)
   uint8_t reset_cmd = PA_RESET;
   if (!this->pa_send_frame_(&reset_cmd, 1)) {
     ESP_LOGE(TAG, "ProtoA reset command failed");
@@ -673,20 +694,35 @@ bool SysGlitch::pa_send_frame_(const uint8_t *data, uint8_t len, bool is_cmd) {
   this->tool0_uart_->flush();
 
   // Discard loopback bytes (1-wire mode)
+  // Expected: header + len + data[len] + csum + etx = len + 4 bytes
   esp_rom_delay_us(5000);
-  uint8_t loopback_count = 4 + len;  // header + len + data + csum + etx
-  while (loopback_count > 0 && this->tool0_uart_->available()) {
+  uint8_t expected_loopback = 4 + len;
+  uint8_t loopback_actual = 0;
+  while (loopback_actual < expected_loopback && this->tool0_uart_->available()) {
     uint8_t discard;
     this->tool0_uart_->read_byte(&discard);
-    loopback_count--;
+    loopback_actual++;
   }
+  // Drain any extra bytes (in case of timing variance)
+  esp_rom_delay_us(2000);
+  while (this->tool0_uart_->available()) {
+    uint8_t extra;
+    this->tool0_uart_->read_byte(&extra);
+    ESP_LOGD(TAG, "PA frame extra RX after loopback: 0x%02X", extra);
+    loopback_actual++;
+  }
+  ESP_LOGD(TAG, "PA frame: sent %u bytes, discarded %u loopback (expected %u)", len + 4, loopback_actual,
+           expected_loopback);
 
   // Read response frame
   uint8_t resp_buf[8];
   uint8_t resp_len;
   if (!this->pa_recv_frame_(resp_buf, &resp_len, sizeof(resp_buf))) {
+    ESP_LOGW(TAG, "PA frame: no response received");
     return false;
   }
+
+  ESP_LOGD(TAG, "PA frame: response len=%u, status=0x%02X", resp_len, resp_len > 0 ? resp_buf[0] : 0xFF);
 
   // First byte of response is status
   return resp_len > 0 && resp_buf[0] == ACK;
@@ -696,7 +732,7 @@ bool SysGlitch::pa_recv_frame_(uint8_t *buf, uint8_t *out_len, uint8_t max_len) 
   // Wait for STX
   uint32_t timeout = 1000;  // ms
   uint32_t start = millis();
-  uint8_t byte;
+  uint8_t byte = 0;
 
   while (millis() - start < timeout) {
     if (this->tool0_uart_->available()) {
@@ -704,11 +740,13 @@ bool SysGlitch::pa_recv_frame_(uint8_t *buf, uint8_t *out_len, uint8_t max_len) 
       if (byte == STX) {
         break;
       }
+      ESP_LOGD(TAG, "PA recv: skipping non-STX byte 0x%02X", byte);
     }
     delay(1);
   }
 
   if (byte != STX) {
+    ESP_LOGW(TAG, "PA recv: timeout waiting for STX (last byte=0x%02X)", byte);
     return false;
   }
 
@@ -735,8 +773,9 @@ bool SysGlitch::pa_recv_frame_(uint8_t *buf, uint8_t *out_len, uint8_t max_len) 
 }
 
 bool SysGlitch::pa_set_baudrate_() {
-  // Send baud rate command: 0x9A, baudrate=0x00(115200), voltage=0x21(2.1V)
-  uint8_t cmd[] = {PA_BAUD_SET, 0x00, 0x21};
+  // Send baud rate command: 0x9A, baudrate=0x00(115200), voltage=0x32(5.0V)
+  // Voltage byte = operating voltage * 10 (e.g. 5.0V = 0x32, 3.3V = 0x21)
+  uint8_t cmd[] = {PA_BAUD_SET, 0x00, 0x32};
   return this->pa_send_frame_(cmd, sizeof(cmd));
 }
 
