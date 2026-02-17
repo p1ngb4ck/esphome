@@ -596,31 +596,34 @@ bool SysGlitch::enter_proto_a_() {
 
   ESP_LOGI(TAG, "Entering ProtoA mode...");
 
-  // Step 1: RESET=LOW
-  this->reset_pin_->digital_write(false);
+  // RL78 ProtoA entry sequence (from rl78flash reference):
+  // 1. RESET=LOW, TOOL0=LOW
+  // 2. Wait (reset hold time)
+  // 3. TOOL0=HIGH (UART reinit — idle HIGH)
+  // 4. Wait 1ms
+  // 5. RESET=HIGH (chip boots, samples TOOL0=HIGH → serial bootloader mode)
+  // 6. Wait 3ms (chip startup)
+  // 7. Send mode byte 0x3A
 
-  // Step 2: TOOL0=LOW — delete UART driver so TX pin goes low
+  // Step 1: RESET=LOW, TOOL0=LOW
+  this->reset_pin_->digital_write(false);
   uart_driver_delete(uart_num);
   esp_rom_delay_us(1000);  // 1ms settle
-
-  // Also pull down via rx_pulldown if available
   if (this->rx_pulldown_pin_ != nullptr) {
     this->rx_pulldown_pin_->digital_write(false);
   }
-  esp_rom_delay_us(40000);  // 40ms with RESET LOW + TOOL0 LOW
+  esp_rom_delay_us(40000);  // 40ms reset hold
 
-  // Step 3: Release RESET (HIGH) — TOOL0 still LOW
-  this->reset_pin_->digital_write(true);
-  esp_rom_delay_us(3000);  // 3ms — chip samples TOOL0
-
-  // Step 4: TOOL0=HIGH — reinit UART (TX idle = HIGH = ProtoA mode)
+  // Step 2: TOOL0=HIGH first (reinit UART — TX idle = HIGH)
   idf_uart->load_settings(false);
   esp_rom_delay_us(1000);  // 1ms settle
-
-  // Release rx_pulldown
   if (this->rx_pulldown_pin_ != nullptr) {
     this->rx_pulldown_pin_->digital_write(true);
   }
+
+  // Step 3: Release RESET — chip boots with TOOL0=HIGH → ProtoA mode
+  this->reset_pin_->digital_write(true);
+  esp_rom_delay_us(3000);  // 3ms chip startup
 
   // Flush any garbage in RX buffer
   while (this->tool0_uart_->available()) {
@@ -628,7 +631,7 @@ bool SysGlitch::enter_proto_a_() {
     this->tool0_uart_->read_byte(&discard);
   }
 
-  // Step 5: Send mode byte for 1-wire ProtoA (raw, unframed)
+  // Step 4: Send mode byte for 1-wire ProtoA (raw, unframed)
   this->tool0_uart_->write_byte(MODE_A_1WIRE);
   this->tool0_uart_->flush();
 
