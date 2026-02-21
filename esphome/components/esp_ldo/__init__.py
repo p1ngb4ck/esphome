@@ -1,9 +1,13 @@
+import logging
+
 from esphome.automation import Action, register_action
 import esphome.codegen as cg
 from esphome.components.esp32 import VARIANT_ESP32P4, only_on_variant
 import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID, CONF_VOLTAGE
 from esphome.final_validate import full_config
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@clydebarrow"]
 
@@ -23,8 +27,8 @@ adjusted_ids = set()
 
 def validate_ldo_voltage(value):
     value = cv.voltage(value)
-    if value == 3.3:
-        return value
+    if abs(value - 3.3) < 0.01:
+        return 3.3
     if 0.9 <= value <= 2.7:
         return value
     raise cv.Invalid(
@@ -66,6 +70,16 @@ CONFIG_SCHEMA = cv.All(
 
 async def to_code(configs):
     for config in configs:
+        if config.get(CONF_ALLOW_INTERNAL, False):
+            _LOGGER.warning(
+                "LDO channel %d is configured with '%s: true'. "
+                "Channels 1 and 2 are normally reserved for internal chip use (flash/PSRAM). "
+                "Incorrect voltage configuration can cause system instability, data corruption, "
+                "or a permanently bricked device. Only use this if you have verified via "
+                "datasheet and schematics that this channel is unused on your specific board.",
+                config[CONF_CHANNEL],
+                CONF_ALLOW_INTERNAL,
+            )
         var = cg.new_Pvariable(config[CONF_ID], config[CONF_CHANNEL])
         await cg.register_component(var, config)
         cg.add(var.set_voltage(config[CONF_VOLTAGE]))
