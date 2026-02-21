@@ -13,22 +13,50 @@ esp_ldo_ns = cg.esphome_ns.namespace("esp_ldo")
 EspLdo = esp_ldo_ns.class_("EspLdo", cg.Component)
 AdjustAction = esp_ldo_ns.class_("AdjustAction", Action)
 
-CHANNELS = (3, 4)
+CHANNELS = (1, 2, 3, 4)
+CHANNELS_INTERNAL = (1, 2)
 CONF_ADJUSTABLE = "adjustable"
+CONF_ALLOW_INTERNAL = "allow_internal_channel"
 
 adjusted_ids = set()
 
+
+def validate_ldo_voltage(value):
+    value = cv.voltage(value)
+    if value == 3.3:
+        return value
+    if 0.9 <= value <= 2.7:
+        return value
+    raise cv.Invalid(
+        f"LDO voltage must be in range 0.9V-2.7V or exactly 3.3V (bypass), got {value}V"
+    )
+
+
+def validate_ldo_config(config):
+    if config[CONF_CHANNEL] in CHANNELS_INTERNAL and not config.get(
+        CONF_ALLOW_INTERNAL, False
+    ):
+        raise cv.Invalid(
+            f"LDO channel {config[CONF_CHANNEL]} is normally used internally by the chip (flash/PSRAM). "
+            f"Set '{CONF_ALLOW_INTERNAL}: true' to confirm you know what you are doing.",
+            path=[CONF_CHANNEL],
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.ensure_list(
-        cv.COMPONENT_SCHEMA.extend(
-            {
-                cv.GenerateID(): cv.declare_id(EspLdo),
-                cv.Required(CONF_VOLTAGE): cv.All(
-                    cv.voltage, cv.float_range(min=0.5, max=2.7)
-                ),
-                cv.Required(CONF_CHANNEL): cv.one_of(*CHANNELS, int=True),
-                cv.Optional(CONF_ADJUSTABLE, default=False): cv.boolean,
-            }
+        cv.All(
+            cv.COMPONENT_SCHEMA.extend(
+                {
+                    cv.GenerateID(): cv.declare_id(EspLdo),
+                    cv.Required(CONF_VOLTAGE): validate_ldo_voltage,
+                    cv.Required(CONF_CHANNEL): cv.one_of(*CHANNELS, int=True),
+                    cv.Optional(CONF_ADJUSTABLE, default=False): cv.boolean,
+                    cv.Optional(CONF_ALLOW_INTERNAL, default=False): cv.boolean,
+                }
+            ),
+            validate_ldo_config,
         )
     ),
     cv.only_on_esp32,
