@@ -15,8 +15,7 @@ void *tuh_init(uint8_t rhport);
 }
 #endif
 
-namespace esphome {
-namespace usb_host {
+namespace esphome::usb_host {
 
 // NEW: Coordinator event callback for interface-class based device dispatch
 // This callback receives device events and triggers interface-class matching
@@ -195,7 +194,6 @@ bool USBHost::is_device_whitelisted(uint16_t vid, uint16_t pid) const {
   return false;
 }
 
-}  // namespace usb_host
-}  // namespace esphome
+}  // namespace esphome::usb_host
 
 #endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
