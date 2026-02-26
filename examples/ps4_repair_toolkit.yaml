@@ -1,0 +1,762 @@
+# =============================================================================
+# PS4 Repair Toolkit — Syscon + NOR Flash
+# =============================================================================
+#
+# PURPOSE: Combined PS4 syscon (RL78/G13) and NOR flash (MX25L25635F) repair
+#          tool. Covers all glitch, ProtoA, NOR dump/verify/write operations
+#          plus PS4-specific NOR analysis (board ID, SN, region, FW version,
+#          southbridge, WiFi chip, NVS health, GDDR5 clock).
+#
+# HARDWARE (ESP32-S3 N16R8 — 16MB flash, 8MB PSRAM)
+#
+# ── Syscon connections ────────────────────────────────────────────────────
+#   PS4 TOOL0  -> ESP32-S3 GPIO17 (UART1 TX/RX, 1-wire)
+#   PS4 RESET  -> ESP32-S3 GPIO5  (open-drain output)
+#   PS4 VDD    -> ESP32-S3 GPIO6  (glitch FET gate, MODE_GLITCH_DUMP only)
+#   PS4 GND    -> ESP32-S3 GND
+#   (PS4 board supplies its own 5V to the syscon)
+#
+# ── NOR flash connections (SOP16 clips or pads on board) ─────────────────
+#   Flash MOSI (SIO0) -> GPIO11
+#   Flash MISO (SIO1) -> GPIO13
+#   Flash CLK  (SCLK) -> GPIO12
+#   Flash CS#         -> GPIO10
+#   Flash VCC         -> 3.3V
+#   Flash GND         -> GND
+#   Flash WP#         -> GND for read-only, VCC for writes
+#   Flash RESET#      -> 3.3V
+#   Flash HOLD/SIO3   -> 3.3V
+#
+# ── SD card (SD-MMC 1-bit) ────────────────────────────────────────────────
+#   SD CLK  -> GPIO39
+#   SD CMD  -> GPIO38
+#   SD DAT0 -> GPIO40
+#
+# =============================================================================
+#
+# OPERATIONS exposed as buttons:
+#
+#   SYSCON:
+#     1.  Glitch Dump       — glitch OCD → dump 512KB syscon to SD
+#     2.  Glitch Stop       — abort running glitch loop
+#     3.  Blank Check       — ProtoA blank check (is chip erased?)
+#     4.  ProtoA Read       — ProtoA read → dump 512KB syscon to SD
+#     5.  ProtoA Write      — ProtoA write from file on SD
+#
+#   NOR FLASH (via binary_storage):
+#     6.  NOR JEDEC ID      — quick connectivity / chip detection
+#     7.  NOR Status Reg    — read SR1/SR2, clear block protection if set
+#     8.  NOR Dump          — read full 32MB to SD file
+#     9.  NOR Verify        — re-read and compare against SD file
+#    10.  NOR Write         — write SD file to flash (full overwrite)
+#    11.  NOR Smart Write   — diff SD file vs flash, only write changed sectors
+#
+#   PS4 ANALYSIS:
+#    12.  Analyze NOR       — log SN, SKU, region, FW ver, mobo, southbridge,
+#                             WiFi chip, NVS health, GDDR5 clock from live chip
+#    13.  Analyze NOR Dump  — same but from existing dump file on SD
+#
+# =============================================================================
+
+esphome:
+  name: ps4-repair
+  friendly_name: "PS4 Repair Toolkit"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+  flash_size: 16MB
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+# ── External components (local dev build) ─────────────────────────────────────
+external_components:
+  - source:
+      type: local
+      path: ../esphome/components
+    components:
+      - binary_storage
+      - ps_tools
+
+# ── SPI bus (shared by NOR flash) ─────────────────────────────────────────────
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+
+# ── SD card (SD-MMC 1-bit, no SPI bus) ───────────────────────────────────────
+sd_storage:
+  id: sd_card
+  type: sd_mmc
+  clk_pin: GPIO39
+  cmd_pin: GPIO38
+  data0_pin: GPIO40
+  mode_1bit: true
+  path: /sdcard
+
+# ── UART for syscon TOOL0 (1-wire half-duplex) ───────────────────────────────
+uart:
+  - id: uart_tool0
+    tx_pin: GPIO17
+    rx_pin: GPIO17
+    baud_rate: 115200
+    stop_bits: 1
+
+# ── PS4 NOR flash (32MB MX25L25635F) via binary_storage ──────────────────────
+binary_storage:
+  - type: SPI_FLASH
+    id: ps4_nor
+    model: "MX25L25635F"
+    mode: raw
+    cs_pin: GPIO10
+
+# ── ps_tools — syscon + NOR analysis ─────────────────────────────────────────
+#
+# MODE: glitch_dump  (change to proto_a_write / proto_a_read / proto_a_blank_check
+#                     as needed — glitch_pin not required for ProtoA modes)
+#
+ps_tools:
+  id: repair
+  tool0_uart: uart_tool0
+  reset_pin:
+    number: GPIO5
+    mode: OUTPUT_OPEN_DRAIN
+  glitch_pin: GPIO6          # VDD glitch FET — only needed for glitch modes
+  mode: glitch_dump
+  dump_path: "/sdcard/syscon_dump.bin"
+  write_path: "/sdcard/syscon_patched.bin"  # must be .bin or .mot
+  voltage: "5.0v"            # native PS4 syscon voltage
+  tool0_tx_pin: 17           # raw GPIO number — for ProtoA TX drive-low
+  # passcode defaults to :Not:Used: — change only if your chip was re-secured
+  # glitch_delay_min: 1500
+  # glitch_delay_max: 7500
+  # glitch_width_max: 6300
+  # max_attempts: 0           # 0 = run until stopped
+
+  # NOR flash link — enables ps_tools.analyze_nor from live hardware
+  nor_flash: ps4_nor
+  nor_chip_id: "MX25L25635F"
+
+  # Alternative: analyse an existing dump file without the chip connected
+  # nor_dump_path: "/sdcard/ps4_nor_dump.bin"
+
+# ── Status sensors ────────────────────────────────────────────────────────────
+sensor:
+  - platform: template
+    name: "Operation Progress"
+    id: op_progress
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: mdi:progress-download
+
+text_sensor:
+  - platform: template
+    name: "Operation Status"
+    id: op_status
+    icon: mdi:information-outline
+  - platform: template
+    name: "Operation Detail"
+    id: op_detail
+    icon: mdi:text-box-outline
+
+# ── File name input (change from HA or API without reflashing) ────────────────
+text:
+  - platform: template
+    name: "NOR File Name"
+    id: nor_file_name
+    icon: mdi:file
+    optimistic: true
+    initial_value: "/sdcard/ps4_nor_dump.bin"
+    min_length: 1
+    max_length: 64
+    mode: text
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+button:
+
+  # ===========================================================================
+  # SYSCON 0: Probe Syscon
+  # Systematically tests every known access path — safe, read-only.
+  # Designed for chips with UNKNOWN flash state (e.g. accidentally erased).
+  #
+  # Phase 1 — ProtoA entry (no security code involved):
+  #   - Reads silicon signature (proves chip is alive)
+  #   - Blank-checks blocks 0, 1, 511 (tells you the erase state)
+  #   - If flash is fully erased: ProtoA write will work directly —
+  #     just set write_path and trigger "Syscon — ProtoA Write"
+  #
+  # Phase 2 — OCD connect WITHOUT glitch:
+  #   - Tries 0xFF×10 (erased security code), :Not:Used:, 0x00×10
+  #   - An erased chip may accept 0xFF×10 with no glitch at all
+  #
+  # Phase 3 — OCD connect WITH single glitch (each passcode):
+  #   - Only runs if glitch_pin is configured and Phase 2 failed
+  #
+  # All results logged. Nothing is written. Stop at any time with "Stop".
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — Probe (unknown/erased chip)"
+    id: btn_probe_syscon
+    icon: mdi:stethoscope
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("Probing syscon...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Check logs for results");
+        - ps_tools.probe_syscon:
+            id: repair
+
+  # ===========================================================================
+  # SYSCON 1: Glitch Dump
+  # Runs glitch loop → OCD → shellcode → dumps 512KB syscon flash to SD.
+  # Abort at any time with "Glitch Stop".
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — Glitch Dump"
+    id: btn_glitch_dump
+    icon: mdi:lightning-bolt
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("Glitching...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("See logs for attempt count");
+        - ps_tools.start_glitch:
+            id: repair
+
+  # ===========================================================================
+  # SYSCON 2: Stop (abort any running operation)
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — Stop"
+    id: btn_stop
+    icon: mdi:stop-circle
+    on_press:
+      then:
+        - ps_tools.stop:
+            id: repair
+        - lambda: |-
+            id(op_status).publish_state("Stopped");
+            id(op_progress).publish_state(0.0f);
+
+  # ===========================================================================
+  # SYSCON 3: Blank Check
+  # ProtoA — check all 512 blocks for erase state.
+  # Result logged. chip must be in bootloader mode (RESET pulled by component).
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — Blank Check"
+    id: btn_blank_check
+    icon: mdi:checkbox-blank-outline
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("Blank checking...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("ProtoA blank check in progress");
+        - ps_tools.start_blank_check:
+            id: repair
+
+  # ===========================================================================
+  # SYSCON 4: ProtoA Read
+  # Reads all ProtoA-accessible blocks → dumps to dump_path on SD.
+  # Chip must have security code :Not:Used: (stock or glitch-patched).
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — ProtoA Read"
+    id: btn_proto_read
+    icon: mdi:download
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("ProtoA reading...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Reading 512KB syscon...");
+        - ps_tools.start_read:
+            id: repair
+
+  # ===========================================================================
+  # SYSCON 5: ProtoA Write
+  # Erases all blocks, programs from write_path (.bin or .mot), verifies.
+  # WARNING: irreversible — keep verified backup before writing!
+  # ===========================================================================
+  - platform: template
+    name: "Syscon — ProtoA Write"
+    id: btn_proto_write
+    icon: mdi:upload
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("ProtoA writing...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Writing 512KB syscon...");
+        - ps_tools.start_write:
+            id: repair
+
+  # ===========================================================================
+  # NOR 1: Read JEDEC ID
+  # Quick chip detection — logs manufacturer + device ID + capacity.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — JEDEC ID"
+    id: btn_nor_jedec
+    icon: mdi:chip
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            id(op_status).publish_state("Reading JEDEC ID...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("");
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint32_t jedec = flash->read_jedec_id();
+            uint32_t cap   = flash->get_capacity();
+
+            ESP_LOGI("nor", "JEDEC: 0x%06X  MFG=0x%02X  DEV=0x%04X  Cap=%uMB",
+                     jedec, (jedec >> 16) & 0xFF, jedec & 0xFFFF,
+                     cap / (1024 * 1024));
+
+            char msg[48];
+            if (jedec == 0x000000 || jedec == 0xFFFFFF) {
+              snprintf(msg, sizeof(msg), "NO CHIP — check wiring!");
+            } else {
+              snprintf(msg, sizeof(msg), "JEDEC:0x%06X  %uMB", jedec, cap / (1024 * 1024));
+            }
+            id(op_status).publish_state(msg);
+            id(op_progress).publish_state(100.0f);
+
+  # ===========================================================================
+  # NOR 2: Read / Clear Status Register
+  # Logs SR1 + SR2, clears block protection bits if set.
+  # WP# must be on VCC to clear BP bits.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — Read/Clear Status Reg"
+    id: btn_nor_sreg
+    icon: mdi:shield-lock-open-outline
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            id(op_status).publish_state("Reading status regs...");
+            id(op_progress).publish_state(0.0f);
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint8_t sr1 = flash->read_status_register();
+            uint8_t sr2 = flash->read_status_register2();
+
+            ESP_LOGI("nor", "SR1=0x%02X  SR2=0x%02X", sr1, sr2);
+            ESP_LOGI("nor", "  WEL=%u BUSY=%u BP=%u%u%u TB=%u SEC=%u SRP=%u  QE=%u",
+                     (sr1>>1)&1, sr1&1, (sr1>>4)&1, (sr1>>3)&1, (sr1>>2)&1,
+                     (sr1>>5)&1, (sr1>>6)&1, (sr1>>7)&1, (sr2>>1)&1);
+
+            uint8_t bp = sr1 & 0x7C;
+            if (bp != 0) {
+              ESP_LOGW("nor", "Block protection active (0x%02X) — clearing...", bp);
+              uint8_t new_sr1 = sr1 & 0x83;
+              if (flash->write_status_registers(new_sr1, sr2)) {
+                uint8_t check = flash->read_status_register();
+                if ((check & 0x7C) == 0) {
+                  ESP_LOGI("nor", "BP cleared OK — SR1 now 0x%02X", check);
+                  id(op_status).publish_state("BP cleared OK");
+                } else {
+                  ESP_LOGE("nor", "BP clear FAILED — SR1=0x%02X (WP# on VCC?)", check);
+                  id(op_status).publish_state("BP clear FAILED — check WP#");
+                }
+              } else {
+                id(op_status).publish_state("SR write FAILED — check WP#");
+              }
+            } else {
+              ESP_LOGI("nor", "No block protection — all sectors writable");
+              char msg[32];
+              snprintf(msg, sizeof(msg), "SR1:0x%02X SR2:0x%02X  No BP", sr1, sr2);
+              id(op_status).publish_state(msg);
+            }
+            id(op_progress).publish_state(100.0f);
+
+  # ===========================================================================
+  # NOR 3: Dump Flash → SD
+  # Reads all 32MB to the file set in "NOR File Name" text input.
+  # Uses PSRAM buffer, 16KB chunks. ~5–8 min at 8 MHz SPI.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — Dump to SD"
+    id: btn_nor_dump
+    icon: mdi:content-save
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            const char *path = id(nor_file_name).state.c_str();
+
+            id(op_status).publish_state("Dumping NOR...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state(path);
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint32_t capacity = flash->get_capacity();
+            if (capacity == 0) {
+              id(op_status).publish_state("No chip — check wiring");
+              return;
+            }
+
+            FILE *f = fopen(path, "wb");
+            if (!f) {
+              char msg[64];
+              snprintf(msg, sizeof(msg), "Cannot open: %s", path);
+              id(op_status).publish_state(msg);
+              return;
+            }
+
+            static const uint32_t CHUNK = 16384;
+            esphome::RAMAllocator<uint8_t> alloc(esphome::RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *buf = alloc.allocate(CHUNK);
+            if (!buf) {
+              fclose(f);
+              id(op_status).publish_state("PSRAM alloc failed");
+              return;
+            }
+
+            bool ok = true;
+            for (uint32_t offset = 0; offset < capacity; offset += CHUNK) {
+              uint32_t to_read = ((offset + CHUNK) <= capacity) ? CHUNK : (capacity - offset);
+              if (!flash->read(offset, buf, to_read)) {
+                ok = false; break;
+              }
+              if (fwrite(buf, 1, to_read, f) != to_read) {
+                ok = false; break;
+              }
+              float pct = (float)(offset + to_read) / (float)capacity * 100.0f;
+              id(op_progress).publish_state(pct);
+              if ((offset % (512 * 1024)) == 0) {
+                char det[32];
+                snprintf(det, sizeof(det), "%u / %u KB", offset / 1024, capacity / 1024);
+                id(op_detail).publish_state(det);
+              }
+            }
+
+            alloc.deallocate(buf, CHUNK);
+            fclose(f);
+
+            id(op_status).publish_state(ok ? "Dump complete!" : "Dump FAILED!");
+            id(op_progress).publish_state(ok ? 100.0f : 0.0f);
+            if (ok) ESP_LOGI("nor", "Dump saved: %s (%u bytes)", path, capacity);
+
+  # ===========================================================================
+  # NOR 4: Verify Dump
+  # Re-reads chip and compares byte-for-byte against the SD file.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — Verify Dump"
+    id: btn_nor_verify
+    icon: mdi:check-circle
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            const char *path = id(nor_file_name).state.c_str();
+
+            id(op_status).publish_state("Verifying...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state(path);
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint32_t capacity = flash->get_capacity();
+            FILE *f = fopen(path, "rb");
+            if (!f) {
+              id(op_status).publish_state("Cannot open file");
+              return;
+            }
+
+            static const uint32_t CHUNK = 16384;
+            esphome::RAMAllocator<uint8_t> alloc(esphome::RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *flash_buf = alloc.allocate(CHUNK);
+            uint8_t *file_buf  = alloc.allocate(CHUNK);
+
+            if (!flash_buf || !file_buf) {
+              fclose(f);
+              if (flash_buf) alloc.deallocate(flash_buf, CHUNK);
+              if (file_buf)  alloc.deallocate(file_buf, CHUNK);
+              id(op_status).publish_state("PSRAM alloc failed");
+              return;
+            }
+
+            bool match = true;
+            uint32_t first_diff = 0;
+            for (uint32_t offset = 0; offset < capacity; offset += CHUNK) {
+              uint32_t to_read = ((offset + CHUNK) <= capacity) ? CHUNK : (capacity - offset);
+              if (!flash->read(offset, flash_buf, to_read) ||
+                  fread(file_buf, 1, to_read, f) != to_read) {
+                match = false; break;
+              }
+              if (memcmp(flash_buf, file_buf, to_read) != 0) {
+                for (uint32_t i = 0; i < to_read; i++) {
+                  if (flash_buf[i] != file_buf[i]) { first_diff = offset + i; break; }
+                }
+                match = false; break;
+              }
+              id(op_progress).publish_state(
+                (float)(offset + to_read) / (float)capacity * 100.0f);
+            }
+
+            alloc.deallocate(flash_buf, CHUNK);
+            alloc.deallocate(file_buf, CHUNK);
+            fclose(f);
+
+            if (match) {
+              id(op_status).publish_state("Verify OK — match!");
+              id(op_progress).publish_state(100.0f);
+              ESP_LOGI("nor", "Verify OK");
+            } else {
+              char msg[48];
+              snprintf(msg, sizeof(msg), "MISMATCH at 0x%06X!", first_diff);
+              id(op_status).publish_state(msg);
+              ESP_LOGE("nor", "Verify FAILED — first diff at 0x%06X", first_diff);
+            }
+
+  # ===========================================================================
+  # NOR 5: Write Flash (full overwrite)
+  # Erases sector-by-sector, writes from SD file, verifies after.
+  # WP# must be on VCC. File size must equal chip capacity.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — Write Flash"
+    id: btn_nor_write
+    icon: mdi:upload
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            const char *path = id(nor_file_name).state.c_str();
+
+            id(op_status).publish_state("Writing NOR...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state(path);
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint32_t capacity = flash->get_capacity();
+            FILE *f = fopen(path, "rb");
+            if (!f) {
+              id(op_status).publish_state("Cannot open file");
+              return;
+            }
+
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            rewind(f);
+
+            if ((uint32_t)file_size != capacity) {
+              char msg[64];
+              snprintf(msg, sizeof(msg), "Size mismatch: %ld != %u", file_size, capacity);
+              id(op_status).publish_state(msg);
+              fclose(f);
+              return;
+            }
+
+            uint32_t sector_size = flash->get_erase_size();
+            static const uint32_t CHUNK = 4096;
+            esphome::RAMAllocator<uint8_t> alloc(esphome::RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *buf = alloc.allocate(CHUNK);
+            if (!buf) {
+              fclose(f);
+              id(op_status).publish_state("PSRAM alloc failed");
+              return;
+            }
+
+            bool ok = true;
+            for (uint32_t offset = 0; offset < capacity; offset += sector_size) {
+              // Erase sector
+              if (!flash->erase_block(offset)) { ok = false; break; }
+
+              // Program sector in page chunks
+              for (uint32_t page = 0; page < sector_size && ok; page += CHUNK) {
+                uint32_t to_write = (CHUNK <= (sector_size - page)) ? CHUNK : (sector_size - page);
+                if (fread(buf, 1, to_write, f) != to_write) { ok = false; break; }
+                if (!flash->write(offset + page, buf, to_write)) { ok = false; break; }
+              }
+              if (!ok) break;
+
+              float pct = (float)(offset + sector_size) / (float)capacity * 100.0f;
+              id(op_progress).publish_state(pct);
+              if ((offset % (1024 * 1024)) == 0) {
+                char det[32];
+                snprintf(det, sizeof(det), "%u / %u MB", offset / (1024*1024), capacity / (1024*1024));
+                id(op_detail).publish_state(det);
+              }
+            }
+
+            alloc.deallocate(buf, CHUNK);
+            fclose(f);
+
+            id(op_status).publish_state(ok ? "Write complete!" : "Write FAILED!");
+            id(op_progress).publish_state(ok ? 100.0f : 0.0f);
+
+  # ===========================================================================
+  # NOR 6: Smart Write
+  # Compares SD file vs chip sector-by-sector, skips matching sectors.
+  # Much faster for partial patches. Always verifies after write.
+  # ===========================================================================
+  - platform: template
+    name: "NOR — Smart Write"
+    id: btn_nor_smart_write
+    icon: mdi:sync
+    on_press:
+      then:
+        - lambda: |-
+            auto *flash = id(ps4_nor);
+            const char *path = id(nor_file_name).state.c_str();
+
+            id(op_status).publish_state("Smart write...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("Comparing sectors...");
+
+            if (flash->is_failed()) {
+              id(op_status).publish_state("FAILED: check wiring");
+              return;
+            }
+
+            uint32_t capacity    = flash->get_capacity();
+            uint32_t sector_size = flash->get_erase_size();
+
+            FILE *f = fopen(path, "rb");
+            if (!f) {
+              id(op_status).publish_state("Cannot open file");
+              return;
+            }
+
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            rewind(f);
+
+            if ((uint32_t)file_size != capacity) {
+              char msg[64];
+              snprintf(msg, sizeof(msg), "Size mismatch: %ld != %u", file_size, capacity);
+              id(op_status).publish_state(msg);
+              fclose(f);
+              return;
+            }
+
+            esphome::RAMAllocator<uint8_t> alloc(esphome::RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+            uint8_t *flash_buf = alloc.allocate(sector_size);
+            uint8_t *file_buf  = alloc.allocate(sector_size);
+            if (!flash_buf || !file_buf) {
+              if (flash_buf) alloc.deallocate(flash_buf, sector_size);
+              if (file_buf)  alloc.deallocate(file_buf, sector_size);
+              fclose(f);
+              id(op_status).publish_state("PSRAM alloc failed");
+              return;
+            }
+
+            bool ok = true;
+            uint32_t written = 0, skipped = 0;
+
+            for (uint32_t offset = 0; offset < capacity; offset += sector_size) {
+              if (fread(file_buf, 1, sector_size, f) != sector_size) { ok = false; break; }
+              if (!flash->read(offset, flash_buf, sector_size)) { ok = false; break; }
+
+              if (memcmp(flash_buf, file_buf, sector_size) == 0) {
+                skipped++;
+              } else {
+                if (!flash->erase_block(offset)) { ok = false; break; }
+                if (!flash->write(offset, file_buf, sector_size)) { ok = false; break; }
+                written++;
+              }
+
+              float pct = (float)(offset + sector_size) / (float)capacity * 100.0f;
+              id(op_progress).publish_state(pct);
+              if ((offset % (1024 * 1024)) == 0) {
+                char det[40];
+                snprintf(det, sizeof(det), "Written:%u  Skipped:%u", written, skipped);
+                id(op_detail).publish_state(det);
+              }
+            }
+
+            alloc.deallocate(flash_buf, sector_size);
+            alloc.deallocate(file_buf, sector_size);
+            fclose(f);
+
+            if (ok) {
+              char msg[48];
+              snprintf(msg, sizeof(msg), "Done! %u written, %u skipped", written, skipped);
+              id(op_status).publish_state(msg);
+              id(op_progress).publish_state(100.0f);
+              ESP_LOGI("nor", "Smart write: %u sectors written, %u skipped", written, skipped);
+            } else {
+              id(op_status).publish_state("Smart write FAILED!");
+            }
+
+  # ===========================================================================
+  # PS4 ANALYSIS 1: Analyze NOR (live hardware)
+  # Reads from the SPI flash chip directly. Logs to serial + HA.
+  # Results appear in the ESPHome log — also visible via API.
+  # ===========================================================================
+  - platform: template
+    name: "PS4 — Analyze NOR (live)"
+    id: btn_analyze_nor_live
+    icon: mdi:magnify
+    on_press:
+      then:
+        - lambda: |-
+            id(op_status).publish_state("Analyzing NOR (live)...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state("See logs for full output");
+        - ps_tools.analyze_nor:
+            id: repair
+
+  # ===========================================================================
+  # PS4 ANALYSIS 2: Analyze NOR Dump (offline, from SD file)
+  # Reads from the dump file set in "NOR File Name" — no chip needed.
+  # Useful for analysing a dump taken earlier or from another tool.
+  # NOTE: temporarily reconfigures nor_dump_path — stops the component,
+  #       triggers analyze_nor, then lets you reset as needed.
+  # ===========================================================================
+  - platform: template
+    name: "PS4 — Analyze NOR (dump file)"
+    id: btn_analyze_nor_file
+    icon: mdi:file-search
+    on_press:
+      then:
+        - lambda: |-
+            // Point ps_tools at the dump file path for offline analysis.
+            // nor_dump_path is used when nor_flash is not connected or not present.
+            id(repair).set_nor_dump_path(id(nor_file_name).state.c_str());
+            id(op_status).publish_state("Analyzing NOR dump...");
+            id(op_progress).publish_state(0.0f);
+            id(op_detail).publish_state(id(nor_file_name).state.c_str());
+        - ps_tools.analyze_nor:
+            id: repair
