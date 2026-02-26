@@ -324,8 +324,12 @@ void PsTools::run_glitch_loop_() {
     this->reset_pin_->digital_write(false);
     esp_rom_delay_us(80);
 
-    // Step 2: UART driver delete → TX floats low → TOOL0 held LOW
+    // Step 2: UART driver delete, then explicitly drive TX GPIO LOW → TOOL0 LOW
     uart_driver_delete(uart_num);
+    gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
+    gpio_reset_pin(tx_gpio);
+    gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(tx_gpio, 0);
     esp_rom_delay_us(1800);
 
     // Step 3: Release RESET — chip boots with TOOL0 LOW → enters OCD mode

@@ -135,7 +135,10 @@ ps_tools:
   tool0_uart: uart_tool0
   reset_pin:
     number: GPIO5
-    mode: OUTPUT_OPEN_DRAIN
+    mode:
+      output: true
+      open_drain: true
+      pullup: true
   glitch_pin: GPIO6          # VDD glitch FET — only needed for glitch modes
   mode: glitch_dump
   dump_path: "/sdcard/syscon_dump.bin"
