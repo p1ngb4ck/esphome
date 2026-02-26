@@ -1,12 +1,3 @@
-"""ps_tools — PS4/PS5 repair toolkit for ESPHome.
-
-Supports:
-  - RL78/G13 syscon OCD voltage glitch (dump, flasher protocol)
-  - RL78/G13 syscon ProtoA serial bootloader (write, read, blank check)
-
-Designed for ESP32 variants with PSRAM (e.g. ESP32-S3).
-"""
-
 from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import binary_storage, uart

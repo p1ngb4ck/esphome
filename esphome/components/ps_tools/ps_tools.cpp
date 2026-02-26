@@ -2186,7 +2186,7 @@ bool PsTools::read_bytes_timeout_(uart::UARTComponent *uart, uint8_t *buf, uint1
 
 void IRAM_ATTR PsTools::delay_ns_(uint32_t ns) {
 #ifdef USE_ESP32
-  uint32_t cycles = (uint64_t) ns * esp_cpu_get_cycle_count_frequency_hz() / 1000000000ULL;
+  uint32_t cycles = (uint64_t) ns * esp_rom_get_cpu_ticks_per_us() / 1000;
   uint32_t start = esp_cpu_get_cycle_count();
   while ((esp_cpu_get_cycle_count() - start) < cycles) {
     // busy wait
