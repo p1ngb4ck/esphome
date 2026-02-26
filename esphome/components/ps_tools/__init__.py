@@ -14,7 +14,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_MODE
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["uart"]
+DEPENDENCIES = ["binary_storage", "uart"]
 
 # ── Config key constants ─────────────────────────────────────────────────────
 CONF_TOOL0_UART = "tool0_uart"
