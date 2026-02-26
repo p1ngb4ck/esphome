@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" font-family="monospace">
+
+  <!-- Background -->
+  <rect width="1400" height="820" fill="white" stroke="#aaa" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="700" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#111">
+    ESP32-S3  ↔  TXS0108E  ↔  RL78/G13 Syscon (PS4 Fat)
+  </text>
+  <line x1="40" y1="42" x2="1360" y2="42" stroke="#bbb" stroke-width="1"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ESP32-S3 BLOCK
+       ═══════════════════════════════════════════════════════════════ -->
+  <rect x="40" y="55" width="230" height="640" rx="6" fill="#e8eeff" stroke="#3344bb" stroke-width="2"/>
+  <text x="155" y="80"  text-anchor="middle" font-size="18" font-weight="bold" fill="#3344bb">ESP32-S3</text>
+  <text x="155" y="98"  text-anchor="middle" font-size="13" fill="#3344bb">(3.3 V logic)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       TXS0108E BLOCK
+       ═══════════════════════════════════════════════════════════════ -->
+  <rect x="530" y="55" width="240" height="640" rx="6" fill="#f5f5f5" stroke="#555" stroke-width="2"/>
+  <text x="650" y="78"  text-anchor="middle" font-size="18" font-weight="bold" fill="#333">TXS0108E</text>
+  <text x="650" y="96"  text-anchor="middle" font-size="12" fill="#555">Bidirectional Level Shifter</text>
+  <text x="545" y="116" font-size="12" font-weight="bold" fill="#1a8c1a">VCCA  3.3V</text>
+  <text x="672" y="116" font-size="12" font-weight="bold" fill="#cc1111">VCCB  5V</text>
+  <text x="650" y="134" text-anchor="middle" font-size="11" fill="#cc7700">OE → 3.3V (always enabled)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SYSCON BLOCK
+       ═══════════════════════════════════════════════════════════════ -->
+  <rect x="1020" y="55" width="340" height="640" rx="6" fill="#fff0f0" stroke="#cc2222" stroke-width="2"/>
+  <text x="1190" y="80"  text-anchor="middle" font-size="18" font-weight="bold" fill="#cc2222">RL78/G13 Syscon</text>
+  <text x="1190" y="98"  text-anchor="middle" font-size="13" fill="#cc2222">(PS4 Fat — 5 V logic)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ROW 1: UART TX  GPIO17 → diode → combined node → A1 → B1 → TOOL0
+       ROW 2: UART RX  GPIO16 ←────── combined node (reads same wire)
+       Diode prevents TX from back-driving RX inside the ESP32-S3.
+       Combined node feeds one TXS0108E channel (bidirectional).
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- TX label -->
+  <text x="262" y="181" text-anchor="end" font-size="15" font-weight="bold" fill="#3344bb">UART TX</text>
+  <text x="262" y="197" text-anchor="end" font-size="11" fill="#777">GPIO17</text>
+  <!-- TX wire to diode anode -->
+  <line x1="270" y1="184" x2="360" y2="184" stroke="#3344bb" stroke-width="2"/>
+  <circle cx="270" cy="184" r="4" fill="#3344bb"/>
+  <!-- Diode symbol: anode at x=360, cathode at x=400 -->
+  <!-- diode body (triangle) -->
+  <polygon points="360,174 360,194 380,184" fill="#3344bb" stroke="#3344bb" stroke-width="1"/>
+  <!-- cathode bar -->
+  <line x1="380" y1="174" x2="380" y2="194" stroke="#3344bb" stroke-width="2"/>
+  <!-- label -->
+  <text x="370" y="168" text-anchor="middle" font-size="10" fill="#3344bb">D1</text>
+  <!-- wire from cathode to combined node at x=430 -->
+  <line x1="380" y1="184" x2="430" y2="184" stroke="#3344bb" stroke-width="2"/>
+  <!-- combined node dot -->
+  <circle cx="430" cy="184" r="5" fill="#555"/>
+
+  <!-- RX label -->
+  <text x="262" y="276" text-anchor="end" font-size="15" font-weight="bold" fill="#007a7a">UART RX</text>
+  <text x="262" y="292" text-anchor="end" font-size="11" fill="#777">GPIO16</text>
+  <!-- RX wire to combined node (vertical drop) -->
+  <line x1="270" y1="279" x2="430" y2="279" stroke="#007a7a" stroke-width="2"/>
+  <circle cx="270" cy="279" r="4" fill="#007a7a"/>
+  <line x1="430" y1="184" x2="430" y2="279" stroke="#555" stroke-width="2"/>
+  <circle cx="430" cy="279" r="5" fill="#555"/>
+  <text x="440" y="236" font-size="11" font-style="italic" fill="#555">combined</text>
+  <text x="440" y="250" font-size="11" font-style="italic" fill="#555">1-wire node</text>
+
+  <!-- combined node → TXS A1 -->
+  <line x1="430" y1="230" x2="530" y2="230" stroke="#555" stroke-width="2"/>
+  <circle cx="430" cy="230" r="4" fill="#555"/>
+  <text x="538" y="226" font-size="12" fill="#333">A1</text>
+  <!-- TXS direction arrow ↔ bidir -->
+  <polygon points="638,225 626,219 626,231" fill="#555"/>
+  <polygon points="662,225 674,219 674,231" fill="#555"/>
+  <text x="650" y="214" text-anchor="middle" font-size="10" fill="#555">↔ bidir</text>
+  <text x="720" y="226" font-size="12" fill="#333">B1</text>
+  <!-- B1 → TOOL0 -->
+  <line x1="770" y1="230" x2="1020" y2="230" stroke="#555" stroke-width="2"/>
+  <circle cx="1020" cy="230" r="4" fill="#555"/>
+  <text x="1035" y="227" font-size="15" font-weight="bold" fill="#3344bb">TOOL0</text>
+  <text x="1035" y="243" font-size="11" fill="#777">Pin 12 FAT</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ROW 3: RESET  GPIO5 → A2 → B2 → RESET
+       ═══════════════════════════════════════════════════════════════ -->
+  <text x="262" y="351" text-anchor="end" font-size="15" font-weight="bold" fill="#880099">RESET</text>
+  <text x="262" y="367" text-anchor="end" font-size="11" fill="#777">GPIO5</text>
+  <line x1="270" y1="354" x2="530" y2="354" stroke="#880099" stroke-width="2"/>
+  <circle cx="270" cy="354" r="4" fill="#880099"/>
+  <text x="538" y="349" font-size="12" fill="#333">A2</text>
+  <polygon points="648,349 636,343 636,355" fill="#880099"/>
+  <text x="650" y="338" text-anchor="middle" font-size="10" fill="#880099">→ output</text>
+  <text x="720" y="349" font-size="12" fill="#333">B2</text>
+  <line x1="770" y1="354" x2="1020" y2="354" stroke="#880099" stroke-width="2"/>
+  <circle cx="1020" cy="354" r="4" fill="#880099"/>
+  <text x="1035" y="351" font-size="15" font-weight="bold" fill="#880099">RESET</text>
+  <text x="1035" y="367" font-size="11" fill="#777">Pin 13 FAT</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ROW 4: GLITCH  GPIO6 → A3 → B3 → VDD
+       ═══════════════════════════════════════════════════════════════ -->
+  <text x="262" y="436" text-anchor="end" font-size="15" font-weight="bold" fill="#bb6600">GLITCH</text>
+  <text x="262" y="452" text-anchor="end" font-size="11" fill="#777">GPIO6</text>
+  <line x1="270" y1="439" x2="530" y2="439" stroke="#bb6600" stroke-width="2"/>
+  <circle cx="270" cy="439" r="4" fill="#bb6600"/>
+  <text x="538" y="434" font-size="12" fill="#333">A3</text>
+  <polygon points="648,434 636,428 636,440" fill="#bb6600"/>
+  <text x="650" y="423" text-anchor="middle" font-size="10" fill="#bb6600">→ output</text>
+  <text x="720" y="434" font-size="12" fill="#333">B3</text>
+  <line x1="770" y1="439" x2="1020" y2="439" stroke="#bb6600" stroke-width="2"/>
+  <circle cx="1020" cy="439" r="4" fill="#bb6600"/>
+  <text x="1035" y="436" font-size="15" font-weight="bold" fill="#bb6600">VDD</text>
+  <text x="1035" y="452" font-size="11" fill="#777">Pin 22 FAT  ⚠ lift if on-board</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       POWER RAILS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- VCCA 3.3V -->
+  <text x="262" y="546" text-anchor="end" font-size="14" font-weight="bold" fill="#1a8c1a">3.3V</text>
+  <line x1="270" y1="542" x2="530" y2="542" stroke="#1a8c1a" stroke-width="2"/>
+  <text x="538" y="539" font-size="12" font-weight="bold" fill="#1a8c1a">VCCA</text>
+  <line x1="630" y1="534" x2="630" y2="542" stroke="#666" stroke-width="1.5"/>
+  <line x1="623" y1="534" x2="637" y2="534" stroke="#666" stroke-width="2"/>
+  <line x1="623" y1="538" x2="637" y2="538" stroke="#666" stroke-width="2"/>
+  <line x1="630" y1="542" x2="630" y2="548" stroke="#666" stroke-width="1.5"/>
+  <text x="641" y="541" font-size="10" fill="#888">100nF → GND</text>
+
+  <!-- VCCB 5V -->
+  <line x1="770" y1="542" x2="1020" y2="542" stroke="#cc1111" stroke-width="2"/>
+  <text x="720" y="539" font-size="12" font-weight="bold" fill="#cc1111">VCCB</text>
+  <line x1="700" y1="534" x2="700" y2="542" stroke="#666" stroke-width="1.5"/>
+  <line x1="693" y1="534" x2="707" y2="534" stroke="#666" stroke-width="2"/>
+  <line x1="693" y1="538" x2="707" y2="538" stroke="#666" stroke-width="2"/>
+  <line x1="700" y1="542" x2="700" y2="548" stroke="#666" stroke-width="1.5"/>
+  <text x="641" y="556" font-size="10" fill="#888">100nF → GND</text>
+  <text x="1035" y="542" font-size="14" font-weight="bold" fill="#cc1111">5V  EVDD0</text>
+  <text x="1035" y="558" font-size="11" fill="#777">Pin 23 FAT  ⚠ lift if on-board</text>
+
+  <!-- OE -->
+  <text x="538" y="575" font-size="13" font-weight="bold" fill="#cc7700">OE → 3.3V</text>
+  <text x="538" y="590" font-size="11" fill="#888">tie directly to VCCA</text>
+
+  <!-- GND -->
+  <text x="262" y="638" text-anchor="end" font-size="14" font-weight="bold" fill="#111">GND</text>
+  <line x1="270" y1="634" x2="1355" y2="634" stroke="#111" stroke-width="2"/>
+  <text x="650" y="628" text-anchor="middle" font-size="12" fill="#555">──────────────── GND common ────────────────</text>
+  <text x="1035" y="638" font-size="14" font-weight="bold" fill="#111">EVSS0</text>
+  <text x="1035" y="653" font-size="11" fill="#777">Pin 21 FAT</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       NOTES
+       ═══════════════════════════════════════════════════════════════ -->
+  <rect x="40" y="716" width="1320" height="90" rx="4" fill="#fffbe6" stroke="#e0c800" stroke-width="1"/>
+  <text x="56" y="734" font-size="12" font-weight="bold" fill="#555">Notes:</text>
+  <text x="56" y="751" font-size="12" fill="#333">• D1 (1N4148 / 1N5817 / MBR0520): anode=TX, cathode=combined node. Prevents TX from back-driving into RX when syscon drives TOOL0 HIGH.</text>
+  <text x="56" y="767" font-size="12" fill="#333">• TX+RX combine to one node on the 3.3V side → single TXS0108E channel A1↔B1 → TOOL0. Only 3 channels used (TOOL0, RESET, GLITCH).</text>
+  <text x="56" y="783" font-size="12" fill="#333">• TXS0108E SSOP-20: VCCA=pin1, OE=pin19, VCCB=pin20. A1–A3 = pins 2–4. B1–B3 = pins 18–16 (B-side reversed).</text>
+  <text x="56" y="799" font-size="12" fill="#333">• ⚠ Lift VDD (Pin 22 FAT) from board if controlling glitch externally. Lift EVDD0 (Pin 23) only if powering syscon externally.</text>
+
+</svg>

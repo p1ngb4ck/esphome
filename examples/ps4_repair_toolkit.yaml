@@ -10,7 +10,7 @@
 # HARDWARE (ESP32-S3 N16R8 — 16MB flash, 8MB PSRAM)
 #
 # ── Syscon connections ────────────────────────────────────────────────────
-#   PS4 TOOL0  -> ESP32-S3 GPIO17 (UART1 TX/RX, 1-wire)
+#   PS4 TOOL0  -> ESP32-S3 GPIO17 (UART1 TX) + GPIO16 (UART1 RX), joined via TXS0108E to TOOL0
 #   PS4 RESET  -> ESP32-S3 GPIO5  (open-drain output)
 #   PS4 VDD    -> ESP32-S3 GPIO6  (glitch FET gate, MODE_GLITCH_DUMP only)
 #   PS4 GND    -> ESP32-S3 GND
@@ -107,11 +107,13 @@ sd_storage:
   mode_1bit: true
   path: /sdcard
 
-# ── UART for syscon TOOL0 (1-wire half-duplex) ───────────────────────────────
+# ── UART for syscon TOOL0 ────────────────────────────────────────────────────
+# TX and RX are separate GPIOs — both connect to TXS0108E which joins them
+# to the single TOOL0 1-wire line on the syscon side.
 uart:
   - id: uart_tool0
     tx_pin: GPIO17
-    rx_pin: GPIO17
+    rx_pin: GPIO16
     baud_rate: 115200
     stop_bits: 1
 
