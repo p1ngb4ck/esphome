@@ -107,7 +107,8 @@ void PsTools::loop() {
       break;
 
     case STATE_DUMPING:
-      this->dump_to_storage_();
+      // Dump is received on the core-1 FreeRTOS task via run_dump_on_task_().
+      // Nothing to do here — main loop just waits for STATE_DONE/FAILED.
       break;
 
     case STATE_FLASHER:
@@ -482,6 +483,7 @@ void PsTools::run_glitch_loop_() {
         this->progress_bytes_.store(0, std::memory_order_relaxed);
         ESP_LOGI(TAG, "Shellcode running. Entering dump mode.");
         this->state_.store(STATE_DUMPING, std::memory_order_release);
+        this->run_dump_on_task_(uart_num);
       }
       return;
     }
@@ -590,6 +592,7 @@ void PsTools::run_ocd_read_() {
   this->progress_bytes_.store(0, std::memory_order_relaxed);
   ESP_LOGI(TAG, "Shellcode running. Entering dump mode.");
   this->state_.store(STATE_DUMPING, std::memory_order_release);
+  this->run_dump_on_task_(uart_num);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2428,52 +2431,63 @@ uint8_t *PsTools::load_mot_to_psram_(uint32_t *out_size) {
 // Dump helpers
 // ════════════════════════════════════════════════════════════════════════════
 
-void PsTools::dump_to_storage_() {
-  // Called from main loop while STATE_DUMPING.
-  // Shellcode is streaming bytes over TOOL0 — collect them into a PSRAM buffer,
-  // then write to storage once all 512KB received.
+#ifdef USE_ESP32
+void PsTools::run_dump_on_task_(int uart_num) {
+  // Called from the core-1 FreeRTOS task immediately after shellcode is
+  // executing.  Reads all 512KB from TOOL0 using uart_read_bytes() (blocking
+  // with timeout) so we never stall on the main loop and never overflow the
+  // FIFO.  Saves to dump_path_ when complete.
 
-  // On first call: allocate PSRAM buffer
-  if (this->dump_buf_ == nullptr) {
-    this->dump_buf_ = static_cast<uint8_t *>(heap_caps_malloc(SYSCON_FLASH_SIZE, MALLOC_CAP_SPIRAM));
-    if (this->dump_buf_ == nullptr) {
-      ESP_LOGE(TAG, "PSRAM alloc failed for dump buffer");
+  // Allocate PSRAM receive buffer
+  uint8_t *buf = static_cast<uint8_t *>(heap_caps_malloc(SYSCON_FLASH_SIZE, MALLOC_CAP_SPIRAM));
+  if (buf == nullptr) {
+    ESP_LOGE(TAG, "PSRAM alloc failed for dump buffer");
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+  ESP_LOGI(TAG, "Dump buffer allocated (%u bytes). Receiving on core %d...", SYSCON_FLASH_SIZE, xPortGetCoreID());
+
+  // Receive loop: read in 1KB chunks with a generous per-chunk timeout.
+  // uart_read_bytes() blocks until data arrives or timeout expires — no FIFO
+  // overflow risk because we are always waiting for bytes here.
+  uint32_t received = 0;
+  uint32_t last_log = 0;
+  static const uint32_t CHUNK = 1024;
+  static const TickType_t CHUNK_TIMEOUT = pdMS_TO_TICKS(500);  // 500ms per chunk
+
+  while (received < SYSCON_FLASH_SIZE) {
+    uint32_t want = std::min((uint32_t) CHUNK, SYSCON_FLASH_SIZE - received);
+    int got = uart_read_bytes(uart_num, buf + received, want, CHUNK_TIMEOUT);
+    if (got <= 0) {
+      ESP_LOGE(TAG, "Dump RX timeout at byte %u / %u — shellcode stalled?", received, SYSCON_FLASH_SIZE);
+      heap_caps_free(buf);
       this->state_.store(STATE_FAILED, std::memory_order_release);
       return;
     }
-    this->dump_bytes_received_ = 0;
-    ESP_LOGI(TAG, "Dump buffer allocated. Receiving...");
-  }
+    received += (uint32_t) got;
+    this->progress_bytes_.store(received, std::memory_order_relaxed);
 
-  // Drain available UART bytes into buffer
-  while (this->tool0_uart_->available() && this->dump_bytes_received_ < SYSCON_FLASH_SIZE) {
-    uint8_t b;
-    if (this->tool0_uart_->read_byte(&b)) {
-      this->dump_buf_[this->dump_bytes_received_++] = b;
+    // Log progress every 64KB
+    if (received - last_log >= 65536 || received == SYSCON_FLASH_SIZE) {
+      ESP_LOGI(TAG, "Dump progress: %u / %u bytes (%.1f%%)", received, SYSCON_FLASH_SIZE,
+               100.0f * received / SYSCON_FLASH_SIZE);
+      last_log = received;
     }
   }
 
-  this->progress_bytes_.store(this->dump_bytes_received_, std::memory_order_relaxed);
-
-  if (this->dump_bytes_received_ < SYSCON_FLASH_SIZE)
-    return;  // Not done yet — keep draining next loop
-
-  // All bytes received — write to file
-  ESP_LOGI(TAG, "Dump complete (%u bytes). Writing to %s...", this->dump_bytes_received_, this->dump_path_.c_str());
+  ESP_LOGI(TAG, "Dump receive complete (%u bytes). Writing to %s...", received, this->dump_path_.c_str());
 
   FILE *f = fopen(this->dump_path_.c_str(), "wb");
   if (f == nullptr) {
     ESP_LOGE(TAG, "Cannot open dump output: %s", this->dump_path_.c_str());
-    heap_caps_free(this->dump_buf_);
-    this->dump_buf_ = nullptr;
+    heap_caps_free(buf);
     this->state_.store(STATE_FAILED, std::memory_order_release);
     return;
   }
 
-  size_t written = fwrite(this->dump_buf_, 1, SYSCON_FLASH_SIZE, f);
+  size_t written = fwrite(buf, 1, SYSCON_FLASH_SIZE, f);
   fclose(f);
-  heap_caps_free(this->dump_buf_);
-  this->dump_buf_ = nullptr;
+  heap_caps_free(buf);
 
   if (written != SYSCON_FLASH_SIZE) {
     ESP_LOGE(TAG, "Dump write error: wrote %u / %u bytes", (uint32_t) written, SYSCON_FLASH_SIZE);
@@ -2484,6 +2498,7 @@ void PsTools::dump_to_storage_() {
   ESP_LOGI(TAG, "Dump saved to %s", this->dump_path_.c_str());
   this->state_.store(STATE_DONE, std::memory_order_release);
 }
+#endif  // USE_ESP32
 
 void PsTools::bridge_uarts_() {
   // Transparent bridge: TOOL0 ↔ pc_uart (for MODE_GLITCH_FLASHER after glitch)

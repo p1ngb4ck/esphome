@@ -466,10 +466,6 @@ class PsTools : public Component {
   // ── Result of last blank check ──
   bool blank_check_result_{false};
 
-  // ── Dump receive buffer (PSRAM, allocated on demand, freed after save) ──
-  uint8_t *dump_buf_{nullptr};
-  uint32_t dump_bytes_received_{0};
-
   // ── Shared atomic state (main loop + FreeRTOS task) ──
   std::atomic<PsToolsState> state_{STATE_IDLE};
   std::atomic<uint32_t> attempt_count_{0};
@@ -536,8 +532,10 @@ class PsTools : public Component {
   void scf_handle_reset_();
 
   // ── Dump helpers ──
-  void bridge_uarts_();     // Stream OCD dump to pc_uart (MODE_GLITCH_FLASHER)
-  void dump_to_storage_();  // Save OCD dump from PSRAM buffer to dump_path_
+  void bridge_uarts_();  // Stream OCD dump to pc_uart (MODE_GLITCH_FLASHER)
+#ifdef USE_ESP32
+  void run_dump_on_task_(int uart_num);  // Receive dump via uart_read_bytes() on core-1 task, then save
+#endif
 
   // ── .mot (Motorola S-record) parser ──
   // Reads .mot file from write_path_, decodes into a PSRAM buffer.
