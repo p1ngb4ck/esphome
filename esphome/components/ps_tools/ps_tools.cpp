@@ -2451,6 +2451,9 @@ void PsTools::run_dump_on_task_(int uart_num) {
   int idle_count = 0;
   auto port = static_cast<uart_port_t>(uart_num);
 
+  // Flush any leftover OCD session bytes (echoes, unlock response, noise)
+  uart_flush_input(port);
+
   while (received < SYSCON_FLASH_SIZE) {
     // Wait for at least one byte
     int got = uart_read_bytes(port, buf + received, 1, pdMS_TO_TICKS(20));
