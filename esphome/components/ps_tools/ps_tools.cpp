@@ -510,8 +510,7 @@ void PsTools::run_ocd_read_() {
   this->progress_bytes_.store(0, std::memory_order_relaxed);
   ESP_LOGI(TAG, "Shellcode running. Entering dump mode.");
   this->state_.store(STATE_DUMPING, std::memory_order_release);
-}
-return;
+  return;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
