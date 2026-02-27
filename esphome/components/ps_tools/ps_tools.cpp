@@ -1459,71 +1459,133 @@ void PsTools::run_analyze_nor_() {
 //
 // Results logged. State set to STATE_DONE regardless (probe is informational).
 
+// Helper: drain RX FIFO, log every byte received, return count.
+// label is a short string shown in the log so we know which step produced the bytes.
+static int probe_drain_log_(uart::UARTComponent *uart, const char *label) {
+  int n = 0;
+  uint8_t rx;
+  while (uart->available()) {
+    if (uart->read_byte(&rx)) {
+      ESP_LOGI(TAG, "    [%s] RX[%d] = 0x%02X", label, n, rx);
+      n++;
+    }
+  }
+  if (n == 0)
+    ESP_LOGI(TAG, "    [%s] RX = (empty)", label);
+  return n;
+}
+
 // Helper: try OCD connect (no glitch) with a given passcode.
-// Returns the response byte received (0xF0/0xF2 = success, 0xFF = no response).
-// Performs the full OCD entry sequence: RESET LOW → TX HIGH → RESET HIGH →
-// MODE_OCD (0xC5) → baud-set frame → OCD_CONNECT → passcode → response.
+// Returns the response byte received (0xF0/0xF2/0xF1 = chip response, 0xFF = no response).
+//
+// Protocol notes:
+//   - TOOL0 is a 1-wire UART: TX and RX share the same physical line (diode on TX).
+//   - Every byte we send echoes back into our own RX FIFO.
+//   - We must drain/discard the echo bytes BEFORE reading genuine chip responses.
+//   - Echo counts: MODE_OCD=1, baud-set frame=7, OCD_CONNECT=1, passcode+csum=11 → total 20 bytes TX.
+//   - After draining echoes the next byte in RX (if any) is the chip's unlock response.
 static uint8_t probe_ocd_no_glitch_(uart::UARTComponent *uart, uart::IDFUARTComponent *idf_uart, uart_port_t uart_num,
                                     gpio_num_t tx_gpio, InternalGPIOPin *reset_pin, const uint8_t *passcode,
                                     uint8_t checksum) {
-  // Step 1: Assert RESET LOW ≥40µs
+  // ── Step 1: Assert RESET LOW ≥40µs ──────────────────────────────────────
   reset_pin->digital_write(false);
   esp_rom_delay_us(500);
 
-  // Step 2: Release UART driver so TX pin can be driven HIGH explicitly
+  // ── Step 2: Delete UART driver, drive TX HIGH explicitly ─────────────────
+  // TOOL0 must be HIGH when RESET is released so the chip enters OCD mode.
   uart_driver_delete(uart_num);
   gpio_reset_pin(tx_gpio);
   gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
-  gpio_set_level(tx_gpio, 1);  // TOOL0 HIGH → OCD mode at reset release
-  esp_rom_delay_us(5000);      // 5ms matches Arduino delay(5) after Serial.end()
+  gpio_set_level(tx_gpio, 1);
+  esp_rom_delay_us(5000);  // 5ms — matches Arduino delay(5) after Serial.end()
 
-  // Step 3: Release RESET — chip samples TOOL0 HIGH → enters OCD mode
+  // ── Step 3: Release RESET — chip samples TOOL0 HIGH → enters OCD mode ───
   reset_pin->digital_write(true);
-  esp_rom_delay_us(5000);  // 5ms for chip to boot into OCD listen
+  esp_rom_delay_us(5000);  // 5ms for chip to boot
 
-  // Step 4: Restore UART driver (TX re-idles HIGH — no gap on TOOL0)
+  // ── Step 4: Restore UART driver ──────────────────────────────────────────
   idf_uart->load_settings(false);
   esp_rom_delay_us(1000);
 
-  // Step 5: Send MODE_OCD byte
-  uart->write_byte(MODE_OCD);
-  esp_rom_delay_us(200);
+  // Drain anything that appeared during init (noise / spurious)
+  probe_drain_log_(uart, "post-reset");
 
-  // Step 6: Send baud-set frame — 0x14 = 115200 baud code, 0x4F = checksum
+  // ── Step 5: Send MODE_OCD (0xC5) ─────────────────────────────────────────
+  // This byte echoes back to us immediately (1-wire). Drain it.
+  uart->write_byte(MODE_OCD);
+  uart->flush();
+  esp_rom_delay_us(2000);
+  probe_drain_log_(uart, "after-MODE_OCD-echo");
+
+  // ── Step 6: Send baud-set frame {01 03 9A 00 14 4F 03} ───────────────────
+  // 7 bytes TX → 7 echoed bytes in RX. Drain echo, then read chip's ACK frame.
   static const uint8_t OCD_BAUD_115200 = 0x14;
   static const uint8_t OCD_BAUD_CSUM = 0x4F;
   const uint8_t baud_tx[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, OCD_BAUD_115200, OCD_BAUD_CSUM, PA_ETX};
   uart->write_array(baud_tx, sizeof(baud_tx));
   uart->flush();
-  esp_rom_delay_us(5000);
+  esp_rom_delay_us(5000);  // wait for echo + chip response
 
-  // Step 7: Flush baud-set response (informational — not gating)
-  while (uart->available()) {
-    uint8_t x;
-    uart->read_byte(&x);
+  // Drain: first 7 bytes are our own echo, remainder is chip's baud-set response
+  {
+    int drained = 0;
+    uint8_t rx;
+    while (uart->available()) {
+      if (uart->read_byte(&rx)) {
+        if (drained < 7) {
+          ESP_LOGI(TAG, "    [baud-set-echo] RX[%d] = 0x%02X (our echo)", drained, rx);
+        } else {
+          ESP_LOGI(TAG, "    [baud-set-resp] RX[%d] = 0x%02X  *** CHIP RESPONSE ***", drained, rx);
+        }
+        drained++;
+      }
+    }
+    if (drained == 0)
+      ESP_LOGW(TAG, "    [baud-set] RX empty — no echo and no chip response");
+    else if (drained <= 7)
+      ESP_LOGW(TAG, "    [baud-set] only %d bytes (echo only, no chip response)", drained);
   }
 
-  // Step 8: Send OCD_CONNECT + passcode + checksum
+  // ── Step 7: Send OCD_CONNECT (0x91) ──────────────────────────────────────
+  // 1 byte TX → 1 echoed byte. Drain echo before passcode.
   uart->write_byte(OCD_CONNECT_CMD);
-  esp_rom_delay_us(500);
+  uart->flush();
+  esp_rom_delay_us(2000);
+  probe_drain_log_(uart, "after-OCD_CONNECT-echo");
+
+  // ── Step 8: Send passcode (10 bytes) + checksum (1 byte) = 11 bytes ──────
+  // 11 bytes TX → 11 echoed bytes. Chip responds with 1 byte after the last.
   uart->write_array(passcode, 10);
   uart->write_byte(checksum);
   uart->flush();
+  esp_rom_delay_us(10000);  // 10ms — give chip time to respond after last byte
 
-  // Step 9: Wait for unlock response
-  esp_rom_delay_us(10000);
+  // Drain: first 11 bytes are our own echo, byte 12+ is the chip's unlock response
   uint8_t response = 0xFF;
-  while (uart->available()) {
+  {
+    int drained = 0;
     uint8_t rx;
-    if (uart->read_byte(&rx)) {
-      if (rx == OCD_UNLOCK_ALREADY || rx == OCD_UNLOCK_OK || rx == OCD_UNLOCK_LOCKED) {
-        response = rx;
-        break;
+    while (uart->available()) {
+      if (uart->read_byte(&rx)) {
+        if (drained < 11) {
+          ESP_LOGI(TAG, "    [passcode-echo] RX[%d] = 0x%02X (our echo)", drained, rx);
+        } else {
+          ESP_LOGI(TAG, "    [unlock-resp]   RX[%d] = 0x%02X  *** CHIP RESPONSE ***", drained, rx);
+          if (rx == OCD_UNLOCK_ALREADY || rx == OCD_UNLOCK_OK || rx == OCD_UNLOCK_LOCKED)
+            response = rx;
+        }
+        drained++;
       }
     }
+    if (drained == 0)
+      ESP_LOGW(TAG, "    [passcode] RX empty — no echo at all (UART problem?)");
+    else if (drained <= 11)
+      ESP_LOGW(TAG, "    [passcode] only %d echo bytes, no chip response byte (drained=%d)", drained, drained);
+    else
+      ESP_LOGI(TAG, "    [passcode] %d total bytes (11 echo + %d chip)", drained, drained - 11);
   }
 
-  // Reset chip back to idle so next probe starts clean
+  // ── Step 9: Reset chip to idle for next attempt ───────────────────────────
   reset_pin->digital_write(false);
   esp_rom_delay_us(500);
   reset_pin->digital_write(true);
