@@ -685,7 +685,9 @@ bool NFSClient::connect_() {
   }
 
   // Create TCP socket
-  this->socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  // Use ::socket to avoid collision with the lwip_sockets.h macro that redefines 'socket'
+  // without argument list, which would otherwise corrupt 'this->socket_' member references.
+  this->socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (this->socket_ < 0) {
     ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
     return false;
