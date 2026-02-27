@@ -62,6 +62,7 @@ StartGlitchWriteAction = ps_tools_ns.class_("StartGlitchWriteAction", automation
 StopAction = ps_tools_ns.class_("StopAction", automation.Action)
 StartWriteAction = ps_tools_ns.class_("StartWriteAction", automation.Action)
 StartReadAction = ps_tools_ns.class_("StartReadAction", automation.Action)
+StartOCDReadAction = ps_tools_ns.class_("StartOCDReadAction", automation.Action)
 StartBlankCheckAction = ps_tools_ns.class_("StartBlankCheckAction", automation.Action)
 AnalyzeNorAction = ps_tools_ns.class_("AnalyzeNorAction", automation.Action)
 ProbeSysconAction = ps_tools_ns.class_("ProbeSysconAction", automation.Action)
@@ -275,6 +276,14 @@ async def ps_tools_start_write_to_code(config, action_id, template_arg, args):
     "ps_tools.start_read", StartReadAction, PS_TOOLS_ACTION_SCHEMA
 )
 async def ps_tools_start_read_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+@automation.register_action(
+    "ps_tools.start_ocd_read", StartOCDReadAction, PS_TOOLS_ACTION_SCHEMA
+)
+async def ps_tools_start_ocd_read_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
