@@ -489,7 +489,7 @@ class PsTools : public Component {
   void run_glitch_write_loop_();
   void run_write_loop_();
   void run_read_loop_();
-  void run_ocd_read_loop_();
+  void run_ocd_read_();
   void run_blank_check_loop_();
   void run_analyze_nor_();   // PS4 NOR analysis: southbridge, torus, FW version, etc.
   void run_probe_syscon_();  // Systematic access probe: ProtoA + OCD variants
