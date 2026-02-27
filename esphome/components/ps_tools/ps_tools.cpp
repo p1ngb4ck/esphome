@@ -2455,11 +2455,12 @@ void PsTools::run_dump_on_task_(int uart_num) {
   int idle_count = 0;
   auto port = static_cast<uart_port_t>(uart_num);
 
-  // Discard the OCD_EXEC echo byte (1 byte) — flushed before OCD_EXEC was sent,
-  // so the only byte ahead of dump data is the echo of OCD_EXEC itself.
+  // Log first 16 bytes to determine what precedes the actual dump data
   {
-    uint8_t discard;
-    uart_read_bytes(port, &discard, 1, pdMS_TO_TICKS(50));
+    uint8_t probe[16];
+    int n = uart_read_bytes(port, probe, 16, pdMS_TO_TICKS(500));
+    for (int i = 0; i < n; i++)
+      ESP_LOGI(TAG, "  dump_pre[%d] = 0x%02X", i, probe[i]);
   }
 
   while (received < SYSCON_FLASH_SIZE) {
