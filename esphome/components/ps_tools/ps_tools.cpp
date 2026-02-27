@@ -1940,10 +1940,6 @@ void PsTools::upload_and_execute_shellcode_() {
   this->tool0_uart_->write_array(SHELLCODE_DUMP, sizeof(SHELLCODE_DUMP));
   this->tool0_uart_->flush();
   esp_rom_delay_us(5000);
-  // Flush all OCD session leftovers before exec — so only the OCD_EXEC echo
-  // precedes the dump stream in the RX buffer.
-  uart_flush_input(
-      static_cast<uart_port_t>(static_cast<uart::IDFUARTComponent *>(this->tool0_uart_)->get_hw_serial_number()));
   this->tool0_uart_->write_byte(OCD_EXEC_CMD);
   this->tool0_uart_->flush();
   esp_rom_delay_us(2000);
@@ -2445,22 +2441,40 @@ void PsTools::run_dump_on_task_(int uart_num) {
   }
   ESP_LOGI(TAG, "Dump buffer allocated (%u bytes). Receiving on core %d...", SYSCON_FLASH_SIZE, xPortGetCoreID());
 
-  // xRingbufferReceiveUpTo() inside uart_read_bytes() re-applies ticks_to_wait
-  // on every ring buffer segment boundary — so a large timeout causes per-segment
-  // stalls even when data is flowing.  Work around it: block with portMAX_DELAY
-  // for 1 byte to wait for data to arrive, then drain the rest with timeout=0
-  // (non-blocking) to consume all buffered segments without any per-segment wait.
   uint32_t received = 0;
   uint32_t last_log = 0;
   int idle_count = 0;
   auto port = static_cast<uart_port_t>(uart_num);
 
-  // Log first 16 bytes to determine what precedes the actual dump data
+  // Scan incoming bytes until we see the dump magic 0x80 0x01 at offset 0.
+  // This skips any OCD echo/response bytes without needing a flush or fixed skip count.
+  ESP_LOGI(TAG, "Waiting for dump magic 0x80 0x01...");
   {
-    uint8_t probe[16];
-    int n = uart_read_bytes(port, probe, 16, pdMS_TO_TICKS(500));
-    for (int i = 0; i < n; i++)
-      ESP_LOGI(TAG, "  dump_pre[%d] = 0x%02X", i, probe[i]);
+    uint8_t prev = 0;
+    int magic_idle = 0;
+    while (true) {
+      uint8_t b;
+      int got = uart_read_bytes(port, &b, 1, pdMS_TO_TICKS(20));
+      if (got <= 0) {
+        if (++magic_idle >= 250) {
+          ESP_LOGE(TAG, "Timed out waiting for dump magic");
+          heap_caps_free(buf);
+          this->state_.store(STATE_FAILED, std::memory_order_release);
+          return;
+        }
+        continue;
+      }
+      magic_idle = 0;
+      if (prev == 0x80 && b == 0x01) {
+        // Found magic — store both bytes and continue
+        buf[0] = 0x80;
+        buf[1] = 0x01;
+        received = 2;
+        ESP_LOGI(TAG, "Dump magic found, receiving...");
+        break;
+      }
+      prev = b;
+    }
   }
 
   while (received < SYSCON_FLASH_SIZE) {
