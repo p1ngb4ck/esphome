@@ -389,11 +389,17 @@ void PsTools::run_glitch_loop_() {
     this->tool0_uart_->flush();
     esp_rom_delay_us(5000);  // Give chip time to process baud-set
 
-    // ── Step 7: Flush any baud-set response bytes (we don't wait for ACK here —
-    // the chip may or may not respond before glitch; we discard whatever arrives)
-    while (this->tool0_uart_->available()) {
-      uint8_t discard;
-      this->tool0_uart_->read_byte(&discard);
+    // ── Step 7: Read and log baud-set response, then discard before glitch
+    {
+      bool logged = false;
+      for (int i = 0; i < 20 && this->tool0_uart_->available(); i++) {
+        uint8_t b;
+        this->tool0_uart_->read_byte(&b);
+        if (!logged) {
+          ESP_LOGD(TAG, "Baud-set response[0]: 0x%02X", b);
+          logged = true;
+        }
+      }
     }
 
     // ── Step 8: Random glitch delay then VDD pulse
@@ -412,32 +418,13 @@ void PsTools::run_glitch_loop_() {
       delay_ns_(glitch_width_ns);
     this->isr_glitch_pin_.digital_write(true);  // VDD HIGH = restore power
 
-    // ── Step 9: Wait for chip to recover, then send OCD_CONNECT + passcode
-    // After glitch the chip re-enters OCD with security bypassed.
-    // Wait up to 20ms for the chip to signal readiness (STX=0x02 byte).
-    {
-      bool saw_stx = false;
-      for (int w = 0; w < 4000; w++) {  // 4000 × 5µs = 20ms max
-        if (this->tool0_uart_->available()) {
-          uint8_t rx;
-          this->tool0_uart_->read_byte(&rx);
-          ESP_LOGV(TAG, "Post-glitch RX: 0x%02X", rx);
-          if (rx == PA_STX) {
-            saw_stx = true;
-            break;
-          }
-        }
-        esp_rom_delay_us(5);
-      }
-      if (!saw_stx) {
-        // No STX — glitch likely didn't land; try next attempt
-        if ((attempt % 100) == 99)
-          ESP_LOGD(TAG, "Attempt %u: no STX after glitch", attempt + 1);
-        if ((attempt % 50) == 49)
-          vTaskDelay(1);
-        continue;
-      }
-      ESP_LOGD(TAG, "STX received after glitch (attempt %u)", attempt + 1);
+    // ── Step 9: Wait for chip to recover, flush any post-glitch bytes, send OCD_CONNECT
+    // Arduino reference: after glitch pulse → delay(5) → w(OCD_CONNECT_CMD).
+    // The chip may send a partial baud-set response frame after glitch — discard it.
+    esp_rom_delay_us(5000);
+    while (this->tool0_uart_->available()) {
+      uint8_t discard;
+      this->tool0_uart_->read_byte(&discard);
     }
 
     this->tool0_uart_->write_byte(OCD_CONNECT_CMD);
@@ -590,28 +577,11 @@ void PsTools::run_glitch_write_loop_() {
       delay_ns_(glitch_width_ns);
     this->isr_glitch_pin_.digital_write(true);
 
-    // ── Step 7: Wait for STX from chip (post-glitch ready signal)
-    {
-      bool saw_stx = false;
-      for (int w = 0; w < 4000; w++) {
-        if (this->tool0_uart_->available()) {
-          uint8_t rx;
-          this->tool0_uart_->read_byte(&rx);
-          if (rx == PA_STX) {
-            saw_stx = true;
-            break;
-          }
-        }
-        esp_rom_delay_us(5);
-      }
-      if (!saw_stx) {
-        if ((attempt % 100) == 99)
-          ESP_LOGD(TAG, "Attempt %u: no STX after glitch", attempt + 1);
-        if ((attempt % 50) == 49)
-          vTaskDelay(1);
-        continue;
-      }
-      ESP_LOGD(TAG, "STX received after glitch (attempt %u)", attempt + 1);
+    // ── Step 7: Wait for chip to recover, flush post-glitch bytes, send OCD_CONNECT
+    esp_rom_delay_us(5000);
+    while (this->tool0_uart_->available()) {
+      uint8_t discard;
+      this->tool0_uart_->read_byte(&discard);
     }
 
     // ── Step 8: OCD_CONNECT + passcode
