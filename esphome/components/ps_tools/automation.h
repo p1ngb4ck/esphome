@@ -50,7 +50,7 @@ template<typename... Ts> class StartReadAction : public Action<Ts...> {
   PsTools *parent_;
 };
 
-template<typename... Ts> class StartReadAction : public Action<Ts...> {
+template<typename... Ts> class StartOCDReadAction : public Action<Ts...> {
  public:
   explicit StartOCDReadAction(PsTools *parent) : parent_(parent) {}
   void play(Ts... x) override { this->parent_->start_ocd_read(); }
