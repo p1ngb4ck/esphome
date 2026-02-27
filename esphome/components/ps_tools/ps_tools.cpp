@@ -1949,7 +1949,7 @@ void PsTools::upload_and_execute_shellcode_() {
   // fully intact. SIG_GPIO_OUT_IDX routes a simple GPIO output (not the UART
   // peripheral) to the pin, effectively floating TX while keeping RX working.
   gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
-  esp_rom_gpio_connect_out_signal(tx_gpio, SIG_GPIO_OUT_IDX, false, false);
+  esp_rom_gpio_connect_out_signal(tx_gpio, 256 /*SIG_GPIO_OUT_IDX*/, false, false);
   gpio_set_direction(tx_gpio, GPIO_MODE_INPUT);  // High-Z — RL78 drives TOOL0 uncontested
   esp_rom_delay_us(2000);
 }
