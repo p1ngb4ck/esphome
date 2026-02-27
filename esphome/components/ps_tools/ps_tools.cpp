@@ -2447,32 +2447,44 @@ void PsTools::run_dump_on_task_(int uart_num) {
   }
   ESP_LOGI(TAG, "Dump buffer allocated (%u bytes). Receiving on core %d...", SYSCON_FLASH_SIZE, xPortGetCoreID());
 
-  // Drain bytes into PSRAM. Read whatever arrives within 20ms per call — fast
-  // when data is flowing, yields briefly when idle. 250 empty calls in a row
-  // (~5s) with no progress = shellcode stalled.
+  // xRingbufferReceiveUpTo() inside uart_read_bytes() re-applies ticks_to_wait
+  // on every ring buffer segment boundary — so a large timeout causes per-segment
+  // stalls even when data is flowing.  Work around it: block with portMAX_DELAY
+  // for 1 byte to wait for data to arrive, then drain the rest with timeout=0
+  // (non-blocking) to consume all buffered segments without any per-segment wait.
   uint32_t received = 0;
   uint32_t last_log = 0;
   int idle_count = 0;
+  auto port = static_cast<uart_port_t>(uart_num);
 
   while (received < SYSCON_FLASH_SIZE) {
-    uint32_t want = SYSCON_FLASH_SIZE - received;
-    int got = uart_read_bytes(static_cast<uart_port_t>(uart_num), buf + received, want, pdMS_TO_TICKS(20));
-    if (got > 0) {
-      received += (uint32_t) got;
-      idle_count = 0;
-      this->progress_bytes_.store(received, std::memory_order_relaxed);
-      if (received - last_log >= 65536) {
-        ESP_LOGI(TAG, "Dump progress: %u / %u bytes (%.1f%%)", received, SYSCON_FLASH_SIZE,
-                 100.0f * received / SYSCON_FLASH_SIZE);
-        last_log = received;
-      }
-    } else {
+    // Wait for at least one byte
+    int got = uart_read_bytes(port, buf + received, 1, pdMS_TO_TICKS(20));
+    if (got <= 0) {
       if (++idle_count >= 250) {
         ESP_LOGE(TAG, "Dump RX stalled at byte %u / %u", received, SYSCON_FLASH_SIZE);
         heap_caps_free(buf);
         this->state_.store(STATE_FAILED, std::memory_order_release);
         return;
       }
+      continue;
+    }
+    received++;
+    idle_count = 0;
+
+    // Drain everything else that arrived while we were waiting — no per-segment stall
+    uint32_t want = SYSCON_FLASH_SIZE - received;
+    if (want > 0) {
+      got = uart_read_bytes(port, buf + received, want, 0);
+      if (got > 0)
+        received += (uint32_t) got;
+    }
+
+    this->progress_bytes_.store(received, std::memory_order_relaxed);
+    if (received - last_log >= 65536) {
+      ESP_LOGI(TAG, "Dump progress: %u / %u bytes (%.1f%%)", received, SYSCON_FLASH_SIZE,
+               100.0f * received / SYSCON_FLASH_SIZE);
+      last_log = received;
     }
   }
 
