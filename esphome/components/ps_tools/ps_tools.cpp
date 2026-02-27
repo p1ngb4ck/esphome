@@ -2457,7 +2457,7 @@ void PsTools::run_dump_on_task_(int uart_num) {
 
   while (received < SYSCON_FLASH_SIZE) {
     uint32_t want = std::min((uint32_t) CHUNK, SYSCON_FLASH_SIZE - received);
-    int got = uart_read_bytes(uart_num, buf + received, want, CHUNK_TIMEOUT);
+    int got = uart_read_bytes(static_cast<uart_port_t>(uart_num), buf + received, want, CHUNK_TIMEOUT);
     if (got <= 0) {
       ESP_LOGE(TAG, "Dump RX timeout at byte %u / %u — shellcode stalled?", received, SYSCON_FLASH_SIZE);
       heap_caps_free(buf);
