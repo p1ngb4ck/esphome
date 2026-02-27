@@ -1945,19 +1945,15 @@ void PsTools::upload_and_execute_shellcode_() {
   esp_rom_delay_us(2000);
 
   // ── Critical: release TX so RL78 can drive TOOL0 for the dump stream.
-  // Delete the driver (stops TX), float the TX pin as input, then reinstall
-  // the driver for RX only — without calling load_settings() which would
-  // reconfigure TX as a UART output and fight the RL78 on the 1-wire bus.
-  // UART hardware registers (baud rate etc.) survive driver delete/reinstall.
+  // uart_driver_delete() stops TX. Reinstall driver for RX only — hardware
+  // registers (baud rate etc.) survive the delete so no pin reconfiguration
+  // needed, and TX stays floating so the RL78 drives TOOL0 uncontested.
   auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
   uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
   uart_driver_delete(uart_num);
   gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
-  gpio_reset_pin(tx_gpio);
   gpio_set_direction(tx_gpio, GPIO_MODE_INPUT);  // Release TX — RL78 drives TOOL0 uncontested
   esp_rom_delay_us(2000);
-
-  // Reinstall driver for RX only — no pin reconfiguration, TX stays floating
   uart_driver_install(uart_num, 4096, 0, 0, nullptr, 0);
 }
 
