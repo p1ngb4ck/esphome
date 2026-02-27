@@ -2466,12 +2466,12 @@ void PsTools::run_dump_on_task_(int uart_num) {
     received++;
     idle_count = 0;
 
-    // Drain everything else that arrived while we were waiting — no per-segment stall
-    uint32_t want = SYSCON_FLASH_SIZE - received;
-    if (want > 0) {
-      got = uart_read_bytes(port, buf + received, want, 0);
-      if (got > 0)
-        received += (uint32_t) got;
+    // Drain all segments currently in the ring buffer — loop until nothing left
+    while (received < SYSCON_FLASH_SIZE) {
+      got = uart_read_bytes(port, buf + received, SYSCON_FLASH_SIZE - received, 0);
+      if (got <= 0)
+        break;
+      received += (uint32_t) got;
     }
 
     this->progress_bytes_.store(received, std::memory_order_relaxed);
