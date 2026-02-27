@@ -1461,30 +1461,57 @@ void PsTools::run_analyze_nor_() {
 
 // Helper: try OCD connect (no glitch) with a given passcode.
 // Returns the response byte received (0xF0/0xF2 = success, 0xFF = no response).
-static uint8_t probe_ocd_no_glitch_(uart::UARTComponent *uart, InternalGPIOPin *reset_pin, const uint8_t *passcode,
+// Performs the full OCD entry sequence: RESET LOW → TX HIGH → RESET HIGH →
+// MODE_OCD (0xC5) → baud-set frame → OCD_CONNECT → passcode → response.
+static uint8_t probe_ocd_no_glitch_(uart::UARTComponent *uart, uart::IDFUARTComponent *idf_uart, uart_port_t uart_num,
+                                    gpio_num_t tx_gpio, InternalGPIOPin *reset_pin, const uint8_t *passcode,
                                     uint8_t checksum) {
-  // Assert RESET to put chip in reset
+  // Step 1: Assert RESET LOW ≥40µs
   reset_pin->digital_write(false);
   esp_rom_delay_us(500);
-  // Release RESET — chip boots normally (not ProtoA, since TOOL0 is UART idle=HIGH)
-  reset_pin->digital_write(true);
-  esp_rom_delay_us(8000);  // Wait for chip to boot and enter OCD listen mode
 
-  // Flush any noise
+  // Step 2: Release UART driver so TX pin can be driven HIGH explicitly
+  uart_driver_delete(uart_num);
+  gpio_reset_pin(tx_gpio);
+  gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
+  gpio_set_level(tx_gpio, 1);  // TOOL0 HIGH → OCD mode at reset release
+  esp_rom_delay_us(5000);      // 5ms matches Arduino delay(5) after Serial.end()
+
+  // Step 3: Release RESET — chip samples TOOL0 HIGH → enters OCD mode
+  reset_pin->digital_write(true);
+  esp_rom_delay_us(5000);  // 5ms for chip to boot into OCD listen
+
+  // Step 4: Restore UART driver (TX re-idles HIGH — no gap on TOOL0)
+  idf_uart->load_settings(false);
+  esp_rom_delay_us(1000);
+
+  // Step 5: Send MODE_OCD byte
+  uart->write_byte(MODE_OCD);
+  esp_rom_delay_us(200);
+
+  // Step 6: Send baud-set frame — 0x14 = 115200 baud code, 0x4F = checksum
+  static const uint8_t OCD_BAUD_115200 = 0x14;
+  static const uint8_t OCD_BAUD_CSUM = 0x4F;
+  const uint8_t baud_tx[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, OCD_BAUD_115200, OCD_BAUD_CSUM, PA_ETX};
+  uart->write_array(baud_tx, sizeof(baud_tx));
+  uart->flush();
+  esp_rom_delay_us(5000);
+
+  // Step 7: Flush baud-set response (informational — not gating)
   while (uart->available()) {
     uint8_t x;
     uart->read_byte(&x);
   }
 
-  // Send OCD connect + passcode + checksum
+  // Step 8: Send OCD_CONNECT + passcode + checksum
   uart->write_byte(OCD_CONNECT_CMD);
   esp_rom_delay_us(500);
   uart->write_array(passcode, 10);
   uart->write_byte(checksum);
   uart->flush();
 
-  // Wait for response
-  esp_rom_delay_us(8000);
+  // Step 9: Wait for unlock response
+  esp_rom_delay_us(10000);
   uint8_t response = 0xFF;
   while (uart->available()) {
     uint8_t rx;
@@ -1529,6 +1556,11 @@ void PsTools::run_probe_syscon_() {
   ESP_LOGI(TAG, "  Syscon Access Probe");
   ESP_LOGI(TAG, "  Chip marking: A04-COL2 (RL78/G13 LQFP64)");
   ESP_LOGI(TAG, "══════════════════════════════════════════════");
+
+  // Resolve UART handle and TX GPIO — needed for OCD entry sequence
+  auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
+  uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
+  gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
 
   // Known passcodes to try
   static const uint8_t PC_ERASED[10] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1623,7 +1655,8 @@ void PsTools::run_probe_syscon_() {
       break;
 
     uint8_t csum = probe_passcode_checksum_(entry.pc);
-    uint8_t resp = probe_ocd_no_glitch_(this->tool0_uart_, this->reset_pin_, entry.pc, csum);
+    uint8_t resp =
+        probe_ocd_no_glitch_(this->tool0_uart_, idf_uart, uart_num, tx_gpio, this->reset_pin_, entry.pc, csum);
 
     const char *resp_str;
     bool ok = false;
