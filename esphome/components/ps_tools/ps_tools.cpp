@@ -467,12 +467,9 @@ void PsTools::run_glitch_loop_() {
 
     if (got_unlock) {
       ESP_LOGI(TAG, "*** GLITCH SUCCESS after %u attempts! ***", attempt + 1);
-      // Drain any remaining echoes/responses left in RX buffer before proceeding
+      // Flush all remaining echoes/responses from RX buffer before proceeding
       esp_rom_delay_us(5000);
-      while (this->tool0_uart_->available()) {
-        uint8_t discard;
-        this->tool0_uart_->read_byte(&discard);
-      }
+      uart_flush_input(uart_num);
       this->ocd_active_ = true;
 
       if (this->mode_ == MODE_GLITCH_FLASHER) {
@@ -1941,11 +1938,15 @@ void PsTools::run_probe_syscon_() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void PsTools::upload_and_execute_shellcode_() {
+  auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
+  uart_port_t sc_uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
+
   this->tool0_uart_->write_byte(OCD_WRITE_CMD);
   esp_rom_delay_us(1000);
   this->tool0_uart_->write_array(SHELLCODE_DUMP, sizeof(SHELLCODE_DUMP));
   this->tool0_uart_->flush();
   esp_rom_delay_us(5000);
+  uart_flush_input(sc_uart_num);  // Discard OCD_WRITE_CMD + shellcode echoes
   this->tool0_uart_->write_byte(OCD_EXEC_CMD);
   this->tool0_uart_->flush();
   esp_rom_delay_us(2000);
