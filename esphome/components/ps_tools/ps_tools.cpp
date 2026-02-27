@@ -467,6 +467,12 @@ void PsTools::run_glitch_loop_() {
 
     if (got_unlock) {
       ESP_LOGI(TAG, "*** GLITCH SUCCESS after %u attempts! ***", attempt + 1);
+      // Drain any remaining echoes/responses left in RX buffer before proceeding
+      esp_rom_delay_us(5000);
+      while (this->tool0_uart_->available()) {
+        uint8_t discard;
+        this->tool0_uart_->read_byte(&discard);
+      }
       this->ocd_active_ = true;
 
       if (this->mode_ == MODE_GLITCH_FLASHER) {
