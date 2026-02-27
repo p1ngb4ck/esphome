@@ -332,7 +332,7 @@ void PsTools::run_task_() {
       this->run_probe_syscon_();
       break;
     case STATE_OCD_READING:
-      this->run_ocd_read_loop_();
+      this->run_ocd_read_();
       break;
     default:
       ESP_LOGW(TAG, "Task started in unexpected state %u", state);
