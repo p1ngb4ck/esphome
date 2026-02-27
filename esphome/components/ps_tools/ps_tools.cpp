@@ -172,6 +172,19 @@ void PsTools::start_glitch() {
   this->spawn_task_("ps_glitch");
 }
 
+void PsTools::start_ocd_read() {
+  if (this->state_.load(std::memory_order_acquire) != STATE_IDLE) {
+    ESP_LOGW(TAG, "Cannot start ocd read — not idle");
+    return;
+  }
+  ESP_LOGI(TAG, "Starting OCD read...");
+  this->attempt_count_.store(0, std::memory_order_relaxed);
+  this->stop_requested_.store(false, std::memory_order_release);
+  this->ocd_active_ = true;
+  this->state_.store(STATE_OCD_READING, std::memory_order_release);
+  this->spawn_task_("ps_ocd_read");
+}
+
 void PsTools::start_glitch_write() {
   if (this->state_.load(std::memory_order_acquire) != STATE_IDLE) {
     ESP_LOGW(TAG, "Cannot start glitch_write — not idle");
@@ -317,6 +330,9 @@ void PsTools::run_task_() {
       break;
     case STATE_PROBING:
       this->run_probe_syscon_();
+      break;
+    case STATE_OCD_READING:
+      this->run_ocd_read_loop_();
       break;
     default:
       ESP_LOGW(TAG, "Task started in unexpected state %u", state);
@@ -480,6 +496,22 @@ void PsTools::run_glitch_loop_() {
   if (this->rx_pulldown_pin_ != nullptr)
     this->rx_pulldown_pin_->digital_write(false);
   this->state_.store(STATE_IDLE, std::memory_order_release);
+}
+
+void PsTools::run_ocd_read_() {
+  auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
+  uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
+
+  // Dump mode: upload shellcode then release TX so RL78 can drive TOOL0
+  this->state_.store(STATE_UPLOADING_SHELLCODE, std::memory_order_release);
+  this->upload_and_execute_shellcode_();
+  if (this->rx_pulldown_pin_ != nullptr)
+    this->rx_pulldown_pin_->digital_write(true);
+  this->progress_bytes_.store(0, std::memory_order_relaxed);
+  ESP_LOGI(TAG, "Shellcode running. Entering dump mode.");
+  this->state_.store(STATE_DUMPING, std::memory_order_release);
+}
+return;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

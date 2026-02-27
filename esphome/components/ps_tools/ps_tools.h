@@ -339,6 +339,7 @@ enum PsToolsState : uint8_t {
   STATE_GLITCH_WRITING,  // Glitch → OCD write-agent → block write in progress
   STATE_WRITING,         // ProtoA write in progress
   STATE_READING,         // ProtoA read in progress
+  STATE_OCD_READING,     // OCD read in progress
   STATE_BLANK_CHECKING,  // ProtoA blank check in progress
   STATE_ANALYZING_NOR,   // PS4 NOR flash analysis running on core 1
   STATE_PROBING,         // Systematic access probe running on core 1
@@ -400,6 +401,7 @@ class PsTools : public Component {
   void stop();
   void start_write();
   void start_read();
+  void start_ocd_read();
   void start_blank_check();
 
   // ── NOR analysis: reads NOR hardware or dump file, logs PS4-specific info ──
@@ -487,6 +489,7 @@ class PsTools : public Component {
   void run_glitch_write_loop_();
   void run_write_loop_();
   void run_read_loop_();
+  void run_ocd_read_loop_();
   void run_blank_check_loop_();
   void run_analyze_nor_();   // PS4 NOR analysis: southbridge, torus, FW version, etc.
   void run_probe_syscon_();  // Systematic access probe: ProtoA + OCD variants
