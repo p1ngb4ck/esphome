@@ -1941,11 +1941,16 @@ void PsTools::upload_and_execute_shellcode_() {
   auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
   uart_port_t sc_uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
 
+  // Match Nano timing exactly: each byte followed by 100µs delay (w() function),
+  // then 1ms before OCD_EXEC_CMD.
   this->tool0_uart_->write_byte(OCD_WRITE_CMD);
-  esp_rom_delay_us(1000);
-  this->tool0_uart_->write_array(SHELLCODE_DUMP, sizeof(SHELLCODE_DUMP));
+  esp_rom_delay_us(100);
+  for (size_t i = 0; i < sizeof(SHELLCODE_DUMP); i++) {
+    this->tool0_uart_->write_byte(SHELLCODE_DUMP[i]);
+    esp_rom_delay_us(100);
+  }
   this->tool0_uart_->flush();
-  esp_rom_delay_us(5000);
+  esp_rom_delay_us(1000);
   uart_flush_input(sc_uart_num);  // Discard OCD_WRITE_CMD + shellcode echoes
   this->tool0_uart_->write_byte(OCD_EXEC_CMD);
   this->tool0_uart_->flush();
