@@ -502,7 +502,87 @@ void PsTools::run_ocd_read_() {
   auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
   uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
 
-  // Dump mode: upload shellcode then release TX so RL78 can drive TOOL0
+  ESP_LOGI(TAG, "OCD read task on core %d (UART %d)", xPortGetCoreID(), uart_num);
+
+  // ── Step 1: RESET LOW, TX HIGH → chip enters OCD mode at reset release
+  this->reset_pin_->digital_write(false);
+  esp_rom_delay_us(40);
+
+  uart_driver_delete(uart_num);
+  gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
+  gpio_reset_pin(tx_gpio);
+  gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
+  gpio_set_level(tx_gpio, 1);  // TOOL0 HIGH = OCD entry
+  esp_rom_delay_us(5000);
+
+  // ── Step 2: Release RESET
+  this->reset_pin_->digital_write(true);
+  esp_rom_delay_us(5000);
+
+  // ── Step 3: Restore UART driver
+  idf_uart->load_settings(false);
+  esp_rom_delay_us(1000);
+
+  // ── Step 4: MODE_OCD byte + baud-set frame
+  this->tool0_uart_->write_byte(MODE_OCD);
+  esp_rom_delay_us(200);
+
+  static const uint8_t OCD_BAUD_115200 = 0x14;
+  static const uint8_t OCD_BAUD_CSUM = 0x4F;
+  const uint8_t baud_tx[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, OCD_BAUD_115200, OCD_BAUD_CSUM, PA_ETX};
+  this->tool0_uart_->write_array(baud_tx, sizeof(baud_tx));
+  this->tool0_uart_->flush();
+  esp_rom_delay_us(5000);
+
+  // ── Step 5: Log baud-set response, flush it
+  {
+    uint8_t resp_buf[8];
+    int n = 0;
+    for (int i = 0; i < 20 && this->tool0_uart_->available(); i++) {
+      uint8_t b;
+      this->tool0_uart_->read_byte(&b);
+      if (n < 8)
+        resp_buf[n++] = b;
+    }
+    if (n > 0) {
+      ESP_LOGI(TAG, "Baud-set response (%d bytes): 0x%02X ...", n, resp_buf[0]);
+    } else {
+      ESP_LOGW(TAG, "No baud-set response — check wiring and baud rate");
+    }
+  }
+
+  // ── Step 6: OCD_CONNECT + passcode
+  this->tool0_uart_->write_byte(OCD_CONNECT_CMD);
+  esp_rom_delay_us(500);
+  this->tool0_uart_->write_array(this->passcode_.data(), 10);
+  this->tool0_uart_->write_byte(this->compute_passcode_checksum_());
+  this->tool0_uart_->flush();
+
+  // ── Step 7: Wait for unlock response
+  esp_rom_delay_us(10000);
+  bool got_unlock = false;
+  while (this->tool0_uart_->available()) {
+    uint8_t rx;
+    if (this->tool0_uart_->read_byte(&rx)) {
+      ESP_LOGI(TAG, "OCD connect response: 0x%02X", rx);
+      if (rx == OCD_UNLOCK_ALREADY || rx == OCD_UNLOCK_OK) {
+        got_unlock = true;
+        break;
+      }
+    }
+  }
+
+  if (!got_unlock) {
+    ESP_LOGE(TAG, "OCD connect failed — no unlock response. Check passcode and baud rate.");
+    this->reset_pin_->digital_write(true);
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  ESP_LOGI(TAG, "OCD connected. Uploading dump shellcode...");
+  this->ocd_active_ = true;
+
+  // ── Step 8: Upload shellcode + exec, release TX, receive dump
   this->state_.store(STATE_UPLOADING_SHELLCODE, std::memory_order_release);
   this->upload_and_execute_shellcode_();
   if (this->rx_pulldown_pin_ != nullptr)
@@ -510,7 +590,6 @@ void PsTools::run_ocd_read_() {
   this->progress_bytes_.store(0, std::memory_order_relaxed);
   ESP_LOGI(TAG, "Shellcode running. Entering dump mode.");
   this->state_.store(STATE_DUMPING, std::memory_order_release);
-  return;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
