@@ -14,6 +14,15 @@ template<typename... Ts> class StartGlitchAction : public Action<Ts...> {
   PsTools *parent_;
 };
 
+template<typename... Ts> class StartGlitchWriteAction : public Action<Ts...> {
+ public:
+  explicit StartGlitchWriteAction(PsTools *parent) : parent_(parent) {}
+  void play(Ts... x) override { this->parent_->start_glitch_write(); }
+
+ protected:
+  PsTools *parent_;
+};
+
 template<typename... Ts> class StopAction : public Action<Ts...> {
  public:
   explicit StopAction(PsTools *parent) : parent_(parent) {}

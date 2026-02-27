@@ -172,6 +172,31 @@ void PsTools::start_glitch() {
   this->spawn_task_("ps_glitch");
 }
 
+void PsTools::start_glitch_write() {
+  if (this->state_.load(std::memory_order_acquire) != STATE_IDLE) {
+    ESP_LOGW(TAG, "Cannot start glitch_write — not idle");
+    return;
+  }
+  if (this->glitch_pin_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot start glitch_write — glitch_pin not configured");
+    return;
+  }
+  if (this->write_path_.empty()) {
+    ESP_LOGE(TAG, "Cannot start glitch_write — write_path not configured");
+    return;
+  }
+  ESP_LOGI(TAG, "Starting OCD glitch+write from: %s", this->write_path_.c_str());
+  this->attempt_count_.store(0, std::memory_order_relaxed);
+  this->stop_requested_.store(false, std::memory_order_release);
+  this->ocd_active_ = false;
+  this->reset_pin_->digital_write(true);
+  this->glitch_pin_->digital_write(true);
+  if (this->rx_pulldown_pin_ != nullptr)
+    this->rx_pulldown_pin_->digital_write(false);
+  this->state_.store(STATE_GLITCH_WRITING, std::memory_order_release);
+  this->spawn_task_("ps_gw");
+}
+
 void PsTools::stop() {
   ESP_LOGI(TAG, "Stop requested (state=%u, attempts=%u)", this->state_.load(std::memory_order_relaxed),
            this->attempt_count_.load(std::memory_order_relaxed));
@@ -272,6 +297,9 @@ void PsTools::task_func_(void *param) {
 void PsTools::run_task_() {
   auto state = this->state_.load(std::memory_order_acquire);
   switch (state) {
+    case STATE_GLITCH_WRITING:
+      this->run_glitch_write_loop_();
+      break;
     case STATE_GLITCHING:
       this->run_glitch_loop_();
       break;
@@ -320,36 +348,55 @@ void PsTools::run_glitch_loop_() {
       return;
     }
 
-    // Step 1: RESET LOW
+    // ── Step 1: RESET LOW, release UART so TX floats HIGH (UART idle = HIGH)
+    // RL78/G13 OCD entry: TOOL0 must be HIGH when RESET is released.
+    // Arduino reference: Serial.end() → TX floats high → RESET released → OCD.
+    // We match this by: delete driver (TX goes high via internal pull/idle) → RESET low → RESET high.
     this->reset_pin_->digital_write(false);
-    esp_rom_delay_us(80);
+    esp_rom_delay_us(40);  // ≥40µs reset hold (matches Arduino's digitalWrite+end)
 
-    // Step 2: UART driver delete, then explicitly drive TX GPIO LOW → TOOL0 LOW
+    // ── Step 2: Release UART driver so TX pin idles HIGH
     uart_driver_delete(uart_num);
     gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
     gpio_reset_pin(tx_gpio);
+    // Drive TX HIGH explicitly (TOOL0 HIGH = OCD mode at reset release)
     gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
-    gpio_set_level(tx_gpio, 0);
-    esp_rom_delay_us(1800);
+    gpio_set_level(tx_gpio, 1);
+    esp_rom_delay_us(5000);  // 5ms (matches Arduino delay(5) after Serial.end())
 
-    // Step 3: Release RESET — chip boots with TOOL0 LOW → enters OCD mode
+    // ── Step 3: Release RESET — chip samples TOOL0=HIGH → enters OCD mode
     this->reset_pin_->digital_write(true);
-    esp_rom_delay_us(2000);
+    esp_rom_delay_us(5000);  // 5ms (matches Arduino delay(5) after RESET high)
 
-    // Step 4: Restore UART driver
+    // ── Step 4: Restore UART driver (TX re-idles HIGH — no gap on TOOL0)
     idf_uart->load_settings(false);
     esp_rom_delay_us(1000);
 
-    // Step 5: Send OCD mode entry byte
+    // ── Step 5: Send OCD mode entry byte 0xC5
     this->tool0_uart_->write_byte(MODE_OCD);
-    esp_rom_delay_us(1000);
+    esp_rom_delay_us(200);
 
-    // Step 6: Baud-set frame (SOH | len=3 | 0x9A | 0x00 | 0x22 | csum | ETX)
-    const uint8_t baud_frame[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, 0x22, 0x41, PA_ETX};
-    this->tool0_uart_->write_array(baud_frame, sizeof(baud_frame));
+    // ── Step 6: OCD baud-set frame
+    // Format: SOH(1) | LEN(1) | CMD(1) | data0(1) | data1(1) | checksum(1) | ETX(1)
+    // In OCD mode data1 is a baud-rate code, NOT the ProtoA voltage×10 byte.
+    // 0x14 = 115200 baud (matches Arduino syscon_reader at Serial.begin(115200)).
+    // Checksum = two's-complement of sum(LEN + CMD + data0 + data1)
+    //          = ~(0x03 + 0x9A + 0x00 + 0x14) + 1 = ~0xB1 + 1 = 0x4F
+    static const uint8_t OCD_BAUD_115200 = 0x14;
+    static const uint8_t OCD_BAUD_CSUM = 0x4F;  // pre-computed: ~(0x03+0x9A+0x00+0x14)+1
+    const uint8_t baud_tx[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, OCD_BAUD_115200, OCD_BAUD_CSUM, PA_ETX};
+    this->tool0_uart_->write_array(baud_tx, sizeof(baud_tx));
     this->tool0_uart_->flush();
+    esp_rom_delay_us(5000);  // Give chip time to process baud-set
 
-    // Step 7: Random glitch delay then VDD pulse
+    // ── Step 7: Flush any baud-set response bytes (we don't wait for ACK here —
+    // the chip may or may not respond before glitch; we discard whatever arrives)
+    while (this->tool0_uart_->available()) {
+      uint8_t discard;
+      this->tool0_uart_->read_byte(&discard);
+    }
+
+    // ── Step 8: Random glitch delay then VDD pulse
     uint32_t delay_range = this->glitch_delay_max_us_ - this->glitch_delay_min_us_;
     uint32_t random_delay = this->glitch_delay_min_us_;
     if (delay_range > 0)
@@ -365,20 +412,47 @@ void PsTools::run_glitch_loop_() {
       delay_ns_(glitch_width_ns);
     this->isr_glitch_pin_.digital_write(true);  // VDD HIGH = restore power
 
-    // Step 8: Wait, then send OCD connect command + passcode
-    esp_rom_delay_us(15000);
+    // ── Step 9: Wait for chip to recover, then send OCD_CONNECT + passcode
+    // After glitch the chip re-enters OCD with security bypassed.
+    // Wait up to 20ms for the chip to signal readiness (STX=0x02 byte).
+    {
+      bool saw_stx = false;
+      for (int w = 0; w < 4000; w++) {  // 4000 × 5µs = 20ms max
+        if (this->tool0_uart_->available()) {
+          uint8_t rx;
+          this->tool0_uart_->read_byte(&rx);
+          ESP_LOGV(TAG, "Post-glitch RX: 0x%02X", rx);
+          if (rx == PA_STX) {
+            saw_stx = true;
+            break;
+          }
+        }
+        esp_rom_delay_us(5);
+      }
+      if (!saw_stx) {
+        // No STX — glitch likely didn't land; try next attempt
+        if ((attempt % 100) == 99)
+          ESP_LOGD(TAG, "Attempt %u: no STX after glitch", attempt + 1);
+        if ((attempt % 50) == 49)
+          vTaskDelay(1);
+        continue;
+      }
+      ESP_LOGD(TAG, "STX received after glitch (attempt %u)", attempt + 1);
+    }
+
     this->tool0_uart_->write_byte(OCD_CONNECT_CMD);
     esp_rom_delay_us(1000);
     this->tool0_uart_->write_array(this->passcode_.data(), 10);
     this->tool0_uart_->write_byte(this->compute_passcode_checksum_());
     this->tool0_uart_->flush();
 
-    // Step 9: Check for OCD unlock response
-    esp_rom_delay_us(5000);
+    // ── Step 10: Check for OCD unlock response (0xF0 = already unlocked, 0xF2 = unlock OK)
     bool got_unlock = false;
+    esp_rom_delay_us(10000);
     while (this->tool0_uart_->available()) {
       uint8_t rx;
       if (this->tool0_uart_->read_byte(&rx)) {
+        ESP_LOGD(TAG, "OCD connect response: 0x%02X", rx);
         if (rx == OCD_UNLOCK_ALREADY || rx == OCD_UNLOCK_OK) {
           ESP_LOGI(TAG, "OCD response: 0x%02X (%s)", rx, rx == OCD_UNLOCK_ALREADY ? "already unlocked" : "unlock OK");
           got_unlock = true;
@@ -397,7 +471,7 @@ void PsTools::run_glitch_loop_() {
         ESP_LOGI(TAG, "Entering scflasher protocol mode.");
         this->state_.store(STATE_FLASHER, std::memory_order_release);
       } else {
-        // Dump mode: upload shellcode into OCD, then stream dump
+        // Dump mode: upload shellcode then release TX so RL78 can drive TOOL0
         this->state_.store(STATE_UPLOADING_SHELLCODE, std::memory_order_release);
         this->upload_and_execute_shellcode_();
         if (this->rx_pulldown_pin_ != nullptr)
@@ -409,12 +483,214 @@ void PsTools::run_glitch_loop_() {
       return;
     }
 
-    esp_rom_delay_us(5000);
     if ((attempt % 50) == 49)
       vTaskDelay(1);  // Feed watchdog
   }
 
   ESP_LOGI(TAG, "Glitch task stopped (user requested)");
+  this->reset_pin_->digital_write(true);
+  this->glitch_pin_->digital_write(true);
+  if (this->rx_pulldown_pin_ != nullptr)
+    this->rx_pulldown_pin_->digital_write(false);
+  this->state_.store(STATE_IDLE, std::memory_order_release);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// OCD glitch + write-agent loop
+// ════════════════════════════════════════════════════════════════════════════
+
+void PsTools::run_glitch_write_loop_() {
+  auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
+  uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
+
+  ESP_LOGI(TAG, "Glitch+write task on core %d (UART %d)", xPortGetCoreID(), uart_num);
+
+  // ── Load write image into PSRAM first ──────────────────────────────────────
+  uint32_t image_size = 0;
+  uint8_t *image = this->write_is_mot_ ? this->load_mot_to_psram_(&image_size) : this->load_bin_to_psram_(&image_size);
+
+  if (image == nullptr) {
+    ESP_LOGE(TAG, "Failed to load write image from: %s", this->write_path_.c_str());
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  if (image_size != SYSCON_FLASH_SIZE) {
+    ESP_LOGE(TAG, "Image size mismatch: expected %u, got %u", SYSCON_FLASH_SIZE, image_size);
+    heap_caps_free(image);
+    this->state_.store(STATE_FAILED, std::memory_order_release);
+    return;
+  }
+
+  ESP_LOGI(TAG, "Image loaded (%u bytes). Starting glitch loop...", image_size);
+
+  // ── Glitch loop: same as run_glitch_loop_() but on success uploads write-agent ──
+  while (!this->stop_requested_.load(std::memory_order_acquire)) {
+    uint32_t attempt = this->attempt_count_.fetch_add(1, std::memory_order_relaxed);
+
+    if (this->max_attempts_ > 0 && attempt >= this->max_attempts_) {
+      ESP_LOGW(TAG, "Max attempts (%u) reached without glitch success", this->max_attempts_);
+      heap_caps_free(image);
+      this->state_.store(STATE_FAILED, std::memory_order_release);
+      this->reset_pin_->digital_write(true);
+      this->glitch_pin_->digital_write(true);
+      return;
+    }
+
+    // ── Step 1: RESET LOW, TX HIGH (OCD entry: TOOL0=HIGH at reset release)
+    this->reset_pin_->digital_write(false);
+    esp_rom_delay_us(40);
+
+    uart_driver_delete(uart_num);
+    gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
+    gpio_reset_pin(tx_gpio);
+    gpio_set_direction(tx_gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(tx_gpio, 1);  // TOOL0 HIGH → OCD mode
+    esp_rom_delay_us(5000);
+
+    // ── Step 2: Release RESET
+    this->reset_pin_->digital_write(true);
+    esp_rom_delay_us(5000);
+
+    // ── Step 3: Restore UART driver
+    idf_uart->load_settings(false);
+    esp_rom_delay_us(1000);
+
+    // ── Step 4: MODE_OCD byte
+    this->tool0_uart_->write_byte(MODE_OCD);
+    esp_rom_delay_us(200);
+
+    // ── Step 5: OCD baud-set frame (0x14 = 115200 baud, checksum 0x4F)
+    {
+      static const uint8_t OCD_BAUD_115200 = 0x14;
+      static const uint8_t OCD_BAUD_CSUM = 0x4F;
+      const uint8_t baud_tx[] = {PA_SOH, 0x03, PA_CMD_BAUD_SET, 0x00, OCD_BAUD_115200, OCD_BAUD_CSUM, PA_ETX};
+      this->tool0_uart_->write_array(baud_tx, sizeof(baud_tx));
+      this->tool0_uart_->flush();
+    }
+    esp_rom_delay_us(5000);
+    while (this->tool0_uart_->available()) {
+      uint8_t discard;
+      this->tool0_uart_->read_byte(&discard);
+    }
+
+    // ── Step 6: Random glitch delay then VDD pulse
+    uint32_t delay_range = this->glitch_delay_max_us_ - this->glitch_delay_min_us_;
+    uint32_t random_delay = this->glitch_delay_min_us_;
+    if (delay_range > 0)
+      random_delay += esp_random() % delay_range;
+    esp_rom_delay_us(random_delay);
+
+    uint32_t glitch_width_ns = 0;
+    if (this->glitch_width_max_ns_ > 0)
+      glitch_width_ns = esp_random() % this->glitch_width_max_ns_;
+
+    this->isr_glitch_pin_.digital_write(false);
+    if (glitch_width_ns > 0)
+      delay_ns_(glitch_width_ns);
+    this->isr_glitch_pin_.digital_write(true);
+
+    // ── Step 7: Wait for STX from chip (post-glitch ready signal)
+    {
+      bool saw_stx = false;
+      for (int w = 0; w < 4000; w++) {
+        if (this->tool0_uart_->available()) {
+          uint8_t rx;
+          this->tool0_uart_->read_byte(&rx);
+          if (rx == PA_STX) {
+            saw_stx = true;
+            break;
+          }
+        }
+        esp_rom_delay_us(5);
+      }
+      if (!saw_stx) {
+        if ((attempt % 100) == 99)
+          ESP_LOGD(TAG, "Attempt %u: no STX after glitch", attempt + 1);
+        if ((attempt % 50) == 49)
+          vTaskDelay(1);
+        continue;
+      }
+      ESP_LOGD(TAG, "STX received after glitch (attempt %u)", attempt + 1);
+    }
+
+    // ── Step 8: OCD_CONNECT + passcode
+    this->tool0_uart_->write_byte(OCD_CONNECT_CMD);
+    esp_rom_delay_us(1000);
+    this->tool0_uart_->write_array(this->passcode_.data(), 10);
+    this->tool0_uart_->write_byte(this->compute_passcode_checksum_());
+    this->tool0_uart_->flush();
+
+    // ── Step 9: Check for OCD unlock response
+    esp_rom_delay_us(10000);
+    bool got_unlock = false;
+    while (this->tool0_uart_->available()) {
+      uint8_t rx;
+      if (this->tool0_uart_->read_byte(&rx)) {
+        ESP_LOGD(TAG, "OCD connect response: 0x%02X", rx);
+        if (rx == OCD_UNLOCK_ALREADY || rx == OCD_UNLOCK_OK) {
+          ESP_LOGI(TAG, "OCD response: 0x%02X (%s)", rx, rx == OCD_UNLOCK_ALREADY ? "already unlocked" : "unlock OK");
+          got_unlock = true;
+          break;
+        }
+      }
+    }
+
+    if (!got_unlock) {
+      if ((attempt % 50) == 49)
+        vTaskDelay(1);
+      continue;
+    }
+
+    // ── Glitch succeeded! Upload write-agent shellcode ────────────────────────
+    ESP_LOGI(TAG, "*** GLITCH SUCCESS after %u attempts! Uploading write agent...", attempt + 1);
+    this->ocd_active_ = true;
+
+    this->upload_write_agent_();
+
+    // ── Write each 1KB block ──────────────────────────────────────────────────
+    ESP_LOGI(TAG, "Write agent running. Writing %u blocks...", SYSCON_BLOCK_COUNT);
+    uint32_t blocks_written = 0;
+    uint32_t blocks_failed = 0;
+
+    for (uint16_t block = 0; block < SYSCON_BLOCK_COUNT; block++) {
+      if (this->stop_requested_.load(std::memory_order_acquire)) {
+        ESP_LOGW(TAG, "Write stopped by user at block %u/%u", block, SYSCON_BLOCK_COUNT);
+        break;
+      }
+
+      uint32_t addr = (uint32_t) block * SYSCON_BLOCK_SIZE;
+      const uint8_t *block_data = image + addr;
+
+      if (this->ocd_write_block_(addr, block_data)) {
+        blocks_written++;
+        this->progress_bytes_.store(blocks_written * SYSCON_BLOCK_SIZE, std::memory_order_relaxed);
+        if ((block % 32) == 0 || block == SYSCON_BLOCK_COUNT - 1)
+          ESP_LOGI(TAG, "Block %u/%u written (addr 0x%05X)", block + 1, SYSCON_BLOCK_COUNT, addr);
+      } else {
+        ESP_LOGE(TAG, "Block %u FAILED (addr 0x%05X)", block, addr);
+        blocks_failed++;
+      }
+    }
+
+    heap_caps_free(image);
+
+    if (blocks_failed == 0) {
+      ESP_LOGI(TAG, "Write complete: %u blocks OK", blocks_written);
+      this->state_.store(STATE_DONE, std::memory_order_release);
+    } else {
+      ESP_LOGE(TAG, "Write finished with %u failures / %u total", blocks_failed, SYSCON_BLOCK_COUNT);
+      this->state_.store(STATE_FAILED, std::memory_order_release);
+    }
+
+    this->ocd_active_ = false;
+    this->reset_pin_->digital_write(true);
+    return;
+  }
+
+  // Stopped before glitch succeeded
+  heap_caps_free(image);
+  ESP_LOGI(TAG, "Glitch+write task stopped (user requested)");
   this->reset_pin_->digital_write(true);
   this->glitch_pin_->digital_write(true);
   if (this->rx_pulldown_pin_ != nullptr)
@@ -1488,7 +1764,84 @@ void PsTools::upload_and_execute_shellcode_() {
   esp_rom_delay_us(5000);
   this->tool0_uart_->write_byte(OCD_EXEC_CMD);
   this->tool0_uart_->flush();
-  esp_rom_delay_us(10000);
+  esp_rom_delay_us(2000);
+
+  // ── Critical: release TX pin so RL78 can drive TOOL0 to send the dump.
+  // Arduino reference: after OCD_EXEC → pinMode(TX, INPUT) → Serial.end().
+  // If we keep driving TX HIGH the RL78 can't pull it low to send bytes.
+  auto *idf_uart = static_cast<uart::IDFUARTComponent *>(this->tool0_uart_);
+  uart_port_t uart_num = static_cast<uart_port_t>(idf_uart->get_hw_serial_number());
+  uart_driver_delete(uart_num);
+  gpio_num_t tx_gpio = static_cast<gpio_num_t>(this->tool0_tx_gpio_);
+  gpio_reset_pin(tx_gpio);
+  gpio_set_direction(tx_gpio, GPIO_MODE_INPUT);  // Release TX — RL78 drives TOOL0
+  esp_rom_delay_us(5000);
+
+  // Re-init UART for RX-only (to receive the dump stream)
+  idf_uart->load_settings(false);
+  esp_rom_delay_us(2000);
+}
+
+void PsTools::upload_write_agent_() {
+  // OCD_WRITE #1: upload 192-byte write-agent to RL78 RAM 0xFB00
+  this->tool0_uart_->write_byte(OCD_WRITE_CMD);
+  esp_rom_delay_us(500);
+  // SHELLCODE_WRITE_AGENT contains [addr_lo, addr_hi, count, data...]
+  this->tool0_uart_->write_array(SHELLCODE_WRITE_AGENT, sizeof(SHELLCODE_WRITE_AGENT));
+  this->tool0_uart_->flush();
+  esp_rom_delay_us(5000);
+
+  // OCD_WRITE #2: upload 4-byte entry stub to RL78 RAM 0xF07E0
+  this->tool0_uart_->write_byte(OCD_WRITE_CMD);
+  esp_rom_delay_us(500);
+  // SHELLCODE_WRITE_STUB contains [addr_lo, addr_hi, count, data...]
+  this->tool0_uart_->write_array(SHELLCODE_WRITE_STUB, sizeof(SHELLCODE_WRITE_STUB));
+  this->tool0_uart_->flush();
+  esp_rom_delay_us(2000);
+
+  // OCD_EXEC: run code at 0xF07E0 → stub loads HL=0xFB00 → calls write-agent
+  this->tool0_uart_->write_byte(OCD_EXEC_CMD);
+  this->tool0_uart_->flush();
+  esp_rom_delay_us(20000);  // Give agent time to initialise
+}
+
+bool PsTools::ocd_write_block_(uint32_t addr, const uint8_t *data) {
+  // Write command: 'w' (0x77) + 4-byte LE flash address
+  uint8_t cmd[5];
+  cmd[0] = 0x77;  // 'w' = write command
+  cmd[1] = (uint8_t) (addr & 0xFF);
+  cmd[2] = (uint8_t) ((addr >> 8) & 0xFF);
+  cmd[3] = (uint8_t) ((addr >> 16) & 0xFF);
+  cmd[4] = (uint8_t) ((addr >> 24) & 0xFF);
+
+  // Flush any pending RX bytes before issuing command
+  while (this->tool0_uart_->available()) {
+    uint8_t discard;
+    this->tool0_uart_->read_byte(&discard);
+  }
+
+  this->tool0_uart_->write_array(cmd, sizeof(cmd));
+  this->tool0_uart_->flush();
+
+  // Agent erases the block, then we send 1024 data bytes
+  esp_rom_delay_us(30000);  // Wait for erase (RL78 flash erase ~20ms)
+
+  this->tool0_uart_->write_array(data, SYSCON_BLOCK_SIZE);
+  this->tool0_uart_->flush();
+
+  // Read 1-byte ACK from agent (timeout 500ms)
+  uint8_t ack = 0;
+  if (!this->read_bytes_timeout_(this->tool0_uart_, &ack, 1, 500)) {
+    ESP_LOGW(TAG, "ocd_write_block_ timeout waiting for ACK at addr 0x%05X", addr);
+    return false;
+  }
+
+  if (ack != 0x00 && ack != 0xAC && ack != 0x06) {
+    // Log unexpected ACK but treat non-zero as possible error indicator
+    ESP_LOGW(TAG, "ocd_write_block_ unexpected ACK 0x%02X at addr 0x%05X", ack, addr);
+  }
+
+  return true;
 }
 
 uint8_t PsTools::compute_ocd_checksum_(const uint8_t *data, uint8_t len) {
@@ -2204,6 +2557,8 @@ const char *PsTools::mode_str_() const {
       return "glitch_dump";
     case MODE_GLITCH_FLASHER:
       return "glitch_flasher";
+    case MODE_GLITCH_WRITE:
+      return "glitch_write";
     case MODE_PROTO_A_WRITE:
       return "proto_a_write";
     case MODE_PROTO_A_READ:

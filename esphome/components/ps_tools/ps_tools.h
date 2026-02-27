@@ -100,6 +100,220 @@ static const uint8_t SHELLCODE_DUMP[] = {
     0xEF, 0x04, 0x55, 0x00, 0x00, 0x00, 0x8E, 0xFD, 0x81, 0x5C, 0x0F, 0x9E, 0xFD, 0x71, 0x00, 0x90, 0x00, 0xEF, 0xE0,
 };
 
+// ── Shellcode: resident flash write agent (reverse-engineered from Abkarino Teensy flasher v2.05)
+// Two OCD_WRITE payloads:
+//   1. 192-byte write-agent uploaded to RL78 RAM 0xFB00
+//   2. 4-byte entry stub uploaded to RL78 RAM 0xF07E0 (OCD_EXEC jumps here → 0xFB00)
+//
+// After OCD_EXEC the agent loops receiving commands over TOOL0 UART:
+//   Send 'w' (0x77) + 4-byte LE flash addr → RL78 erases block → send 1024 data bytes → recv 1 ACK
+//
+// OCD_WRITE #1 payload: addr_lo=0x00 addr_hi=0xFB count=0xC0 data[192]
+static const uint8_t SHELLCODE_WRITE_AGENT[] = {
+    0x00,
+    0xFB,
+    0xC0,  // OCD_WRITE header: addr=0xFB00, count=192
+    // 192-byte RL78 flash write agent (extracted from Teensy flasher AVR data section)
+    0x13,
+    0xBF,
+    0xE6,
+    0x07,
+    0xC0,
+    0xBF,
+    0xEC,
+    0x07,
+    0xC0,
+    0xBF,
+    0xEE,
+    0x07,
+    0xCF,
+    0xEB,
+    0x07,
+    0xEC,
+    0xF5,
+    0xEA,
+    0x07,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x72,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x76,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x77,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x9E,
+    0xFD,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x73,
+    0x62,
+    0x4C,
+    0x69,
+    0xDD,
+    0x6D,
+    0x4C,
+    0x77,
+    0xDD,
+    0x1D,
+    0x4C,
+    0x72,
+    0xDD,
+    0x29,
+    0x4C,
+    0x65,
+    0xDD,
+    0x32,
+    0x4C,
+    0x75,
+    0xDD,
+    0x62,
+    0xFC,
+    0xA1,
+    0xFF,
+    0x0E,
+    0xD5,
+    0xEA,
+    0x07,
+    0xDF,
+    0xC8,
+    0xAF,
+    0xE6,
+    0x07,
+    0x12,
+    0xEC,
+    0xEB,
+    0x07,
+    0x0F,
+    0xFC,
+    0xB2,
+    0xFF,
+    0x0E,
+    0x11,
+    0x9B,
+    0xA7,
+    0x93,
+    0xDF,
+    0xF6,
+    0xFE,
+    0x4C,
+    0x00,
+    0xEE,
+    0xE3,
+    0xFF,
+    0x11,
+    0x8B,
+    0xFC,
+    0xA1,
+    0xFF,
+    0x0E,
+    0xA7,
+    0x93,
+    0xDF,
+    0xF6,
+    0xEE,
+    0xD6,
+    0xFF,
+    0x61,
+    0xFF,
+    0xFC,
+    0xF8,
+    0xFF,
+    0x0E,
+    0x8F,
+    0x02,
+    0x08,
+    0x4C,
+    0x0F,
+    0xDD,
+    0x0B,
+    0x62,
+    0x4C,
+    0xFF,
+    0xDF,
+    0x11,
+    0xFC,
+    0xC4,
+    0x08,
+    0x0F,
+    0xEF,
+    0xF5,
+    0x62,
+    0x4C,
+    0xFF,
+    0xDF,
+    0x06,
+    0xFC,
+    0x04,
+    0xF0,
+    0x0E,
+    0xEF,
+    0xF5,
+    0xC3,
+    0x61,
+    0xCF,
+    0xC2,
+    0x62,
+    0xFC,
+    0xA1,
+    0xFF,
+    0x0E,
+    0xEE,
+    0xA7,
+    0xFF,
+    0xE5,
+    0xEA,
+    0x07,
+    0xEF,
+    0x03,
+    0xE5,
+    0xEA,
+    0x07,
+    0xFE,
+    0x02,
+    0x00,
+    0xEF,
+    0x9A,
+    0x51,
+    0x00,
+    0xFC,
+    0xA1,
+    0xFF,
+    0x0E,
+    0xD7,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF,
+};
+
+// OCD_WRITE #2 payload: entry stub at 0xF07E0 (addr_lo=0xE0 addr_hi=0x07 count=4)
+static const uint8_t SHELLCODE_WRITE_STUB[] = {
+    0xE0, 0x07, 0x04,        // OCD_WRITE header: addr=0x07E0, count=4
+    0xEC, 0x00, 0xFB, 0x0F,  // RL78: MOVW HL,#0xFB00 + branch to shellcode
+};
+
 // ── PSRAM buffer size for full syscon dump ───────────────────────────────────
 static const uint32_t PSRAM_SYSCON_BUF_SIZE = SYSCON_FLASH_SIZE;  // 512 KB
 
@@ -108,6 +322,7 @@ enum PsToolsMode : uint8_t {
   // OCD glitch modes (locked/original chip)
   MODE_GLITCH_DUMP = 0,  // Glitch → OCD → shellcode → dump 512 KB to storage path
   MODE_GLITCH_FLASHER,   // Glitch → OCD → scflasher v2.05 protocol on pc_uart
+  MODE_GLITCH_WRITE,     // Glitch → OCD → write-agent shellcode → erase+write from file
   // ProtoA modes (stock/blank/erased chip)
   MODE_PROTO_A_WRITE,        // ProtoA → erase all → program from file (bin or mot)
   MODE_PROTO_A_READ,         // ProtoA → read all blocks → dump to file (unprotected only)
@@ -121,6 +336,7 @@ enum PsToolsState : uint8_t {
   STATE_UPLOADING_SHELLCODE,
   STATE_DUMPING,         // Streaming dump to storage or pc_uart
   STATE_FLASHER,         // Scflasher protocol active
+  STATE_GLITCH_WRITING,  // Glitch → OCD write-agent → block write in progress
   STATE_WRITING,         // ProtoA write in progress
   STATE_READING,         // ProtoA read in progress
   STATE_BLANK_CHECKING,  // ProtoA blank check in progress
@@ -180,6 +396,7 @@ class PsTools : public Component {
 
   // ── Action entry points (called from automations or loop) ──
   void start_glitch();
+  void start_glitch_write();
   void stop();
   void start_write();
   void start_read();
@@ -267,6 +484,7 @@ class PsTools : public Component {
 
   // ── Per-mode task bodies (called from run_task_) ──
   void run_glitch_loop_();
+  void run_glitch_write_loop_();
   void run_write_loop_();
   void run_read_loop_();
   void run_blank_check_loop_();
@@ -276,6 +494,11 @@ class PsTools : public Component {
 
   // ── OCD operations ──
   void upload_and_execute_shellcode_();
+  // Uploads the 192-byte write-agent + 4-byte stub via OCD_WRITE, then OCD_EXEC
+  void upload_write_agent_();
+  // Sends one 1KB block to the running write-agent: 'w' + 4-byte LE addr + 1024 bytes of data
+  // Returns true on ACK, false on timeout/error
+  bool ocd_write_block_(uint32_t addr, const uint8_t *data);
   uint8_t compute_ocd_checksum_(const uint8_t *data, uint8_t len);
   uint8_t compute_passcode_checksum_();
 

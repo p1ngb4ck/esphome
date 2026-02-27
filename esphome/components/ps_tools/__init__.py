@@ -37,6 +37,7 @@ VOLTAGE_OPTIONS = {
 # ── Mode strings ─────────────────────────────────────────────────────────────
 MODE_GLITCH_DUMP = "glitch_dump"
 MODE_GLITCH_FLASHER = "glitch_flasher"
+MODE_GLITCH_WRITE = "glitch_write"
 MODE_PROTO_A_WRITE = "proto_a_write"
 MODE_PROTO_A_READ = "proto_a_read"
 MODE_PROTO_A_BLANK_CHECK = "proto_a_blank_check"
@@ -49,6 +50,7 @@ PsToolsMode = ps_tools_ns.enum("PsToolsMode")
 MODES = {
     MODE_GLITCH_DUMP: PsToolsMode.MODE_GLITCH_DUMP,
     MODE_GLITCH_FLASHER: PsToolsMode.MODE_GLITCH_FLASHER,
+    MODE_GLITCH_WRITE: PsToolsMode.MODE_GLITCH_WRITE,
     MODE_PROTO_A_WRITE: PsToolsMode.MODE_PROTO_A_WRITE,
     MODE_PROTO_A_READ: PsToolsMode.MODE_PROTO_A_READ,
     MODE_PROTO_A_BLANK_CHECK: PsToolsMode.MODE_PROTO_A_BLANK_CHECK,
@@ -56,6 +58,7 @@ MODES = {
 
 # ── Automation action bindings ───────────────────────────────────────────────
 StartGlitchAction = ps_tools_ns.class_("StartGlitchAction", automation.Action)
+StartGlitchWriteAction = ps_tools_ns.class_("StartGlitchWriteAction", automation.Action)
 StopAction = ps_tools_ns.class_("StopAction", automation.Action)
 StartWriteAction = ps_tools_ns.class_("StartWriteAction", automation.Action)
 StartReadAction = ps_tools_ns.class_("StartReadAction", automation.Action)
@@ -86,15 +89,16 @@ def _validate_config(config):
             f"Mode '{MODE_GLITCH_FLASHER}' requires 'pc_uart' to be configured"
         )
 
-    # write_path is required for write mode
-    if mode == MODE_PROTO_A_WRITE and CONF_WRITE_PATH not in config:
-        raise cv.Invalid(
-            f"Mode '{MODE_PROTO_A_WRITE}' requires 'write_path' to be configured"
-        )
+    # write_path is required for write modes
+    if (
+        mode in (MODE_PROTO_A_WRITE, MODE_GLITCH_WRITE)
+        and CONF_WRITE_PATH not in config
+    ):
+        raise cv.Invalid(f"Mode '{mode}' requires 'write_path' to be configured")
 
     # glitch_pin is required for glitch modes
     if (
-        mode in (MODE_GLITCH_DUMP, MODE_GLITCH_FLASHER)
+        mode in (MODE_GLITCH_DUMP, MODE_GLITCH_FLASHER, MODE_GLITCH_WRITE)
         and CONF_GLITCH_PIN not in config
     ):
         raise cv.Invalid(f"Mode '{mode}' requires 'glitch_pin' to be configured")
@@ -241,6 +245,14 @@ PS_TOOLS_ACTION_SCHEMA = cv.Schema({cv.GenerateID(): cv.use_id(PsTools)})
     "ps_tools.start_glitch", StartGlitchAction, PS_TOOLS_ACTION_SCHEMA
 )
 async def ps_tools_start_glitch_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+@automation.register_action(
+    "ps_tools.start_glitch_write", StartGlitchWriteAction, PS_TOOLS_ACTION_SCHEMA
+)
+async def ps_tools_start_glitch_write_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
