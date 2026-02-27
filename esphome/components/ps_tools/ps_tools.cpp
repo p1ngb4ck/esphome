@@ -1940,6 +1940,10 @@ void PsTools::upload_and_execute_shellcode_() {
   this->tool0_uart_->write_array(SHELLCODE_DUMP, sizeof(SHELLCODE_DUMP));
   this->tool0_uart_->flush();
   esp_rom_delay_us(5000);
+  // Flush all OCD session leftovers before exec — so only the OCD_EXEC echo
+  // precedes the dump stream in the RX buffer.
+  uart_flush_input(
+      static_cast<uart_port_t>(static_cast<uart::IDFUARTComponent *>(this->tool0_uart_)->get_hw_serial_number()));
   this->tool0_uart_->write_byte(OCD_EXEC_CMD);
   this->tool0_uart_->flush();
   esp_rom_delay_us(2000);
@@ -2451,8 +2455,12 @@ void PsTools::run_dump_on_task_(int uart_num) {
   int idle_count = 0;
   auto port = static_cast<uart_port_t>(uart_num);
 
-  // Flush any leftover OCD session bytes (echoes, unlock response, noise)
-  uart_flush_input(port);
+  // Discard the OCD_EXEC echo byte (1 byte) — flushed before OCD_EXEC was sent,
+  // so the only byte ahead of dump data is the echo of OCD_EXEC itself.
+  {
+    uint8_t discard;
+    uart_read_bytes(port, &discard, 1, pdMS_TO_TICKS(50));
+  }
 
   while (received < SYSCON_FLASH_SIZE) {
     // Wait for at least one byte
