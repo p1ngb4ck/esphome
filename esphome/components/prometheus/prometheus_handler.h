@@ -43,12 +43,7 @@ class PrometheusHandler : public AsyncWebHandler, public Component {
   bool canHandle(AsyncWebServerRequest *request) const override {
     if (request->method() != HTTP_GET)
       return false;
-#ifdef USE_ESP32
-    char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-    return request->url_to(url_buf) == "/metrics";
-#else
-    return request->url() == ESPHOME_F("/metrics");
-#endif
+    return request->url() == "/metrics";
   }
 
   void handleRequest(AsyncWebServerRequest *req) override;

@@ -2203,12 +2203,7 @@ json::SerializationBuffer<> WebServer::update_json_(update::UpdateEntity *obj, J
 #endif
 
 bool WebServer::canHandle(AsyncWebServerRequest *request) const {
-#ifdef USE_ESP32
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  StringRef url = request->url_to(url_buf);
-#else
-  const auto &url = request->url();
-#endif
+  StringRef url = request->url();
   const auto method = request->method();
 
   // Static URL checks - use ESPHOME_F to keep strings in flash on ESP8266
@@ -2344,12 +2339,7 @@ bool WebServer::canHandle(AsyncWebServerRequest *request) const {
   return false;
 }
 void WebServer::handleRequest(AsyncWebServerRequest *request) {
-#ifdef USE_ESP32
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  StringRef url = request->url_to(url_buf);
-#else
-  const auto &url = request->url();
-#endif
+  StringRef url = request->url();
 
   // Handle static routes first
   if (url == ESPHOME_F("/")) {

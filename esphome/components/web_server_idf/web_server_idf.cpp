@@ -253,16 +253,17 @@ optional<std::string> AsyncWebServerRequest::get_header(const char *name) const 
   return request_get_header(*this, name);
 }
 
-StringRef AsyncWebServerRequest::url_to(std::span<char, URL_BUF_SIZE> buffer) const {
-  const char *uri = this->req_->uri;
-  const char *query_start = strchr(uri, '?');
-  size_t uri_len = query_start ? static_cast<size_t>(query_start - uri) : strlen(uri);
-  size_t copy_len = std::min(uri_len, URL_BUF_SIZE - 1);
-  memcpy(buffer.data(), uri, copy_len);
-  buffer[copy_len] = '\0';
-  // Decode URL-encoded characters in-place (e.g., %20 -> space)
-  size_t decoded_len = url_decode(buffer.data());
-  return StringRef(buffer.data(), decoded_len);
+StringRef AsyncWebServerRequest::url() const {
+  if (this->url_decoded_len_ == 0) {
+    // Decode in-place into req_->uri (mutable, URL_BUF_SIZE bytes, lives for the request lifetime).
+    // Strip query string first by null-terminating at '?'.
+    char *uri = this->req_->uri;
+    char *query_start = strchr(uri, '?');
+    if (query_start != nullptr)
+      *query_start = '\0';
+    this->url_decoded_len_ = static_cast<uint16_t>(url_decode(uri));
+  }
+  return StringRef(this->req_->uri, this->url_decoded_len_);
 }
 
 void AsyncWebServerRequest::send(AsyncWebServerResponse *response) {

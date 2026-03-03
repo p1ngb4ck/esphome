@@ -229,8 +229,7 @@ void HttpFileBrowser::loop() {
 // AsyncWebHandler interface implementation
 bool HttpFileBrowser::canHandle(AsyncWebServerRequest *request) const {
   // Handle requests that start with our URL prefix
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  std::string uri{request->url_to(url_buf)};
+  std::string uri{request->url()};
   const char *method_name = (request->method() == HTTP_GET)      ? "GET"
                             : (request->method() == HTTP_POST)   ? "POST"
                             : (request->method() == HTTP_DELETE) ? "DELETE"
@@ -262,8 +261,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
     }
   }
 
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  std::string uri{request->url_to(url_buf)};
+  std::string uri{request->url()};
   ESP_LOGI(TAG, "handleRequest: uri='%s', url_prefix_='%s', method=%d", uri.c_str(), this->url_prefix_.c_str(),
            request->method());
 
@@ -598,8 +596,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       this->chunk_buffer_size_ = 0;
     }
 
-    char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-    std::string uri{request->url_to(url_buf)};
+    std::string uri{request->url()};
     ESP_LOGI(TAG, "Upload started: index=0, uri='%s', filename='%s'", uri.c_str(), filename.c_str());
 
     this->upload_directory_ = this->uri_to_filepath(uri);
@@ -2753,8 +2750,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   }
 
   // Get the directory path from URI
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  std::string uri{request->url_to(url_buf)};
+  std::string uri{request->url()};
   std::string dir_path = this->uri_to_filepath(uri);
 
   // Check if target is a directory

@@ -96,12 +96,7 @@ void CaptivePortal::start() {
 }
 
 void CaptivePortal::handleRequest(AsyncWebServerRequest *req) {
-#ifdef USE_ESP32
-  char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-  StringRef url = req->url_to(url_buf);
-#else
-  const auto &url = req->url();
-#endif
+  StringRef url = req->url();
   if (url == ESPHOME_F("/config.json")) {
     this->handle_config(req);
     return;
