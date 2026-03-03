@@ -1,12 +1,8 @@
 import esphome.codegen as cg
 from esphome.components import socket
+from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.components.esp32.const import KEY_ESP32, KEY_VARIANT
-from esphome.components.uart import (
-    CONF_DATA_BITS,
-    CONF_PARITY,
-    CONF_STOP_BITS,
-    UARTComponent,
-)
+from esphome.components.uart import UARTComponent
 from esphome.components.usb_host import (
     USBClient,
     USBHost,
