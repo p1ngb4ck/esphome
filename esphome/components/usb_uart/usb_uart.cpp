@@ -153,7 +153,7 @@ void USBUartChannel::write_array(const uint8_t *data, size_t len) {
     }
     size_t chunk_len = std::min(len, UsbOutputChunk::MAX_CHUNK_SIZE);
     memcpy(chunk->data, data, chunk_len);
-    chunk->length = static_cast<uint8_t>(chunk_len);
+    chunk->length = static_cast<decltype(chunk->length)>(chunk_len);
     if (!this->output_queue_.push(chunk)) {
       this->output_pool_.release(chunk);
       ESP_LOGE(TAG, "Output queue full - lost %zu bytes", len);
@@ -391,7 +391,7 @@ void USBUartComponent::start_output(USBUartChannel *channel) {
     this->start_output(channel);
   };
 
-  const uint8_t len = chunk->length;
+  const auto len = chunk->length;
   if (!this->transfer_out(ep->bEndpointAddress, callback, chunk->data, len)) {
     // Transfer submission failed — return chunk and release flag so callers can retry.
     channel->output_pool_.release(chunk);

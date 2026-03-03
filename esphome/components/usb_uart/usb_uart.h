@@ -134,11 +134,15 @@ struct UsbDataChunk {
   void release() {}
 };
 
-// Structure for queuing outgoing USB data chunks (one per USB FS packet)
+// Structure for queuing outgoing USB data chunks (one per USB packet)
 struct UsbOutputChunk {
-  static constexpr size_t MAX_CHUNK_SIZE = 64;  // USB FS MPS
+  static constexpr size_t MAX_CHUNK_SIZE = esphome::usb_host::USB_MAX_PACKET_SIZE;
   uint8_t data[MAX_CHUNK_SIZE];
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  uint16_t length;
+#else
   uint8_t length;
+#endif
 
   // Required for EventPool - no cleanup needed for POD types
   void release() {}
