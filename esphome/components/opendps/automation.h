@@ -13,7 +13,7 @@ template<typename... Ts> class EnableOutputAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(bool, enable)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     bool enable = this->enable_.value(x...);
     this->parent_->enable_output(enable);
   }
@@ -29,7 +29,7 @@ template<typename... Ts> class SetVoltageAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(float, voltage)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     float voltage = this->voltage_.value(x...);
     this->parent_->set_voltage(voltage);
   }
@@ -45,7 +45,7 @@ template<typename... Ts> class SetCurrentAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(float, current)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     float current = this->current_.value(x...);
     this->parent_->set_current(current);
   }
@@ -61,7 +61,7 @@ template<typename... Ts> class SetFunctionAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, function)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     std::string function = this->function_.value(x...);
     this->parent_->set_function(function);
   }
@@ -78,7 +78,7 @@ template<typename... Ts> class SetParameterAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(std::string, key)
   TEMPLATABLE_VALUE(std::string, value)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     std::string key = this->key_.value(x...);
     std::string value = this->value_.value(x...);
     this->parent_->set_parameter(key, value);
@@ -95,7 +95,7 @@ template<typename... Ts> class LockAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(bool, locked)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     bool locked = this->locked_.value(x...);
     this->parent_->lock(locked);
   }
@@ -111,7 +111,7 @@ template<typename... Ts> class SetBrightnessAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(uint8_t, brightness)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     uint8_t brightness = this->brightness_.value(x...);
     this->parent_->set_brightness(brightness);
   }
@@ -125,7 +125,7 @@ template<typename... Ts> class PingAction : public Action<Ts...> {
  public:
   explicit PingAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->send_ping(); }
+  void play(const Ts &...x) override { this->parent_->send_ping(); }
 
  protected:
   OpenDPS *parent_;
@@ -136,7 +136,7 @@ template<typename... Ts> class RequestVersionAction : public Action<Ts...> {
  public:
   explicit RequestVersionAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->request_version(); }
+  void play(const Ts &...x) override { this->parent_->request_version(); }
 
  protected:
   OpenDPS *parent_;
@@ -149,7 +149,7 @@ template<typename... Ts> class UpgradeFirmwareAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, firmware_path)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     std::string path = this->firmware_path_.value(x...);
     this->parent_->start_firmware_upgrade(path);
   }
@@ -163,7 +163,7 @@ template<typename... Ts> class RequestCalibrationReportAction : public Action<Ts
  public:
   explicit RequestCalibrationReportAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->request_calibration_report(); }
+  void play(const Ts &...x) override { this->parent_->request_calibration_report(); }
 
  protected:
   OpenDPS *parent_;
@@ -177,7 +177,7 @@ template<typename... Ts> class SetCalibrationAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(std::string, name)
   TEMPLATABLE_VALUE(float, value)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     std::string name = this->name_.value(x...);
     float value = this->value_.value(x...);
     this->parent_->set_calibration(name, value);
@@ -192,7 +192,7 @@ template<typename... Ts> class ClearCalibrationAction : public Action<Ts...> {
  public:
   explicit ClearCalibrationAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->clear_calibration(); }
+  void play(const Ts &...x) override { this->parent_->clear_calibration(); }
 
  protected:
   OpenDPS *parent_;
@@ -205,7 +205,7 @@ template<typename... Ts> class SaveCalibrationAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, path)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->path_.has_value()) {
       this->parent_->save_calibration_to_storage(this->path_.value(x...));
     } else {
@@ -224,7 +224,7 @@ template<typename... Ts> class RestoreCalibrationAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, path)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->path_.has_value()) {
       this->parent_->restore_calibration_from_storage(this->path_.value(x...));
     } else {
@@ -241,7 +241,7 @@ template<typename... Ts> class StartCalibrationAssistantAction : public Action<T
  public:
   explicit StartCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->start_calibration_assistant(); }
+  void play(const Ts &...x) override { this->parent_->start_calibration_assistant(); }
 
  protected:
   OpenDPS *parent_;
@@ -254,7 +254,7 @@ template<typename... Ts> class CalibrationAssistantStepAction : public Action<Ts
 
   TEMPLATABLE_VALUE(float, measured_value)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     float value = this->measured_value_.value(x...);
     this->parent_->calibration_assistant_step(value);
   }
@@ -268,7 +268,7 @@ template<typename... Ts> class CancelCalibrationAssistantAction : public Action<
  public:
   explicit CancelCalibrationAssistantAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->cancel_calibration_assistant(); }
+  void play(const Ts &...x) override { this->parent_->cancel_calibration_assistant(); }
 
  protected:
   OpenDPS *parent_;
@@ -285,7 +285,7 @@ template<typename... Ts> class StartDatalogAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, filename)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     std::string filename = this->filename_.value(x...);
     this->parent_->start_datalog(filename);
   }
@@ -299,7 +299,7 @@ template<typename... Ts> class StopDatalogAction : public Action<Ts...> {
  public:
   explicit StopDatalogAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->stop_datalog(); }
+  void play(const Ts &...x) override { this->parent_->stop_datalog(); }
 
  protected:
   OpenDPS *parent_;
@@ -310,7 +310,7 @@ template<typename... Ts> class FlushDatalogAction : public Action<Ts...> {
  public:
   explicit FlushDatalogAction(OpenDPS *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->flush_datalog(); }
+  void play(const Ts &...x) override { this->parent_->flush_datalog(); }
 
  protected:
   OpenDPS *parent_;
