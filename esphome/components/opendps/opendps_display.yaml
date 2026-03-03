@@ -1,24 +1,33 @@
-# ============================================================================
-# OpenDPS Lab PSU Display — LVGL 9.5
-# Target: ESP32-P4 + 10.1" DSI display (1280×800)
-#
-# Page 1 — MAIN:      PSU front panel (LCD + sliders + power button + LEDs)
-# Page 2 — GRAPHS:    Live V/I/P 60-second history charts
-# Page 3 — SETTINGS:  Presets + brightness
-#
-# Merge the sensor/number/binary_sensor on_value hooks shown in the comments
-# below into your existing opendps config.
-#
-# external_components:
-#   - source: github://youkorr/dev-lvgl_9.5
-#     components: [lvgl]
-# ============================================================================
+font:
+  - file: "gfonts://Montserrat"
+    id: montserrat_12
+    size: 12
+  - file: "gfonts://Montserrat"
+    id: montserrat_14
+    size: 14
+  - file: "gfonts://Montserrat"
+    id: montserrat_16
+    size: 16
+  - file: "gfonts://Montserrat"
+    id: montserrat_18
+    size: 18
+  - file: "gfonts://Montserrat"
+    id: montserrat_20
+    size: 20
+  - file: "gfonts://Montserrat"
+    id: montserrat_28
+    size: 28
+  - file: "gfonts://Montserrat"
+    id: montserrat_36
+    size: 36
+  - file: "gfonts://Montserrat"
+    id: montserrat_48
+    size: 48
+  - file: "gfonts://Montserrat"
+    id: montserrat_72
+    size: 72
 
-# ============================================================================
-# GLOBALS
-# ============================================================================
 globals:
-  # Shadow the setpoints so we can initialise sliders from opendps on_connect
   - id: g_vset
     type: float
     initial_value: "0.0"
@@ -26,1932 +35,1930 @@ globals:
     type: float
     initial_value: "0.0"
 
-# ============================================================================
-# SENSOR on_value HOOKS (merge into your sensor: block)
-# ============================================================================
-# sensor:
-#   - platform: opendps
-#     opendps_id: my_opendps
-#     voltage_out:
-#       id: opendps_vout
-#       on_value:
-#         - lvgl.label.update:
-#             id: lbl_vout
-#             text: {format: "%.2f", args: [x]}
-#         - lvgl.label.update:
-#             id: lbl_vout_g
-#             text: {format: "Vout  %.2fV", args: [x]}
-#         - lvgl.chart.set_next_value:
-#             id: chart_v
-#             series_id: ser_v
-#             value: !lambda 'return (int)(x * 100);'
-#
-#     current_out:
-#       id: opendps_iout
-#       on_value:
-#         - lvgl.label.update:
-#             id: lbl_iout
-#             text: {format: "%.3f", args: [x]}
-#         - lvgl.label.update:
-#             id: lbl_iout_g
-#             text: {format: "Iout  %.3fA", args: [x]}
-#         - lvgl.chart.set_next_value:
-#             id: chart_i
-#             series_id: ser_i
-#             value: !lambda 'return (int)(x * 1000);'
-#
-#     power_out:
-#       id: opendps_pout
-#       on_value:
-#         - lvgl.label.update:
-#             id: lbl_pout
-#             text: {format: "%.2f", args: [x]}
-#         - lvgl.label.update:
-#             id: lbl_pout_g
-#             text: {format: "Pout  %.2fW", args: [x]}
-#         - lvgl.chart.set_next_value:
-#             id: chart_p
-#             series_id: ser_p
-#             value: !lambda 'return (int)(x * 100);'
-#
-#     voltage_in:
-#       id: opendps_vin
-#       on_value:
-#         - lvgl.label.update:
-#             id: lbl_vin
-#             text: {format: "%.1fV", args: [x]}
-#
-#     temperature_1:
-#       id: opendps_temp1
-#       on_value:
-#         - lvgl.bar.update:
-#             id: bar_t1
-#             value: !lambda 'return (int)x;'
-#         - lvgl.label.update:
-#             id: lbl_t1
-#             text: {format: "%.0f°C", args: [x]}
-#
-#     temperature_2:
-#       id: opendps_temp2
-#       on_value:
-#         - lvgl.bar.update:
-#             id: bar_t2
-#             value: !lambda 'return (int)x;'
-#         - lvgl.label.update:
-#             id: lbl_t2
-#             text: {format: "%.0f°C", args: [x]}
-#
-# ============================================================================
-# NUMBER on_value HOOKS (merge into your number: block)
-# ============================================================================
-# number:
-#   - platform: template
-#     id: opendps_set_voltage
-#     on_value:
-#       - globals.set:
-#           id: g_vset
-#           value: !lambda 'return x;'
-#       - lvgl.slider.update:
-#           id: sl_v
-#           value: !lambda 'return (int)(x * 10);'
-#       - lvgl.label.update:
-#           id: lbl_setv
-#           text: {format: "%.2f", args: [x]}
-#
-#   - platform: template
-#     id: opendps_set_current
-#     on_value:
-#       - globals.set:
-#           id: g_iset
-#           value: !lambda 'return x;'
-#       - lvgl.slider.update:
-#           id: sl_i
-#           value: !lambda 'return (int)(x * 100);'
-#       - lvgl.label.update:
-#           id: lbl_seti
-#           text: {format: "%.3f", args: [x]}
-#
-# ============================================================================
-# BINARY SENSOR on_state HOOKS (merge into your binary_sensor: block)
-# ============================================================================
-# binary_sensor:
-#   - platform: opendps
-#     output_enabled:
-#       id: opendps_output_state
-#       on_press:
-#         - lvgl.widget.update:
-#             id: pwr_ring
-#             border_color: 0x39FF14
-#             shadow_color: 0x39FF14
-#             shadow_width: 16
-#         - lvgl.label.update:
-#             id: lbl_pwr
-#             text: "OUTPUT\nON"
-#             text_color: 0x39FF14
-#       on_release:
-#         - lvgl.widget.update:
-#             id: pwr_ring
-#             border_color: 0x555555
-#             shadow_color: 0x000000
-#             shadow_width: 0
-#         - lvgl.label.update:
-#             id: lbl_pwr
-#             text: "OUTPUT\nOFF"
-#             text_color: 0x555555
-#
-# ============================================================================
-# SELECT on_value HOOKS (merge into your select: block)
-# ============================================================================
-# select:
-#   - platform: template
-#     id: opendps_mode
-#     on_value:
-#       - lvgl.widget.update:
-#           id: led_cv
-#           bg_color: !lambda 'return (x == "cv") ? 0x39FF14 : 0x1A1A1A;'
-#           shadow_color: !lambda 'return (x == "cv") ? 0x39FF14 : 0x000000;'
-#           shadow_width: !lambda 'return (x == "cv") ? 10 : 0;'
-#       - lvgl.widget.update:
-#           id: led_cc
-#           bg_color: !lambda 'return (x == "cc") ? 0xFFBF00 : 0x1A1A1A;'
-#           shadow_color: !lambda 'return (x == "cc") ? 0xFFBF00 : 0x000000;'
-#           shadow_width: !lambda 'return (x == "cc") ? 10 : 0;'
-#       - lvgl.widget.update:
-#           id: led_cp
-#           bg_color: !lambda 'return (x == "cp") ? 0xFF3333 : 0x1A1A1A;'
-#           shadow_color: !lambda 'return (x == "cp") ? 0xFF3333 : 0x000000;'
-#           shadow_width: !lambda 'return (x == "cp") ? 10 : 0;'
+sensor:
+  - platform: opendps
+    opendps_id: opendps_id
+    voltage_out:
+      id: opendps_output_voltage
+      on_value:
+        - lvgl.label.update:
+            id: lbl_vout
+            text: {format: "%.2f", args: [x]}
+        - lvgl.label.update:
+            id: lbl_vout_g
+            text: {format: "Vout  %.2fV", args: [x]}
+        - lvgl.chart.set_next_value:
+            id: chart_v
+            series_id: ser_v
+            value: !lambda 'return (int)(x * 100);'
+    current_out:
+      id: opendps_ouput_current
+      on_value:
+        - lvgl.label.update:
+            id: lbl_iout
+            text: {format: "%.3f", args: [x]}
+        - lvgl.label.update:
+            id: lbl_iout_g
+            text: {format: "Iout  %.3fA", args: [x]}
+        - lvgl.chart.set_next_value:
+            id: chart_i
+            series_id: ser_i
+            value: !lambda 'return (int)(x * 1000);'
+    power_out:
+      id: opendps_output_power
+      on_value:
+        - lvgl.label.update:
+            id: lbl_pout
+            text: {format: "%.2f", args: [x]}
+        - lvgl.label.update:
+            id: lbl_pout_g
+            text: {format: "Pout  %.2fW", args: [x]}
+        - lvgl.chart.set_next_value:
+            id: chart_p
+            series_id: ser_p
+            value: !lambda 'return (int)(x * 100);'
+    voltage_in:
+      id: opendps_input_voltage
+      on_value:
+        - lvgl.label.update:
+            id: lbl_vin
+            text: {format: "%.1fV", args: [x]}
+    temperature_1:
+      id: opendps_temp1
+      on_value:
+        - lvgl.bar.update:
+            id: bar_t1
+            value: !lambda 'return (int)x;'
+        - lvgl.label.update:
+            id: lbl_t1
+            text: {format: "%.0f°C", args: [x]}
+    temperature_2:
+      id: opendps_temp2
+      on_value:
+        - lvgl.bar.update:
+            id: bar_t2
+            value: !lambda 'return (int)x;'
+        - lvgl.label.update:
+            id: lbl_t2
+            text: {format: "%.0f°C", args: [x]}
 
-# ============================================================================
-# LVGL
-# ============================================================================
+number:
+  - platform: template
+    id: voltage_number
+    name: "Set Voltage"
+    icon: mdi:flash-triangle
+    min_value: 0
+    max_value: 50
+    step: 0.1
+    unit_of_measurement: "V"
+    mode: box
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(opendps_id).set_voltage(x);
+    on_value:
+      - globals.set:
+          id: g_vset
+          value: !lambda 'return x;'
+      - lvgl.slider.update:
+          id: sl_v
+          value: !lambda 'return (int)(x * 10);'
+      - lvgl.label.update:
+          id: lbl_setv
+          text: {format: "%.2f", args: [x]}
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 50
+  - platform: template
+    id: current_number
+    name: "Set Current Limit"
+    icon: mdi:current-dc
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    unit_of_measurement: "A"
+    mode: box
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(opendps_id).set_current(x);
+    on_value:
+      - globals.set:
+          id: g_iset
+          value: !lambda 'return x;'
+      - lvgl.slider.update:
+          id: sl_i
+          value: !lambda 'return (int)(x * 100);'
+      - lvgl.label.update:
+          id: lbl_seti
+          text: {format: "%.3f", args: [x]}
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 60
+
+binary_sensor:
+  - platform: opendps
+    opendps_id: opendps_id
+    output_enabled:
+      id: dps_output_sensor_id
+      name: "OpenDPS Output Enabled"
+      icon: mdi:meter-electric-outline
+      on_press:
+        - lvgl.widget.update:
+            id: pwr_ring
+            border_color: 0x39FF14
+            shadow_color: 0x39FF14
+            shadow_width: 16
+        - lvgl.label.update:
+            id: lbl_pwr
+            text: "OUTPUT\nON"
+            text_color: 0x39FF14
+      on_release:
+        - lvgl.widget.update:
+            id: pwr_ring
+            border_color: 0x555555
+            shadow_color: 0x000000
+            shadow_width: 0
+        - lvgl.label.update:
+            id: lbl_pwr
+            text: "OUTPUT\nOFF"
+            text_color: 0x555555
+      web_server:
+        sorting_group_id: opendps_sensors
+        sorting_weight: 10
+
+select:
+  - platform: template
+    id: opendps_select_mode
+    name: "Select output mode"
+    icon: mdi:cog-outline
+    options:
+      - "cv"
+      - "cc"
+      - "cp"
+    set_action:
+      - lambda: |-
+          id(opendps_id).set_function(x.c_str());
+    on_value:
+      - lvgl.widget.update:
+          id: led_cv
+          bg_color: !lambda 'return (x == "cv") ? lv_color_hex(0x39FF14) : lv_color_hex(0x1A1A1A);'
+          shadow_color: !lambda 'return (x == "cv") ? lv_color_hex(0x39FF14) : lv_color_hex(0x000000);'
+          shadow_width: !lambda 'return (x == "cv") ? 10 : 0;'
+      - lvgl.widget.update:
+          id: led_cc
+          bg_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x1A1A1A);'
+          shadow_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x000000);'
+          shadow_width: !lambda 'return (x == "cc") ? 10 : 0;'
+      - lvgl.widget.update:
+          id: led_cp
+          bg_color: !lambda 'return (x == "cp") ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A);'
+          shadow_color: !lambda 'return (x == "cp") ? lv_color_hex(0xFF3333) : lv_color_hex(0x000000);'
+          shadow_width: !lambda 'return (x == "cp") ? 10 : 0;'
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 40
+
+switch:
+  - platform: template
+    name: "OpenDPS Output"
+    id: dps_output_switch
+    icon: "mdi:power"
+    lambda: |-
+      return id(dps_output_sensor_id).state;
+    turn_on_action:
+      - opendps.enable_output:
+          id: opendps_id
+          enable: true
+    turn_off_action:
+      - opendps.enable_output:
+          id: opendps_id
+          enable: false
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 30
+  - platform: template
+    name: "Lock OpenDPS"
+    id: dps_lock_switch
+    icon: "mdi:lock"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - opendps.lock:
+          id: opendps_id
+          locked: true
+    turn_off_action:
+      - opendps.lock:
+          id: opendps_id
+          locked: false
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 20
+
 lvgl:
-  displays:
-    - display_id: my_display
-      default_font: montserrat_16
+  displays: dsi_display
+  touchscreens: touchscreen_id
+  byte_order: little_endian
+  default_font: montserrat_16
 
-      pages:
-        # ====================================================================
-        # PAGE 1 — MAIN   (PSU front panel)
-        # ====================================================================
-        - id: page_main
-          bg_color: 0x1E1E1E   # brushed-metal dark chassis
+  pages:
+    - id: page_main
+      bg_color: 0x1E1E1E
 
-          widgets:
-            # ── Outer chassis frame ─────────────────────────────────────────
-            - obj:
-                x: 0
-                y: 0
-                width: 1280
-                height: 800
-                bg_color: 0x1E1E1E
-                border_width: 0
-                radius: 0
-                pad_all: 0
+      widgets:
+        - obj:
+            x: 0
+            y: 0
+            width: 1280
+            height: 800
+            bg_color: 0x1E1E1E
+            border_width: 0
+            radius: 0
+            pad_all: 0
 
-                widgets:
-                  # ── Top panel: model name + input voltage ─────────────────
-                  - obj:
-                      x: 0
-                      y: 0
-                      width: 1280
-                      height: 48
-                      bg_color: 0x141414
-                      border_width: 0
-                      radius: 0
-                      pad_left: 28
-                      pad_right: 28
-                      pad_top: 0
-                      pad_bottom: 0
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_BETWEEN
-                        flex_align_cross: CENTER
-                      widgets:
-                        - label:
-                            text: "DPS5005"
-                            text_color: 0xAAAAAA
-                            text_font: montserrat_18
-                        - obj:
-                            bg_opa: TRANSP
-                            border_width: 0
-                            height: size_content
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              pad_column: 6
-                            widgets:
-                              - label:
-                                  text: "INPUT"
-                                  text_color: 0x555555
-                                  text_font: montserrat_14
-                              - label:
-                                  id: lbl_vin
-                                  text: "--.-V"
-                                  text_color: 0x888888
-                                  text_font: montserrat_16
+            widgets:
+              - obj:
+                  x: 0
+                  y: 0
+                  width: 1280
+                  height: 48
+                  bg_color: 0x141414
+                  border_width: 0
+                  radius: 0
+                  pad_left: 28
+                  pad_right: 28
+                  pad_top: 0
+                  pad_bottom: 0
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        text: "DPS5005"
+                        text_color: 0xAAAAAA
+                        text_font: montserrat_18
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        height: size_content
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: CENTER
+                          pad_column: 6
+                        widgets:
+                          - label:
+                              text: "INPUT"
+                              text_color: 0x555555
+                              text_font: montserrat_14
+                          - label:
+                              id: lbl_vin
+                              text: "--.-V"
+                              text_color: 0x888888
+                              text_font: montserrat_16
 
-                  # ── LCD panel ─────────────────────────────────────────────
-                  # Main row: big VOLTAGE and CURRENT displays
-                  # Secondary row: POWER, SET V, SET A (smaller)
-                  - obj:
-                      id: lcd_panel
-                      x: 40
-                      y: 56
-                      width: 1200
-                      height: 280
-                      bg_color: 0x0C1A0C     # dark green LCD background
-                      border_color: 0x004408
-                      border_width: 2
-                      radius: 8
-                      shadow_color: 0x39FF14
-                      shadow_width: 10
-                      shadow_opa: 25%
-                      pad_all: 20
-                      layout:
-                        type: FLEX
-                        flex_flow: COLUMN
-                        flex_align_main: SPACE_EVENLY
-                        flex_align_cross: STRETCH
-                        pad_row: 8
+              - obj:
+                  id: lcd_panel
+                  x: 40
+                  y: 56
+                  width: 1200
+                  height: 280
+                  bg_color: 0x0C1A0C
+                  border_color: 0x004408
+                  border_width: 2
+                  radius: 8
+                  shadow_color: 0x39FF14
+                  shadow_width: 10
+                  shadow_opa: 25%
+                  pad_all: 20
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: SPACE_EVENLY
+                    flex_align_cross: STRETCH
+                    pad_row: 8
 
-                      widgets:
-                        # ── Main row: VOLTAGE + CURRENT ─────────────────────
-                        - obj:
-                            bg_opa: TRANSP
-                            border_width: 0
-                            height: 130
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_main: SPACE_EVENLY
-                              flex_align_cross: CENTER
+                  widgets:
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        height: 130
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: SPACE_EVENLY
+                          flex_align_cross: CENTER
 
-                            widgets:
-                              # VOLTAGE group
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  width: 540
-                                  height: 120
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: COLUMN
-                                    flex_align_cross: CENTER
-                                    pad_row: 0
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              width: 540
+                              height: 120
+                              layout:
+                                type: FLEX
+                                flex_flow: COLUMN
+                                flex_align_cross: CENTER
+                                pad_row: 0
 
-                                  widgets:
-                                    - label:
-                                        text: "VOLTAGE"
-                                        text_color: 0x39FF14
-                                        text_font: montserrat_14
-                                    - obj:
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        height: size_content
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: ROW
-                                          flex_align_cross: END
-                                          flex_align_main: CENTER
-                                          pad_column: 4
-                                        widgets:
-                                          - label:
-                                              id: lbl_vout
-                                              text: "--.-"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_72
-                                          - label:
-                                              text: "V"
-                                              text_color: 0x1A8020
-                                              text_font: montserrat_28
-                                              y: -10     # baseline alignment
-
-                              # CURRENT group
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  width: 540
-                                  height: 120
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: COLUMN
-                                    flex_align_cross: CENTER
-                                    pad_row: 0
-
-                                  widgets:
-                                    - label:
-                                        text: "CURRENT"
-                                        text_color: 0x39FF14
-                                        text_font: montserrat_14
-                                    - obj:
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        height: size_content
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: ROW
-                                          flex_align_cross: END
-                                          flex_align_main: CENTER
-                                          pad_column: 4
-                                        widgets:
-                                          - label:
-                                              id: lbl_iout
-                                              text: "-.---"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_72
-                                          - label:
-                                              text: "A"
-                                              text_color: 0x1A8020
-                                              text_font: montserrat_28
-                                              y: -10
-
-                        # ── Secondary row: POWER | SET V | SET A ────────────
-                        - obj:
-                            bg_color: 0x060E06
-                            border_color: 0x002208
-                            border_width: 1
-                            radius: 4
-                            height: 72
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_main: SPACE_EVENLY
-                              flex_align_cross: CENTER
-
-                            widgets:
-                              # POWER
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  width: 360
-                                  height: 60
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: CENTER
-                                    flex_align_cross: END
-                                    pad_column: 6
-                                  widgets:
-                                    - label:
-                                        text: "POWER"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_14
-                                        y: -4
-                                    - label:
-                                        id: lbl_pout
-                                        text: "--.-"
-                                        text_color: 0x39FF14
-                                        text_font: montserrat_36
-                                    - label:
-                                        text: "W"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_20
-                                        y: -4
-
-                              # divider
-                              - obj:
-                                  width: 1
-                                  height: 40
-                                  bg_color: 0x003308
-                                  border_width: 0
-                                  radius: 0
-
-                              # SET V
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  width: 360
-                                  height: 60
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: CENTER
-                                    flex_align_cross: END
-                                    pad_column: 6
-                                  widgets:
-                                    - label:
-                                        text: "SET V"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_14
-                                        y: -4
-                                    - label:
-                                        id: lbl_setv
-                                        text: "--.-"
-                                        text_color: 0x22CC55
-                                        text_font: montserrat_36
-                                    - label:
-                                        text: "V"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_20
-                                        y: -4
-
-                              # divider
-                              - obj:
-                                  width: 1
-                                  height: 40
-                                  bg_color: 0x003308
-                                  border_width: 0
-                                  radius: 0
-
-                              # SET A
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  width: 360
-                                  height: 60
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: CENTER
-                                    flex_align_cross: END
-                                    pad_column: 6
-                                  widgets:
-                                    - label:
-                                        text: "SET A"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_14
-                                        y: -4
-                                    - label:
-                                        id: lbl_seti
-                                        text: "-.--"
-                                        text_color: 0x22CC55
-                                        text_font: montserrat_36
-                                    - label:
-                                        text: "A"
-                                        text_color: 0x1A6020
-                                        text_font: montserrat_20
-                                        y: -4
-
-                  # ── Mode LEDs row: CV  CC  CP  OUT ──────────────────────
-                  - obj:
-                      x: 40
-                      y: 348
-                      width: 1200
-                      height: 48
-                      bg_color: 0x141414
-                      border_width: 0
-                      radius: 4
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: CENTER
-                        flex_align_cross: CENTER
-                        pad_column: 60
-
-                      widgets:
-                        # CV — full button tap area, LED dot is visual-only indicator
-                        - button:
-                            id: btn_cv
-                            height: 40
-                            width: 100
-                            bg_opa: TRANSP
-                            border_width: 0
-                            radius: 4
-                            pad_all: 4
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                              pad_column: 8
-                            on_click:
-                              - select.set:
-                                  id: opendps_mode
-                                  option: "cv"
-                            widgets:
-                              - obj:
-                                  id: led_cv
-                                  width: 16
-                                  height: 16
-                                  radius: 8
-                                  bg_color: 0x1A1A1A
-                                  border_color: 0x39FF14
-                                  border_width: 1
-                                  shadow_width: 0
-                                  clickable: false
-                              - label:
-                                  text: "CV"
-                                  text_color: 0x39FF14
-                                  text_font: montserrat_16
-
-                        # CC — full button tap area
-                        - button:
-                            id: btn_cc
-                            height: 40
-                            width: 100
-                            bg_opa: TRANSP
-                            border_width: 0
-                            radius: 4
-                            pad_all: 4
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                              pad_column: 8
-                            on_click:
-                              - select.set:
-                                  id: opendps_mode
-                                  option: "cc"
-                            widgets:
-                              - obj:
-                                  id: led_cc
-                                  width: 16
-                                  height: 16
-                                  radius: 8
-                                  bg_color: 0x1A1A1A
-                                  border_color: 0xFFBF00
-                                  border_width: 1
-                                  shadow_width: 0
-                                  clickable: false
-                              - label:
-                                  text: "CC"
-                                  text_color: 0xFFBF00
-                                  text_font: montserrat_16
-
-                        # CP — full button tap area
-                        - button:
-                            id: btn_cp
-                            height: 40
-                            width: 100
-                            bg_opa: TRANSP
-                            border_width: 0
-                            radius: 4
-                            pad_all: 4
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                              pad_column: 8
-                            on_click:
-                              - select.set:
-                                  id: opendps_mode
-                                  option: "cp"
-                            widgets:
-                              - obj:
-                                  id: led_cp
-                                  width: 16
-                                  height: 16
-                                  radius: 8
-                                  bg_color: 0x1A1A1A
-                                  border_color: 0xFF3333
-                                  border_width: 1
-                                  shadow_width: 0
-                                  clickable: false
-                              - label:
-                                  text: "CP"
-                                  text_color: 0xFF3333
-                                  text_font: montserrat_16
-
-                        # OUT — read-only, reflects output_enabled state
-                        - obj:
-                            height: 40
-                            width: 100
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                              pad_column: 8
-                            widgets:
-                              - obj:
-                                  id: led_out
-                                  width: 16
-                                  height: 16
-                                  radius: 8
-                                  bg_color: 0x1A1A1A
-                                  border_color: 0x555555
-                                  border_width: 1
-                                  shadow_width: 0
-                              - label:
-                                  text: "OUT"
-                                  text_color: 0x888888
-                                  text_font: montserrat_16
-
-                  # ── Controls row: Voltage slider | Power button | Current slider ──
-                  - obj:
-                      x: 40
-                      y: 404
-                      width: 1200
-                      height: 200
-                      bg_color: 0x171717
-                      border_color: 0x2A2A2A
-                      border_width: 1
-                      radius: 6
-                      pad_left: 32
-                      pad_right: 32
-                      pad_top: 16
-                      pad_bottom: 16
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_BETWEEN
-                        flex_align_cross: CENTER
-
-                      widgets:
-                        # ── Voltage slider block ─────────────────────────────
-                        - obj:
-                            width: 440
-                            height: 168
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: STRETCH
-                              flex_align_main: SPACE_EVENLY
-                              pad_row: 8
-
-                            widgets:
-                              # label row: "VOLTAGE" .... "SET V"
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                    flex_align_cross: CENTER
-                                  widgets:
-                                    - label:
-                                        text: "VOLTAGE"
-                                        text_color: 0x888888
-                                        text_font: montserrat_14
-                                    - label:
-                                        text: "0          15          30V"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-
-                              # The slider
-                              - slider:
-                                  id: sl_v
-                                  height: 32
-                                  min_value: 0
-                                  max_value: 300        # 0.0–30.0V ×10
-                                  value: 0
-                                  main:
-                                    bg_color: 0x222222
-                                    bg_opa: COVER
-                                    radius: 6
-                                    border_color: 0x333333
-                                    border_width: 1
-                                  indicator:
-                                    bg_color: 0x39FF14
-                                    bg_opa: COVER
-                                    radius: 6
-                                  knob:
-                                    bg_color: 0xDDDDDD
-                                    border_color: 0x888888
-                                    border_width: 2
-                                    radius: 4
-                                    width: 22
-                                    height: 36
-                                    pad_top: -4
-                                    pad_bottom: -4
-                                  on_value:
-                                    - lambda: |-
-                                        float v = x / 10.0f;
-                                        id(opendps_set_voltage).make_call().set_value(v).perform();
-                                    - lvgl.label.update:
-                                        id: lbl_setv
-                                        text:
-                                          format: "%.2f"
-                                          args: ['x / 10.0f']
-
-                              # scale tick labels under slider
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                    flex_align_cross: CENTER
-                                  widgets:
-                                    - label:
-                                        text: "0.0"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "7.5"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "15.0"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "22.5"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "30V"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-
-                        # ── Power button (centre) ─────────────────────────────
-                        - obj:
-                            width: 140
-                            height: 168
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_main: CENTER
-                              flex_align_cross: CENTER
-                              pad_row: 8
-
-                            widgets:
-                              # Ring (updates colour/glow when output on/off)
-                              - obj:
-                                  id: pwr_ring
-                                  width: 100
-                                  height: 100
-                                  radius: 50
-                                  bg_color: 0x222222
-                                  border_color: 0x555555
-                                  border_width: 4
-                                  shadow_color: 0x000000
-                                  shadow_width: 0
-                                  on_click:
-                                    - switch.toggle: opendps_output_switch
-                                  widgets:
-                                    # Power icon — vertical bar + arc approximated with label
-                                    # LVGL has no native SVG path, so we use Unicode power symbol
-                                    - label:
-                                        align: CENTER
-                                        text: "\u23FB"   # ⏻  Unicode POWER SYMBOL
-                                        text_color: 0x555555
-                                        text_font: montserrat_48
-                                        id: lbl_pwr_icon
-
-                              - label:
-                                  id: lbl_pwr
-                                  text: "OUTPUT\nOFF"
-                                  text_color: 0x555555
-                                  text_font: montserrat_14
-                                  text_align: CENTER
-
-                        # ── Current slider block ──────────────────────────────
-                        - obj:
-                            width: 440
-                            height: 168
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: STRETCH
-                              flex_align_main: SPACE_EVENLY
-                              pad_row: 8
-
-                            widgets:
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                    flex_align_cross: CENTER
-                                  widgets:
-                                    - label:
-                                        text: "CURRENT"
-                                        text_color: 0x888888
-                                        text_font: montserrat_14
-                                    - label:
-                                        text: "0         2.5          5A"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-
-                              - slider:
-                                  id: sl_i
-                                  height: 32
-                                  min_value: 0
-                                  max_value: 500        # 0.00–5.00A ×100
-                                  value: 0
-                                  main:
-                                    bg_color: 0x222222
-                                    bg_opa: COVER
-                                    radius: 6
-                                    border_color: 0x333333
-                                    border_width: 1
-                                  indicator:
-                                    bg_color: 0x39FF14
-                                    bg_opa: COVER
-                                    radius: 6
-                                  knob:
-                                    bg_color: 0xDDDDDD
-                                    border_color: 0x888888
-                                    border_width: 2
-                                    radius: 4
-                                    width: 22
-                                    height: 36
-                                    pad_top: -4
-                                    pad_bottom: -4
-                                  on_value:
-                                    - lambda: |-
-                                        float i = x / 100.0f;
-                                        id(opendps_set_current).make_call().set_value(i).perform();
-                                    - lvgl.label.update:
-                                        id: lbl_seti
-                                        text:
-                                          format: "%.3f"
-                                          args: ['x / 100.0f']
-
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                    flex_align_cross: CENTER
-                                  widgets:
-                                    - label:
-                                        text: "0.00"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "1.25"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "2.50"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "3.75"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-                                    - label:
-                                        text: "5.00A"
-                                        text_color: 0x444444
-                                        text_font: montserrat_12
-
-                  # ── Temperature bar gauges ────────────────────────────────
-                  - obj:
-                      x: 40
-                      y: 612
-                      width: 1200
-                      height: 80
-                      bg_color: 0x141414
-                      border_width: 0
-                      radius: 4
-                      pad_left: 24
-                      pad_right: 24
-                      pad_top: 10
-                      pad_bottom: 10
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_EVENLY
-                        flex_align_cross: CENTER
-                        pad_column: 40
-
-                      widgets:
-                        # HEATSINK
-                        - obj:
-                            flex_grow: 1
-                            height: 60
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: STRETCH
-                              pad_row: 4
-
-                            widgets:
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                  widgets:
-                                    - label:
-                                        text: "HEATSINK"
-                                        text_color: 0x666666
-                                        text_font: montserrat_12
-                                    - label:
-                                        id: lbl_t1
-                                        text: "--°C"
-                                        text_color: 0x39FF14
-                                        text_font: montserrat_12
-                              - lv_bar:
-                                  id: bar_t1
-                                  height: 10
-                                  min_value: 0
-                                  max_value: 80
-                                  value: 0
-                                  indicator:
-                                    bg_color: 0x39FF14
-                                    bg_grad_color: 0xFF2200
-                                    bg_grad_dir: HOR
-                                    bg_opa: COVER
-                                  main:
-                                    bg_color: 0x1A1A1A
-                                    radius: 4
+                              widgets:
+                                - label:
+                                    text: "VOLTAGE"
+                                    text_color: 0x39FF14
+                                    text_font: montserrat_14
+                                - obj:
+                                    bg_opa: TRANSP
                                     border_width: 0
+                                    height: size_content
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: ROW
+                                      flex_align_cross: END
+                                      flex_align_main: CENTER
+                                      pad_column: 4
+                                    widgets:
+                                      - label:
+                                          id: lbl_vout
+                                          text: "--.-"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_72
+                                      - label:
+                                          text: "V"
+                                          text_color: 0x1A8020
+                                          text_font: montserrat_28
+                                          y: -10
 
-                        # AMBIENT
-                        - obj:
-                            flex_grow: 1
-                            height: 60
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: STRETCH
-                              pad_row: 4
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              width: 540
+                              height: 120
+                              layout:
+                                type: FLEX
+                                flex_flow: COLUMN
+                                flex_align_cross: CENTER
+                                pad_row: 0
 
-                            widgets:
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                  widgets:
-                                    - label:
-                                        text: "AMBIENT"
-                                        text_color: 0x666666
-                                        text_font: montserrat_12
-                                    - label:
-                                        id: lbl_t2
-                                        text: "--°C"
-                                        text_color: 0x00AACC
-                                        text_font: montserrat_12
-                              - lv_bar:
-                                  id: bar_t2
-                                  height: 10
-                                  min_value: 0
-                                  max_value: 50
-                                  value: 0
-                                  indicator:
-                                    bg_color: 0x00AACC
-                                    bg_grad_color: 0xFF8800
-                                    bg_grad_dir: HOR
-                                    bg_opa: COVER
-                                  main:
-                                    bg_color: 0x1A1A1A
-                                    radius: 4
+                              widgets:
+                                - label:
+                                    text: "CURRENT"
+                                    text_color: 0x39FF14
+                                    text_font: montserrat_14
+                                - obj:
+                                    bg_opa: TRANSP
                                     border_width: 0
+                                    height: size_content
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: ROW
+                                      flex_align_cross: END
+                                      flex_align_main: CENTER
+                                      pad_column: 4
+                                    widgets:
+                                      - label:
+                                          id: lbl_iout
+                                          text: "-.---"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_72
+                                      - label:
+                                          text: "A"
+                                          text_color: 0x1A8020
+                                          text_font: montserrat_28
+                                          y: -10
 
-                  # ── Ventilation slots (decorative bottom trim) ─────────────
-                  - obj:
-                      x: 40
-                      y: 700
-                      width: 1200
-                      height: 80
-                      bg_color: 0x141414
-                      border_width: 0
-                      radius: 4
-                      pad_all: 14
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_EVENLY
-                        flex_align_cross: CENTER
-                        pad_column: 6
+                    - obj:
+                        bg_color: 0x060E06
+                        border_color: 0x002208
+                        border_width: 1
+                        radius: 4
+                        height: 72
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: SPACE_EVENLY
+                          flex_align_cross: CENTER
 
-                      widgets:
-                        # 14 vent slots
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
-                        - obj:
-                            width: 52
-                            height: 10
-                            bg_color: 0x0A0A0A
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 3
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              width: 360
+                              height: 60
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: CENTER
+                                flex_align_cross: END
+                                pad_column: 6
+                              widgets:
+                                - label:
+                                    text: "POWER"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_14
+                                    y: -4
+                                - label:
+                                    id: lbl_pout
+                                    text: "--.-"
+                                    text_color: 0x39FF14
+                                    text_font: montserrat_36
+                                - label:
+                                    text: "W"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_20
+                                    y: -4
 
-                  # ── Page navigation bar (bottom) ──────────────────────────
-                  - obj:
-                      x: 0
-                      y: 760
-                      width: 1280
-                      height: 40
-                      bg_color: 0x0D0D0D
-                      border_width: 0
-                      radius: 0
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: CENTER
-                        flex_align_cross: CENTER
-                        pad_column: 0
-
-                      widgets:
-                        - button:
-                            width: 426
-                            height: 40
-                            bg_color: 0x1A1A1A
-                            border_width: 0
-                            border_side: BOTTOM
-                            border_color: 0x39FF14
-                            radius: 0
-                            widgets:
-                              - label:
-                                  align: CENTER
-                                  text: "MAIN"
-                                  text_color: 0x39FF14
-                                  text_font: montserrat_16
-                        - button:
-                            width: 426
-                            height: 40
-                            bg_color: 0x111111
-                            border_width: 0
-                            radius: 0
-                            on_click:
-                              - lvgl.page.show: page_graphs
-                            widgets:
-                              - label:
-                                  align: CENTER
-                                  text: "GRAPHS"
-                                  text_color: 0x555555
-                                  text_font: montserrat_16
-                        - button:
-                            width: 428
-                            height: 40
-                            bg_color: 0x111111
-                            border_width: 0
-                            radius: 0
-                            on_click:
-                              - lvgl.page.show: page_settings
-                            widgets:
-                              - label:
-                                  align: CENTER
-                                  text: "SETTINGS"
-                                  text_color: 0x555555
-                                  text_font: montserrat_16
-
-        # ====================================================================
-        # PAGE 2 — GRAPHS   (60-second live history)
-        # ====================================================================
-        - id: page_graphs
-          bg_color: 0x111111
-
-          widgets:
-            # ── Live values header ────────────────────────────────────────
-            - obj:
-                x: 0
-                y: 0
-                width: 1280
-                height: 48
-                bg_color: 0x0D0D0D
-                border_width: 0
-                radius: 0
-                pad_left: 24
-                pad_right: 24
-                layout:
-                  type: FLEX
-                  flex_flow: ROW
-                  flex_align_main: SPACE_BETWEEN
-                  flex_align_cross: CENTER
-                widgets:
-                  - label:
-                      id: lbl_vout_g
-                      text: "Vout  --.-V"
-                      text_color: 0x4499FF
-                      text_font: montserrat_18
-                  - label:
-                      id: lbl_iout_g
-                      text: "Iout  -.---A"
-                      text_color: 0xFFAA22
-                      text_font: montserrat_18
-                  - label:
-                      id: lbl_pout_g
-                      text: "Pout  --.-W"
-                      text_color: 0xFF44CC
-                      text_font: montserrat_18
-                  - label:
-                      text: "60s window"
-                      text_color: 0x444444
-                      text_font: montserrat_14
-
-            # ── 3 stacked charts ──────────────────────────────────────────
-            - obj:
-                x: 0
-                y: 48
-                width: 1280
-                height: 712
-                bg_color: 0x111111
-                border_width: 0
-                radius: 0
-                pad_all: 16
-                layout:
-                  type: FLEX
-                  flex_flow: COLUMN
-                  flex_align_main: SPACE_EVENLY
-                  flex_align_cross: STRETCH
-                  pad_row: 10
-
-                widgets:
-                  # Voltage chart
-                  - obj:
-                      bg_color: 0x070D07
-                      border_color: 0x002208
-                      border_width: 1
-                      radius: 6
-                      flex_grow: 1
-                      pad_all: 8
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_cross: CENTER
-                        pad_column: 10
-
-                      widgets:
-                        - obj:
-                            width: 64
-                            height: size_content
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                            widgets:
-                              - label:
-                                  text: "V"
-                                  text_color: 0x4499FF
-                                  text_font: montserrat_28
-                              - label:
-                                  text: "out"
-                                  text_color: 0x224466
-                                  text_font: montserrat_12
-
-                        - chart:
-                            id: chart_v
-                            flex_grow: 1
-                            height: SIZE_CONTENT
-                            type: LINE
-                            point_count: 60
-                            update_mode: SHIFT
-                            bg_color: 0x050D05
-                            border_color: 0x002208
-                            border_width: 1
-                            div_line_count_hor: 4
-                            div_line_count_ver: 6
-                            items:
-                              line_color: 0x4499FF
-                              line_width: 2
-                              bg_color: 0x4499FF
-                              bg_opa: 20%
-                              bg_grad_color: 0x050D05
-                              bg_grad_dir: VER
-                            indicator:
+                          - obj:
+                              width: 1
+                              height: 40
+                              bg_color: 0x003308
+                              border_width: 0
                               radius: 0
-                            axis_primary_y:
-                              min_value: 0
-                              max_value: 3000    # ×100, so 0.00–30.00V
-                            series:
-                              - id: ser_v
-                                color: 0x4499FF
 
-                  # Current chart
-                  - obj:
-                      bg_color: 0x070D07
-                      border_color: 0x002208
-                      border_width: 1
-                      radius: 6
-                      flex_grow: 1
-                      pad_all: 8
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_cross: CENTER
-                        pad_column: 10
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              width: 360
+                              height: 60
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: CENTER
+                                flex_align_cross: END
+                                pad_column: 6
+                              widgets:
+                                - label:
+                                    text: "SET V"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_14
+                                    y: -4
+                                - label:
+                                    id: lbl_setv
+                                    text: "--.-"
+                                    text_color: 0x22CC55
+                                    text_font: montserrat_36
+                                - label:
+                                    text: "V"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_20
+                                    y: -4
 
-                      widgets:
-                        - obj:
-                            width: 64
-                            height: size_content
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                            widgets:
-                              - label:
-                                  text: "A"
-                                  text_color: 0xFFAA22
-                                  text_font: montserrat_28
-                              - label:
-                                  text: "out"
-                                  text_color: 0x664422
-                                  text_font: montserrat_12
-
-                        - chart:
-                            id: chart_i
-                            flex_grow: 1
-                            height: SIZE_CONTENT
-                            type: LINE
-                            point_count: 60
-                            update_mode: SHIFT
-                            bg_color: 0x050D05
-                            border_color: 0x002208
-                            border_width: 1
-                            div_line_count_hor: 4
-                            div_line_count_ver: 6
-                            items:
-                              line_color: 0xFFAA22
-                              line_width: 2
-                              bg_color: 0xFFAA22
-                              bg_opa: 15%
-                              bg_grad_color: 0x050D05
-                              bg_grad_dir: VER
-                            indicator:
+                          - obj:
+                              width: 1
+                              height: 40
+                              bg_color: 0x003308
+                              border_width: 0
                               radius: 0
-                            axis_primary_y:
+
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              width: 360
+                              height: 60
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: CENTER
+                                flex_align_cross: END
+                                pad_column: 6
+                              widgets:
+                                - label:
+                                    text: "SET A"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_14
+                                    y: -4
+                                - label:
+                                    id: lbl_seti
+                                    text: "-.--"
+                                    text_color: 0x22CC55
+                                    text_font: montserrat_36
+                                - label:
+                                    text: "A"
+                                    text_color: 0x1A6020
+                                    text_font: montserrat_20
+                                    y: -4
+
+              - obj:
+                  x: 40
+                  y: 348
+                  width: 1200
+                  height: 48
+                  bg_color: 0x141414
+                  border_width: 0
+                  radius: 4
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 60
+
+                  widgets:
+                    - button:
+                        id: btn_cv
+                        height: 40
+                        width: 100
+                        bg_opa: TRANSP
+                        border_width: 0
+                        radius: 4
+                        pad_all: 4
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                          pad_column: 8
+                        on_click:
+                          - select.set:
+                              id: opendps_select_mode
+                              option: "cv"
+                        widgets:
+                          - obj:
+                              id: led_cv
+                              width: 16
+                              height: 16
+                              radius: 8
+                              bg_color: 0x1A1A1A
+                              border_color: 0x39FF14
+                              border_width: 1
+                              shadow_width: 0
+                              clickable: false
+                          - label:
+                              text: "CV"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+
+                    - button:
+                        id: btn_cc
+                        height: 40
+                        width: 100
+                        bg_opa: TRANSP
+                        border_width: 0
+                        radius: 4
+                        pad_all: 4
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                          pad_column: 8
+                        on_click:
+                          - select.set:
+                              id: opendps_select_mode
+                              option: "cc"
+                        widgets:
+                          - obj:
+                              id: led_cc
+                              width: 16
+                              height: 16
+                              radius: 8
+                              bg_color: 0x1A1A1A
+                              border_color: 0xFFBF00
+                              border_width: 1
+                              shadow_width: 0
+                              clickable: false
+                          - label:
+                              text: "CC"
+                              text_color: 0xFFBF00
+                              text_font: montserrat_16
+
+                    - button:
+                        id: btn_cp
+                        height: 40
+                        width: 100
+                        bg_opa: TRANSP
+                        border_width: 0
+                        radius: 4
+                        pad_all: 4
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                          pad_column: 8
+                        on_click:
+                          - select.set:
+                              id: opendps_select_mode
+                              option: "cp"
+                        widgets:
+                          - obj:
+                              id: led_cp
+                              width: 16
+                              height: 16
+                              radius: 8
+                              bg_color: 0x1A1A1A
+                              border_color: 0xFF3333
+                              border_width: 1
+                              shadow_width: 0
+                              clickable: false
+                          - label:
+                              text: "CP"
+                              text_color: 0xFF3333
+                              text_font: montserrat_16
+
+                    - obj:
+                        height: 40
+                        width: 100
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                          pad_column: 8
+                        widgets:
+                          - obj:
+                              id: led_out
+                              width: 16
+                              height: 16
+                              radius: 8
+                              bg_color: 0x1A1A1A
+                              border_color: 0x555555
+                              border_width: 1
+                              shadow_width: 0
+                          - label:
+                              text: "OUT"
+                              text_color: 0x888888
+                              text_font: montserrat_16
+
+              - obj:
+                  x: 40
+                  y: 404
+                  width: 1200
+                  height: 200
+                  bg_color: 0x171717
+                  border_color: 0x2A2A2A
+                  border_width: 1
+                  radius: 6
+                  pad_left: 32
+                  pad_right: 32
+                  pad_top: 16
+                  pad_bottom: 16
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+
+                  widgets:
+                    - obj:
+                        width: 440
+                        height: 168
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: STRETCH
+                          flex_align_main: SPACE_EVENLY
+                          pad_row: 8
+
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                                flex_align_cross: CENTER
+                              widgets:
+                                - label:
+                                    text: "VOLTAGE"
+                                    text_color: 0x888888
+                                    text_font: montserrat_14
+                                - label:
+                                    text: "0          15          30V"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+
+                          - slider:
+                              id: sl_v
+                              height: 32
                               min_value: 0
-                              max_value: 5000    # ×1000, so 0.000–5.000A
-                            series:
-                              - id: ser_i
-                                color: 0xFFAA22
+                              max_value: 300
+                              value: 0
+                              main:
+                                bg_color: 0x222222
+                                bg_opa: COVER
+                                radius: 6
+                                border_color: 0x333333
+                                border_width: 1
+                              indicator:
+                                bg_color: 0x39FF14
+                                bg_opa: COVER
+                                radius: 6
+                              knob:
+                                bg_color: 0xDDDDDD
+                                border_color: 0x888888
+                                border_width: 2
+                                radius: 4
+                                width: 22
+                                height: 36
+                                pad_top: -4
+                                pad_bottom: -4
+                              on_value:
+                                - lambda: |-
+                                    float v = x / 10.0f;
+                                    id(voltage_number).make_call().set_value(v).perform();
+                                - lvgl.label.update:
+                                    id: lbl_setv
+                                    text:
+                                      format: "%.2f"
+                                      args: ['x / 10.0f']
 
-                  # Power chart
-                  - obj:
-                      bg_color: 0x070D07
-                      border_color: 0x002208
-                      border_width: 1
-                      radius: 6
-                      flex_grow: 1
-                      pad_all: 8
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_cross: CENTER
-                        pad_column: 10
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                                flex_align_cross: CENTER
+                              widgets:
+                                - label:
+                                    text: "0.0"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "7.5"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "15.0"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "22.5"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "30V"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
 
-                      widgets:
-                        - obj:
-                            width: 64
-                            height: size_content
-                            bg_opa: TRANSP
-                            border_width: 0
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: CENTER
-                              flex_align_main: CENTER
-                            widgets:
-                              - label:
-                                  text: "W"
-                                  text_color: 0xFF44CC
-                                  text_font: montserrat_28
-                              - label:
-                                  text: "out"
-                                  text_color: 0x662266
-                                  text_font: montserrat_12
+                    - obj:
+                        width: 140
+                        height: 168
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_main: CENTER
+                          flex_align_cross: CENTER
+                          pad_row: 8
 
-                        - chart:
-                            id: chart_p
-                            flex_grow: 1
-                            height: SIZE_CONTENT
-                            type: LINE
-                            point_count: 60
-                            update_mode: SHIFT
-                            bg_color: 0x050D05
-                            border_color: 0x002208
-                            border_width: 1
-                            div_line_count_hor: 4
-                            div_line_count_ver: 6
-                            items:
-                              line_color: 0xFF44CC
-                              line_width: 2
-                              bg_color: 0xFF44CC
-                              bg_opa: 15%
-                              bg_grad_color: 0x050D05
-                              bg_grad_dir: VER
-                            indicator:
-                              radius: 0
-                            axis_primary_y:
+                        widgets:
+                          - obj:
+                              id: pwr_ring
+                              width: 100
+                              height: 100
+                              radius: 50
+                              bg_color: 0x222222
+                              border_color: 0x555555
+                              border_width: 4
+                              shadow_color: 0x000000
+                              shadow_width: 0
+                              on_click:
+                                - switch.toggle: dps_output_switch
+                              widgets:
+                                - label:
+                                    align: CENTER
+                                    text: "\u23FB"
+                                    text_color: 0x555555
+                                    text_font: montserrat_48
+                                    id: lbl_pwr_icon
+
+                          - label:
+                              id: lbl_pwr
+                              text: "OUTPUT\nOFF"
+                              text_color: 0x555555
+                              text_font: montserrat_14
+                              text_align: CENTER
+
+                    - obj:
+                        width: 440
+                        height: 168
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: STRETCH
+                          flex_align_main: SPACE_EVENLY
+                          pad_row: 8
+
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                                flex_align_cross: CENTER
+                              widgets:
+                                - label:
+                                    text: "CURRENT"
+                                    text_color: 0x888888
+                                    text_font: montserrat_14
+                                - label:
+                                    text: "0         2.5          5A"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+
+                          - slider:
+                              id: sl_i
+                              height: 32
                               min_value: 0
-                              max_value: 15000   # ×100, so 0.00–150.00W
-                            series:
-                              - id: ser_p
-                                color: 0xFF44CC
+                              max_value: 500
+                              value: 0
+                              main:
+                                bg_color: 0x222222
+                                bg_opa: COVER
+                                radius: 6
+                                border_color: 0x333333
+                                border_width: 1
+                              indicator:
+                                bg_color: 0x39FF14
+                                bg_opa: COVER
+                                radius: 6
+                              knob:
+                                bg_color: 0xDDDDDD
+                                border_color: 0x888888
+                                border_width: 2
+                                radius: 4
+                                width: 22
+                                height: 36
+                                pad_top: -4
+                                pad_bottom: -4
+                              on_value:
+                                - lambda: |-
+                                    float i = x / 100.0f;
+                                    id(current_number).make_call().set_value(i).perform();
+                                - lvgl.label.update:
+                                    id: lbl_seti
+                                    text:
+                                      format: "%.3f"
+                                      args: ['x / 100.0f']
 
-            # ── Page nav bar ─────────────────────────────────────────────
-            - obj:
-                x: 0
-                y: 760
-                width: 1280
-                height: 40
-                bg_color: 0x0D0D0D
-                border_width: 0
-                radius: 0
-                layout:
-                  type: FLEX
-                  flex_flow: ROW
-                  flex_align_main: CENTER
-                  flex_align_cross: CENTER
-                  pad_column: 0
-                widgets:
-                  - button:
-                      width: 426
-                      height: 40
-                      bg_color: 0x111111
-                      border_width: 0
-                      radius: 0
-                      on_click:
-                        - lvgl.page.show: page_main
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "MAIN"
-                            text_color: 0x555555
-                            text_font: montserrat_16
-                  - button:
-                      width: 426
-                      height: 40
-                      bg_color: 0x1A1A1A
-                      border_width: 0
-                      border_side: BOTTOM
-                      border_color: 0x4499FF
-                      radius: 0
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "GRAPHS"
-                            text_color: 0x4499FF
-                            text_font: montserrat_16
-                  - button:
-                      width: 428
-                      height: 40
-                      bg_color: 0x111111
-                      border_width: 0
-                      radius: 0
-                      on_click:
-                        - lvgl.page.show: page_settings
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "SETTINGS"
-                            text_color: 0x555555
-                            text_font: montserrat_16
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                                flex_align_cross: CENTER
+                              widgets:
+                                - label:
+                                    text: "0.00"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "1.25"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "2.50"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "3.75"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
+                                - label:
+                                    text: "5.00A"
+                                    text_color: 0x444444
+                                    text_font: montserrat_12
 
-        # ====================================================================
-        # PAGE 3 — SETTINGS   (presets + brightness)
-        # ====================================================================
-        - id: page_settings
-          bg_color: 0x141414
+              - obj:
+                  x: 40
+                  y: 612
+                  width: 1200
+                  height: 80
+                  bg_color: 0x141414
+                  border_width: 0
+                  radius: 4
+                  pad_left: 24
+                  pad_right: 24
+                  pad_top: 10
+                  pad_bottom: 10
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_EVENLY
+                    flex_align_cross: CENTER
+                    pad_column: 40
 
-          widgets:
-            - obj:
-                x: 0
-                y: 0
-                width: 1280
-                height: 760
-                bg_color: 0x141414
-                border_width: 0
-                radius: 0
-                pad_all: 24
-                layout:
-                  type: FLEX
-                  flex_flow: ROW
-                  flex_align_main: SPACE_EVENLY
-                  flex_align_cross: START
-                  pad_column: 24
+                  widgets:
+                    - obj:
+                        flex_grow: 1
+                        height: 60
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: STRETCH
+                          pad_row: 4
 
-                widgets:
-                  # ── Left: Presets grid ──────────────────────────────────
-                  - obj:
-                      width: 760
-                      height: 712
-                      bg_color: 0x1C1C1C
-                      border_color: 0x2A2A2A
-                      border_width: 1
-                      radius: 8
-                      pad_all: 20
-                      layout:
-                        type: FLEX
-                        flex_flow: COLUMN
-                        flex_align_main: START
-                        flex_align_cross: STRETCH
-                        pad_row: 16
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                              widgets:
+                                - label:
+                                    text: "HEATSINK"
+                                    text_color: 0x666666
+                                    text_font: montserrat_12
+                                - label:
+                                    id: lbl_t1
+                                    text: "--°C"
+                                    text_color: 0x39FF14
+                                    text_font: montserrat_12
+                          - bar:
+                              id: bar_t1
+                              height: 10
+                              min_value: 0
+                              max_value: 80
+                              value: 0
+                              indicator:
+                                bg_color: 0x39FF14
+                                bg_grad_color: 0xFF2200
+                                bg_grad_dir: HOR
+                                bg_opa: COVER
+                              main:
+                                bg_color: 0x1A1A1A
+                                radius: 4
+                                border_width: 0
 
-                      widgets:
-                        - label:
-                            text: "PRESETS"
-                            text_color: 0x39FF14
-                            text_font: montserrat_20
+                    - obj:
+                        flex_grow: 1
+                        height: 60
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: STRETCH
+                          pad_row: 4
 
-                        - obj:
-                            bg_opa: TRANSP
-                            border_width: 0
-                            height: size_content
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW_WRAP
-                              flex_align_main: SPACE_EVENLY
-                              flex_align_cross: CENTER
-                              pad_column: 12
-                              pad_row: 12
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                              widgets:
+                                - label:
+                                    text: "AMBIENT"
+                                    text_color: 0x666666
+                                    text_font: montserrat_12
+                                - label:
+                                    id: lbl_t2
+                                    text: "--°C"
+                                    text_color: 0x00AACC
+                                    text_font: montserrat_12
+                          - bar:
+                              id: bar_t2
+                              height: 10
+                              min_value: 0
+                              max_value: 50
+                              value: 0
+                              indicator:
+                                bg_color: 0x00AACC
+                                bg_grad_color: 0xFF8800
+                                bg_grad_dir: HOR
+                                bg_opa: COVER
+                              main:
+                                bg_color: 0x1A1A1A
+                                radius: 4
+                                border_width: 0
 
-                            widgets:
-                              # 3.3V / 1A
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x0F1F0F
-                                  border_color: 0x1A3A1A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 3.3
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 1.0
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "3.3V / 1A"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "Logic / MCU"
-                                              text_color: 0x336633
-                                              text_font: montserrat_12
+              - obj:
+                  x: 40
+                  y: 700
+                  width: 1200
+                  height: 80
+                  bg_color: 0x141414
+                  border_width: 0
+                  radius: 4
+                  pad_all: 14
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_EVENLY
+                    flex_align_cross: CENTER
+                    pad_column: 6
 
-                              # 5V / 2A
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x0F1F0F
-                                  border_color: 0x1A3A1A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 5.0
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 2.0
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "5V / 2A"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "USB / RPi"
-                                              text_color: 0x336633
-                                              text_font: montserrat_12
+                  widgets:
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
+                    - obj:
+                        width: 52
+                        height: 10
+                        bg_color: 0x0A0A0A
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 3
 
-                              # 9V / 2A
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x0F1F0F
-                                  border_color: 0x1A3A1A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 9.0
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 2.0
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "9V / 2A"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "QC / Motors"
-                                              text_color: 0x336633
-                                              text_font: montserrat_12
+              - obj:
+                  x: 0
+                  y: 760
+                  width: 1280
+                  height: 40
+                  bg_color: 0x0D0D0D
+                  border_width: 0
+                  radius: 0
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: CENTER
+                    pad_column: 0
 
-                              # 12V / 1A
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x0F1F0F
-                                  border_color: 0x1A3A1A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 12.0
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 1.0
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "12V / 1A"
-                                              text_color: 0x39FF14
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "Arduino / strips"
-                                              text_color: 0x336633
-                                              text_font: montserrat_12
+                  widgets:
+                    - button:
+                        width: 426
+                        height: 40
+                        bg_color: 0x1A1A1A
+                        border_width: 0
+                        border_side: BOTTOM
+                        border_color: 0x39FF14
+                        radius: 0
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "MAIN"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+                    - button:
+                        width: 426
+                        height: 40
+                        bg_color: 0x111111
+                        border_width: 0
+                        radius: 0
+                        on_click:
+                          - lvgl.page.show: page_graphs
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "GRAPHS"
+                              text_color: 0x555555
+                              text_font: montserrat_16
+                    - button:
+                        width: 428
+                        height: 40
+                        bg_color: 0x111111
+                        border_width: 0
+                        radius: 0
+                        on_click:
+                          - lvgl.page.show: page_settings
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "SETTINGS"
+                              text_color: 0x555555
+                              text_font: montserrat_16
 
-                              # 4.2V / 0.5A (LiPo)
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x10101F
-                                  border_color: 0x1A1A3A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 4.2
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 0.5
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "4.2V / 0.5A"
-                                              text_color: 0x8888FF
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "LiPo charge"
-                                              text_color: 0x333366
-                                              text_font: montserrat_12
+    - id: page_graphs
+      bg_color: 0x111111
 
-                              # 24V / 0.5A
-                              - button:
-                                  width: 320
-                                  height: 90
-                                  bg_color: 0x1A0F0F
-                                  border_color: 0x3A1A1A
-                                  border_width: 1
-                                  radius: 6
-                                  on_click:
-                                    - select.set:
-                                        id: opendps_mode
-                                        option: "cv"
-                                    - number.set:
-                                        id: opendps_set_voltage
-                                        value: 24.0
-                                    - number.set:
-                                        id: opendps_set_current
-                                        value: 0.5
-                                  widgets:
-                                    - obj:
-                                        align: CENTER
-                                        bg_opa: TRANSP
-                                        border_width: 0
-                                        layout:
-                                          type: FLEX
-                                          flex_flow: COLUMN
-                                          flex_align_cross: CENTER
-                                        widgets:
-                                          - label:
-                                              text: "24V / 0.5A"
-                                              text_color: 0xFF6666
-                                              text_font: montserrat_20
-                                          - label:
-                                              text: "Automation"
-                                              text_color: 0x663333
-                                              text_font: montserrat_12
+      widgets:
+        - obj:
+            x: 0
+            y: 0
+            width: 1280
+            height: 48
+            bg_color: 0x0D0D0D
+            border_width: 0
+            radius: 0
+            pad_left: 24
+            pad_right: 24
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: SPACE_BETWEEN
+              flex_align_cross: CENTER
+            widgets:
+              - label:
+                  id: lbl_vout_g
+                  text: "Vout  --.-V"
+                  text_color: 0x4499FF
+                  text_font: montserrat_18
+              - label:
+                  id: lbl_iout_g
+                  text: "Iout  -.---A"
+                  text_color: 0xFFAA22
+                  text_font: montserrat_18
+              - label:
+                  id: lbl_pout_g
+                  text: "Pout  --.-W"
+                  text_color: 0xFF44CC
+                  text_font: montserrat_18
+              - label:
+                  text: "60s window"
+                  text_color: 0x444444
+                  text_font: montserrat_14
 
-                  # ── Right: Brightness + misc ────────────────────────────
-                  - obj:
-                      width: 408
-                      height: 712
-                      bg_color: 0x1C1C1C
-                      border_color: 0x2A2A2A
-                      border_width: 1
-                      radius: 8
-                      pad_all: 20
-                      layout:
-                        type: FLEX
-                        flex_flow: COLUMN
-                        flex_align_main: START
-                        flex_align_cross: STRETCH
-                        pad_row: 20
+        - obj:
+            x: 0
+            y: 48
+            width: 1280
+            height: 712
+            bg_color: 0x111111
+            border_width: 0
+            radius: 0
+            pad_all: 16
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              flex_align_main: SPACE_EVENLY
+              flex_align_cross: STRETCH
+              pad_row: 10
 
-                      widgets:
-                        - label:
-                            text: "PSU DISPLAY"
-                            text_color: 0x39FF14
-                            text_font: montserrat_20
+            widgets:
+              - obj:
+                  bg_color: 0x070D07
+                  border_color: 0x002208
+                  border_width: 1
+                  radius: 6
+                  flex_grow: 1
+                  pad_all: 8
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                    pad_column: 10
 
-                        # Brightness
-                        - obj:
-                            bg_color: 0x222222
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 6
-                            pad_all: 16
-                            height: size_content
-                            layout:
-                              type: FLEX
-                              flex_flow: COLUMN
-                              flex_align_cross: STRETCH
-                              pad_row: 10
+                  widgets:
+                    - obj:
+                        width: 64
+                        height: size_content
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                        widgets:
+                          - label:
+                              text: "V"
+                              text_color: 0x4499FF
+                              text_font: montserrat_28
+                          - label:
+                              text: "out"
+                              text_color: 0x224466
+                              text_font: montserrat_12
 
-                            widgets:
-                              - obj:
-                                  bg_opa: TRANSP
-                                  border_width: 0
-                                  height: size_content
-                                  layout:
-                                    type: FLEX
-                                    flex_flow: ROW
-                                    flex_align_main: SPACE_BETWEEN
-                                  widgets:
-                                    - label:
-                                        text: "Brightness"
-                                        text_color: 0xCCCCCC
-                                        text_font: montserrat_16
-                                    - label:
-                                        id: lbl_bright
-                                        text: "80%"
-                                        text_color: 0xFFFF66
-                                        text_font: montserrat_16
-                              - slider:
-                                  id: sl_bright
-                                  height: 24
-                                  min_value: 5
-                                  max_value: 100
-                                  value: 80
-                                  main:
-                                    bg_color: 0x2A2A2A
-                                    radius: 4
-                                  indicator:
-                                    bg_color: 0xFFFF66
-                                    radius: 4
-                                  knob:
-                                    bg_color: 0xFFFFCC
-                                    radius: 4
-                                    width: 20
-                                    height: 28
-                                    pad_top: -4
-                                    pad_bottom: -4
-                                  on_value:
-                                    - opendps.set_brightness:
-                                        id: my_opendps
-                                        brightness: !lambda 'return x;'
-                                    - lvgl.label.update:
-                                        id: lbl_bright
-                                        text:
-                                          format: "%d%%"
-                                          args: [x]
+                    - chart:
+                        id: chart_v
+                        flex_grow: 1
+                        height: SIZE_CONTENT
+                        type: LINE
+                        point_count: 60
+                        update_mode: SHIFT
+                        bg_color: 0x050D05
+                        border_color: 0x002208
+                        border_width: 1
+                        div_line_count_hor: 4
+                        div_line_count_ver: 6
+                        items:
+                          line_color: 0x4499FF
+                          line_width: 2
+                          bg_color: 0x4499FF
+                          bg_opa: 20%
+                          bg_grad_color: 0x050D05
+                          bg_grad_dir: VER
+                        indicator:
+                          radius: 0
+                        axis_primary_y:
+                          min_value: 0
+                          max_value: 3000
+                        series:
+                          - id: ser_v
+                            color: 0x4499FF
 
-                        # Lock switch
-                        - obj:
-                            bg_color: 0x222222
-                            border_color: 0x333333
-                            border_width: 1
-                            radius: 6
-                            pad_all: 16
-                            height: size_content
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_main: SPACE_BETWEEN
-                              flex_align_cross: CENTER
+              - obj:
+                  bg_color: 0x070D07
+                  border_color: 0x002208
+                  border_width: 1
+                  radius: 6
+                  flex_grow: 1
+                  pad_all: 8
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                    pad_column: 10
 
-                            widgets:
-                              - label:
-                                  text: "Lock keypad"
-                                  text_color: 0xCCCCCC
-                                  text_font: montserrat_16
-                              - switch:
-                                  id: sw_lock
-                                  on_value:
-                                    - if:
-                                        condition:
-                                          lvgl.is_paused: sw_lock
-                                        else:
-                                          - lambda: |-
-                                              id(my_opendps).lock(x);
+                  widgets:
+                    - obj:
+                        width: 64
+                        height: size_content
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                        widgets:
+                          - label:
+                              text: "A"
+                              text_color: 0xFFAA22
+                              text_font: montserrat_28
+                          - label:
+                              text: "out"
+                              text_color: 0x664422
+                              text_font: montserrat_12
 
-            # ── Page nav bar ─────────────────────────────────────────────
-            - obj:
-                x: 0
-                y: 760
-                width: 1280
-                height: 40
-                bg_color: 0x0D0D0D
-                border_width: 0
-                radius: 0
-                layout:
-                  type: FLEX
-                  flex_flow: ROW
-                  flex_align_main: CENTER
-                  flex_align_cross: CENTER
-                  pad_column: 0
-                widgets:
-                  - button:
-                      width: 426
-                      height: 40
-                      bg_color: 0x111111
-                      border_width: 0
-                      radius: 0
-                      on_click:
-                        - lvgl.page.show: page_main
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "MAIN"
-                            text_color: 0x555555
-                            text_font: montserrat_16
-                  - button:
-                      width: 426
-                      height: 40
-                      bg_color: 0x111111
-                      border_width: 0
-                      radius: 0
-                      on_click:
-                        - lvgl.page.show: page_graphs
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "GRAPHS"
-                            text_color: 0x555555
-                            text_font: montserrat_16
-                  - button:
-                      width: 428
-                      height: 40
-                      bg_color: 0x1A1A1A
-                      border_width: 0
-                      border_side: BOTTOM
-                      border_color: 0xAAAAAA
-                      radius: 0
-                      widgets:
-                        - label:
-                            align: CENTER
-                            text: "SETTINGS"
-                            text_color: 0xAAAAAA
-                            text_font: montserrat_16
+                    - chart:
+                        id: chart_i
+                        flex_grow: 1
+                        height: SIZE_CONTENT
+                        type: LINE
+                        point_count: 60
+                        update_mode: SHIFT
+                        bg_color: 0x050D05
+                        border_color: 0x002208
+                        border_width: 1
+                        div_line_count_hor: 4
+                        div_line_count_ver: 6
+                        items:
+                          line_color: 0xFFAA22
+                          line_width: 2
+                          bg_color: 0xFFAA22
+                          bg_opa: 15%
+                          bg_grad_color: 0x050D05
+                          bg_grad_dir: VER
+                        indicator:
+                          radius: 0
+                        axis_primary_y:
+                          min_value: 0
+                          max_value: 5000
+                        series:
+                          - id: ser_i
+                            color: 0xFFAA22
+
+              - obj:
+                  bg_color: 0x070D07
+                  border_color: 0x002208
+                  border_width: 1
+                  radius: 6
+                  flex_grow: 1
+                  pad_all: 8
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                    pad_column: 10
+
+                  widgets:
+                    - obj:
+                        width: 64
+                        height: size_content
+                        bg_opa: TRANSP
+                        border_width: 0
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          flex_align_main: CENTER
+                        widgets:
+                          - label:
+                              text: "W"
+                              text_color: 0xFF44CC
+                              text_font: montserrat_28
+                          - label:
+                              text: "out"
+                              text_color: 0x662266
+                              text_font: montserrat_12
+
+                    - chart:
+                        id: chart_p
+                        flex_grow: 1
+                        height: SIZE_CONTENT
+                        type: LINE
+                        point_count: 60
+                        update_mode: SHIFT
+                        bg_color: 0x050D05
+                        border_color: 0x002208
+                        border_width: 1
+                        div_line_count_hor: 4
+                        div_line_count_ver: 6
+                        items:
+                          line_color: 0xFF44CC
+                          line_width: 2
+                          bg_color: 0xFF44CC
+                          bg_opa: 15%
+                          bg_grad_color: 0x050D05
+                          bg_grad_dir: VER
+                        indicator:
+                          radius: 0
+                        axis_primary_y:
+                          min_value: 0
+                          max_value: 15000
+                        series:
+                          - id: ser_p
+                            color: 0xFF44CC
+
+        - obj:
+            x: 0
+            y: 760
+            width: 1280
+            height: 40
+            bg_color: 0x0D0D0D
+            border_width: 0
+            radius: 0
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              pad_column: 0
+            widgets:
+              - button:
+                  width: 426
+                  height: 40
+                  bg_color: 0x111111
+                  border_width: 0
+                  radius: 0
+                  on_click:
+                    - lvgl.page.show: page_main
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "MAIN"
+                        text_color: 0x555555
+                        text_font: montserrat_16
+              - button:
+                  width: 426
+                  height: 40
+                  bg_color: 0x1A1A1A
+                  border_width: 0
+                  border_side: BOTTOM
+                  border_color: 0x4499FF
+                  radius: 0
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "GRAPHS"
+                        text_color: 0x4499FF
+                        text_font: montserrat_16
+              - button:
+                  width: 428
+                  height: 40
+                  bg_color: 0x111111
+                  border_width: 0
+                  radius: 0
+                  on_click:
+                    - lvgl.page.show: page_settings
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "SETTINGS"
+                        text_color: 0x555555
+                        text_font: montserrat_16
+
+    - id: page_settings
+      bg_color: 0x141414
+
+      widgets:
+        - obj:
+            x: 0
+            y: 0
+            width: 1280
+            height: 760
+            bg_color: 0x141414
+            border_width: 0
+            radius: 0
+            pad_all: 24
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: SPACE_EVENLY
+              flex_align_cross: START
+              pad_column: 24
+
+            widgets:
+              - obj:
+                  width: 760
+                  height: 712
+                  bg_color: 0x1C1C1C
+                  border_color: 0x2A2A2A
+                  border_width: 1
+                  radius: 8
+                  pad_all: 20
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: START
+                    flex_align_cross: STRETCH
+                    pad_row: 16
+
+                  widgets:
+                    - label:
+                        text: "PRESETS"
+                        text_color: 0x39FF14
+                        text_font: montserrat_20
+
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        height: size_content
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW_WRAP
+                          flex_align_main: SPACE_EVENLY
+                          flex_align_cross: CENTER
+                          pad_column: 12
+                          pad_row: 12
+
+                        widgets:
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x0F1F0F
+                              border_color: 0x1A3A1A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 3.3
+                                - number.set:
+                                    id: current_number
+                                    value: 1.0
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "3.3V / 1A"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "Logic / MCU"
+                                          text_color: 0x336633
+                                          text_font: montserrat_12
+
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x0F1F0F
+                              border_color: 0x1A3A1A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 5.0
+                                - number.set:
+                                    id: current_number
+                                    value: 2.0
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "5V / 2A"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "USB / RPi"
+                                          text_color: 0x336633
+                                          text_font: montserrat_12
+
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x0F1F0F
+                              border_color: 0x1A3A1A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 9.0
+                                - number.set:
+                                    id: current_number
+                                    value: 2.0
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "9V / 2A"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "QC / Motors"
+                                          text_color: 0x336633
+                                          text_font: montserrat_12
+
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x0F1F0F
+                              border_color: 0x1A3A1A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 12.0
+                                - number.set:
+                                    id: current_number
+                                    value: 1.0
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "12V / 1A"
+                                          text_color: 0x39FF14
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "Arduino / strips"
+                                          text_color: 0x336633
+                                          text_font: montserrat_12
+
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x10101F
+                              border_color: 0x1A1A3A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 4.2
+                                - number.set:
+                                    id: current_number
+                                    value: 0.5
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "4.2V / 0.5A"
+                                          text_color: 0x8888FF
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "LiPo charge"
+                                          text_color: 0x333366
+                                          text_font: montserrat_12
+
+                          - button:
+                              width: 320
+                              height: 90
+                              bg_color: 0x1A0F0F
+                              border_color: 0x3A1A1A
+                              border_width: 1
+                              radius: 6
+                              on_click:
+                                - select.set:
+                                    id: opendps_select_mode
+                                    option: "cv"
+                                - number.set:
+                                    id: voltage_number
+                                    value: 24.0
+                                - number.set:
+                                    id: current_number
+                                    value: 0.5
+                              widgets:
+                                - obj:
+                                    align: CENTER
+                                    bg_opa: TRANSP
+                                    border_width: 0
+                                    layout:
+                                      type: FLEX
+                                      flex_flow: COLUMN
+                                      flex_align_cross: CENTER
+                                    widgets:
+                                      - label:
+                                          text: "24V / 0.5A"
+                                          text_color: 0xFF6666
+                                          text_font: montserrat_20
+                                      - label:
+                                          text: "Automation"
+                                          text_color: 0x663333
+                                          text_font: montserrat_12
+
+              - obj:
+                  width: 408
+                  height: 712
+                  bg_color: 0x1C1C1C
+                  border_color: 0x2A2A2A
+                  border_width: 1
+                  radius: 8
+                  pad_all: 20
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: START
+                    flex_align_cross: STRETCH
+                    pad_row: 20
+
+                  widgets:
+                    - label:
+                        text: "PSU DISPLAY"
+                        text_color: 0x39FF14
+                        text_font: montserrat_20
+
+                    - obj:
+                        bg_color: 0x222222
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 6
+                        pad_all: 16
+                        height: size_content
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: STRETCH
+                          pad_row: 10
+
+                        widgets:
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              height: size_content
+                              layout:
+                                type: FLEX
+                                flex_flow: ROW
+                                flex_align_main: SPACE_BETWEEN
+                              widgets:
+                                - label:
+                                    text: "Brightness"
+                                    text_color: 0xCCCCCC
+                                    text_font: montserrat_16
+                                - label:
+                                    id: lbl_bright
+                                    text: "80%"
+                                    text_color: 0xFFFF66
+                                    text_font: montserrat_16
+                          - slider:
+                              id: sl_bright
+                              height: 24
+                              min_value: 5
+                              max_value: 100
+                              value: 80
+                              main:
+                                bg_color: 0x2A2A2A
+                                radius: 4
+                              indicator:
+                                bg_color: 0xFFFF66
+                                radius: 4
+                              knob:
+                                bg_color: 0xFFFFCC
+                                radius: 4
+                                width: 20
+                                height: 28
+                                pad_top: -4
+                                pad_bottom: -4
+                              on_value:
+                                - opendps.set_brightness:
+                                    id: opendps_id
+                                    brightness: !lambda 'return x;'
+                                - lvgl.label.update:
+                                    id: lbl_bright
+                                    text:
+                                      format: "%d%%"
+                                      args: [x]
+
+                    - obj:
+                        bg_color: 0x222222
+                        border_color: 0x333333
+                        border_width: 1
+                        radius: 6
+                        pad_all: 16
+                        height: size_content
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: SPACE_BETWEEN
+                          flex_align_cross: CENTER
+
+                        widgets:
+                          - label:
+                              text: "Lock keypad"
+                              text_color: 0xCCCCCC
+                              text_font: montserrat_16
+                          - switch:
+                              id: sw_lock
+                              on_value:
+                                - opendps.lock:
+                                    id: opendps_id
+                                    locked: !lambda 'return x;'
+
+        - obj:
+            x: 0
+            y: 760
+            width: 1280
+            height: 40
+            bg_color: 0x0D0D0D
+            border_width: 0
+            radius: 0
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              pad_column: 0
+            widgets:
+              - button:
+                  width: 426
+                  height: 40
+                  bg_color: 0x111111
+                  border_width: 0
+                  radius: 0
+                  on_click:
+                    - lvgl.page.show: page_main
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "MAIN"
+                        text_color: 0x555555
+                        text_font: montserrat_16
+              - button:
+                  width: 426
+                  height: 40
+                  bg_color: 0x111111
+                  border_width: 0
+                  radius: 0
+                  on_click:
+                    - lvgl.page.show: page_graphs
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "GRAPHS"
+                        text_color: 0x555555
+                        text_font: montserrat_16
+              - button:
+                  width: 428
+                  height: 40
+                  bg_color: 0x1A1A1A
+                  border_width: 0
+                  border_side: BOTTOM
+                  border_color: 0xAAAAAA
+                  radius: 0
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "SETTINGS"
+                        text_color: 0xAAAAAA
+                        text_font: montserrat_16

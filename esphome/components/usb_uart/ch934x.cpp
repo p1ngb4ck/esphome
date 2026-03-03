@@ -9,10 +9,6 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-#ifdef USE_UART_DEBUGGER
-#include "esphome/components/uart/uart_debugger.h"
-#endif
-
 namespace esphome {
 namespace usb_uart {
 
@@ -892,7 +888,7 @@ void USBUartTypeCH934X::handle_command_data_(const uint8_t *data, size_t len) {
  * Handle TX multiplexing - send data from channels to shared OUT endpoint
  * This runs in main loop context
  *
- * THREAD CONTEXT: Main loop (safe to access output_buffer_)
+ * THREAD CONTEXT: Main loop (safe to access output_queue_)
  */
 void USBUartTypeCH934X::handle_tx_multiplexing_() {
   // If a TX transfer is already in progress, wait for it to complete
@@ -909,8 +905,8 @@ void USBUartTypeCH934X::handle_tx_multiplexing_() {
     this->tx_current_channel_index_ = (this->tx_current_channel_index_ + 1) % this->channels_.size();
     channels_checked++;
 
-    // Skip if channel not initialized or no data available
-    if (!channel->initialised_.load() || channel->output_buffer_.is_empty()) {
+    // Skip if channel not initialized or no data queued
+    if (!channel->initialised_.load() || channel->output_queue_.empty()) {
       continue;
     }
 
@@ -925,78 +921,72 @@ void USBUartTypeCH934X::handle_tx_multiplexing_() {
 /**
  * Send data from the specified channel
  *
+ * Pops one chunk from the channel's lock-free output_queue_, prepends the
+ * 3-byte CH934X multiplexing header, and submits a bulk OUT transfer.
+ * The chunk is returned to the pool in the USB-task callback.
+ *
  * THREAD CONTEXT: Main loop
  */
 void USBUartTypeCH934X::send_next_channel_data_(USBUartChannel *channel) {
-  if (!channel->initialised_.load() || channel->output_buffer_.is_empty()) {
+  if (!channel->initialised_.load()) {
+    return;
+  }
+
+  UsbOutputChunk *chunk = channel->output_queue_.pop();
+  if (chunk == nullptr) {
     return;
   }
 
   const auto *ep = this->uart_host_dev_.out_ep;
+  const size_t data_len = chunk->length;
 
-  // Calculate maximum data size (leave room for 3-byte header)
-  size_t max_data_size = ep->wMaxPacketSize - TX_HEADER_SIZE;
-  size_t available = channel->output_buffer_.get_available();
-  size_t data_to_send = std::min(available, max_data_size);
-
-  // Allocate buffer for TX packet on heap (must be valid for async transfer)
-  auto *buffer = new uint8_t[ep->wMaxPacketSize];
-
-  // Build TX packet: [port][len_lo][len_hi][data...]
-  buffer[0] = this->port_offset_ + channel->index_;
-  buffer[1] = data_to_send & 0xFF;
-  buffer[2] = (data_to_send >> 8) & 0xFF;
-
-  // Copy data from output buffer
-  channel->output_buffer_.pop(buffer + TX_HEADER_SIZE, data_to_send);
+  // Build TX packet on heap: [port][len_lo][len_hi][data...]
+  // Heap allocation is necessary here because the buffer must outlive this
+  // stack frame — it is handed to the USB host layer and freed in the callback.
+  const size_t pkt_len = TX_HEADER_SIZE + data_len;
+  auto *tx_buf = new uint8_t[pkt_len];
+  tx_buf[0] = this->port_offset_ + channel->index_;
+  tx_buf[1] = data_len & 0xFF;
+  tx_buf[2] = (data_len >> 8) & 0xFF;
+  memcpy(tx_buf + TX_HEADER_SIZE, chunk->data, data_len);
 
 #ifdef USE_UART_DEBUGGER
-  // Copy buffer data for debug logging (before callback)
-  std::vector<uint8_t> debug_data;
   if (channel->debug_) {
-    debug_data.assign(buffer + TX_HEADER_SIZE, buffer + TX_HEADER_SIZE + data_to_send);
+    constexpr size_t BATCH = 16;
+    char buf[4 + format_hex_pretty_size(BATCH)];
+    for (size_t off = 0; off < data_len; off += BATCH) {
+      size_t n = std::min(data_len - off, BATCH);
+      memcpy(buf, ">>> ", 4);
+      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data + off, n, ',');
+      ESP_LOGD(TAG, "%s", buf);
+    }
   }
 #endif
 
   // CALLBACK CONTEXT: Executed in USB task
-  auto callback = [this, channel, data_to_send, buffer
-#ifdef USE_UART_DEBUGGER
-                   ,
-                   debug_data
-#endif
-  ](const usb_host::TransferStatus &status) {
+  auto callback = [this, channel, chunk, tx_buf, data_len](const usb_host::TransferStatus &status) {
+    // Return chunk to pool — safe from USB task (EventPool is lock-free)
+    channel->output_pool_.release(chunk);
+    delete[] tx_buf;
+
     this->tx_in_progress_.store(false);
 
     if (!status.success) {
       ESP_LOGE(TAG, "TX transfer failed for channel %d, status=%s", channel->index_,
                esp_err_to_name(status.error_code));
-      delete[] buffer;  // Free heap buffer on error
       return;
     }
 
-    ESP_LOGV(TAG, "TX complete: channel %d, %d bytes", channel->index_, data_to_send);
+    ESP_LOGV(TAG, "TX complete: channel %d, %zu bytes", channel->index_, data_len);
 
-#ifdef USE_UART_DEBUGGER
-    if (channel->debug_) {
-      // Defer debug logging to main loop
-      this->defer([channel, debug_data] {
-        std::string debug_prefix = channel->get_debug_prefix();
-        uart::UARTDebug::log_hex(uart::UART_DIRECTION_TX, debug_data, ',', debug_prefix);
-      });
-    }
-#endif
-
-    // Free heap buffer
-    delete[] buffer;
-
-    // Defer next TX attempt to main loop
-    this->defer([this] { this->handle_tx_multiplexing_(); });
+    // Continue sending from USB task context — safe because output_queue_ is lock-free
+    this->handle_tx_multiplexing_();
   };
 
   this->tx_in_progress_.store(true);
-  this->transfer_out(ep->bEndpointAddress, callback, buffer, data_to_send + TX_HEADER_SIZE);
+  this->transfer_out(ep->bEndpointAddress, callback, tx_buf, pkt_len);
 
-  ESP_LOGV(TAG, "TX started: channel %d, %d bytes", channel->index_, data_to_send);
+  ESP_LOGV(TAG, "TX started: channel %d, %zu bytes", channel->index_, data_len);
 }
 
 void USBUartTypeCH934X::start_input(USBUartChannel *channel) {
@@ -1021,9 +1011,14 @@ void USBUartTypeCH934X::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
-      std::string debug_prefix = channel->get_debug_prefix();
-      uart::UARTDebug::log_hex(uart::UART_DIRECTION_RX, std::vector<uint8_t>(chunk->data, chunk->data + chunk->length),
-                               ',', debug_prefix);
+      constexpr size_t BATCH = 16;
+      char buf[4 + format_hex_pretty_size(BATCH)];
+      for (size_t off = 0; off < chunk->length; off += BATCH) {
+        size_t n = std::min((size_t) chunk->length - off, BATCH);
+        memcpy(buf, "<<< ", 4);
+        format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data + off, n, ',');
+        ESP_LOGD(TAG, "%s", buf);
+      }
     }
 #endif
 
@@ -1119,7 +1114,13 @@ void USBUartTypeCH934X::on_disconnected() {
     channel->input_started_.store(false);
     channel->output_started_.store(false);
     channel->input_buffer_.clear();
-    channel->output_buffer_.clear();
+    // Drain any pending output chunks and return them to the pool
+    {
+      UsbOutputChunk *chunk;
+      while ((chunk = channel->output_queue_.pop()) != nullptr) {
+        channel->output_pool_.release(chunk);
+      }
+    }
   }
 
   // Halt and flush all endpoints
@@ -1148,60 +1149,19 @@ void USBUartTypeCH934X::on_disconnected() {
 }
 
 /**
- * Override start_output to add CH934X multiplexing header
- * CH934X requires: [port][len_lo][len_hi][data...]
+ * Override start_output for CH934X.
+ *
+ * CH934X uses a single shared OUT endpoint multiplexed across all channels.
+ * TX serialisation is managed by tx_in_progress_ + handle_tx_multiplexing_()
+ * rather than per-channel output_started_ flags.
+ *
+ * write_array() calls start_output() after queuing a chunk, so this simply
+ * kicks the multiplexer.  The channel parameter is ignored because
+ * handle_tx_multiplexing_() selects the next channel via round-robin.
+ *
+ * THREAD CONTEXT: Called from main loop (write_array / flush).
  */
-void USBUartTypeCH934X::start_output(USBUartChannel *channel) {
-  // IMPORTANT: This function must only be called from the main loop!
-  // The output_buffer_ is not thread-safe and can only be accessed from main loop.
-  if (channel->output_started_.load()) {
-    return;
-  }
-  if (channel->output_buffer_.is_empty()) {
-    return;
-  }
-
-  const auto *ep = this->uart_host_dev_.out_ep;
-
-  // Calculate maximum data size (leave room for 3-byte header: [port][len_lo][len_hi])
-  size_t max_data_size = ep->wMaxPacketSize - TX_HEADER_SIZE;
-  size_t available = channel->output_buffer_.get_available();
-  size_t data_to_send = std::min(available, max_data_size);
-
-  // Allocate buffer for TX packet on heap - must persist until transfer completes
-  auto *tx_data = new uint8_t[ep->wMaxPacketSize];
-
-  // Build TX packet: [port][len_lo][len_hi][data...]
-  tx_data[0] = this->port_offset_ + channel->index_;
-  tx_data[1] = data_to_send & 0xFF;
-  tx_data[2] = (data_to_send >> 8) & 0xFF;
-
-  // Copy data from output buffer
-  channel->output_buffer_.pop(tx_data + TX_HEADER_SIZE, data_to_send);
-
-#ifdef USE_UART_DEBUGGER
-  if (channel->debug_) {
-    std::string debug_prefix = channel->get_debug_prefix();
-    uart::UARTDebug::log_hex(uart::UART_DIRECTION_TX,
-                             std::vector<uint8_t>(tx_data + TX_HEADER_SIZE, tx_data + TX_HEADER_SIZE + data_to_send),
-                             ',',
-                             debug_prefix);  // NOLINT()
-  }
-#endif
-
-  // CALLBACK CONTEXT: This lambda is executed in USB task via transfer_callback
-  auto callback = [this, channel, tx_data](const usb_host::TransferStatus &status) {
-    // Clean up the heap-allocated buffer after transfer completes
-    delete[] tx_data;
-    ESP_LOGV(TAG, "Output Transfer result: length: %u; status %X", status.data_len, status.error_code);
-    channel->output_started_.store(false);
-    // Defer restart to main loop (defer is thread-safe)
-    this->defer([this, channel] { this->start_output(channel); });
-  };
-  channel->output_started_.store(true);
-  this->transfer_out(ep->bEndpointAddress, callback, tx_data, data_to_send + TX_HEADER_SIZE);
-  ESP_LOGV(TAG, "Output %d bytes started", data_to_send);
-}
+void USBUartTypeCH934X::start_output(USBUartChannel * /*channel*/) { this->handle_tx_multiplexing_(); }
 
 }  // namespace usb_uart
 }  // namespace esphome
