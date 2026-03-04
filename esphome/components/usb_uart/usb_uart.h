@@ -34,7 +34,6 @@ struct CdcEps {
   const usb_ep_desc_t *out_ep;
   uint8_t bulk_interface_number;
   uint8_t interrupt_interface_number;
-  bool comm_interface_claimed{false};
 };
 
 struct Ch934xEps {
@@ -280,6 +279,7 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
 
  protected:
   void enable_channels() override;
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
 };
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {

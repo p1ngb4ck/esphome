@@ -144,7 +144,7 @@ void SpeakerMediaPlayer::watch_media_commands_() {
         delete media_command.url.value();
       }
       if (media_command.file.has_value()) {
-        playlist_item.file = media_command.file.value();
+        playlist_item.file = media_command.file;
       }
       if (media_command.file_path.has_value()) {
         playlist_item.file_path = *media_command.file_path.value();
@@ -507,19 +507,21 @@ void SpeakerMediaPlayer::control(const media_player::MediaPlayerCall &call) {
 
   MediaCallCommand media_command;
 
-  if (this->single_pipeline_() || (call.get_announcement().has_value() && call.get_announcement().value())) {
+  auto ann = call.get_announcement();
+  if (this->single_pipeline_() || (ann.has_value() && *ann)) {
     media_command.announce = true;
   } else {
     media_command.announce = false;
   }
 
-  if (call.get_media_url().has_value()) {
-    std::string media_url = call.get_media_url().value();
+  auto media_url = call.get_media_url();
+  if (media_url.has_value()) {
+    std::string media_url_str = *media_url;
 
     // Detect local file paths (start with '/' or 'file://')
-    if (media_url[0] == '/' || media_url.rfind("file://", 0) == 0) {
+    if (media_url_str[0] == '/' || media_url_str.rfind("file://", 0) == 0) {
       // Local file path
-      std::string file_path = media_url;
+      std::string file_path = media_url_str;
       if (file_path.rfind("file://", 0) == 0) {
         // Strip 'file://' prefix
         file_path = file_path.substr(7);
@@ -528,11 +530,12 @@ void SpeakerMediaPlayer::control(const media_player::MediaPlayerCall &call) {
     } else {
       // HTTP/HTTPS URL
       media_command.url =
-          new std::string(media_url);  // Must be manually deleted after receiving media_command from a queue
+          new std::string(media_url_str);  // Must be manually deleted after receiving media_command from a queue
     }
 
-    if (call.get_command().has_value()) {
-      if (call.get_command().value() == media_player::MEDIA_PLAYER_COMMAND_ENQUEUE) {
+    auto cmd = call.get_command();
+    if (cmd.has_value()) {
+      if (*cmd == media_player::MEDIA_PLAYER_COMMAND_ENQUEUE) {
         media_command.enqueue = true;
       }
     }
@@ -541,18 +544,20 @@ void SpeakerMediaPlayer::control(const media_player::MediaPlayerCall &call) {
     return;
   }
 
-  if (call.get_volume().has_value()) {
-    media_command.volume = call.get_volume().value();
+  auto vol = call.get_volume();
+  if (vol.has_value()) {
+    media_command.volume = vol;
     // Wait 0 ticks for queue to be free, volume sets aren't that important!
     xQueueSend(this->media_control_command_queue_, &media_command, 0);
     return;
   }
 
-  if (call.get_command().has_value()) {
-    media_command.command = call.get_command().value();
+  auto cmd = call.get_command();
+  if (cmd.has_value()) {
+    media_command.command = cmd;
     TickType_t ticks_to_wait = portMAX_DELAY;
-    if ((call.get_command().value() == media_player::MEDIA_PLAYER_COMMAND_VOLUME_UP) ||
-        (call.get_command().value() == media_player::MEDIA_PLAYER_COMMAND_VOLUME_DOWN)) {
+    if ((*cmd == media_player::MEDIA_PLAYER_COMMAND_VOLUME_UP) ||
+        (*cmd == media_player::MEDIA_PLAYER_COMMAND_VOLUME_DOWN)) {
       ticks_to_wait = 0;  // Wait 0 ticks for queue to be free, volume sets aren't that important!
     }
     xQueueSend(this->media_control_command_queue_, &media_command, ticks_to_wait);
