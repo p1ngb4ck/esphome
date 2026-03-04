@@ -239,7 +239,7 @@ bool HttpFileBrowser::canHandle(AsyncWebServerRequest *request) const {
   ESP_LOGD(TAG, "canHandle called: %s %s (prefix: %s)", method_name, uri.c_str(), this->url_prefix_.c_str());
 
   // Check if URI starts with our prefix
-  if (uri.find(this->url_prefix_) != 0) {
+  if (uri.find(this->url_prefix_.c_str()) != 0) {
     ESP_LOGD(TAG, "  -> NO: URI doesn't start with prefix");
     return false;
   }
@@ -268,45 +268,45 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
            request->method());
 
   // Check for API endpoints
-  if (uri.find(this->url_prefix_ + "/api/copy") == 0 && request->method() == HTTP_POST) {
+  if (uri.find((this->url_prefix_ + "/api/copy").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API COPY endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_copy(request);
-  } else if (uri.find(this->url_prefix_ + "/api/move") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/move").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API MOVE endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_move(request);
-  } else if (uri.find(this->url_prefix_ + "/api/rename") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/rename").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API RENAME endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_rename(request);
-  } else if (uri.find(this->url_prefix_ + "/api/mkdir") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/mkdir").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API MKDIR endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_mkdir(request);
-  } else if (uri.find(this->url_prefix_ + "/api/delete") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/delete").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API DELETE endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_delete(request);
-  } else if (uri.find(this->url_prefix_ + "/api/mount") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/mount").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API MOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_mount(request);
-  } else if (uri.find(this->url_prefix_ + "/api/unmount") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/unmount").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API UNMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_unmount(request);
-  } else if (uri.find(this->url_prefix_ + "/api/remount") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/remount").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API REMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_remount(request);
-  } else if (uri.find(this->url_prefix_ + "/api/fileinfo") == 0 && request->method() == HTTP_GET) {
+  } else if (uri.find((this->url_prefix_ + "/api/fileinfo").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_fileinfo(request);
     return;
-  } else if (uri.find(this->url_prefix_ + "/api/exists") == 0 && request->method() == HTTP_GET) {
+  } else if (uri.find((this->url_prefix_ + "/api/exists").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_exists(request);
-  } else if (uri.find(this->url_prefix_ + "/api/dirisempty") == 0 && request->method() == HTTP_GET) {
+  } else if (uri.find((this->url_prefix_ + "/api/dirisempty").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_dirisempty(request);
-  } else if (uri.find(this->url_prefix_ + "/api/dirinfo") == 0 && request->method() == HTTP_GET) {
+  } else if (uri.find((this->url_prefix_ + "/api/dirinfo").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_dirinfo(request);
-  } else if (uri.find(this->url_prefix_ + "/api/progress") == 0 && request->method() == HTTP_GET) {
+  } else if (uri.find((this->url_prefix_ + "/api/progress").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_progress(request);
-  } else if (uri.find(this->url_prefix_ + "/api/cancel") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/cancel").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API CANCEL endpoint hit");
     this->handle_api_cancel(request);
-  } else if (uri.find(this->url_prefix_ + "/api/upload_chunk") == 0 && request->method() == HTTP_POST) {
+  } else if (uri.find((this->url_prefix_ + "/api/upload_chunk").c_str()) == 0 && request->method() == HTTP_POST) {
     ESP_LOGD(TAG, "API UPLOAD_CHUNK endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_upload_chunk(request);
   } else if (request->method() == HTTP_GET) {
