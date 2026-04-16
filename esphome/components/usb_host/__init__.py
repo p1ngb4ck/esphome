@@ -4,8 +4,10 @@ from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
+    add_idf_component,
     add_idf_sdkconfig_option,
     get_esp32_variant,
+    idf_version,
     only_on_variant,
 )
 import esphome.config_validation as cv
@@ -130,19 +132,11 @@ async def register_usb_client(config, parent=None):
 async def to_code(config: ConfigType) -> None:
     dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
 
-    # Set TinyUSB MCU type based on ESP32 variant
-    variant = get_esp32_variant()
-    mcu_map = {
-        VARIANT_ESP32S2: "OPT_MCU_ESP32S2",
-        VARIANT_ESP32S3: "OPT_MCU_ESP32S3",
-        VARIANT_ESP32P4: "OPT_MCU_ESP32P4",
-    }
-    if variant in mcu_map:
-        cg.add_build_flag(f"-DCFG_TUSB_MCU={mcu_map[variant]}")
+    # IDF 6.0 moved USB host to an external component
+    if idf_version() >= cv.Version(6, 0, 0):
+        add_idf_component(name="espressif/usb", ref="1.3.0")
 
     # Load modified esp-usb USB Host library for dual host support
-    # TinyUSB is now included directly in esp-usb repo (not as submodule)
-    # Use override_path to replace the built-in ESP-IDF "usb" component
     if dual_host_support:
         esp32.add_idf_component(
             name="usb",
@@ -151,13 +145,6 @@ async def to_code(config: ConfigType) -> None:
             path="host/usb",
             override_path="host/usb",
         )
-        # TinyUSB is now provided via esp-usb's idf_component.yml dependency
-        # Commenting out to avoid duplicate TinyUSB compilation
-        # cg.add_library(
-        #     name="TinyUSB",
-        #     repository="https://github.com/p1ngb4ck/tinyusb.git",
-        #     version="feat/dual-host-support",
-        # )
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
@@ -170,8 +157,6 @@ async def to_code(config: ConfigType) -> None:
         cg.add_define("USE_USB_HOST_DUAL_INSTANCE")
 
     # USB uses the socket wake_loop_threadsafe() mechanism to wake the main loop from USB task
-    # This enables low-latency (~12μs) USB event processing instead of waiting for
-    # select() timeout (0-16ms). The wake socket is shared across all components.
     socket.require_wake_loop_threadsafe()
 
     from esphome.core import CORE
@@ -185,34 +170,28 @@ async def to_code(config: ConfigType) -> None:
         usb_host_instances = {}
 
         # Calculate combined peripheral_map from user config values
-        # User provides "fs" or "hs" strings in YAML
         combined_peripheral_map = 0
-        controller_map = {"fs": 0, "hs": 1}  # Map user strings to controller indices
+        controller_map = {"fs": 0, "hs": 1}
         for instance_conf in config[CONF_INSTANCES]:
-            # Get controller index from user's string value
             controller_idx = controller_map[instance_conf[CONF_CONTROLLER]]
             # Invert mapping: controller 0 (FS) → OTG1 (BIT1), controller 1 (HS) → OTG0 (BIT0)
             peripheral_bit = 1 << (1 - controller_idx)
             combined_peripheral_map |= peripheral_bit
 
-        # Now generate C++ code for each instance
         for instance_conf in config[CONF_INSTANCES]:
             controller_index = controller_map[instance_conf[CONF_CONTROLLER]]
             var = cg.new_Pvariable(instance_conf[CONF_ID], controller_index)
             await cg.register_component(var, instance_conf)
 
-            # Register devices as USBClient components and add to whitelist
             for device in instance_conf.get(CONF_DEVICES) or ():
                 await register_usb_client(device, parent=var)
-                cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
+                cg.add(var.add_device_to_allowlist(device[CONF_VID], device[CONF_PID]))
 
             usb_host_instances[instance_conf[CONF_ID]] = {
                 "var": var,
                 "controller": controller_index,
             }
 
-        # Define the combined peripheral map for all configured controllers
-        # This is used by usb_host_install_controller() to install HCD with all ports
         cg.add_define(
             "USB_HOST_DUAL_PERIPHERAL_MAP", f"0x{combined_peripheral_map:02X}"
         )
@@ -223,4 +202,4 @@ async def to_code(config: ConfigType) -> None:
         await cg.register_component(var, config)
         for device in config.get(CONF_DEVICES) or ():
             await register_usb_client(device)
-            cg.add(var.add_device_to_whitelist(device[CONF_VID], device[CONF_PID]))
+            cg.add(var.add_device_to_allowlist(device[CONF_VID], device[CONF_PID]))

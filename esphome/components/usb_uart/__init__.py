@@ -1,8 +1,7 @@
 import esphome.codegen as cg
-from esphome.components import socket
 from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.components.esp32.const import KEY_ESP32, KEY_VARIANT
-from esphome.components.uart import UARTComponent
+from esphome.components.uart import CONF_DEBUG_PREFIX, CONF_FLUSH_TIMEOUT, UARTComponent
 from esphome.components.usb_host import (
     USBClient,
     USBHost,
@@ -22,7 +21,7 @@ from esphome.core import CORE
 
 CONF_USB_HOST_ID = "usb_host_id"
 
-AUTO_LOAD = ["uart", "usb_host", "bytebuffer", "socket"]
+AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
 
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
@@ -46,9 +45,7 @@ UART_STOP_BITS_OPTIONS = {
 }
 
 DEFAULT_BAUD_RATE = 9600
-# By default, log in hex format when no specific sequence is provided.
-CONF_DEBUG_PREFIX = "debug_prefix"
-CONF_DEBUG_ADD_SETTINGS = "debug_add_uart_settings"
+CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 
 
 class Type:
@@ -110,8 +107,11 @@ def channel_schema(max_channels, baud_rate_required, class_name):
                             cv.Optional(CONF_DEBUG, default=False): cv.boolean,
                             cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
                             cv.Optional(
-                                CONF_DEBUG_ADD_SETTINGS, default=False
+                                CONF_DEBUG_ADD_UART_SETTINGS, default=False
                             ): cv.boolean,
+                            cv.Optional(
+                                CONF_FLUSH_TIMEOUT, default="100ms"
+                            ): cv.positive_time_period_milliseconds,
                         }
                     )
                 ),
@@ -141,12 +141,7 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config):
-    # Enable wake_loop_threadsafe for low-latency USB data processing
-    # The USB task queues data events that need immediate processing
-    socket.require_wake_loop_threadsafe()
-
     for device in config:
-        # In dual-host mode, usb_host_id specifies which USBHost instance to use as parent
         parent = None
         if CONF_USB_HOST_ID in device:
             parent = await cg.get_variable(device[CONF_USB_HOST_ID])
@@ -160,16 +155,17 @@ async def to_code(config):
             cg.add(chvar.set_parity(channel[CONF_PARITY]))
             cg.add(chvar.set_baud_rate(channel[CONF_BAUD_RATE]))
             cg.add(chvar.set_dummy_receiver(channel[CONF_DUMMY_RECEIVER]))
+            cg.add(chvar.set_flush_timeout(channel[CONF_FLUSH_TIMEOUT]))
             cg.add(chvar.set_debug(channel[CONF_DEBUG]))
+            if channel[CONF_DEBUG_PREFIX]:
+                cg.add(chvar.set_debug_prefix(channel[CONF_DEBUG_PREFIX]))
             if channel[CONF_DEBUG]:
                 cg.add_define("USE_UART_DEBUGGER")
-                if channel[CONF_DEBUG_PREFIX]:
-                    cg.add(chvar.set_debug_prefix(channel[CONF_DEBUG_PREFIX]))
-                    if channel[CONF_DEBUG_ADD_SETTINGS]:
-                        cg.add(
-                            chvar.set_debug_add_settings(
-                                channel[CONF_DEBUG_ADD_SETTINGS]
-                            )
+                if channel[CONF_DEBUG_ADD_UART_SETTINGS]:
+                    cg.add(
+                        chvar.set_debug_add_settings(
+                            channel[CONF_DEBUG_ADD_UART_SETTINGS]
                         )
-                        cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
+                    )
+                    cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
             cg.add(var.add_channel(chvar))

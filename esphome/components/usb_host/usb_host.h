@@ -167,7 +167,10 @@ class USBClient : public Component, public Parented<USBHost> {
   // Lock-free event queue and pool for USB task to main loop communication
   // Must be public for access from static callbacks
   LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
-  EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE> event_pool;
+  // Pool sized to queue capacity (SIZE-1) because LockFreeQueue<T,N> is a ring
+  // buffer that holds N-1 elements. This guarantees allocate() returns nullptr
+  // before push() can fail, preventing a pool slot leak.
+  EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
 
  protected:
   // Process USB events from the queue. Returns true if any work was done.
@@ -220,9 +223,9 @@ class USBHost : public Component {
   // NEW: Close a device handle (for handlers that need to re-open with different client)
   void close_device_handle(usb_device_handle_t device_handle);
 
-  // Device whitelist management
-  void add_device_to_whitelist(uint16_t vid, uint16_t pid);
-  bool is_device_whitelisted(uint16_t vid, uint16_t pid) const;
+  // Device allowlist management
+  void add_device_to_allowlist(uint16_t vid, uint16_t pid);
+  bool is_device_allowlisted(uint16_t vid, uint16_t pid) const;
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   // Dual USB Host support (ESP32-P4 only)
@@ -235,7 +238,7 @@ class USBHost : public Component {
   std::vector<USBDeviceHandler *> handlers_{};                     // NEW: Interface-class based handlers
   std::set<uint8_t> claimed_devices_{};                            // NEW: Track devices claimed by VID/PID clients
   usb_host_client_handle_t coordinator_handle_{};                  // NEW: Handle for handler dispatch
-  std::vector<std::pair<uint16_t, uint16_t>> device_whitelist_{};  // Whitelist of allowed devices (VID, PID)
+  std::vector<std::pair<uint16_t, uint16_t>> device_allowlist_{};  // Allowlist of allowed devices (VID, PID)
 
 #ifdef USE_USB_HOST_DUAL_INSTANCE
   uint8_t controller_type_{0};   // 0 = FS, 1 = HS

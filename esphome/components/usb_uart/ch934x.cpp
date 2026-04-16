@@ -14,6 +14,17 @@ namespace usb_uart {
 
 using namespace bytebuffer;
 
+#ifdef USE_USB_HOST_DUAL_INSTANCE
+USBUartTypeCH934X::USBUartTypeCH934X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent)
+    : USBUartComponent(vid, pid, parent) {
+  ESP_LOGI(TAG, "CH934X VID=%04X PID=%04X", vid, pid);
+}
+#else
+USBUartTypeCH934X::USBUartTypeCH934X(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {
+  ESP_LOGI(TAG, "CH934X VID=%04X PID=%04X", vid, pid);
+}
+#endif
+
 /**
  * CH934x - USB to Multi-UART with Multiplexed Endpoints
  *

@@ -5,6 +5,7 @@
 #include <vector>
 #include "esphome/core/component.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/string_ref.h"
 #include "uart.h"
 #include "uart_component.h"
 
@@ -17,7 +18,7 @@ namespace esphome::uart {
 /// 'appropriate time' means exactly, is determined by a number of
 /// configurable constraints. E.g. when a given number of bytes is gathered
 /// and/or when no more data has been seen for a given time interval.
-class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector<uint8_t>, std::string> {
+class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector<uint8_t>, StringRef> {
  public:
   explicit UARTDebugger(UARTComponent *parent);
   void loop() override;
@@ -41,16 +42,25 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
   /// logging will be triggered.
   void add_delimiter_byte(uint8_t byte) { this->after_delimiter_.push_back(byte); }
 
+  void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
+
 #ifdef UART_DEBUGGER_ADD_SETTINGS
   void reload();
 
-  static std::string get_debug_prefix(std::string debug_prefix, bool debug_add_settings, uint32_t baud_rate,
+  static std::string get_debug_prefix(StringRef debug_prefix, bool debug_add_settings, uint32_t baud_rate,
                                       uint8_t data_bits, uint8_t stop_bits, uint8_t parity) {
     if (!debug_add_settings)
-      return debug_prefix;
-    std::string res = "|" + std::to_string(baud_rate);
-    res += ":" + std::to_string(data_bits);
-    res += ":" + std::to_string(stop_bits);
+      return std::string(debug_prefix.c_str());
+    char buf[12];
+    std::string res = "|";
+    snprintf(buf, sizeof(buf), "%" PRIu32, baud_rate);
+    res += buf;
+    res += ":";
+    snprintf(buf, sizeof(buf), "%u", data_bits);
+    res += buf;
+    res += ":";
+    snprintf(buf, sizeof(buf), "%u", stop_bits);
+    res += buf;
     switch (parity) {
       case UART_CONFIG_PARITY_NONE:
         res += ":NONE";
@@ -65,20 +75,16 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
         res += ":UNKNOWN";
         break;
     }
-    return res + "|" + debug_prefix;
+    return res + "|" + debug_prefix.c_str();
   }
-#endif
 
-  // debug setting setters
-  void set_debug_prefix(std::string debug_prefix) { this->debug_prefix_ = debug_prefix; }
   void set_debug_add_settings(bool debug_add_settings) {
     this->debug_add_settings_ = debug_add_settings;
-#ifdef UART_DEBUGGER_ADD_SETTINGS
     if (debug_add_settings)
       this->final_debug_prefix_ = get_debug_prefix(this->debug_prefix_, this->debug_add_settings_, this->baud_rate_,
                                                    this->data_bits_, this->stop_bits_, this->parity_);
-#endif
   }
+#endif
 
  protected:
   UARTDirection for_direction_;
@@ -90,9 +96,9 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
   std::vector<uint8_t> after_delimiter_{};
   size_t after_delimiter_pos_{};
   bool is_triggering_{false};
-  std::string debug_prefix_{""};
-  bool debug_add_settings_{false};
+  StringRef debug_prefix_{};
 #ifdef UART_DEBUGGER_ADD_SETTINGS
+  bool debug_add_settings_{false};
   std::string final_debug_prefix_{""};
   uint32_t baud_rate_;
   uint8_t stop_bits_;
@@ -131,20 +137,20 @@ class UARTDebug {
   /// Log the bytes as hex values, separated by the provided separator
   /// character.
   static void log_hex(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                      std::string debug_prefix = "");
+                      StringRef prefix = StringRef());
 
   /// Log the bytes as string values, escaping unprintable characters.
-  static void log_string(UARTDirection direction, std::vector<uint8_t> bytes, std::string debug_prefix = "");
+  static void log_string(UARTDirection direction, std::vector<uint8_t> bytes, StringRef prefix = StringRef());
 
   /// Log the bytes as integer values, separated by the provided separator
   /// character.
   static void log_int(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                      std::string debug_prefix = "");
+                      StringRef prefix = StringRef());
 
   /// Log the bytes as '<binary> (<hex>)' values, separated by the provided
   /// separator.
   static void log_binary(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                         std::string debug_prefix = "");
+                         StringRef prefix = StringRef());
 };
 
 }  // namespace esphome::uart

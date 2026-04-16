@@ -18,7 +18,7 @@ UARTDebugger::UARTDebugger(UARTComponent *parent) {
   this->stop_bits_ = parent->get_stop_bits();
   this->parity_ = parent->get_parity();
 #endif
-  parent->add_debug_callback([this](UARTDirection direction, uint8_t byte, std::string debug_prefix) {
+  parent->add_debug_callback([this](UARTDirection direction, uint8_t byte, StringRef debug_prefix) {
     if (!this->is_my_direction_(direction) || this->is_recursive_()) {
       return;
     }
@@ -99,7 +99,7 @@ bool UARTDebugger::has_buffered_bytes_() { return !this->bytes_.empty(); }
 void UARTDebugger::fire_trigger_() {
   this->is_triggering_ = true;
 #ifdef UART_DEBUGGER_ADD_SETTINGS
-  trigger(this->last_direction_, this->bytes_, this->final_debug_prefix_);
+  trigger(this->last_direction_, this->bytes_, StringRef(this->final_debug_prefix_.c_str()));
 #else
   trigger(this->last_direction_, this->bytes_, this->debug_prefix_);
 #endif
@@ -122,8 +122,7 @@ void UARTDummyReceiver::loop() {
 // TCP connection(s). Without these delays, debug log lines could go
 // missing when UART devices block the main loop for too long.
 
-void UARTDebug::log_hex(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                        std::string debug_prefix) {
+void UARTDebug::log_hex(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator, StringRef prefix) {
   std::string res;
   if (direction == UART_DIRECTION_RX) {
     res += "<<< ";
@@ -139,10 +138,11 @@ void UARTDebug::log_hex(UARTDirection direction, std::vector<uint8_t> bytes, uin
     buf_append_printf(buf, sizeof(buf), 0, "%02X", bytes[i]);
     res += buf;
   }
-  ESP_LOGD(TAG, "%s%s", debug_prefix.c_str(), res.c_str());
+  ESP_LOGD(TAG, "%s%s", prefix.c_str(), res.c_str());
+  delay(10);
 }
 
-void UARTDebug::log_string(UARTDirection direction, std::vector<uint8_t> bytes, std::string debug_prefix) {
+void UARTDebug::log_string(UARTDirection direction, std::vector<uint8_t> bytes, StringRef prefix) {
   std::string res;
   if (direction == UART_DIRECTION_RX) {
     res += "<<< \"";
@@ -182,12 +182,11 @@ void UARTDebug::log_string(UARTDirection direction, std::vector<uint8_t> bytes, 
     }
   }
   res += '"';
-  ESP_LOGD(TAG, "%s%s", debug_prefix.c_str(), res.c_str());
+  ESP_LOGD(TAG, "%s%s", prefix.c_str(), res.c_str());
   delay(10);
 }
 
-void UARTDebug::log_int(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                        std::string debug_prefix) {
+void UARTDebug::log_int(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator, StringRef prefix) {
   std::string res;
   size_t len = bytes.size();
   if (direction == UART_DIRECTION_RX) {
@@ -203,12 +202,11 @@ void UARTDebug::log_int(UARTDirection direction, std::vector<uint8_t> bytes, uin
     buf_append_printf(buf, sizeof(buf), 0, "%u", bytes[i]);
     res += buf;
   }
-  ESP_LOGD(TAG, "%s%s", debug_prefix.c_str(), res.c_str());
+  ESP_LOGD(TAG, "%s%s", prefix.c_str(), res.c_str());
   delay(10);
 }
 
-void UARTDebug::log_binary(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator,
-                           std::string debug_prefix) {
+void UARTDebug::log_binary(UARTDirection direction, std::vector<uint8_t> bytes, uint8_t separator, StringRef prefix) {
   std::string res;
   size_t len = bytes.size();
   if (direction == UART_DIRECTION_RX) {
@@ -224,7 +222,7 @@ void UARTDebug::log_binary(UARTDirection direction, std::vector<uint8_t> bytes, 
     buf_append_printf(buf, sizeof(buf), 0, "0b" BYTE_TO_BINARY_PATTERN " (0x%02X)", BYTE_TO_BINARY(bytes[i]), bytes[i]);
     res += buf;
   }
-  ESP_LOGD(TAG, "%s%s", debug_prefix.c_str(), res.c_str());
+  ESP_LOGD(TAG, "%s%s", prefix.c_str(), res.c_str());
   delay(10);
 }
 

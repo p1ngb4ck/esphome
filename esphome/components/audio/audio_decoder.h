@@ -20,14 +20,17 @@
 // AAC comes from esp_audio_codec (via adapter for API compatibility)
 #include "aac_decoder_adapter.h"
 #endif
-// esp-audio-libs (MP3, FLAC, WAV)
-#ifdef USE_AUDIO_FLAC_SUPPORT
-#include <flac_decoder.h>
-#endif
+
+// esp-audio-libs
 #ifdef USE_AUDIO_MP3_SUPPORT
 #include <mp3_decoder.h>
 #endif
 #include <wav_decoder.h>
+
+// micro-flac
+#ifdef USE_AUDIO_FLAC_SUPPORT
+#include <micro_flac/flac_decoder.h>
+#endif
 
 // micro-opus
 #ifdef USE_AUDIO_OPUS_SUPPORT
@@ -128,7 +131,7 @@ class AudioDecoder {
 #endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FileDecoderState decode_flac_();
-  std::unique_ptr<esp_audio_libs::flac::FLACDecoder> flac_decoder_;
+  std::unique_ptr<micro_flac::FLACDecoder> flac_decoder_;
 #endif
 #ifdef USE_AUDIO_MP3_SUPPORT
   FileDecoderState decode_mp3_();
