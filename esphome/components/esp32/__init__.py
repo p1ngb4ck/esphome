@@ -2136,7 +2136,8 @@ async def to_code(config):
     # Components that need FATFS (SD card, etc.) can call require_fatfs()
     if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
         # Component called require_fatfs() - enable regardless of user setting
-        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", False)
+        # Only set LFN_HEAP=y; do not write LFN_NONE=n as that can cause Kconfig
+        # to reset the entire choice to its default (NONE), overriding user settings.
         add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
         add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 2)
     elif advanced[CONF_DISABLE_FATFS]:
