@@ -1,5 +1,5 @@
 import esphome.codegen as cg
-from esphome.components import esp32, socket
+from esphome.components import esp32
 from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
@@ -155,9 +155,6 @@ async def to_code(config: ConfigType) -> None:
 
     if dual_host_support:
         cg.add_define("USE_USB_HOST_DUAL_INSTANCE")
-
-    # USB uses the socket wake_loop_threadsafe() mechanism to wake the main loop from USB task
-    socket.require_wake_loop_threadsafe()
 
     from esphome.core import CORE
 
