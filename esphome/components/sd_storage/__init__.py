@@ -223,6 +223,8 @@ FINAL_VALIDATE_SCHEMA = _final_validate_spi_interface
 async def to_code(config):
     # Re-enable fatfs IDF component (excluded by default) - needed for esp_vfs_fat
     esp32.include_builtin_idf_component("fatfs")
+    # Prevent disable_fatfs from setting CONFIG_FATFS_LFN_NONE=y
+    esp32.require_fatfs()
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
