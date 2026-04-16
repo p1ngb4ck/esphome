@@ -2137,6 +2137,7 @@ async def to_code(config):
     if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
         # Component called require_fatfs() - enable regardless of user setting
         add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", False)
+        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
         add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 2)
     elif advanced[CONF_DISABLE_FATFS]:
         add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
