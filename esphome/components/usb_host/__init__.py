@@ -132,6 +132,16 @@ async def register_usb_client(config, parent=None):
 async def to_code(config: ConfigType) -> None:
     dual_host_support = config.get(CONF_DUAL_HOST_SUPPORT)
 
+    # Set TinyUSB MCU type based on ESP32 variant
+    variant = get_esp32_variant()
+    mcu_map = {
+        VARIANT_ESP32S2: "OPT_MCU_ESP32S2",
+        VARIANT_ESP32S3: "OPT_MCU_ESP32S3",
+        VARIANT_ESP32P4: "OPT_MCU_ESP32P4",
+    }
+    if variant in mcu_map:
+        cg.add_build_flag(f"-DCFG_TUSB_MCU={mcu_map[variant]}")
+
     # IDF 6.0 moved USB host to an external component
     if idf_version() >= cv.Version(6, 0, 0):
         add_idf_component(name="espressif/usb", ref="1.3.0")
