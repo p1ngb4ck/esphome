@@ -25,6 +25,7 @@ CONF_PID = "pid"
 CONF_ON_MOUNTED = "on_mounted"
 
 require_vfs_dir()
+require_fatfs()
 
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
@@ -111,8 +112,6 @@ async def to_code(config):
 
     # Re-enable fatfs IDF component (excluded by default) - needed for esp_vfs_fat
     include_builtin_idf_component("fatfs")
-    # Prevent disable_fatfs from setting CONFIG_FATFS_LFN_NONE=y
-    require_fatfs()
     # Load appropriate MSC driver based on dual_host_support flag
     dual_host_support = CORE.data.get("usb_host_dual_instance", False)
     if dual_host_support:
