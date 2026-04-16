@@ -182,7 +182,7 @@ opendps:
   default_brightness: 80
   bootloader_baud_rate: 19200
   tcp_bridge:
-    port: 5005
+    tcp_bridge_port: 5005
   on_connect:
     - lambda: |-
         id(voltage_number).publish_state(id(my_opendps).get_voltage_setting());

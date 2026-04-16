@@ -95,7 +95,7 @@ def validate_spi_bus_pins(config):
 
 def validate_spi_mode(config):
     """Validate SPI mode requirements."""
-    if not CORE.using_esp_idf:
+    if CORE.using_arduino:
         raise cv.Invalid("Only esp-idf supported for SD SPI")
     if config[CONF_MODE_1BIT] is False:
         raise cv.Invalid("Only 1bit mode supported for SPI")
@@ -297,7 +297,7 @@ SD_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
 
 
 @automation.register_action(
-    "sd_storage.mount", MountCardAction, SD_STORAGE_ACTION_SCHEMA
+    "sd_storage.mount", MountCardAction, SD_STORAGE_ACTION_SCHEMA, synchronous=True
 )
 async def sd_storage_mount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -305,7 +305,7 @@ async def sd_storage_mount_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "sd_storage.unmount", UnmountCardAction, SD_STORAGE_ACTION_SCHEMA
+    "sd_storage.unmount", UnmountCardAction, SD_STORAGE_ACTION_SCHEMA, synchronous=True
 )
 async def sd_storage_unmount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -320,7 +320,9 @@ LIST_FILES_SCHEMA = cv.Schema(
 )
 
 
-@automation.register_action("sd_storage.list_files", ListFilesAction, LIST_FILES_SCHEMA)
+@automation.register_action(
+    "sd_storage.list_files", ListFilesAction, LIST_FILES_SCHEMA, synchronous=True
+)
 async def sd_storage_list_files_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, paren)

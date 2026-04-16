@@ -76,14 +76,14 @@ opendps:
 
   # TCP bridge for dpsctl.py access
   tcp_bridge:
-    port: 5005
-    disconnect_delay: 1s
-    frame_timeout: 500ms
+    tcp_bridge_port: 5005
+    tcp_bridge_disconnect_delay: 1s
+    tcp_bridge_frame_timeout: 500ms
 
   # Calibration backup configuration
   calibration_backup:
-    path: "/sd/opendps_calibration.cfg"
-    auto_restore: true
+    calibration_backup_path: "/sd/opendps_calibration.cfg"
+    calibration_auto_restore: true
 
   bootloader_baud_rate: 9600
 

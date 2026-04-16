@@ -4,7 +4,21 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import time as time_component, uart
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TIME_ID, CONF_TRIGGER_ID
+from esphome.const import (
+    CONF_BRIGHTNESS,
+    CONF_BUFFER_SIZE,
+    CONF_CURRENT,
+    CONF_FORMAT,
+    CONF_ID,
+    CONF_KEY,
+    CONF_ON_CONNECT,
+    CONF_PATH,
+    CONF_TIME_ID,
+    CONF_TRIGGER_ID,
+    CONF_UPDATE_INTERVAL,
+    CONF_VALUE,
+    CONF_VOLTAGE,
+)
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["uart"]
@@ -15,8 +29,6 @@ CONF_DATALOGGER = "datalogger"
 CONF_STORAGE_PATH = "storage_path"
 CONF_FILENAME_FORMAT = "filename_format"
 CONF_FILENAME_ID = "filename_id"
-CONF_BUFFER_SIZE = "buffer_size"
-CONF_FORMAT = "format"
 CONF_COLUMNS = "columns"
 CONF_FLUSH_INTERVAL = "flush_interval"
 CONF_FILENAME = "filename"
@@ -24,36 +36,28 @@ CONF_FILENAME = "filename"
 DATALOG_FORMAT_CSV = "csv"
 DATALOG_FORMAT_BINARY = "binary"
 
-CONF_UPDATE_INTERVAL = "update_interval"
 CONF_OPENDPS_ID = "opendps_id"
 CONF_ENABLE = "enable"
-CONF_VOLTAGE = "voltage"
-CONF_CURRENT = "current"
 CONF_FUNCTION = "function"
-CONF_KEY = "key"
-CONF_VALUE = "value"
 CONF_LOCKED = "locked"
-CONF_BRIGHTNESS = "brightness"
 CONF_FIRMWARE_PATH = "firmware_path"
 CONF_DEFAULT_BRIGHTNESS = "default_brightness"
 CONF_CALIBRATION_NAME = "calibration_name"
 CONF_CALIBRATION_VALUE = "calibration_value"
 
-CONF_ON_CONNECT = "on_connect"
-
 # TCP Bridge for dpsctl.py access
 CONF_TCP_BRIDGE = "tcp_bridge"
-CONF_TCP_BRIDGE_PORT = "port"
-CONF_TCP_BRIDGE_DISCONNECT_DELAY = "disconnect_delay"
-CONF_TCP_BRIDGE_FRAME_TIMEOUT = "frame_timeout"
+CONF_TCP_BRIDGE_PORT = "tcp_bridge_port"
+CONF_TCP_BRIDGE_DISCONNECT_DELAY = "tcp_bridge_disconnect_delay"
+CONF_TCP_BRIDGE_FRAME_TIMEOUT = "tcp_bridge_frame_timeout"
 
 # Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
 CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
 
 # Calibration backup/restore
 CONF_CALIBRATION_BACKUP = "calibration_backup"
-CONF_CALIBRATION_BACKUP_PATH = "path"
-CONF_CALIBRATION_AUTO_RESTORE = "auto_restore"
+CONF_CALIBRATION_BACKUP_PATH = "calibration_backup_path"
+CONF_CALIBRATION_AUTO_RESTORE = "calibration_auto_restore"
 
 opendps_ns = cg.esphome_ns.namespace("opendps")
 OpenDPS = opendps_ns.class_("OpenDPS", cg.Component, uart.UARTDevice)
@@ -331,6 +335,7 @@ OPENDPS_ACTION_SCHEMA = cv.Schema({cv.GenerateID(): cv.use_id(OpenDPS)})
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_ENABLE): cv.templatable(cv.boolean)}
     ),
+    synchronous=True,
 )
 async def opendps_enable_output_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -346,6 +351,7 @@ async def opendps_enable_output_to_code(config, action_id, template_arg, args):
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_VOLTAGE): cv.templatable(cv.float_)}
     ),
+    synchronous=True,
 )
 async def opendps_set_voltage_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -361,6 +367,7 @@ async def opendps_set_voltage_to_code(config, action_id, template_arg, args):
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_CURRENT): cv.templatable(cv.float_)}
     ),
+    synchronous=True,
 )
 async def opendps_set_current_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -376,6 +383,7 @@ async def opendps_set_current_to_code(config, action_id, template_arg, args):
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_FUNCTION): cv.templatable(cv.string)}
     ),
+    synchronous=True,
 )
 async def opendps_set_function_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -394,6 +402,7 @@ async def opendps_set_function_to_code(config, action_id, template_arg, args):
             cv.Required(CONF_VALUE): cv.templatable(cv.string),
         }
     ),
+    synchronous=True,
 )
 async def opendps_set_parameter_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -411,6 +420,7 @@ async def opendps_set_parameter_to_code(config, action_id, template_arg, args):
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_LOCKED): cv.templatable(cv.boolean)}
     ),
+    synchronous=True,
 )
 async def opendps_lock_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -426,6 +436,7 @@ async def opendps_lock_to_code(config, action_id, template_arg, args):
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_BRIGHTNESS): cv.templatable(cv.uint8_t)}
     ),
+    synchronous=True,
 )
 async def opendps_set_brightness_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -435,14 +446,19 @@ async def opendps_set_brightness_to_code(config, action_id, template_arg, args):
     return var
 
 
-@automation.register_action("opendps.ping", PingAction, OPENDPS_ACTION_SCHEMA)
+@automation.register_action(
+    "opendps.ping", PingAction, OPENDPS_ACTION_SCHEMA, synchronous=True
+)
 async def opendps_ping_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
 
 
 @automation.register_action(
-    "opendps.request_version", RequestVersionAction, OPENDPS_ACTION_SCHEMA
+    "opendps.request_version",
+    RequestVersionAction,
+    OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_request_version_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -455,6 +471,7 @@ async def opendps_request_version_to_code(config, action_id, template_arg, args)
     OPENDPS_ACTION_SCHEMA.extend(
         {cv.Required(CONF_FIRMWARE_PATH): cv.templatable(cv.string)}
     ),
+    synchronous=True,
 )
 async def opendps_upgrade_firmware_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -469,6 +486,7 @@ async def opendps_upgrade_firmware_to_code(config, action_id, template_arg, args
     "opendps.request_calibration_report",
     RequestCalibrationReportAction,
     OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_request_calibration_report_to_code(
     config, action_id, template_arg, args
@@ -486,6 +504,7 @@ async def opendps_request_calibration_report_to_code(
             cv.Required(CONF_CALIBRATION_VALUE): cv.templatable(cv.float_),
         }
     ),
+    synchronous=True,
 )
 async def opendps_set_calibration_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -500,15 +519,14 @@ async def opendps_set_calibration_to_code(config, action_id, template_arg, args)
 
 
 @automation.register_action(
-    "opendps.clear_calibration", ClearCalibrationAction, OPENDPS_ACTION_SCHEMA
+    "opendps.clear_calibration",
+    ClearCalibrationAction,
+    OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_clear_calibration_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, parent)
-
-
-# Calibration backup path config key for actions
-CONF_PATH = "path"
 
 
 @automation.register_action(
@@ -519,6 +537,7 @@ CONF_PATH = "path"
             cv.Optional(CONF_PATH): cv.templatable(cv.string),
         }
     ),
+    synchronous=True,
 )
 async def opendps_save_calibration_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -537,6 +556,7 @@ async def opendps_save_calibration_to_code(config, action_id, template_arg, args
             cv.Optional(CONF_PATH): cv.templatable(cv.string),
         }
     ),
+    synchronous=True,
 )
 async def opendps_restore_calibration_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -552,6 +572,7 @@ async def opendps_restore_calibration_to_code(config, action_id, template_arg, a
     "opendps.start_calibration_assistant",
     StartCalibrationAssistantAction,
     OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_start_calibration_assistant_to_code(
     config, action_id, template_arg, args
@@ -568,6 +589,7 @@ async def opendps_start_calibration_assistant_to_code(
             cv.Optional(CONF_MEASURED_VALUE, default=0): cv.templatable(cv.float_),
         }
     ),
+    synchronous=True,
 )
 async def opendps_calibration_assistant_step_to_code(
     config, action_id, template_arg, args
@@ -583,6 +605,7 @@ async def opendps_calibration_assistant_step_to_code(
     "opendps.cancel_calibration_assistant",
     CancelCalibrationAssistantAction,
     OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_cancel_calibration_assistant_to_code(
     config, action_id, template_arg, args
@@ -600,6 +623,7 @@ async def opendps_cancel_calibration_assistant_to_code(
             cv.Optional(CONF_FILENAME, default=""): cv.templatable(cv.string),
         }
     ),
+    synchronous=True,
 )
 async def opendps_start_datalog_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -613,6 +637,7 @@ async def opendps_start_datalog_to_code(config, action_id, template_arg, args):
     "opendps.stop_datalog",
     StopDatalogAction,
     OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_stop_datalog_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -623,6 +648,7 @@ async def opendps_stop_datalog_to_code(config, action_id, template_arg, args):
     "opendps.flush_datalog",
     FlushDatalogAction,
     OPENDPS_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def opendps_flush_datalog_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])

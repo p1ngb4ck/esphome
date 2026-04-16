@@ -158,7 +158,10 @@ USB_STORAGE_ACTION_SCHEMA = automation.maybe_simple_id(
 
 
 @automation.register_action(
-    "usb_storage.remount", RemountDeviceAction, USB_STORAGE_ACTION_SCHEMA
+    "usb_storage.remount",
+    RemountDeviceAction,
+    USB_STORAGE_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def usb_storage_remount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -166,7 +169,10 @@ async def usb_storage_remount_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "usb_storage.unmount", UnmountDeviceAction, USB_STORAGE_ACTION_SCHEMA
+    "usb_storage.unmount",
+    UnmountDeviceAction,
+    USB_STORAGE_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def usb_storage_unmount_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -174,7 +180,10 @@ async def usb_storage_unmount_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "usb_storage.list_files", ListFilesAction, USB_STORAGE_ACTION_SCHEMA
+    "usb_storage.list_files",
+    ListFilesAction,
+    USB_STORAGE_ACTION_SCHEMA,
+    synchronous=True,
 )
 async def usb_storage_list_files_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
