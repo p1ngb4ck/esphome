@@ -285,6 +285,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   float get_voltage_setting() const;
   float get_current_setting() const;
   uint8_t get_brightness_setting() const { return this->brightness_; }
+  bool is_connected() const { return this->connected_; }
 
   // Connection trigger
   void add_on_connect_callback(std::function<void()> callback) { this->on_connect_callback_.add(std::move(callback)); }

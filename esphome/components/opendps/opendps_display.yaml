@@ -34,6 +34,12 @@ globals:
   - id: g_iset
     type: float
     initial_value: "0.0"
+  - id: g_output_on
+    type: bool
+    initial_value: "false"
+  - id: g_datetime_fmt
+    type: int
+    initial_value: "2"
 
 sensor:
   - platform: opendps
@@ -41,9 +47,13 @@ sensor:
     voltage_out:
       id: opendps_output_voltage
       on_value:
-        - lvgl.label.update:
-            id: lbl_vout
-            text: {format: "%.2f", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_output_on);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_vout
+                  text: {format: "%.2f", args: [x]}
         - lvgl.label.update:
             id: lbl_vout_g
             text: {format: "Vout  %.2fV", args: [x]}
@@ -54,9 +64,13 @@ sensor:
     current_out:
       id: opendps_ouput_current
       on_value:
-        - lvgl.label.update:
-            id: lbl_iout
-            text: {format: "%.3f", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_output_on);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_iout
+                  text: {format: "%.3f", args: [x]}
         - lvgl.label.update:
             id: lbl_iout_g
             text: {format: "Iout  %.3fA", args: [x]}
@@ -64,12 +78,10 @@ sensor:
             id: chart_i
             series_id: ser_i
             value: !lambda 'return (int)(x * 1000);'
+
     power_out:
       id: opendps_output_power
       on_value:
-        - lvgl.label.update:
-            id: lbl_pout
-            text: {format: "%.2f", args: [x]}
         - lvgl.label.update:
             id: lbl_pout_g
             text: {format: "Pout  %.2fW", args: [x]}
@@ -83,24 +95,6 @@ sensor:
         - lvgl.label.update:
             id: lbl_vin
             text: {format: "%.1fV", args: [x]}
-    temperature_1:
-      id: opendps_temp1
-      on_value:
-        - lvgl.bar.update:
-            id: bar_t1
-            value: !lambda 'return (int)x;'
-        - lvgl.label.update:
-            id: lbl_t1
-            text: {format: "%.0f°C", args: [x]}
-    temperature_2:
-      id: opendps_temp2
-      on_value:
-        - lvgl.bar.update:
-            id: bar_t2
-            value: !lambda 'return (int)x;'
-        - lvgl.label.update:
-            id: lbl_t2
-            text: {format: "%.0f°C", args: [x]}
 
 number:
   - platform: template
@@ -115,7 +109,8 @@ number:
     optimistic: true
     set_action:
       - lambda: |-
-          id(opendps_id).set_voltage(x);
+          if (id(opendps_id).is_connected())
+            id(opendps_id).set_voltage(x);
     on_value:
       - globals.set:
           id: g_vset
@@ -123,9 +118,13 @@ number:
       - lvgl.slider.update:
           id: sl_v
           value: !lambda 'return (int)(x * 10);'
-      - lvgl.label.update:
-          id: lbl_setv
-          text: {format: "%.2f", args: [x]}
+      - if:
+          condition:
+            lambda: 'return !id(g_output_on);'
+          then:
+            - lvgl.label.update:
+                id: lbl_vout
+                text: {format: "%.2f", args: [x]}
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 50
@@ -141,7 +140,8 @@ number:
     optimistic: true
     set_action:
       - lambda: |-
-          id(opendps_id).set_current(x);
+          if (id(opendps_id).is_connected())
+            id(opendps_id).set_current(x);
     on_value:
       - globals.set:
           id: g_iset
@@ -149,9 +149,13 @@ number:
       - lvgl.slider.update:
           id: sl_i
           value: !lambda 'return (int)(x * 100);'
-      - lvgl.label.update:
-          id: lbl_seti
-          text: {format: "%.3f", args: [x]}
+      - if:
+          condition:
+            lambda: 'return !id(g_output_on);'
+          then:
+            - lvgl.label.update:
+                id: lbl_iout
+                text: {format: "%.3f", args: [x]}
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 60
@@ -163,26 +167,39 @@ binary_sensor:
       id: dps_output_sensor_id
       name: "OpenDPS Output Enabled"
       icon: mdi:meter-electric-outline
-      on_press:
-        - lvgl.widget.update:
-            id: pwr_ring
-            border_color: 0x39FF14
-            shadow_color: 0x39FF14
-            shadow_width: 16
-        - lvgl.label.update:
-            id: lbl_pwr
-            text: "OUTPUT\nON"
-            text_color: 0x39FF14
-      on_release:
-        - lvgl.widget.update:
-            id: pwr_ring
-            border_color: 0x555555
-            shadow_color: 0x000000
-            shadow_width: 0
-        - lvgl.label.update:
-            id: lbl_pwr
-            text: "OUTPUT\nOFF"
-            text_color: 0x555555
+      on_value:
+        - globals.set:
+            id: g_output_on
+            value: !lambda 'return x;'
+        - if:
+            condition:
+              lambda: 'return x;'
+            then:
+              - lvgl.widget.update:
+                  id: pwr_ring
+                  border_color: 0x39FF14
+                  shadow_color: 0x39FF14
+                  shadow_width: 16
+              - lvgl.label.update:
+                  id: lbl_pwr
+                  text: "ON"
+                  text_color: 0x39FF14
+            else:
+              - lvgl.widget.update:
+                  id: pwr_ring
+                  border_color: 0x555555
+                  shadow_color: 0x000000
+                  shadow_width: 0
+              - lvgl.label.update:
+                  id: lbl_pwr
+                  text: "OFF"
+                  text_color: 0x555555
+              - lvgl.label.update:
+                  id: lbl_vout
+                  text: {format: "%.2f", args: [id(g_vset)]}
+              - lvgl.label.update:
+                  id: lbl_iout
+                  text: {format: "%.3f", args: [id(g_iset)]}
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
@@ -195,7 +212,7 @@ select:
     options:
       - "cv"
       - "cc"
-      - "cp"
+      - "cl"
     set_action:
       - lambda: |-
           id(opendps_id).set_function(x.c_str());
@@ -211,10 +228,10 @@ select:
           shadow_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x000000);'
           shadow_width: !lambda 'return (x == "cc") ? 10 : 0;'
       - lvgl.widget.update:
-          id: led_cp
-          bg_color: !lambda 'return (x == "cp") ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A);'
-          shadow_color: !lambda 'return (x == "cp") ? lv_color_hex(0xFF3333) : lv_color_hex(0x000000);'
-          shadow_width: !lambda 'return (x == "cp") ? 10 : 0;'
+          id: led_cl
+          bg_color: !lambda 'return (x == "cl") ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A);'
+          shadow_color: !lambda 'return (x == "cl") ? lv_color_hex(0xFF3333) : lv_color_hex(0x000000);'
+          shadow_width: !lambda 'return (x == "cl") ? 10 : 0;'
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 40
@@ -262,12 +279,12 @@ lvgl:
   default_font: montserrat_16
 
   # =========================================================
-  # TOP LAYER — always visible, covers header (y=0) and footer (y=760)
+  # TOP LAYER — always visible, covers header (y=0) and footer (y=560)
   # Uses no layout so children can be absolutely positioned
   # =========================================================
   top_layer:
-    width: 1280
-    height: 800
+    width: 1024
+    height: 600
     bg_opa: TRANSP
     border_width: 0
     radius: 0
@@ -278,7 +295,7 @@ lvgl:
       - obj:
           x: 0
           y: 0
-          width: 1280
+          width: 1024
           height: 40
           bg_color: 0x141414
           border_width: 0
@@ -295,9 +312,10 @@ lvgl:
             flex_align_cross: CENTER
           widgets:
             - label:
-                text: "DPS5005"
+                id: lbl_status_time
+                text: "--:--"
                 text_color: 0xAAAAAA
-                text_font: montserrat_16
+                text_font: montserrat_14
             - obj:
                 bg_opa: TRANSP
                 border_width: 0
@@ -342,11 +360,11 @@ lvgl:
                       text_color: 0x888888
                       text_font: montserrat_14
 
-      # --- Footer tab bar (y=760, h=40) ---
+      # --- Footer tab bar (y=560, h=40) ---
       - obj:
           x: 0
-          y: 760
-          width: 1280
+          y: 560
+          width: 1024
           height: 40
           bg_color: 0x0D0D0D
           border_width: 0
@@ -361,7 +379,7 @@ lvgl:
           widgets:
             - button:
                 id: tab_btn_main
-                width: 426
+                width: 341
                 height: 40
                 bg_color: 0x1A1A1A
                 border_width: 2
@@ -379,7 +397,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_graphs
-                width: 426
+                width: 341
                 height: 40
                 bg_color: 0x111111
                 border_width: 0
@@ -395,7 +413,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_settings
-                width: 428
+                width: 342
                 height: 40
                 bg_color: 0x111111
                 border_width: 0
@@ -412,8 +430,8 @@ lvgl:
 
   pages:
     # =========================================================
-    # PAGE: MAIN  (content area y=40..760, 720px tall)
-    # top_layer covers header y=0..40 and footer y=760..800
+    # PAGE: MAIN  (content area y=40..560, 520px tall)
+    # top_layer covers header y=0..40 and footer y=560..600
     # All positions absolute, all sizes fixed.
     # =========================================================
     - id: page_main
@@ -421,13 +439,13 @@ lvgl:
       scrollbar_mode: "off"
 
       widgets:
-        # LCD panel: x=40, y=48, w=1200, h=244
+        # LCD panel: x=32, y=40, w=960, h=160
         - obj:
             id: lcd_panel
-            x: 40
-            y: 48
-            width: 1200
-            height: 244
+            x: 32
+            y: 40
+            width: 960
+            height: 160
             bg_color: 0x0C1A0C
             border_color: 0x004408
             border_width: 2
@@ -437,20 +455,19 @@ lvgl:
             shadow_opa: 25%
             pad_left: 16
             pad_right: 16
-            pad_top: 12
+            pad_top: 8
             pad_bottom: 8
             scrollbar_mode: "off"
             layout:
               type: FLEX
-              flex_flow: COLUMN
+              flex_flow: ROW
               flex_align_main: SPACE_EVENLY
-              flex_align_cross: STRETCH
-              pad_row: 0
+              flex_align_cross: CENTER
 
             widgets:
-              # Top row: Vout + Iout — w=1168, h=140
+              # Voltage display
               - obj:
-                  width: 1168
+                  width: 440
                   height: 140
                   bg_opa: TRANSP
                   border_width: 0
@@ -458,215 +475,58 @@ lvgl:
                   layout:
                     type: FLEX
                     flex_flow: ROW
-                    flex_align_main: SPACE_EVENLY
-                    flex_align_cross: CENTER
-
+                    flex_align_cross: END
+                    flex_align_main: CENTER
+                    pad_column: 4
                   widgets:
-                    # Voltage display — w=564, h=130
-                    - obj:
-                        width: 564
-                        height: 130
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "VOLTAGE"
-                              text_color: 0x39FF14
-                              text_font: montserrat_14
-                          - obj:
-                              width: 564
-                              height: 100
-                              bg_opa: TRANSP
-                              border_width: 0
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: ROW
-                                flex_align_cross: END
-                                flex_align_main: CENTER
-                                pad_column: 4
-                              widgets:
-                                - label:
-                                    id: lbl_vout
-                                    text: "--.-"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_72
-                                - label:
-                                    text: "V"
-                                    text_color: 0x1A8020
-                                    text_font: montserrat_28
-                                    y: -8
+                    - label:
+                        id: lbl_vout
+                        text: !lambda |-
+                          char buf[16];
+                          snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
+                          return std::string(buf);
+                        text_color: 0x39FF14
+                        text_font: montserrat_72
+                    - label:
+                        text: "V"
+                        text_color: 0x1A8020
+                        text_font: montserrat_28
+                        y: -10
 
-                    # Current display — w=564, h=130
-                    - obj:
-                        width: 564
-                        height: 130
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "CURRENT"
-                              text_color: 0x39FF14
-                              text_font: montserrat_14
-                          - obj:
-                              width: 564
-                              height: 100
-                              bg_opa: TRANSP
-                              border_width: 0
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: ROW
-                                flex_align_cross: END
-                                flex_align_main: CENTER
-                                pad_column: 4
-                              widgets:
-                                - label:
-                                    id: lbl_iout
-                                    text: "-.---"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_72
-                                - label:
-                                    text: "A"
-                                    text_color: 0x1A8020
-                                    text_font: montserrat_28
-                                    y: -8
-
-              # Bottom row: Power / SetV / SetA — w=1168, h=68
+              # Current display
               - obj:
-                  width: 1168
-                  height: 68
-                  bg_color: 0x060E06
-                  border_color: 0x002208
-                  border_width: 1
-                  radius: 4
+                  width: 440
+                  height: 140
+                  bg_opa: TRANSP
+                  border_width: 0
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
                     flex_flow: ROW
-                    flex_align_main: SPACE_EVENLY
-                    flex_align_cross: CENTER
-
+                    flex_align_cross: END
+                    flex_align_main: CENTER
+                    pad_column: 4
                   widgets:
-                    - obj:
-                        width: 360
-                        height: 56
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: ROW
-                          flex_align_main: CENTER
-                          flex_align_cross: END
-                          pad_column: 6
-                        widgets:
-                          - label:
-                              text: "POWER"
-                              text_color: 0x1A6020
-                              text_font: montserrat_14
-                              y: -4
-                          - label:
-                              id: lbl_pout
-                              text: "--.-"
-                              text_color: 0x39FF14
-                              text_font: montserrat_36
-                          - label:
-                              text: "W"
-                              text_color: 0x1A6020
-                              text_font: montserrat_20
-                              y: -4
+                    - label:
+                        id: lbl_iout
+                        text: !lambda |-
+                          char buf[16];
+                          snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
+                          return std::string(buf);
+                        text_color: 0x39FF14
+                        text_font: montserrat_72
+                    - label:
+                        text: "A"
+                        text_color: 0x1A8020
+                        text_font: montserrat_28
+                        y: -10
 
-                    - obj:
-                        width: 1
-                        height: 36
-                        bg_color: 0x003308
-                        border_width: 0
-                        radius: 0
-
-                    - obj:
-                        width: 360
-                        height: 56
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: ROW
-                          flex_align_main: CENTER
-                          flex_align_cross: END
-                          pad_column: 6
-                        widgets:
-                          - label:
-                              text: "SET V"
-                              text_color: 0x1A6020
-                              text_font: montserrat_14
-                              y: -4
-                          - label:
-                              id: lbl_setv
-                              text: "--.-"
-                              text_color: 0x22CC55
-                              text_font: montserrat_36
-                          - label:
-                              text: "V"
-                              text_color: 0x1A6020
-                              text_font: montserrat_20
-                              y: -4
-
-                    - obj:
-                        width: 1
-                        height: 36
-                        bg_color: 0x003308
-                        border_width: 0
-                        radius: 0
-
-                    - obj:
-                        width: 360
-                        height: 56
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: ROW
-                          flex_align_main: CENTER
-                          flex_align_cross: END
-                          pad_column: 6
-                        widgets:
-                          - label:
-                              text: "SET A"
-                              text_color: 0x1A6020
-                              text_font: montserrat_14
-                              y: -4
-                          - label:
-                              id: lbl_seti
-                              text: "-.--"
-                              text_color: 0x22CC55
-                              text_font: montserrat_36
-                          - label:
-                              text: "A"
-                              text_color: 0x1A6020
-                              text_font: montserrat_20
-                              y: -4
-
-        # Mode buttons + output indicator: x=40, y=300, w=1200, h=44
+        # Controls row: CV/CC/CP + power ring + lock — x=32, y=208, w=960, h=52
         - obj:
-            x: 40
-            y: 300
-            width: 1200
-            height: 44
+            x: 32
+            y: 208
+            width: 960
+            height: 52
             bg_color: 0x141414
             border_width: 0
             radius: 4
@@ -674,15 +534,14 @@ lvgl:
             layout:
               type: FLEX
               flex_flow: ROW
-              flex_align_main: CENTER
+              flex_align_main: SPACE_EVENLY
               flex_align_cross: CENTER
-              pad_column: 56
 
             widgets:
               - button:
                   id: btn_cv
-                  width: 96
-                  height: 36
+                  width: 88
+                  height: 40
                   bg_opa: TRANSP
                   border_width: 0
                   radius: 4
@@ -716,8 +575,8 @@ lvgl:
 
               - button:
                   id: btn_cc
-                  width: 96
-                  height: 36
+                  width: 88
+                  height: 40
                   bg_opa: TRANSP
                   border_width: 0
                   radius: 4
@@ -751,8 +610,8 @@ lvgl:
 
               - button:
                   id: btn_cp
-                  width: 96
-                  height: 36
+                  width: 88
+                  height: 40
                   bg_opa: TRANSP
                   border_width: 0
                   radius: 4
@@ -767,7 +626,7 @@ lvgl:
                   on_click:
                     - select.set:
                         id: opendps_select_mode
-                        option: "cp"
+                        option: "cl"
                   widgets:
                     - obj:
                         id: led_cp
@@ -784,47 +643,56 @@ lvgl:
                         text_color: 0xFF3333
                         text_font: montserrat_16
 
+              # Power ring button
               - obj:
-                  width: 96
-                  height: 36
-                  bg_opa: TRANSP
-                  border_width: 0
+                  id: pwr_ring
+                  width: 44
+                  height: 44
+                  radius: 22
+                  bg_color: 0x222222
+                  border_color: 0x555555
+                  border_width: 3
+                  shadow_color: 0x000000
+                  shadow_width: 0
                   scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                    pad_column: 8
+                  on_click:
+                    - switch.toggle: dps_output_switch
                   widgets:
-                    - obj:
-                        id: led_out
-                        width: 14
-                        height: 14
-                        radius: 7
-                        bg_color: 0x1A1A1A
-                        border_color: 0x555555
-                        border_width: 1
-                        shadow_width: 0
                     - label:
-                        text: "OUT"
-                        text_color: 0x888888
-                        text_font: montserrat_16
+                        id: lbl_pwr_icon
+                        align: CENTER
+                        text: "\u23FB"
+                        text_color: 0x555555
+                        text_font: montserrat_28
 
-        # Sliders + power button: x=40, y=352, w=1200, h=188
+              - label:
+                  id: lbl_pwr
+                  text: "OFF"
+                  text_color: 0x555555
+                  text_font: montserrat_16
+
+              # Lock switch
+              - switch:
+                  id: sw_lock_main
+                  on_value:
+                    - opendps.lock:
+                        id: opendps_id
+                        locked: !lambda 'return x;'
+
+        # Sliders: x=32, y=268, w=960, h=140
         - obj:
-            x: 40
-            y: 352
-            width: 1200
-            height: 188
+            x: 32
+            y: 268
+            width: 960
+            height: 140
             bg_color: 0x171717
             border_color: 0x2A2A2A
             border_width: 1
             radius: 6
-            pad_left: 24
-            pad_right: 24
-            pad_top: 12
-            pad_bottom: 12
+            pad_left: 20
+            pad_right: 20
+            pad_top: 10
+            pad_bottom: 10
             scrollbar_mode: "off"
             layout:
               type: FLEX
@@ -833,10 +701,10 @@ lvgl:
               flex_align_cross: CENTER
 
             widgets:
-              # Voltage slider — w=448, h=164
+              # Voltage slider — w=440, h=120
               - obj:
-                  width: 448
-                  height: 164
+                  width: 440
+                  height: 120
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -849,7 +717,7 @@ lvgl:
 
                   widgets:
                     - obj:
-                        width: 448
+                        width: 440
                         height: 20
                         bg_opa: TRANSP
                         border_width: 0
@@ -871,7 +739,7 @@ lvgl:
 
                     - slider:
                         id: sl_v
-                        width: 448
+                        width: 440
                         height: 32
                         min_value: 0
                         max_value: 300
@@ -897,16 +765,10 @@ lvgl:
                           pad_bottom: -4
                         on_value:
                           - lambda: |-
-                              float v = x / 10.0f;
-                              id(voltage_number).make_call().set_value(v).perform();
-                          - lvgl.label.update:
-                              id: lbl_setv
-                              text:
-                                format: "%.2f"
-                                args: ['x / 10.0f']
+                              id(voltage_number).make_call().set_value(x / 10.0f).perform();
 
                     - obj:
-                        width: 448
+                        width: 440
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
@@ -938,53 +800,10 @@ lvgl:
                               text_color: 0x444444
                               text_font: montserrat_12
 
-              # Power button — w=144, h=164
+              # Current slider — w=440, h=120
               - obj:
-                  width: 144
-                  height: 164
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: COLUMN
-                    flex_align_main: CENTER
-                    flex_align_cross: CENTER
-                    pad_row: 8
-
-                  widgets:
-                    - obj:
-                        id: pwr_ring
-                        width: 96
-                        height: 96
-                        radius: 48
-                        bg_color: 0x222222
-                        border_color: 0x555555
-                        border_width: 4
-                        shadow_color: 0x000000
-                        shadow_width: 0
-                        scrollbar_mode: "off"
-                        on_click:
-                          - switch.toggle: dps_output_switch
-                        widgets:
-                          - label:
-                              id: lbl_pwr_icon
-                              align: CENTER
-                              text: "\u23FB"
-                              text_color: 0x555555
-                              text_font: montserrat_48
-
-                    - label:
-                        id: lbl_pwr
-                        text: "OUTPUT\nOFF"
-                        text_color: 0x555555
-                        text_font: montserrat_14
-                        text_align: CENTER
-
-              # Current slider — w=448, h=164
-              - obj:
-                  width: 448
-                  height: 164
+                  width: 440
+                  height: 120
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -997,7 +816,7 @@ lvgl:
 
                   widgets:
                     - obj:
-                        width: 448
+                        width: 440
                         height: 20
                         bg_opa: TRANSP
                         border_width: 0
@@ -1019,7 +838,7 @@ lvgl:
 
                     - slider:
                         id: sl_i
-                        width: 448
+                        width: 440
                         height: 32
                         min_value: 0
                         max_value: 500
@@ -1045,16 +864,10 @@ lvgl:
                           pad_bottom: -4
                         on_value:
                           - lambda: |-
-                              float i = x / 100.0f;
-                              id(current_number).make_call().set_value(i).perform();
-                          - lvgl.label.update:
-                              id: lbl_seti
-                              text:
-                                format: "%.3f"
-                                args: ['x / 100.0f']
+                              id(current_number).make_call().set_value(x / 100.0f).perform();
 
                     - obj:
-                        width: 448
+                        width: 440
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
@@ -1086,249 +899,19 @@ lvgl:
                               text_color: 0x444444
                               text_font: montserrat_12
 
-        # Temperature bars: x=40, y=548, w=1200, h=72
-        - obj:
-            x: 40
-            y: 548
-            width: 1200
-            height: 72
-            bg_color: 0x141414
-            border_width: 0
-            radius: 4
-            pad_left: 20
-            pad_right: 20
-            pad_top: 8
-            pad_bottom: 8
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_main: SPACE_EVENLY
-              flex_align_cross: CENTER
-              pad_column: 32
-
-            widgets:
-              # Heatsink bar — w=548, h=56
-              - obj:
-                  width: 548
-                  height: 56
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: COLUMN
-                    flex_align_cross: STRETCH
-                    pad_row: 4
-
-                  widgets:
-                    - obj:
-                        width: 548
-                        height: 18
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: ROW
-                          flex_align_main: SPACE_BETWEEN
-                        widgets:
-                          - label:
-                              text: "HEATSINK"
-                              text_color: 0x666666
-                              text_font: montserrat_12
-                          - label:
-                              id: lbl_t1
-                              text: "--°C"
-                              text_color: 0x39FF14
-                              text_font: montserrat_12
-                    - bar:
-                        id: bar_t1
-                        width: 548
-                        height: 10
-                        min_value: 0
-                        max_value: 80
-                        value: 0
-                        indicator:
-                          bg_color: 0x39FF14
-                          bg_grad_color: 0xFF2200
-                          bg_grad_dir: HOR
-                          bg_opa: COVER
-                        main:
-                          bg_color: 0x1A1A1A
-                          radius: 4
-                          border_width: 0
-
-              # Ambient bar — w=548, h=56
-              - obj:
-                  width: 548
-                  height: 56
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: COLUMN
-                    flex_align_cross: STRETCH
-                    pad_row: 4
-
-                  widgets:
-                    - obj:
-                        width: 548
-                        height: 18
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: ROW
-                          flex_align_main: SPACE_BETWEEN
-                        widgets:
-                          - label:
-                              text: "AMBIENT"
-                              text_color: 0x666666
-                              text_font: montserrat_12
-                          - label:
-                              id: lbl_t2
-                              text: "--°C"
-                              text_color: 0x00AACC
-                              text_font: montserrat_12
-                    - bar:
-                        id: bar_t2
-                        width: 548
-                        height: 10
-                        min_value: 0
-                        max_value: 50
-                        value: 0
-                        indicator:
-                          bg_color: 0x00AACC
-                          bg_grad_color: 0xFF8800
-                          bg_grad_dir: HOR
-                          bg_opa: COVER
-                        main:
-                          bg_color: 0x1A1A1A
-                          radius: 4
-                          border_width: 0
-
-        # Waveform decoration: x=40, y=628, w=1200, h=40
-        - obj:
-            x: 40
-            y: 628
-            width: 1200
-            height: 40
-            bg_color: 0x141414
-            border_width: 0
-            radius: 4
-            pad_left: 16
-            pad_right: 16
-            pad_top: 10
-            pad_bottom: 10
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_main: SPACE_EVENLY
-              flex_align_cross: CENTER
-
-            widgets:
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-              - obj:
-                  width: 48
-                  height: 8
-                  bg_color: 0x0A0A0A
-                  border_color: 0x333333
-                  border_width: 1
-                  radius: 3
-
     # =========================================================
-    # PAGE: GRAPHS  (content area y=40..760, 720px tall)
+    # PAGE: GRAPHS  (content area y=40..560, 520px tall)
     # =========================================================
     - id: page_graphs
       bg_color: 0x111111
       scrollbar_mode: "off"
 
       widgets:
-        # Chart header strip: x=0, y=40, w=1280, h=28
+        # Chart header strip: x=0, y=40, w=1024, h=28
         - obj:
             x: 0
             y: 40
-            width: 1280
+            width: 1024
             height: 28
             bg_color: 0x0D0D0D
             border_width: 0
@@ -1364,12 +947,12 @@ lvgl:
                   text_color: 0x444444
                   text_font: montserrat_12
 
-        # Voltage chart row: x=0, y=68, w=1280, h=220
+        # Voltage chart row: x=0, y=68, w=1024, h=164
         - obj:
             x: 0
             y: 68
-            width: 1280
-            height: 220
+            width: 1024
+            height: 164
             bg_color: 0x070D07
             border_color: 0x002208
             border_width: 1
@@ -1384,8 +967,8 @@ lvgl:
 
             widgets:
               - obj:
-                  width: 56
-                  height: 200
+                  width: 44
+                  height: 148
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -1398,7 +981,7 @@ lvgl:
                     - label:
                         text: "V"
                         text_color: 0x4499FF
-                        text_font: montserrat_28
+                        text_font: montserrat_20
                     - label:
                         text: "out"
                         text_color: 0x224466
@@ -1406,8 +989,8 @@ lvgl:
 
               - chart:
                   id: chart_v
-                  width: 1192
-                  height: 200
+                  width: 944
+                  height: 148
                   type: LINE
                   point_count: 60
                   update_mode: SHIFT
@@ -1432,12 +1015,12 @@ lvgl:
                     - id: ser_v
                       color: 0x4499FF
 
-        # Current chart row: x=0, y=296, w=1280, h=220
+        # Current chart row: x=0, y=232, w=1024, h=164
         - obj:
             x: 0
-            y: 296
-            width: 1280
-            height: 220
+            y: 232
+            width: 1024
+            height: 164
             bg_color: 0x070D07
             border_color: 0x002208
             border_width: 1
@@ -1452,8 +1035,8 @@ lvgl:
 
             widgets:
               - obj:
-                  width: 56
-                  height: 200
+                  width: 44
+                  height: 148
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -1466,7 +1049,7 @@ lvgl:
                     - label:
                         text: "A"
                         text_color: 0xFFAA22
-                        text_font: montserrat_28
+                        text_font: montserrat_20
                     - label:
                         text: "out"
                         text_color: 0x664422
@@ -1474,8 +1057,8 @@ lvgl:
 
               - chart:
                   id: chart_i
-                  width: 1192
-                  height: 200
+                  width: 944
+                  height: 148
                   type: LINE
                   point_count: 60
                   update_mode: SHIFT
@@ -1500,12 +1083,12 @@ lvgl:
                     - id: ser_i
                       color: 0xFFAA22
 
-        # Power chart row: x=0, y=524, w=1280, h=220
+        # Power chart row: x=0, y=396, w=1024, h=164
         - obj:
             x: 0
-            y: 524
-            width: 1280
-            height: 220
+            y: 396
+            width: 1024
+            height: 164
             bg_color: 0x070D07
             border_color: 0x002208
             border_width: 1
@@ -1520,8 +1103,8 @@ lvgl:
 
             widgets:
               - obj:
-                  width: 56
-                  height: 200
+                  width: 44
+                  height: 148
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -1534,7 +1117,7 @@ lvgl:
                     - label:
                         text: "W"
                         text_color: 0xFF44CC
-                        text_font: montserrat_28
+                        text_font: montserrat_20
                     - label:
                         text: "out"
                         text_color: 0x662266
@@ -1542,8 +1125,8 @@ lvgl:
 
               - chart:
                   id: chart_p
-                  width: 1192
-                  height: 200
+                  width: 944
+                  height: 148
                   type: LINE
                   point_count: 60
                   update_mode: SHIFT
@@ -1569,31 +1152,31 @@ lvgl:
                       color: 0xFF44CC
 
     # =========================================================
-    # PAGE: SETTINGS  (content area y=40..760, 720px tall)
+    # PAGE: SETTINGS  (content area y=40..560, 520px tall)
     # =========================================================
     - id: page_settings
       bg_color: 0x141414
       scrollbar_mode: "off"
 
       widgets:
-        # Left column (presets): x=20, y=48, w=756, h=700
+        # Left column (presets): x=16, y=40, w=596, h=508
         - obj:
-            x: 20
-            y: 48
-            width: 756
-            height: 700
+            x: 16
+            y: 40
+            width: 596
+            height: 508
             bg_color: 0x1C1C1C
             border_color: 0x2A2A2A
             border_width: 1
             radius: 8
-            pad_all: 20
+            pad_all: 16
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: COLUMN
               flex_align_main: START
               flex_align_cross: STRETCH
-              pad_row: 16
+              pad_row: 12
 
             widgets:
               - label:
@@ -1601,10 +1184,10 @@ lvgl:
                   text_color: 0x39FF14
                   text_font: montserrat_20
 
-              # Preset buttons grid: 2 columns × 3 rows, each 336×88
+              # Preset buttons grid: 2 columns × 3 rows, each 272×72
               - obj:
-                  width: 716
-                  height: 572
+                  width: 564
+                  height: 460
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
@@ -1613,13 +1196,13 @@ lvgl:
                     flex_flow: ROW_WRAP
                     flex_align_main: SPACE_EVENLY
                     flex_align_cross: START
-                    pad_column: 12
-                    pad_row: 12
+                    pad_column: 10
+                    pad_row: 10
 
                   widgets:
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x0F1F0F
                         border_color: 0x1A3A1A
                         border_width: 1
@@ -1639,8 +1222,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1650,15 +1233,15 @@ lvgl:
                                 - label:
                                     text: "3.3V / 1A"
                                     text_color: 0x39FF14
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "Logic / MCU"
                                     text_color: 0x336633
                                     text_font: montserrat_12
 
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x0F1F0F
                         border_color: 0x1A3A1A
                         border_width: 1
@@ -1678,8 +1261,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1689,15 +1272,15 @@ lvgl:
                                 - label:
                                     text: "5V / 2A"
                                     text_color: 0x39FF14
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "USB / RPi"
                                     text_color: 0x336633
                                     text_font: montserrat_12
 
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x0F1F0F
                         border_color: 0x1A3A1A
                         border_width: 1
@@ -1717,8 +1300,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1728,15 +1311,15 @@ lvgl:
                                 - label:
                                     text: "9V / 2A"
                                     text_color: 0x39FF14
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "QC / Motors"
                                     text_color: 0x336633
                                     text_font: montserrat_12
 
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x0F1F0F
                         border_color: 0x1A3A1A
                         border_width: 1
@@ -1756,8 +1339,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1767,15 +1350,15 @@ lvgl:
                                 - label:
                                     text: "12V / 1A"
                                     text_color: 0x39FF14
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "Arduino / strips"
                                     text_color: 0x336633
                                     text_font: montserrat_12
 
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x10101F
                         border_color: 0x1A1A3A
                         border_width: 1
@@ -1795,8 +1378,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1806,15 +1389,15 @@ lvgl:
                                 - label:
                                     text: "4.2V / 0.5A"
                                     text_color: 0x8888FF
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "LiPo charge"
                                     text_color: 0x333366
                                     text_font: montserrat_12
 
                     - button:
-                        width: 336
-                        height: 88
+                        width: 272
+                        height: 72
                         bg_color: 0x1A0F0F
                         border_color: 0x3A1A1A
                         border_width: 1
@@ -1834,8 +1417,8 @@ lvgl:
                               align: CENTER
                               bg_opa: TRANSP
                               border_width: 0
-                              width: 310
-                              height: 60
+                              width: 248
+                              height: 52
                               scrollbar_mode: "off"
                               layout:
                                 type: FLEX
@@ -1845,30 +1428,30 @@ lvgl:
                                 - label:
                                     text: "24V / 0.5A"
                                     text_color: 0xFF6666
-                                    text_font: montserrat_20
+                                    text_font: montserrat_18
                                 - label:
                                     text: "Automation"
                                     text_color: 0x663333
                                     text_font: montserrat_12
 
-        # Right column (PSU controls): x=796, y=48, w=464, h=700
+        # Right column (PSU controls): x=628, y=40, w=380, h=508
         - obj:
-            x: 796
-            y: 48
-            width: 464
-            height: 700
+            x: 628
+            y: 40
+            width: 380
+            height: 508
             bg_color: 0x1C1C1C
             border_color: 0x2A2A2A
             border_width: 1
             radius: 8
-            pad_all: 20
+            pad_all: 16
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: COLUMN
               flex_align_main: START
               flex_align_cross: STRETCH
-              pad_row: 20
+              pad_row: 16
 
             widgets:
               - label:
@@ -1878,13 +1461,13 @@ lvgl:
 
               # Brightness control box
               - obj:
-                  width: 424
-                  height: 108
+                  width: 348
+                  height: 100
                   bg_color: 0x222222
                   border_color: 0x333333
                   border_width: 1
                   radius: 6
-                  pad_all: 16
+                  pad_all: 14
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
@@ -1894,7 +1477,7 @@ lvgl:
 
                   widgets:
                     - obj:
-                        width: 392
+                        width: 320
                         height: 20
                         bg_opa: TRANSP
                         border_width: 0
@@ -1915,7 +1498,7 @@ lvgl:
                               text_font: montserrat_16
                     - slider:
                         id: sl_bright
-                        width: 392
+                        width: 320
                         height: 24
                         min_value: 5
                         max_value: 100
@@ -1945,13 +1528,13 @@ lvgl:
 
               # Lock keypad toggle
               - obj:
-                  width: 424
-                  height: 64
+                  width: 348
+                  height: 56
                   bg_color: 0x222222
                   border_color: 0x333333
                   border_width: 1
                   radius: 6
-                  pad_all: 16
+                  pad_all: 14
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
@@ -1965,7 +1548,7 @@ lvgl:
                         text_color: 0xCCCCCC
                         text_font: montserrat_16
                     - switch:
-                        id: sw_lock
+                        id: sw_lock_settings
                         on_value:
                           - opendps.lock:
                               id: opendps_id
