@@ -128,7 +128,7 @@ number:
           id: g_vset
           value: !lambda 'return x;'
       - lambda: |-
-          lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 100.0f), LV_ANIM_OFF);
+          lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 10000.0f), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_v));
       - lvgl.label.update:
           id: lbl_setv
@@ -614,7 +614,7 @@ lvgl:
                         width: 548
                         height: 62
                         min_value: 0
-                        max_value: 100
+                        max_value: 10000
                         value: 0
                         bg_color: 0x222222
                         bg_opa: COVER
@@ -644,7 +644,7 @@ lvgl:
                               value: "false"
                         on_value:
                           - lambda: |-
-                              id(voltage_number).make_call().set_value(x / 100.0f * id(g_vmax)).perform();
+                              id(voltage_number).make_call().set_value(x / 10000.0f * id(g_vmax)).perform();
 
                     - obj:
                         width: 548
