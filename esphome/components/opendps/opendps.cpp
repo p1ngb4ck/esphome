@@ -38,16 +38,15 @@ void OpenDPS::setup() {
   }
 
   // Check if we were in the middle of a firmware upgrade when we rebooted
-  // If so, switch to bootloader baud rate to continue/retry the upgrade
+  // Bootloader always starts at 9600 regardless of operational baud
   this->upgrade_state_pref_ = global_preferences->make_preference<uint32_t>(fnv1_hash("opendps_upgrade_state"));
-  uint32_t saved_bootloader_baud = 0;
-  if (this->upgrade_state_pref_.load(&saved_bootloader_baud) && saved_bootloader_baud > 0) {
+  uint32_t upgrade_flag = 0;
+  if (this->upgrade_state_pref_.load(&upgrade_flag) && upgrade_flag > 0) {
     ESP_LOGW(TAG, "Detected incomplete firmware upgrade - DPS may be in bootloader mode");
-    ESP_LOGI(TAG, "Switching UART to bootloader baud rate: %u", saved_bootloader_baud);
+    ESP_LOGI(TAG, "Switching UART to 9600 for bootloader");
     this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    this->bootloader_baud_rate_ = saved_bootloader_baud;
     this->parent_->flush();
-    this->parent_->set_baud_rate(saved_bootloader_baud);
+    this->parent_->set_baud_rate(9600);
     this->parent_->load_settings();
   }
 
@@ -97,6 +96,20 @@ void OpenDPS::loop() {
   if (this->upgrade_bootloader_ready_time_ > 0) {
     if (now - this->upgrade_bootloader_ready_time_ >= 500) {
       this->upgrade_bootloader_ready_time_ = 0;
+      // Switch to faster baud if configured, before first data chunk
+      if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != 9600) {
+        ESP_LOGI(TAG, "Switching bootloader to %u for data transfer", this->bootloader_baud_rate_);
+        std::vector<uint8_t> payload;
+        this->pack8_(payload, CMD_SET_BAUD);
+        this->pack8_(payload, (this->bootloader_baud_rate_ >> 24) & 0xFF);
+        this->pack8_(payload, (this->bootloader_baud_rate_ >> 16) & 0xFF);
+        this->pack8_(payload, (this->bootloader_baud_rate_ >> 8) & 0xFF);
+        this->pack8_(payload, this->bootloader_baud_rate_ & 0xFF);
+        this->send_frame_(payload);
+        this->parent_->flush();
+        this->parent_->set_baud_rate(this->bootloader_baud_rate_);
+        this->parent_->load_settings();
+      }
       this->upgrade_last_chunk_time_ = now;
       this->send_next_upgrade_chunk_();
     }
@@ -648,11 +661,10 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
           this->upgrade_last_chunk_time_ = 0;
-          // NOTE: Keep bootloader baud rate on failure - device may still be in bootloader
-          // User can retry the upgrade. Preference state is preserved for reboot recovery.
+          // Stay at 9600 on rejection - device may still be in bootloader
+          // Preference flag preserved for reboot recovery; user can retry or power cycle
           if (this->firmware_baud_rate_ > 0) {
-            ESP_LOGW(TAG, "Staying at bootloader baud rate %u - retry upgrade or power cycle DPS",
-                     this->bootloader_baud_rate_);
+            ESP_LOGW(TAG, "Staying at 9600 - retry upgrade or power cycle DPS");
           }
         }
         break;
@@ -674,19 +686,22 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->upgrade_progress_callback_) {
             this->upgrade_progress_callback_(100);
           }
-          // Restore firmware baud rate if we switched for bootloader
-          // (new firmware will run at normal UART baud rate)
-          if (this->firmware_baud_rate_ > 0) {
-            ESP_LOGI(TAG, "Restoring UART baud rate to %u", this->firmware_baud_rate_);
+          // New firmware starts at 9600; if operational baud differs, send cmd_set_baud
+          uint32_t target_baud = (this->firmware_baud_rate_ > 0) ? this->firmware_baud_rate_ : 9600;
+          if (target_baud != 9600) {
+            ESP_LOGI(TAG, "Sending cmd_set_baud %u to new firmware", target_baud);
+            this->set_uart_baud(target_baud);
+          } else if (this->firmware_baud_rate_ > 0 && this->firmware_baud_rate_ != this->parent_->get_baud_rate()) {
+            // firmware_baud_rate_ was 9600 but ESPHome UART may have been changed during upgrade
             this->parent_->flush();
             this->parent_->set_baud_rate(this->firmware_baud_rate_);
             this->parent_->load_settings();
-            this->firmware_baud_rate_ = 0;
-            // Clear upgrade state from preferences
-            uint32_t zero = 0;
-            this->upgrade_state_pref_.save(&zero);
-            global_preferences->sync();
           }
+          this->firmware_baud_rate_ = 0;
+          // Clear upgrade state from preferences
+          uint32_t zero = 0;
+          this->upgrade_state_pref_.save(&zero);
+          global_preferences->sync();
           // Auto-restore calibration if enabled and backup exists
           if (this->auto_restore_calibration_ && this->has_calibration_backup()) {
             ESP_LOGI(TAG, "Auto-restoring calibration from backup...");
@@ -722,11 +737,10 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
           this->upgrade_last_chunk_time_ = 0;
-          // NOTE: Keep bootloader baud rate on failure - device may still be in bootloader mode
+          // Stay at 9600 on failure - device may still be in bootloader mode
           // User can retry upgrade or power cycle the DPS to restart it
           if (this->firmware_baud_rate_ > 0) {
-            ESP_LOGW(TAG, "Staying at bootloader baud rate %u - retry upgrade or power cycle DPS",
-                     this->bootloader_baud_rate_);
+            ESP_LOGW(TAG, "Staying at 9600 - retry upgrade or power cycle DPS");
           }
           // Restore connection icon after failed upgrade
 #ifdef USE_ETHERNET
@@ -868,6 +882,35 @@ void OpenDPS::set_brightness(uint8_t brightness) {
   this->brightness_set_time_ = millis();
 
   ESP_LOGI(TAG, "Set brightness: %d", brightness);
+}
+
+void OpenDPS::set_uart_baud(uint32_t baud) {
+  static const uint32_t valid_bauds[] = {9600, 19200, 38400, 57600, 115200};
+  bool valid = false;
+  for (uint32_t v : valid_bauds) {
+    if (baud == v) {
+      valid = true;
+      break;
+    }
+  }
+  if (!valid) {
+    ESP_LOGE(TAG, "Invalid baud rate: %u (valid: 9600, 19200, 38400, 57600, 115200)", baud);
+    return;
+  }
+
+  std::vector<uint8_t> payload;
+  this->pack8_(payload, CMD_SET_BAUD);
+  this->pack8_(payload, (baud >> 24) & 0xFF);
+  this->pack8_(payload, (baud >> 16) & 0xFF);
+  this->pack8_(payload, (baud >> 8) & 0xFF);
+  this->pack8_(payload, baud & 0xFF);
+  this->send_frame_(payload);
+
+  // Device ACKs at old baud then switches; switch ESPHome UART after flush
+  this->parent_->flush();
+  this->parent_->set_baud_rate(baud);
+  this->parent_->load_settings();
+  ESP_LOGI(TAG, "UART baud rate changed to %u", baud);
 }
 
 void OpenDPS::lock(bool locked) {
@@ -2689,25 +2732,24 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
+    // Switch UART to 9600 for bootloader contact (bootloader always starts at 9600)
+    this->firmware_baud_rate_ = this->parent_->get_baud_rate();
+    if (this->firmware_baud_rate_ != 9600) {
+      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+      this->parent_->flush();
+      this->parent_->set_baud_rate(9600);
+      this->parent_->load_settings();
+    }
+    // Save upgrade-in-progress flag so we can recover to 9600 after reboot
+    uint32_t flag = 1;
+    this->upgrade_state_pref_.save(&flag);
+    global_preferences->sync();
+
     // Send upgrade start command
     ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
              this->upgrade_crc_);
     this->upgrade_last_chunk_time_ = millis();
     this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
-
-    // Switch to bootloader baud rate if configured (before sending upgrade_start)
-    // The DPS will reboot into bootloader after receiving this command
-    if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != this->parent_->get_baud_rate()) {
-      this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-      ESP_LOGI(TAG, "Switching UART baud rate from %u to %u for bootloader", this->firmware_baud_rate_,
-               this->bootloader_baud_rate_);
-      this->parent_->flush();
-      this->parent_->set_baud_rate(this->bootloader_baud_rate_);
-      this->parent_->load_settings();
-      // Save upgrade state to preferences so we can recover after reboot
-      this->upgrade_state_pref_.save(&this->bootloader_baud_rate_);
-      global_preferences->sync();
-    }
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   } else {
@@ -2752,25 +2794,24 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
+    // Switch UART to 9600 for bootloader contact (bootloader always starts at 9600)
+    this->firmware_baud_rate_ = this->parent_->get_baud_rate();
+    if (this->firmware_baud_rate_ != 9600) {
+      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+      this->parent_->flush();
+      this->parent_->set_baud_rate(9600);
+      this->parent_->load_settings();
+    }
+    // Save upgrade-in-progress flag so we can recover to 9600 after reboot
+    uint32_t flag = 1;
+    this->upgrade_state_pref_.save(&flag);
+    global_preferences->sync();
+
     // Send upgrade start command
     ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
              this->upgrade_crc_);
     this->upgrade_last_chunk_time_ = millis();
     this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
-
-    // Switch to bootloader baud rate if configured (before sending upgrade_start)
-    // The DPS will reboot into bootloader after receiving this command
-    if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != this->parent_->get_baud_rate()) {
-      this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-      ESP_LOGI(TAG, "Switching UART baud rate from %u to %u for bootloader", this->firmware_baud_rate_,
-               this->bootloader_baud_rate_);
-      this->parent_->flush();
-      this->parent_->set_baud_rate(this->bootloader_baud_rate_);
-      this->parent_->load_settings();
-      // Save upgrade state to preferences so we can recover after reboot
-      this->upgrade_state_pref_.save(&this->bootloader_baud_rate_);
-      global_preferences->sync();
-    }
 
     ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
   }

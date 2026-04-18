@@ -306,6 +306,21 @@ template<typename... Ts> class StopDatalogAction : public Action<Ts...> {
 };
 
 // Flush Datalog Action
+template<typename... Ts> class SetUartBaudAction : public Action<Ts...> {
+ public:
+  explicit SetUartBaudAction(OpenDPS *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(uint32_t, baud_rate)
+
+  void play(const Ts &...x) override {
+    uint32_t baud = this->baud_rate_.value(x...);
+    this->parent_->set_uart_baud(baud);
+  }
+
+ protected:
+  OpenDPS *parent_;
+};
+
 template<typename... Ts> class FlushDatalogAction : public Action<Ts...> {
  public:
   explicit FlushDatalogAction(OpenDPS *parent) : parent_(parent) {}

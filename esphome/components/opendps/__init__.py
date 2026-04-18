@@ -5,6 +5,7 @@ import esphome.codegen as cg
 from esphome.components import time as time_component, uart
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_BAUD_RATE,
     CONF_BRIGHTNESS,
     CONF_BUFFER_SIZE,
     CONF_CURRENT,
@@ -54,6 +55,16 @@ CONF_TCP_BRIDGE_FRAME_TIMEOUT = "tcp_bridge_frame_timeout"
 # Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
 CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
 
+VALID_BAUD_RATES = [9600, 19200, 38400, 57600, 115200]
+
+
+def validate_uart_baud(value):
+    value = cv.positive_int(value)
+    if value not in VALID_BAUD_RATES:
+        raise cv.Invalid(f"Invalid baud rate {value}. Valid values: {VALID_BAUD_RATES}")
+    return value
+
+
 # Calibration backup/restore
 CONF_CALIBRATION_BACKUP = "calibration_backup"
 CONF_CALIBRATION_BACKUP_PATH = "calibration_backup_path"
@@ -73,6 +84,7 @@ SetFunctionAction = opendps_ns.class_("SetFunctionAction", automation.Action)
 SetParameterAction = opendps_ns.class_("SetParameterAction", automation.Action)
 LockAction = opendps_ns.class_("LockAction", automation.Action)
 SetBrightnessAction = opendps_ns.class_("SetBrightnessAction", automation.Action)
+SetUartBaudAction = opendps_ns.class_("SetUartBaudAction", automation.Action)
 PingAction = opendps_ns.class_("PingAction", automation.Action)
 RequestVersionAction = opendps_ns.class_("RequestVersionAction", automation.Action)
 UpgradeFirmwareAction = opendps_ns.class_("UpgradeFirmwareAction", automation.Action)
@@ -443,6 +455,22 @@ async def opendps_set_brightness_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg, parent)
     template_ = await cg.templatable(config[CONF_BRIGHTNESS], args, cg.uint8)
     cg.add(var.set_brightness(template_))
+    return var
+
+
+@automation.register_action(
+    "opendps.set_uart_baud",
+    SetUartBaudAction,
+    OPENDPS_ACTION_SCHEMA.extend(
+        {cv.Required(CONF_BAUD_RATE): cv.templatable(validate_uart_baud)}
+    ),
+    synchronous=True,
+)
+async def opendps_set_uart_baud_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_ = await cg.templatable(config[CONF_BAUD_RATE], args, cg.uint32)
+    cg.add(var.set_baud_rate(template_))
     return var
 
 

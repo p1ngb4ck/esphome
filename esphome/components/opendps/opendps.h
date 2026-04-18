@@ -96,6 +96,7 @@ enum OpenDPSCommand : uint8_t {
   CMD_CLEAR_CALIBRATION = 20,
   CMD_CHANGE_SCREEN = 21,
   CMD_SET_BRIGHTNESS = 22,
+  CMD_SET_BAUD = 23,
   CMD_RESPONSE = 0x80
 };
 
@@ -246,6 +247,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_voltage(float voltage);
   void set_current(float current);
   void set_brightness(uint8_t brightness);
+  void set_uart_baud(uint32_t baud);
   void send_ping();
   void request_version();
   void lock(bool locked);
