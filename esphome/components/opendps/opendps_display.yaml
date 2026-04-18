@@ -311,24 +311,25 @@ select:
       - lambda: |-
           id(opendps_id).set_function(x.c_str());
     on_value:
-      - lvgl.widget.update:
-          id: btn_cv
-          bg_color: !lambda 'return (x == "cv") ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A);'
-      - lvgl.widget.update:
-          id: lbl_cv
-          text_color: !lambda 'return (x == "cv") ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A4A2A);'
-      - lvgl.widget.update:
-          id: btn_cc
-          bg_color: !lambda 'return (x == "cc") ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A);'
-      - lvgl.widget.update:
-          id: lbl_cc
-          text_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x4A4A1A);'
-      - lvgl.widget.update:
-          id: btn_cp
-          bg_color: !lambda 'return (x == "cl") ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A);'
-      - lvgl.widget.update:
-          id: lbl_cp
-          text_color: !lambda 'return (x == "cl") ? lv_color_hex(0xFF3333) : lv_color_hex(0x4A1A1A);'
+      - lambda: |-
+          bool cv_on = (x == "cv");
+          bool cc_on = (x == "cc");
+          bool cl_on = (x == "cl");
+          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
+          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
+          lv_obj_set_style_text_color(id(lbl_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A4A2A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
+          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
+          lv_obj_set_style_text_color(id(lbl_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x4A4A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
+          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
+          lv_obj_set_style_text_color(id(lbl_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x4A1A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_invalidate(id(btn_cv));
+          lv_obj_invalidate(id(btn_cc));
+          lv_obj_invalidate(id(btn_cp));
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 40
