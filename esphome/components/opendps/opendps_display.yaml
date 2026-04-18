@@ -319,10 +319,13 @@ select:
           lv_style_selector_t sel_pr  = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED);
           lv_style_selector_t sel_foc = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_FOCUSED);
           for (lv_style_selector_t s : {sel_def, sel_pr, sel_foc}) {
+            lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, s);
             lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x1A4A1A) : lv_color_hex(0x0A0A0A), s);
             lv_obj_set_style_border_color(id(btn_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x1A1A1A), s);
+            lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, s);
             lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x3A3A00) : lv_color_hex(0x0A0A0A), s);
             lv_obj_set_style_border_color(id(btn_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x1A1A1A), s);
+            lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, s);
             lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x3A0A0A) : lv_color_hex(0x0A0A0A), s);
             lv_obj_set_style_border_color(id(btn_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A), s);
           }
