@@ -282,7 +282,7 @@ binary_sensor:
 
   - platform: template
     id: bs_ha_connected
-    name: "HA/MQTT Connected"
+    name: "HA⁄MQTT Connected"
     lambda: |-
       bool api_ok = false;
       bool mqtt_ok = false;
