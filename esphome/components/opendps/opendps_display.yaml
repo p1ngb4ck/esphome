@@ -644,7 +644,9 @@ lvgl:
                               value: "false"
                         on_value:
                           - lambda: |-
-                              id(voltage_number).make_call().set_value(x / 10000.0f * id(g_vmax)).perform();
+                              float v = x / 10000.0f * id(g_vmax);
+                              v = roundf(v / 0.005f) * 0.005f;
+                              id(voltage_number).make_call().set_value(v).perform();
 
                     - obj:
                         width: 548
