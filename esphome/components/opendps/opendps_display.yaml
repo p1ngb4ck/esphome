@@ -285,7 +285,6 @@ binary_sensor:
   - platform: template
     id: bs_ha_connected
     name: "HA⁄MQTT Connected"
-    update_interval: 10s
     lambda: |-
       bool api_ok = false;
       bool mqtt_ok = false;
@@ -304,7 +303,6 @@ binary_sensor:
   - platform: template
     id: bs_sd_mounted
     name: "SD Card Mounted"
-    update_interval: 10s
     lambda: |-
       #ifdef USE_SD_STORAGE
       return global_sd_storage != nullptr && global_sd_storage->is_mounted();
@@ -319,7 +317,6 @@ binary_sensor:
   - platform: template
     id: bs_usb_mounted
     name: "USB Mounted"
-    update_interval: 10s
     lambda: |-
       #ifdef USE_USB_STORAGE
       return global_usb_storage != nullptr && global_usb_storage->is_mounted();
@@ -334,7 +331,6 @@ binary_sensor:
   - platform: template
     id: bs_nfs_mounted
     name: "NFS Mounted"
-    update_interval: 10s
     lambda: |-
       #ifdef USE_NFS_CLIENT
       return global_nfs_client != nullptr && global_nfs_client->is_mounted();
@@ -433,6 +429,14 @@ switch:
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 20
+
+interval:
+  - interval: 10s
+    then:
+      - component.update: bs_ha_connected
+      - component.update: bs_sd_mounted
+      - component.update: bs_usb_mounted
+      - component.update: bs_nfs_mounted
 
 time:
   - platform: rx8130
