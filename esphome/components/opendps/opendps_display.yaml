@@ -249,6 +249,7 @@ binary_sensor:
               - lambda: |-
                   lv_label_set_text(id(lbl_pwr), "ON");
                   lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x4499FF), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x1A4A1A), LV_PART_MAIN);
@@ -262,6 +263,7 @@ binary_sensor:
               - lambda: |-
                   lv_label_set_text(id(lbl_pwr), "OFF");
                   lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x555555), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x555555), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x39FF14), LV_PART_MAIN);
