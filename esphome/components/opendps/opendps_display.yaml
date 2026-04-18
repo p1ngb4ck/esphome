@@ -312,9 +312,9 @@ select:
           id(opendps_id).set_function(x.c_str());
     on_value:
       - lambda: |-
-          bool cv_on = (x == "cv");
-          bool cc_on = (x == "cc");
-          bool cl_on = (x == "cl");
+          bool cv_on = (i == 0);
+          bool cc_on = (i == 1);
+          bool cl_on = (i == 2);
           lv_style_selector_t sel_def = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
           lv_style_selector_t sel_pr  = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED);
           lv_style_selector_t sel_foc = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_FOCUSED);
