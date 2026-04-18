@@ -54,6 +54,8 @@ CONF_TCP_BRIDGE_FRAME_TIMEOUT = "tcp_bridge_frame_timeout"
 
 # Bootloader baud rate for firmware upgrades (dpsboot may use different rate than main firmware)
 CONF_BOOTLOADER_BAUD_RATE = "bootloader_baud_rate"
+# Legacy bootloader mode: starts at configured baud directly, does not support cmd_set_baud
+CONF_BOOTLOADER_LEGACY = "bootloader_legacy"
 
 VALID_BAUD_RATES = [9600, 19200, 38400, 57600, 115200]
 
@@ -245,6 +247,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_BOOTLOADER_BAUD_RATE, default=0): cv.int_range(
                 min=0, max=921600
             ),
+            # Legacy bootloader mode: bootloader starts at bootloader_baud_rate (or UART baud),
+            # does NOT support cmd_set_baud. Use this when running stock/unmodified dpsboot.
+            cv.Optional(CONF_BOOTLOADER_LEGACY, default=False): cv.boolean,
             # Calibration backup/restore configuration
             cv.Optional(CONF_CALIBRATION_BACKUP): CALIBRATION_BACKUP_SCHEMA,
         }
@@ -265,6 +270,8 @@ async def to_code(config):
     # Bootloader baud rate for firmware upgrades
     if config[CONF_BOOTLOADER_BAUD_RATE] > 0:
         cg.add(var.set_bootloader_baud_rate(config[CONF_BOOTLOADER_BAUD_RATE]))
+    if config[CONF_BOOTLOADER_LEGACY]:
+        cg.add(var.set_bootloader_legacy(True))
 
     # TCP bridge configuration for dpsctl.py access
     if CONF_TCP_BRIDGE in config:

@@ -38,16 +38,25 @@ void OpenDPS::setup() {
   }
 
   // Check if we were in the middle of a firmware upgrade when we rebooted
-  // Bootloader always starts at 9600 regardless of operational baud
   this->upgrade_state_pref_ = global_preferences->make_preference<uint32_t>(fnv1_hash("opendps_upgrade_state"));
   uint32_t upgrade_flag = 0;
   if (this->upgrade_state_pref_.load(&upgrade_flag) && upgrade_flag > 0) {
     ESP_LOGW(TAG, "Detected incomplete firmware upgrade - DPS may be in bootloader mode");
-    ESP_LOGI(TAG, "Switching UART to 9600 for bootloader");
     this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    this->parent_->flush();
-    this->parent_->set_baud_rate(9600);
-    this->parent_->load_settings();
+    if (this->bootloader_legacy_) {
+      // Legacy bootloader starts at whatever baud was saved (stored in upgrade_flag)
+      uint32_t boot_baud = (upgrade_flag > 1) ? upgrade_flag : this->firmware_baud_rate_;
+      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u", boot_baud);
+      this->parent_->flush();
+      this->parent_->set_baud_rate(boot_baud);
+      this->parent_->load_settings();
+    } else {
+      // New bootloader always starts at 9600
+      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader");
+      this->parent_->flush();
+      this->parent_->set_baud_rate(9600);
+      this->parent_->load_settings();
+    }
   }
 
   // Note: TCP bridge setup is deferred to loop() to ensure network is ready
@@ -96,8 +105,8 @@ void OpenDPS::loop() {
   if (this->upgrade_bootloader_ready_time_ > 0) {
     if (now - this->upgrade_bootloader_ready_time_ >= 500) {
       this->upgrade_bootloader_ready_time_ = 0;
-      // Switch to faster baud if configured, before first data chunk
-      if (this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != 9600) {
+      // Switch to faster baud if configured, before first data chunk (new bootloader only)
+      if (!this->bootloader_legacy_ && this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != 9600) {
         ESP_LOGI(TAG, "Switching bootloader to %u for data transfer", this->bootloader_baud_rate_);
         std::vector<uint8_t> payload;
         this->pack8_(payload, CMD_SET_BAUD);
@@ -2732,17 +2741,31 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
-    // Switch UART to 9600 for bootloader contact (bootloader always starts at 9600)
+    // Switch UART to correct bootloader baud and save recovery state
     this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    if (this->firmware_baud_rate_ != 9600) {
-      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
-      this->parent_->flush();
-      this->parent_->set_baud_rate(9600);
-      this->parent_->load_settings();
+    if (this->bootloader_legacy_) {
+      // Legacy bootloader: starts at bootloader_baud_rate_ (or current baud if unset)
+      uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
+      if (boot_baud != this->firmware_baud_rate_) {
+        ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
+        this->parent_->flush();
+        this->parent_->set_baud_rate(boot_baud);
+        this->parent_->load_settings();
+      }
+      // Save boot_baud so setup() can recover to the right baud after reboot
+      this->upgrade_state_pref_.save(&boot_baud);
+    } else {
+      // New bootloader always starts at 9600
+      if (this->firmware_baud_rate_ != 9600) {
+        ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+        this->parent_->flush();
+        this->parent_->set_baud_rate(9600);
+        this->parent_->load_settings();
+      }
+      // Save flag=1 (new bootloader always recovers at 9600)
+      uint32_t flag = 1;
+      this->upgrade_state_pref_.save(&flag);
     }
-    // Save upgrade-in-progress flag so we can recover to 9600 after reboot
-    uint32_t flag = 1;
-    this->upgrade_state_pref_.save(&flag);
     global_preferences->sync();
 
     // Send upgrade start command
@@ -2794,17 +2817,31 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
-    // Switch UART to 9600 for bootloader contact (bootloader always starts at 9600)
+    // Switch UART to correct bootloader baud and save recovery state
     this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    if (this->firmware_baud_rate_ != 9600) {
-      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
-      this->parent_->flush();
-      this->parent_->set_baud_rate(9600);
-      this->parent_->load_settings();
+    if (this->bootloader_legacy_) {
+      // Legacy bootloader: starts at bootloader_baud_rate_ (or current baud if unset)
+      uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
+      if (boot_baud != this->firmware_baud_rate_) {
+        ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
+        this->parent_->flush();
+        this->parent_->set_baud_rate(boot_baud);
+        this->parent_->load_settings();
+      }
+      // Save boot_baud so setup() can recover to the right baud after reboot
+      this->upgrade_state_pref_.save(&boot_baud);
+    } else {
+      // New bootloader always starts at 9600
+      if (this->firmware_baud_rate_ != 9600) {
+        ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+        this->parent_->flush();
+        this->parent_->set_baud_rate(9600);
+        this->parent_->load_settings();
+      }
+      // Save flag=1 (new bootloader always recovers at 9600)
+      uint32_t flag = 1;
+      this->upgrade_state_pref_.save(&flag);
     }
-    // Save upgrade-in-progress flag so we can recover to 9600 after reboot
-    uint32_t flag = 1;
-    this->upgrade_state_pref_.save(&flag);
     global_preferences->sync();
 
     // Send upgrade start command

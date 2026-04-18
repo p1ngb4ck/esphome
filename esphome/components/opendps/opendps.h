@@ -225,6 +225,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_tcp_bridge_disconnect_delay(uint32_t delay_ms) { this->tcp_bridge_disconnect_delay_ms_ = delay_ms; }
   void set_tcp_bridge_frame_timeout(uint32_t timeout_ms) { this->tcp_bridge_frame_timeout_ms_ = timeout_ms; }
   void set_bootloader_baud_rate(uint32_t baud_rate) { this->bootloader_baud_rate_ = baud_rate; }
+  void set_bootloader_legacy(bool legacy) { this->bootloader_legacy_ = legacy; }
 
   // Sensor registration
   void set_voltage_in_sensor(sensor::Sensor *sensor) { this->voltage_in_sensor_ = sensor; }
@@ -409,6 +410,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   uint16_t upgrade_crc_{0};
   uint32_t bootloader_baud_rate_{0};        // Bootloader baud rate (0 = use same as UART)
   uint32_t firmware_baud_rate_{0};          // Saved firmware baud rate to restore after upgrade
+  bool bootloader_legacy_{false};           // Legacy bootloader: starts at configured baud, no cmd_set_baud
   ESPPreferenceObject upgrade_state_pref_;  // Persists upgrade state across reboots
   static const uint32_t UPGRADE_CHUNK_TIMEOUT_MS = 3000;
   static const uint8_t UPGRADE_MAX_RETRIES = 3;
