@@ -26,6 +26,15 @@ font:
   - file: "gfonts://Montserrat"
     id: montserrat_72
     size: 72
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: mdi_20
+    size: 20
+    glyphs:
+      - "\U000F105B"  # mdi:sd
+      - "\U000F0287"  # mdi:usb
+      - "\U000F0A11"  # mdi:folder-network
+      - "\U000F06B5"  # mdi:home-assistant
+      - "\U000F068A"  # mdi:power-plug
 
 globals:
   - id: g_vset
@@ -44,6 +53,9 @@ globals:
     type: float
     initial_value: "44.3"
   - id: g_ui_active
+    type: bool
+    initial_value: "false"
+  - id: g_slider_updating
     type: bool
     initial_value: "false"
 
@@ -128,8 +140,10 @@ number:
           id: g_vset
           value: !lambda 'return x;'
       - lambda: |-
+          id(g_slider_updating) = true;
           lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 10000.0f), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_v));
+          id(g_slider_updating) = false;
       - lvgl.label.update:
           id: lbl_setv
           text: {format: "%.2f", args: [x]}
@@ -257,6 +271,74 @@ binary_sensor:
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
+    connected:
+      id: dps_connected_sensor_id
+      name: "OpenDPS Connected"
+      icon: mdi:power-plug
+      on_state:
+        - lvgl.label.update:
+            id: lbl_icon_dps
+            text_color: !lambda 'return x ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333);'
+
+  - platform: template
+    id: bs_ha_connected
+    name: "HA/MQTT Connected"
+    lambda: |-
+      bool api_ok = false;
+      bool mqtt_ok = false;
+      #ifdef USE_API
+      api_ok = global_api_server != nullptr && global_api_server->is_connected();
+      #endif
+      #ifdef USE_MQTT
+      mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
+      #endif
+      return api_ok || mqtt_ok;
+    on_state:
+      - lvgl.label.update:
+          id: lbl_icon_ha
+          text_color: !lambda 'return x ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333);'
+
+  - platform: template
+    id: bs_sd_mounted
+    name: "SD Card Mounted"
+    lambda: |-
+      #ifdef USE_SD_STORAGE
+      return global_sd_storage != nullptr && global_sd_storage->is_mounted();
+      #else
+      return false;
+      #endif
+    on_state:
+      - lvgl.label.update:
+          id: lbl_icon_sd
+          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
+
+  - platform: template
+    id: bs_usb_mounted
+    name: "USB Mounted"
+    lambda: |-
+      #ifdef USE_USB_STORAGE
+      return global_usb_storage != nullptr && global_usb_storage->is_mounted();
+      #else
+      return false;
+      #endif
+    on_state:
+      - lvgl.label.update:
+          id: lbl_icon_usb
+          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
+
+  - platform: template
+    id: bs_nfs_mounted
+    name: "NFS Mounted"
+    lambda: |-
+      #ifdef USE_NFS_CLIENT
+      return global_nfs_client != nullptr && global_nfs_client->is_mounted();
+      #else
+      return false;
+      #endif
+    on_state:
+      - lvgl.label.update:
+          id: lbl_icon_nfs
+          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
 
 select:
   - platform: template
@@ -411,6 +493,41 @@ lvgl:
                 text: "--:--"
                 text_color: 0xAAAAAA
                 text_font: montserrat_20
+            - obj:
+                bg_opa: TRANSP
+                border_width: 0
+                height: size_content
+                layout:
+                  type: FLEX
+                  flex_flow: ROW
+                  flex_align_cross: CENTER
+                  pad_column: 10
+                widgets:
+                  - label:
+                      id: lbl_icon_sd
+                      text: "\U000F105B"
+                      text_color: 0x333333
+                      text_font: mdi_20
+                  - label:
+                      id: lbl_icon_usb
+                      text: "\U000F0287"
+                      text_color: 0x333333
+                      text_font: mdi_20
+                  - label:
+                      id: lbl_icon_nfs
+                      text: "\U000F0A11"
+                      text_color: 0x333333
+                      text_font: mdi_20
+                  - label:
+                      id: lbl_icon_ha
+                      text: "\U000F06B5"
+                      text_color: 0x333333
+                      text_font: mdi_20
+                  - label:
+                      id: lbl_icon_dps
+                      text: "\U000F068A"
+                      text_color: 0x333333
+                      text_font: mdi_20
             - obj:
                 bg_opa: TRANSP
                 border_width: 0
@@ -644,6 +761,7 @@ lvgl:
                               value: "false"
                         on_value:
                           - lambda: |-
+                              if (id(g_slider_updating)) return;
                               float v = x / 10000.0f * id(g_vmax);
                               v = roundf(v / 0.005f) * 0.005f;
                               id(voltage_number).make_call().set_value(v).perform();

@@ -237,6 +237,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_output_enabled_binary_sensor(binary_sensor::BinarySensor *sensor) {
     this->output_enabled_binary_sensor_ = sensor;
   }
+  void set_connected_binary_sensor(binary_sensor::BinarySensor *sensor) { this->connected_binary_sensor_ = sensor; }
 
   // Actions
   void enable_output(bool enable);
@@ -373,6 +374,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   sensor::Sensor *voltage_set_sensor_{nullptr};
   sensor::Sensor *current_set_sensor_{nullptr};
   binary_sensor::BinarySensor *output_enabled_binary_sensor_{nullptr};
+  binary_sensor::BinarySensor *connected_binary_sensor_{nullptr};
 
   // State
   OpenDPSData data_;

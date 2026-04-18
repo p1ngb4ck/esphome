@@ -170,6 +170,7 @@ void OpenDPS::dump_config() {
   LOG_SENSOR("  ", "Voltage Set", this->voltage_set_sensor_);
   LOG_SENSOR("  ", "Current Set", this->current_set_sensor_);
   LOG_BINARY_SENSOR("  ", "Output Enabled", this->output_enabled_binary_sensor_);
+  LOG_BINARY_SENSOR("  ", "Connected", this->connected_binary_sensor_);
 }
 
 // ============================================================================
@@ -532,36 +533,46 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           }
         }
 
-        // Publish vset/iset from params (mV/mA → V/A)
+        // Publish vset/iset from params (mV/mA → V/A), only on change
         auto voltage_it = this->data_.params.find("voltage");
         if (voltage_it != this->data_.params.end() && this->voltage_set_sensor_ != nullptr) {
           float vset = std::atoi(voltage_it->second.c_str()) / 1000.0f;
-          this->voltage_set_sensor_->publish_state(vset);
+          if (!this->voltage_set_sensor_->has_state() || this->voltage_set_sensor_->state != vset)
+            this->voltage_set_sensor_->publish_state(vset);
         }
         auto current_it = this->data_.params.find("current");
         if (current_it != this->data_.params.end() && this->current_set_sensor_ != nullptr) {
           float iset = std::atoi(current_it->second.c_str()) / 1000.0f;
-          this->current_set_sensor_->publish_state(iset);
+          if (!this->current_set_sensor_->has_state() || this->current_set_sensor_->state != iset)
+            this->current_set_sensor_->publish_state(iset);
         }
 
         this->data_.last_update = millis();
 
-        // Publish sensor values
-        if (this->voltage_in_sensor_ != nullptr)
+        // Publish sensor values, only on change
+        if (this->voltage_in_sensor_ != nullptr &&
+            (!this->voltage_in_sensor_->has_state() || this->voltage_in_sensor_->state != this->data_.v_in))
           this->voltage_in_sensor_->publish_state(this->data_.v_in);
-        if (this->voltage_out_sensor_ != nullptr)
+        if (this->voltage_out_sensor_ != nullptr &&
+            (!this->voltage_out_sensor_->has_state() || this->voltage_out_sensor_->state != this->data_.v_out))
           this->voltage_out_sensor_->publish_state(this->data_.v_out);
-        if (this->current_out_sensor_ != nullptr)
+        if (this->current_out_sensor_ != nullptr &&
+            (!this->current_out_sensor_->has_state() || this->current_out_sensor_->state != this->data_.i_out))
           this->current_out_sensor_->publish_state(this->data_.i_out);
         if (this->power_out_sensor_ != nullptr) {
           float power = this->data_.v_out * this->data_.i_out;
-          this->power_out_sensor_->publish_state(power);
+          if (!this->power_out_sensor_->has_state() || this->power_out_sensor_->state != power)
+            this->power_out_sensor_->publish_state(power);
         }
-        if (this->temp1_sensor_ != nullptr && this->data_.temp1 != 0)
+        if (this->temp1_sensor_ != nullptr && this->data_.temp1 != 0 &&
+            (!this->temp1_sensor_->has_state() || this->temp1_sensor_->state != this->data_.temp1))
           this->temp1_sensor_->publish_state(this->data_.temp1);
-        if (this->temp2_sensor_ != nullptr && this->data_.temp2 != 0)
+        if (this->temp2_sensor_ != nullptr && this->data_.temp2 != 0 &&
+            (!this->temp2_sensor_->has_state() || this->temp2_sensor_->state != this->data_.temp2))
           this->temp2_sensor_->publish_state(this->data_.temp2);
-        if (this->output_enabled_binary_sensor_ != nullptr)
+        if (this->output_enabled_binary_sensor_ != nullptr &&
+            (!this->output_enabled_binary_sensor_->has_state() ||
+             this->output_enabled_binary_sensor_->state != this->data_.output_enabled))
           this->output_enabled_binary_sensor_->publish_state(this->data_.output_enabled);
 
         ESP_LOGD(TAG, "Query: Vin=%.3fV Vout=%.3fV Iout=%.3fA Out=%s", this->data_.v_in, this->data_.v_out,
@@ -575,6 +586,8 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         // Fire on_connect trigger on first successful query
         if (!this->connected_) {
           this->connected_ = true;
+          if (this->connected_binary_sensor_ != nullptr)
+            this->connected_binary_sensor_->publish_state(true);
           ESP_LOGI(TAG, "Connected to OpenDPS device");
           // Send connection status to update display icon (ethernet or wifi)
 #ifdef USE_ETHERNET
@@ -629,7 +642,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           // At 9600 baud, the bootloader's response takes ~10ms to send.
           // We add extra margin for flash operations and loop entry.
           ESP_LOGI(TAG, "Waiting 500ms for bootloader to be ready...");
-          this->upgrade_bootloader_ready_time_ = std::max(millis(), static_cast<unsigned long>(1));
+          this->upgrade_bootloader_ready_time_ = static_cast<uint32_t>(millis()) | 1u;
         } else {
           ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
           this->upgrade_in_progress_ = false;
@@ -678,7 +691,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->auto_restore_calibration_ && this->has_calibration_backup()) {
             ESP_LOGI(TAG, "Auto-restoring calibration from backup...");
             // Small delay to let new firmware fully initialize before restoring calibration
-            this->upgrade_cal_restore_time_ = std::max(millis(), static_cast<unsigned long>(1));
+            this->upgrade_cal_restore_time_ = static_cast<uint32_t>(millis()) | 1u;
           }
           // Restore connection icon after successful upgrade
 #ifdef USE_ETHERNET
