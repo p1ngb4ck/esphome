@@ -285,7 +285,7 @@ binary_sensor:
   - platform: template
     id: bs_usb_mounted
     name: "USB Mounted"
-    lambda: 'return id(usb_storage_id).is_mounted();'
+    lambda: 'return id(usb_storage_1).is_mounted();'
     on_state:
       - lambda: |-
           lv_obj_set_style_text_color(id(lbl_icon_usb), x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
@@ -394,7 +394,7 @@ interval:
           bool mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
           id(bs_ha_connected).publish_state(api_ok || mqtt_ok);
           id(bs_sd_mounted).publish_state(id(sd_card).is_mounted());
-          id(bs_usb_mounted).publish_state(id(usb_storage_id).is_mounted());
+          id(bs_usb_mounted).publish_state(id(usb_storage_1).is_mounted());
           id(bs_nfs_mounted).publish_state(id(nfs_share).is_mounted());
 
 time:
