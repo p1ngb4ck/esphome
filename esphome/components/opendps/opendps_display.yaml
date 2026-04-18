@@ -315,17 +315,18 @@ select:
           bool cv_on = (x == "cv");
           bool cc_on = (x == "cc");
           bool cl_on = (x == "cl");
-          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
-          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
+          lv_color_t cv_bg = cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A);
+          lv_color_t cc_bg = cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A);
+          lv_color_t cl_bg = cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A);
+          for (lv_style_selector_t s : {(lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT),
+                                        (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_PRESSED),
+                                        (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_FOCUSED)}) {
+            lv_obj_set_style_bg_color(id(btn_cv), cv_bg, s);
+            lv_obj_set_style_bg_color(id(btn_cc), cc_bg, s);
+            lv_obj_set_style_bg_color(id(btn_cp), cl_bg, s);
+          }
           lv_obj_set_style_text_color(id(lbl_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A4A2A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
-          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
           lv_obj_set_style_text_color(id(lbl_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x4A4A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_PRESSED);
-          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), LV_PART_MAIN | LV_STATE_FOCUSED);
           lv_obj_set_style_text_color(id(lbl_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x4A1A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
           lv_obj_invalidate(id(btn_cv));
           lv_obj_invalidate(id(btn_cc));
