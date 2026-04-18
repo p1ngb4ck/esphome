@@ -40,6 +40,12 @@ globals:
   - id: g_datetime_fmt
     type: int
     initial_value: "2"
+  - id: g_vmax
+    type: float
+    initial_value: "44.3"
+  - id: g_ui_active
+    type: bool
+    initial_value: "false"
 
 sensor:
   - platform: opendps
@@ -47,13 +53,10 @@ sensor:
     voltage_out:
       id: opendps_output_voltage
       on_value:
-        - if:
-            condition:
-              lambda: 'return id(g_output_on);'
-            then:
-              - lvgl.label.update:
-                  id: lbl_vout
-                  text: {format: "%.2f", args: [x]}
+        - lvgl.label.update:
+            id: lbl_vout
+            text: {format: "%.2f", args: [x]}
+            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A);'
         - lvgl.label.update:
             id: lbl_vout_g
             text: {format: "Vout  %.2fV", args: [x]}
@@ -64,13 +67,10 @@ sensor:
     current_out:
       id: opendps_ouput_current
       on_value:
-        - if:
-            condition:
-              lambda: 'return id(g_output_on);'
-            then:
-              - lvgl.label.update:
-                  id: lbl_iout
-                  text: {format: "%.3f", args: [x]}
+        - lvgl.label.update:
+            id: lbl_iout
+            text: {format: "%.3f", args: [x]}
+            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A);'
         - lvgl.label.update:
             id: lbl_iout_g
             text: {format: "Iout  %.3fA", args: [x]}
@@ -89,6 +89,18 @@ sensor:
             id: chart_p
             series_id: ser_p
             value: !lambda 'return (int)(x * 100);'
+    voltage_set:
+      id: opendps_voltage_set
+      on_value:
+        - lambda: |-
+            if (!id(g_ui_active))
+              id(voltage_number).make_call().set_value(x).perform();
+    current_set:
+      id: opendps_current_set
+      on_value:
+        - lambda: |-
+            if (!id(g_ui_active))
+              id(current_number).make_call().set_value(x).perform();
     voltage_in:
       id: opendps_input_voltage
       on_value:
@@ -115,16 +127,12 @@ number:
       - globals.set:
           id: g_vset
           value: !lambda 'return x;'
-      - lvgl.slider.update:
-          id: sl_v
-          value: !lambda 'return (int)(x * 10);'
-      - if:
-          condition:
-            lambda: 'return !id(g_output_on);'
-          then:
-            - lvgl.label.update:
-                id: lbl_vout
-                text: {format: "%.2f", args: [x]}
+      - lambda: |-
+          lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 100.0f), LV_ANIM_OFF);
+          lv_obj_invalidate(id(sl_v));
+      - lvgl.label.update:
+          id: lbl_setv
+          text: {format: "%.2f", args: [x]}
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 50
@@ -146,19 +154,47 @@ number:
       - globals.set:
           id: g_iset
           value: !lambda 'return x;'
-      - lvgl.slider.update:
-          id: sl_i
-          value: !lambda 'return (int)(x * 100);'
-      - if:
-          condition:
-            lambda: 'return !id(g_output_on);'
-          then:
-            - lvgl.label.update:
-                id: lbl_iout
-                text: {format: "%.3f", args: [x]}
+      - lambda: |-
+          lv_slider_set_value(id(sl_i), (int)(x * 100), LV_ANIM_OFF);
+          lv_obj_invalidate(id(sl_i));
+      - lvgl.label.update:
+          id: lbl_seti
+          text: {format: "%.3f", args: [x]}
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 60
+  - platform: template
+    id: voltage_max_number
+    name: "Max Voltage"
+    icon: mdi:flash-triangle-outline
+    min_value: 10
+    max_value: 60
+    step: 0.1
+    unit_of_measurement: "V"
+    mode: box
+    optimistic: true
+    initial_value: 44.3
+    restore_value: true
+    on_value:
+      - globals.set:
+          id: g_vmax
+          value: !lambda 'return x;'
+      - lambda: |-
+          lv_obj_invalidate(id(sl_v));
+          char buf[8];
+          snprintf(buf, sizeof(buf), "%.1f", x * 0.25f); lv_label_set_text(id(lbl_vtick25), buf);
+          snprintf(buf, sizeof(buf), "%.1f", x * 0.50f); lv_label_set_text(id(lbl_vtick50), buf);
+          snprintf(buf, sizeof(buf), "%.1f", x * 0.75f); lv_label_set_text(id(lbl_vtick75), buf);
+          snprintf(buf, sizeof(buf), "%.1fV", x);         lv_label_set_text(id(lbl_vtick100), buf);
+      - lvgl.label.update:
+          id: lbl_vrange
+          text: !lambda |-
+            char buf[16];
+            snprintf(buf, sizeof(buf), "0 — %.1fV", x);
+            return std::string(buf);
+    web_server:
+      sorting_group_id: opendps_control
+      sorting_weight: 70
 
 binary_sensor:
   - platform: opendps
@@ -167,7 +203,7 @@ binary_sensor:
       id: dps_output_sensor_id
       name: "OpenDPS Output Enabled"
       icon: mdi:meter-electric-outline
-      on_value:
+      on_state:
         - globals.set:
             id: g_output_on
             value: !lambda 'return x;'
@@ -184,6 +220,18 @@ binary_sensor:
                   id: lbl_pwr
                   text: "ON"
                   text_color: 0x39FF14
+              - lvgl.label.update:
+                  id: lbl_vout
+                  text_color: 0x39FF14
+              - lvgl.label.update:
+                  id: lbl_iout
+                  text_color: 0x4499FF
+              - lvgl.label.update:
+                  id: lbl_setv
+                  text_color: 0x1A4A1A
+              - lvgl.label.update:
+                  id: lbl_seti
+                  text_color: 0x1A1A4A
             else:
               - lvgl.widget.update:
                   id: pwr_ring
@@ -196,10 +244,16 @@ binary_sensor:
                   text_color: 0x555555
               - lvgl.label.update:
                   id: lbl_vout
-                  text: {format: "%.2f", args: [id(g_vset)]}
+                  text_color: 0x2A2A2A
               - lvgl.label.update:
                   id: lbl_iout
-                  text: {format: "%.3f", args: [id(g_iset)]}
+                  text_color: 0x2A2A2A
+              - lvgl.label.update:
+                  id: lbl_setv
+                  text_color: 0x39FF14
+              - lvgl.label.update:
+                  id: lbl_seti
+                  text_color: 0x4499FF
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
@@ -217,21 +271,41 @@ select:
       - lambda: |-
           id(opendps_id).set_function(x.c_str());
     on_value:
-      - lvgl.widget.update:
-          id: led_cv
-          bg_color: !lambda 'return (x == "cv") ? lv_color_hex(0x39FF14) : lv_color_hex(0x1A1A1A);'
-          shadow_color: !lambda 'return (x == "cv") ? lv_color_hex(0x39FF14) : lv_color_hex(0x000000);'
-          shadow_width: !lambda 'return (x == "cv") ? 10 : 0;'
-      - lvgl.widget.update:
-          id: led_cc
-          bg_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x1A1A1A);'
-          shadow_color: !lambda 'return (x == "cc") ? lv_color_hex(0xFFBF00) : lv_color_hex(0x000000);'
-          shadow_width: !lambda 'return (x == "cc") ? 10 : 0;'
-      - lvgl.widget.update:
-          id: led_cl
-          bg_color: !lambda 'return (x == "cl") ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A);'
-          shadow_color: !lambda 'return (x == "cl") ? lv_color_hex(0xFF3333) : lv_color_hex(0x000000);'
-          shadow_width: !lambda 'return (x == "cl") ? 10 : 0;'
+      - lambda: |-
+          bool cv_on = (x == "cv");
+          bool cc_on = (x == "cc");
+          bool cl_on = (x == "cl");
+          lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+          // btn_cv
+          lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), sel);
+          lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
+          lv_obj_set_style_border_side(id(btn_cv), cv_on ? (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM) : (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+          // led_cv
+          lv_obj_set_style_bg_color(id(led_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x1A3A1A), sel);
+          lv_obj_set_style_shadow_color(id(led_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x000000), sel);
+          lv_obj_set_style_shadow_width(id(led_cv), cv_on ? 8 : 0, sel);
+          // btn_cc
+          lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A), sel);
+          lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel);
+          lv_obj_set_style_border_side(id(btn_cc), cc_on ? (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM) : (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+          // led_cc
+          lv_obj_set_style_bg_color(id(led_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x3A3A1A), sel);
+          lv_obj_set_style_shadow_color(id(led_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x000000), sel);
+          lv_obj_set_style_shadow_width(id(led_cc), cc_on ? 8 : 0, sel);
+          // btn_cp
+          lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A), sel);
+          lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel);
+          lv_obj_set_style_border_side(id(btn_cp), cl_on ? (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM) : (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+          // led_cl
+          lv_obj_set_style_bg_color(id(led_cl), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x3A1A1A), sel);
+          lv_obj_set_style_shadow_color(id(led_cl), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x000000), sel);
+          lv_obj_set_style_shadow_width(id(led_cl), cl_on ? 8 : 0, sel);
+          lv_obj_invalidate(id(btn_cv));
+          lv_obj_invalidate(id(btn_cc));
+          lv_obj_invalidate(id(btn_cp));
+          lv_obj_invalidate(id(led_cv));
+          lv_obj_invalidate(id(led_cc));
+          lv_obj_invalidate(id(led_cl));
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 40
@@ -272,6 +346,27 @@ switch:
       sorting_group_id: opendps_control
       sorting_weight: 20
 
+time:
+  - platform: rx8130
+    id: rx8130_time
+    on_time:
+      - seconds: /1
+        then:
+          - lvgl.label.update:
+              id: lbl_status_time
+              text: !lambda |-
+                auto t = id(rx8130_time).now();
+                if (!t.is_valid()) return std::string("--:--");
+                char buf[32];
+                switch (id(g_datetime_fmt)) {
+                  case 1: snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.hour, t.minute, t.second); break;
+                  case 2: snprintf(buf, sizeof(buf), "%02d.%02d.%04d %02d:%02d", t.day_of_month, t.month, t.year, t.hour, t.minute); break;
+                  case 3: snprintf(buf, sizeof(buf), "%02d/%02d/%04d %02d:%02d", t.month, t.day_of_month, t.year, t.hour, t.minute); break;
+                  case 4: snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d", t.year, t.month, t.day_of_month, t.hour, t.minute); break;
+                  default: snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute); break;
+                }
+                return std::string(buf);
+
 lvgl:
   displays: dsi_display
   touchscreens: touchscreen_id
@@ -291,12 +386,12 @@ lvgl:
     scrollbar_mode: "off"
 
     widgets:
-      # --- Header bar (y=0, h=40) ---
+      # --- Header bar (y=0, h=80) ---
       - obj:
           x: 0
           y: 0
           width: 1024
-          height: 40
+          height: 80
           bg_color: 0x141414
           border_width: 0
           radius: 0
@@ -315,31 +410,7 @@ lvgl:
                 id: lbl_status_time
                 text: "--:--"
                 text_color: 0xAAAAAA
-                text_font: montserrat_14
-            - obj:
-                bg_opa: TRANSP
-                border_width: 0
-                height: size_content
-                layout:
-                  type: FLEX
-                  flex_flow: ROW
-                  flex_align_cross: CENTER
-                  pad_column: 8
-                widgets:
-                  - label:
-                      id: lbl_t1
-                      text: "--°C"
-                      text_color: 0x39FF14
-                      text_font: montserrat_14
-                  - label:
-                      text: "|"
-                      text_color: 0x333333
-                      text_font: montserrat_14
-                  - label:
-                      id: lbl_t2
-                      text: "--°C"
-                      text_color: 0x00AACC
-                      text_font: montserrat_14
+                text_font: montserrat_20
             - obj:
                 bg_opa: TRANSP
                 border_width: 0
@@ -353,20 +424,20 @@ lvgl:
                   - label:
                       text: "IN"
                       text_color: 0x555555
-                      text_font: montserrat_12
+                      text_font: montserrat_16
                   - label:
                       id: lbl_vin
                       text: "--.-V"
                       text_color: 0x888888
-                      text_font: montserrat_14
+                      text_font: montserrat_20
 
-      # --- Footer tab bar (y=560, h=40) ---
+      # --- Footer tab bar (y=520, h=80) ---
       - obj:
           x: 0
-          y: 560
+          y: 520
           width: 1024
-          height: 40
-          bg_color: 0x0D0D0D
+          height: 80
+          bg_opa: TRANSP
           border_width: 0
           radius: 0
           scrollbar_mode: "off"
@@ -380,7 +451,7 @@ lvgl:
             - button:
                 id: tab_btn_main
                 width: 341
-                height: 40
+                height: 72
                 bg_color: 0x1A1A1A
                 border_width: 2
                 border_side: BOTTOM
@@ -388,6 +459,16 @@ lvgl:
                 radius: 0
                 on_click:
                   - lvgl.page.show: page_main
+                  - lambda: |-
+                      lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x555555), LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_main
@@ -398,12 +479,24 @@ lvgl:
             - button:
                 id: tab_btn_graphs
                 width: 341
-                height: 40
+                height: 72
                 bg_color: 0x111111
-                border_width: 0
+                border_width: 2
+                border_side: NONE
+                border_color: 0x39FF14
                 radius: 0
                 on_click:
                   - lvgl.page.show: page_graphs
+                  - lambda: |-
+                      lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x555555), LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_graphs
@@ -414,12 +507,24 @@ lvgl:
             - button:
                 id: tab_btn_settings
                 width: 342
-                height: 40
+                height: 72
                 bg_color: 0x111111
-                border_width: 0
+                border_width: 2
+                border_side: NONE
+                border_color: 0x39FF14
                 radius: 0
                 on_click:
                   - lvgl.page.show: page_settings
+                  - lambda: |-
+                      lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x555555), LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_settings
@@ -439,286 +544,49 @@ lvgl:
       scrollbar_mode: "off"
 
       widgets:
-        # LCD panel: x=32, y=40, w=960, h=160
+        # ── VOLTAGE BAR: x=0, y=80, w=1024, h=168 ──────────────────
+        # Left: slider (~65% width). Right: SET value + ACT value
         - obj:
             id: lcd_panel
-            x: 32
-            y: 40
-            width: 960
-            height: 160
+            x: 0
+            y: 80
+            width: 1024
+            height: 172
             bg_color: 0x0C1A0C
             border_color: 0x004408
             border_width: 2
             radius: 8
-            shadow_color: 0x39FF14
-            shadow_width: 10
-            shadow_opa: 25%
             pad_left: 16
             pad_right: 16
-            pad_top: 8
-            pad_bottom: 8
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_main: SPACE_EVENLY
-              flex_align_cross: CENTER
-
-            widgets:
-              # Voltage display
-              - obj:
-                  width: 440
-                  height: 140
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: END
-                    flex_align_main: CENTER
-                    pad_column: 4
-                  widgets:
-                    - label:
-                        id: lbl_vout
-                        text: !lambda |-
-                          char buf[16];
-                          snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
-                          return std::string(buf);
-                        text_color: 0x39FF14
-                        text_font: montserrat_72
-                    - label:
-                        text: "V"
-                        text_color: 0x1A8020
-                        text_font: montserrat_28
-                        y: -10
-
-              # Current display
-              - obj:
-                  width: 440
-                  height: 140
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: END
-                    flex_align_main: CENTER
-                    pad_column: 4
-                  widgets:
-                    - label:
-                        id: lbl_iout
-                        text: !lambda |-
-                          char buf[16];
-                          snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
-                          return std::string(buf);
-                        text_color: 0x39FF14
-                        text_font: montserrat_72
-                    - label:
-                        text: "A"
-                        text_color: 0x1A8020
-                        text_font: montserrat_28
-                        y: -10
-
-        # Controls row: CV/CC/CP + power ring + lock — x=32, y=208, w=960, h=52
-        - obj:
-            x: 32
-            y: 208
-            width: 960
-            height: 52
-            bg_color: 0x141414
-            border_width: 0
-            radius: 4
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_main: SPACE_EVENLY
-              flex_align_cross: CENTER
-
-            widgets:
-              - button:
-                  id: btn_cv
-                  width: 88
-                  height: 40
-                  bg_opa: TRANSP
-                  border_width: 0
-                  radius: 4
-                  pad_all: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                    pad_column: 8
-                  on_click:
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                  widgets:
-                    - obj:
-                        id: led_cv
-                        width: 14
-                        height: 14
-                        radius: 7
-                        bg_color: 0x1A1A1A
-                        border_color: 0x39FF14
-                        border_width: 1
-                        shadow_width: 0
-                        clickable: false
-                    - label:
-                        text: "CV"
-                        text_color: 0x39FF14
-                        text_font: montserrat_16
-
-              - button:
-                  id: btn_cc
-                  width: 88
-                  height: 40
-                  bg_opa: TRANSP
-                  border_width: 0
-                  radius: 4
-                  pad_all: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                    pad_column: 8
-                  on_click:
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cc"
-                  widgets:
-                    - obj:
-                        id: led_cc
-                        width: 14
-                        height: 14
-                        radius: 7
-                        bg_color: 0x1A1A1A
-                        border_color: 0xFFBF00
-                        border_width: 1
-                        shadow_width: 0
-                        clickable: false
-                    - label:
-                        text: "CC"
-                        text_color: 0xFFBF00
-                        text_font: montserrat_16
-
-              - button:
-                  id: btn_cp
-                  width: 88
-                  height: 40
-                  bg_opa: TRANSP
-                  border_width: 0
-                  radius: 4
-                  pad_all: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                    pad_column: 8
-                  on_click:
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cl"
-                  widgets:
-                    - obj:
-                        id: led_cp
-                        width: 14
-                        height: 14
-                        radius: 7
-                        bg_color: 0x1A1A1A
-                        border_color: 0xFF3333
-                        border_width: 1
-                        shadow_width: 0
-                        clickable: false
-                    - label:
-                        text: "CP"
-                        text_color: 0xFF3333
-                        text_font: montserrat_16
-
-              # Power ring button
-              - obj:
-                  id: pwr_ring
-                  width: 44
-                  height: 44
-                  radius: 22
-                  bg_color: 0x222222
-                  border_color: 0x555555
-                  border_width: 3
-                  shadow_color: 0x000000
-                  shadow_width: 0
-                  scrollbar_mode: "off"
-                  on_click:
-                    - switch.toggle: dps_output_switch
-                  widgets:
-                    - label:
-                        id: lbl_pwr_icon
-                        align: CENTER
-                        text: "\u23FB"
-                        text_color: 0x555555
-                        text_font: montserrat_28
-
-              - label:
-                  id: lbl_pwr
-                  text: "OFF"
-                  text_color: 0x555555
-                  text_font: montserrat_16
-
-              # Lock switch
-              - switch:
-                  id: sw_lock_main
-                  on_value:
-                    - opendps.lock:
-                        id: opendps_id
-                        locked: !lambda 'return x;'
-
-        # Sliders: x=32, y=268, w=960, h=140
-        - obj:
-            x: 32
-            y: 268
-            width: 960
-            height: 140
-            bg_color: 0x171717
-            border_color: 0x2A2A2A
-            border_width: 1
-            radius: 6
-            pad_left: 20
-            pad_right: 20
             pad_top: 10
             pad_bottom: 10
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: ROW
-              flex_align_main: SPACE_BETWEEN
+              flex_align_main: START
               flex_align_cross: CENTER
+              pad_column: 0
 
             widgets:
-              # Voltage slider — w=440, h=120
+              # Slider section (65%)
               - obj:
-                  width: 440
-                  height: 120
+                  width: 650
+                  height: 148
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
-                    flex_align_cross: STRETCH
+                    flex_align_cross: CENTER
                     flex_align_main: SPACE_EVENLY
                     pad_row: 4
 
                   widgets:
                     - obj:
-                        width: 440
-                        height: 20
+                        width: 548
+                        height: 18
                         bg_opa: TRANSP
                         border_width: 0
                         scrollbar_mode: "off"
@@ -733,42 +601,53 @@ lvgl:
                               text_color: 0x888888
                               text_font: montserrat_14
                           - label:
-                              text: "0 — 30V"
+                              id: lbl_vrange
+                              text: !lambda |-
+                                char buf[16];
+                                snprintf(buf, sizeof(buf), "0 — %.1fV", id(g_vmax));
+                                return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
 
                     - slider:
                         id: sl_v
-                        width: 440
-                        height: 32
+                        width: 548
+                        height: 62
                         min_value: 0
-                        max_value: 300
+                        max_value: 100
                         value: 0
-                        main:
-                          bg_color: 0x222222
-                          bg_opa: COVER
-                          radius: 6
-                          border_color: 0x333333
-                          border_width: 1
+                        bg_color: 0x222222
+                        bg_opa: COVER
+                        radius: 8
+                        border_color: 0x333333
+                        border_width: 1
                         indicator:
                           bg_color: 0x39FF14
                           bg_opa: COVER
-                          radius: 6
+                          radius: 8
                         knob:
                           bg_color: 0xDDDDDD
                           border_color: 0x888888
                           border_width: 2
                           radius: 4
-                          width: 20
-                          height: 34
+                          width: 28
+                          height: 52
                           pad_top: -4
                           pad_bottom: -4
+                        on_press:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                        on_release:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         on_value:
                           - lambda: |-
-                              id(voltage_number).make_call().set_value(x / 10.0f).perform();
+                              id(voltage_number).make_call().set_value(x / 100.0f * id(g_vmax)).perform();
 
                     - obj:
-                        width: 440
+                        width: 548
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
@@ -784,40 +663,178 @@ lvgl:
                               text_color: 0x444444
                               text_font: montserrat_12
                           - label:
-                              text: "7.5"
+                              id: lbl_vtick25
+                              text: !lambda |-
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "%.1f", id(g_vmax) * 0.25f);
+                                return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
                           - label:
-                              text: "15"
+                              id: lbl_vtick50
+                              text: !lambda |-
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "%.1f", id(g_vmax) * 0.50f);
+                                return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
                           - label:
-                              text: "22.5"
+                              id: lbl_vtick75
+                              text: !lambda |-
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "%.1f", id(g_vmax) * 0.75f);
+                                return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
                           - label:
-                              text: "30V"
+                              id: lbl_vtick100
+                              text: !lambda |-
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "%.1fV", id(g_vmax));
+                                return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
 
-              # Current slider — w=440, h=120
+              # Divider
+              # SET value
               - obj:
-                  width: 440
-                  height: 120
+                  width: 168
+                  height: 148
                   bg_opa: TRANSP
                   border_width: 0
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
-                    flex_align_cross: STRETCH
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  widgets:
+                    - label:
+                        text: "SET"
+                        text_color: 0x39FF14
+                        text_font: montserrat_12
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        width: 164
+                        height: 68
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: END
+                          flex_align_main: CENTER
+                          pad_column: 2
+                        widgets:
+                          - label:
+                              id: lbl_setv
+                              text: !lambda |-
+                                char buf[16];
+                                snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
+                                return std::string(buf);
+                              text_color: 0x39FF14
+                              text_font: montserrat_48
+                          - label:
+                              text: "V"
+                              text_color: 0x39FF14
+                              text_font: montserrat_20
+                              y: -6
+
+              # Divider
+              - obj:
+                  width: 1
+                  height: 128
+                  bg_color: 0x1A3A1A
+                  border_width: 0
+                  radius: 0
+
+              # ACT value
+              - obj:
+                  width: 170
+                  height: 148
+                  bg_opa: TRANSP
+                  border_width: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  widgets:
+                    - label:
+                        text: "ACT"
+                        text_color: 0x336633
+                        text_font: montserrat_12
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        width: 166
+                        height: 68
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: END
+                          flex_align_main: CENTER
+                          pad_column: 2
+                        widgets:
+                          - label:
+                              id: lbl_vout
+                              text: !lambda |-
+                                char buf[16];
+                                snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
+                                return std::string(buf);
+                              text_color: 0x2A2A2A
+                              text_font: montserrat_48
+                          - label:
+                              text: "V"
+                              text_color: 0x222222
+                              text_font: montserrat_20
+                              y: -6
+
+        # ── CURRENT BAR: x=0, y=256, w=1024, h=168 ─────────────────
+        - obj:
+            x: 0
+            y: 252
+            width: 1024
+            height: 172
+            bg_color: 0x0C0F1A
+            border_color: 0x080040
+            border_width: 2
+            radius: 8
+            pad_left: 16
+            pad_right: 16
+            pad_top: 10
+            pad_bottom: 10
+            scrollbar_mode: "off"
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: START
+              flex_align_cross: CENTER
+              pad_column: 0
+
+            widgets:
+              # Slider section (65%)
+              - obj:
+                  width: 650
+                  height: 148
+                  bg_opa: TRANSP
+                  border_width: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
                     flex_align_main: SPACE_EVENLY
                     pad_row: 4
 
                   widgets:
                     - obj:
-                        width: 440
-                        height: 20
+                        width: 548
+                        height: 18
                         bg_opa: TRANSP
                         border_width: 0
                         scrollbar_mode: "off"
@@ -838,36 +855,43 @@ lvgl:
 
                     - slider:
                         id: sl_i
-                        width: 440
-                        height: 32
+                        width: 548
+                        height: 62
                         min_value: 0
                         max_value: 500
                         value: 0
-                        main:
-                          bg_color: 0x222222
-                          bg_opa: COVER
-                          radius: 6
-                          border_color: 0x333333
-                          border_width: 1
+                        bg_color: 0x222233
+                        bg_opa: COVER
+                        radius: 8
+                        border_color: 0x333344
+                        border_width: 1
                         indicator:
-                          bg_color: 0x39FF14
+                          bg_color: 0x4499FF
                           bg_opa: COVER
-                          radius: 6
+                          radius: 8
                         knob:
-                          bg_color: 0xDDDDDD
-                          border_color: 0x888888
+                          bg_color: 0xDDDDFF
+                          border_color: 0x8888BB
                           border_width: 2
                           radius: 4
-                          width: 20
-                          height: 34
+                          width: 28
+                          height: 52
                           pad_top: -4
                           pad_bottom: -4
+                        on_press:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                        on_release:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         on_value:
                           - lambda: |-
                               id(current_number).make_call().set_value(x / 100.0f).perform();
 
                     - obj:
-                        width: 440
+                        width: 548
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
@@ -898,6 +922,371 @@ lvgl:
                               text: "5A"
                               text_color: 0x444444
                               text_font: montserrat_12
+
+              # SET value
+              - obj:
+                  width: 168
+                  height: 148
+                  bg_opa: TRANSP
+                  border_width: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  widgets:
+                    - label:
+                        text: "SET"
+                        text_color: 0x4499FF
+                        text_font: montserrat_12
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        width: 164
+                        height: 68
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: END
+                          flex_align_main: CENTER
+                          pad_column: 2
+                        widgets:
+                          - label:
+                              id: lbl_seti
+                              text: !lambda |-
+                                char buf[16];
+                                snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
+                                return std::string(buf);
+                              text_color: 0x4499FF
+                              text_font: montserrat_48
+                          - label:
+                              text: "A"
+                              text_color: 0x4499FF
+                              text_font: montserrat_20
+                              y: -6
+
+              # Divider
+              - obj:
+                  width: 1
+                  height: 128
+                  bg_color: 0x1A1A3A
+                  border_width: 0
+                  radius: 0
+
+              # ACT value
+              - obj:
+                  width: 170
+                  height: 148
+                  bg_opa: TRANSP
+                  border_width: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  widgets:
+                    - label:
+                        text: "ACT"
+                        text_color: 0x333366
+                        text_font: montserrat_12
+                    - obj:
+                        bg_opa: TRANSP
+                        border_width: 0
+                        width: 166
+                        height: 68
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_cross: END
+                          flex_align_main: CENTER
+                          pad_column: 2
+                        widgets:
+                          - label:
+                              id: lbl_iout
+                              text: !lambda |-
+                                char buf[16];
+                                snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
+                                return std::string(buf);
+                              text_color: 0x2A2A2A
+                              text_font: montserrat_48
+                          - label:
+                              text: "A"
+                              text_color: 0x222233
+                              text_font: montserrat_20
+                              y: -6
+
+        # ── CONTROLS ROW: x=0, y=424, w=1024, h=96 ─────────────────
+        # 50% mode buttons | 2.5% gap | 20% power | 2.5% gap | 20% lock | 2.5% gap | 2.5% right
+        - obj:
+            x: 0
+            y: 424
+            width: 1024
+            height: 96
+            bg_color: 0x141414
+            border_width: 0
+            radius: 0
+            scrollbar_mode: "off"
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: START
+              flex_align_cross: STRETCH
+              pad_column: 0
+
+            widgets:
+              # ── Mode buttons: 3 × 170px = 510px (≈50%) ─────────────
+              - button:
+                  id: btn_cv
+                  width: 170
+                  height: 96
+                  bg_color: 0x0A0A0A
+                  border_width: 2
+                  border_side: NONE
+                  border_color: 0x39FF14
+                  radius: 0
+                  pad_all: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - lambda: |-
+                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0F2A0F), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cv), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
+                        lv_obj_set_style_bg_color(id(led_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_shadow_color(id(led_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_shadow_width(id(led_cv), 8, sel);
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cc), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cc), lv_color_hex(0x3A3A1A), sel); lv_obj_set_style_shadow_width(id(led_cc), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cp), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cl), lv_color_hex(0x3A1A1A), sel); lv_obj_set_style_shadow_width(id(led_cl), 0, sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        id: led_cv
+                        width: 10
+                        height: 10
+                        radius: 5
+                        bg_color: 0x1A3A1A
+                        border_width: 0
+                        shadow_width: 0
+                        clickable: false
+                    - label:
+                        text: "CV"
+                        text_color: 0x336633
+                        text_font: montserrat_20
+
+              - button:
+                  id: btn_cc
+                  width: 170
+                  height: 96
+                  bg_color: 0x0A0A0A
+                  border_width: 2
+                  border_side: NONE
+                  border_color: 0xFFBF00
+                  radius: 0
+                  pad_all: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cc"
+                    - lambda: |-
+                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x2A2A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cc), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
+                        lv_obj_set_style_bg_color(id(led_cc), lv_color_hex(0xFFBF00), sel); lv_obj_set_style_shadow_color(id(led_cc), lv_color_hex(0xFFBF00), sel); lv_obj_set_style_shadow_width(id(led_cc), 8, sel);
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cv), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cv), lv_color_hex(0x1A3A1A), sel); lv_obj_set_style_shadow_width(id(led_cv), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cp), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cl), lv_color_hex(0x3A1A1A), sel); lv_obj_set_style_shadow_width(id(led_cl), 0, sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        id: led_cc
+                        width: 10
+                        height: 10
+                        radius: 5
+                        bg_color: 0x3A3A1A
+                        border_width: 0
+                        shadow_width: 0
+                        clickable: false
+                    - label:
+                        text: "CC"
+                        text_color: 0x666633
+                        text_font: montserrat_20
+
+              - button:
+                  id: btn_cp
+                  width: 170
+                  height: 96
+                  bg_color: 0x0A0A0A
+                  border_width: 2
+                  border_side: NONE
+                  border_color: 0xFF3333
+                  radius: 0
+                  pad_all: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_row: 4
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cl"
+                    - lambda: |-
+                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x2A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cp), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
+                        lv_obj_set_style_bg_color(id(led_cl), lv_color_hex(0xFF3333), sel); lv_obj_set_style_shadow_color(id(led_cl), lv_color_hex(0xFF3333), sel); lv_obj_set_style_shadow_width(id(led_cl), 8, sel);
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cv), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cv), lv_color_hex(0x1A3A1A), sel); lv_obj_set_style_shadow_width(id(led_cv), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel);
+                        lv_obj_set_style_border_side(id(btn_cc), (lv_border_side_t)LV_BORDER_SIDE_NONE, sel);
+                        lv_obj_set_style_bg_color(id(led_cc), lv_color_hex(0x3A3A1A), sel); lv_obj_set_style_shadow_width(id(led_cc), 0, sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        id: led_cl
+                        width: 10
+                        height: 10
+                        radius: 5
+                        bg_color: 0x3A1A1A
+                        border_width: 0
+                        shadow_width: 0
+                        clickable: false
+                    - label:
+                        text: "CP"
+                        text_color: 0x663333
+                        text_font: montserrat_20
+
+              # Power group: 20% = 205px, 2.5% left margin = 26px
+              - obj:
+                  width: 205
+                  height: 96
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_left: 26
+                  pad_right: 0
+                  pad_top: 0
+                  pad_bottom: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_column: 12
+                  widgets:
+                    - obj:
+                        id: pwr_ring
+                        width: 52
+                        height: 52
+                        radius: 26
+                        bg_color: 0x222222
+                        border_color: 0x555555
+                        border_width: 3
+                        shadow_color: 0x000000
+                        shadow_width: 0
+                        scrollbar_mode: "off"
+                        on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                          - switch.toggle: dps_output_switch
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
+                        widgets:
+                          - label:
+                              id: lbl_pwr_icon
+                              align: CENTER
+                              text: "\u23FB"
+                              text_color: 0x555555
+                              text_font: montserrat_28
+                    - label:
+                        id: lbl_pwr
+                        text: "OFF"
+                        text_color: 0x555555
+                        text_font: montserrat_16
+
+              # Lock group: 20% = 205px, 2.5% left margin = 26px
+              - obj:
+                  width: 205
+                  height: 96
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_left: 26
+                  pad_right: 0
+                  pad_top: 0
+                  pad_bottom: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_cross: CENTER
+                    flex_align_main: CENTER
+                    pad_column: 10
+                  widgets:
+                    - label:
+                        text: "LOCK"
+                        text_color: 0x555555
+                        text_font: montserrat_14
+                    - switch:
+                        id: sw_lock_main
+                        on_value:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                          - lambda: |-
+                              if (id(opendps_id).is_connected())
+                                id(opendps_id).lock(x);
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
 
     # =========================================================
     # PAGE: GRAPHS  (content area y=40..560, 520px tall)
@@ -1208,6 +1597,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1217,6 +1609,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 1.0
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1247,6 +1642,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1256,6 +1654,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 2.0
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1286,6 +1687,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1295,6 +1699,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 2.0
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1325,6 +1732,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1334,6 +1744,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 1.0
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1364,6 +1777,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1373,6 +1789,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 0.5
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1403,6 +1822,9 @@ lvgl:
                         border_width: 1
                         radius: 6
                         on_click:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
                           - select.set:
                               id: opendps_select_mode
                               option: "cv"
@@ -1412,6 +1834,9 @@ lvgl:
                           - number.set:
                               id: current_number
                               value: 0.5
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         widgets:
                           - obj:
                               align: CENTER
@@ -1503,9 +1928,8 @@ lvgl:
                         min_value: 5
                         max_value: 100
                         value: 80
-                        main:
-                          bg_color: 0x2A2A2A
-                          radius: 4
+                        bg_color: 0x2A2A2A
+                        radius: 4
                         indicator:
                           bg_color: 0xFFFF66
                           radius: 4
@@ -1516,10 +1940,18 @@ lvgl:
                           height: 28
                           pad_top: -4
                           pad_bottom: -4
+                        on_press:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                        on_release:
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"
                         on_value:
-                          - opendps.set_brightness:
-                              id: opendps_id
-                              brightness: !lambda 'return x;'
+                          - lambda: |-
+                              if (id(opendps_id).is_connected())
+                                id(opendps_id).set_brightness(x);
                           - lvgl.label.update:
                               id: lbl_bright
                               text:
@@ -1550,6 +1982,12 @@ lvgl:
                     - switch:
                         id: sw_lock_settings
                         on_value:
-                          - opendps.lock:
-                              id: opendps_id
-                              locked: !lambda 'return x;'
+                          - globals.set:
+                              id: g_ui_active
+                              value: "true"
+                          - lambda: |-
+                              if (id(opendps_id).is_connected())
+                                id(opendps_id).lock(x);
+                          - globals.set:
+                              id: g_ui_active
+                              value: "false"

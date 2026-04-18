@@ -232,6 +232,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_power_out_sensor(sensor::Sensor *sensor) { this->power_out_sensor_ = sensor; }
   void set_temp1_sensor(sensor::Sensor *sensor) { this->temp1_sensor_ = sensor; }
   void set_temp2_sensor(sensor::Sensor *sensor) { this->temp2_sensor_ = sensor; }
+  void set_voltage_set_sensor(sensor::Sensor *sensor) { this->voltage_set_sensor_ = sensor; }
+  void set_current_set_sensor(sensor::Sensor *sensor) { this->current_set_sensor_ = sensor; }
   void set_output_enabled_binary_sensor(binary_sensor::BinarySensor *sensor) {
     this->output_enabled_binary_sensor_ = sensor;
   }
@@ -368,6 +370,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   sensor::Sensor *power_out_sensor_{nullptr};
   sensor::Sensor *temp1_sensor_{nullptr};
   sensor::Sensor *temp2_sensor_{nullptr};
+  sensor::Sensor *voltage_set_sensor_{nullptr};
+  sensor::Sensor *current_set_sensor_{nullptr};
   binary_sensor::BinarySensor *output_enabled_binary_sensor_{nullptr};
 
   // State
@@ -395,6 +399,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   size_t upgrade_offset_{0};
   uint16_t upgrade_chunk_size_{1024};
   uint32_t upgrade_last_chunk_time_{0};
+  uint32_t upgrade_bootloader_ready_time_{0};
+  uint32_t upgrade_cal_restore_time_{0};
   uint8_t upgrade_retry_count_{0};
   uint16_t upgrade_crc_{0};
   uint32_t bootloader_baud_rate_{0};        // Bootloader baud rate (0 = use same as UART)

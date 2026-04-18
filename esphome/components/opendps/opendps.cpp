@@ -93,6 +93,29 @@ void OpenDPS::loop() {
 
   uint32_t now = millis();
 
+  // Wait for bootloader to be ready before sending first chunk
+  if (this->upgrade_bootloader_ready_time_ > 0) {
+    if (now - this->upgrade_bootloader_ready_time_ >= 500) {
+      this->upgrade_bootloader_ready_time_ = 0;
+      this->upgrade_last_chunk_time_ = now;
+      this->send_next_upgrade_chunk_();
+    }
+    return;
+  }
+
+  // Wait before restoring calibration after firmware upgrade
+  if (this->upgrade_cal_restore_time_ > 0) {
+    if (now - this->upgrade_cal_restore_time_ >= 500) {
+      this->upgrade_cal_restore_time_ = 0;
+      if (this->restore_calibration_from_storage()) {
+        ESP_LOGI(TAG, "Calibration auto-restored successfully after firmware upgrade");
+      } else {
+        ESP_LOGW(TAG, "Failed to auto-restore calibration after firmware upgrade");
+      }
+    }
+    return;
+  }
+
   // Handle upgrade timeout and retry
   if (this->upgrade_in_progress_ && this->upgrade_last_chunk_time_ > 0) {
     if (now - this->upgrade_last_chunk_time_ >= UPGRADE_CHUNK_TIMEOUT_MS) {
@@ -144,6 +167,8 @@ void OpenDPS::dump_config() {
   LOG_SENSOR("  ", "Power Out", this->power_out_sensor_);
   LOG_SENSOR("  ", "Temperature 1", this->temp1_sensor_);
   LOG_SENSOR("  ", "Temperature 2", this->temp2_sensor_);
+  LOG_SENSOR("  ", "Voltage Set", this->voltage_set_sensor_);
+  LOG_SENSOR("  ", "Current Set", this->current_set_sensor_);
   LOG_BINARY_SENSOR("  ", "Output Enabled", this->output_enabled_binary_sensor_);
 }
 
@@ -326,7 +351,8 @@ void OpenDPS::send_frame_(const std::vector<uint8_t> &payload) {
                frame[3], frame[4], frame[5], frame[6], frame[7], frame[8], frame[9]);
     }
   } else {
-    ESP_LOGV(TAG, "TX Frame (%u bytes): %s", frame.size(), format_hex_pretty(frame).c_str());
+    char hex_buf[format_hex_pretty_size(64)];
+    ESP_LOGV(TAG, "TX Frame (%u bytes): %s", frame.size(), format_hex_pretty_to(hex_buf, frame));
   }
 
   // Send frame
@@ -374,7 +400,9 @@ bool OpenDPS::read_frame_() {
       if (byte == FRAME_EOF) {
         this->receiving_frame_ = false;
 
-        ESP_LOGV(TAG, "RX Frame (%d bytes): %s", this->rx_buffer_.size(), format_hex_pretty(this->rx_buffer_).c_str());
+        char hex_buf[format_hex_pretty_size(64)];
+        ESP_LOGV(TAG, "RX Frame (%d bytes): %s", this->rx_buffer_.size(),
+                 format_hex_pretty_to(hex_buf, this->rx_buffer_));
 
         // Validate frame
         if (this->rx_buffer_.size() < 4) {
@@ -504,6 +532,18 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           }
         }
 
+        // Publish vset/iset from params (mV/mA → V/A)
+        auto voltage_it = this->data_.params.find("voltage");
+        if (voltage_it != this->data_.params.end() && this->voltage_set_sensor_ != nullptr) {
+          float vset = std::atoi(voltage_it->second.c_str()) / 1000.0f;
+          this->voltage_set_sensor_->publish_state(vset);
+        }
+        auto current_it = this->data_.params.find("current");
+        if (current_it != this->data_.params.end() && this->current_set_sensor_ != nullptr) {
+          float iset = std::atoi(current_it->second.c_str()) / 1000.0f;
+          this->current_set_sensor_->publish_state(iset);
+        }
+
         this->data_.last_update = millis();
 
         // Publish sensor values
@@ -589,10 +629,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           // At 9600 baud, the bootloader's response takes ~10ms to send.
           // We add extra margin for flash operations and loop entry.
           ESP_LOGI(TAG, "Waiting 500ms for bootloader to be ready...");
-          delay(500);
-          // Update timeout tracker and send first chunk
-          this->upgrade_last_chunk_time_ = millis();
-          this->send_next_upgrade_chunk_();
+          this->upgrade_bootloader_ready_time_ = std::max(millis(), 1u);
         } else {
           ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
           this->upgrade_in_progress_ = false;
@@ -640,13 +677,8 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           // Auto-restore calibration if enabled and backup exists
           if (this->auto_restore_calibration_ && this->has_calibration_backup()) {
             ESP_LOGI(TAG, "Auto-restoring calibration from backup...");
-            // Small delay to let new firmware fully initialize
-            delay(500);
-            if (this->restore_calibration_from_storage()) {
-              ESP_LOGI(TAG, "Calibration auto-restored successfully after firmware upgrade");
-            } else {
-              ESP_LOGW(TAG, "Failed to auto-restore calibration after firmware upgrade");
-            }
+            // Small delay to let new firmware fully initialize before restoring calibration
+            this->upgrade_cal_restore_time_ = std::max(millis(), 1u);
           }
           // Restore connection icon after successful upgrade
 #ifdef USE_ETHERNET
@@ -798,13 +830,17 @@ void OpenDPS::set_parameter(const std::string &key, const std::string &value) {
 void OpenDPS::set_voltage(float voltage) {
   // Convert voltage to millivolts
   uint16_t voltage_mv = static_cast<uint16_t>(voltage * 1000.0f);
-  this->set_parameter("voltage", std::to_string(voltage_mv));
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%u", voltage_mv);
+  this->set_parameter("voltage", buf);
 }
 
 void OpenDPS::set_current(float current) {
   // Convert current to milliamps
   uint16_t current_ma = static_cast<uint16_t>(current * 1000.0f);
-  this->set_parameter("current", std::to_string(current_ma));
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%u", current_ma);
+  this->set_parameter("current", buf);
 }
 
 void OpenDPS::set_brightness(uint8_t brightness) {
@@ -1303,7 +1339,9 @@ void OpenDPS::cal_assistant_process_() {
       // Async sweep: V_DAC from 0 to 4095 in 100 steps
       if (this->cal_sweep_step_ <= 100) {
         uint16_t v_dac = (this->cal_sweep_step_ * 4095) / 100;
-        this->set_parameter("V_DAC", std::to_string(v_dac));
+        char dac_buf[6];
+        snprintf(dac_buf, sizeof(dac_buf), "%u", v_dac);
+        this->set_parameter("V_DAC", dac_buf);
         // Store DAC value now, ADC value will be stored in callback
         this->cal_samples_x_.push_back(static_cast<float>(v_dac));
         // Request calibration report - callback will collect sample and continue
@@ -1330,7 +1368,9 @@ void OpenDPS::cal_assistant_process_() {
 
         // Set V_DAC to 10%
         uint16_t v_dac_low = static_cast<uint16_t>(this->cal_max_v_dac_ * 0.1f);
-        this->set_parameter("V_DAC", std::to_string(v_dac_low));
+        char dac_buf[6];
+        snprintf(dac_buf, sizeof(dac_buf), "%u", v_dac_low);
+        this->set_parameter("V_DAC", dac_buf);
         this->cal_samples_x_.push_back(static_cast<float>(v_dac_low));  // Store DAC value
         this->request_calibration_report();
 
@@ -1448,7 +1488,9 @@ void OpenDPS::cal_assistant_process_() {
         float output_voltage = max_output_mv * (static_cast<float>(this->cal_sweep_step_) / num_steps);
         uint16_t output_dac = static_cast<uint16_t>(this->cal_v_dac_k_ * output_voltage + this->cal_v_dac_c_);
 
-        this->set_parameter("V_DAC", std::to_string(output_dac));
+        char dac_buf[6];
+        snprintf(dac_buf, sizeof(dac_buf), "%u", output_dac);
+        this->set_parameter("V_DAC", dac_buf);
         this->enable_output(true);
         // Request calibration report - callback will collect sample and continue
         this->request_calibration_report();
@@ -1502,7 +1544,9 @@ void OpenDPS::cal_assistant_process_() {
       uint8_t num_steps = 100;
       if (this->cal_sweep_step_ <= num_steps) {
         uint16_t a_dac = (this->cal_sweep_step_ * 4095) / num_steps;
-        this->set_parameter("A_DAC", std::to_string(a_dac));
+        char dac_buf[6];
+        snprintf(dac_buf, sizeof(dac_buf), "%u", a_dac);
+        this->set_parameter("A_DAC", dac_buf);
         this->enable_output(true);
         // Store DAC value now, ADC value will be stored in callback
         this->cal_samples_x_.push_back(static_cast<float>(a_dac));
@@ -1556,7 +1600,9 @@ void OpenDPS::cal_assistant_process_() {
         uint16_t a_dac =
             this->cal_a_dac_lower_ + static_cast<uint16_t>((this->cal_a_dac_upper_ - this->cal_a_dac_lower_) * ratio);
 
-        this->set_parameter("A_DAC", std::to_string(a_dac));
+        char dac_buf[6];
+        snprintf(dac_buf, sizeof(dac_buf), "%u", a_dac);
+        this->set_parameter("A_DAC", dac_buf);
         this->enable_output(true);
         // Store DAC value now for later use in callback
         // We use a temporary storage approach - store DAC in cal_max_v_dac_ temporarily
@@ -1640,7 +1686,9 @@ void OpenDPS::cal_assistant_collect_sample_() {
 
       // Set V_DAC to 90% for the high measurement
       uint16_t v_dac_high = static_cast<uint16_t>(this->cal_max_v_dac_ * 0.9f);
-      this->set_parameter("V_DAC", std::to_string(v_dac_high));
+      char dac_buf[6];
+      snprintf(dac_buf, sizeof(dac_buf), "%u", v_dac_high);
+      this->set_parameter("V_DAC", dac_buf);
       this->cal_samples_x_.push_back(static_cast<float>(v_dac_high));  // Store DAC value
 
       this->cal_assistant_state_ = CAL_VOUT_HIGH_WAIT_INPUT;
@@ -2895,7 +2943,8 @@ void OpenDPS::loop_tcp_bridge_() {
     uint8_t tcp_buf[256];
     ssize_t tcp_len = this->tcp_client_socket_->read(tcp_buf, sizeof(tcp_buf));
     if (tcp_len > 0) {
-      ESP_LOGI(TAG, "TCP->UART: %d bytes: %s", tcp_len, format_hex_pretty(tcp_buf, tcp_len).c_str());
+      char hex_buf[format_hex_pretty_size(256)];
+      ESP_LOGI(TAG, "TCP->UART: %d bytes: %s", tcp_len, format_hex_pretty_to(hex_buf, tcp_buf, tcp_len));
       this->write_array(tcp_buf, tcp_len);
       this->flush();
     } else if (tcp_len == 0) {
@@ -2930,8 +2979,9 @@ void OpenDPS::loop_tcp_bridge_() {
       // Check if we have a complete frame (ends with EOF)
       if (byte == FRAME_EOF && !this->tcp_uart_buffer_.empty() && this->tcp_uart_buffer_[0] == FRAME_SOF) {
         // Send the complete frame
+        char hex_buf2[format_hex_pretty_size(256)];
         ESP_LOGI(TAG, "UART->TCP: %d bytes: %s", this->tcp_uart_buffer_.size(),
-                 format_hex_pretty(this->tcp_uart_buffer_.data(), this->tcp_uart_buffer_.size()).c_str());
+                 format_hex_pretty_to(hex_buf2, this->tcp_uart_buffer_.data(), this->tcp_uart_buffer_.size()));
         ssize_t written = this->tcp_client_socket_->write(this->tcp_uart_buffer_.data(), this->tcp_uart_buffer_.size());
         if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
           ESP_LOGI(TAG, "TCP bridge: write error, disconnecting");

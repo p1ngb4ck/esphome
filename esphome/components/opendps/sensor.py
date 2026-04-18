@@ -26,6 +26,8 @@ CONF_CURRENT_OUT = "current_out"
 CONF_POWER_OUT = "power_out"
 CONF_TEMPERATURE_1 = "temperature_1"
 CONF_TEMPERATURE_2 = "temperature_2"
+CONF_VOLTAGE_SET = "voltage_set"
+CONF_CURRENT_SET = "current_set"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -66,6 +68,18 @@ CONFIG_SCHEMA = cv.Schema(
             device_class=DEVICE_CLASS_TEMPERATURE,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        cv.Optional(CONF_VOLTAGE_SET): sensor.sensor_schema(
+            unit_of_measurement=UNIT_VOLT,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_VOLTAGE,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        cv.Optional(CONF_CURRENT_SET): sensor.sensor_schema(
+            unit_of_measurement=UNIT_AMPERE,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_CURRENT,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
     }
 )
 
@@ -96,3 +110,11 @@ async def to_code(config):
     if temp2_config := config.get(CONF_TEMPERATURE_2):
         sens = await sensor.new_sensor(temp2_config)
         cg.add(parent.set_temp2_sensor(sens))
+
+    if voltage_set_config := config.get(CONF_VOLTAGE_SET):
+        sens = await sensor.new_sensor(voltage_set_config)
+        cg.add(parent.set_voltage_set_sensor(sens))
+
+    if current_set_config := config.get(CONF_CURRENT_SET):
+        sens = await sensor.new_sensor(current_set_config)
+        cg.add(parent.set_current_set_sensor(sens))
