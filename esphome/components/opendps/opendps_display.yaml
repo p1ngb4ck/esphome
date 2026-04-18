@@ -118,7 +118,7 @@ sensor:
       on_value:
         - lvgl.label.update:
             id: lbl_vin
-            text: {format: "%.1fV", args: [x]}
+            text: {format: "%.2fV", args: [x]}
 
 number:
   - platform: template
@@ -303,6 +303,7 @@ select:
     id: opendps_select_mode
     name: "Select output mode"
     icon: mdi:cog-outline
+    optimistic: true
     options:
       - "cv"
       - "cc"
@@ -311,33 +312,99 @@ select:
       - lambda: |-
           id(opendps_id).set_function(x.c_str());
     on_value:
-      - lambda: |-
-          bool cv_on = (i == 0);
-          bool cc_on = (i == 1);
-          bool cl_on = (i == 2);
-          lv_style_selector_t sel_def = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
-          lv_style_selector_t sel_pr  = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED);
-          lv_style_selector_t sel_foc = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_FOCUSED);
-          for (lv_style_selector_t s : {sel_def, sel_pr, sel_foc}) {
-            lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, s);
-            lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x1A4A1A) : lv_color_hex(0x0A0A0A), s);
-            lv_obj_set_style_border_color(id(btn_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x1A1A1A), s);
-            lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, s);
-            lv_obj_set_style_bg_color(id(btn_cc), cc_on ? lv_color_hex(0x3A3A00) : lv_color_hex(0x0A0A0A), s);
-            lv_obj_set_style_border_color(id(btn_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x1A1A1A), s);
-            lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, s);
-            lv_obj_set_style_bg_color(id(btn_cp), cl_on ? lv_color_hex(0x3A0A0A) : lv_color_hex(0x0A0A0A), s);
-            lv_obj_set_style_border_color(id(btn_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x1A1A1A), s);
-          }
-          lv_obj_set_style_border_width(id(btn_cv), cv_on ? 3 : 0, sel_def);
-          lv_obj_set_style_border_width(id(btn_cc), cc_on ? 3 : 0, sel_def);
-          lv_obj_set_style_border_width(id(btn_cp), cl_on ? 3 : 0, sel_def);
-          lv_obj_set_style_text_color(id(lbl_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x444444), sel_def);
-          lv_obj_set_style_text_color(id(lbl_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x444444), sel_def);
-          lv_obj_set_style_text_color(id(lbl_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x444444), sel_def);
-          lv_obj_invalidate(id(btn_cv));
-          lv_obj_invalidate(id(btn_cc));
-          lv_obj_invalidate(id(btn_cp));
+      - if:
+          condition:
+            lambda: 'return i == 0;'
+          then:
+            - lvgl.widget.update:
+                id: btn_cv
+                bg_color: 0x1A4A1A
+                bg_opa: COVER
+                border_color: 0x39FF14
+                border_width: 3
+            - lvgl.widget.update:
+                id: btn_cc
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.widget.update:
+                id: btn_cp
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.label.update:
+                id: lbl_cv
+                text_color: 0x39FF14
+            - lvgl.label.update:
+                id: lbl_cc
+                text_color: 0x444444
+            - lvgl.label.update:
+                id: lbl_cp
+                text_color: 0x444444
+      - if:
+          condition:
+            lambda: 'return i == 1;'
+          then:
+            - lvgl.widget.update:
+                id: btn_cc
+                bg_color: 0x3A3A00
+                bg_opa: COVER
+                border_color: 0xFFBF00
+                border_width: 3
+            - lvgl.widget.update:
+                id: btn_cv
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.widget.update:
+                id: btn_cp
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.label.update:
+                id: lbl_cc
+                text_color: 0xFFBF00
+            - lvgl.label.update:
+                id: lbl_cv
+                text_color: 0x444444
+            - lvgl.label.update:
+                id: lbl_cp
+                text_color: 0x444444
+      - if:
+          condition:
+            lambda: 'return i == 2;'
+          then:
+            - lvgl.widget.update:
+                id: btn_cp
+                bg_color: 0x3A0A0A
+                bg_opa: COVER
+                border_color: 0xFF3333
+                border_width: 3
+            - lvgl.widget.update:
+                id: btn_cv
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.widget.update:
+                id: btn_cc
+                bg_color: 0x0A0A0A
+                bg_opa: COVER
+                border_color: 0x1A1A1A
+                border_width: 0
+            - lvgl.label.update:
+                id: lbl_cp
+                text_color: 0xFF3333
+            - lvgl.label.update:
+                id: lbl_cv
+                text_color: 0x444444
+            - lvgl.label.update:
+                id: lbl_cc
+                text_color: 0x444444
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 40
