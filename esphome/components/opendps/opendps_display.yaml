@@ -30,11 +30,11 @@ font:
     id: mdi_20
     size: 20
     glyphs:
-      - "\U000F105B"  # mdi:sd
-      - "\U000F0287"  # mdi:usb
-      - "\U000F0A11"  # mdi:folder-network
-      - "\U000F06B5"  # mdi:home-assistant
-      - "\U000F068A"  # mdi:power-plug
+      - "\U000F0479"  # mdi:sd
+      - "\U000F0553"  # mdi:usb
+      - "\U000F0870"  # mdi:folder-network
+      - "\U000F07D0"  # mdi:home-assistant
+      - "\U000F06A5"  # mdi:power-plug
 
 globals:
   - id: g_vset
@@ -483,27 +483,27 @@ lvgl:
                 widgets:
                   - label:
                       id: lbl_icon_sd
-                      text: "\U000F105B"
+                      text: "\U000F0479"
                       text_color: 0x333333
                       text_font: mdi_20
                   - label:
                       id: lbl_icon_usb
-                      text: "\U000F0287"
+                      text: "\U000F0553"
                       text_color: 0x333333
                       text_font: mdi_20
                   - label:
                       id: lbl_icon_nfs
-                      text: "\U000F0A11"
+                      text: "\U000F0870"
                       text_color: 0x333333
                       text_font: mdi_20
                   - label:
                       id: lbl_icon_ha
-                      text: "\U000F06B5"
+                      text: "\U000F07D0"
                       text_color: 0x333333
                       text_font: mdi_20
                   - label:
                       id: lbl_icon_dps
-                      text: "\U000F068A"
+                      text: "\U000F06A5"
                       text_color: 0x333333
                       text_font: mdi_20
             - obj:
