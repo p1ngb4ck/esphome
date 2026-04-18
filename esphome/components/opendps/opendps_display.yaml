@@ -433,10 +433,31 @@ switch:
 interval:
   - interval: 10s
     then:
-      - component.update: bs_ha_connected
-      - component.update: bs_sd_mounted
-      - component.update: bs_usb_mounted
-      - component.update: bs_nfs_mounted
+      - lambda: |-
+          bool api_ok = false;
+          bool mqtt_ok = false;
+          #ifdef USE_API
+          api_ok = global_api_server != nullptr && global_api_server->is_connected();
+          #endif
+          #ifdef USE_MQTT
+          mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
+          #endif
+          id(bs_ha_connected).publish_state(api_ok || mqtt_ok);
+          #ifdef USE_SD_STORAGE
+          id(bs_sd_mounted).publish_state(global_sd_storage != nullptr && global_sd_storage->is_mounted());
+          #else
+          id(bs_sd_mounted).publish_state(false);
+          #endif
+          #ifdef USE_USB_STORAGE
+          id(bs_usb_mounted).publish_state(global_usb_storage != nullptr && global_usb_storage->is_mounted());
+          #else
+          id(bs_usb_mounted).publish_state(false);
+          #endif
+          #ifdef USE_NFS_CLIENT
+          id(bs_nfs_mounted).publish_state(global_nfs_client != nullptr && global_nfs_client->is_mounted());
+          #else
+          id(bs_nfs_mounted).publish_state(false);
+          #endif
 
 time:
   - platform: rx8130
