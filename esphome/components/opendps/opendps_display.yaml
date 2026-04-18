@@ -589,12 +589,12 @@ lvgl:
     scrollbar_mode: "off"
 
     widgets:
-      # --- Header bar (y=0, h=80) ---
+      # --- Header bar (y=0, h=52) ---
       - obj:
           x: 0
           y: 0
           width: 1024
-          height: 80
+          height: 52
           bg_color: 0x141414
           border_width: 0
           radius: 0
@@ -778,22 +778,22 @@ lvgl:
       pad_all: 0
 
       widgets:
-        # ── VOLTAGE BAR: x=0, y=80, w=1024, h=168 ──────────────────
+        # ── VOLTAGE BAR: x=0, y=52, w=1024, h=154 ──────────────────
         # Left: slider (~65% width). Right: SET value + ACT value
         - obj:
             id: lcd_panel
             x: 0
-            y: 80
+            y: 52
             width: 1024
-            height: 172
+            height: 154
             bg_color: 0x0C1A0C
             border_color: 0x004408
             border_width: 2
             radius: 8
             pad_left: 16
             pad_right: 16
-            pad_top: 10
-            pad_bottom: 10
+            pad_top: 3
+            pad_bottom: 3
             scrollbar_mode: "off"
             layout:
               type: FLEX
@@ -1044,20 +1044,20 @@ lvgl:
                               text_font: montserrat_20
                               y: -6
 
-        # ── CURRENT BAR: x=0, y=256, w=1024, h=168 ─────────────────
+        # ── CURRENT BAR: x=0, y=206, w=1024, h=154 ─────────────────
         - obj:
             x: 0
-            y: 252
+            y: 206
             width: 1024
-            height: 172
+            height: 154
             bg_color: 0x0C0F1A
             border_color: 0x080040
             border_width: 2
             radius: 8
             pad_left: 16
             pad_right: 16
-            pad_top: 10
-            pad_bottom: 10
+            pad_top: 3
+            pad_bottom: 3
             scrollbar_mode: "off"
             layout:
               type: FLEX
@@ -1280,11 +1280,11 @@ lvgl:
                               text_font: montserrat_20
                               y: -6
 
-        # ── CONTROLS ROW: x=0, y=424, w=1024, h=96 ─────────────────
+        # ── CONTROLS ROW: x=0, y=360, w=1024, h=96 ─────────────────
         # 50% mode buttons | 2.5% gap | 20% power | 2.5% gap | 20% lock | 2.5% gap | 2.5% right
         - obj:
             x: 0
-            y: 424
+            y: 360
             width: 1024
             height: 96
             bg_color: 0x141414
@@ -1551,6 +1551,333 @@ lvgl:
                               text_color: 0x444444
                               text_font: mdi_36
 
+        # ── PRESET ROW: x=0, y=456, w=1024, h=64 ───────────────────
+        - obj:
+            x: 0
+            y: 456
+            width: 1024
+            height: 64
+            bg_color: 0x111111
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            scrollbar_mode: "off"
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: SPACE_EVENLY
+              flex_align_cross: STRETCH
+              pad_column: 0
+            widgets:
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 1.0
+                    - number.set:
+                        id: current_number
+                        value: 0.3
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "1.0V"
+                              text_color: 0x888888
+                              text_font: montserrat_16
+                          - label:
+                              text: "0.3A"
+                              text_color: 0x444444
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 1.8
+                    - number.set:
+                        id: current_number
+                        value: 0.56
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "1.8V"
+                              text_color: 0x888888
+                              text_font: montserrat_16
+                          - label:
+                              text: "0.56A"
+                              text_color: 0x444444
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 3.3
+                    - number.set:
+                        id: current_number
+                        value: 1.0
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "3.3V"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+                          - label:
+                              text: "1.0A"
+                              text_color: 0x1A6610
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 5.0
+                    - number.set:
+                        id: current_number
+                        value: 1.5
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "5V"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+                          - label:
+                              text: "1.5A"
+                              text_color: 0x1A6610
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 6.0
+                    - number.set:
+                        id: current_number
+                        value: 1.8
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "6V"
+                              text_color: 0xFFBF00
+                              text_font: montserrat_16
+                          - label:
+                              text: "1.8A"
+                              text_color: 0x664400
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 9.0
+                    - number.set:
+                        id: current_number
+                        value: 2.6
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "9V"
+                              text_color: 0xFF8800
+                              text_font: montserrat_16
+                          - label:
+                              text: "2.6A"
+                              text_color: 0x663300
+                              text_font: montserrat_12
+              - button:
+                  width: 146
+                  height: 64
+                  bg_color: 0x0A0A0A
+                  border_color: 0x1A1A1A
+                  border_width: 1
+                  radius: 0
+                  pad_all: 0
+                  on_click:
+                    - globals.set:
+                        id: g_ui_active
+                        value: "true"
+                    - select.set:
+                        id: opendps_select_mode
+                        option: "cv"
+                    - number.set:
+                        id: voltage_number
+                        value: 12.0
+                    - number.set:
+                        id: current_number
+                        value: 3.0
+                    - globals.set:
+                        id: g_ui_active
+                        value: "false"
+                  widgets:
+                    - obj:
+                        align: CENTER
+                        bg_opa: TRANSP
+                        border_width: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: COLUMN
+                          flex_align_cross: CENTER
+                          pad_row: 1
+                        widgets:
+                          - label:
+                              text: "12V"
+                              text_color: 0xFF3333
+                              text_font: montserrat_16
+                          - label:
+                              text: "3.0A"
+                              text_color: 0x661111
+                              text_font: montserrat_12
+
     # =========================================================
     # PAGE: GRAPHS  (content area y=40..560, 520px tall)
     # =========================================================
@@ -1811,322 +2138,11 @@ lvgl:
       scrollbar_mode: "off"
 
       widgets:
-        # Left column (presets): x=16, y=40, w=596, h=508
+        # PSU controls — full width now that presets moved to main page
         - obj:
             x: 16
             y: 40
-            width: 596
-            height: 508
-            bg_color: 0x1C1C1C
-            border_color: 0x2A2A2A
-            border_width: 1
-            radius: 8
-            pad_all: 16
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: COLUMN
-              flex_align_main: START
-              flex_align_cross: STRETCH
-              pad_row: 12
-
-            widgets:
-              - label:
-                  text: "PRESETS"
-                  text_color: 0x39FF14
-                  text_font: montserrat_20
-
-              # Preset buttons grid: 2 columns × 3 rows, each 272×72
-              - obj:
-                  width: 564
-                  height: 460
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW_WRAP
-                    flex_align_main: SPACE_EVENLY
-                    flex_align_cross: START
-                    pad_column: 10
-                    pad_row: 10
-
-                  widgets:
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x0F1F0F
-                        border_color: 0x1A3A1A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 3.3
-                          - number.set:
-                              id: current_number
-                              value: 1.0
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "3.3V / 1A"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "Logic / MCU"
-                                    text_color: 0x336633
-                                    text_font: montserrat_12
-
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x0F1F0F
-                        border_color: 0x1A3A1A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 5.0
-                          - number.set:
-                              id: current_number
-                              value: 2.0
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "5V / 2A"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "USB / RPi"
-                                    text_color: 0x336633
-                                    text_font: montserrat_12
-
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x0F1F0F
-                        border_color: 0x1A3A1A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 9.0
-                          - number.set:
-                              id: current_number
-                              value: 2.0
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "9V / 2A"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "QC / Motors"
-                                    text_color: 0x336633
-                                    text_font: montserrat_12
-
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x0F1F0F
-                        border_color: 0x1A3A1A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 12.0
-                          - number.set:
-                              id: current_number
-                              value: 1.0
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "12V / 1A"
-                                    text_color: 0x39FF14
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "Arduino / strips"
-                                    text_color: 0x336633
-                                    text_font: montserrat_12
-
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x10101F
-                        border_color: 0x1A1A3A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 4.2
-                          - number.set:
-                              id: current_number
-                              value: 0.5
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "4.2V / 0.5A"
-                                    text_color: 0x8888FF
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "LiPo charge"
-                                    text_color: 0x333366
-                                    text_font: montserrat_12
-
-                    - button:
-                        width: 272
-                        height: 72
-                        bg_color: 0x1A0F0F
-                        border_color: 0x3A1A1A
-                        border_width: 1
-                        radius: 6
-                        on_click:
-                          - globals.set:
-                              id: g_ui_active
-                              value: "true"
-                          - select.set:
-                              id: opendps_select_mode
-                              option: "cv"
-                          - number.set:
-                              id: voltage_number
-                              value: 24.0
-                          - number.set:
-                              id: current_number
-                              value: 0.5
-                          - globals.set:
-                              id: g_ui_active
-                              value: "false"
-                        widgets:
-                          - obj:
-                              align: CENTER
-                              bg_opa: TRANSP
-                              border_width: 0
-                              width: 248
-                              height: 52
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: COLUMN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "24V / 0.5A"
-                                    text_color: 0xFF6666
-                                    text_font: montserrat_18
-                                - label:
-                                    text: "Automation"
-                                    text_color: 0x663333
-                                    text_font: montserrat_12
-
-        # Right column (PSU controls): x=628, y=40, w=380, h=508
-        - obj:
-            x: 628
-            y: 40
-            width: 380
+            width: 992
             height: 508
             bg_color: 0x1C1C1C
             border_color: 0x2A2A2A
