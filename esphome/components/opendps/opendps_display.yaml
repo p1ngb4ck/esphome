@@ -65,13 +65,13 @@ sensor:
     voltage_out:
       id: opendps_output_voltage
       on_value:
-        - lvgl.label.update:
-            id: lbl_vout
-            text: {format: "%.2f", args: [x]}
-            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A);'
-        - lvgl.label.update:
-            id: lbl_vout_g
-            text: {format: "Vout  %.2fV", args: [x]}
+        - lambda: |-
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.2f", x);
+            lv_label_set_text(id(lbl_vout), buf);
+            lv_obj_set_style_text_color(id(lbl_vout), id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), "Vout  %.2fV", x);
+            lv_label_set_text(id(lbl_vout_g), buf);
         - lvgl.chart.set_next_value:
             id: chart_v
             series_id: ser_v
@@ -79,13 +79,13 @@ sensor:
     current_out:
       id: opendps_ouput_current
       on_value:
-        - lvgl.label.update:
-            id: lbl_iout
-            text: {format: "%.3f", args: [x]}
-            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A);'
-        - lvgl.label.update:
-            id: lbl_iout_g
-            text: {format: "Iout  %.3fA", args: [x]}
+        - lambda: |-
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.3f", x);
+            lv_label_set_text(id(lbl_iout), buf);
+            lv_obj_set_style_text_color(id(lbl_iout), id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), "Iout  %.3fA", x);
+            lv_label_set_text(id(lbl_iout_g), buf);
         - lvgl.chart.set_next_value:
             id: chart_i
             series_id: ser_i
@@ -144,9 +144,10 @@ number:
           lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 10000.0f), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_v));
           id(g_slider_updating) = false;
-      - lvgl.label.update:
-          id: lbl_setv
-          text: {format: "%.2f", args: [x]}
+      - lambda: |-
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%.2f", x);
+          lv_label_set_text(id(lbl_setv), buf);
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 50
@@ -171,9 +172,10 @@ number:
       - lambda: |-
           lv_slider_set_value(id(sl_i), (int)(x * 100), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_i));
-      - lvgl.label.update:
-          id: lbl_seti
-          text: {format: "%.3f", args: [x]}
+      - lambda: |-
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%.3f", x);
+          lv_label_set_text(id(lbl_seti), buf);
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 60
@@ -826,6 +828,10 @@ lvgl:
                   height: 148
                   bg_opa: TRANSP
                   border_width: 0
+                  pad_left: 4
+                  pad_right: 12
+                  pad_top: 0
+                  pad_bottom: 0
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
@@ -1057,6 +1063,10 @@ lvgl:
                   height: 148
                   bg_opa: TRANSP
                   border_width: 0
+                  pad_left: 4
+                  pad_right: 12
+                  pad_top: 0
+                  pad_bottom: 0
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
