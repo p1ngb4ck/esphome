@@ -318,16 +318,17 @@ select:
           lv_color_t cv_bg = cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A);
           lv_color_t cc_bg = cc_on ? lv_color_hex(0x2A2A0A) : lv_color_hex(0x0A0A0A);
           lv_color_t cl_bg = cl_on ? lv_color_hex(0x2A0A0A) : lv_color_hex(0x0A0A0A);
-          for (lv_style_selector_t s : {(lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT),
-                                        (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_PRESSED),
-                                        (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_FOCUSED)}) {
+          lv_style_selector_t sel_def  = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
+          lv_style_selector_t sel_pr   = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED);
+          lv_style_selector_t sel_foc  = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_FOCUSED);
+          for (lv_style_selector_t s : {sel_def, sel_pr, sel_foc}) {
             lv_obj_set_style_bg_color(id(btn_cv), cv_bg, s);
             lv_obj_set_style_bg_color(id(btn_cc), cc_bg, s);
             lv_obj_set_style_bg_color(id(btn_cp), cl_bg, s);
           }
-          lv_obj_set_style_text_color(id(lbl_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A4A2A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_text_color(id(lbl_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x4A4A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
-          lv_obj_set_style_text_color(id(lbl_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x4A1A1A), LV_PART_MAIN | LV_STATE_DEFAULT);
+          lv_obj_set_style_text_color(id(lbl_cv), cv_on ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A4A2A), sel_def);
+          lv_obj_set_style_text_color(id(lbl_cc), cc_on ? lv_color_hex(0xFFBF00) : lv_color_hex(0x4A4A1A), sel_def);
+          lv_obj_set_style_text_color(id(lbl_cp), cl_on ? lv_color_hex(0xFF3333) : lv_color_hex(0x4A1A1A), sel_def);
           lv_obj_invalidate(id(btn_cv));
           lv_obj_invalidate(id(btn_cc));
           lv_obj_invalidate(id(btn_cp));
