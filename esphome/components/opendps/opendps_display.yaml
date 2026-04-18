@@ -315,7 +315,7 @@ select:
           bool cv_on = (x == "cv");
           bool cc_on = (x == "cc");
           bool cl_on = (x == "cl");
-          lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+          lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT);
           // btn_cv
           lv_obj_set_style_bg_color(id(btn_cv), cv_on ? lv_color_hex(0x0F2A0F) : lv_color_hex(0x0A0A0A), sel);
           lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
@@ -1168,7 +1168,7 @@ lvgl:
                         id: opendps_select_mode
                         option: "cv"
                     - lambda: |-
-                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT);
                         lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0F2A0F), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel);
                         lv_obj_set_style_border_side(id(btn_cv), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
                         lv_obj_set_style_bg_color(id(led_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_shadow_color(id(led_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_shadow_width(id(led_cv), 8, sel);
@@ -1222,7 +1222,7 @@ lvgl:
                         id: opendps_select_mode
                         option: "cc"
                     - lambda: |-
-                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT);
                         lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x2A2A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel);
                         lv_obj_set_style_border_side(id(btn_cc), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
                         lv_obj_set_style_bg_color(id(led_cc), lv_color_hex(0xFFBF00), sel); lv_obj_set_style_shadow_color(id(led_cc), lv_color_hex(0xFFBF00), sel); lv_obj_set_style_shadow_width(id(led_cc), 8, sel);
@@ -1276,7 +1276,7 @@ lvgl:
                         id: opendps_select_mode
                         option: "cl"
                     - lambda: |-
-                        lv_style_selector_t sel = LV_PART_MAIN | LV_STATE_DEFAULT;
+                        lv_style_selector_t sel = (lv_style_selector_t)(LV_PART_MAIN | LV_STATE_DEFAULT);
                         lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x2A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel);
                         lv_obj_set_style_border_side(id(btn_cp), (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM), sel);
                         lv_obj_set_style_bg_color(id(led_cl), lv_color_hex(0xFF3333), sel); lv_obj_set_style_shadow_color(id(led_cl), lv_color_hex(0xFF3333), sel); lv_obj_set_style_shadow_width(id(led_cl), 8, sel);
