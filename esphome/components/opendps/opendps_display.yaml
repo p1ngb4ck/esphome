@@ -1033,6 +1033,7 @@ lvgl:
             bg_color: 0x141414
             border_width: 0
             radius: 0
+            pad_all: 0
             scrollbar_mode: "off"
             layout:
               type: FLEX
