@@ -232,44 +232,26 @@ binary_sensor:
                   border_color: 0x39FF14
                   shadow_color: 0x39FF14
                   shadow_width: 16
-              - lvgl.label.update:
-                  id: lbl_pwr
-                  text: "ON"
-                  text_color: 0x39FF14
-              - lvgl.label.update:
-                  id: lbl_vout
-                  text_color: 0x39FF14
-              - lvgl.label.update:
-                  id: lbl_iout
-                  text_color: 0x4499FF
-              - lvgl.label.update:
-                  id: lbl_setv
-                  text_color: 0x1A4A1A
-              - lvgl.label.update:
-                  id: lbl_seti
-                  text_color: 0x1A1A4A
+              - lambda: |-
+                  lv_label_set_text(id(lbl_pwr), "ON");
+                  lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x4499FF), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x1A4A1A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x1A1A4A), LV_PART_MAIN);
             else:
               - lvgl.widget.update:
                   id: pwr_ring
                   border_color: 0x555555
                   shadow_color: 0x000000
                   shadow_width: 0
-              - lvgl.label.update:
-                  id: lbl_pwr
-                  text: "OFF"
-                  text_color: 0x555555
-              - lvgl.label.update:
-                  id: lbl_vout
-                  text_color: 0x2A2A2A
-              - lvgl.label.update:
-                  id: lbl_iout
-                  text_color: 0x2A2A2A
-              - lvgl.label.update:
-                  id: lbl_setv
-                  text_color: 0x39FF14
-              - lvgl.label.update:
-                  id: lbl_seti
-                  text_color: 0x4499FF
+              - lambda: |-
+                  lv_label_set_text(id(lbl_pwr), "OFF");
+                  lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x555555), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x4499FF), LV_PART_MAIN);
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
@@ -278,9 +260,8 @@ binary_sensor:
       name: "OpenDPS Connected"
       icon: mdi:power-plug
       on_state:
-        - lvgl.label.update:
-            id: lbl_icon_dps
-            text_color: !lambda 'return x ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333);'
+        - lambda: |-
+            lv_obj_set_style_text_color(id(lbl_icon_dps), x ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333), LV_PART_MAIN);
 
   - platform: template
     id: bs_ha_connected
@@ -290,36 +271,32 @@ binary_sensor:
       bool mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
       return api_ok || mqtt_ok;
     on_state:
-      - lvgl.label.update:
-          id: lbl_icon_ha
-          text_color: !lambda 'return x ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333);'
+      - lambda: |-
+          lv_obj_set_style_text_color(id(lbl_icon_ha), x ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333), LV_PART_MAIN);
 
   - platform: template
     id: bs_sd_mounted
     name: "SD Card Mounted"
     lambda: 'return id(sd_card).is_mounted();'
     on_state:
-      - lvgl.label.update:
-          id: lbl_icon_sd
-          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
+      - lambda: |-
+          lv_obj_set_style_text_color(id(lbl_icon_sd), x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
 
   - platform: template
     id: bs_usb_mounted
     name: "USB Mounted"
     lambda: 'return id(usb_storage_id).is_mounted();'
     on_state:
-      - lvgl.label.update:
-          id: lbl_icon_usb
-          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
+      - lambda: |-
+          lv_obj_set_style_text_color(id(lbl_icon_usb), x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
 
   - platform: template
     id: bs_nfs_mounted
     name: "NFS Mounted"
     lambda: 'return id(nfs_share).is_mounted();'
     on_state:
-      - lvgl.label.update:
-          id: lbl_icon_nfs
-          text_color: !lambda 'return x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333);'
+      - lambda: |-
+          lv_obj_set_style_text_color(id(lbl_icon_nfs), x ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
 
 select:
   - platform: template
