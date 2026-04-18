@@ -1168,6 +1168,15 @@ lvgl:
                     - select.set:
                         id: opendps_select_mode
                         option: "cv"
+                    - lambda: |-
+                        lv_style_selector_t sel = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x1A4A1A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_border_width(id(btn_cv), 3, sel);
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cc), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cc), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cp), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cp), 0, sel);
+                        lv_obj_set_style_text_color(id(lbl_cv), lv_color_hex(0x39FF14), sel);
+                        lv_obj_set_style_text_color(id(lbl_cc), lv_color_hex(0x444444), sel);
+                        lv_obj_set_style_text_color(id(lbl_cp), lv_color_hex(0x444444), sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
                     - globals.set:
                         id: g_ui_active
                         value: "false"
@@ -1196,6 +1205,15 @@ lvgl:
                     - select.set:
                         id: opendps_select_mode
                         option: "cc"
+                    - lambda: |-
+                        lv_style_selector_t sel = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x3A3A00), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cc), lv_color_hex(0xFFBF00), sel); lv_obj_set_style_border_width(id(btn_cc), 3, sel);
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cv), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cv), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cp), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cp), 0, sel);
+                        lv_obj_set_style_text_color(id(lbl_cc), lv_color_hex(0xFFBF00), sel);
+                        lv_obj_set_style_text_color(id(lbl_cv), lv_color_hex(0x444444), sel);
+                        lv_obj_set_style_text_color(id(lbl_cp), lv_color_hex(0x444444), sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
                     - globals.set:
                         id: g_ui_active
                         value: "false"
@@ -1224,6 +1242,15 @@ lvgl:
                     - select.set:
                         id: opendps_select_mode
                         option: "cl"
+                    - lambda: |-
+                        lv_style_selector_t sel = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
+                        lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x3A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cp), lv_color_hex(0xFF3333), sel); lv_obj_set_style_border_width(id(btn_cp), 3, sel);
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cv), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cv), 0, sel);
+                        lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cc), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cc), 0, sel);
+                        lv_obj_set_style_text_color(id(lbl_cp), lv_color_hex(0xFF3333), sel);
+                        lv_obj_set_style_text_color(id(lbl_cv), lv_color_hex(0x444444), sel);
+                        lv_obj_set_style_text_color(id(lbl_cc), lv_color_hex(0x444444), sel);
+                        lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
                     - globals.set:
                         id: g_ui_active
                         value: "false"
