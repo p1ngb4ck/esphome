@@ -303,12 +303,7 @@ binary_sensor:
   - platform: template
     id: bs_sd_mounted
     name: "SD Card Mounted"
-    lambda: |-
-      #ifdef USE_SD_STORAGE
-      return global_sd_storage != nullptr && global_sd_storage->is_mounted();
-      #else
-      return false;
-      #endif
+    lambda: 'return id(sd_card).is_mounted();'
     on_state:
       - lvgl.label.update:
           id: lbl_icon_sd
@@ -317,12 +312,7 @@ binary_sensor:
   - platform: template
     id: bs_usb_mounted
     name: "USB Mounted"
-    lambda: |-
-      #ifdef USE_USB_STORAGE
-      return global_usb_storage != nullptr && global_usb_storage->is_mounted();
-      #else
-      return false;
-      #endif
+    lambda: 'return id(usb_storage_id).is_mounted();'
     on_state:
       - lvgl.label.update:
           id: lbl_icon_usb
@@ -331,12 +321,7 @@ binary_sensor:
   - platform: template
     id: bs_nfs_mounted
     name: "NFS Mounted"
-    lambda: |-
-      #ifdef USE_NFS_CLIENT
-      return global_nfs_client != nullptr && global_nfs_client->is_mounted();
-      #else
-      return false;
-      #endif
+    lambda: 'return id(nfs_share).is_mounted();'
     on_state:
       - lvgl.label.update:
           id: lbl_icon_nfs
@@ -443,21 +428,9 @@ interval:
           mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
           #endif
           id(bs_ha_connected).publish_state(api_ok || mqtt_ok);
-          #ifdef USE_SD_STORAGE
-          id(bs_sd_mounted).publish_state(global_sd_storage != nullptr && global_sd_storage->is_mounted());
-          #else
-          id(bs_sd_mounted).publish_state(false);
-          #endif
-          #ifdef USE_USB_STORAGE
-          id(bs_usb_mounted).publish_state(global_usb_storage != nullptr && global_usb_storage->is_mounted());
-          #else
-          id(bs_usb_mounted).publish_state(false);
-          #endif
-          #ifdef USE_NFS_CLIENT
-          id(bs_nfs_mounted).publish_state(global_nfs_client != nullptr && global_nfs_client->is_mounted());
-          #else
-          id(bs_nfs_mounted).publish_state(false);
-          #endif
+          id(bs_sd_mounted).publish_state(id(sd_card).is_mounted());
+          id(bs_usb_mounted).publish_state(id(usb_storage_id).is_mounted());
+          id(bs_nfs_mounted).publish_state(id(nfs_share).is_mounted());
 
 time:
   - platform: rx8130
