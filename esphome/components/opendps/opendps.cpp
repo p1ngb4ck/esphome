@@ -629,7 +629,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           // At 9600 baud, the bootloader's response takes ~10ms to send.
           // We add extra margin for flash operations and loop entry.
           ESP_LOGI(TAG, "Waiting 500ms for bootloader to be ready...");
-          this->upgrade_bootloader_ready_time_ = std::max(millis(), 1u);
+          this->upgrade_bootloader_ready_time_ = std::max(millis(), static_cast<unsigned long>(1));
         } else {
           ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
           this->upgrade_in_progress_ = false;
@@ -678,7 +678,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->auto_restore_calibration_ && this->has_calibration_backup()) {
             ESP_LOGI(TAG, "Auto-restoring calibration from backup...");
             // Small delay to let new firmware fully initialize before restoring calibration
-            this->upgrade_cal_restore_time_ = std::max(millis(), 1u);
+            this->upgrade_cal_restore_time_ = std::max(millis(), static_cast<unsigned long>(1));
           }
           // Restore connection icon after successful upgrade
 #ifdef USE_ETHERNET
