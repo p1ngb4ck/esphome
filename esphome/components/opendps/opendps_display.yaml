@@ -392,10 +392,20 @@ interval:
       - lambda: |-
           bool api_ok = global_api_server != nullptr && global_api_server->is_connected();
           bool mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
-          id(bs_ha_connected).publish_state(api_ok || mqtt_ok);
-          id(bs_sd_mounted).publish_state(id(sd_card).is_mounted());
-          id(bs_usb_mounted).publish_state(id(usb_storage_1).is_mounted());
-          id(bs_nfs_mounted).publish_state(id(nfs_share).is_mounted());
+          bool ha_ok = api_ok || mqtt_ok;
+          bool sd_ok = id(sd_card).is_mounted();
+          bool usb_ok = id(usb_storage_1).is_mounted();
+          bool nfs_ok = id(nfs_share).is_mounted();
+          bool dps_ok = id(dps_connected_sensor_id).state;
+          id(bs_ha_connected).publish_state(ha_ok);
+          id(bs_sd_mounted).publish_state(sd_ok);
+          id(bs_usb_mounted).publish_state(usb_ok);
+          id(bs_nfs_mounted).publish_state(nfs_ok);
+          lv_obj_set_style_text_color(id(lbl_icon_dps), dps_ok ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_icon_ha), ha_ok ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_icon_sd), sd_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_icon_usb), usb_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_icon_nfs), nfs_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
 
 time:
   - platform: rx8130
