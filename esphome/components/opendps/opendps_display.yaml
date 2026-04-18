@@ -286,14 +286,8 @@ binary_sensor:
     id: bs_ha_connected
     name: "HA⁄MQTT Connected"
     lambda: |-
-      bool api_ok = false;
-      bool mqtt_ok = false;
-      #ifdef USE_API
-      api_ok = global_api_server != nullptr && global_api_server->is_connected();
-      #endif
-      #ifdef USE_MQTT
-      mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
-      #endif
+      bool api_ok = global_api_server != nullptr && global_api_server->is_connected();
+      bool mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
       return api_ok || mqtt_ok;
     on_state:
       - lvgl.label.update:
@@ -419,14 +413,8 @@ interval:
   - interval: 10s
     then:
       - lambda: |-
-          bool api_ok = false;
-          bool mqtt_ok = false;
-          #ifdef USE_API
-          api_ok = global_api_server != nullptr && global_api_server->is_connected();
-          #endif
-          #ifdef USE_MQTT
-          mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
-          #endif
+          bool api_ok = global_api_server != nullptr && global_api_server->is_connected();
+          bool mqtt_ok = mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected();
           id(bs_ha_connected).publish_state(api_ok || mqtt_ok);
           id(bs_sd_mounted).publish_state(id(sd_card).is_mounted());
           id(bs_usb_mounted).publish_state(id(usb_storage_id).is_mounted());
