@@ -1476,9 +1476,9 @@ lvgl:
                               text_color: 0x555555
                               text_font: montserrat_16
 
-              # Lock + Log toggle buttons: 2 × 136px, 1px divider via container bg
+              # Lock + Log toggle buttons: 2 × 154px, 1px divider via container bg
               - obj:
-                  width: 273
+                  width: 309
                   height: 96
                   bg_color: 0x2A2A2A
                   bg_opa: COVER
@@ -1494,7 +1494,7 @@ lvgl:
                   widgets:
                     - button:
                         id: btn_lock
-                        width: 136
+                        width: 154
                         height: 96
                         bg_color: 0x0A0A0A
                         bg_opa: COVER
@@ -1525,7 +1525,7 @@ lvgl:
                               text_font: mdi_36
                     - button:
                         id: btn_log
-                        width: 136
+                        width: 154
                         height: 96
                         bg_color: 0x0A0A0A
                         bg_opa: COVER
