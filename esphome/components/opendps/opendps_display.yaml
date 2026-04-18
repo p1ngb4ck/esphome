@@ -283,6 +283,7 @@ binary_sensor:
   - platform: template
     id: bs_ha_connected
     name: "HA⁄MQTT Connected"
+    update_interval: 10s
     lambda: |-
       bool api_ok = false;
       bool mqtt_ok = false;
@@ -301,6 +302,7 @@ binary_sensor:
   - platform: template
     id: bs_sd_mounted
     name: "SD Card Mounted"
+    update_interval: 10s
     lambda: |-
       #ifdef USE_SD_STORAGE
       return global_sd_storage != nullptr && global_sd_storage->is_mounted();
@@ -315,6 +317,7 @@ binary_sensor:
   - platform: template
     id: bs_usb_mounted
     name: "USB Mounted"
+    update_interval: 10s
     lambda: |-
       #ifdef USE_USB_STORAGE
       return global_usb_storage != nullptr && global_usb_storage->is_mounted();
@@ -329,6 +332,7 @@ binary_sensor:
   - platform: template
     id: bs_nfs_mounted
     name: "NFS Mounted"
+    update_interval: 10s
     lambda: |-
       #ifdef USE_NFS_CLIENT
       return global_nfs_client != nullptr && global_nfs_client->is_mounted();
@@ -434,20 +438,19 @@ time:
     on_time:
       - seconds: /1
         then:
-          - lvgl.label.update:
-              id: lbl_status_time
-              text: !lambda |-
-                auto t = id(rx8130_time).now();
-                if (!t.is_valid()) return std::string("--:--");
-                char buf[32];
-                switch (id(g_datetime_fmt)) {
-                  case 1: snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.hour, t.minute, t.second); break;
-                  case 2: snprintf(buf, sizeof(buf), "%02d.%02d.%04d %02d:%02d", t.day_of_month, t.month, t.year, t.hour, t.minute); break;
-                  case 3: snprintf(buf, sizeof(buf), "%02d/%02d/%04d %02d:%02d", t.month, t.day_of_month, t.year, t.hour, t.minute); break;
-                  case 4: snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d", t.year, t.month, t.day_of_month, t.hour, t.minute); break;
-                  default: snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute); break;
-                }
-                return std::string(buf);
+          - lambda: |-
+              auto t = id(rx8130_time).now();
+              if (!t.is_valid()) return;
+              if (t.second != 0 && lv_label_get_text(id(lbl_status_time))[0] != '-') return;
+              char buf[32];
+              switch (id(g_datetime_fmt)) {
+                case 1: snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.hour, t.minute, t.second); break;
+                case 2: snprintf(buf, sizeof(buf), "%02d.%02d.%04d %02d:%02d", t.day_of_month, t.month, t.year, t.hour, t.minute); break;
+                case 3: snprintf(buf, sizeof(buf), "%02d/%02d/%04d %02d:%02d", t.month, t.day_of_month, t.year, t.hour, t.minute); break;
+                case 4: snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d", t.year, t.month, t.day_of_month, t.hour, t.minute); break;
+                default: snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.minute); break;
+              }
+              lv_label_set_text(id(lbl_status_time), buf);
 
 lvgl:
   displays: dsi_display
@@ -659,6 +662,7 @@ lvgl:
     - id: page_main
       bg_color: 0x1E1E1E
       scrollbar_mode: "off"
+      pad_all: 0
 
       widgets:
         # ── VOLTAGE BAR: x=0, y=80, w=1024, h=168 ──────────────────
@@ -818,7 +822,7 @@ lvgl:
               # Divider
               # SET value
               - obj:
-                  width: 168
+                  width: 170
                   height: 148
                   bg_opa: TRANSP
                   border_width: 0
@@ -837,18 +841,20 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 164
+                        width: 166
                         height: 68
                         scrollbar_mode: "off"
                         layout:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: CENTER
+                          flex_align_main: END
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_setv
+                              width: 132
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
@@ -897,11 +903,13 @@ lvgl:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: CENTER
+                          flex_align_main: END
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_vout
+                              width: 132
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
@@ -1064,18 +1072,20 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 164
+                        width: 166
                         height: 68
                         scrollbar_mode: "off"
                         layout:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: CENTER
+                          flex_align_main: END
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_seti
+                              width: 132
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
@@ -1124,11 +1134,13 @@ lvgl:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: CENTER
+                          flex_align_main: END
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_iout
+                              width: 132
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
@@ -1157,7 +1169,7 @@ lvgl:
               type: FLEX
               flex_flow: ROW
               flex_align_main: START
-              flex_align_cross: STRETCH
+              flex_align_cross: CENTER
               pad_column: 0
 
             widgets:
