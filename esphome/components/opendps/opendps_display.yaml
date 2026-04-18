@@ -1080,8 +1080,6 @@ lvgl:
                         widgets:
                           - label:
                               id: lbl_seti
-                              width: 132
-                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
@@ -1135,8 +1133,6 @@ lvgl:
                         widgets:
                           - label:
                               id: lbl_iout
-                              width: 132
-                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
