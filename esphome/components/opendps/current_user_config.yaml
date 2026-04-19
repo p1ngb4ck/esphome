@@ -1666,13 +1666,6 @@ script:
     mode: restart
     then:
       - lambda: |-
-          #include <dirent.h>
-          #include <sys/stat.h>
-          #include <string>
-          #include <vector>
-          #include <algorithm>
-          #include "esphome/components/storage/storage.h"
-
           lv_obj_t *list = id(fw_file_list);
           lv_obj_clean(list);
 
@@ -1692,19 +1685,30 @@ script:
             return true;
           };
 
-          if (esphome::storage::global_storage != nullptr &&
-              esphome::storage::global_storage->is_network_path(cwd)) {
-            std::vector<esphome::storage::NetworkStorage::DirEntry> net_entries;
-            if (!esphome::storage::global_storage->network_list_directory(cwd, net_entries)) {
+          const std::string &nfs_mount = id(nfs_share).get_mount_path();
+          bool is_nfs = !nfs_mount.empty() && cwd.compare(0, nfs_mount.size(), nfs_mount) == 0;
+
+          if (is_nfs) {
+            if (!id(nfs_share).is_mounted()) {
+              lv_obj_t *err = lv_list_add_text(list, "(NFS not connected)");
+              lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
+              return;
+            }
+            // Strip mount prefix: "/nfs" -> "/", "/nfs/sub" -> "/sub"
+            std::string nfs_path = cwd.substr(nfs_mount.size());
+            if (nfs_path.empty()) nfs_path = "/";
+            std::vector<esphome::nfs_client::NFSDirEntry> nfs_entries;
+            if (!id(nfs_share).list_directory(nfs_path, nfs_entries)) {
               lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
               lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
               return;
             }
-            for (const auto &e : net_entries) {
-              if (e.is_directory) {
+            for (const auto &e : nfs_entries) {
+              if (e.has_attr && e.attr.type == esphome::nfs_client::NF3DIR) {
                 dirs.push_back(e.name);
-              } else if (bin_filter(e.name, e.size)) {
-                files.push_back(e.name);
+              } else if (!e.has_attr || e.attr.type == esphome::nfs_client::NF3REG) {
+                uint64_t sz = e.has_attr ? e.attr.size : 0;
+                if (bin_filter(e.name, sz)) files.push_back(e.name);
               }
             }
           } else {
