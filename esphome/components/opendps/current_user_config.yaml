@@ -1671,6 +1671,7 @@ script:
           #include <string>
           #include <vector>
           #include <algorithm>
+          #include "esphome/components/storage/storage.h"
 
           lv_obj_t *list = id(fw_file_list);
           lv_obj_clean(list);
@@ -1678,36 +1679,56 @@ script:
           std::string cwd = id(g_fw_cwd);
           lv_label_set_text(id(fw_breadcrumb), cwd.c_str());
 
-          DIR *dir = opendir(cwd.c_str());
-          if (!dir) {
-            lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
-            lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
-            return;
-          }
-
           std::vector<std::string> dirs;
           std::vector<std::string> files;
-          struct dirent *ent;
-          while ((ent = readdir(dir)) != nullptr) {
-            std::string name = ent->d_name;
-            if (name == "." || name == "..") continue;
-            std::string path = cwd + "/" + name;
-            struct stat st;
-            if (stat(path.c_str(), &st) != 0) continue;
-            if (S_ISDIR(st.st_mode)) {
-              dirs.push_back(name);
-            } else if (S_ISREG(st.st_mode)) {
-              if (id(g_fw_filter_bin)) {
-                if (name.size() < 4) continue;
-                std::string ext = name.substr(name.size() - 4);
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext != ".bin") continue;
-                if (st.st_size > 58368) continue;  // app_size = 64K - 5K boot - 2K past
-              }
-              files.push_back(name);
+
+          auto bin_filter = [&](const std::string &name, uint64_t size) -> bool {
+            if (!id(g_fw_filter_bin)) return true;
+            if (name.size() < 4) return false;
+            std::string ext = name.substr(name.size() - 4);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".bin") return false;
+            if (size > 58368) return false;  // app_size = 64K - 5K boot - 2K past
+            return true;
+          };
+
+          if (esphome::storage::global_storage != nullptr &&
+              esphome::storage::global_storage->is_network_path(cwd)) {
+            std::vector<esphome::storage::NetworkStorage::DirEntry> net_entries;
+            if (!esphome::storage::global_storage->network_list_directory(cwd, net_entries)) {
+              lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
+              lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
+              return;
             }
+            for (const auto &e : net_entries) {
+              if (e.is_directory) {
+                dirs.push_back(e.name);
+              } else if (bin_filter(e.name, e.size)) {
+                files.push_back(e.name);
+              }
+            }
+          } else {
+            DIR *dir = opendir(cwd.c_str());
+            if (!dir) {
+              lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
+              lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
+              return;
+            }
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != nullptr) {
+              std::string name = ent->d_name;
+              if (name == "." || name == "..") continue;
+              std::string path = cwd + "/" + name;
+              struct stat st;
+              if (stat(path.c_str(), &st) != 0) continue;
+              if (S_ISDIR(st.st_mode)) {
+                dirs.push_back(name);
+              } else if (S_ISREG(st.st_mode) && bin_filter(name, st.st_size)) {
+                files.push_back(name);
+              }
+            }
+            closedir(dir);
           }
-          closedir(dir);
           std::sort(dirs.begin(), dirs.end());
           std::sort(files.begin(), files.end());
 
