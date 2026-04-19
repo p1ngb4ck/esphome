@@ -163,6 +163,8 @@ void OpenDPS::loop() {
           this->parent_->load_settings();
           this->firmware_baud_rate_ = 0;
         }
+        if (this->upgrade_complete_callback_)
+          this->upgrade_complete_callback_(false, "Timeout: no response from device");
       }
     }
   }
@@ -675,6 +677,8 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->firmware_baud_rate_ > 0) {
             ESP_LOGW(TAG, "Staying at 9600 - retry upgrade or power cycle DPS");
           }
+          if (this->upgrade_complete_callback_)
+            this->upgrade_complete_callback_(false, "Device rejected upgrade");
         }
         break;
       }
@@ -692,9 +696,10 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           this->upgrade_in_progress_ = false;
           this->upgrade_firmware_data_.clear();
           this->upgrade_last_chunk_time_ = 0;
-          if (this->upgrade_progress_callback_) {
+          if (this->upgrade_progress_callback_)
             this->upgrade_progress_callback_(100);
-          }
+          if (this->upgrade_complete_callback_)
+            this->upgrade_complete_callback_(true, "Upgrade complete!");
           // New firmware starts at 9600; if operational baud differs, send cmd_set_baud
           uint32_t target_baud = (this->firmware_baud_rate_ > 0) ? this->firmware_baud_rate_ : 9600;
           if (target_baud != 9600) {
@@ -751,7 +756,9 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           if (this->firmware_baud_rate_ > 0) {
             ESP_LOGW(TAG, "Staying at 9600 - retry upgrade or power cycle DPS");
           }
-          // Restore connection icon after failed upgrade
+          if (this->upgrade_complete_callback_)
+            this->upgrade_complete_callback_(false, error_msg);
+            // Restore connection icon after failed upgrade
 #ifdef USE_ETHERNET
           this->send_connection_status(CONN_ETHERNET_CONNECTED);
 #else

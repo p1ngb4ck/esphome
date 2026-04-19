@@ -26,6 +26,14 @@ font:
   - file: "gfonts://Montserrat"
     id: montserrat_72
     size: 72
+  - file: "gfonts://Roboto+Mono"
+    id: roboto_mono_48
+    size: 48
+    glyphs: "0123456789.-"
+  - file: "gfonts://Roboto+Mono"
+    id: roboto_mono_20
+    size: 20
+    glyphs: "0123456789.-V"
   - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
     id: mdi_20
     size: 20
@@ -66,12 +74,187 @@ globals:
   - id: g_slider_updating
     type: bool
     initial_value: "false"
+  - id: g_preset_active
+    type: bool
+    initial_value: "false"
   - id: g_locked
     type: bool
     initial_value: "false"
   - id: g_logging
     type: bool
     initial_value: "false"
+  - id: preset_count
+    type: int
+    restore_value: true
+    initial_value: "8"
+  - id: g_edit_slot
+    type: int
+    initial_value: "0"
+  - id: g_edit_v
+    type: float
+    initial_value: "5.0"
+  - id: g_edit_i
+    type: float
+    initial_value: "1.0"
+  # theme — 0=custom, 1=Neon, 2=Amber, 3=Ice
+  - id: g_theme_scheme
+    type: int
+    restore_value: true
+    initial_value: "1"
+  - id: theme_accent
+    type: int
+    restore_value: true
+    initial_value: "0x39FF14"
+  - id: theme_voltage
+    type: int
+    restore_value: true
+    initial_value: "0x39FF14"
+  - id: theme_current
+    type: int
+    restore_value: true
+    initial_value: "0x4499FF"
+  - id: theme_bg_main
+    type: int
+    restore_value: true
+    initial_value: "0x1E1E1E"
+  - id: theme_bg_panel
+    type: int
+    restore_value: true
+    initial_value: "0x141414"
+  - id: theme_text_dim
+    type: int
+    restore_value: true
+    initial_value: "0x555555"
+  # preset voltages (slots 0-11)
+  - id: preset_v_0
+    type: float
+    restore_value: true
+    initial_value: "1.0"
+  - id: preset_v_1
+    type: float
+    restore_value: true
+    initial_value: "1.8"
+  - id: preset_v_2
+    type: float
+    restore_value: true
+    initial_value: "3.3"
+  - id: preset_v_3
+    type: float
+    restore_value: true
+    initial_value: "5.0"
+  - id: preset_v_4
+    type: float
+    restore_value: true
+    initial_value: "6.0"
+  - id: preset_v_5
+    type: float
+    restore_value: true
+    initial_value: "9.0"
+  - id: preset_v_6
+    type: float
+    restore_value: true
+    initial_value: "12.0"
+  - id: preset_v_7
+    type: float
+    restore_value: true
+    initial_value: "24.0"
+  - id: preset_v_8
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_v_9
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_v_10
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_v_11
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  # preset currents (slots 0-11)
+  - id: preset_i_0
+    type: float
+    restore_value: true
+    initial_value: "0.3"
+  - id: preset_i_1
+    type: float
+    restore_value: true
+    initial_value: "0.56"
+  - id: preset_i_2
+    type: float
+    restore_value: true
+    initial_value: "1.0"
+  - id: preset_i_3
+    type: float
+    restore_value: true
+    initial_value: "1.5"
+  - id: preset_i_4
+    type: float
+    restore_value: true
+    initial_value: "1.8"
+  - id: preset_i_5
+    type: float
+    restore_value: true
+    initial_value: "2.6"
+  - id: preset_i_6
+    type: float
+    restore_value: true
+    initial_value: "3.0"
+  - id: preset_i_7
+    type: float
+    restore_value: true
+    initial_value: "3.0"
+  - id: preset_i_8
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_i_9
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_i_10
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: preset_i_11
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+  - id: g_chart_i_val
+    type: int
+    initial_value: "0"
+  - id: g_chart_p_val
+    type: int
+    initial_value: "0"
+
+  # Firmware update wizard state
+  - id: g_fw_storage
+    type: int
+    initial_value: "0"
+  - id: g_fw_cwd
+    type: std::string
+    initial_value: '"/sdcard"'
+  - id: g_fw_selected
+    type: std::string
+    initial_value: '""'
+  - id: g_fw_filter_bin
+    type: bool
+    initial_value: "true"
+  - id: g_fw_status
+    type: std::string
+    initial_value: '""'
+  - id: g_fw_progress
+    type: int
+    initial_value: "0"
+  - id: g_fw_flashing
+    type: bool
+    initial_value: "false"
+  - id: g_fw_url
+    type: std::string
+    initial_value: '""'
 
 sensor:
   - platform: opendps
@@ -83,7 +266,7 @@ sensor:
             char buf[24];
             snprintf(buf, sizeof(buf), "%.2f", x);
             lv_label_set_text(id(lbl_vout), buf);
-            lv_obj_set_style_text_color(id(lbl_vout), id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+            lv_obj_set_style_text_color(id(lbl_vout), id(g_output_on) ? lv_color_hex((uint32_t)id(theme_voltage)) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
             snprintf(buf, sizeof(buf), "Vout  %.2fV", x);
             lv_label_set_text(id(lbl_vout_g), buf);
         - lvgl.chart.set_next_value:
@@ -97,7 +280,7 @@ sensor:
             char buf[24];
             snprintf(buf, sizeof(buf), "%.3f", x);
             lv_label_set_text(id(lbl_iout), buf);
-            lv_obj_set_style_text_color(id(lbl_iout), id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+            lv_obj_set_style_text_color(id(lbl_iout), id(g_output_on) ? lv_color_hex((uint32_t)id(theme_current)) : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
             snprintf(buf, sizeof(buf), "Iout  %.3fA", x);
             lv_label_set_text(id(lbl_iout_g), buf);
         - lvgl.chart.set_next_value:
@@ -220,7 +403,7 @@ number:
           id: lbl_vrange
           text: !lambda |-
             char buf[16];
-            snprintf(buf, sizeof(buf), "0 — %.1fV", x);
+            snprintf(buf, sizeof(buf), "0 - %.1fV", x);
             return std::string(buf);
     web_server:
       sorting_group_id: opendps_control
@@ -241,33 +424,43 @@ binary_sensor:
             condition:
               lambda: 'return x;'
             then:
-              - lvgl.widget.update:
-                  id: pwr_ring
-                  border_color: 0x39FF14
-                  shadow_color: 0x39FF14
-                  shadow_width: 16
               - lambda: |-
-                  lv_label_set_text(id(lbl_pwr), "ON");
-                  lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x39FF14), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x39FF14), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x39FF14), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x4499FF), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x1A4A1A), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x1A1A4A), LV_PART_MAIN);
+                  lv_color_t acc  = lv_color_hex((uint32_t)id(theme_accent));
+                  lv_color_t volt = lv_color_hex((uint32_t)id(theme_voltage));
+                  lv_color_t curr = lv_color_hex((uint32_t)id(theme_current));
+                  uint8_t ar = (id(theme_voltage) >> 16) & 0xFF;
+                  uint8_t ag = (id(theme_voltage) >> 8)  & 0xFF;
+                  uint8_t ab = (id(theme_voltage))        & 0xFF;
+                  uint8_t cr = (id(theme_current) >> 16) & 0xFF;
+                  uint8_t cg = (id(theme_current) >> 8)  & 0xFF;
+                  uint8_t cb = (id(theme_current))        & 0xFF;
+                  lv_obj_set_style_border_color(id(pwr_ring), acc, LV_PART_MAIN);
+                  lv_obj_set_style_shadow_color(id(pwr_ring), acc, LV_PART_MAIN);
+                  lv_obj_set_style_shadow_width(id(pwr_ring), 16, LV_PART_MAIN);
+                  lv_obj_add_flag(id(lbl_pwr_off), LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_clear_flag(id(lbl_pwr_on), LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_on),   acc,  LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_icon), acc,  LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_vout), volt, LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_iout), curr, LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv), lv_color_make(ar/6, ag/6, ab/6), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti), lv_color_make(cr/6, cg/6, cb/6), LV_PART_MAIN);
             else:
-              - lvgl.widget.update:
-                  id: pwr_ring
-                  border_color: 0x555555
-                  shadow_color: 0x000000
-                  shadow_width: 0
               - lambda: |-
-                  lv_label_set_text(id(lbl_pwr), "OFF");
-                  lv_obj_set_style_text_color(id(lbl_pwr), lv_color_hex(0x555555), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x555555), LV_PART_MAIN);
+                  lv_color_t dim  = lv_color_hex((uint32_t)id(theme_text_dim));
+                  lv_color_t volt = lv_color_hex((uint32_t)id(theme_voltage));
+                  lv_color_t curr = lv_color_hex((uint32_t)id(theme_current));
+                  lv_obj_set_style_border_color(id(pwr_ring), dim, LV_PART_MAIN);
+                  lv_obj_set_style_shadow_color(id(pwr_ring), lv_color_hex(0x000000), LV_PART_MAIN);
+                  lv_obj_set_style_shadow_width(id(pwr_ring), 0, LV_PART_MAIN);
+                  lv_obj_clear_flag(id(lbl_pwr_off), LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_add_flag(id(lbl_pwr_on), LV_OBJ_FLAG_HIDDEN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_off),  dim,  LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_pwr_icon), dim,  LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x39FF14), LV_PART_MAIN);
-                  lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x4499FF), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv), volt, LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti), curr, LV_PART_MAIN);
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
@@ -277,7 +470,7 @@ binary_sensor:
       icon: mdi:power-plug
       on_state:
         - lambda: |-
-            lv_obj_set_style_text_color(id(lbl_icon_dps), x ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333), LV_PART_MAIN);
+            lv_obj_set_style_text_color(id(lbl_icon_dps), x ? lv_color_hex((uint32_t)id(theme_accent)) : lv_color_hex(0x333333), LV_PART_MAIN);
 
   - platform: template
     id: bs_ha_connected
@@ -545,11 +738,19 @@ interval:
           id(bs_sd_mounted).publish_state(sd_ok);
           id(bs_usb_mounted).publish_state(usb_ok);
           id(bs_nfs_mounted).publish_state(nfs_ok);
-          lv_obj_set_style_text_color(id(lbl_icon_dps), dps_ok ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333), LV_PART_MAIN);
+          lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+          lv_obj_set_style_text_color(id(lbl_icon_dps), dps_ok ? acc : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_ha), ha_ok ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_sd), sd_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_usb), usb_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_nfs), nfs_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(g_fw_flashing);'
+          then:
+            - script.execute: fw_poll_status
 
 time:
   - platform: rx8130
@@ -571,12 +772,560 @@ time:
               }
               lv_label_set_text(id(lbl_status_time), buf);
 
+script:
+  # Rebuilds the file list of fw_file_list from current g_fw_cwd.
+  # Applies *.bin filter if g_fw_filter_bin is true.
+  # Keeps directories always visible. Adds a ".." entry when not at a mount root.
+  - id: fw_refresh_list
+    mode: restart
+    then:
+      - lambda: |-
+          #include <dirent.h>
+          #include <sys/stat.h>
+          #include <string>
+          #include <vector>
+          #include <algorithm>
+
+          lv_obj_t *list = id(fw_file_list);
+          lv_obj_clean(list);
+
+          std::string cwd = id(g_fw_cwd);
+          lv_label_set_text(id(fw_breadcrumb), cwd.c_str());
+
+          // user_data encoding:
+          //   nullptr      = parent (..) entry
+          //   ptr & 1 == 1 = directory: strip low bit, cast to char*
+          //   ptr & 1 == 0 = file:      cast to char* (absolute path)
+          // Strings are heap-allocated and freed in the delete callback.
+          auto delete_cb = [](lv_event_t *e) {
+            void *ud = lv_obj_get_user_data((lv_obj_t *)lv_event_get_target(e));
+            uintptr_t p = (uintptr_t)ud;
+            if (p == 0) return;
+            char *s = (char *)(p & ~(uintptr_t)1);
+            delete[] s;
+          };
+
+          auto click_cb = [](lv_event_t *e) {
+            lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+            uintptr_t p = (uintptr_t)lv_obj_get_user_data(btn);
+
+            // Parent navigation
+            if (p == 0) {
+              std::string cwd = id(g_fw_cwd);
+              size_t pos = cwd.find_last_of('/');
+              if (pos != std::string::npos && pos > 0)
+                id(g_fw_cwd) = cwd.substr(0, pos);
+              id(fw_refresh_list).execute();
+              return;
+            }
+
+            bool is_dir = (p & 1) != 0;
+            char *s = (char *)(p & ~(uintptr_t)1);
+
+            if (is_dir) {
+              id(g_fw_cwd) = s;
+              id(fw_refresh_list).execute();
+              return;
+            }
+
+            // Regular file: absolute path already stored
+            id(g_fw_selected) = s;
+            lv_label_set_text(id(fw_selected_lbl), s);
+            lv_obj_clear_state(id(fw_flash_btn), LV_STATE_DISABLED);
+          };
+
+          if (cwd != "/sdcard" && cwd != "/usb" && cwd != "/nfs" && cwd != "/") {
+            lv_obj_t *up_btn = lv_list_add_button(list, LV_SYMBOL_UP, "..  (parent)");
+            lv_obj_set_user_data(up_btn, nullptr);
+            lv_obj_add_event_cb(up_btn, click_cb, LV_EVENT_CLICKED, nullptr);
+          }
+
+          DIR *dir = opendir(cwd.c_str());
+          if (!dir) {
+            lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
+            lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
+            return;
+          }
+
+          std::vector<std::string> dirs;
+          std::vector<std::string> files;
+          struct dirent *ent;
+          while ((ent = readdir(dir)) != nullptr) {
+            std::string name = ent->d_name;
+            if (name == "." || name == "..") continue;
+            std::string path = cwd + "/" + name;
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) {
+              dirs.push_back(name);
+            } else if (S_ISREG(st.st_mode)) {
+              if (id(g_fw_filter_bin)) {
+                if (name.size() < 4) continue;
+                std::string ext = name.substr(name.size() - 4);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext != ".bin") continue;
+                if (st.st_size > 58368) continue;  // app_size = 64K - 5K boot - 2K past
+              }
+              files.push_back(name);
+            }
+          }
+          closedir(dir);
+          std::sort(dirs.begin(), dirs.end());
+          std::sort(files.begin(), files.end());
+
+          for (size_t i = 0; i < dirs.size(); i++) {
+            std::string full = cwd + "/" + dirs[i];
+            char *s = new char[full.size() + 1];
+            memcpy(s, full.c_str(), full.size() + 1);
+            lv_obj_t *b = lv_list_add_button(list, LV_SYMBOL_DIRECTORY, dirs[i].c_str());
+            lv_obj_set_style_text_color(b, lv_color_hex(0xCCCCCC), 0);
+            lv_obj_set_user_data(b, (void *)((uintptr_t)s | 1));
+            lv_obj_add_event_cb(b, click_cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_add_event_cb(b, delete_cb, LV_EVENT_DELETE, nullptr);
+          }
+          for (size_t i = 0; i < files.size(); i++) {
+            std::string full = cwd + "/" + files[i];
+            char *s = new char[full.size() + 1];
+            memcpy(s, full.c_str(), full.size() + 1);
+            lv_obj_t *b = lv_list_add_button(list, LV_SYMBOL_FILE, files[i].c_str());
+            lv_obj_set_style_text_color(b, lv_color_hex(0xEEEEEE), 0);
+            lv_obj_set_user_data(b, (void *)(uintptr_t)s);
+            lv_obj_add_event_cb(b, click_cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_add_event_cb(b, delete_cb, LV_EVENT_DELETE, nullptr);
+          }
+
+          if (dirs.empty() && files.empty()) {
+            lv_obj_t *e = lv_list_add_text(list, "(no matching files)");
+            lv_obj_set_style_text_color(e, lv_color_hex(0x777777), 0);
+          }
+
+  # Select a storage and reset cwd + selected file
+  - id: fw_set_storage
+    mode: restart
+    parameters:
+      which: int
+    then:
+      - globals.set:
+          id: g_fw_storage
+          value: !lambda 'return which;'
+      - globals.set:
+          id: g_fw_selected
+          value: '""'
+      - lambda: |-
+          switch (which) {
+            case 0: id(g_fw_cwd) = "/sdcard"; break;
+            case 1: id(g_fw_cwd) = "/usb"; break;
+            case 2: id(g_fw_cwd) = "/nfs"; break;
+            case 3: id(g_fw_cwd) = ""; break;
+          }
+      - lvgl.label.update:
+          id: fw_selected_lbl
+          text: "(no file selected)"
+      - lvgl.widget.disable: fw_flash_btn
+      - script.execute: fw_refresh_list
+
+  # Trigger the firmware flash using the OpenDPS hub
+  - id: fw_flash
+    mode: single
+    then:
+      - lambda: |-
+          std::string path = id(g_fw_selected);
+          if (path.empty()) {
+            id(g_fw_status) = "Error: no file selected";
+            return;
+          }
+          id(g_fw_flashing) = true;
+          id(g_fw_progress) = 0;
+          id(g_fw_status) = "Uploading firmware...";
+          id(opendps_firmware_path) = path;
+          id(opendps_id).start_firmware_upgrade(path);
+      - lvgl.widget.show: fw_progress_overlay
+      - lvgl.label.update:
+          id: fw_progress_status
+          text: !lambda 'return id(g_fw_status).c_str();'
+      - lvgl.bar.update:
+          id: fw_progress_bar
+          value: 0
+
+  # Poll updates from g_fw_status / g_fw_progress into the overlay
+  - id: fw_poll_status
+    mode: single
+    then:
+      - lvgl.label.update:
+          id: fw_progress_status
+          text: !lambda 'return id(g_fw_status).c_str();'
+      - lvgl.bar.update:
+          id: fw_progress_bar
+          value: !lambda 'return id(g_fw_progress);'
+
+  # Loads scheme colors into theme_* globals (scheme 0 = custom, leave globals untouched)
+  - id: scr_load_scheme
+    then:
+      - lambda: |-
+          switch (id(g_theme_scheme)) {
+            case 1: // Neon (default)
+              id(theme_accent)   = 0x39FF14;
+              id(theme_voltage)  = 0x39FF14;
+              id(theme_current)  = 0x4499FF;
+              id(theme_bg_main)  = 0x1E1E1E;
+              id(theme_bg_panel) = 0x141414;
+              id(theme_text_dim) = 0x555555;
+              break;
+            case 2: // Amber
+              id(theme_accent)   = 0xFFBF00;
+              id(theme_voltage)  = 0xFFDD44;
+              id(theme_current)  = 0xFF8800;
+              id(theme_bg_main)  = 0x1A1500;
+              id(theme_bg_panel) = 0x0F0C00;
+              id(theme_text_dim) = 0x665500;
+              break;
+            case 3: // Ice
+              id(theme_accent)   = 0x00DDFF;
+              id(theme_voltage)  = 0x88EEFF;
+              id(theme_current)  = 0x4488FF;
+              id(theme_bg_main)  = 0x0A1520;
+              id(theme_bg_panel) = 0x050D18;
+              id(theme_text_dim) = 0x336688;
+              break;
+            default: // 0 = custom, globals already have user values
+              break;
+          }
+
+  # Applies theme_* globals to all styled widgets and triggers full redraw
+  - id: scr_apply_theme
+    then:
+      - lambda: |-
+          lv_color_t c_acc  = lv_color_hex((uint32_t)id(theme_accent));
+          lv_color_t c_volt = lv_color_hex((uint32_t)id(theme_voltage));
+          lv_color_t c_curr = lv_color_hex((uint32_t)id(theme_current));
+          lv_color_t c_bg   = lv_color_hex((uint32_t)id(theme_bg_main));
+          lv_color_t c_pan  = lv_color_hex((uint32_t)id(theme_bg_panel));
+          lv_color_t c_dim  = lv_color_hex((uint32_t)id(theme_text_dim));
+
+          // Derive secondary colors from tokens
+          // bg_active = accent at ~15% brightness for active-button backgrounds
+          uint8_t ar = (id(theme_accent) >> 16) & 0xFF;
+          uint8_t ag = (id(theme_accent) >> 8)  & 0xFF;
+          uint8_t ab = (id(theme_accent))        & 0xFF;
+          lv_color_t c_acc_dim  = lv_color_make(ar/6, ag/6, ab/6);   // dark tint for active bg
+          lv_color_t c_acc_mid  = lv_color_make(ar/3, ag/3, ab/3);   // mid tint for borders etc
+
+          uint8_t vr = (id(theme_voltage) >> 16) & 0xFF;
+          uint8_t vg = (id(theme_voltage) >> 8)  & 0xFF;
+          uint8_t vb = (id(theme_voltage))        & 0xFF;
+          lv_color_t c_volt_dim = lv_color_make(vr/6, vg/6, vb/6);
+
+          uint8_t cr2 = (id(theme_current) >> 16) & 0xFF;
+          uint8_t cg2 = (id(theme_current) >> 8)  & 0xFF;
+          uint8_t cb2 = (id(theme_current))        & 0xFF;
+          lv_color_t c_curr_dim = lv_color_make(cr2/6, cg2/6, cb2/6);
+
+          // ── Page backgrounds ──────────────────────────────────────────
+          lv_obj_set_style_bg_color(id(page_main)->obj,     c_bg,  LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(page_graphs)->obj,   lv_color_hex((uint32_t)id(theme_bg_panel)), LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(page_settings)->obj, c_pan, LV_PART_MAIN);
+
+          // ── Voltage slider ────────────────────────────────────────────
+          lv_obj_set_style_bg_color(id(sl_v), c_volt_dim, LV_PART_INDICATOR);
+          lv_obj_set_style_bg_color(id(sl_v), c_volt,     LV_PART_INDICATOR);
+          lv_obj_set_style_bg_color(id(sl_v), c_volt,     LV_PART_KNOB);
+          lv_obj_set_style_border_color(id(sl_v), c_volt_dim, LV_PART_KNOB);
+
+          // ── Current slider ────────────────────────────────────────────
+          lv_obj_set_style_bg_color(id(sl_i), c_curr,     LV_PART_INDICATOR);
+          lv_obj_set_style_bg_color(id(sl_i), c_curr,     LV_PART_KNOB);
+          lv_obj_set_style_border_color(id(sl_i), c_curr_dim, LV_PART_KNOB);
+
+          // ── Power button ring / labels ────────────────────────────────
+          bool pwr = id(g_output_on);
+          lv_obj_set_style_border_color(id(pwr_ring), pwr ? c_acc : c_dim, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_pwr_icon), pwr ? c_acc : c_dim, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_pwr_on),  c_acc, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_pwr_off), c_dim, LV_PART_MAIN);
+
+          // ── Set value labels ──────────────────────────────────────────
+          lv_obj_set_style_text_color(id(lbl_setv), pwr ? c_acc_dim : c_volt, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_seti), pwr ? c_curr_dim : c_curr, LV_PART_MAIN);
+
+          // ── Readout labels ────────────────────────────────────────────
+          lv_obj_set_style_text_color(id(lbl_vout), pwr ? c_volt : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_iout), pwr ? c_curr : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+
+          // ── Tab bar ───────────────────────────────────────────────────
+          // Active tab determined by current page — just set all to dim, active page handler will correct
+          lv_obj_set_style_border_color(id(tab_btn_main),     c_acc, LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(tab_btn_graphs),   c_acc, LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(tab_btn_settings), c_acc, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(tab_lbl_main),     c_dim, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(tab_lbl_graphs),   c_dim, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(tab_lbl_settings), c_dim, LV_PART_MAIN);
+
+          // ── LCD panels ────────────────────────────────────────────────
+          lv_obj_set_style_bg_color(id(lcd_panel_v),
+            lv_color_make(vr/20, vg/20, vb/20), LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(lcd_panel_v),
+            lv_color_make(vr/8, vg/8, vb/8), LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(lcd_panel_i),
+            lv_color_make(cr2/20, cg2/20, cb2/20), LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(lcd_panel_i),
+            lv_color_make(cr2/8, cg2/8, cb2/8), LV_PART_MAIN);
+
+          // ── DPS connected icon ────────────────────────────────────────
+          bool dps_ok = id(dps_connected_sensor_id).state;
+          lv_obj_set_style_text_color(id(lbl_icon_dps), dps_ok ? c_acc : lv_color_hex(0x333333), LV_PART_MAIN);
+
+          // ── CV mode button (active state) ─────────────────────────────
+          lv_obj_set_style_bg_color(id(btn_cv),   c_acc_dim, LV_STATE_DEFAULT);
+          lv_obj_set_style_border_color(id(btn_cv), c_acc,   LV_STATE_DEFAULT);
+          lv_obj_set_style_text_color(id(lbl_cv),  c_acc,   LV_PART_MAIN);
+
+          // ── Preset bar buttons ────────────────────────────────────────
+          // rebuilt by scr_rebuild_presets which reads theme globals at creation time
+
+          // ── Settings page accent (title + edit buttons) ───────────────
+          lv_obj_set_style_text_color(id(lbl_settings_title), c_acc, LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(btn_open_preset_editor), c_acc, LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(btn_open_preset_editor),
+            lv_color_make(ar/10, ag/10, ab/10), LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(btn_open_theme_editor), c_acc, LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(btn_open_theme_editor),
+            lv_color_make(ar/10, ag/10, ab/10), LV_PART_MAIN);
+
+          // ── Full redraw ───────────────────────────────────────────────
+          lv_obj_report_style_change(NULL);
+
+  # Loads scheme then applies — call this from boot and from theme overlay Save
+  - id: scr_theme_apply_full
+    then:
+      - script.execute: scr_load_scheme
+      - script.execute: scr_apply_theme
+      - script.execute: scr_rebuild_presets
+
+  # Loads slot values into g_edit_v/i and refreshes overlay labels.
+  # Call when slot changes (prev/next) or when overlay first opens.
+  - id: scr_update_edit_labels
+    then:
+      - lambda: |-
+          float vv[12] = {
+            id(preset_v_0), id(preset_v_1), id(preset_v_2), id(preset_v_3),
+            id(preset_v_4), id(preset_v_5), id(preset_v_6), id(preset_v_7),
+            id(preset_v_8), id(preset_v_9), id(preset_v_10), id(preset_v_11)
+          };
+          float ii[12] = {
+            id(preset_i_0), id(preset_i_1), id(preset_i_2), id(preset_i_3),
+            id(preset_i_4), id(preset_i_5), id(preset_i_6), id(preset_i_7),
+            id(preset_i_8), id(preset_i_9), id(preset_i_10), id(preset_i_11)
+          };
+          int s = id(g_edit_slot);
+          id(g_edit_v) = vv[s];
+          id(g_edit_i) = ii[s];
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d / %d", s + 1, id(preset_count));
+          lv_label_set_text(id(lbl_edit_slot), buf);
+          snprintf(buf, sizeof(buf), "%.4g", id(g_edit_v));
+          lv_label_set_text(id(lbl_edit_v), buf);
+          snprintf(buf, sizeof(buf), "%.4g", id(g_edit_i));
+          lv_label_set_text(id(lbl_edit_i), buf);
+
+  # Voltage decrement (0.1V steps, min 0.1)
+  - id: scr_edit_v_step
+    then:
+      - lambda: |-
+          float v = roundf((id(g_edit_v) - 0.1f) * 10.0f) / 10.0f;
+          if (v < 0.1f) v = 0.1f;
+          id(g_edit_v) = v;
+          id(scr_update_edit_labels).execute();
+
+  # Voltage increment (0.1V steps, max 50.0)
+  - id: scr_edit_v_step_up
+    then:
+      - lambda: |-
+          float v = roundf((id(g_edit_v) + 0.1f) * 10.0f) / 10.0f;
+          if (v > 50.0f) v = 50.0f;
+          id(g_edit_v) = v;
+          id(scr_update_edit_labels).execute();
+
+  # Current decrement (0.1A steps, min 0.1)
+  - id: scr_edit_i_step
+    then:
+      - lambda: |-
+          float i = roundf((id(g_edit_i) - 0.1f) * 10.0f) / 10.0f;
+          if (i < 0.1f) i = 0.1f;
+          id(g_edit_i) = i;
+          id(scr_update_edit_labels).execute();
+
+  # Current increment (0.1A steps, max 5.0)
+  - id: scr_edit_i_step_up
+    then:
+      - lambda: |-
+          float i = roundf((id(g_edit_i) + 0.1f) * 10.0f) / 10.0f;
+          if (i > 5.0f) i = 5.0f;
+          id(g_edit_i) = i;
+          id(scr_update_edit_labels).execute();
+
+  # Save edited preset to the correct global, then rebuild bar and close overlay
+  - id: scr_save_preset
+    then:
+      - lambda: |-
+          int s = id(g_edit_slot);
+          float v = id(g_edit_v);
+          float i2 = id(g_edit_i);
+          switch (s) {
+            case 0:  id(preset_v_0) = v; id(preset_i_0) = i2; break;
+            case 1:  id(preset_v_1) = v; id(preset_i_1) = i2; break;
+            case 2:  id(preset_v_2) = v; id(preset_i_2) = i2; break;
+            case 3:  id(preset_v_3) = v; id(preset_i_3) = i2; break;
+            case 4:  id(preset_v_4) = v; id(preset_i_4) = i2; break;
+            case 5:  id(preset_v_5) = v; id(preset_i_5) = i2; break;
+            case 6:  id(preset_v_6) = v; id(preset_i_6) = i2; break;
+            case 7:  id(preset_v_7) = v; id(preset_i_7) = i2; break;
+            case 8:  id(preset_v_8) = v; id(preset_i_8) = i2; break;
+            case 9:  id(preset_v_9) = v; id(preset_i_9) = i2; break;
+            case 10: id(preset_v_10) = v; id(preset_i_10) = i2; break;
+            case 11: id(preset_v_11) = v; id(preset_i_11) = i2; break;
+            default: break;
+          }
+          lv_obj_add_flag(id(overlay_preset_editor), LV_OBJ_FLAG_HIDDEN);
+      - script.execute: scr_rebuild_presets
+
+  # Rebuilds all preset buttons in preset_bar from globals.
+  # Called on boot and after saving preset edits.
+  - id: scr_rebuild_presets
+    mode: restart
+    then:
+      - lambda: |-
+          // float arrays for easy indexed access
+          float vv[12] = {
+            id(preset_v_0), id(preset_v_1), id(preset_v_2), id(preset_v_3),
+            id(preset_v_4), id(preset_v_5), id(preset_v_6), id(preset_v_7),
+            id(preset_v_8), id(preset_v_9), id(preset_v_10), id(preset_v_11)
+          };
+          float ii[12] = {
+            id(preset_i_0), id(preset_i_1), id(preset_i_2), id(preset_i_3),
+            id(preset_i_4), id(preset_i_5), id(preset_i_6), id(preset_i_7),
+            id(preset_i_8), id(preset_i_9), id(preset_i_10), id(preset_i_11)
+          };
+          int cnt = id(preset_count);
+          if (cnt < 1) cnt = 1;
+          if (cnt > 12) cnt = 12;
+
+          lv_obj_t *bar = id(preset_bar);
+
+          // Remove previously created buttons
+          lv_obj_clean(bar);
+
+          int32_t btn_w = 1024 / cnt;
+
+          for (int i = 0; i < cnt; i++) {
+            lv_obj_t *btn = lv_btn_create(bar);
+            lv_obj_set_pos(btn, i * btn_w, 0);
+            lv_obj_set_size(btn, btn_w, 96);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x0A0A0A), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x1A1A1A), LV_PART_MAIN);
+            lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+            lv_obj_set_style_radius(btn, 0, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
+            // Remove default pressed/checked style changes
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x0A0A0A), (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED));
+
+            // Inner container (non-clickable, flex column, centered)
+            lv_obj_t *inner = lv_obj_create(btn);
+            lv_obj_set_size(inner, btn_w - 6, 60);
+            lv_obj_align(inner, LV_ALIGN_CENTER, 0, 0);
+            lv_obj_set_style_bg_opa(inner, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(inner, 0, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(inner, 0, LV_PART_MAIN);
+            lv_obj_clear_flag(inner, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_scrollbar_mode(inner, LV_SCROLLBAR_MODE_OFF);
+            lv_obj_set_flex_flow(inner, LV_FLEX_FLOW_COLUMN);
+            lv_obj_set_flex_align(inner, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_row(inner, 2, LV_PART_MAIN);
+
+            char buf[16];
+            // Voltage label
+            lv_obj_t *lbl_v = lv_label_create(inner);
+            snprintf(buf, sizeof(buf), "%.4gV", vv[i]);
+            lv_label_set_text(lbl_v, buf);
+            lv_obj_set_style_text_color(lbl_v, lv_color_hex((uint32_t)id(theme_voltage)), LV_PART_MAIN);
+            lv_obj_set_style_text_font(lbl_v, &lv_font_montserrat_16, LV_PART_MAIN);
+
+            // Current label
+            lv_obj_t *lbl_i = lv_label_create(inner);
+            snprintf(buf, sizeof(buf), "%.4gA", ii[i]);
+            lv_label_set_text(lbl_i, buf);
+            lv_obj_set_style_text_color(lbl_i, lv_color_hex((uint32_t)id(theme_current)), LV_PART_MAIN);
+            lv_obj_set_style_text_font(lbl_i, &lv_font_montserrat_12, LV_PART_MAIN);
+
+            // Store slot index in user_data for the click handler
+            lv_obj_set_user_data(btn, (void*)(intptr_t)i);
+
+            // Click event
+            lv_obj_add_event_cb(btn, [](lv_event_t *e) {
+              int slot = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t *)lv_event_get_target(e));
+              float vv2[12] = {
+                id(preset_v_0), id(preset_v_1), id(preset_v_2), id(preset_v_3),
+                id(preset_v_4), id(preset_v_5), id(preset_v_6), id(preset_v_7),
+                id(preset_v_8), id(preset_v_9), id(preset_v_10), id(preset_v_11)
+              };
+              float ii2[12] = {
+                id(preset_i_0), id(preset_i_1), id(preset_i_2), id(preset_i_3),
+                id(preset_i_4), id(preset_i_5), id(preset_i_6), id(preset_i_7),
+                id(preset_i_8), id(preset_i_9), id(preset_i_10), id(preset_i_11)
+              };
+              id(g_ui_active) = true;
+              id(g_preset_active) = true;
+              id(opendps_select_mode).make_call().set_option("cv").perform();
+              id(voltage_number).make_call().set_value(vv2[slot]).perform();
+              id(current_number).make_call().set_value(ii2[slot]).perform();
+              // Highlight active, dim all others
+              lv_obj_t *bar2 = id(preset_bar);
+              uint32_t n = lv_obj_get_child_count(bar2);
+              for (uint32_t ci = 0; ci < n; ci++) {
+                lv_obj_t *child = lv_obj_get_child(bar2, ci);
+                lv_obj_set_style_bg_color(child,
+                  (int)ci == slot ? lv_color_hex((uint32_t)id(theme_accent) & 0x333333) : lv_color_hex(0x0A0A0A),
+                  LV_PART_MAIN);
+              }
+              id(g_preset_active) = false;
+              id(g_ui_active) = false;
+            }, LV_EVENT_CLICKED, nullptr);
+          }
+
+  # Updates lbl_theme_name text and all 6 swatch bg_colors to preview the current g_theme_scheme.
+  # Calls scr_load_scheme to push scheme colors into theme_* globals, then reads them for swatches.
+  # Called from theme overlay prev/next buttons.
+  - id: scr_update_theme_labels
+    then:
+      - script.execute: scr_load_scheme
+      - lambda: |-
+          const char *names[] = { "Custom", "Neon", "Amber", "Ice" };
+          int s = id(g_theme_scheme);
+          if (s < 0 || s > 3) s = 0;
+          lv_label_set_text(id(lbl_theme_name), names[s]);
+
+          lv_obj_set_style_bg_color(id(swatch_accent),   lv_color_hex((uint32_t)id(theme_accent)),   LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(swatch_voltage),  lv_color_hex((uint32_t)id(theme_voltage)),  LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(swatch_current),  lv_color_hex((uint32_t)id(theme_current)),  LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(swatch_bg_main),  lv_color_hex((uint32_t)id(theme_bg_main)),  LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(swatch_bg_panel), lv_color_hex((uint32_t)id(theme_bg_panel)), LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(swatch_text_dim), lv_color_hex((uint32_t)id(theme_text_dim)), LV_PART_MAIN);
+
 lvgl:
   displays: dsi_display
   touchscreens: touchscreen_id
   byte_order: little_endian
   default_font: montserrat_16
+  use_ppa: true
+  color_depth: 16
+  use_ppa_img: true
+  buffer_size: 100%
   pad_all: 0
+  scrollbar_mode: "off"
+  scroll_on_focus: false
+
+  on_boot:
+    - script.execute: scr_theme_apply_full
 
   # =========================================================
   # TOP LAYER — always visible, covers header (y=0) and footer (y=560)
@@ -589,6 +1338,7 @@ lvgl:
     border_width: 0
     radius: 0
     scrollbar_mode: "off"
+    scrollable: false
 
     widgets:
       # --- Header bar (y=0, h=48) ---
@@ -663,7 +1413,7 @@ lvgl:
                       id: lbl_vin
                       text: "--.-V"
                       text_color: 0x888888
-                      text_font: montserrat_20
+                      text_font: roboto_mono_20
 
       # --- Footer tab bar (y=520, h=80) ---
       - obj:
@@ -695,15 +1445,17 @@ lvgl:
                 on_click:
                   - lvgl.page.show: page_main
                   - lambda: |-
+                      lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+                      lv_color_t dim = lv_color_hex((uint32_t)id(theme_text_dim));
                       lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), acc, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), dim, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), dim, LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_main
@@ -723,15 +1475,17 @@ lvgl:
                 on_click:
                   - lvgl.page.show: page_graphs
                   - lambda: |-
+                      lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+                      lv_color_t dim = lv_color_hex((uint32_t)id(theme_text_dim));
                       lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), acc, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), dim, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), dim, LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_graphs
@@ -751,15 +1505,17 @@ lvgl:
                 on_click:
                   - lvgl.page.show: page_settings
                   - lambda: |-
+                      lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+                      lv_color_t dim = lv_color_hex((uint32_t)id(theme_text_dim));
                       lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_settings), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), acc, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_main), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), dim, LV_PART_MAIN);
                       lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
-                      lv_obj_set_style_text_color(id(tab_lbl_graphs), lv_color_hex(0x555555), LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), dim, LV_PART_MAIN);
                 widgets:
                   - label:
                       id: tab_lbl_settings
@@ -767,6 +1523,1061 @@ lvgl:
                       text: "SETTINGS"
                       text_color: 0x555555
                       text_font: montserrat_16
+
+      # ── PRESET EDITOR OVERLAY ────────────────────────────────────────
+      # Full-screen modal; hidden by default; shown by settings page button
+      - obj:
+          id: overlay_preset_editor
+          x: 0
+          y: 0
+          width: 1024
+          height: 600
+          bg_color: 0x000000
+          bg_opa: 86%
+          border_width: 0
+          radius: 0
+          scrollbar_mode: "off"
+          hidden: true
+
+          widgets:
+            # Dialog box
+            - obj:
+                x: 212
+                y: 150
+                width: 600
+                height: 300
+                bg_color: 0x1C1C1C
+                border_color: 0x39FF14
+                border_width: 1
+                radius: 8
+                pad_all: 20
+                scrollbar_mode: "off"
+                scrollable: false
+                layout:
+                  type: FLEX
+                  flex_flow: COLUMN
+                  flex_align_main: SPACE_BETWEEN
+                  flex_align_cross: CENTER
+
+                widgets:
+                  # Title row: "Edit Preset  < N / M >"
+                  - obj:
+                      width: 560
+                      height: 36
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text: "Edit Preset"
+                            text_color: 0xCCCCCC
+                            text_font: montserrat_20
+                        - obj:
+                            bg_opa: TRANSP
+                            border_width: 0
+                            scrollbar_mode: "off"
+                            width: size_content
+                            height: size_content
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_cross: CENTER
+                              pad_column: 8
+                            widgets:
+                              - button:
+                                  id: btn_preset_edit_prev
+                                  width: 40
+                                  height: 32
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        int s = id(g_edit_slot) - 1;
+                                        if (s < 0) s = id(preset_count) - 1;
+                                        id(g_edit_slot) = s;
+                                        id(scr_update_edit_labels).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "<"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_16
+                              - label:
+                                  id: lbl_edit_slot
+                                  text: "1 / 8"
+                                  text_color: 0xFFFF66
+                                  text_font: montserrat_16
+                              - button:
+                                  id: btn_preset_edit_next
+                                  width: 40
+                                  height: 32
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        int s = (id(g_edit_slot) + 1) % id(preset_count);
+                                        id(g_edit_slot) = s;
+                                        id(scr_update_edit_labels).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: ">"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_16
+
+                  # Voltage row
+                  - obj:
+                      width: 560
+                      height: 60
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text: "Voltage (V)"
+                            text_color: 0x888888
+                            text_font: montserrat_16
+                        - obj:
+                            bg_opa: TRANSP
+                            border_width: 0
+                            scrollbar_mode: "off"
+                            width: size_content
+                            height: size_content
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_cross: CENTER
+                              pad_column: 12
+                            widgets:
+                              - button:
+                                  id: btn_edit_v_dec
+                                  width: 48
+                                  height: 48
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        id(scr_edit_v_step).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "−"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_20
+                              - label:
+                                  id: lbl_edit_v
+                                  text: "0.00"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_20
+                                  width: 80
+                                  align: CENTER
+                              - button:
+                                  id: btn_edit_v_inc
+                                  width: 48
+                                  height: 48
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        id(scr_edit_v_step_up).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "+"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_20
+
+                  # Current row
+                  - obj:
+                      width: 560
+                      height: 60
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text: "Current (A)"
+                            text_color: 0x888888
+                            text_font: montserrat_16
+                        - obj:
+                            bg_opa: TRANSP
+                            border_width: 0
+                            scrollbar_mode: "off"
+                            width: size_content
+                            height: size_content
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_cross: CENTER
+                              pad_column: 12
+                            widgets:
+                              - button:
+                                  id: btn_edit_i_dec
+                                  width: 48
+                                  height: 48
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        id(scr_edit_i_step).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "−"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_20
+                              - label:
+                                  id: lbl_edit_i
+                                  text: "0.00"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_20
+                                  width: 80
+                                  align: CENTER
+                              - button:
+                                  id: btn_edit_i_inc
+                                  width: 48
+                                  height: 48
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        id(scr_edit_i_step_up).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "+"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_20
+
+                  # Save / Cancel row
+                  - obj:
+                      width: 560
+                      height: 48
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: END
+                        flex_align_cross: CENTER
+                        pad_column: 12
+                      widgets:
+                        - button:
+                            id: btn_preset_edit_cancel
+                            width: 120
+                            height: 40
+                            bg_color: 0x2A2A2A
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_preset_editor), LV_OBJ_FLAG_HIDDEN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Cancel"
+                                  text_color: 0xAAAAAA
+                                  text_font: montserrat_16
+                        - button:
+                            id: btn_preset_edit_save
+                            width: 120
+                            height: 40
+                            bg_color: 0x1A3A1A
+                            border_color: 0x39FF14
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(scr_save_preset).execute();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Save"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_16
+
+      # ── THEME EDITOR OVERLAY ─────────────────────────────────────────
+      - obj:
+          id: overlay_theme_editor
+          x: 0
+          y: 0
+          width: 1024
+          height: 600
+          bg_color: 0x000000
+          bg_opa: 86%
+          border_width: 0
+          radius: 0
+          scrollbar_mode: "off"
+          hidden: true
+
+          widgets:
+            - obj:
+                x: 162
+                y: 100
+                width: 700
+                height: 400
+                bg_color: 0x1C1C1C
+                border_color: 0x39FF14
+                border_width: 1
+                radius: 8
+                pad_all: 20
+                scrollbar_mode: "off"
+                scrollable: false
+                layout:
+                  type: FLEX
+                  flex_flow: COLUMN
+                  flex_align_main: SPACE_BETWEEN
+                  flex_align_cross: CENTER
+
+                widgets:
+                  # Title + scheme selector row
+                  - obj:
+                      width: 660
+                      height: 40
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text: "Color Scheme"
+                            text_color: 0xCCCCCC
+                            text_font: montserrat_20
+                        - obj:
+                            bg_opa: TRANSP
+                            border_width: 0
+                            scrollbar_mode: "off"
+                            width: size_content
+                            height: size_content
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_cross: CENTER
+                              pad_column: 8
+                            widgets:
+                              - button:
+                                  id: btn_theme_prev
+                                  width: 40
+                                  height: 32
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        int s = id(g_theme_scheme) - 1;
+                                        if (s < 0) s = 3;
+                                        id(g_theme_scheme) = s;
+                                        id(scr_update_theme_labels).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "<"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_16
+                              - label:
+                                  id: lbl_theme_name
+                                  text: "Neon"
+                                  text_color: 0xFFFF66
+                                  text_font: montserrat_16
+                                  width: 80
+                                  align: CENTER
+                              - button:
+                                  id: btn_theme_next
+                                  width: 40
+                                  height: 32
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        int s = (id(g_theme_scheme) + 1) % 4;
+                                        id(g_theme_scheme) = s;
+                                        id(scr_update_theme_labels).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: ">"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_16
+
+                  # Color swatch preview row
+                  - obj:
+                      width: 660
+                      height: 56
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_EVENLY
+                        flex_align_cross: CENTER
+                        pad_column: 8
+                      widgets:
+                        - obj:
+                            id: swatch_accent
+                            width: 90
+                            height: 40
+                            bg_color: 0x39FF14
+                            radius: 4
+                            border_width: 0
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "accent"
+                                  text_color: 0x000000
+                                  text_font: montserrat_12
+                        - obj:
+                            id: swatch_voltage
+                            width: 90
+                            height: 40
+                            bg_color: 0x39FF14
+                            radius: 4
+                            border_width: 0
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "voltage"
+                                  text_color: 0x000000
+                                  text_font: montserrat_12
+                        - obj:
+                            id: swatch_current
+                            width: 90
+                            height: 40
+                            bg_color: 0x4499FF
+                            radius: 4
+                            border_width: 0
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "current"
+                                  text_color: 0x000000
+                                  text_font: montserrat_12
+                        - obj:
+                            id: swatch_bg_main
+                            width: 90
+                            height: 40
+                            bg_color: 0x1E1E1E
+                            radius: 4
+                            border_color: 0x444444
+                            border_width: 1
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "bg main"
+                                  text_color: 0x888888
+                                  text_font: montserrat_12
+                        - obj:
+                            id: swatch_bg_panel
+                            width: 90
+                            height: 40
+                            bg_color: 0x141414
+                            radius: 4
+                            border_color: 0x444444
+                            border_width: 1
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "bg panel"
+                                  text_color: 0x888888
+                                  text_font: montserrat_12
+                        - obj:
+                            id: swatch_text_dim
+                            width: 90
+                            height: 40
+                            bg_color: 0x555555
+                            radius: 4
+                            border_width: 0
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "text dim"
+                                  text_color: 0x000000
+                                  text_font: montserrat_12
+
+                  # Note about custom editing (placeholder)
+                  - obj:
+                      width: 660
+                      height: 40
+                      bg_color: 0x222222
+                      border_color: 0x333333
+                      border_width: 1
+                      radius: 4
+                      scrollbar_mode: "off"
+                      widgets:
+                        - label:
+                            align: CENTER
+                            id: lbl_theme_custom_note
+                            text: "Select a scheme above  —  custom color editing coming soon"
+                            text_color: 0x666666
+                            text_font: montserrat_14
+
+                  # Spacer
+                  - obj:
+                      width: 660
+                      height: 16
+                      bg_opa: TRANSP
+                      border_width: 0
+
+                  # Apply / Cancel row
+                  - obj:
+                      width: 660
+                      height: 48
+                      bg_opa: TRANSP
+                      border_width: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: END
+                        flex_align_cross: CENTER
+                        pad_column: 12
+                      widgets:
+                        - button:
+                            id: btn_theme_cancel
+                            width: 120
+                            height: 40
+                            bg_color: 0x2A2A2A
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_theme_editor), LV_OBJ_FLAG_HIDDEN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Cancel"
+                                  text_color: 0xAAAAAA
+                                  text_font: montserrat_16
+                        - button:
+                            id: btn_theme_apply
+                            width: 120
+                            height: 40
+                            bg_color: 0x1A3A1A
+                            border_color: 0x39FF14
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_theme_editor), LV_OBJ_FLAG_HIDDEN);
+                              - script.execute: scr_theme_apply_full
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Apply"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_16
+
+      # ── CALIBRATION EDITOR OVERLAY ───────────────────────────────────
+      - obj:
+          id: overlay_cal_editor
+          x: 0
+          y: 0
+          width: 1024
+          height: 600
+          bg_color: 0x000000
+          bg_opa: 86%
+          border_width: 0
+          radius: 0
+          scrollbar_mode: "off"
+          hidden: true
+
+          widgets:
+            - obj:
+                x: 112
+                y: 60
+                width: 800
+                height: 480
+                bg_color: 0x1C1C1C
+                border_color: 0x4499FF
+                border_width: 1
+                radius: 8
+                pad_all: 20
+                scrollbar_mode: "off"
+                scrollable: false
+                layout:
+                  type: FLEX
+                  flex_flow: COLUMN
+                  flex_align_main: SPACE_BETWEEN
+                  flex_align_cross: CENTER
+
+                widgets:
+                  # Title row
+                  - obj:
+                      width: 760
+                      height: 36
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      scrollable: false
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                      widgets:
+                        - label:
+                            text: "Calibration Values"
+                            text_color: 0x4499FF
+                            text_font: montserrat_20
+                        - button:
+                            id: btn_cal_refresh
+                            width: 100
+                            height: 32
+                            bg_color: 0x1A2A3A
+                            border_color: 0x4499FF
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(opendps_id).request_calibration_report();
+                              - delay: 500ms
+                              - lambda: |-
+                                  auto &cal = id(opendps_id).get_calibration_data();
+                                  char buf[32];
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);   id(input_v_adc_k).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);   id(input_v_adc_c).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);   id(input_v_dac_k).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);   id(input_v_dac_c).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);   id(input_a_adc_k).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);   id(input_a_adc_c).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);   id(input_a_dac_k).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);   id(input_a_dac_c).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k); id(input_vin_adc_k).publish_state(buf);
+                                  snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c); id(input_vin_adc_c).publish_state(buf);
+                                  lv_label_set_text(id(lbl_cal_v_adc_k),   id(input_v_adc_k).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_v_adc_c),   id(input_v_adc_c).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_v_dac_k),   id(input_v_dac_k).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_v_dac_c),   id(input_v_dac_c).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_a_adc_k),   id(input_a_adc_k).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_a_adc_c),   id(input_a_adc_c).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_a_dac_k),   id(input_a_dac_k).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_a_dac_c),   id(input_a_dac_c).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_vin_adc_k), id(input_vin_adc_k).state.c_str());
+                                  lv_label_set_text(id(lbl_cal_vin_adc_c), id(input_vin_adc_c).state.c_str());
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Refresh"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_14
+
+                  # Cal values grid — two columns side by side
+                  - obj:
+                      width: 760
+                      height: 280
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      scrollable: false
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: START
+                        pad_column: 16
+
+                      widgets:
+                        # Left column: voltage cal
+                        - obj:
+                            width: 370
+                            height: 280
+                            bg_color: 0x222222
+                            border_color: 0x333333
+                            border_width: 1
+                            radius: 6
+                            pad_all: 12
+                            scrollbar_mode: "off"
+                            scrollable: false
+                            layout:
+                              type: FLEX
+                              flex_flow: COLUMN
+                              flex_align_main: START
+                              flex_align_cross: STRETCH
+                              pad_row: 8
+
+                            widgets:
+                              - label:
+                                  text: "VOLTAGE"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "V_ADC_K"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_v_adc_k
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "V_ADC_C"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_v_adc_c
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "V_DAC_K"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_v_dac_k
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "V_DAC_C"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_v_dac_c
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+
+                        # Right column: current + vin cal
+                        - obj:
+                            width: 370
+                            height: 280
+                            bg_color: 0x222222
+                            border_color: 0x333333
+                            border_width: 1
+                            radius: 6
+                            pad_all: 12
+                            scrollbar_mode: "off"
+                            scrollable: false
+                            layout:
+                              type: FLEX
+                              flex_flow: COLUMN
+                              flex_align_main: START
+                              flex_align_cross: STRETCH
+                              pad_row: 8
+
+                            widgets:
+                              - label:
+                                  text: "CURRENT + VIN"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "A_ADC_K"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_a_adc_k
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "A_ADC_C"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_a_adc_c
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "A_DAC_K"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_a_dac_k
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "A_DAC_C"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_a_dac_c
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "VIN_ADC_K"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_vin_adc_k
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+                              - obj:
+                                  width: 346
+                                  height: 28
+                                  bg_opa: TRANSP
+                                  border_width: 0
+                                  pad_all: 0
+                                  scrollbar_mode: "off"
+                                  scrollable: false
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        text: "VIN_ADC_C"
+                                        text_color: 0x888888
+                                        text_font: montserrat_14
+                                    - label:
+                                        id: lbl_cal_vin_adc_c
+                                        text: "—"
+                                        text_color: 0xCCCCCC
+                                        text_font: montserrat_14
+
+                  # Action buttons row
+                  - obj:
+                      width: 760
+                      height: 48
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      scrollable: false
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                        pad_column: 8
+                      widgets:
+                        - button:
+                            id: btn_cal_save
+                            width: 160
+                            height: 40
+                            bg_color: 0x1A2A3A
+                            border_color: 0x4499FF
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(opendps_id).request_calibration_report();
+                              - delay: 500ms
+                              - lambda: |-
+                                  id(opendps_id).save_calibration();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Save to SD"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_restore
+                            width: 160
+                            height: 40
+                            bg_color: 0x2A2A1A
+                            border_color: 0xFFFF66
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(opendps_id).restore_calibration();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Restore"
+                                  text_color: 0xFFFF66
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_clear
+                            width: 120
+                            height: 40
+                            bg_color: 0x3A1A1A
+                            border_color: 0xFF4444
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(opendps_id).clear_calibration();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Clear"
+                                  text_color: 0xFF4444
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_assistant
+                            width: 160
+                            height: 40
+                            bg_color: 0x1A3A2A
+                            border_color: 0x39FF14
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
+                              - lambda: |-
+                                  id(opendps_id).start_calibration_assistant();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Assistant"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_close
+                            width: 80
+                            height: 40
+                            bg_color: 0x2A2A2A
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Close"
+                                  text_color: 0xAAAAAA
+                                  text_font: montserrat_14
 
   pages:
     # =========================================================
@@ -777,13 +2588,14 @@ lvgl:
     - id: page_main
       bg_color: 0x1E1E1E
       scrollbar_mode: "off"
+      scrollable: false
       pad_all: 0
 
       widgets:
         # ── VOLTAGE BAR: x=0, y=48, w=1024, h=140 ──────────────────
         # Left: slider (~65% width). Right: SET value + ACT value
         - obj:
-            id: lcd_panel
+            id: lcd_panel_v
             x: 0
             y: 48
             width: 1024
@@ -793,10 +2605,11 @@ lvgl:
             border_width: 2
             radius: 8
             pad_left: 16
-            pad_right: 16
-            pad_top: 3
-            pad_bottom: 3
+            pad_right: 0
+            pad_top: 6
+            pad_bottom: 6
             scrollbar_mode: "off"
+            scrollable: false
             layout:
               type: FLEX
               flex_flow: ROW
@@ -808,11 +2621,12 @@ lvgl:
               # Slider section (65%)
               - obj:
                   width: 624
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
                   border_width: 0
                   pad_all: 0
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
@@ -826,7 +2640,9 @@ lvgl:
                         height: 18
                         bg_opa: TRANSP
                         border_width: 0
+                        pad_all: 0
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -841,7 +2657,7 @@ lvgl:
                               id: lbl_vrange
                               text: !lambda |-
                                 char buf[16];
-                                snprintf(buf, sizeof(buf), "0 — %.1fV", id(g_vmax));
+                                snprintf(buf, sizeof(buf), "0 - %.1fV", id(g_vmax));
                                 return std::string(buf);
                               text_color: 0x444444
                               text_font: montserrat_12
@@ -882,6 +2698,11 @@ lvgl:
                         on_value:
                           - lambda: |-
                               if (id(g_slider_updating)) return;
+                              if (!id(g_preset_active)) {
+                                uint32_t n = lv_obj_get_child_count(id(preset_bar));
+                                for (uint32_t ci = 0; ci < n; ci++)
+                                  lv_obj_set_style_bg_color(lv_obj_get_child(id(preset_bar), ci), lv_color_hex(0x0A0A0A), LV_PART_MAIN);
+                              }
                               float v = x / 10000.0f * id(g_vmax);
                               v = roundf(v / 0.005f) * 0.005f;
                               id(voltage_number).make_call().set_value(v).perform();
@@ -891,7 +2712,9 @@ lvgl:
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
+                        pad_all: 0
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -935,24 +2758,34 @@ lvgl:
                               text_color: 0x444444
                               text_font: montserrat_12
 
-              # Divider
+              # Spacer between slider and SET/ACT values
+              - obj:
+                  width: 8
+                  height: 128
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+
               # SET value
               - obj:
                   width: 183
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
-                  border_width: 0
-                  pad_left: 8
-                  pad_right: 8
-                  pad_top: 0
-                  pad_bottom: 0
+                  border_color: 0x1A3A1A
+                  border_width: 1
+                  border_side: RIGHT
+                  pad_all: 0
+                  pad_left: 4
+                  pad_right: 4
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
                     flex_align_cross: CENTER
                     flex_align_main: CENTER
-                    pad_row: 4
+                    pad_row: 2
                   widgets:
                     - label:
                         text: "SET"
@@ -961,9 +2794,11 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 179
-                        height: 68
+                        pad_all: 0
+                        width: 171
+                        height: 80
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -973,45 +2808,35 @@ lvgl:
                         widgets:
                           - label:
                               id: lbl_setv
-                              width: 132
+                              width: 147
                               text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
                                 return std::string(buf);
                               text_color: 0x39FF14
-                              text_font: montserrat_48
+                              text_font: roboto_mono_48
                           - label:
                               text: "V"
                               text_color: 0x39FF14
                               text_font: montserrat_20
                               y: -6
 
-              # Divider
-              - obj:
-                  width: 1
-                  height: 128
-                  bg_color: 0x1A3A1A
-                  border_width: 0
-                  radius: 0
-
               # ACT value
               - obj:
                   width: 183
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
                   border_width: 0
-                  pad_left: 8
-                  pad_right: 8
-                  pad_top: 0
-                  pad_bottom: 0
+                  pad_all: 0
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
                     flex_align_cross: CENTER
                     flex_align_main: CENTER
-                    pad_row: 4
+                    pad_row: 2
                   widgets:
                     - label:
                         text: "ACT"
@@ -1020,26 +2845,28 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 179
-                        height: 68
+                        pad_all: 0
+                        width: 171
+                        height: 80
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: END
+                          flex_align_main: START
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_vout
-                              width: 132
+                              width: 147
                               text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.2f", id(g_vset));
                                 return std::string(buf);
                               text_color: 0x2A2A2A
-                              text_font: montserrat_48
+                              text_font: roboto_mono_48
                           - label:
                               text: "V"
                               text_color: 0x222222
@@ -1048,6 +2875,7 @@ lvgl:
 
         # ── CURRENT BAR: x=0, y=188, w=1024, h=140 ─────────────────
         - obj:
+            id: lcd_panel_i
             x: 0
             y: 188
             width: 1024
@@ -1057,10 +2885,11 @@ lvgl:
             border_width: 2
             radius: 8
             pad_left: 16
-            pad_right: 16
-            pad_top: 3
-            pad_bottom: 3
+            pad_right: 0
+            pad_top: 6
+            pad_bottom: 6
             scrollbar_mode: "off"
+            scrollable: false
             layout:
               type: FLEX
               flex_flow: ROW
@@ -1072,11 +2901,12 @@ lvgl:
               # Slider section (65%)
               - obj:
                   width: 624
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
                   border_width: 0
                   pad_all: 0
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
@@ -1090,7 +2920,9 @@ lvgl:
                         height: 18
                         bg_opa: TRANSP
                         border_width: 0
+                        pad_all: 0
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -1102,7 +2934,7 @@ lvgl:
                               text_color: 0x888888
                               text_font: montserrat_14
                           - label:
-                              text: "0 — 5A"
+                              text: "0 - 5A"
                               text_color: 0x444444
                               text_font: montserrat_12
 
@@ -1141,6 +2973,11 @@ lvgl:
                               value: "false"
                         on_value:
                           - lambda: |-
+                              if (!id(g_preset_active)) {
+                                uint32_t n = lv_obj_get_child_count(id(preset_bar));
+                                for (uint32_t ci = 0; ci < n; ci++)
+                                  lv_obj_set_style_bg_color(lv_obj_get_child(id(preset_bar), ci), lv_color_hex(0x0A0A0A), LV_PART_MAIN);
+                              }
                               id(current_number).make_call().set_value(x / 100.0f).perform();
 
                     - obj:
@@ -1148,7 +2985,9 @@ lvgl:
                         height: 16
                         bg_opa: TRANSP
                         border_width: 0
+                        pad_all: 0
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -1176,23 +3015,34 @@ lvgl:
                               text_color: 0x444444
                               text_font: montserrat_12
 
+              # Spacer between slider and SET/ACT values
+              - obj:
+                  width: 8
+                  height: 128
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+
               # SET value
               - obj:
                   width: 183
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
-                  border_width: 0
-                  pad_left: 8
-                  pad_right: 8
-                  pad_top: 0
-                  pad_bottom: 0
+                  border_color: 0x1A1A3A
+                  border_width: 1
+                  border_side: RIGHT
+                  pad_all: 0
+                  pad_left: 4
+                  pad_right: 4
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
                     flex_align_cross: CENTER
                     flex_align_main: CENTER
-                    pad_row: 4
+                    pad_row: 2
                   widgets:
                     - label:
                         text: "SET"
@@ -1201,9 +3051,11 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 179
-                        height: 68
+                        pad_all: 0
+                        width: 171
+                        height: 80
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
@@ -1213,43 +3065,35 @@ lvgl:
                         widgets:
                           - label:
                               id: lbl_seti
+                              width: 147
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
                                 return std::string(buf);
                               text_color: 0x4499FF
-                              text_font: montserrat_48
+                              text_font: roboto_mono_48
                           - label:
                               text: "A"
                               text_color: 0x4499FF
                               text_font: montserrat_20
                               y: -6
 
-              # Divider
-              - obj:
-                  width: 1
-                  height: 128
-                  bg_color: 0x1A1A3A
-                  border_width: 0
-                  radius: 0
-
               # ACT value
               - obj:
                   width: 183
-                  height: 148
+                  height: 128
                   bg_opa: TRANSP
                   border_width: 0
-                  pad_left: 8
-                  pad_right: 8
-                  pad_top: 0
-                  pad_bottom: 0
+                  pad_all: 0
                   scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
                     flex_align_cross: CENTER
                     flex_align_main: CENTER
-                    pad_row: 4
+                    pad_row: 2
                   widgets:
                     - label:
                         text: "ACT"
@@ -1258,42 +3102,47 @@ lvgl:
                     - obj:
                         bg_opa: TRANSP
                         border_width: 0
-                        width: 179
-                        height: 68
+                        pad_all: 0
+                        width: 171
+                        height: 80
                         scrollbar_mode: "off"
+                        scrollable: false
                         layout:
                           type: FLEX
                           flex_flow: ROW
                           flex_align_cross: END
-                          flex_align_main: END
+                          flex_align_main: START
                           pad_column: 2
                         widgets:
                           - label:
                               id: lbl_iout
+                              width: 147
+                              text_align: RIGHT
                               text: !lambda |-
                                 char buf[16];
                                 snprintf(buf, sizeof(buf), "%.3f", id(g_iset));
                                 return std::string(buf);
                               text_color: 0x2A2A2A
-                              text_font: montserrat_48
+                              text_font: roboto_mono_48
                           - label:
                               text: "A"
                               text_color: 0x222233
                               text_font: montserrat_20
                               y: -6
 
-        # ── CONTROLS ROW: x=0, y=328, w=1024, h=96 ─────────────────
+        # ── CONTROLS ROW: x=0, y=328, w=1024, h=93 ─────────────────
         # 50% mode buttons | 2.5% gap | 20% power | 2.5% gap | 20% lock | 2.5% gap | 2.5% right
         - obj:
             x: 0
             y: 328
             width: 1024
-            height: 96
+            height: 93
             bg_color: 0x141414
             border_width: 0
             radius: 0
             pad_all: 0
             scrollbar_mode: "off"
+            scrollable: false
             layout:
               type: FLEX
               flex_flow: ROW
@@ -1306,7 +3155,7 @@ lvgl:
               - button:
                   id: btn_cv
                   width: 170
-                  height: 96
+                  height: 93
                   bg_color: 0x0A0A0A
                   border_width: 0
                   radius: 0
@@ -1322,10 +3171,12 @@ lvgl:
                         option: "cv"
                     - lambda: |-
                         lv_style_selector_t sel = (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_DEFAULT);
-                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_hex(0x1A4A1A), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cv), lv_color_hex(0x39FF14), sel); lv_obj_set_style_border_width(id(btn_cv), 3, sel);
+                        lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+                        uint8_t ar=(id(theme_accent)>>16)&0xFF, ag=(id(theme_accent)>>8)&0xFF, ab=id(theme_accent)&0xFF;
+                        lv_obj_set_style_bg_color(id(btn_cv), lv_color_make(ar/6,ag/6,ab/6), sel); lv_obj_set_style_bg_opa(id(btn_cv), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cv), acc, sel); lv_obj_set_style_border_width(id(btn_cv), 3, sel);
                         lv_obj_set_style_bg_color(id(btn_cc), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cc), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cc), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cc), 0, sel);
                         lv_obj_set_style_bg_color(id(btn_cp), lv_color_hex(0x0A0A0A), sel); lv_obj_set_style_bg_opa(id(btn_cp), LV_OPA_COVER, sel); lv_obj_set_style_border_color(id(btn_cp), lv_color_hex(0x1A1A1A), sel); lv_obj_set_style_border_width(id(btn_cp), 0, sel);
-                        lv_obj_set_style_text_color(id(lbl_cv), lv_color_hex(0x39FF14), sel);
+                        lv_obj_set_style_text_color(id(lbl_cv), acc, sel);
                         lv_obj_set_style_text_color(id(lbl_cc), lv_color_hex(0x444444), sel);
                         lv_obj_set_style_text_color(id(lbl_cp), lv_color_hex(0x444444), sel);
                         lv_obj_invalidate(id(btn_cv)); lv_obj_invalidate(id(btn_cc)); lv_obj_invalidate(id(btn_cp));
@@ -1343,7 +3194,7 @@ lvgl:
               - button:
                   id: btn_cc
                   width: 170
-                  height: 96
+                  height: 93
                   bg_color: 0x0A0A0A
                   border_width: 0
                   radius: 0
@@ -1380,7 +3231,7 @@ lvgl:
               - button:
                   id: btn_cp
                   width: 170
-                  height: 96
+                  height: 93
                   bg_color: 0x0A0A0A
                   border_width: 0
                   radius: 0
@@ -1417,7 +3268,7 @@ lvgl:
               # Power group: 20% = 205px, 2.5% left margin = 26px
               - obj:
                   width: 205
-                  height: 96
+                  height: 93
                   bg_opa: TRANSP
                   border_width: 0
                   pad_all: 0
@@ -1472,16 +3323,34 @@ lvgl:
                                     text: "\u23FB"
                                     text_color: 0x555555
                                     text_font: montserrat_28
-                          - label:
-                              id: lbl_pwr
-                              text: "OFF"
-                              text_color: 0x555555
-                              text_font: montserrat_16
+                          - obj:
+                              bg_opa: TRANSP
+                              border_width: 0
+                              pad_all: 0
+                              width: 44
+                              height: 26
+                              scrollbar_mode: "off"
+                              widgets:
+                                - label:
+                                    id: lbl_pwr_off
+                                    x: 0
+                                    y: 0
+                                    text: "OFF"
+                                    text_color: 0x555555
+                                    text_font: montserrat_16
+                                - label:
+                                    id: lbl_pwr_on
+                                    x: 0
+                                    y: 0
+                                    text: " ON"
+                                    text_color: 0x555555
+                                    text_font: montserrat_16
+                                    hidden: true
 
               # Lock + Log toggle buttons: 2 × 154px, 1px divider via container bg
               - obj:
                   width: 309
-                  height: 96
+                  height: 93
                   bg_color: 0x2A2A2A
                   bg_opa: COVER
                   border_width: 0
@@ -1497,7 +3366,7 @@ lvgl:
                     - button:
                         id: btn_lock
                         width: 154
-                        height: 96
+                        height: 93
                         bg_color: 0x0A0A0A
                         bg_opa: COVER
                         border_width: 0
@@ -1528,7 +3397,7 @@ lvgl:
                     - button:
                         id: btn_log
                         width: 154
-                        height: 96
+                        height: 93
                         bg_color: 0x0A0A0A
                         bg_opa: COVER
                         border_width: 0
@@ -1553,353 +3422,21 @@ lvgl:
                               text_color: 0x444444
                               text_font: mdi_36
 
-        # ── PRESET ROW: x=0, y=424, w=1024, h=96 ───────────────────
+        # ── PRESET ROW: x=0, y=421, w=1024, h=93 ───────────────────
         - obj:
+            id: preset_bar
             x: 0
-            y: 424
+            y: 421
             width: 1024
-            height: 96
+            height: 93
             bg_color: 0x111111
             border_width: 0
             radius: 0
             pad_all: 0
             scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_main: SPACE_EVENLY
-              flex_align_cross: STRETCH
-              pad_column: 0
-            widgets:
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 1.0
-                    - number.set:
-                        id: current_number
-                        value: 0.3
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "1.0V"
-                              text_color: 0x888888
-                              text_font: montserrat_16
-                          - label:
-                              text: "0.3A"
-                              text_color: 0x444444
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 1.8
-                    - number.set:
-                        id: current_number
-                        value: 0.56
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "1.8V"
-                              text_color: 0x888888
-                              text_font: montserrat_16
-                          - label:
-                              text: "0.56A"
-                              text_color: 0x444444
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 3.3
-                    - number.set:
-                        id: current_number
-                        value: 1.0
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "3.3V"
-                              text_color: 0x39FF14
-                              text_font: montserrat_16
-                          - label:
-                              text: "1.0A"
-                              text_color: 0x1A6610
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 5.0
-                    - number.set:
-                        id: current_number
-                        value: 1.5
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "5V"
-                              text_color: 0x39FF14
-                              text_font: montserrat_16
-                          - label:
-                              text: "1.5A"
-                              text_color: 0x1A6610
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 6.0
-                    - number.set:
-                        id: current_number
-                        value: 1.8
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "6V"
-                              text_color: 0xFFBF00
-                              text_font: montserrat_16
-                          - label:
-                              text: "1.8A"
-                              text_color: 0x664400
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 9.0
-                    - number.set:
-                        id: current_number
-                        value: 2.6
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "9V"
-                              text_color: 0xFF8800
-                              text_font: montserrat_16
-                          - label:
-                              text: "2.6A"
-                              text_color: 0x663300
-                              text_font: montserrat_12
-              - button:
-                  width: 146
-                  height: 96
-                  bg_color: 0x0A0A0A
-                  border_color: 0x1A1A1A
-                  border_width: 1
-                  radius: 0
-                  pad_all: 0
-                  on_click:
-                    - globals.set:
-                        id: g_ui_active
-                        value: "true"
-                    - select.set:
-                        id: opendps_select_mode
-                        option: "cv"
-                    - number.set:
-                        id: voltage_number
-                        value: 12.0
-                    - number.set:
-                        id: current_number
-                        value: 3.0
-                    - globals.set:
-                        id: g_ui_active
-                        value: "false"
-                  widgets:
-                    - obj:
-                        align: CENTER
-                        width: 140
-                        height: 60
-                        bg_opa: TRANSP
-                        border_width: 0
-                        scrollbar_mode: "off"
-                        layout:
-                          type: FLEX
-                          flex_flow: COLUMN
-                          flex_align_cross: CENTER
-                          flex_align_main: CENTER
-                          pad_row: 2
-                        widgets:
-                          - label:
-                              text: "12V"
-                              text_color: 0xFF3333
-                              text_font: montserrat_16
-                          - label:
-                              text: "3.0A"
-                              text_color: 0x661111
-                              text_font: montserrat_12
+            scrollable: false
+            # buttons are created dynamically in on_boot lambda below
+            widgets: []
 
     # =========================================================
     # PAGE: GRAPHS  (content area y=40..560, 520px tall)
@@ -1909,19 +3446,19 @@ lvgl:
       scrollbar_mode: "off"
 
       widgets:
-        # Chart header strip: x=0, y=40, w=1024, h=28
+        # Chart header strip: x=0, y=80, w=1024, h=40
         - obj:
             x: 0
-            y: 40
+            y: 80
             width: 1024
-            height: 28
+            height: 40
             bg_color: 0x0D0D0D
             border_width: 0
             radius: 0
             pad_left: 24
             pad_right: 24
-            pad_top: 4
-            pad_bottom: 4
+            pad_top: 6
+            pad_bottom: 6
             scrollbar_mode: "off"
             layout:
               type: FLEX
@@ -1931,227 +3468,667 @@ lvgl:
             widgets:
               - label:
                   id: lbl_vout_g
-                  text: "Vout  --.-V"
+                  text: "\u25CF  Vout  --.-V"
                   text_color: 0x4499FF
-                  text_font: montserrat_14
+                  text_font: montserrat_16
               - label:
                   id: lbl_iout_g
-                  text: "Iout  -.---A"
+                  text: "\u25CF  Iout  -.---A"
                   text_color: 0xFFAA22
-                  text_font: montserrat_14
+                  text_font: montserrat_16
               - label:
                   id: lbl_pout_g
-                  text: "Pout  --.-W"
+                  text: "\u25CF  Pout  --.-W"
                   text_color: 0xFF44CC
-                  text_font: montserrat_14
+                  text_font: montserrat_16
               - label:
-                  text: "60s window"
-                  text_color: 0x444444
+                  text: "60s  /  % du setpoint"
+                  text_color: 0x555555
                   text_font: montserrat_12
 
-        # Voltage chart row: x=0, y=68, w=1024, h=164
+        # Single combined chart: x=0, y=120, w=1024, h=400
         - obj:
             x: 0
-            y: 68
+            y: 120
             width: 1024
-            height: 164
-            bg_color: 0x070D07
-            border_color: 0x002208
+            height: 400
+            bg_color: 0x0C1A0C
+            border_color: 0x004408
             border_width: 1
-            radius: 6
-            pad_all: 8
+            radius: 8
+            pad_all: 12
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: ROW
               flex_align_cross: CENTER
-              pad_column: 8
+              pad_column: 0
 
             widgets:
-              - obj:
-                  width: 44
-                  height: 148
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: COLUMN
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                  widgets:
-                    - label:
-                        text: "V"
-                        text_color: 0x4499FF
-                        text_font: montserrat_20
-                    - label:
-                        text: "out"
-                        text_color: 0x224466
-                        text_font: montserrat_12
-
               - chart:
-                  id: chart_v
-                  width: 944
-                  height: 148
+                  id: chart_main
+                  width: 1000
+                  height: 376
                   type: LINE
                   point_count: 60
                   update_mode: SHIFT
-                  bg_color: 0x050D05
-                  border_color: 0x002208
+                  bg_color: 0x070F07
+                  border_color: 0x003306
                   border_width: 1
-                  div_line_count_hor: 4
+                  div_line_count_hor: 5
                   div_line_count_ver: 6
                   items:
-                    line_color: 0x4499FF
                     line_width: 2
-                    bg_color: 0x4499FF
-                    bg_opa: 20%
-                    bg_grad_color: 0x050D05
-                    bg_grad_dir: VER
                   indicator:
-                    radius: 0
+                    radius: 3
+                    width: 6
+                    height: 6
                   axis_primary_y:
                     min_value: 0
-                    max_value: 3000
+                    max_value: 1000
                   series:
                     - id: ser_v
                       color: 0x4499FF
-
-        # Current chart row: x=0, y=232, w=1024, h=164
-        - obj:
-            x: 0
-            y: 232
-            width: 1024
-            height: 164
-            bg_color: 0x070D07
-            border_color: 0x002208
-            border_width: 1
-            radius: 6
-            pad_all: 8
-            scrollbar_mode: "off"
-            layout:
-              type: FLEX
-              flex_flow: ROW
-              flex_align_cross: CENTER
-              pad_column: 8
-
-            widgets:
-              - obj:
-                  width: 44
-                  height: 148
-                  bg_opa: TRANSP
-                  border_width: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: COLUMN
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
-                  widgets:
-                    - label:
-                        text: "A"
-                        text_color: 0xFFAA22
-                        text_font: montserrat_20
-                    - label:
-                        text: "out"
-                        text_color: 0x664422
-                        text_font: montserrat_12
-
-              - chart:
-                  id: chart_i
-                  width: 944
-                  height: 148
-                  type: LINE
-                  point_count: 60
-                  update_mode: SHIFT
-                  bg_color: 0x050D05
-                  border_color: 0x002208
-                  border_width: 1
-                  div_line_count_hor: 4
-                  div_line_count_ver: 6
-                  items:
-                    line_color: 0xFFAA22
-                    line_width: 2
-                    bg_color: 0xFFAA22
-                    bg_opa: 15%
-                    bg_grad_color: 0x050D05
-                    bg_grad_dir: VER
-                  indicator:
-                    radius: 0
-                  axis_primary_y:
-                    min_value: 0
-                    max_value: 5000
-                  series:
                     - id: ser_i
                       color: 0xFFAA22
+                    - id: ser_p
+                      color: 0xFF44CC
 
-        # Power chart row: x=0, y=396, w=1024, h=164
+    # =========================================================
+    # PAGE: FIRMWARE  (content area y=80..520, 440px tall)
+    # File picker + QWERTY keyboard + OTA flasher
+    # =========================================================
+    - id: page_firmware
+      bg_color: 0x111111
+      scrollbar_mode: "off"
+
+      widgets:
+        # ---- Storage selector (left column) x=8 y=88 w=220 h=424 ----
         - obj:
-            x: 0
-            y: 396
-            width: 1024
-            height: 164
-            bg_color: 0x070D07
-            border_color: 0x002208
+            x: 8
+            y: 88
+            width: 220
+            height: 424
+            bg_color: 0x1C1C1C
+            border_color: 0x2A2A2A
             border_width: 1
-            radius: 6
-            pad_all: 8
+            radius: 8
+            pad_all: 10
+            scrollbar_mode: "off"
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              flex_align_main: START
+              flex_align_cross: STRETCH
+              pad_row: 8
+
+            widgets:
+              - label:
+                  text: "SOURCE"
+                  text_color: 0x888888
+                  text_font: montserrat_14
+
+              - button:
+                  id: fw_src_sd
+                  width: 200
+                  height: 56
+                  bg_color: 0x243028
+                  border_color: 0x39FF14
+                  border_width: 2
+                  border_side: BOTTOM
+                  radius: 6
+                  on_click:
+                    - script.execute:
+                        id: fw_set_storage
+                        which: 0
+                    - lambda: |-
+                        lv_obj_set_style_border_side(id(fw_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_usb), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_url), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "SD card"
+                        text_color: 0xEEEEEE
+                        text_font: montserrat_16
+
+              - button:
+                  id: fw_src_usb
+                  width: 200
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x39FF14
+                  border_width: 2
+                  border_side: NONE
+                  radius: 6
+                  on_click:
+                    - script.execute:
+                        id: fw_set_storage
+                        which: 1
+                    - lambda: |-
+                        lv_obj_set_style_border_side(id(fw_src_usb), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_url), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "USB drive"
+                        text_color: 0xEEEEEE
+                        text_font: montserrat_16
+
+              - button:
+                  id: fw_src_nfs
+                  width: 200
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x39FF14
+                  border_width: 2
+                  border_side: NONE
+                  radius: 6
+                  on_click:
+                    - script.execute:
+                        id: fw_set_storage
+                        which: 2
+                    - lambda: |-
+                        lv_obj_set_style_border_side(id(fw_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_usb), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_url), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "NFS share"
+                        text_color: 0xEEEEEE
+                        text_font: montserrat_16
+
+              - button:
+                  id: fw_src_url
+                  width: 200
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x39FF14
+                  border_width: 2
+                  border_side: NONE
+                  radius: 6
+                  on_click:
+                    - script.execute:
+                        id: fw_set_storage
+                        which: 3
+                    - lvgl.widget.show: fw_url_overlay
+                    - lambda: |-
+                        lv_obj_set_style_border_side(id(fw_src_url), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_usb), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                        lv_obj_set_style_border_side(id(fw_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "URL (HTTP)"
+                        text_color: 0xEEEEEE
+                        text_font: montserrat_16
+
+              - label:
+                  text: "FILTER"
+                  text_color: 0x888888
+                  text_font: montserrat_14
+
+              - obj:
+                  width: 200
+                  height: 48
+                  bg_color: 0x222222
+                  border_width: 0
+                  radius: 6
+                  pad_all: 10
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+
+                  widgets:
+                    - label:
+                        text: "Only .bin"
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_14
+                    - switch:
+                        id: fw_filter_sw
+                        state:
+                          checked: true
+                        on_value:
+                          - globals.set:
+                              id: g_fw_filter_bin
+                              value: !lambda 'return x;'
+                          - script.execute: fw_refresh_list
+
+        # ---- File browser (right column) x=236 y=88 w=780 h=360 ----
+        - obj:
+            x: 236
+            y: 88
+            width: 780
+            height: 360
+            bg_color: 0x1C1C1C
+            border_color: 0x2A2A2A
+            border_width: 1
+            radius: 8
+            pad_all: 0
+            scrollbar_mode: "off"
+
+            widgets:
+              # Breadcrumb + refresh bar (top strip)
+              - obj:
+                  x: 0
+                  y: 0
+                  width: 780
+                  height: 40
+                  bg_color: 0x141414
+                  border_width: 0
+                  radius: 0
+                  pad_left: 12
+                  pad_right: 8
+                  pad_top: 8
+                  pad_bottom: 8
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        id: fw_breadcrumb
+                        text: "/sdcard"
+                        text_color: 0xAAAAAA
+                        text_font: montserrat_14
+                    - button:
+                        width: 80
+                        height: 28
+                        bg_color: 0x2A2A2A
+                        radius: 4
+                        on_click:
+                          - script.execute: fw_refresh_list
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "Refresh"
+                              text_color: 0x39FF14
+                              text_font: montserrat_14
+
+              # File list
+              - list:
+                  id: fw_file_list
+                  x: 0
+                  y: 40
+                  width: 780
+                  height: 320
+                  bg_color: 0x0F0F0F
+                  border_width: 0
+                  radius: 0
+                  scrollbar_mode: AUTO
+
+        # ---- Action bar (bottom) x=236 y=456 w=780 h=56 ----
+        - obj:
+            x: 236
+            y: 456
+            width: 780
+            height: 56
+            bg_color: 0x1C1C1C
+            border_color: 0x2A2A2A
+            border_width: 1
+            radius: 8
+            pad_left: 12
+            pad_right: 12
+            pad_top: 6
+            pad_bottom: 6
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: ROW
+              flex_align_main: SPACE_BETWEEN
               flex_align_cross: CENTER
-              pad_column: 8
 
             widgets:
+              - label:
+                  id: fw_selected_lbl
+                  text: "(no file selected)"
+                  text_color: 0xCCCCCC
+                  text_font: montserrat_14
+                  long_mode: DOT
+                  width: 500
+
+              - button:
+                  id: fw_flash_btn
+                  width: 200
+                  height: 44
+                  bg_color: 0x2A4A2A
+                  border_color: 0x39FF14
+                  border_width: 2
+                  radius: 6
+                  state:
+                    disabled: true
+                  on_click:
+                    - lvgl.widget.show: fw_confirm_overlay
+                  widgets:
+                    - label:
+                        align: CENTER
+                        text: "FLASH FIRMWARE"
+                        text_color: 0x39FF14
+                        text_font: montserrat_16
+
+        # ==============================================================
+        # URL INPUT OVERLAY  (hidden by default, shown when "URL" source)
+        # ==============================================================
+        - obj:
+            id: fw_url_overlay
+            hidden: true
+            x: 0
+            y: 80
+            width: 1024
+            height: 440
+            bg_color: 0x000000
+            bg_opa: 90%
+            border_width: 0
+            radius: 0
+            scrollbar_mode: "off"
+
+            widgets:
+              # Dialog card
               - obj:
-                  width: 44
-                  height: 148
-                  bg_opa: TRANSP
-                  border_width: 0
+                  x: 112
+                  y: 20
+                  width: 800
+                  height: 400
+                  bg_color: 0x1C1C1C
+                  border_color: 0x39FF14
+                  border_width: 2
+                  radius: 10
+                  pad_all: 16
                   scrollbar_mode: "off"
                   layout:
                     type: FLEX
                     flex_flow: COLUMN
-                    flex_align_cross: CENTER
-                    flex_align_main: CENTER
+                    flex_align_main: START
+                    flex_align_cross: STRETCH
+                    pad_row: 10
+
                   widgets:
                     - label:
-                        text: "W"
-                        text_color: 0xFF44CC
+                        text: "Firmware URL"
+                        text_color: 0xEEEEEE
                         text_font: montserrat_20
-                    - label:
-                        text: "out"
-                        text_color: 0x662266
-                        text_font: montserrat_12
 
-              - chart:
-                  id: chart_p
-                  width: 944
-                  height: 148
-                  type: LINE
-                  point_count: 60
-                  update_mode: SHIFT
-                  bg_color: 0x050D05
-                  border_color: 0x002208
-                  border_width: 1
-                  div_line_count_hor: 4
-                  div_line_count_ver: 6
-                  items:
-                    line_color: 0xFF44CC
-                    line_width: 2
-                    bg_color: 0xFF44CC
-                    bg_opa: 15%
-                    bg_grad_color: 0x050D05
-                    bg_grad_dir: VER
-                  indicator:
-                    radius: 0
-                  axis_primary_y:
-                    min_value: 0
-                    max_value: 15000
-                  series:
-                    - id: ser_p
-                      color: 0xFF44CC
+                    - label:
+                        text: "Enter the HTTP(S) URL of the .bin firmware:"
+                        text_color: 0x888888
+                        text_font: montserrat_14
+
+                    - textarea:
+                        id: fw_url_input
+                        width: 760
+                        height: 50
+                        one_line: true
+                        placeholder_text: "http://server/firmware.bin"
+                        text_color: 0xEEEEEE
+                        bg_color: 0x0F0F0F
+                        border_color: 0x39FF14
+                        border_width: 1
+                        radius: 4
+                        on_focus:
+                          - lvgl.keyboard.update:
+                              id: fw_keyboard
+                              mode: TEXT_LOWER
+
+                    - keyboard:
+                        id: fw_keyboard
+                        width: 760
+                        height: 220
+                        textarea: fw_url_input
+                        mode: TEXT_LOWER
+                        bg_color: 0x222222
+                        text_color: 0xEEEEEE
+
+                    # Action row (OK / Cancel)
+                    - obj:
+                        width: 760
+                        height: 44
+                        bg_opa: TRANSP
+                        border_width: 0
+                        pad_all: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: END
+                          flex_align_cross: CENTER
+                          pad_column: 12
+
+                        widgets:
+                          - button:
+                              width: 140
+                              height: 44
+                              bg_color: 0x333333
+                              radius: 6
+                              on_click:
+                                - lvgl.widget.hide: fw_url_overlay
+                              widgets:
+                                - label:
+                                    align: CENTER
+                                    text: "Cancel"
+                                    text_color: 0xCCCCCC
+                                    text_font: montserrat_16
+                          - button:
+                              width: 140
+                              height: 44
+                              bg_color: 0x2A4A2A
+                              border_color: 0x39FF14
+                              border_width: 2
+                              radius: 6
+                              on_click:
+                                - lambda: |-
+                                    const char *url = lv_textarea_get_text(id(fw_url_input));
+                                    if (url == nullptr || url[0] == '\0') return;
+                                    id(g_fw_url) = url;
+                                    id(g_fw_selected) = url;
+                                    lv_label_set_text(id(fw_selected_lbl), url);
+                                    lv_obj_clear_state(id(fw_flash_btn), LV_STATE_DISABLED);
+                                - lvgl.widget.hide: fw_url_overlay
+                              widgets:
+                                - label:
+                                    align: CENTER
+                                    text: "OK"
+                                    text_color: 0x39FF14
+                                    text_font: montserrat_16
+
+        # ==============================================================
+        # CONFIRM OVERLAY  (hidden by default, shown before flashing)
+        # ==============================================================
+        - obj:
+            id: fw_confirm_overlay
+            hidden: true
+            x: 0
+            y: 80
+            width: 1024
+            height: 440
+            bg_color: 0x000000
+            bg_opa: 90%
+            border_width: 0
+            radius: 0
+            scrollbar_mode: "off"
+
+            widgets:
+              - obj:
+                  x: 212
+                  y: 80
+                  width: 600
+                  height: 280
+                  bg_color: 0x1C1C1C
+                  border_color: 0xFFAA22
+                  border_width: 2
+                  radius: 10
+                  pad_all: 20
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: STRETCH
+                    pad_row: 12
+
+                  widgets:
+                    - label:
+                        text: "Confirm firmware flash"
+                        text_color: 0xFFAA22
+                        text_font: montserrat_20
+                        align: CENTER
+
+                    - label:
+                        text: "The device will be reprogrammed.\nDo NOT power off during the process."
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_16
+                        align: CENTER
+
+                    - label:
+                        id: fw_confirm_file
+                        text: ""
+                        text_color: 0xAAAAAA
+                        text_font: montserrat_14
+                        long_mode: DOT
+                        align: CENTER
+
+                    - obj:
+                        width: 560
+                        height: 50
+                        bg_opa: TRANSP
+                        border_width: 0
+                        pad_all: 0
+                        scrollbar_mode: "off"
+                        layout:
+                          type: FLEX
+                          flex_flow: ROW
+                          flex_align_main: SPACE_EVENLY
+                          flex_align_cross: CENTER
+
+                        widgets:
+                          - button:
+                              width: 200
+                              height: 44
+                              bg_color: 0x333333
+                              radius: 6
+                              on_click:
+                                - lvgl.widget.hide: fw_confirm_overlay
+                              widgets:
+                                - label:
+                                    align: CENTER
+                                    text: "Cancel"
+                                    text_color: 0xCCCCCC
+                                    text_font: montserrat_16
+                          - button:
+                              width: 200
+                              height: 44
+                              bg_color: 0x4A2A2A
+                              border_color: 0xFF4444
+                              border_width: 2
+                              radius: 6
+                              on_click:
+                                - lvgl.widget.hide: fw_confirm_overlay
+                                - script.execute: fw_flash
+                              widgets:
+                                - label:
+                                    align: CENTER
+                                    text: "Start flash"
+                                    text_color: 0xFF4444
+                                    text_font: montserrat_16
+
+        # ==============================================================
+        # PROGRESS OVERLAY  (hidden by default, shown during flashing)
+        # ==============================================================
+        - obj:
+            id: fw_progress_overlay
+            hidden: true
+            x: 0
+            y: 80
+            width: 1024
+            height: 440
+            bg_color: 0x000000
+            bg_opa: 90%
+            border_width: 0
+            radius: 0
+            scrollbar_mode: "off"
+
+            widgets:
+              - obj:
+                  x: 112
+                  y: 60
+                  width: 800
+                  height: 320
+                  bg_color: 0x1C1C1C
+                  border_color: 0x39FF14
+                  border_width: 2
+                  radius: 10
+                  pad_all: 20
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: STRETCH
+                    pad_row: 16
+
+                  widgets:
+                    - label:
+                        text: "Flashing firmware..."
+                        text_color: 0x39FF14
+                        text_font: montserrat_20
+                        align: CENTER
+
+                    - spinner:
+                        width: 60
+                        height: 60
+                        align: CENTER
+                        indicator:
+                          arc_color: 0x39FF14
+                          arc_width: 6
+
+                    - label:
+                        id: fw_progress_status
+                        text: "Uploading..."
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_16
+                        align: CENTER
+
+                    - bar:
+                        id: fw_progress_bar
+                        width: 760
+                        height: 20
+                        min_value: 0
+                        max_value: 100
+                        value: 0
+                        bg_color: 0x222222
+                        indicator:
+                          bg_color: 0x39FF14
+
+                    - button:
+                        id: fw_progress_close
+                        width: 200
+                        height: 44
+                        align: CENTER
+                        bg_color: 0x333333
+                        radius: 6
+                        state:
+                          disabled: true
+                        on_click:
+                          - lvgl.widget.hide: fw_progress_overlay
+                          - globals.set:
+                              id: g_fw_flashing
+                              value: "false"
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "Close"
+                              text_color: 0xCCCCCC
+                              text_font: montserrat_16
 
     # =========================================================
     # PAGE: SETTINGS  (content area y=40..560, 520px tall)
@@ -2159,6 +4136,7 @@ lvgl:
     - id: page_settings
       bg_color: 0x141414
       scrollbar_mode: "off"
+      scrollable: false
 
       widgets:
         # PSU controls — full width now that presets moved to main page
@@ -2182,6 +4160,7 @@ lvgl:
 
             widgets:
               - label:
+                  id: lbl_settings_title
                   text: "PSU DISPLAY"
                   text_color: 0x39FF14
                   text_font: montserrat_20
@@ -2293,3 +4272,121 @@ lvgl:
                           - globals.set:
                               id: g_ui_active
                               value: "false"
+
+              # Edit presets button
+              - obj:
+                  width: 348
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x333333
+                  border_width: 1
+                  radius: 6
+                  pad_all: 14
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        text: "Preset buttons"
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_16
+                    - button:
+                        id: btn_open_preset_editor
+                        width: 80
+                        height: 32
+                        bg_color: 0x1A3A1A
+                        border_color: 0x39FF14
+                        border_width: 1
+                        radius: 4
+                        on_click:
+                          - lambda: |-
+                              int s = id(g_edit_slot);
+                              if (s >= id(preset_count)) { s = 0; id(g_edit_slot) = 0; }
+                              lv_obj_clear_flag(id(overlay_preset_editor), LV_OBJ_FLAG_HIDDEN);
+                          - script.execute: scr_update_edit_labels
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "Edit"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+
+              # Colors / theme editor button
+              - obj:
+                  width: 348
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x333333
+                  border_width: 1
+                  radius: 6
+                  pad_all: 14
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        text: "Colors"
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_16
+                    - button:
+                        id: btn_open_theme_editor
+                        width: 80
+                        height: 32
+                        bg_color: 0x1A3A1A
+                        border_color: 0x39FF14
+                        border_width: 1
+                        radius: 4
+                        on_click:
+                          - script.execute: scr_update_theme_labels
+                          - lambda: |-
+                              lv_obj_clear_flag(id(overlay_theme_editor), LV_OBJ_FLAG_HIDDEN);
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "Theme"
+                              text_color: 0x39FF14
+                              text_font: montserrat_16
+
+              # Calibration editor button
+              - obj:
+                  width: 348
+                  height: 56
+                  bg_color: 0x222222
+                  border_color: 0x333333
+                  border_width: 1
+                  radius: 6
+                  pad_all: 14
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: ROW
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: CENTER
+                  widgets:
+                    - label:
+                        text: "Calibration"
+                        text_color: 0xCCCCCC
+                        text_font: montserrat_16
+                    - button:
+                        id: btn_open_cal_editor
+                        width: 80
+                        height: 32
+                        bg_color: 0x1A2A3A
+                        border_color: 0x4499FF
+                        border_width: 1
+                        radius: 4
+                        on_click:
+                          - lambda: |-
+                              lv_obj_clear_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
+                        widgets:
+                          - label:
+                              align: CENTER
+                              text: "View"
+                              text_color: 0x4499FF
+                              text_font: montserrat_16

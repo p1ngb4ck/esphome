@@ -282,6 +282,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
   void set_upgrade_progress_callback(std::function<void(uint8_t)> &&callback) {
     this->upgrade_progress_callback_ = std::move(callback);
   }
+  void set_upgrade_complete_callback(std::function<void(bool, const char *)> &&callback) {
+    this->upgrade_complete_callback_ = std::move(callback);
+  }
 
   // Get current data
   const OpenDPSData &get_data() const { return this->data_; }
@@ -399,6 +402,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Firmware upgrade
   std::function<void(uint8_t)> upgrade_progress_callback_{nullptr};
+  std::function<void(bool, const char *)> upgrade_complete_callback_{nullptr};
   bool upgrade_in_progress_{false};
   std::vector<uint8_t> upgrade_firmware_data_;
   size_t upgrade_offset_{0};
