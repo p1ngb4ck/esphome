@@ -13,6 +13,7 @@
 
 #ifdef USE_ESP32
 #include <esp_heap_caps.h>
+#include <esp_http_client.h>
 #include <esp_psram.h>
 #endif
 
@@ -152,7 +153,7 @@ void OpenDPS::loop() {
       } else {
         ESP_LOGE(TAG, "Upgrade failed after %d retries", UPGRADE_MAX_RETRIES);
         this->upgrade_in_progress_ = false;
-        this->upgrade_firmware_data_.clear();
+        this->upgrade_firmware_free_();
         this->upgrade_last_chunk_time_ = 0;
         this->upgrade_retry_count_ = 0;
         // Restore firmware baud rate if we switched for bootloader
@@ -670,7 +671,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         } else {
           ESP_LOGE(TAG, "Device rejected firmware upgrade (status: %d)", status);
           this->upgrade_in_progress_ = false;
-          this->upgrade_firmware_data_.clear();
+          this->upgrade_firmware_free_();
           this->upgrade_last_chunk_time_ = 0;
           // Stay at 9600 on rejection - device may still be in bootloader
           // Preference flag preserved for reboot recovery; user can retry or power cycle
@@ -694,7 +695,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
         } else if (status == UPGRADE_SUCCESS) {
           ESP_LOGI(TAG, "Firmware upgrade completed successfully!");
           this->upgrade_in_progress_ = false;
-          this->upgrade_firmware_data_.clear();
+          this->upgrade_firmware_free_();
           this->upgrade_last_chunk_time_ = 0;
           if (this->upgrade_progress_callback_)
             this->upgrade_progress_callback_(100);
@@ -749,7 +750,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           }
           ESP_LOGE(TAG, "Firmware upgrade failed: %s (status: %d)", error_msg, status);
           this->upgrade_in_progress_ = false;
-          this->upgrade_firmware_data_.clear();
+          this->upgrade_firmware_free_();
           this->upgrade_last_chunk_time_ = 0;
           // Stay at 9600 on failure - device may still be in bootloader mode
           // User can retry upgrade or power cycle the DPS to restart it
@@ -2695,11 +2696,10 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     return;
   }
 
-  // For network paths, we need to load entire file into PSRAM
+  // For network paths, load entire file into PSRAM buffer
   if (is_network_path) {
     ESP_LOGI(TAG, "Reading firmware from network storage into PSRAM...");
 
-    // Read file into vector (will use PSRAM via allocator if available)
     std::vector<uint8_t> firmware_data;
     if (!storage::global_storage->network_read_file(firmware_path, firmware_data)) {
       ESP_LOGE(TAG, "Failed to read firmware file from network storage");
@@ -2714,74 +2714,43 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
     size_t firmware_size = firmware_data.size();
     ESP_LOGI(TAG, "Firmware size: %u bytes", firmware_size);
 
-    // Verify we have enough PSRAM (need at least firmware size + safety margin)
-    size_t required_psram = firmware_size + (64 * 1024);  // 64KB safety margin
+    size_t required_psram = firmware_size + (64 * 1024);
     if (free_psram < required_psram) {
       ESP_LOGE(TAG, "Insufficient PSRAM: need %u bytes, have %u bytes free", required_psram, free_psram);
       return;
     }
 
-    // Validate firmware - check for reasonable size (OpenDPS firmware is typically 40-80KB)
     if (firmware_size < 1024) {
       ESP_LOGE(TAG, "Firmware file too small (%u bytes) - likely corrupt or empty", firmware_size);
       return;
     }
-    // Log first bytes for debugging
+
+    if (!this->upgrade_firmware_alloc_(firmware_size)) {
+      return;
+    }
+    memcpy(this->upgrade_firmware_data_, firmware_data.data(), firmware_size);
+    firmware_data.clear();  // free vector memory now that it's in PSRAM
+
     if (firmware_size >= 8) {
-      ESP_LOGD(TAG, "Firmware header: %02X %02X %02X %02X %02X %02X %02X %02X", firmware_data[0], firmware_data[1],
-               firmware_data[2], firmware_data[3], firmware_data[4], firmware_data[5], firmware_data[6],
-               firmware_data[7]);
+      ESP_LOGD(TAG, "Firmware header: %02X %02X %02X %02X %02X %02X %02X %02X", this->upgrade_firmware_data_[0],
+               this->upgrade_firmware_data_[1], this->upgrade_firmware_data_[2], this->upgrade_firmware_data_[3],
+               this->upgrade_firmware_data_[4], this->upgrade_firmware_data_[5], this->upgrade_firmware_data_[6],
+               this->upgrade_firmware_data_[7]);
     }
 
-    // Store firmware data for chunked transfer (move to avoid copy)
-    this->upgrade_firmware_data_ = std::move(firmware_data);
     this->upgrade_offset_ = 0;
     this->upgrade_chunk_size_ = 1024;
     this->upgrade_in_progress_ = true;
     this->upgrade_retry_count_ = 0;
 
-    // Calculate CRC-16 CCITT (XMODEM) of entire firmware
     ESP_LOGI(TAG, "Calculating CRC-16...");
     this->upgrade_crc_ = 0;
-    for (uint8_t byte : this->upgrade_firmware_data_) {
-      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, byte);
+    for (size_t i = 0; i < this->upgrade_firmware_size_; i++) {
+      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, this->upgrade_firmware_data_[i]);
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
-    // Switch UART to correct bootloader baud and save recovery state
-    this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    if (this->bootloader_legacy_) {
-      // Legacy bootloader: starts at bootloader_baud_rate_ (or current baud if unset)
-      uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
-      if (boot_baud != this->firmware_baud_rate_) {
-        ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
-        this->parent_->flush();
-        this->parent_->set_baud_rate(boot_baud);
-        this->parent_->load_settings();
-      }
-      // Save boot_baud so setup() can recover to the right baud after reboot
-      this->upgrade_state_pref_.save(&boot_baud);
-    } else {
-      // New bootloader always starts at 9600
-      if (this->firmware_baud_rate_ != 9600) {
-        ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
-        this->parent_->flush();
-        this->parent_->set_baud_rate(9600);
-        this->parent_->load_settings();
-      }
-      // Save flag=1 (new bootloader always recovers at 9600)
-      uint32_t flag = 1;
-      this->upgrade_state_pref_.save(&flag);
-    }
-    global_preferences->sync();
-
-    // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
-             this->upgrade_crc_);
-    this->upgrade_last_chunk_time_ = millis();
-    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
-
-    ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
+    this->start_upgrade_sequence_();
   } else {
     // Local storage (USB/SD/LittleFS) - can work without PSRAM
     ESP_LOGI(TAG, "Reading firmware from local storage...");
@@ -2809,57 +2778,95 @@ void OpenDPS::start_firmware_upgrade(const std::string &firmware_path) {
                static_cast<uint8_t>(firmware_data[7]));
     }
 
-    // Store firmware data for chunked transfer
-    this->upgrade_firmware_data_.assign(firmware_data.begin(), firmware_data.end());
+    // Store firmware data in PSRAM buffer
+    if (!this->upgrade_firmware_alloc_(firmware_size)) {
+      return;
+    }
+    memcpy(this->upgrade_firmware_data_, reinterpret_cast<const uint8_t *>(firmware_data.data()), firmware_size);
+
     this->upgrade_offset_ = 0;
     this->upgrade_chunk_size_ = 1024;
     this->upgrade_in_progress_ = true;
     this->upgrade_retry_count_ = 0;
 
-    // Calculate CRC-16 CCITT (XMODEM) of entire firmware
     ESP_LOGI(TAG, "Calculating CRC-16...");
     this->upgrade_crc_ = 0;
-    for (uint8_t byte : this->upgrade_firmware_data_) {
-      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, byte);
+    for (size_t i = 0; i < this->upgrade_firmware_size_; i++) {
+      this->upgrade_crc_ = this->crc16_ccitt_(this->upgrade_crc_, this->upgrade_firmware_data_[i]);
     }
     ESP_LOGI(TAG, "Firmware CRC: 0x%04X", this->upgrade_crc_);
 
-    // Switch UART to correct bootloader baud and save recovery state
-    this->firmware_baud_rate_ = this->parent_->get_baud_rate();
-    if (this->bootloader_legacy_) {
-      // Legacy bootloader: starts at bootloader_baud_rate_ (or current baud if unset)
-      uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
-      if (boot_baud != this->firmware_baud_rate_) {
-        ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
-        this->parent_->flush();
-        this->parent_->set_baud_rate(boot_baud);
-        this->parent_->load_settings();
-      }
-      // Save boot_baud so setup() can recover to the right baud after reboot
-      this->upgrade_state_pref_.save(&boot_baud);
-    } else {
-      // New bootloader always starts at 9600
-      if (this->firmware_baud_rate_ != 9600) {
-        ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
-        this->parent_->flush();
-        this->parent_->set_baud_rate(9600);
-        this->parent_->load_settings();
-      }
-      // Save flag=1 (new bootloader always recovers at 9600)
-      uint32_t flag = 1;
-      this->upgrade_state_pref_.save(&flag);
-    }
-    global_preferences->sync();
-
-    // Send upgrade start command
-    ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
-             this->upgrade_crc_);
-    this->upgrade_last_chunk_time_ = millis();
-    this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
-
-    ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
+    this->start_upgrade_sequence_();
   }
 #endif
+}
+
+void OpenDPS::start_upgrade_sequence_() {
+  // Switch UART to correct bootloader baud and save recovery state
+  this->firmware_baud_rate_ = this->parent_->get_baud_rate();
+  if (this->bootloader_legacy_) {
+    uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
+    if (boot_baud != this->firmware_baud_rate_) {
+      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
+      this->parent_->flush();
+      this->parent_->set_baud_rate(boot_baud);
+      this->parent_->load_settings();
+    }
+    this->upgrade_state_pref_.save(&boot_baud);
+  } else {
+    if (this->firmware_baud_rate_ != 9600) {
+      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+      this->parent_->flush();
+      this->parent_->set_baud_rate(9600);
+      this->parent_->load_settings();
+    }
+    uint32_t flag = 1;
+    this->upgrade_state_pref_.save(&flag);
+  }
+  global_preferences->sync();
+
+  ESP_LOGI(TAG, "Sending upgrade start command (chunk_size=%d, crc=0x%04X)", this->upgrade_chunk_size_,
+           this->upgrade_crc_);
+  this->upgrade_last_chunk_time_ = millis();
+  this->send_upgrade_start_(this->upgrade_chunk_size_, this->upgrade_crc_);
+  ESP_LOGI(TAG, "Firmware upgrade initiated - waiting for device confirmation");
+}
+
+void OpenDPS::upgrade_firmware_free_() {
+  if (this->upgrade_firmware_data_ != nullptr) {
+#ifdef USE_ESP32
+    heap_caps_free(this->upgrade_firmware_data_);
+#else
+    free(this->upgrade_firmware_data_);
+#endif
+    this->upgrade_firmware_data_ = nullptr;
+    this->upgrade_firmware_size_ = 0;
+  }
+}
+
+bool OpenDPS::upgrade_firmware_alloc_(size_t size) {
+  this->upgrade_firmware_free_();
+#ifdef USE_ESP32
+  if (esp_psram_is_initialized()) {
+    this->upgrade_firmware_data_ = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
+    if (this->upgrade_firmware_data_ != nullptr) {
+      this->upgrade_firmware_size_ = size;
+      ESP_LOGI(TAG, "Firmware buffer allocated in PSRAM (%u bytes)", size);
+      return true;
+    }
+    ESP_LOGW(TAG, "PSRAM alloc failed, falling back to internal heap");
+  }
+  this->upgrade_firmware_data_ = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_DEFAULT));
+#else
+  this->upgrade_firmware_data_ = static_cast<uint8_t *>(malloc(size));
+#endif
+  if (this->upgrade_firmware_data_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate firmware buffer (%u bytes)", size);
+    return false;
+  }
+  this->upgrade_firmware_size_ = size;
+  ESP_LOGI(TAG, "Firmware buffer allocated in internal heap (%u bytes)", size);
+  return true;
 }
 
 void OpenDPS::send_upgrade_start_(uint16_t chunk_size, uint16_t crc) {
@@ -2892,22 +2899,22 @@ void OpenDPS::send_upgrade_data_(const std::vector<uint8_t> &data) {
 }
 
 void OpenDPS::send_next_upgrade_chunk_() {
-  if (!this->upgrade_in_progress_ || this->upgrade_firmware_data_.empty()) {
+  if (!this->upgrade_in_progress_ || this->upgrade_firmware_data_ == nullptr || this->upgrade_firmware_size_ == 0) {
     ESP_LOGW(TAG, "No upgrade in progress or no firmware data");
     return;
   }
 
-  size_t remaining = this->upgrade_firmware_data_.size() - this->upgrade_offset_;
+  size_t remaining = this->upgrade_firmware_size_ - this->upgrade_offset_;
   if (remaining == 0) {
     ESP_LOGI(TAG, "All firmware data sent, waiting for final confirmation");
     return;
   }
 
   size_t chunk_len = std::min(static_cast<size_t>(this->upgrade_chunk_size_), remaining);
-  std::vector<uint8_t> chunk(this->upgrade_firmware_data_.begin() + this->upgrade_offset_,
-                             this->upgrade_firmware_data_.begin() + this->upgrade_offset_ + chunk_len);
+  std::vector<uint8_t> chunk(this->upgrade_firmware_data_ + this->upgrade_offset_,
+                             this->upgrade_firmware_data_ + this->upgrade_offset_ + chunk_len);
 
-  uint8_t progress = static_cast<uint8_t>((this->upgrade_offset_ * 100) / this->upgrade_firmware_data_.size());
+  uint8_t progress = static_cast<uint8_t>((this->upgrade_offset_ * 100) / this->upgrade_firmware_size_);
   ESP_LOGI(TAG, "Sending chunk at offset %u, size %u bytes (%u%%)", this->upgrade_offset_, chunk_len, progress);
 
   this->send_upgrade_data_(chunk);

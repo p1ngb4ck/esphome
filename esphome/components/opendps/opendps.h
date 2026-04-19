@@ -404,7 +404,8 @@ class OpenDPS : public Component, public uart::UARTDevice {
   std::function<void(uint8_t)> upgrade_progress_callback_{nullptr};
   std::function<void(bool, const char *)> upgrade_complete_callback_{nullptr};
   bool upgrade_in_progress_{false};
-  std::vector<uint8_t> upgrade_firmware_data_;
+  uint8_t *upgrade_firmware_data_{nullptr};  // PSRAM-allocated buffer
+  size_t upgrade_firmware_size_{0};
   size_t upgrade_offset_{0};
   uint16_t upgrade_chunk_size_{1024};
   uint32_t upgrade_last_chunk_time_{0};
@@ -454,6 +455,9 @@ class OpenDPS : public Component, public uart::UARTDevice {
 
   // Firmware upgrade helpers
   void send_next_upgrade_chunk_();
+  void start_upgrade_sequence_();
+  bool upgrade_firmware_alloc_(size_t size);
+  void upgrade_firmware_free_();
 
   // TCP bridge configuration (always present for Python codegen compatibility)
   bool tcp_bridge_enabled_{false};
