@@ -1021,16 +1021,16 @@ void USBUartTypeCH934X::loop() {
     auto *channel = chunk->channel;
 
 #ifdef USE_UART_DEBUGGER
-    if (channel->debug_) {
-      constexpr size_t BATCH = 16;
-      char buf[4 + format_hex_pretty_size(BATCH)];
-      for (size_t off = 0; off < chunk->length; off += BATCH) {
-        size_t n = std::min((size_t) chunk->length - off, BATCH);
-        memcpy(buf, "<<< ", 4);
-        format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data + off, n, ',');
-        ESP_LOGD(TAG, "%s", buf);
-      }
+  if (this->debug_) {
+    constexpr size_t BATCH = 16;
+    char buf[4 + format_hex_pretty_size(BATCH)];  // ">>> " + "XX,XX,...,XX\0"
+    for (size_t off = 0; off < len; off += BATCH) {
+      size_t n = std::min(len - off, BATCH);
+      memcpy(buf, ">>> ", 4);
+      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, data + off, n, ',');
+      ESP_LOGD(TAG, "%s%s", this->debug_prefix_.c_str(), buf);
     }
+  }
 #endif
 
     // Push data to channel's ring buffer (now safe in main loop)
