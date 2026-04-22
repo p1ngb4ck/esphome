@@ -99,7 +99,7 @@ bool UARTDebugger::has_buffered_bytes_() { return !this->bytes_.empty(); }
 void UARTDebugger::fire_trigger_() {
   this->is_triggering_ = true;
 #ifdef UART_DEBUGGER_ADD_SETTINGS
-  trigger(this->last_direction_, this->bytes_, StringRef(this->final_debug_prefix_.c_str()));
+  trigger(this->last_direction_, this->bytes_, this->final_debug_prefix_);
 #else
   trigger(this->last_direction_, this->bytes_, this->debug_prefix_);
 #endif
