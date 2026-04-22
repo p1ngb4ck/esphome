@@ -11,6 +11,9 @@ namespace usb_uart {
 
 using namespace bytebuffer;
 
+static constexpr uint8_t H_CLK = 120000000;
+static constexpr uint8_t C_CLK = 48000000;
+
 enum ftdi_chip_type {
   TYPE_AM = 0,
   TYPE_BM = 1,
@@ -117,8 +120,6 @@ static int ftdi_convert_baudrate(int baudrate, uint8_t chip_type, uint8_t channe
     return -1;
   }
 
-#define H_CLK 120000000
-#define C_CLK 48000000
   if ((chip_type == TYPE_2232H) || (chip_type == TYPE_4232H) || (chip_type == TYPE_232H)) {
     if (baudrate * 10 > H_CLK / 0x3fff) {
       best_baud = ftdi_to_clkbits(baudrate, H_CLK, 10, &encoded_divisor);
@@ -390,7 +391,7 @@ void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
         }
 #ifdef USE_UART_DEBUGGER
         if (channel->debug_) {
-          std::string debug_prefix = channel->get_debug_prefix();
+          StringRef debug_prefix = channel->debug_prefix_;
           uart::UARTDebug::log_hex(uart::UART_DIRECTION_RX,
                                    std::vector<uint8_t>(status.data + 2, status.data + status.data_len), ',',
                                    debug_prefix);
