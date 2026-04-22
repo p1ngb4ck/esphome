@@ -255,28 +255,6 @@ void USBUartComponent::loop() {
   }
 }
 
-#ifdef USE_UART_DEBUGGER
-std::string USBUartChannel::get_debug_prefix() {
-  std::string debug_prefix = "";
-  if (this->debug_add_settings_) {
-    char buf[12];
-    debug_prefix += "|";
-    snprintf(buf, sizeof(buf), "%" PRIu32, this->baud_rate_);
-    debug_prefix += buf;
-    debug_prefix += ":";
-    snprintf(buf, sizeof(buf), "%u", this->data_bits_);
-    debug_prefix += buf;
-    debug_prefix += ":";
-    debug_prefix += PARITY_NAMES[this->parity_];
-    debug_prefix += ":";
-    debug_prefix += STOP_BITS_NAMES[this->stop_bits_];
-    debug_prefix += "|";
-  }
-  debug_prefix += this->debug_prefix_.c_str();
-  return debug_prefix;
-}
-#endif
-
 void USBUartComponent::dump_config() {
   USBClient::dump_config();
   for (auto &channel : this->channels_) {
