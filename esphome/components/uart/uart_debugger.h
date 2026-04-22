@@ -75,7 +75,7 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
         res += ":UNKNOWN";
         break;
     }
-    return res + "|" + debug_prefix.c_str();
+    return StringRef(res + "|" + debug_prefix.c_str());
   }
 
   void set_debug_add_settings(bool debug_add_settings) {
