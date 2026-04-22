@@ -52,7 +52,7 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
     if (!debug_add_settings)
       return StringRef(debug_prefix.c_str());
     char buf[12];
-    StringRef res = "|";
+    std::string res = "|";
     snprintf(buf, sizeof(buf), "%" PRIu32, baud_rate);
     res += buf;
     res += ":";
