@@ -47,10 +47,10 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
 #ifdef UART_DEBUGGER_ADD_SETTINGS
   void reload();
 
-  static std::string get_debug_prefix(StringRef debug_prefix, bool debug_add_settings, uint32_t baud_rate,
-                                      uint8_t data_bits, uint8_t stop_bits, uint8_t parity) {
+  static StringRef get_debug_prefix(StringRef debug_prefix, bool debug_add_settings, uint32_t baud_rate,
+                                    uint8_t data_bits, uint8_t stop_bits, uint8_t parity) {
     if (!debug_add_settings)
-      return std::string(debug_prefix.c_str());
+      return StringRef(debug_prefix.c_str());
     char buf[12];
     std::string res = "|";
     snprintf(buf, sizeof(buf), "%" PRIu32, baud_rate);
@@ -99,7 +99,7 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
   StringRef debug_prefix_{};
 #ifdef UART_DEBUGGER_ADD_SETTINGS
   bool debug_add_settings_{false};
-  std::string final_debug_prefix_{""};
+  StringRef final_debug_prefix_{""};
   uint32_t baud_rate_;
   uint8_t stop_bits_;
   uint8_t data_bits_;
