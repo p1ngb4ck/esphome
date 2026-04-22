@@ -11,8 +11,8 @@ namespace usb_uart {
 
 using namespace bytebuffer;
 
-static constexpr uint8_t H_CLK = 120000000;
-static constexpr uint8_t C_CLK = 48000000;
+static constexpr uint16_t H_CLK = 120000000;
+static constexpr uint16_t C_CLK = 48000000;
 
 enum ftdi_chip_type {
   TYPE_AM = 0,
