@@ -75,6 +75,11 @@ uart_types = (
 )
 
 
+def get_usb_mps() -> int:
+    """Get usb max packet size."""
+    return CORE.data.get("usb_host", {}).get("max_packet_size", {})
+
+
 def channel_schema(max_channels, baud_rate_required, class_name):
     available_channels = 7 if "P4" in get_target_variant() else 3
     return cv.Schema(
@@ -141,6 +146,18 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config):
+    # The output chunk pool/queue are compile-time-sized templates shared by all
+    # USBUartChannel instances, so use the largest buffer_size across every channel
+    # of every device.  Each chunk is 64 bytes (USB FS MPS); add one extra slot
+    # because LockFreeQueue<T,N> is a ring buffer that wastes one entry.
+    max_buffer_size = max(
+        channel[CONF_BUFFER_SIZE]
+        for device in config
+        for channel in device[CONF_CHANNELS]
+    )
+    output_chunk_count = max_buffer_size // get_usb_mps() + 1
+    cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
+
     for device in config:
         parent = None
         if CONF_USB_HOST_ID in device:

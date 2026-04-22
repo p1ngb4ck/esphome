@@ -12,6 +12,7 @@ from esphome.components.esp32 import (
 )
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID
+from esphome.core import CORE
 from esphome.cpp_types import Component
 from esphome.types import ConfigType
 
@@ -22,10 +23,12 @@ usb_host_ns = cg.esphome_ns.namespace("usb_host")
 USBHost = usb_host_ns.class_("USBHost", Component)
 USBClient = usb_host_ns.class_("USBClient", Component, cg.Parented.template(USBHost))
 
+DOMAIN = "usb_host"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
+CONF_MAX_PACKET_SIZE = "max_packet_size"
 CONF_DUAL_HOST_SUPPORT = "dual_host_support"
 CONF_INSTANCES = "instances"
 CONF_CONTROLLER = "controller"
@@ -91,6 +94,18 @@ def _validate_schema(config):
     return config
 
 
+def add_usb_mps(mps_value: int):
+    if not hasattr(CORE, DOMAIN):
+        CORE.DOMAIN = {}
+    CORE.DOMAIN["usb_max_packet_size"] = mps_value
+
+
+def set_dual_host_support(dual_host: bool):
+    if not hasattr(CORE, DOMAIN):
+        CORE.DOMAIN = {}
+    CORE.DOMAIN["usb_host_dual_instance"] = dual_host
+
+
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
@@ -112,8 +127,6 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def register_usb_client(config, parent=None):
-    from esphome.core import CORE
-
     # Check if dual_host_support is enabled
     dual_host_support = CORE.data.get("usb_host_dual_instance", False)
 
@@ -162,15 +175,16 @@ async def to_code(config: ConfigType) -> None:
 
     max_requests = config[CONF_MAX_TRANSFER_REQUESTS]
     cg.add_define("USB_HOST_MAX_REQUESTS", max_requests)
+    max_packet_size = config.get(CONF_MAX_PACKET_SIZE)
+    cg.add_define("USB_HOST_MAX_PACKET_SIZE", max_packet_size)
+    add_usb_mps(max_packet_size)
 
     if dual_host_support:
         cg.add_define("USE_USB_HOST_DUAL_INSTANCE")
 
-    from esphome.core import CORE
-
-    if not hasattr(CORE, "data"):
-        CORE.data = {}
-    CORE.data["usb_host_dual_instance"] = dual_host_support
+    if not hasattr(CORE, DOMAIN):
+        CORE.DOMAIN = {}
+    CORE.DOMAIN["usb_host_dual_instance"] = dual_host_support
 
     if dual_host_support and CONF_INSTANCES in config:
         # Dual host mode: create multiple USBHost instances
