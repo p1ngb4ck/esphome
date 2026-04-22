@@ -383,7 +383,6 @@ class USBUartTypeCH934X : public USBUartComponent {
   std::atomic<bool> tx_in_progress_{false};
 };
 
-}  // namespace usb_uart
-}  // namespace esphome
+}  // namespace esphome::usb_uart
 
 #endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
