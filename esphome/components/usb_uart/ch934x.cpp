@@ -962,14 +962,14 @@ void USBUartTypeCH934X::send_next_channel_data_(USBUartChannel *channel) {
   memcpy(tx_buf + TX_HEADER_SIZE, chunk->data, data_len);
 
 #ifdef USE_UART_DEBUGGER
-  if (channel->debug_) {
+  if (this->debug_) {
     constexpr size_t BATCH = 16;
-    char buf[4 + format_hex_pretty_size(BATCH)];
-    for (size_t off = 0; off < data_len; off += BATCH) {
-      size_t n = std::min(data_len - off, BATCH);
+    char buf[4 + format_hex_pretty_size(BATCH)];  // ">>> " + "XX,XX,...,XX\0"
+    for (size_t off = 0; off < len; off += BATCH) {
+      size_t n = std::min(len - off, BATCH);
       memcpy(buf, ">>> ", 4);
-      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data + off, n, ',');
-      ESP_LOGD(TAG, "%s", buf);
+      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, data + off, n, ',');
+      ESP_LOGD(TAG, "%s%s", this->debug_prefix_.c_str(), buf);
     }
   }
 #endif
