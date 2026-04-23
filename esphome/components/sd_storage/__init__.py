@@ -324,8 +324,8 @@ LIST_FILES_SCHEMA = cv.Schema(
     "sd_storage.list_files", ListFilesAction, LIST_FILES_SCHEMA, synchronous=True
 )
 async def sd_storage_list_files_to_code(config, action_id, template_arg, args):
-    paren = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, paren)
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
     if "path" in config:
         template_ = await cg.templatable(config["path"], args, cg.std_string)
         cg.add(var.set_path(template_))
@@ -337,5 +337,5 @@ async def sd_storage_list_files_to_code(config, action_id, template_arg, args):
     "sd_storage.is_mounted", CardMountedCondition, SD_STORAGE_ACTION_SCHEMA
 )
 async def sd_storage_is_mounted_to_code(config, condition_id, template_arg, args):
-    paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(condition_id, template_arg, paren)
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(condition_id, template_arg, parent)
