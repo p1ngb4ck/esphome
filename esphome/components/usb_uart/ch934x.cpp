@@ -961,19 +961,6 @@ void USBUartTypeCH934X::send_next_channel_data_(USBUartChannel *channel) {
   tx_buf[2] = (data_len >> 8) & 0xFF;
   memcpy(tx_buf + TX_HEADER_SIZE, chunk->data, data_len);
 
-#ifdef USE_UART_DEBUGGER
-  if (channel->debug_) {
-    constexpr size_t BATCH = 16;
-    char buf[4 + format_hex_pretty_size(BATCH)];
-    for (size_t off = 0; off < data_len; off += BATCH) {
-      size_t n = std::min(data_len - off, BATCH);
-      memcpy(buf, ">>> ", 4);
-      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data + off, n, ',');
-      ESP_LOGD(TAG, "%s", buf);
-    }
-  }
-#endif
-
   // CALLBACK CONTEXT: Executed in USB task
   auto callback = [this, channel, chunk, tx_buf, data_len](const usb_host::TransferStatus &status) {
     // Return chunk to pool — safe from USB task (EventPool is lock-free)
