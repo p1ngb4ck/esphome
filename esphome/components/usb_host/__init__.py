@@ -95,15 +95,11 @@ def _validate_schema(config):
 
 
 def add_usb_mps(mps_value: int):
-    if not hasattr(CORE, DOMAIN):
-        CORE.DOMAIN = {}
-    CORE.DOMAIN["usb_max_packet_size"] = mps_value
+    CORE.data.setdefault(DOMAIN, {}).setdefault(CONF_MAX_PACKET_SIZE, mps_value)
 
 
 def set_dual_host_support(dual_host: bool):
-    if not hasattr(CORE, DOMAIN):
-        CORE.DOMAIN = {}
-    CORE.DOMAIN["usb_host_dual_instance"] = dual_host
+    CORE.data.setdefault(DOMAIN, {}).setdefault(CONF_DUAL_HOST_SUPPORT, dual_host)
 
 
 CONFIG_SCHEMA = cv.All(
