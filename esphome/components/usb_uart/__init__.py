@@ -150,13 +150,8 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-    # exactly one instance exists → just take it
-    usb_host = await cg.get_variable(
-        CORE.data.get(USB_HOST_DOMAIN, {}).get(CONF_USB_HOST_ID)
-    )
-    cg.add(var.set_usb_host(usb_host))
+    # Await usb_host to_code completion before reading MPS from CORE.data
+    await cg.get_variable(CORE.config[USB_HOST_DOMAIN][CONF_ID])
 
     # The output chunk pool/queue are compile-time-sized templates shared by all
     # USBUartChannel instances, so use the largest buffer_size across every channel
