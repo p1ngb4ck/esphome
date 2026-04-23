@@ -95,12 +95,11 @@ def _validate_schema(config):
 
 
 def add_usb_mps(mps_value: int):
-    usb_mps = CORE.data.setdefault(DOMAIN, {})
-    usb_mps[CONF_MAX_PACKET_SIZE] = mps_value
+    CORE.data.get(DOMAIN, {})[CONF_MAX_PACKET_SIZE] = mps_value
 
 
 def set_dual_host_support(dual_host: bool):
-    CORE.data.setdefault(DOMAIN, {}).setdefault(CONF_DUAL_HOST_SUPPORT, dual_host)
+    CORE.data.get(DOMAIN, {})[CONF_DUAL_HOST_SUPPORT] = dual_host
 
 
 CONFIG_SCHEMA = cv.All(
