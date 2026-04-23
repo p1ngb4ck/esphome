@@ -75,8 +75,8 @@ uart_types = (
 
 
 def get_usb_mps() -> int:
-    """Get usb max packet size."""
-    return CORE.data.get("usb_host", {}).get("max_packet_size", 64)
+    usb_host_data = CORE.data.get("usb_host", {})
+    return usb_host_data.get("usb_max_packet_size", 64)
 
 
 def channel_schema(max_channels, baud_rate_required, class_name):
