@@ -28,6 +28,7 @@ CODEOWNERS = ["@clydebarrow"]
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", USBClient)
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
+CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 
 UARTParityOptions = usb_uart_ns.enum("UARTParityOptions")
 UART_PARITY_OPTIONS = {
@@ -53,6 +54,7 @@ class Type:
     def __init__(self, name, vid, pid, cls, max_channels=1, baud_rate_required=True):
         self.name = name
         cls = cls or name
+        self.cls_name = cls
         self.vid = vid
         self.pid = pid
         self.cls = usb_uart_ns.class_(f"USBUartType{cls}", USBUartComponent)
@@ -83,13 +85,14 @@ def get_usb_mps() -> int:
 
 def channel_schema(max_channels, baud_rate_required, class_name):
     available_channels = 7 if "P4" in get_target_variant() else 3
+    channel_cls = CH934XChannel if class_name == "CH934X" else USBUartChannel
     return cv.Schema(
         {
             cv.Required(CONF_CHANNELS): cv.All(
                 cv.ensure_list(
                     cv.Schema(
                         {
-                            cv.GenerateID(): cv.declare_id(USBUartChannel),
+                            cv.GenerateID(): cv.declare_id(channel_cls),
                             cv.Optional(CONF_BUFFER_SIZE, default=256): cv.int_range(
                                 min=64, max=8192
                             ),
@@ -133,7 +136,7 @@ CONFIG_SCHEMA = cv.ensure_list(
     cv.typed_schema(
         {
             it.name: usb_device_schema(it.cls, it.vid, it.pid)
-            .extend(channel_schema(it.max_channels, it.baud_rate_required, it.cls))
+            .extend(channel_schema(it.max_channels, it.baud_rate_required, it.cls_name))
             .extend(
                 {
                     cv.Optional(CONF_USB_HOST_ID): cv.use_id(USBHost),
@@ -147,6 +150,14 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config):
+    var = cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var, config)
+    # exactly one instance exists → just take it
+    usb_host = await cg.get_variable(
+        CORE.data.get(USB_HOST_DOMAIN, {}).get(CONF_USB_HOST_ID)
+    )
+    cg.add(var.set_usb_host(usb_host))
+
     # The output chunk pool/queue are compile-time-sized templates shared by all
     # USBUartChannel instances, so use the largest buffer_size across every channel
     # of every device.  Each chunk is 64 bytes (USB FS MPS); add one extra slot
@@ -163,6 +174,7 @@ async def to_code(config):
         parent = None
         if CONF_USB_HOST_ID in device:
             parent = await cg.get_variable(device[CONF_USB_HOST_ID])
+
         var = await register_usb_client(device, parent=parent)
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
