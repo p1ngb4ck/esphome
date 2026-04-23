@@ -20,7 +20,7 @@ from esphome.const import (
 from esphome.core import CORE
 
 CONF_USB_HOST_ID = "usb_host_id"
-
+USB_HOST_DOMAIN = "usb_host"
 AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
 
@@ -77,7 +77,7 @@ uart_types = (
 
 def get_usb_mps() -> int:
     """Get usb max packet size."""
-    return CORE["usb_host"].get("max_packet_size", int)
+    return CORE.data.get(USB_HOST_DOMAIN, {}).get("max_packet_size", 64)
 
 
 def channel_schema(max_channels, baud_rate_required, class_name):
