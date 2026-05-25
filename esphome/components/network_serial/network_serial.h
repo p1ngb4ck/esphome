@@ -198,8 +198,8 @@ class NetworkSerialClient : public Component {
   uint8_t get_modem_state() const { return this->modem_state_; }
   uint8_t get_line_state() const { return this->line_state_; }
 
-  void add_on_connect_callback(std::function<void()> callback) { this->on_connect_callbacks_.push_back(callback); }
-  void add_on_disconnect_callback(std::function<void()> callback) {
+  static const add_on_connect_callback(std::function<void()> callback) { this->on_connect_callbacks_.push_back(callback); }
+  static const add_on_disconnect_callback(std::function<void()> callback) {
     this->on_disconnect_callbacks_.push_back(callback);
   }
   void add_on_data_callback(std::function<void(const std::vector<uint8_t> &)> callback) {
