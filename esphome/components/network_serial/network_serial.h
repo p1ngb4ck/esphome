@@ -37,7 +37,6 @@ enum TelnetCommand : uint8_t {
   TELNET_IAC = 255,
 };
 
-/// Telnet option codes
 enum TelnetOption : uint8_t {
   TELNET_BINARY = 0,
   TELNET_ECHO = 1,
