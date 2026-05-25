@@ -224,7 +224,6 @@ size_t NetworkSerialServer::receive_from_client_(uint8_t *buffer, size_t length)
     return 0;
   }
 
-#ifdef USE_ESP_IDF
   int received = recv(this->client_socket_, buffer, length, 0);
   if (received < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -240,18 +239,6 @@ size_t NetworkSerialServer::receive_from_client_(uint8_t *buffer, size_t length)
     return 0;
   }
   return received;
-#else
-  if (!this->client_ || !this->client_->connected()) {
-    this->disconnect_client_();
-    return 0;
-  }
-  int avail = this->client_->available();
-  if (avail <= 0) {
-    return 0;
-  }
-  size_t to_read = std::min(static_cast<size_t>(avail), length);
-  return this->client_->read(buffer, to_read);
-#endif
 }
 
 //========================================================================
@@ -363,10 +350,8 @@ void NetworkSerialServer::handle_telnet_command_(TelnetCommand cmd, TelnetOption
 
     case TELNET_WONT:
     case TELNET_DONT:
-      // Client refuses — nothing to do
-      break;
-
     default:
+      // Client refuses — nothing to do
       break;
   }
 }
