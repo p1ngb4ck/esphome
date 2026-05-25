@@ -4,14 +4,9 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "esphome/components/uart/uart_component.h"
-
-#ifdef USE_ESP_IDF
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
-#else
-#include <WiFiClient.h>
-#include <WiFiServer.h>
-#endif
+
 
 #include <string>
 #include <vector>
