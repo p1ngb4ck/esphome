@@ -5,13 +5,6 @@
 #include <cstring>
 #include <algorithm>
 
-// Forward declare storage for soft dependency
-#if defined(USE_STORAGE)
-namespace storage {
-extern class StorageHost *global_storage;
-}
-#endif  // USE_STORAGE
-
 namespace esphome {
 namespace network_serial {
 
