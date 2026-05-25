@@ -1,10 +1,3 @@
-"""RFC 2217 Network Serial component for ESPHome.
-
-Supports two modes:
-  - client: Connect to a remote RFC 2217 server
-  - server: Expose a local UART as an RFC 2217 server
-"""
-
 import esphome.codegen as cg
 from esphome.components import uart
 import esphome.config_validation as cv
