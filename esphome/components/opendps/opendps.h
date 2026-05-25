@@ -9,32 +9,21 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/switch/switch.h"
-
-#ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
 #include "esphome/core/time.h"
-#endif
-
-#ifdef USE_SOCKET_IMPL_LWIP_TCP
 #include "esphome/components/socket/socket.h"
-#endif
-#ifdef USE_SOCKET_IMPL_BSD_SOCKETS
 #include "esphome/components/socket/socket.h"
-#endif
 
 #include <vector>
 #include <queue>
 #include <map>
 #include <functional>
 #include <memory>
-
-#ifdef USE_ESP32
 #include <esp_heap_caps.h>
 #include <esp_psram.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-#endif
 
 namespace esphome {
 
@@ -470,9 +459,7 @@ class OpenDPS : public Component, public uart::UARTDevice {
   //========================================================================
   DataloggerConfig datalog_config_;
   bool datalog_active_{false};
-#ifdef USE_TIME
   time::RealTimeClock *datalog_time_{nullptr};  // Optional time component for system_time column
-#endif
   std::string datalog_filepath_;                             // Full absolute path (e.g., "/sd/logs/file.csv")
   std::string datalog_relative_path_;                        // Path relative to mount point (e.g., "logs/file.csv")
   storage::StorageDevice *datalog_storage_device_{nullptr};  // Cached storage device
@@ -491,7 +478,6 @@ class OpenDPS : public Component, public uart::UARTDevice {
   uint8_t datalog_flush_idx_{0xFF};                            // Buffer currently being flushed (0xFF if none)
   bool datalog_buffer_in_psram_{false};
 
-#ifdef USE_ESP32
   // FreeRTOS synchronization for async writes
   SemaphoreHandle_t datalog_mutex_{nullptr};      // Protects buffer state changes
   SemaphoreHandle_t datalog_write_sem_{nullptr};  // Signals write task
@@ -499,7 +485,6 @@ class OpenDPS : public Component, public uart::UARTDevice {
   bool datalog_task_running_{false};
   static void datalog_write_task_(void *arg);  // FreeRTOS task function
   void datalog_rotate_buffers_();              // Rotate buffers for triple-buffering
-#endif
 
   // Datalogger helper methods
   void datalog_write_sample_();
@@ -511,7 +496,6 @@ class OpenDPS : public Component, public uart::UARTDevice {
   size_t datalog_format_csv_row_(char *buffer, size_t max_len);
   size_t datalog_format_binary_row_(uint8_t *buffer, size_t max_len);
 
-#if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   // TCP bridge for dpsctl.py access (port 5005 by default)
   void setup_tcp_bridge_();
   void loop_tcp_bridge_();
@@ -522,7 +506,6 @@ class OpenDPS : public Component, public uart::UARTDevice {
   std::vector<uint8_t> tcp_uart_buffer_;    // Buffer for assembling complete UART frames
   uint32_t tcp_uart_buffer_start_time_{0};  // Timeout tracking for UART frame buffering
   uint32_t tcp_client_disconnect_time_{0};  // When client disconnected (for grace period)
-#endif
 };
 
 // Trigger for on_connect
