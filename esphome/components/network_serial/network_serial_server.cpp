@@ -10,10 +10,6 @@ namespace network_serial {
 
 static const char *const TAG_SERVER = "network_serial.server";
 
-//========================================================================
-// NetworkSerialServer Lifecycle
-//========================================================================
-
 NetworkSerialServer::~NetworkSerialServer() {
   this->disconnect_client_();
   this->stop_listening_();
@@ -35,7 +31,6 @@ void NetworkSerialServer::setup() {
 }
 
 void NetworkSerialServer::loop() {
-  // Accept new connections
   if (!this->client_connected_) {
     this->accept_client_();
   }
@@ -44,14 +39,11 @@ void NetworkSerialServer::loop() {
     return;
   }
 
-  // Read data from client
   uint8_t buffer[BRIDGE_BUF_SIZE];
   size_t received = this->receive_from_client_(buffer, sizeof(buffer));
   if (received > 0) {
     this->process_client_data_(buffer, received);
   }
-
-  // Bridge UART -> client
   this->bridge_uart_to_client_();
 }
 
@@ -61,10 +53,6 @@ void NetworkSerialServer::dump_config() {
   ESP_LOGCONFIG(TAG_SERVER, "  Client: %s", this->client_connected_ ? "Connected" : "None");
 }
 
-//========================================================================
-// Server Socket Operations
-//========================================================================
-
 bool NetworkSerialServer::start_listening_() {
 #ifdef USE_ESP_IDF
   this->listen_socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -73,7 +61,6 @@ bool NetworkSerialServer::start_listening_() {
     return false;
   }
 
-  // Allow address reuse
   int reuse = 1;
   setsockopt(this->listen_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
@@ -97,7 +84,6 @@ bool NetworkSerialServer::start_listening_() {
     return false;
   }
 
-  // Set non-blocking
   int flags = fcntl(this->listen_socket_, F_GETFL, 0);
   fcntl(this->listen_socket_, F_SETFL, flags | O_NONBLOCK);
 
@@ -130,10 +116,9 @@ void NetworkSerialServer::accept_client_() {
   socklen_t addr_len = sizeof(client_addr);
   int new_socket = accept(this->listen_socket_, (struct sockaddr *) &client_addr, &addr_len);
   if (new_socket < 0) {
-    return;  // No pending connection (non-blocking)
+    return;
   }
 
-  // Set non-blocking and TCP_NODELAY on client socket
   int flags = fcntl(new_socket, F_GETFL, 0);
   fcntl(new_socket, F_SETFL, flags | O_NONBLOCK);
   int nodelay = 1;
@@ -146,8 +131,6 @@ void NetworkSerialServer::accept_client_() {
   char addr_str[INET_ADDRSTRLEN];
   inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str));
   ESP_LOGI(TAG_SERVER, "Client connected from %s:%u", addr_str, ntohs(client_addr.sin_port));
-
-  // Send telnet negotiation
   this->send_telnet_negotiation_();
 #else
   if (!this->server_->hasClient()) {
@@ -234,36 +217,23 @@ size_t NetworkSerialServer::receive_from_client_(uint8_t *buffer, size_t length)
     return 0;
   }
   if (received == 0) {
-    // Connection closed
     this->disconnect_client_();
     return 0;
   }
   return received;
 }
 
-//========================================================================
-// Telnet Protocol (Server Side)
-//========================================================================
-
 void NetworkSerialServer::send_telnet_negotiation_() {
   ESP_LOGD(TAG_SERVER, "Sending Telnet negotiation...");
-
-  // Server announces capabilities
-  // WILL BINARY - we will transmit in binary
   this->send_telnet_command_(TELNET_WILL, TELNET_BINARY);
-  // DO BINARY - client should transmit in binary
   this->send_telnet_command_(TELNET_DO, TELNET_BINARY);
-  // WILL SUPPRESS_GO_AHEAD
+
   this->send_telnet_command_(TELNET_WILL, TELNET_SUPPRESS_GO_AHEAD);
-  // DO SUPPRESS_GO_AHEAD
   this->send_telnet_command_(TELNET_DO, TELNET_SUPPRESS_GO_AHEAD);
-  // WILL COM_PORT (RFC 2217) - we support com port control
   this->send_telnet_command_(TELNET_WILL, TELNET_COM_PORT);
 
   this->telnet_negotiated_ = true;
   ESP_LOGD(TAG_SERVER, "Telnet negotiation sent");
-
-  // Send initial modem state
   this->send_initial_modem_state_();
 }
 
@@ -273,7 +243,6 @@ void NetworkSerialServer::send_telnet_command_(TelnetCommand cmd, TelnetOption o
 }
 
 void NetworkSerialServer::send_telnet_subnegotiation_(const uint8_t *data, size_t length) {
-  // IAC SB <data> IAC SE
   std::vector<uint8_t> buffer;
   buffer.reserve(length + 4);
   buffer.push_back(TELNET_IAC);
@@ -294,15 +263,13 @@ void NetworkSerialServer::process_client_data_(const uint8_t *data, size_t lengt
         uint8_t cmd = data[++i];
 
         if (cmd == TELNET_IAC) {
-          // Escaped IAC -> forward single 0xFF to UART
           this->uart_->write_byte(0xFF);
         } else if (cmd == TELNET_SB) {
-          // Subnegotiation begin — collect until IAC SE
           this->telnet_parse_buf_.clear();
           i++;
           while (i < length) {
             if (data[i] == TELNET_IAC && i + 1 < length && data[i + 1] == TELNET_SE) {
-              i++;  // skip SE
+              i++;
               this->handle_telnet_subnegotiation_(this->telnet_parse_buf_.data(), this->telnet_parse_buf_.size());
               break;
             }
@@ -314,10 +281,8 @@ void NetworkSerialServer::process_client_data_(const uint8_t *data, size_t lengt
             this->handle_telnet_command_(static_cast<TelnetCommand>(cmd), static_cast<TelnetOption>(option));
           }
         }
-        // Other telnet commands (NOP, BRK, etc.) ignored
       }
     } else {
-      // Regular data byte -> forward to UART
       this->uart_->write_byte(byte);
     }
   }
@@ -329,19 +294,14 @@ void NetworkSerialServer::handle_telnet_command_(TelnetCommand cmd, TelnetOption
   switch (cmd) {
     case TELNET_DO:
       if (option == TELNET_COM_PORT || option == TELNET_BINARY || option == TELNET_SUPPRESS_GO_AHEAD) {
-        // Confirm options we support
         this->send_telnet_command_(TELNET_WILL, option);
       } else {
-        // Refuse options we don't support
         this->send_telnet_command_(TELNET_WONT, option);
       }
       break;
 
     case TELNET_WILL:
-      if (option == TELNET_BINARY || option == TELNET_SUPPRESS_GO_AHEAD) {
-        this->send_telnet_command_(TELNET_DO, option);
-      } else if (option == TELNET_COM_PORT) {
-        // Client supports COM_PORT too - acknowledge
+      if (option == TELNET_COM_PORT || option == TELNET_BINARY || option == TELNET_SUPPRESS_GO_AHEAD) {
         this->send_telnet_command_(TELNET_DO, option);
       } else {
         this->send_telnet_command_(TELNET_DONT, option);
@@ -351,7 +311,6 @@ void NetworkSerialServer::handle_telnet_command_(TelnetCommand cmd, TelnetOption
     case TELNET_WONT:
     case TELNET_DONT:
     default:
-      // Client refuses — nothing to do
       break;
   }
 }
@@ -368,15 +327,11 @@ void NetworkSerialServer::handle_telnet_subnegotiation_(const uint8_t *data, siz
   }
 }
 
-//========================================================================
-// RFC 2217 Com Port Control (Server Side)
-//========================================================================
-
 void NetworkSerialServer::send_com_port_response_(uint8_t command, const uint8_t *data, size_t length) {
   std::vector<uint8_t> subneg_data;
   subneg_data.reserve(2 + length);
   subneg_data.push_back(TELNET_COM_PORT);
-  subneg_data.push_back(command);  // Server response (101-112)
+  subneg_data.push_back(command);
   if (data && length > 0) {
     subneg_data.insert(subneg_data.end(), data, data + length);
   }
@@ -403,29 +358,22 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
 
   ESP_LOGD(TAG_SERVER, "RFC2217 client command: %u, params: %zu bytes", command, param_length);
 
-  // RFC 2217 command numbering:
-  //   Client sends commands 1-12 (RFC2217ServerCommand values)
-  //   Server responds with commands 101-112 (RFC2217ClientCommand values)
-  // The naming in our enums is misleading but the values are correct.
-
   switch (command) {
-    case RFC2217_SET_BAUDRATE:  // Client sends 1
+    case RFC2217_SET_BAUDRATE:
       if (param_length >= 4) {
         uint32_t baudrate = (param_data[0] << 24) | (param_data[1] << 16) | (param_data[2] << 8) | param_data[3];
         if (baudrate == 0) {
-          // Request: report current baud rate
           baudrate = this->uart_->get_baud_rate();
         } else {
           ESP_LOGI(TAG_SERVER, "Client set baudrate: %u", baudrate);
           this->uart_->set_baud_rate(baudrate);
           this->apply_uart_config_();
         }
-        // Respond with 101 + actual baud rate
         this->send_com_port_response_uint32_(RFC2217_SET_BAUDRATE_CS, this->uart_->get_baud_rate());
       }
       break;
 
-    case RFC2217_SET_DATASIZE:  // Client sends 2
+    case RFC2217_SET_DATASIZE:
       if (param_length >= 1) {
         uint8_t data_size = param_data[0];
         if (data_size == 0) {
@@ -436,15 +384,14 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           this->apply_uart_config_();
         }
         uint8_t resp = this->uart_->get_data_bits();
-        this->send_com_port_response_(RFC2217_SET_DATASIZE_CS, &resp, 1);  // Respond with 102
+        this->send_com_port_response_(RFC2217_SET_DATASIZE_CS, &resp, 1);
       }
       break;
 
-    case RFC2217_SET_PARITY:  // Client sends 3
+    case RFC2217_SET_PARITY:
       if (param_length >= 1) {
         uint8_t parity = param_data[0];
         if (parity == 0) {
-          // Request current
         } else {
           ESP_LOGI(TAG_SERVER, "Client set parity: %u", parity);
           switch (parity) {
@@ -479,11 +426,11 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
             resp = PARITY_NONE;
             break;
         }
-        this->send_com_port_response_(RFC2217_SET_PARITY_CS, &resp, 1);  // Respond with 103
+        this->send_com_port_response_(RFC2217_SET_PARITY_CS, &resp, 1);
       }
       break;
 
-    case RFC2217_SET_STOPSIZE:  // Client sends 4
+    case RFC2217_SET_STOPSIZE:
       if (param_length >= 1) {
         uint8_t stop_bits = param_data[0];
         if (stop_bits == 0) {
@@ -494,11 +441,11 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           this->apply_uart_config_();
         }
         uint8_t resp = this->uart_->get_stop_bits();
-        this->send_com_port_response_(RFC2217_SET_STOPSIZE_CS, &resp, 1);  // Respond with 104
+        this->send_com_port_response_(RFC2217_SET_STOPSIZE_CS, &resp, 1);
       }
       break;
 
-    case RFC2217_SET_CONTROL:  // Client sends 5
+    case RFC2217_SET_CONTROL:
       if (param_length >= 1) {
         uint8_t control = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set control: %u", control);
@@ -507,27 +454,27 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           case 0:
             resp = FLOW_NONE;
             break;
-          case 1:  // No flow control
-          case 2:  // XON/XOFF
-          case 3:  // Hardware
+          case 1:
+          case 2:
+          case 3:
             resp = control;
             break;
-          case 8:  // DTR ON
+          case 8:
             this->modem_state_ |= MODEM_STATE_DSR;
             this->send_modem_state_();
             resp = 8;
             break;
-          case 9:  // DTR OFF
+          case 9:
             this->modem_state_ &= ~MODEM_STATE_DSR;
             this->send_modem_state_();
             resp = 9;
             break;
-          case 11:  // RTS ON
+          case 11:
             this->modem_state_ |= MODEM_STATE_CTS;
             this->send_modem_state_();
             resp = 11;
             break;
-          case 12:  // RTS OFF
+          case 12:
             this->modem_state_ &= ~MODEM_STATE_CTS;
             this->send_modem_state_();
             resp = 12;
@@ -535,11 +482,11 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
           default:
             break;
         }
-        this->send_com_port_response_(RFC2217_SET_CONTROL_CS, &resp, 1);  // Respond with 105
+        this->send_com_port_response_(RFC2217_SET_CONTROL_CS, &resp, 1);
       }
       break;
 
-    case RFC2217_SET_LINESTATE_MASK:  // Client sends 10
+    case RFC2217_SET_LINESTATE_MASK:
       if (param_length >= 1) {
         this->line_state_mask_ = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set line state mask: 0x%02X", this->line_state_mask_);
@@ -547,7 +494,7 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
       }
       break;
 
-    case RFC2217_SET_MODEMSTATE_MASK:  // Client sends 11
+    case RFC2217_SET_MODEMSTATE_MASK:
       if (param_length >= 1) {
         this->modem_state_mask_ = param_data[0];
         ESP_LOGD(TAG_SERVER, "Client set modem state mask: 0x%02X", this->modem_state_mask_);
@@ -555,19 +502,19 @@ void NetworkSerialServer::handle_com_port_command_(const uint8_t *data, size_t l
       }
       break;
 
-    case RFC2217_PURGE_DATA:  // Client sends 12
+    case RFC2217_PURGE_DATA:
       if (param_length >= 1) {
         ESP_LOGD(TAG_SERVER, "Client purge: %u", param_data[0]);
         this->send_com_port_response_(RFC2217_PURGE_DATA_CS, param_data, 1);
       }
       break;
 
-    case RFC2217_FLOWCONTROL_SUSPEND:  // Client sends 8
+    case RFC2217_FLOWCONTROL_SUSPEND:
       ESP_LOGD(TAG_SERVER, "Client flow control suspend");
       this->send_com_port_response_(RFC2217_FLOWCONTROL_SUSPEND_CS, nullptr, 0);
       break;
 
-    case RFC2217_FLOWCONTROL_RESUME:  // Client sends 9
+    case RFC2217_FLOWCONTROL_RESUME:
       ESP_LOGD(TAG_SERVER, "Client flow control resume");
       this->send_com_port_response_(RFC2217_FLOWCONTROL_RESUME_CS, nullptr, 0);
       break;
@@ -593,14 +540,9 @@ void NetworkSerialServer::send_modem_state_() {
 }
 
 void NetworkSerialServer::send_initial_modem_state_() {
-  // Send initial modem state: DSR active, CTS active (typical for local UART)
   this->modem_state_ = MODEM_STATE_DSR | MODEM_STATE_CTS;
   this->send_modem_state_();
 }
-
-//========================================================================
-// UART Bridging
-//========================================================================
 
 void NetworkSerialServer::bridge_uart_to_client_() {
   size_t avail = this->uart_->available();
@@ -608,7 +550,6 @@ void NetworkSerialServer::bridge_uart_to_client_() {
     return;
   }
 
-  // Read from UART and send to client, escaping IAC bytes
   uint8_t uart_buf[BRIDGE_BUF_SIZE];
   size_t to_read = std::min(avail, sizeof(uart_buf));
 
@@ -616,14 +557,13 @@ void NetworkSerialServer::bridge_uart_to_client_() {
     return;
   }
 
-  // Build output buffer with IAC escaping
-  uint8_t out_buf[BRIDGE_BUF_SIZE * 2];  // Worst case: every byte is 0xFF
+  uint8_t out_buf[BRIDGE_BUF_SIZE * 2];
   size_t out_len = 0;
 
   for (size_t i = 0; i < to_read && out_len < sizeof(out_buf) - 1; i++) {
     out_buf[out_len++] = uart_buf[i];
     if (uart_buf[i] == TELNET_IAC) {
-      out_buf[out_len++] = TELNET_IAC;  // Escape by doubling
+      out_buf[out_len++] = TELNET_IAC;
     }
   }
 
