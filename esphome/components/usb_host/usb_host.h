@@ -164,6 +164,7 @@ class USBClient : public Component {
 
   static void usb_task_fn(void *arg);
   [[noreturn]] void usb_task_loop_() const;
+  static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
 
   TransferRequest requests_[MAX_REQUESTS]{};
   TaskHandle_t usb_task_handle_{nullptr};

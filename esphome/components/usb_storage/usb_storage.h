@@ -81,11 +81,14 @@ class USBStorageHost : public Component {
 };
 
 // Thin USBClient that detects MSC devices by interface class and delegates to USBStorageHost.
-// Does not use any transfer infrastructure — just reads VID/PID from the device descriptor
-// then hands off to the MSC host driver via USBStorageHost.
+// Overrides setup()/loop() to skip the transfer buffer pool and dedicated USB task — it only
+// needs connect/disconnect events, which it polls non-blocking in loop().
 class MSCDetector : public usb_host::USBClient {
  public:
   explicit MSCDetector(USBStorageHost *host) : usb_host::USBClient(0, 0), host_(host) {}
+
+  void setup() override;
+  void loop() override;
 
   uint8_t get_interface_class() const override { return USB_CLASS_MASS_STORAGE; }
 

@@ -336,6 +336,25 @@ void USBStorageHost::on_msc_removed(uint8_t addr) {
   }
 }
 
+void MSCDetector::setup() {
+  // Only register as a USB host client — skip transfer buffer pool and dedicated task.
+  // MSCDetector never does transfers; it only needs connect/disconnect events.
+  usb_host_client_config_t config{.is_synchronous = false,
+                                  .max_num_event_msg = 5,
+                                  .async = {.client_event_callback = usb_host::USBClient::client_event_cb, .callback_arg = this}};
+  auto err = usb_host_client_register(&config, &this->handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "MSCDetector client register failed: %s", esp_err_to_name(err));
+    this->mark_failed();
+  }
+}
+
+void MSCDetector::loop() {
+  // Poll events non-blocking instead of using a dedicated task
+  usb_host_client_handle_events(this->handle_, 0);
+  this->process_usb_events_();
+}
+
 void MSCDetector::on_connected() {
   const usb_device_desc_t *desc;
   uint16_t vid = 0, pid = 0;

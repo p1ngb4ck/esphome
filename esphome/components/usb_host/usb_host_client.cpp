@@ -162,7 +162,7 @@ static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<c
 }
 
 // CALLBACK CONTEXT: USB task (called from usb_host_client_handle_events in USB task)
-static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *ptr) {
+void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, void *ptr) {
   auto *client = static_cast<USBClient *>(ptr);
 
   // Allocate event from pool
@@ -206,7 +206,7 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
 void USBClient::setup() {
   usb_host_client_config_t config{.is_synchronous = false,
                                   .max_num_event_msg = 5,
-                                  .async = {.client_event_callback = client_event_cb, .callback_arg = this}};
+                                  .async = {.client_event_callback = USBClient::client_event_cb, .callback_arg = this}};
   auto err = usb_host_client_register(&config, &this->handle_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "client register failed: %s", esp_err_to_name(err));
