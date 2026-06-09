@@ -32,6 +32,7 @@ USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
     usb_host_ns.class_("USBClient"),
+    cg.Component,
     cg.Parented.template(USBStorageHost),
 )
 
