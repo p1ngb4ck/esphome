@@ -6,15 +6,13 @@
 
 #include "esphome/components/bytebuffer/bytebuffer.h"
 
-namespace esphome {
-namespace usb_uart {
+namespace esphome::usb_uart {
 
 using namespace bytebuffer;
 
-static constexpr uint32_t H_CLK = 120000000;
-static constexpr uint32_t C_CLK = 48000000;
-
-enum ftdi_chip_type {
+// FTDI chip family identifiers. These map to USB device bcdDevice values
+// and determine how baudrate divisors and clock sources are calculated.
+enum FtdiChipType {
   TYPE_AM = 0,
   TYPE_BM = 1,
   TYPE_2232C = 2,
@@ -25,15 +23,15 @@ enum ftdi_chip_type {
   TYPE_230X = 7,
 };
 
-static int ftdi_to_clkbits_AM(int baudrate, unsigned long *encoded_divisor) {
-  static const char frac_code[8] = {0, 3, 2, 4, 1, 5, 6, 7};
-  static const char am_adjust_up[8] = {0, 0, 0, 1, 0, 3, 2, 1};
-  static const char am_adjust_dn[8] = {0, 0, 0, 1, 0, 1, 2, 3};
+static int ftdi_to_clkbits_am(int baudrate, uint32_t *encoded_divisor) {
+  static const char FRAC_CODE[8] = {0, 3, 2, 4, 1, 5, 6, 7};
+  static const char AM_ADJUST_UP[8] = {0, 0, 0, 1, 0, 3, 2, 1};
+  static const char AM_ADJUST_DN[8] = {0, 0, 0, 1, 0, 1, 2, 3};
   int divisor, best_divisor, best_baud, best_baud_diff;
   int i;
   divisor = 24000000 / baudrate;
 
-  divisor -= am_adjust_dn[divisor & 7];
+  divisor -= AM_ADJUST_DN[divisor & 7];
 
   best_divisor = 0;
   best_baud = 0;
@@ -48,7 +46,7 @@ static int ftdi_to_clkbits_AM(int baudrate, unsigned long *encoded_divisor) {
     } else if (divisor < 16) {
       try_divisor = 16;
     } else {
-      try_divisor += am_adjust_up[try_divisor & 7];
+      try_divisor += AM_ADJUST_UP[try_divisor & 7];
       if (try_divisor > 0x1FFF8) {
         // Round down to maximum supported divisor value (for AM)
         try_divisor = 0x1FFF8;
@@ -69,7 +67,7 @@ static int ftdi_to_clkbits_AM(int baudrate, unsigned long *encoded_divisor) {
       }
     }
   }
-  *encoded_divisor = (best_divisor >> 3) | (frac_code[best_divisor & 7] << 14);
+  *encoded_divisor = (best_divisor >> 3) | (FRAC_CODE[best_divisor & 7] << 14);
   if (*encoded_divisor == 1) {
     *encoded_divisor = 0;  // 3000000 baud
   } else if (*encoded_divisor == 0x4001) {
@@ -78,8 +76,8 @@ static int ftdi_to_clkbits_AM(int baudrate, unsigned long *encoded_divisor) {
   return best_baud;
 }
 
-static int ftdi_to_clkbits(int baudrate, unsigned int clk, int clk_div, unsigned long *encoded_divisor) {
-  static const char frac_code[8] = {0, 3, 2, 4, 1, 5, 6, 7};
+static int ftdi_to_clkbits(int baudrate, unsigned int clk, int clk_div, uint32_t *encoded_divisor) {
+  static const char FRAC_CODE[8] = {0, 3, 2, 4, 1, 5, 6, 7};
   int best_baud = 0;
   int divisor, best_divisor;
   if (baudrate >= clk / clk_div) {
@@ -92,53 +90,57 @@ static int ftdi_to_clkbits(int baudrate, unsigned int clk, int clk_div, unsigned
     *encoded_divisor = 2;
     best_baud = clk / (2 * clk_div);
   } else {
-    /* We divide by 16 to have 3 fractional bits and one bit for rounding */
     divisor = clk * 16 / clk_div / baudrate;
-    if (divisor & 1) /* Decide if to round up or down*/
+    if (divisor & 1) {
       best_divisor = divisor / 2 + 1;
-    else
+    } else {
       best_divisor = divisor / 2;
+    }
     if (best_divisor > 0x20000)
       best_divisor = 0x1ffff;
     best_baud = clk * 16 / clk_div / best_divisor;
-    if (best_baud & 1) /* Decide if to round up or down*/
+    if (best_baud & 1) {
       best_baud = best_baud / 2 + 1;
-    else
+    } else {
       best_baud = best_baud / 2;
-    *encoded_divisor = (best_divisor >> 3) | (frac_code[best_divisor & 0x7] << 14);
+    }
+    *encoded_divisor = (best_divisor >> 3) | (FRAC_CODE[best_divisor & 0x7] << 14);
   }
   return best_baud;
 }
 
-static int ftdi_convert_baudrate(int baudrate, uint8_t chip_type, uint8_t channel_index, unsigned short *value,
-                                 unsigned short *index) {
+static int ftdi_convert_baudrate(int baudrate, uint8_t chip_type, uint8_t channel_index, uint16_t *value,
+                                 uint16_t *index) {
   int best_baud;
-  unsigned long encoded_divisor;
+  uint32_t encoded_divisor;
 
   if (baudrate <= 0) {
-    // Return error
     return -1;
   }
 
+  static constexpr uint32_t H_CLK = 120000000;
+  static constexpr uint32_t C_CLK = 48000000;
   if ((chip_type == TYPE_2232H) || (chip_type == TYPE_4232H) || (chip_type == TYPE_232H)) {
     if (baudrate * 10 > H_CLK / 0x3fff) {
       best_baud = ftdi_to_clkbits(baudrate, H_CLK, 10, &encoded_divisor);
       encoded_divisor |= 0x20000; /* switch on CLK/10*/
-    } else
+    } else {
       best_baud = ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
+    }
   } else if ((chip_type == TYPE_BM) || (chip_type == TYPE_2232C) || (chip_type == TYPE_R) || (chip_type == TYPE_230X)) {
     best_baud = ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
   } else {
-    best_baud = ftdi_to_clkbits_AM(baudrate, &encoded_divisor);
+    best_baud = ftdi_to_clkbits_am(baudrate, &encoded_divisor);
   }
 
-  *value = (unsigned short) (encoded_divisor & 0xFFFF);
+  *value = (uint16_t) (encoded_divisor & 0xFFFF);
   if (chip_type == TYPE_2232H || chip_type == TYPE_4232H || chip_type == TYPE_232H) {
-    *index = (unsigned short) (encoded_divisor >> 8);
+    *index = (uint16_t) (encoded_divisor >> 8);
     *index &= 0xFF00;
     *index |= (channel_index + 1);
-  } else
-    *index = (unsigned short) (encoded_divisor >> 16);
+  } else {
+    *index = (uint16_t) (encoded_divisor >> 16);
+  }
 
   return best_baud;
 }
@@ -187,7 +189,7 @@ static optional<CdcEps> get_uart(const usb_config_desc_t *config_desc, uint8_t i
   }
 
   if (ep1 == nullptr || ep2 == nullptr) {
-    ESP_LOGD(TAG, "Interface %d has %zu endpoints (need 2 bulk endWHpoints)", intf_idx, endpoints.size());
+    ESP_LOGD(TAG, "Interface %d has %zu endpoints (need 2 bulk endpoints)", intf_idx, endpoints.size());
     return nullopt;
   }
 
@@ -212,7 +214,6 @@ static optional<CdcEps> get_uart(const usb_config_desc_t *config_desc, uint8_t i
 std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev_hdl) {
   const usb_config_desc_t *config_desc;
   const usb_device_desc_t *device_desc;
-  int desc_offset = 0;
   std::vector<CdcEps> cdc_devs{};
   std::string type_string;
 
@@ -250,62 +251,74 @@ std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev
     type_string = "230x chip";
   }
 
-  ESP_LOGV(TAG, "Found FTDI %s based device", type_string.c_str());
-  for (uint8_t intf_idx = 0; intf_idx < this->channels_.size(); intf_idx++) {
-    if (auto eps = get_uart(config_desc, intf_idx)) {
+  ESP_LOGD(TAG, "Found FTDI %s based device", type_string.c_str());
+  for (size_t intf_idx = 0; intf_idx < this->channels_.size(); intf_idx++) {
+    if (auto eps = get_uart(config_desc, static_cast<uint8_t>(intf_idx))) {
       cdc_devs.push_back(*eps);
-      ESP_LOGD(TAG, "Found CDC interface at USB interface index %d", intf_idx);
+      ESP_LOGD(TAG, "Found CDC interface at USB interface index %zu", intf_idx);
     }
   }
   return cdc_devs;
 }
 
-int USBUartTypeFT23XX::reset(USBUartChannel *channel) {
-  usb_host::transfer_cb_t callback = [=, this](const usb_host::TransferStatus &status) {
+int USBUartTypeFT23XX::reset_(USBUartChannel *channel) {
+  usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Reset failed, status=%s", esp_err_to_name(status.error_code));
       channel->initialised_.store(false);
     } else {
-      ESP_LOGD(TAG, "✓ Reset successful (SIO_RESET_SIO), setting baudrate...");
-      this->set_baudrate(channel);
+      ESP_LOGD(TAG, "Reset successful, setting baudrate...");
+      this->set_baudrate_(channel);
     }
   };
-  return this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x00, 0x00,
-                                channel->cdc_dev_.bulk_interface_number + 1, callback);
+  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x00, 0x00,
+                                   channel->cdc_dev_.bulk_interface_number + 1, callback);
+  if (!ok) {
+    ESP_LOGE(TAG, "Reset control_transfer submit failed");
+    channel->initialised_.store(false);
+    return -1;
+  }
+  return 0;
 }
 
-int USBUartTypeFT23XX::set_baudrate(USBUartChannel *channel, uint32_t baudrate) {
-  usb_host::transfer_cb_t callback = [=, this](const usb_host::TransferStatus &status) {
+int USBUartTypeFT23XX::set_baudrate_(USBUartChannel *channel, uint32_t baudrate) {
+  usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set baudrate failed, status=%s", esp_err_to_name(status.error_code));
       channel->initialised_.store(false);
     } else {
-      ESP_LOGD(TAG, "✓ Baudrate %d set, setting line properties...", channel->baud_rate_);
-      this->set_line_properties(channel);
+      ESP_LOGD(TAG, "Baudrate %d set, setting line properties...", channel->baud_rate_);
+      this->set_line_properties_(channel);
     }
   };
   if (baudrate == 0) {
     baudrate = channel->baud_rate_;
   }
-  unsigned short value, ftdi_index;
+  uint16_t value, ftdi_index;
   ftdi_convert_baudrate(baudrate, this->chip_type_, channel->index_, &value, &ftdi_index);
   ESP_LOGD(TAG, "Baudrate: %d, value=0x%04X, ftdi_index=0x%04X", baudrate, value, ftdi_index);
   uint16_t usb_index = (ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
-  return this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, value, usb_index, callback);
+  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, value, usb_index, callback);
+  if (!ok) {
+    ESP_LOGE(TAG, "Set baudrate control_transfer submit failed");
+    channel->initialised_.store(false);
+    return -1;
+  }
+  return 0;
 }
 
-int USBUartTypeFT23XX::set_line_properties(USBUartChannel *channel) {
-  usb_host::transfer_cb_t callback = [=, this](const usb_host::TransferStatus &status) {
+int USBUartTypeFT23XX::set_line_properties_(USBUartChannel *channel) {
+  usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set line properties failed, status=%s", esp_err_to_name(status.error_code));
       channel->initialised_.store(false);
       return;
     }
-    ESP_LOGD(TAG, "✓ Line properties set, setting modem control...");
-    this->set_dtr_rts(channel);
+    ESP_LOGD(TAG, "Line properties set, setting modem control...");
+    this->set_dtr_rts_(channel);
   };
 
-  unsigned short value = channel->data_bits_;
+  uint16_t value = channel->data_bits_;
 
   switch (channel->parity_) {
     case UART_CONFIG_PARITY_NONE:
@@ -339,33 +352,45 @@ int USBUartTypeFT23XX::set_line_properties(USBUartChannel *channel) {
 
   value |= (0x00 << 14);
 
-  return this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x04, value,
-                                channel->cdc_dev_.bulk_interface_number + 1, callback);
+  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x04, value,
+                                   channel->cdc_dev_.bulk_interface_number + 1, callback);
+  if (!ok) {
+    ESP_LOGE(TAG, "Set line properties control_transfer submit failed");
+    channel->initialised_.store(false);
+    return -1;
+  }
+  return 0;
 }
 
-int USBUartTypeFT23XX::set_dtr_rts(USBUartChannel *channel) {
-  usb_host::transfer_cb_t callback = [=, this](const usb_host::TransferStatus &status) {
+int USBUartTypeFT23XX::set_dtr_rts_(USBUartChannel *channel) {
+  usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set modem control failed, status=%s", esp_err_to_name(status.error_code));
       channel->initialised_.store(false);
       return;
     }
-    ESP_LOGD(TAG, "✓ Modem control set for channel %d, starting input...", channel->index_);
+    ESP_LOGD(TAG, "Modem control set for channel %d, starting input...", channel->index_);
     channel->initialised_.store(true);
     this->start_input(channel);
     uint8_t next_index = channel->index_ + 1;
     if (next_index < this->channels_.size()) {
       USBUartChannel *next_channel = this->channels_[next_index];
       ESP_LOGD(TAG, "Configuring next channel %d", next_channel->index_);
-      this->reset(next_channel);
+      this->reset_(next_channel);
       return;
     } else {
-      ESP_LOGI(TAG, "✅ All channels configured successfully");
+      ESP_LOGI(TAG, "All channels configured");
     }
   };
 
-  return this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x01, 0x0000,
-                                channel->cdc_dev_.bulk_interface_number + 1, callback);
+  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x01, 0x0000,
+                                   channel->cdc_dev_.bulk_interface_number + 1, callback);
+  if (!ok) {
+    ESP_LOGE(TAG, "Set modem control control_transfer submit failed");
+    channel->initialised_.store(false);
+    return -1;
+  }
+  return 0;
 }
 
 void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
@@ -386,15 +411,17 @@ void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
     if (uart_data_len > 0) {
       ESP_LOGV(TAG, "RX callback: Received %zu bytes, channel=%d", uart_data_len, channel->index_);
       if (!channel->dummy_receiver_) {
-        for (size_t i = 0; i < uart_data_len; i++) {
-          channel->input_buffer_.push(status.data[2 + i]);
-        }
+        // Copy the entire received UART payload into the ring buffer in one
+        // operation to avoid per-byte overhead and reduce the chance of
+        // heap activity in hot paths.
+        channel->input_buffer_.push(status.data + 2, uart_data_len);
 #ifdef USE_UART_DEBUGGER
         if (channel->debug_) {
-          StringRef debug_prefix = channel->debug_prefix_;
+          // Debug path creates a temporary vector for logging only; this is
+          // acceptable because debug mode is opt-in and not used in release.
           uart::UARTDebug::log_hex(uart::UART_DIRECTION_RX,
-                                   std::vector<uint8_t>(status.data + 2, status.data + status.data_len), ',',
-                                   debug_prefix);
+                                   std::vector<uint8_t>(status.data + 2, status.data + 2 + uart_data_len), ',',
+                                   channel->debug_prefix_);
         }
 #endif
       }
@@ -416,7 +443,7 @@ void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
 
 void USBUartTypeFT23XX::enable_channels() {
   if (!this->channels_.empty() && this->channels_[0]->initialised_.load()) {
-    this->reset(this->channels_[0]);
+    this->reset_(this->channels_[0]);
   }
 
   for (auto *channel : this->channels_) {
@@ -427,6 +454,5 @@ void USBUartTypeFT23XX::enable_channels() {
   }
 }
 
-}  // namespace usb_uart
-}  // namespace esphome
+}  // namespace esphome::usb_uart
 #endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4

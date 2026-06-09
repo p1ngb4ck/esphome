@@ -141,13 +141,12 @@ void USBUartChannel::write_array(const uint8_t *data, size_t len) {
   }
 #ifdef USE_UART_DEBUGGER
   if (this->debug_) {
-    constexpr size_t BATCH = 16;
-    char buf[4 + format_hex_pretty_size(BATCH)];  // ">>> " + "XX,XX,...,XX\0"
-    for (size_t off = 0; off < len; off += BATCH) {
-      size_t n = std::min(len - off, BATCH);
-      memcpy(buf, ">>> ", 4);
-      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, data + off, n, ',');
-      ESP_LOGD(TAG, "%s%s", this->debug_prefix_.c_str(), buf);
+    constexpr size_t batch = 16;
+    char buf[format_hex_pretty_size(batch)];  // "XX,XX,...,XX\0"
+    for (size_t off = 0; off < len; off += batch) {
+      size_t n = std::min(len - off, batch);
+      format_hex_pretty_to(buf, data + off, n, ',');
+      ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
     }
   }
 #endif
@@ -157,7 +156,7 @@ void USBUartChannel::write_array(const uint8_t *data, size_t len) {
       ESP_LOGE(TAG, "Output pool full - lost %zu bytes", len);
       break;
     }
-    size_t chunk_len = std::min(len, UsbOutputChunk::MAX_CHUNK_SIZE);
+    uint16_t chunk_len = std::min(len, UsbOutputChunk::MAX_CHUNK_SIZE);
     memcpy(chunk->data, data, chunk_len);
     chunk->length = static_cast<uint8_t>(chunk_len);
     // Push always succeeds: pool is sized to queue capacity (SIZE-1), so if
@@ -222,10 +221,9 @@ void USBUartComponent::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
-      char buf[4 + format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];  // "<<< " + hex
-      memcpy(buf, "<<< ", 4);
-      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, chunk->data, chunk->length, ',');
-      ESP_LOGD(TAG, "%s%s", channel->debug_prefix_.c_str(), buf);
+      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];  // "XX,XX,...,XX\0"
+      format_hex_pretty_to(buf, chunk->data, chunk->length, ',');
+      ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
     }
 #endif
 
@@ -254,7 +252,6 @@ void USBUartComponent::loop() {
     this->disable_loop();
   }
 }
-
 void USBUartComponent::dump_config() {
   USBClient::dump_config();
   for (auto &channel : this->channels_) {
@@ -272,9 +269,8 @@ void USBUartComponent::dump_config() {
                   YESNO(channel->dummy_receiver_));
   }
 }
-
 void USBUartComponent::start_input(USBUartChannel *channel) {
-  if (!channel->initialised_.load() || channel->input_started_.load())
+  if (!channel->initialised_.load())
     return;
   // THREAD CONTEXT: Called from both USB task and main loop threads
   // - USB task: Immediate restart after successful transfer for continuous data flow
@@ -390,24 +386,19 @@ void USBUartComponent::start_output(USBUartChannel *channel) {
 }
 
 /**
- * Fix for devices that report incorrect MPS values or when running in Full-Speed mode.
- *
- * On ESP32-S2/S3: Always limit to 64 bytes (Full-Speed only hardware)
- * On ESP32-P4: Limit to configured MPS (64 for FS, 512 for HS)
- *
+ * Hacky fix for some devices that report incorrect MPS values
  * @param ep The endpoint descriptor
  */
 static void fix_mps(const usb_ep_desc_t *ep) {
   if (ep != nullptr) {
     auto *ep_mutable = const_cast<usb_ep_desc_t *>(ep);
-    if (ep->wMaxPacketSize > esphome::usb_host::USB_MAX_PACKET_SIZE) {
+    if (ep->wMaxPacketSize > usb_host::USB_MAX_PACKET_SIZE) {
       ESP_LOGW(TAG, "Corrected MPS of EP 0x%02X from %u to %u", static_cast<uint8_t>(ep->bEndpointAddress & 0xFF),
-               ep->wMaxPacketSize, esphome::usb_host::USB_MAX_PACKET_SIZE);
-      ep_mutable->wMaxPacketSize = esphome::usb_host::USB_MAX_PACKET_SIZE;
+               ep->wMaxPacketSize, usb_host::USB_MAX_PACKET_SIZE);
+      ep_mutable->wMaxPacketSize = usb_host::USB_MAX_PACKET_SIZE;
     }
   }
 }
-
 void USBUartTypeCdcAcm::on_connected() {
   auto cdc_devs = this->parse_descriptors(this->device_handle_);
   if (cdc_devs.empty()) {
@@ -424,20 +415,8 @@ void USBUartTypeCdcAcm::on_connected() {
       break;
     }
     channel->cdc_dev_ = cdc_devs[i++];
-
-    // Always apply MPS correction based on configured USB speed
-    // - S2/S3: Always 64 (Full-Speed only)
-    // - P4: 64 (if use_full_speed) or 512 (High-Speed default)
     fix_mps(channel->cdc_dev_.in_ep);
     fix_mps(channel->cdc_dev_.out_ep);
-
-    // Allocate transferbuffers as soon as soon as endpoints mps is fix
-    ESP_LOGD(TAG, "Allocating transfer buffers for device %d", this->device_addr_);
-    for (auto &request : this->requests_) {
-      usb_host_transfer_alloc(CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE, 0, &request.transfer);
-      request.client = this;  // Set once, never changes
-    }
-
     channel->initialised_.store(true);
     // Claim the communication (interrupt) interface so CDC class requests are accepted
     // by the device. Some CDC ACM implementations (e.g. EFR32 NCP) require this before
@@ -547,10 +526,10 @@ void USBUartTypeCdcAcm::enable_channels() {
                              }
                            });
   }
-  this->start_channels();
+  this->start_channels_();
 }
 
-void USBUartTypeCdcAcm::start_channels() {
+void USBUartTypeCdcAcm::start_channels_() {
   for (auto *channel : this->channels_) {
     if (!channel->initialised_.load())
       continue;

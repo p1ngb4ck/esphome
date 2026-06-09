@@ -1,5 +1,5 @@
 // Should not be needed, but it's required to pass CI clang-tidy checks
-#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 #include "usb_host.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -214,6 +214,12 @@ void USBClient::setup() {
     this->mark_failed();
     return;
   }
+  // Pre-allocate USB transfer buffers for all slots at startup
+  // This avoids any dynamic allocation during runtime
+  for (auto &request : this->requests_) {
+    usb_host_transfer_alloc(USB_MAX_PACKET_SIZE, 0, &request.transfer);
+    request.client = this;  // Set once, never changes
+  }
 
   // Create and start USB task
   xTaskCreate(usb_task_fn, "usb_task",
@@ -230,9 +236,9 @@ void USBClient::setup() {
 
 void USBClient::usb_task_fn(void *arg) {
   auto *client = static_cast<USBClient *>(arg);
-  client->usb_task_loop();
+  client->usb_task_loop_();
 }
-void USBClient::usb_task_loop() const {
+void USBClient::usb_task_loop_() const {
   while (true) {
     usb_host_client_handle_events(this->handle_, portMAX_DELAY);
   }
@@ -295,73 +301,13 @@ void USBClient::handle_open_state_() {
     return;
   }
   ESP_LOGD(TAG, "Device descriptor: vid %X pid %X", desc->idVendor, desc->idProduct);
-  bool vid_pid_match = (desc->idVendor == this->vid_ && desc->idProduct == this->pid_);
-  bool is_wildcard = (this->vid_ == 0 && this->pid_ == 0);
-
-  // For wildcard VID/PID, check if device should be skipped for specific handlers
-  // Skip if device has MSC interface (let MSC handler claim it)
-  // Skip if device is CH934X/CH9344/CH348 (let specific CH934X driver claim it)
-  bool skip_for_specific_driver = false;
-  if (is_wildcard) {
-    ESP_LOGD(TAG, "Wildcard client checking device %d: VID=%04X, PID=%04X", this->device_addr_, desc->idVendor,
-             desc->idProduct);
-    // Check VID/PID for known multi-UART chips that should use specific drivers
-    if ((desc->idVendor == 0x1A86 && desc->idProduct == 0x55D9) ||  // CH934X
-        (desc->idVendor == 0x1A86 && desc->idProduct == 0xE018) ||  // CH9344
-        (desc->idVendor == 0x1A86 && desc->idProduct == 0x55D5)) {  // CH34X
-      skip_for_specific_driver = true;
-      ESP_LOGD(TAG, "Device %d is CH934X/CH9344/CH34X (VID=%04X, PID=%04X), skipping wildcard VID/PID match",
-               this->device_addr_, desc->idVendor, desc->idProduct);
-    } else {
-      ESP_LOGD(TAG, "Device %d (VID=%04X, PID=%04X) not in skip list, checking for MSC...", this->device_addr_,
-               desc->idVendor, desc->idProduct);
-    }
-
-    // Check for MSC interface
-    if (!skip_for_specific_driver) {
-      const usb_config_desc_t *config_desc;
-      err = usb_host_get_active_config_descriptor(this->device_handle_, &config_desc);
-      if (err == ESP_OK) {
-        // Check if device has MSC interface (Class=0x08, SubClass=0x06, Protocol=0x50)
-        size_t offset = 0;
-        const usb_standard_desc_t *next_desc = (const usb_standard_desc_t *) config_desc;
-        while ((next_desc = usb_parse_next_descriptor_of_type(next_desc, config_desc->wTotalLength,
-                                                              USB_W_VALUE_DT_INTERFACE, (int *) &offset)) != nullptr) {
-          const usb_intf_desc_t *ifc_desc = (const usb_intf_desc_t *) next_desc;
-          if (ifc_desc->bInterfaceClass == USB_CLASS_MASS_STORAGE && ifc_desc->bInterfaceSubClass == 0x06 &&
-              ifc_desc->bInterfaceProtocol == 0x50) {
-            skip_for_specific_driver = true;
-            ESP_LOGD(TAG, "Device %d has MSC interface, skipping wildcard VID/PID match (let MSC handler claim it)",
-                     this->device_addr_);
-            break;
-          }
-        }
-      }
+  if (desc->idVendor != this->vid_ || desc->idProduct != this->pid_) {
+    if (this->vid_ != 0 || this->pid_ != 0) {
+      ESP_LOGD(TAG, "Not our device, closing");
+      this->disconnect();
+      return;
     }
   }
-
-  if (!vid_pid_match && !is_wildcard) {
-    ESP_LOGD(TAG, "Not our device, closing");
-    this->disconnect();
-    return;
-  }
-
-  if (skip_for_specific_driver) {
-    ESP_LOGD(TAG, "Device %d skipped for specific driver", this->device_addr_);
-    this->disconnect();
-    return;
-  }
-
-  // Try to claim device (coordinates with USBHost for interface-class handlers)
-  ESP_LOGD(TAG, "Attempting to claim device %d (VID=%04X, PID=%04X)", this->device_addr_, this->vid_, this->pid_);
-  if (this->parent_ != nullptr && !this->parent_->try_claim_device(this->device_addr_)) {
-    ESP_LOGD(TAG, "Device %d already claimed by another client (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
-             this->pid_);
-    this->disconnect();
-    return;
-  }
-  ESP_LOGD(TAG, "Device %d successfully claimed (VID=%04X, PID=%04X)", this->device_addr_, this->vid_, this->pid_);
-
   usb_device_info_t dev_info;
   err = usb_host_device_info(this->device_handle_, &dev_info);
   if (err != ESP_OK) {
@@ -388,10 +334,7 @@ void USBClient::handle_open_state_() {
   if (err == ESP_OK)
     usb_client_print_config_descriptor(config_desc, nullptr);
 #endif
-  ESP_LOGD(TAG, "Calling on_connected() for device %d (VID=%04X, PID=%04X)", this->device_addr_, this->vid_,
-           this->pid_);
   this->on_connected();
-  ESP_LOGD(TAG, "on_connected() returned for device %d", this->device_addr_);
 }
 
 void USBClient::on_opened(uint8_t addr) {
@@ -463,14 +406,6 @@ TransferRequest *USBClient::get_trq_() {
 
 void USBClient::disconnect() {
   this->on_disconnected();
-
-  // NEW: Release device claim - but only if we actually claimed it (state == CONNECTED)
-  // If we opened the device but didn't claim it (e.g., wildcard skipped MSC device),
-  // don't release it - the interface-class handler may have claimed it instead
-  if (this->parent_ != nullptr && this->device_addr_ != -1 && this->state_ == USB_CLIENT_CONNECTED) {
-    this->parent_->release_device(this->device_addr_);
-  }
-
   auto err = usb_host_device_close(this->handle_, this->device_handle_);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Device close failed: %s", esp_err_to_name(err));

@@ -18,6 +18,7 @@ class USBUartTypeCH934X;
 class USBUartComponent;
 class USBUartChannel;
 class CH934XChannel;
+class USBUartTypePL2303;
 
 static const char *const TAG = "usb_uart";
 
@@ -35,14 +36,6 @@ struct CdcEps {
   const usb_ep_desc_t *out_ep;
   uint8_t bulk_interface_number;
   uint8_t interrupt_interface_number;
-};
-
-struct Ch934xEps {
-  const usb_ep_desc_t *in_ep{nullptr};
-  const usb_ep_desc_t *out_ep{nullptr};
-  const usb_ep_desc_t *ep_cmd_read{nullptr};
-  const usb_ep_desc_t *ep_cmd_write{nullptr};
-  uint8_t data_interface{0};
 };
 
 enum CH34xChipType : uint8_t {
@@ -75,6 +68,24 @@ enum CH34xChipType : uint8_t {
   CHIP_UNKNOWN = 0xFF,
 };
 
+struct Ch934xEps {
+  const usb_ep_desc_t *in_ep{nullptr};
+  const usb_ep_desc_t *out_ep{nullptr};
+  const usb_ep_desc_t *ep_cmd_read{nullptr};
+  const usb_ep_desc_t *ep_cmd_write{nullptr};
+  uint8_t data_interface{0};
+};
+
+// clang-format off
+enum CH934xChipType : uint8_t {
+  CHIP_CH9344L = 0,
+  CHIP_CH9344Q,
+  CHIP_CH348L,
+  CHIP_CH348Q,
+  CHIP_CH934X_UNKNOWN = 0xFF,
+};
+// clang-format on
+
 enum UARTParityOptions {
   UART_CONFIG_PARITY_NONE = 0,
   UART_CONFIG_PARITY_ODD,
@@ -87,14 +98,6 @@ enum UARTStopBitsOptions {
   UART_CONFIG_STOP_BITS_1 = 0,
   UART_CONFIG_STOP_BITS_1_5,
   UART_CONFIG_STOP_BITS_2,
-};
-
-enum CH934xChipType : uint8_t {
-  CHIP_CH9344L = 0,
-  CHIP_CH9344Q,
-  CHIP_CH348L,
-  CHIP_CH348Q,
-  CHIP_CH934X_UNKNOWN = 0xFF,
 };
 
 static const char *const PARITY_NAMES[] = {"NONE", "ODD", "EVEN", "MARK", "SPACE"};
@@ -124,12 +127,8 @@ class RingBuffer {
 
 // Structure for queuing received USB data chunks
 struct UsbDataChunk {
-  uint8_t data[esphome::usb_host::USB_MAX_PACKET_SIZE];
-#if defined(USE_ESP32_VARIANT_ESP32P4)
+  uint8_t data[usb_host::USB_MAX_PACKET_SIZE];
   uint16_t length;
-#else
-  uint8_t length;
-#endif
   USBUartChannel *channel;
 
   // Required for EventPool - no cleanup needed for POD types
@@ -138,13 +137,9 @@ struct UsbDataChunk {
 
 // Structure for queuing outgoing USB data chunks (one per USB packet)
 struct UsbOutputChunk {
-  static constexpr size_t MAX_CHUNK_SIZE = esphome::usb_host::USB_MAX_PACKET_SIZE;
+  static constexpr size_t MAX_CHUNK_SIZE = usb_host::USB_MAX_PACKET_SIZE;
   uint8_t data[MAX_CHUNK_SIZE];
-#if defined(USE_ESP32_VARIANT_ESP32P4)
   uint16_t length;
-#else
-  uint8_t length;
-#endif
 
   // Required for EventPool - no cleanup needed for POD types
   void release() {}
@@ -156,14 +151,16 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
   friend class USBUartTypeCH934X;
-  friend class USBUartTypeFT23XX;
   friend class CH934XChannel;
+  friend class USBUartTypeFT23XX;
+  friend class USBUartTypePL2303;
 
  public:
-  // Number of output chunk slots per channel (8 × 64 bytes = 512 bytes peak, lazily allocated)
+  // Number of output chunk slots per channel, derived from buffer_size config.
+  // Computed as ceil(buffer_size / 64) + 1 in Python codegen; defaults to 5 (256 / 64 + 1).
   static constexpr uint8_t USB_OUTPUT_CHUNK_COUNT = USB_UART_OUTPUT_CHUNK_COUNT;
 
-  USBUartChannel(uint8_t index, uint16_t buffer_size) : index_(index), input_buffer_(RingBuffer(buffer_size)) {}
+  USBUartChannel(uint8_t index, uint16_t buffer_size) : input_buffer_(RingBuffer(buffer_size)), index_(index) {}
   void write_array(const uint8_t *data, size_t len) override;
   bool peek_byte(uint8_t *data) override;
   bool read_array(uint8_t *data, size_t len) override;
@@ -176,9 +173,6 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   void set_dummy_receiver(bool dummy_receiver) { this->dummy_receiver_ = dummy_receiver; }
   void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
   void set_flush_timeout(uint32_t flush_timeout_ms) override { this->flush_timeout_ms_ = flush_timeout_ms; }
-#ifdef USE_UART_DEBUGGER
-  void set_debug_add_settings(bool add) { this->debug_add_settings_ = add; }
-#endif
 
   /// Register a callback invoked immediately after data is pushed to the input ring buffer.
   /// Called from USBUartComponent::loop() in the main loop context.
@@ -201,25 +195,17 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   UARTParityOptions parity_{UART_CONFIG_PARITY_NONE};
   uint32_t flush_timeout_ms_{100};
   // 1-byte fields (no padding between groups)
-  std::atomic<bool> input_started_{false};
-  std::atomic<bool> output_started_{false};
-  std::atomic<bool> initialised_{false};  // Set to true only after configuration complete and RX started
+  std::atomic<bool> input_started_{true};
+  std::atomic<bool> output_started_{true};
+  std::atomic<bool> initialised_{false};
   const uint8_t index_;
   bool debug_{};
   bool dummy_receiver_{};
-#ifdef USE_UART_DEBUGGER
-  bool debug_add_settings_{false};
-#endif
 };
 
 class USBUartComponent : public usb_host::USBClient {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartComponent(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : usb_host::USBClient(vid, pid, parent) {}
-#else
   USBUartComponent(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
-#endif
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -227,8 +213,8 @@ class USBUartComponent : public usb_host::USBClient {
 
   void add_channel(USBUartChannel *channel) { this->channels_.push_back(channel); }
 
-  virtual void start_input(USBUartChannel *channel);
-  virtual void start_output(USBUartChannel *channel);
+  void start_input(USBUartChannel *channel);
+  void start_output(USBUartChannel *channel);
 
   // Lock-free data transfer from USB task to main loop
   static constexpr int USB_DATA_QUEUE_SIZE = 32;
@@ -237,21 +223,12 @@ class USBUartComponent : public usb_host::USBClient {
   EventPool<UsbDataChunk, USB_DATA_QUEUE_SIZE - 1> chunk_pool_;
 
  protected:
-  // Re-declare on_connected as protected to maintain virtual dispatch chain
-  // Called from USBClient::loop() (protected context), overridden by derived classes
-  void on_connected() override {}
-
   std::vector<USBUartChannel *> channels_{};
 };
 
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : USBUartComponent(vid, pid, parent) {}
-#else
   USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
-#endif
 
  protected:
   virtual std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl);
@@ -261,17 +238,12 @@ class USBUartTypeCdcAcm : public USBUartComponent {
   /// Resets per-channel transfer flags and posts the first bulk IN transfer.
   /// Called by enable_channels() and by vendor-specific subclass overrides that
   /// handle their own line-coding setup before starting data flow.
-  void start_channels();
+  void start_channels_();
 };
 
 class USBUartTypeCP210X : public USBUartTypeCdcAcm {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartTypeCP210X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : USBUartTypeCdcAcm(vid, pid, parent) {}
-#else
   USBUartTypeCP210X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
-#endif
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
@@ -279,12 +251,7 @@ class USBUartTypeCP210X : public USBUartTypeCdcAcm {
 };
 class USBUartTypeCH34X : public USBUartTypeCdcAcm {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartTypeCH34X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : USBUartTypeCdcAcm(vid, pid, parent) {}
-#else
   USBUartTypeCH34X(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
-#endif
   void dump_config() override;
 
  protected:
@@ -300,64 +267,50 @@ class USBUartTypeCH34X : public USBUartTypeCdcAcm {
 
 class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartTypeFT23XX(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : USBUartTypeCdcAcm(vid, pid, parent) {}
-#else
   USBUartTypeFT23XX(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
-#endif
 
-  virtual void start_input(USBUartChannel *channel);
+  void start_input(USBUartChannel *channel);
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
   void enable_channels() override;
 
-  int reset(USBUartChannel *channel);
-  int set_baudrate(USBUartChannel *channel, uint32_t baudrate = 0);
-  int set_line_properties(USBUartChannel *channel);
-  int set_dtr_rts(USBUartChannel *channel);
+  int reset_(USBUartChannel *channel);
+  int set_baudrate_(USBUartChannel *channel, uint32_t baudrate = 0);
+  int set_line_properties_(USBUartChannel *channel);
+  int set_dtr_rts_(USBUartChannel *channel);
 
   uint8_t chip_type_{255};
-  bool device_init_complete_{false};
 };
 
 class USBUartTypeCH934X : public USBUartComponent {
  public:
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  USBUartTypeCH934X(uint16_t vid, uint16_t pid, usb_host::USBHost *parent = nullptr)
-      : USBUartComponent(vid, pid, parent) {}
-#else
   USBUartTypeCH934X(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
-#endif
 
   void start_input(USBUartChannel *channel);
-  void start_output(USBUartChannel *channel);
-  uint8_t get_port_offset() const { return this->port_offset_; }
 
  protected:
   void on_connected() override;
   void on_disconnected() override;
-  bool parse_descriptors(usb_device_handle_t dev_hdl);
-  void enable_channels();
+  void enable_channels_();
+
+  bool parse_descriptors_(usb_device_handle_t dev_hdl);
   void configure_device_();
   void configure_channels_after_detection_();
   bool configure_channel_(USBUartChannel *channel);
-  bool set_uart_mode(USBUartChannel *channel);
+  bool set_uart_mode_(USBUartChannel *channel);
   bool configure_uart_parameters_(USBUartChannel *channel);
   uint8_t get_reg_address_(uint8_t portnum);
+
   void start_rx_reader_();
-  void handle_rx_data_(const uint8_t *data, size_t len);
   void demux_rx_data_(const uint8_t *data, size_t len);
   void start_command_reader_();
   void handle_command_data_(const uint8_t *data, size_t len);
 
   Ch934xEps uart_host_dev_{};
   CH934xChipType chiptype_{CHIP_CH934X_UNKNOWN};
-  uint8_t chipversion_{0};
   uint8_t num_ports_{0};
   uint8_t port_offset_{0};
-  bool bpackload_{false};
   std::atomic<bool> rx_running_{false};
   std::atomic<bool> cmd_running_{false};
 };
@@ -366,6 +319,7 @@ class CH934XChannel : public USBUartChannel {
   friend class USBUartTypeCH934X;
 
  public:
+  // TX header is 3 bytes: [port, len_lo, len_hi] — max data per packet is reduced accordingly
   static constexpr size_t TX_HEADER_SIZE = 3;
   static constexpr size_t TX_MAX_DATA = UsbOutputChunk::MAX_CHUNK_SIZE - TX_HEADER_SIZE;
 
@@ -375,6 +329,30 @@ class CH934XChannel : public USBUartChannel {
 
  protected:
   USBUartChannel *tx_shared_channel_{nullptr};
+  uint8_t tx_port_byte_{0};
+};
+
+enum Pl2303ChipType : uint8_t {
+  PL2303_TYPE_H = 0,  // Legacy, max 1.2Mbaud
+  PL2303_TYPE_HX,     // max 6Mbaud, divisor encoding
+  PL2303_TYPE_TA,     // max 6Mbaud, alt divisor encoding
+  PL2303_TYPE_TB,     // max 12Mbaud, alt divisor encoding
+  PL2303_TYPE_HXD,    // max 12Mbaud, divisor encoding
+  PL2303_TYPE_HXN,    // G-series, max 12Mbaud, direct encoding only
+  PL2303_TYPE_UNKNOWN = 0xFF,
+};
+
+class USBUartTypePL2303 : public USBUartTypeCdcAcm {
+  friend class USBUartChannel;
+
+ public:
+  USBUartTypePL2303(uint16_t vid, uint16_t pid) : USBUartTypeCdcAcm(vid, pid) {}
+
+ protected:
+  std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
+  void enable_channels() override;
+
+  Pl2303ChipType chip_type_{PL2303_TYPE_UNKNOWN};
 };
 
 }  // namespace esphome::usb_uart

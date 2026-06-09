@@ -1,11 +1,10 @@
 #pragma once
 
 // Should not be needed, but it's required to pass CI clang-tidy checks
-#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 #include "esphome/core/defines.h"
 #include "esphome/core/component.h"
 #include <vector>
-#include <set>
 #include "usb/usb_host.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -42,20 +41,6 @@ static const char *const TAG = "usb_host";
 // Forward declarations
 struct TransferRequest;
 class USBClient;
-class USBHost;
-
-// NEW: Interface for class-based device handlers (e.g., MSC, HID)
-// Operates in parallel to VID/PID-based USBClient system
-class USBDeviceHandler {
- public:
-  virtual ~USBDeviceHandler() = default;
-  // Check if this handler supports the device based on interface descriptors
-  virtual bool matches_device(const usb_config_desc_t *config_desc) = 0;
-  // Called when device is matched and claimed by this handler
-  virtual void on_device_connected(usb_device_handle_t device_handle, uint8_t addr) = 0;
-  // Called when device is disconnected
-  virtual void on_device_disconnected(usb_device_handle_t device_handle) = 0;
-};
 
 // constants for setup packet type
 static constexpr uint8_t USB_RECIP_DEVICE = 0;
@@ -69,12 +54,6 @@ static constexpr uint8_t USB_DIR_IN = 1 << 7;
 static constexpr uint8_t USB_DIR_OUT = 0;
 static constexpr size_t SETUP_PACKET_SIZE = 8;
 
-#ifdef USE_ESP32_VARIANT_ESP32P4
-static constexpr uint16_t USB_MAX_PACKET_SIZE = 512;
-#else
-static constexpr uint8_t USB_MAX_PACKET_SIZE = 64;
-#endif
-
 static constexpr size_t MAX_REQUESTS = USB_HOST_MAX_REQUESTS;  // maximum number of outstanding requests possible.
 static_assert(MAX_REQUESTS >= 1 && MAX_REQUESTS <= 32, "MAX_REQUESTS must be between 1 and 32");
 
@@ -87,10 +66,10 @@ static_assert(MAX_REQUESTS >= 1 && MAX_REQUESTS <= 32, "MAX_REQUESTS must be bet
 using trq_bitmask_t = std::conditional<(MAX_REQUESTS <= 16), uint16_t, uint32_t>::type;
 static constexpr trq_bitmask_t ALL_REQUESTS_IN_USE = MAX_REQUESTS == 32 ? ~0 : (1 << MAX_REQUESTS) - 1;
 
-static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;  // Size of event queue between USB task and main loop
-#ifndef USB_TASK_STACK_SIZE
-static constexpr size_t USB_TASK_STACK_SIZE = 4096;  // Stack size for USB task
-#endif
+static constexpr size_t USB_MAX_PACKET_SIZE =
+    USB_HOST_MAX_PACKET_SIZE;                        // Max USB packet size (64 for FS, 512 for P4 HS)
+static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;   // Size of event queue between USB task and main loop
+static constexpr size_t USB_TASK_STACK_SIZE = 4096;  // Stack size for USB task (same as ESP-IDF USB examples)
 static constexpr UBaseType_t USB_TASK_PRIORITY = 5;  // Higher priority than main loop (tskIDLE_PRIORITY + 5)
 
 // used to report a transfer status
@@ -145,7 +124,7 @@ enum ClientState {
   USB_CLIENT_GET_INFO,
   USB_CLIENT_CONNECTED,
 };
-class USBClient : public Component, public Parented<USBHost> {
+class USBClient : public Component {
   friend class USBHost;
 
  public:
@@ -188,7 +167,7 @@ class USBClient : public Component, public Parented<USBHost> {
 
   // USB task management
   static void usb_task_fn(void *arg);
-  [[noreturn]] void usb_task_loop() const;
+  [[noreturn]] void usb_task_loop_() const;
 
   // Members ordered to minimize struct padding on 32-bit platforms
   TransferRequest requests_[MAX_REQUESTS]{};
@@ -210,42 +189,10 @@ class USBHost : public Component {
   void loop() override;
   void setup() override;
 
-  // NEW: Device claiming system for coordination between VID/PID clients and interface-class handlers
-  bool try_claim_device(uint8_t address);
-  void release_device(uint8_t address);
-
-  // NEW: Register interface-class based handlers (e.g., MSC, HID)
-  void register_device_handler(USBDeviceHandler *handler);
-
-  // NEW: Try to dispatch device to interface-class handlers (called when not claimed by VID/PID)
-  void try_dispatch_to_handlers(uint8_t address);
-
-  // NEW: Close a device handle (for handlers that need to re-open with different client)
-  void close_device_handle(usb_device_handle_t device_handle);
-
-  // Device allowlist management
-  void add_device_to_allowlist(uint16_t vid, uint16_t pid);
-  bool is_device_allowlisted(uint16_t vid, uint16_t pid) const;
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Dual USB Host support (ESP32-P4 only)
-  void set_controller_type(uint8_t controller) { this->controller_type_ = controller; }
-  void *get_tuh_instance() const { return this->tuh_instance_; }
-#endif
-
  protected:
-  std::vector<USBClient *> clients_{};                             // EXISTING: VID/PID based clients
-  std::vector<USBDeviceHandler *> handlers_{};                     // NEW: Interface-class based handlers
-  std::set<uint8_t> claimed_devices_{};                            // NEW: Track devices claimed by VID/PID clients
-  usb_host_client_handle_t coordinator_handle_{};                  // NEW: Handle for handler dispatch
-  std::vector<std::pair<uint16_t, uint16_t>> device_allowlist_{};  // Allowlist of allowed devices (VID, PID)
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  uint8_t controller_type_{0};   // 0 = FS, 1 = HS
-  void *tuh_instance_{nullptr};  // TinyUSB instance handle (void* to avoid including TinyUSB headers)
-#endif
+  std::vector<USBClient *> clients_{};
 };
 
 }  // namespace esphome::usb_host
 
-#endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3
