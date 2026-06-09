@@ -31,7 +31,7 @@ require_fatfs()
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
 MSCDetector = usb_storage_ns.class_(
-    "MSCDetector", usb_host_ns.class_("USBClient")
+    "MSCDetector", usb_host_ns.class_("USBClient"), cg.Component
 )
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
