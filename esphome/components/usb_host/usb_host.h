@@ -142,7 +142,7 @@ class USBClient : public Component {
   void loop() override;
   // setup must happen after the host bus has been setup
   float get_setup_priority() const override { return setup_priority::IO; }
-  void on_opened(uint8_t addr);
+  virtual void on_opened(uint8_t addr);
   virtual void on_removed(usb_device_handle_t handle);
   bool transfer_in(uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
   bool transfer_out(uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data, uint16_t length);
@@ -211,6 +211,8 @@ class USBClassRouter : public USBClient {
 
   void register_driver(USBClassDriver *driver) { this->drivers_.push_back(driver); }
   void set_host(USBHost *host) { this->clients_ = &host->get_clients(); }
+  void on_opened(uint8_t addr) override;
+  void loop() override;
 
  protected:
   void on_connected() override;
@@ -218,6 +220,8 @@ class USBClassRouter : public USBClient {
 
   std::vector<USBClassDriver *> drivers_{};
   std::vector<USBClient *> *clients_{nullptr};
+  // Addresses seen but deferred — processed next loop cycle after other clients have had a chance
+  std::vector<uint8_t> pending_addrs_{};
   struct ClaimedIface {
     uint8_t addr;
     usb_device_handle_t handle;
