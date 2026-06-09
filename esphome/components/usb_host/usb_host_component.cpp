@@ -28,6 +28,17 @@ void USBHost::loop() {
 }
 
 void USBClassRouter::on_connected() {
+  // Skip if another USBClient already claimed this device address.
+  if (this->clients_ != nullptr) {
+    for (auto *client : *this->clients_) {
+      if (client != this && client->get_device_addr() == this->device_addr_ &&
+          client->get_state() == USB_CLIENT_CONNECTED) {
+        this->disconnect();
+        return;
+      }
+    }
+  }
+
   const usb_device_desc_t *dev_desc;
   if (usb_host_get_device_descriptor(this->device_handle_, &dev_desc) != ESP_OK) {
     this->disconnect();
