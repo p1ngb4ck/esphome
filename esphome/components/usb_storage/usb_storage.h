@@ -61,15 +61,10 @@ static constexpr uint8_t SCSI_COMMAND_SET = 0x06;
 static constexpr uint8_t BULK_ONLY_TRANSFER = 0x50;
 
 class USBStorageHost : public Component {
-  friend class USBHost;
   friend class USBStorageDevice;
 
  public:
   void setup() override;
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }
-#endif
 
  protected:
   void free_all_msc_devices(void);
@@ -80,11 +75,6 @@ class USBStorageHost : public Component {
   msc_host_device_handle_t get_handle_by_address(uint8_t usb_addr);
 
   msc_dev_entry_t *msc_devices_[MAX_MSC_DEVICES] = {NULL};
-
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  msc_host_driver_handle_t msc_driver_{nullptr};  // Driver handle for multi-instance API
-  usb_host::USBHost *usb_host_{nullptr};          // Reference to USBHost for getting TinyUSB instance
-#endif
 };
 
 // Forward declaration for mount callback
@@ -92,11 +82,11 @@ using mount_ready_callback_t = std::function<void(const std::string &mount_path)
 
 #ifdef USE_STORAGE
 class USBStorageDevice : public Component,
-                         public usb_host::USBDeviceHandler,
+                         public usb_host::USBClassDriver,
                          public Parented<USBStorageHost>,
                          public storage::StorageDevice {
 #else
-class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, public Parented<USBStorageHost> {
+class USBStorageDevice : public Component, public usb_host::USBClassDriver, public Parented<USBStorageHost> {
 #endif
   friend class USBHost;
   friend class USBStorageHost;
@@ -108,16 +98,15 @@ class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, pu
   // Run after storage component (DATA=600) to ensure global_storage is initialized
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  void set_usb_host(usb_host::USBHost *usb_host) { this->usb_host_ = usb_host; }
   void set_mount_path(const std::string &mount_path) { this->mount_path_ = mount_path; }
   void set_vid(uint16_t vid) { this->vid_ = vid; }
   void set_pid(uint16_t pid) { this->pid_ = pid; }
   void set_id(const std::string &id) { this->id_ = id; }
 
-  // USBDeviceHandler Interface implementation
-  bool matches_device(const usb_config_desc_t *config_desc) override;
-  void on_device_connected(usb_device_handle_t device_handle, uint8_t addr) override;
-  void on_device_disconnected(usb_device_handle_t device_handle) override;
+  // USBClassDriver interface
+  bool claim_interface(const usb_intf_desc_t *intf_desc, const usb_device_desc_t *dev_desc) override;
+  void on_interface_claimed(uint8_t addr, uint8_t interface_num) override;
+  void on_device_disconnected(uint8_t addr) override;
 
   // MSC-specific operations
   void list_files();
@@ -184,9 +173,7 @@ class USBStorageDevice : public Component, public usb_host::USBDeviceHandler, pu
 #endif
 
  protected:
-  usb_device_handle_t device_handle_{nullptr};
   uint8_t device_addr_{255};
-  usb_host::USBHost *usb_host_{nullptr};
   std::string mount_path_;
   std::string id_;                                             // Unique identifier for storage registry
   uint16_t vid_{0x0000};                                       // 0x0000 = wildcard, match any VID

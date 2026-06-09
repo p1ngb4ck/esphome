@@ -81,14 +81,7 @@ esp_err_t USBStorageHost::allocate_new_msc_device(uint8_t new_dev_address, const
 
   ESP_LOGI(TAG, "Memory allocated, calling msc_host_install_device...");
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Multi-instance API: Pass driver handle
-  esp_err_t err =
-      msc_host_driver_install_device(this->msc_driver_, new_dev_address, &this->msc_devices_[slot]->msc_device);
-#else
-  // Singleton API: No driver handle needed
   esp_err_t err = msc_host_install_device(new_dev_address, &this->msc_devices_[slot]->msc_device);
-#endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "msc_host_install_device failed: %s", esp_err_to_name(err));
     free(this->msc_devices_[slot]);
@@ -311,26 +304,13 @@ void USBStorageHost::setup() {
       .callback = msc_event_callback,
   };
 
-#ifdef USE_USB_HOST_DUAL_INSTANCE
-  // Multi-instance API: Initialize MSC driver with USB Host instance
-  void *tuh_inst = (this->usb_host_ != nullptr) ? this->usb_host_->get_tuh_instance() : nullptr;
-  this->msc_driver_ = msc_host_driver_init(tuh_inst, &msc_config);
-  if (this->msc_driver_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to initialize MSC host driver (multi-instance)");
-    this->mark_failed();
-    return;
-  }
-  ESP_LOGI(TAG, "MSC host driver initialized successfully (multi-instance)");
-#else
-  // Singleton API: Use global msc_host_install
   esp_err_t err = msc_host_install(&msc_config);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize MSC host driver: %s", esp_err_to_name(err));
     this->mark_failed();
     return;
   }
-  ESP_LOGI(TAG, "MSC host driver initialized successfully (singleton)");
-#endif
+  ESP_LOGI(TAG, "MSC host driver initialized successfully");
 }
 
 void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device (interface-class based handler)"); }
@@ -340,66 +320,26 @@ void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
 }
 
-bool USBStorageDevice::matches_device(const usb_config_desc_t *config_desc) {
-  ESP_LOGD(TAG, "matches_device() called - checking if device is MSC (vid_filter=0x%04X, pid_filter=0x%04X)",
-           this->vid_, this->pid_);
-
-  const usb_intf_desc_t *msc_intf = find_msc_interface(config_desc);
-  if (msc_intf == nullptr) {
-    ESP_LOGD(TAG, "Device not matched: No MSC interface found");
+bool USBStorageDevice::claim_interface(const usb_intf_desc_t *intf_desc, const usb_device_desc_t *dev_desc) {
+  if (intf_desc->bInterfaceClass != USB_CLASS_MASS_STORAGE ||
+      intf_desc->bInterfaceSubClass != SCSI_COMMAND_SET ||
+      intf_desc->bInterfaceProtocol != BULK_ONLY_TRANSFER) {
     return false;
   }
-
-  ESP_LOGD(TAG, "MSC interface found: Class=0x%02X, SubClass=0x%02X, Protocol=0x%02X", msc_intf->bInterfaceClass,
-           msc_intf->bInterfaceSubClass, msc_intf->bInterfaceProtocol);
-
-  if (this->vid_ == 0x0000 && this->pid_ == 0x0000) {
-    ESP_LOGD(TAG, "Device matched: MSC interface with wildcard VID/PID");
-    return true;
-  }
-
-  ESP_LOGW(TAG, "VID/PID filtering requested but device descriptor not available in matches_device() - accepting");
+  if (this->vid_ != 0x0000 && dev_desc->idVendor != this->vid_)
+    return false;
+  if (this->pid_ != 0x0000 && dev_desc->idProduct != this->pid_)
+    return false;
+  ESP_LOGD(TAG, "Claiming MSC interface %d (VID=0x%04X PID=0x%04X)", intf_desc->bInterfaceNumber,
+           dev_desc->idVendor, dev_desc->idProduct);
   return true;
 }
 
-void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, uint8_t addr) {
-  ESP_LOGI(TAG, "USB Storage Device connected via interface-class matching (address=%d, mount_path='%s')", addr,
+void USBStorageDevice::on_interface_claimed(uint8_t addr, uint8_t interface_num) {
+  ESP_LOGI(TAG, "USB Storage Device connected (address=%d, interface=%d, mount_path='%s')", addr, interface_num,
            this->mount_path_.c_str());
 
-  if (this->vid_ != 0x0000 || this->pid_ != 0x0000) {
-    const usb_device_desc_t *device_desc;
-    esp_err_t err = usb_host_get_device_descriptor(device_handle, &device_desc);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to get device descriptor for VID/PID check: %s", esp_err_to_name(err));
-      if (this->usb_host_ != nullptr) {
-        this->usb_host_->close_device_handle(device_handle);
-      }
-      return;
-    }
-
-    bool vid_match = (this->vid_ == 0x0000) || (device_desc->idVendor == this->vid_);
-    bool pid_match = (this->pid_ == 0x0000) || (device_desc->idProduct == this->pid_);
-
-    if (!vid_match || !pid_match) {
-      ESP_LOGD(TAG, "Device VID/PID (0x%04X/0x%04X) doesn't match filter (0x%04X/0x%04X) - rejecting",
-               device_desc->idVendor, device_desc->idProduct, this->vid_, this->pid_);
-      if (this->usb_host_ != nullptr) {
-        this->usb_host_->close_device_handle(device_handle);
-      }
-      return;
-    }
-
-    ESP_LOGD(TAG, "Device VID/PID (0x%04X/0x%04X) matches filter", device_desc->idVendor, device_desc->idProduct);
-  }
-
   this->device_addr_ = addr;
-
-  ESP_LOGD(TAG, "Closing device handle from usb_host before calling msc_host_install_device()");
-  if (this->usb_host_ != nullptr) {
-    this->usb_host_->close_device_handle(device_handle);
-  } else {
-    ESP_LOGE(TAG, "usb_host_ is nullptr, cannot close device handle!");
-  }
 
   esp_err_t err = this->parent_->allocate_new_msc_device(addr, this->mount_path_);
   if (err != ESP_OK) {
@@ -436,8 +376,8 @@ void USBStorageDevice::on_device_connected(usb_device_handle_t device_handle, ui
 #endif
 }
 
-void USBStorageDevice::on_device_disconnected(usb_device_handle_t device_handle) {
-  if (this->device_handle_ != device_handle) {
+void USBStorageDevice::on_device_disconnected(uint8_t addr) {
+  if (this->device_addr_ != addr) {
     return;
   }
 
@@ -451,7 +391,6 @@ void USBStorageDevice::on_device_disconnected(usb_device_handle_t device_handle)
     ESP_LOGI(TAG, "Freed MSC device resources for slot %d", slot);
   }
 
-  this->device_handle_ = nullptr;
   this->device_addr_ = 255;
   this->slot_ = -1;
 
