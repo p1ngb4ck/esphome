@@ -8,8 +8,7 @@
 
 #include "../ads1115.h"
 
-namespace esphome {
-namespace ads1115 {
+namespace esphome::ads1115 {
 
 /// Internal holder class that is in instance of Sensor so that the hub can create individual sensors.
 class ADS1115Sensor : public sensor::Sensor,
@@ -48,5 +47,4 @@ class ADS1115Sensor : public sensor::Sensor,
 #endif
 };
 
-}  // namespace ads1115
-}  // namespace esphome
+}  // namespace esphome::ads1115
