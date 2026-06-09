@@ -10,10 +10,7 @@ from esphome.components.esp32 import (
     require_fatfs,
     require_vfs_dir,
 )
-from esphome.components.usb_host import (
-    register_usb_class_driver,
-    usb_host_ns,
-)
+from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
 from esphome.core import CORE
@@ -34,8 +31,7 @@ usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
-    cg.Component,
-    usb_host_ns.class_("USBClassDriver"),
+    usb_host_ns.class_("USBClient"),
     cg.Parented.template(USBStorageHost),
 )
 
@@ -59,8 +55,6 @@ async def register_usb_storage_handler(device_config, storage_host):
     cg.add(var.set_id(str(device_config[CONF_ID])))
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
-
-    await register_usb_class_driver(var)
 
     for conf in device_config.get(CONF_ON_MOUNTED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

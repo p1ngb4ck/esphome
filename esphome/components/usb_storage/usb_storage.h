@@ -81,21 +81,18 @@ class USBStorageHost : public Component {
 using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
 
 #ifdef USE_STORAGE
-class USBStorageDevice : public Component,
-                         public usb_host::USBClassDriver,
+class USBStorageDevice : public usb_host::USBClient,
                          public Parented<USBStorageHost>,
                          public storage::StorageDevice {
 #else
-class USBStorageDevice : public Component, public usb_host::USBClassDriver, public Parented<USBStorageHost> {
+class USBStorageDevice : public usb_host::USBClient, public Parented<USBStorageHost> {
 #endif
-  friend class USBHost;
   friend class USBStorageHost;
 
  public:
-  USBStorageDevice() = default;
+  USBStorageDevice() : usb_host::USBClient(0, 0) {}
   void setup() override;
   void dump_config() override;
-  // Run after storage component (DATA=600) to ensure global_storage is initialized
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   void set_mount_path(const std::string &mount_path) { this->mount_path_ = mount_path; }
@@ -103,12 +100,13 @@ class USBStorageDevice : public Component, public usb_host::USBClassDriver, publ
   void set_pid(uint16_t pid) { this->pid_ = pid; }
   void set_id(const std::string &id) { this->id_ = id; }
 
-  // USBClassDriver interface
-  uint8_t interface_class() override { return USB_CLASS_MASS_STORAGE; }
-  bool claim_interface(const usb_intf_desc_t *intf_desc, const usb_device_desc_t *dev_desc) override;
-  void on_interface_claimed(uint8_t addr, uint8_t interface_num) override;
-  void on_device_disconnected(uint8_t addr) override;
+  uint8_t get_interface_class() const override { return USB_CLASS_MASS_STORAGE; }
 
+ protected:
+  void on_connected() override;
+  void on_removed(usb_device_handle_t handle) override;
+
+ public:
   // MSC-specific operations
   void list_files();
   void speed_test();
@@ -174,15 +172,11 @@ class USBStorageDevice : public Component, public usb_host::USBClassDriver, publ
 #endif
 
  protected:
-  uint8_t device_addr_{255};
   std::string mount_path_;
-  std::string id_;                                             // Unique identifier for storage registry
-  uint16_t vid_{0x0000};                                       // 0x0000 = wildcard, match any VID
-  uint16_t pid_{0x0000};                                       // 0x0000 = wildcard, match any PID
-  int8_t slot_{-1};                                            // Track which slot this device is using
-  std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // Callbacks to notify when mount is ready
+  std::string id_;
+  int8_t slot_{-1};
+  std::vector<mount_ready_callback_t> mount_ready_callbacks_;
 
-  // Helper to build full path
   std::string build_full_path(const char *path);
 };
 
