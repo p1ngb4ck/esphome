@@ -160,7 +160,7 @@ msc_host_device_handle_t USBStorageHost::get_handle_by_address(uint8_t usb_addr)
 }
 
 void USBStorageDevice::print_device_info() {
-  int8_t slot = this->parent_->find_msc_device_slot(static_cast<uint8_t>(this->device_addr_));
+  int8_t slot = this->parent_->find_msc_device_slot(this->device_addr_);
   if (slot < 0) {
     ESP_LOGE(TAG, "Device slot not found for printing device info");
     return;
@@ -313,19 +313,61 @@ void USBStorageHost::setup() {
   ESP_LOGI(TAG, "MSC host driver initialized successfully");
 }
 
-void USBStorageDevice::setup() {
-  USBClient::setup();
-  ESP_LOGCONFIG(TAG, "Setting up USB Storage Device");
+void USBStorageHost::on_msc_connected(uint8_t addr, uint16_t vid, uint16_t pid) {
+  for (auto *device : this->devices_) {
+    // wildcard (0,0) matches any; otherwise match VID and PID
+    if ((device->vid_ == 0 && device->pid_ == 0) ||
+        (device->vid_ == vid && device->pid_ == pid)) {
+      if (device->device_addr_ == 255) {  // not already claimed
+        device->on_device_connected(addr);
+        return;
+      }
+    }
+  }
+  ESP_LOGW(TAG, "No storage device configured for MSC addr=%d VID=0x%04X PID=0x%04X", addr, vid, pid);
 }
+
+void USBStorageHost::on_msc_removed(uint8_t addr) {
+  for (auto *device : this->devices_) {
+    if (device->device_addr_ == addr) {
+      device->on_device_disconnected(addr);
+      return;
+    }
+  }
+}
+
+void MSCDetector::on_connected() {
+  const usb_device_desc_t *desc;
+  uint16_t vid = 0, pid = 0;
+  if (usb_host_get_device_descriptor(this->device_handle_, &desc) == ESP_OK) {
+    vid = desc->idVendor;
+    pid = desc->idProduct;
+  }
+  this->connected_addr_ = static_cast<uint8_t>(this->device_addr_);
+  this->host_->on_msc_connected(this->connected_addr_, vid, pid);
+  // Release our handle — MSC host driver will open the device independently
+  this->disconnect();
+}
+
+void MSCDetector::on_removed(usb_device_handle_t handle) {
+  if (this->connected_addr_ != 0) {
+    this->host_->on_msc_removed(this->connected_addr_);
+    this->connected_addr_ = 0;
+  }
+  USBClient::on_removed(handle);
+}
+
+void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
 }
 
-void USBStorageDevice::on_connected() {
-  uint8_t addr = static_cast<uint8_t>(this->device_addr_);
+void USBStorageDevice::on_device_connected(uint8_t addr) {
   ESP_LOGI(TAG, "USB Storage Device connected (address=%d, mount_path='%s')", addr, this->mount_path_.c_str());
+
+  this->device_addr_ = addr;
 
   esp_err_t err = this->parent_->allocate_new_msc_device(addr, this->mount_path_);
   if (err != ESP_OK) {
@@ -357,12 +399,11 @@ void USBStorageDevice::on_connected() {
 #endif
 }
 
-void USBStorageDevice::on_removed(usb_device_handle_t handle) {
-  if (this->device_handle_ != handle) {
+void USBStorageDevice::on_device_disconnected(uint8_t addr) {
+  if (this->device_addr_ != addr) {
     return;
   }
 
-  uint8_t addr = static_cast<uint8_t>(this->device_addr_);
   ESP_LOGI(TAG, "USB Storage Device disconnected (address=%d)", addr);
 
   int8_t slot = this->parent_->find_msc_device_slot(addr);
@@ -373,6 +414,7 @@ void USBStorageDevice::on_removed(usb_device_handle_t handle) {
     ESP_LOGI(TAG, "Freed MSC device resources for slot %d", slot);
   }
 
+  this->device_addr_ = 255;
   this->slot_ = -1;
 
 #ifdef USE_STORAGE
@@ -381,18 +423,15 @@ void USBStorageDevice::on_removed(usb_device_handle_t handle) {
     ESP_LOGD(TAG, "Unregistered USB storage device from storage registry");
   }
 #endif
-
-  // Call base class to handle disconnect state reset
-  USBClient::on_removed(handle);
 }
 
 bool USBStorageDevice::remount_device() {
-  if (this->device_addr_ < 0) {
+  if (this->device_addr_ == 255) {
     ESP_LOGW(TAG, "No device connected, cannot remount");
     return false;
   }
 
-  uint8_t addr = static_cast<uint8_t>(this->device_addr_);
+  uint8_t addr = this->device_addr_;
 
   if (this->slot_ >= 0) {
     this->unmount_device();
@@ -404,7 +443,7 @@ bool USBStorageDevice::remount_device() {
     return false;
   }
 
-  this->slot_ = this->parent_->find_msc_device_slot(addr);
+  this->slot_ = this->parent_->find_msc_device_slot(this->device_addr_);
   if (this->slot_ < 0) {
     ESP_LOGE(TAG, "Failed to find slot for remounted device!");
     return false;

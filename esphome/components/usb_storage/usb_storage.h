@@ -44,27 +44,29 @@ static constexpr const char *MNT_PATH = "/usb";
 static constexpr uint16_t BUFFER_SIZE = 4096;
 static constexpr uint8_t MAX_MSC_DEVICES = CONFIG_FATFS_VOLUME_COUNT;
 
-/**
- * @brief MSC Device Entry
- *
- * This structure holds information about a connected MSC device,
- * including the USB address, MSC device handle, VFS handle, and assigned mount point.
- */
 typedef struct {
-  uint8_t usb_addr;                    /*!< USB device address */
-  msc_host_device_handle_t msc_device; /*!< Handle of the MSC device */
-  msc_host_vfs_handle_t vfs_handle;    /*!< VFS handle assigned to the MSC device */
+  uint8_t usb_addr;
+  msc_host_device_handle_t msc_device;
+  msc_host_vfs_handle_t vfs_handle;
 } msc_dev_entry_t;
 
 static constexpr const char *TAG = "usb_storage";
 static constexpr uint8_t SCSI_COMMAND_SET = 0x06;
 static constexpr uint8_t BULK_ONLY_TRANSFER = 0x50;
 
+// Forward declarations
+class USBStorageDevice;
+using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
+
 class USBStorageHost : public Component {
   friend class USBStorageDevice;
 
  public:
   void setup() override;
+
+  void on_msc_connected(uint8_t addr, uint16_t vid, uint16_t pid);
+  void on_msc_removed(uint8_t addr);
+  void add_device(USBStorageDevice *device) { this->devices_.push_back(device); }
 
  protected:
   void free_all_msc_devices(void);
@@ -75,22 +77,34 @@ class USBStorageHost : public Component {
   msc_host_device_handle_t get_handle_by_address(uint8_t usb_addr);
 
   msc_dev_entry_t *msc_devices_[MAX_MSC_DEVICES] = {NULL};
+  std::vector<USBStorageDevice *> devices_{};
 };
 
-// Forward declaration for mount callback
-using mount_ready_callback_t = std::function<void(const std::string &mount_path)>;
+// Thin USBClient that detects MSC devices by interface class and delegates to USBStorageHost.
+// Does not use any transfer infrastructure — just reads VID/PID from the device descriptor
+// then hands off to the MSC host driver via USBStorageHost.
+class MSCDetector : public usb_host::USBClient {
+ public:
+  explicit MSCDetector(USBStorageHost *host) : usb_host::USBClient(0, 0), host_(host) {}
+
+  uint8_t get_interface_class() const override { return USB_CLASS_MASS_STORAGE; }
+
+ protected:
+  void on_connected() override;
+  void on_removed(usb_device_handle_t handle) override;
+
+  USBStorageHost *host_;
+  uint8_t connected_addr_{0};
+};
 
 #ifdef USE_STORAGE
-class USBStorageDevice : public usb_host::USBClient,
-                         public Parented<USBStorageHost>,
-                         public storage::StorageDevice {
+class USBStorageDevice : public Component, public Parented<USBStorageHost>, public storage::StorageDevice {
 #else
-class USBStorageDevice : public usb_host::USBClient, public Parented<USBStorageHost> {
+class USBStorageDevice : public Component, public Parented<USBStorageHost> {
 #endif
   friend class USBStorageHost;
 
  public:
-  USBStorageDevice() : usb_host::USBClient(0, 0) {}
   void setup() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
@@ -100,45 +114,32 @@ class USBStorageDevice : public usb_host::USBClient, public Parented<USBStorageH
   void set_pid(uint16_t pid) { this->pid_ = pid; }
   void set_id(const std::string &id) { this->id_ = id; }
 
-  uint8_t get_interface_class() const override { return USB_CLASS_MASS_STORAGE; }
+  // Called by USBStorageHost when an MSC device with matching VID/PID connects/disconnects
+  void on_device_connected(uint8_t addr);
+  void on_device_disconnected(uint8_t addr);
 
- protected:
-  void on_connected() override;
-  void on_removed(usb_device_handle_t handle) override;
-
- public:
-  // MSC-specific operations
   void list_files();
   void speed_test();
   void file_operations();
   void print_device_info();
   uint8_t find_usb_addr_by_handle(msc_host_device_handle_t handle);
 
-  // Mount notification system for storage consumers
   void add_mount_ready_callback(const mount_ready_callback_t &callback) {
     this->mount_ready_callbacks_.push_back(callback);
   }
   const std::string &get_mount_path() const { return this->mount_path_; }
   bool is_mounted() const { return this->slot_ >= 0; }
 
-  // Public mount/unmount methods for external control
   bool remount_device();
   void unmount_device();
 
 #ifdef USE_STORAGE
-  //========================================================================
-  // StorageDevice Interface Implementation
-  //========================================================================
-
-  // Device Information (required)
   storage::StorageInfo get_info() override;
   bool is_available() override { return this->slot_ >= 0; }
 
-  // Filesystem Access
   bool supports_filesystem() override { return true; }
   std::string get_mount_path() override { return this->mount_path_; }
 
-  // File Operations
   bool file_exists(const char *path) override;
   bool get_file_size(const char *path, size_t *size) override;
   bool read_file(const char *path, uint8_t *data, size_t *length) override;
@@ -148,17 +149,14 @@ class USBStorageDevice : public usb_host::USBClient, public Parented<USBStorageH
   bool rename_file(const char *old_path, const char *new_path) override;
   bool copy_file(const char *src_path, const char *dst_path) override;
 
-  // Directory Operations
   bool dir_exists(const char *path) override;
   bool create_dir(const char *path) override;
   bool delete_dir(const char *path, bool recursive = false) override;
   bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
 
-  // Space Information
   bool get_space_info(uint64_t *total, uint64_t *free) override;
   bool can_write_file(const char *path, size_t size) override;
 
-  // Streaming File Access
   void *open_file(const char *path, const char *mode) override;
   size_t read_file_chunk(void *handle, uint8_t *buffer, size_t size) override;
   size_t write_file_chunk(void *handle, const uint8_t *data, size_t size) override;
@@ -166,12 +164,14 @@ class USBStorageDevice : public usb_host::USBClient, public Parented<USBStorageH
   size_t tell_file(void *handle) override;
   bool close_file(void *handle) override;
 
-  // Maintenance
   bool format() override;
   bool sync() override;
 #endif
 
  protected:
+  uint8_t device_addr_{255};
+  uint16_t vid_{0};
+  uint16_t pid_{0};
   std::string mount_path_;
   std::string id_;
   int8_t slot_{-1};
