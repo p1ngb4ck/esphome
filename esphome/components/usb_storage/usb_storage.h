@@ -104,6 +104,7 @@ class USBStorageDevice : public Component, public usb_host::USBClassDriver, publ
   void set_id(const std::string &id) { this->id_ = id; }
 
   // USBClassDriver interface
+  uint8_t interface_class() override { return USB_CLASS_MASS_STORAGE; }
   bool claim_interface(const usb_intf_desc_t *intf_desc, const usb_device_desc_t *dev_desc) override;
   void on_interface_claimed(uint8_t addr, uint8_t interface_num) override;
   void on_device_disconnected(uint8_t addr) override;
