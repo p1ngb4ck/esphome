@@ -197,15 +197,6 @@ class UARTComponent {
   template<typename F> void add_debug_callback(F &&callback) { this->debug_callback_.add(std::forward<F>(callback)); }
 #endif
 
-#ifdef UART_DEBUGGER_ADD_SETTINGS
-  bool debugger_needs_reload() {
-    if (this->debugger_reload_required_) {
-      this->debugger_reload_required_ = false;
-      return true;
-    }
-    return false;
-  }
-#endif
 
  protected:
   virtual void check_logger_conflict() = 0;
@@ -225,9 +216,6 @@ class UARTComponent {
   UARTParityOptions parity_{UART_CONFIG_PARITY_NONE};
 #ifdef USE_UART_DEBUGGER
   CallbackManager<void(UARTDirection, uint8_t, StringRef)> debug_callback_{};
-#endif
-#ifdef UART_DEBUGGER_ADD_SETTINGS
-  bool debugger_reload_required_{false};
 #endif
 };
 

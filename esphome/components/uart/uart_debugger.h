@@ -45,45 +45,7 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
   void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
 
 #ifdef UART_DEBUGGER_ADD_SETTINGS
-  void reload();
-
-  StringRef get_debug_prefix(StringRef debug_prefix, bool debug_add_settings, uint32_t baud_rate, uint8_t data_bits,
-                             uint8_t stop_bits, uint8_t parity) {
-    if (!debug_add_settings)
-      return StringRef(debug_prefix.c_str());
-    char buf[12];
-    std::string res = "|";
-    snprintf(buf, sizeof(buf), "%" PRIu32, baud_rate);
-    res += buf;
-    res += ":";
-    snprintf(buf, sizeof(buf), "%u", data_bits);
-    res += buf;
-    res += ":";
-    snprintf(buf, sizeof(buf), "%u", stop_bits);
-    res += buf;
-    switch (parity) {
-      case UART_CONFIG_PARITY_NONE:
-        res += ":NONE";
-        break;
-      case UART_CONFIG_PARITY_EVEN:
-        res += ":EVEN";
-        break;
-      case UART_CONFIG_PARITY_ODD:
-        res += ":ODD";
-        break;
-      default:
-        res += ":UNKNOWN";
-        break;
-    }
-    return StringRef(res + "|" + debug_prefix.c_str());
-  }
-
-  void set_debug_add_settings(bool debug_add_settings) {
-    this->debug_add_settings_ = debug_add_settings;
-    if (debug_add_settings)
-      this->final_debug_prefix_ = get_debug_prefix(this->debug_prefix_, this->debug_add_settings_, this->baud_rate_,
-                                                   this->data_bits_, this->stop_bits_, this->parity_);
-  }
+  void set_debug_add_settings(bool debug_add_settings) { this->debug_add_settings_ = debug_add_settings; }
 #endif
 
  protected:
@@ -96,15 +58,10 @@ class UARTDebugger : public Component, public Trigger<UARTDirection, std::vector
   std::vector<uint8_t> after_delimiter_{};
   size_t after_delimiter_pos_{};
   bool is_triggering_{false};
+  UARTComponent *parent_;
   StringRef debug_prefix_{};
 #ifdef UART_DEBUGGER_ADD_SETTINGS
   bool debug_add_settings_{false};
-  StringRef final_debug_prefix_{""};
-  uint32_t baud_rate_;
-  uint8_t stop_bits_;
-  uint8_t data_bits_;
-  UARTParityOptions parity_;
-  UARTComponent *parent_;
 #endif
 
   bool is_my_direction_(UARTDirection direction);
