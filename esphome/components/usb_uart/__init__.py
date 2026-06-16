@@ -44,6 +44,7 @@ UART_STOP_BITS_OPTIONS = {
 }
 
 DEFAULT_BAUD_RATE = 9600
+CONF_DEBUG_ADD_SETTINGS = "debug_add_uart_settings"
 
 
 class Type:
@@ -68,19 +69,31 @@ class Type:
         self.baud_rate_required = baud_rate_required
         self.channel_cls = channel_cls or USBUartChannel
 
-    def get_max_channels(self):
+    @property
+    def max_channels(self):
         return (
-            self._max_channels() if callable(self._max_channels) else self._max_channels
+            3
+            if CORE.is_esp32
+            and get_esp32_variant() != VARIANT_ESP32P4
+            and self._max_channels > 3
+            else self._max_channels
         )
 
 
+class MpxType(Type):
+    @property
+    def max_channels(self):
+        # Multiplexed devices aren't restricted by the number of available USB endpoints
+        return self._max_channels
+
+
 uart_types = (
-    Type("CH9344", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    Type("CH9344L", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    Type("CH9344Q", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    Type("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
-    Type("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
-    Type("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH9344", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344L", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344Q", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     Type("CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False),
     Type("CH34X", 0x1A86, 0x55D5, "CH34X", 4),
     Type("CH340", 0x1A86, 0x7523, "CH34X", 1),
@@ -101,17 +114,7 @@ uart_types = (
 
 
 def channel_schema(type_: "Type", baud_rate_required):
-    max_channels = type_.get_max_channels()
-    # S3 is restricted to 3 channels since each needs 2 endpoints plus the control endpoint,
-    # and there are only 8 endpoints available. CH934X is exempt as it multiplexes all ports
-    # over a single shared endpoint pair.
-    if (
-        type_.cls_name != "CH934X"
-        and CORE.is_esp32
-        and get_esp32_variant() != VARIANT_ESP32P4
-        and max_channels > 3
-    ):
-        max_channels = 3
+    max_channels = type_.max_channels
     return cv.Schema(
         {
             cv.Required(CONF_CHANNELS): cv.All(
@@ -142,12 +145,18 @@ def channel_schema(type_: "Type", baud_rate_required):
                             cv.Optional(CONF_DEBUG, default=False): cv.boolean,
                             cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
                             cv.Optional(
+                                CONF_DEBUG_ADD_SETTINGS, default=False
+                            ): cv.boolean,
+                            cv.Optional(
                                 CONF_FLUSH_TIMEOUT, default="100ms"
                             ): cv.positive_time_period_milliseconds,
                         }
                     )
                 ),
-                cv.Length(max=max_channels),
+                cv.Length(
+                    max=type_.max_channels,
+                    msg=f"{type_.name} supports a maximum of {max_channels} channels on this ESP32 variant",
+                ),
             )
         }
     )
@@ -193,6 +202,9 @@ async def to_code(config):
             cg.add(chvar.set_debug(channel[CONF_DEBUG]))
             if channel[CONF_DEBUG_PREFIX]:
                 cg.add(chvar.set_debug_prefix(channel[CONF_DEBUG_PREFIX]))
+            if channel[CONF_DEBUG_ADD_SETTINGS]:
+                cg.add(chvar.set_debug_add_settings(channel[CONF_DEBUG_ADD_SETTINGS]))
+                cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
             cg.add(var.add_channel(chvar))
             if channel[CONF_DEBUG]:
                 cg.add_define("USE_UART_DEBUGGER")
