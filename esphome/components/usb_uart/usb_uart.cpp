@@ -137,6 +137,21 @@ size_t RingBuffer::pop(uint8_t *data, size_t len) {
   }
   return len;
 }
+#if defined(USE_UART_DEBUGGER) && defined(UART_DEBUGGER_ADD_SETTINGS)
+std::string USBUartChannel::get_debug_prefix() const {
+  std::string prefix = "|";
+  prefix += std::to_string(this->baud_rate_);
+  prefix += ':';
+  prefix += std::to_string(this->data_bits_);
+  prefix += ':';
+  prefix += PARITY_NAMES[this->parity_];
+  prefix += ':';
+  prefix += STOP_BITS_NAMES[this->stop_bits_];
+  prefix += '|';
+  return prefix;
+}
+#endif
+
 void USBUartChannel::write_array(const uint8_t *data, size_t len) {
   if (!this->initialised_.load()) {
     ESP_LOGD(TAG, "Channel not initialised - write ignored");
@@ -145,24 +160,16 @@ void USBUartChannel::write_array(const uint8_t *data, size_t len) {
 #ifdef USE_UART_DEBUGGER
   if (this->debug_) {
     constexpr size_t batch = 16;
-    char buf[format_hex_pretty_size(batch)];  // "XX,XX,...,XX\0"
-#ifdef UART_DEBUGGER_ADD_SETTINGS
-    char settings_prefix[48];
-    if (this->debug_add_settings_) {
-      snprintf(settings_prefix, sizeof(settings_prefix), "|%" PRIu32 ":%u:%s:%s|",
-               this->baud_rate_, this->data_bits_, PARITY_NAMES[this->parity_], STOP_BITS_NAMES[this->stop_bits_]);
-    } else {
-      settings_prefix[0] = '\0';
-    }
-#endif
+    char buf[format_hex_pretty_size(batch)];
     for (size_t off = 0; off < len; off += batch) {
       size_t n = std::min(len - off, batch);
       format_hex_pretty_to(buf, data + off, n, ',');
 #ifdef UART_DEBUGGER_ADD_SETTINGS
-      ESP_LOGD(TAG, "%s%s>>> %s", settings_prefix, this->debug_prefix_.c_str(), buf);
-#else
-      ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
+      if (this->debug_add_settings_)
+        ESP_LOGD(TAG, "%s%s>>> %s", this->get_debug_prefix().c_str(), this->debug_prefix_.c_str(), buf);
+      else
 #endif
+        ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
     }
   }
 #endif
@@ -238,21 +245,14 @@ void USBUartComponent::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
-      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];  // "XX,XX,...,XX\0"
+      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];
       format_hex_pretty_to(buf, chunk->data, chunk->length, ',');
 #ifdef UART_DEBUGGER_ADD_SETTINGS
-      if (channel->debug_add_settings_) {
-        char settings_prefix[48];
-        snprintf(settings_prefix, sizeof(settings_prefix), "|%" PRIu32 ":%u:%s:%s|",
-                 channel->baud_rate_, channel->data_bits_, PARITY_NAMES[channel->parity_],
-                 STOP_BITS_NAMES[channel->stop_bits_]);
-        ESP_LOGD(TAG, "%s%s<<< %s", settings_prefix, channel->debug_prefix_.c_str(), buf);
-      } else {
-        ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
-      }
-#else
-      ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
+      if (channel->debug_add_settings_)
+        ESP_LOGD(TAG, "%s%s<<< %s", channel->get_debug_prefix().c_str(), channel->debug_prefix_.c_str(), buf);
+      else
 #endif
+        ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
     }
 #endif
 

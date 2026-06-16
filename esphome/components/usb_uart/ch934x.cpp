@@ -559,12 +559,16 @@ void CH934XChannel::write_array(const uint8_t *data, size_t len) {
 #ifdef USE_UART_DEBUGGER
   if (this->debug_) {
     constexpr size_t batch = 16;
-    char buf[4 + format_hex_pretty_size(batch)];
+    char buf[format_hex_pretty_size(batch)];
     for (size_t off = 0; off < len; off += batch) {
       size_t n = std::min(len - off, batch);
-      strcpy(buf, ">>> ");
-      format_hex_pretty_to(buf + 4, sizeof(buf) - 4, data + off, n, ',');
-      ESP_LOGD(TAG, "%s%s", this->debug_prefix_.c_str(), buf);
+      format_hex_pretty_to(buf, data + off, n, ',');
+#ifdef UART_DEBUGGER_ADD_SETTINGS
+      if (this->debug_add_settings_)
+        ESP_LOGD(TAG, "%s%s>>> %s", this->get_debug_prefix().c_str(), this->debug_prefix_.c_str(), buf);
+      else
+#endif
+        ESP_LOGD(TAG, "%s>>> %s", this->debug_prefix_.c_str(), buf);
     }
   }
 #endif
