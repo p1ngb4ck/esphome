@@ -196,8 +196,40 @@ bool USBUartTypeCH934X::config_device_step(uint8_t step, bool ok, const uint8_t 
 // (baud/parity/stop/data) to an already-open channel.
 bool USBUartTypeCH934X::config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok,
                                     const uint8_t *response) {
-  if (reload && step == 0 && channel->index_ < this->num_ports_)
-    this->configure_uart_parameters_(channel);
+  if (!reload || channel->index_ >= this->num_ports_)
+    return false;
+
+  this->configure_uart_parameters_(channel);
+
+  // Re-send the post-parameter register writes that configure_channel_() issues after
+  // configure_uart_parameters_() during full init. Without these, the device does not
+  // apply the new settings on a runtime reload:
+  //   - R_C1 | 0x07 (CMD_W_R): re-assert UART enable / control lines
+  //   - R_C4 | 0x00 then R_C4 | 0x10 (CMD_W_BR, CH9344 only): commit the new baud config
+  uint8_t portnum = channel->index_;
+  uint8_t rgadd = this->get_reg_address_(portnum);
+  uint8_t buffer[3];
+
+  usb_host::transfer_cb_t callback = [=](const usb_host::TransferStatus &status) {
+    if (!status.success)
+      ESP_LOGE(TAG, "Reload post-param write failed: %s", esp_err_to_name(status.error_code));
+  };
+
+  buffer[0] = CMD_W_R;
+  buffer[1] = rgadd + R_C1;
+  buffer[2] = 0x07;
+  this->transfer_out(this->uart_host_dev_.ep_cmd_write->bEndpointAddress, callback, buffer, 3);
+
+  if (this->chiptype_ == CHIP_CH9344L || this->chiptype_ == CHIP_CH9344Q) {
+    buffer[0] = CMD_W_BR;
+    buffer[1] = rgadd + R_C4;
+    buffer[2] = 0x00;
+    this->transfer_out(this->uart_host_dev_.ep_cmd_write->bEndpointAddress, callback, buffer, 3);
+
+    buffer[2] = 0x10;
+    this->transfer_out(this->uart_host_dev_.ep_cmd_write->bEndpointAddress, callback, buffer, 3);
+  }
+
   return false;
 }
 
