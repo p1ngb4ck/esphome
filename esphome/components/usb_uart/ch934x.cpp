@@ -645,6 +645,17 @@ void USBUartTypeCH934X::on_connected() {
     return;
   }
 
+  for (auto *channel : this->channels_) {
+    if (!channel->input_buffer_.has_buffer()) {
+      if (!channel->input_buffer_.allocate()) {
+        ESP_LOGE(TAG, "Channel %d: out of memory for RX buffer", channel->index_);
+        this->status_set_error(LOG_STR("Out of memory for RX buffer"));
+        this->disconnect();
+        return;
+      }
+    }
+    channel->destroying_.store(false);
+  }
   this->enable_channels();
 }
 
@@ -655,7 +666,7 @@ void USBUartTypeCH934X::on_disconnected() {
   for (auto *channel : this->channels_) {
     channel->initialised_.store(false);
     channel->input_started_.store(false);
-    channel->input_buffer_.clear();
+    channel->destroying_.store(true);
   }
   // Shared TX queue lives on channel 0 — drain it on disconnect
   if (!this->channels_.empty()) {
