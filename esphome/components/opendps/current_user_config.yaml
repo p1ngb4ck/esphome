@@ -231,7 +231,6 @@ globals:
   - id: opendps_firmware_path
     type: std::string
     initial_value: '"/sdcard/opendps_DPS5005.bin"'
-    restore_value: True
   # Two input voltages for two-point VIN calibration (like dpsctl.py)
   - id: cal_vin_low_mv
     type: float
@@ -312,7 +311,6 @@ globals:
   # datalogger dir
   - id: g_log_dir
     type: std::string
-    restore_value: true
     initial_value: '"/sdcard/logs"'
   - id: g_log_cwd
     type: std::string
@@ -1161,7 +1159,7 @@ select:
                    new_baud_rate);
           if (id(uart1_id).get_baud_rate() != new_baud_rate) {
             id(uart1_id).set_baud_rate(new_baud_rate);
-            id(uart1_id).load_settings();
+            id(uart1_id).load_settings(true);
           }
     web_server:
       sorting_group_id: opendps_control
