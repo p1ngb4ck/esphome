@@ -1,7 +1,14 @@
 esphome:
-  name: esp32-p4-tab7
-  friendly_name: 7inch-tab
+  name: opendps
+  friendly_name: "OpenDPS"
   on_boot:
+    - priority: 900
+      then:
+        - lambda: |-
+            App.set_loop_interval(0);
+    - priority: 1
+      then:
+        - lvgl.resume:
     - priority: 1
       then:
         - lambda: |-
@@ -18,35 +25,10 @@ esphome:
               lv_obj_set_style_bg_color(id(fw_progress_bar), ok ? lv_color_hex(0x39FF14) : lv_color_hex(0xFF3333), LV_PART_INDICATOR);
               lv_obj_clear_state(id(fw_progress_close), LV_STATE_DISABLED);
             });
-    - priority: 10
-      then:
-        - lambda: |-
-            auto &cal = id(opendps_id).get_calibration_data();
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);
-            id(input_v_adc_k).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);
-            id(input_v_adc_c).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);
-            id(input_v_dac_k).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);
-            id(input_v_dac_c).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);
-            id(input_a_adc_k).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);
-            id(input_a_adc_c).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);
-            id(input_a_dac_k).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);
-            id(input_a_dac_c).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k);
-            id(input_vin_adc_k).publish_state(buf);
-            snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c);
-            id(input_vin_adc_c).publish_state(buf);
-            ESP_LOGI("cal", "Updated text inputs with current calibration values");
 
 esp32:
   variant: ESP32P4
+  board: esp32-p4-evboard
   flash_size: 16MB
   cpu_frequency: 360MHz
   engineering_sample: true
@@ -72,14 +54,16 @@ esp32:
       CONFIG_LWIP_MAX_SOCKETS: "16"
       CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
       CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
-      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "180"
       CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_ESP_HOSTED_CONFIG_DEFAULT_SLAVE_RESET_DURATION: "0"
 
 external_components:
   - source: github://p1ngb4ck/esphome@dev
-    components: [esp32, http_file_browser, nfs_client, opendps, storage, sd_storage, uart, usb_audio, usb_host, usb_storage, usb_uart]
+    components: [esp32, http_file_browser, nfs_client, opendps, storage, sd_storage, uart, usb_host, usb_storage, usb_uart]
     refresh: 0s
-  - source: github://youkorr/lvgl_9.5
+  - source: github://p1ngb4ck/lvgl_9.5
     components: [font, image, lvgl]
     refresh: 0s
 
@@ -91,7 +75,7 @@ logger:
     usb_host: DEBUG
     usb_client: DEBUG
     usb_device: DEBUG
-    usb_uart: INFO
+    usb_uart: DEBUG
     sd_storage: DEBUG
     storage: DEBUG
     opendps: INFO
@@ -103,6 +87,7 @@ psram:
 debug:
 
 esp32_hosted:
+  type: sdio
   variant: ESP32C6
   reset_pin: GPIO54
   cmd_pin: GPIO19
@@ -122,6 +107,7 @@ time:
       - seconds: /1
         then:
           - lambda: |-
+              if (!id(g_lvgl_ready)) return;
               auto t = id(rx8130_time).now();
               if (!t.is_valid()) return;
               if (t.second != 0 && lv_label_get_text(id(lbl_status_time))[0] != '-') return;
@@ -271,7 +257,10 @@ globals:
   - id: g_slider_updating
     type: bool
     initial_value: "false"
-  - id: g_chart_v_val
+  - id: g_chart_v_val       # Vout × 10  (e.g. 12.34V → 123)
+    type: int
+    initial_value: "0"
+  - id: g_chart_vset_val    # Vset × 10  — setpoint line
     type: int
     initial_value: "0"
   - id: g_locked
@@ -280,10 +269,13 @@ globals:
   - id: g_logging
     type: bool
     initial_value: "false"
-  - id: g_chart_i_val
+  - id: g_chart_i_val       # Iout × 100 (e.g. 1.234A → 123)
     type: int
     initial_value: "0"
-  - id: g_chart_p_val
+  - id: g_chart_iset_val    # Iset × 100 — setpoint line
+    type: int
+    initial_value: "0"
+  - id: g_chart_p_val       # power normalized to primary V-axis range
     type: int
     initial_value: "0"
 
@@ -317,7 +309,17 @@ globals:
   - id: cal_backup_path
     type: std::string
     initial_value: '"/sdcard/opendps_calibration.cfg"'
-
+  # datalogger dir
+  - id: g_log_dir
+    type: std::string
+    restore_value: true
+    initial_value: '"/sdcard/logs"'
+  - id: g_log_cwd
+    type: std::string
+    initial_value: '"/sdcard"'
+  - id: g_log_storage
+    type: int
+    initial_value: "0"
   # Preset system
   - id: g_preset_active
     type: bool
@@ -338,6 +340,12 @@ globals:
   - id: g_edit_i
     type: float
     initial_value: "1.0"
+  - id: g_v_hold_count
+    type: int
+    initial_value: "0"
+  - id: g_i_hold_count
+    type: int
+    initial_value: "0"
   # preset voltages (slots 0-11)
   - id: preset_v_0
     type: float
@@ -470,12 +478,43 @@ globals:
     type: int
     restore_value: false
     initial_value: "0"
-  - id: g_cal_editing_field
-    type: int
-    restore_value: false
-    initial_value: "0"
+  - id: g_lvgl_ready
+    type: bool
+    initial_value: "false"
 
 interval:
+  - interval: 5s
+    then:
+#      - uart.write:
+#          id: ftdi_uart_1
+#          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_1
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_2
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_3
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_4
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_5
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_6
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_7
+          data: "Hello World !\n"
+      - uart.write:
+          id: octa_uart_8
+          data: "Hello World !\n"
+      - uart.write:
+          id: pl2303_uart_1
+          data: "Hello World !\n"
   - interval: 10s
     then:
       - lambda: |-
@@ -490,6 +529,7 @@ interval:
           id(bs_sd_mounted).publish_state(sd_ok);
           id(bs_usb_mounted).publish_state(usb_ok);
           id(bs_nfs_mounted).publish_state(nfs_ok);
+          if (!id(g_lvgl_ready)) return;
           lv_obj_set_style_text_color(id(lbl_icon_dps), dps_ok ? lv_color_hex(0x39FF14) : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_ha), ha_ok ? lv_color_hex(0x44AAFF) : lv_color_hex(0x333333), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_icon_sd), sd_ok ? lv_color_hex(0xFFFF44) : lv_color_hex(0x333333), LV_PART_MAIN);
@@ -502,6 +542,17 @@ interval:
             lambda: 'return id(g_fw_flashing);'
           then:
             - script.execute: fw_poll_status
+
+  # Chart tick: push all series every 250 ms for time-based shifting
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (!id(g_lvgl_ready)) return;
+          lv_chart_set_next_value(id(chart_main), id(ser_v),    id(g_chart_v_val));
+          lv_chart_set_next_value(id(chart_main), id(ser_vset), id(g_chart_vset_val));
+          lv_chart_set_next_value(id(chart_main), id(ser_i),    id(g_chart_i_val));
+          lv_chart_set_next_value(id(chart_main), id(ser_iset), id(g_chart_iset_val));
+          lv_chart_set_next_value(id(chart_main), id(ser_p),    id(g_chart_p_val));
 
 display:
   - platform: mipi_dsi
@@ -559,9 +610,116 @@ usb_host:
   id: usb_host_id
   enable_hubs: True
   devices:
-    - id: usb_uart
+    - id: usb_uart_id
       vid: 0
       pid: 0
+
+usb_uart:
+  - id: pl2303_clone
+    type: pl2303
+    vid: 0x067B
+    pid: 0x2303
+    channels:
+      - id: pl2303_uart_1
+        baud_rate: 115200
+        buffer_size: 1024
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "pl2303_uart_1"
+  - id: ft232_clone
+    type: FT232
+    vid: 0x0403
+    pid: 0x6001
+    channels:
+      - id: ftdi_uart_1
+        baud_rate: 115200
+        buffer_size: 1024
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "ftdi_uart_1"
+  - id: octa_usb_uart
+    type: CH348
+    vid: 0x1A86
+    pid: 0x55D9
+    channels:
+      - id: octa_uart_1
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_1"
+      - id: octa_uart_2
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_2"
+      - id: octa_uart_3
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_3"
+      - id: octa_uart_4
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_4"
+      - id: octa_uart_5
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_5"
+      - id: octa_uart_6
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_6"
+      - id: octa_uart_7
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_7"
+      - id: octa_uart_8
+        baud_rate: 115200
+        buffer_size: 4096
+        data_bits: 8
+        stop_bits: 1
+        parity: NONE
+        debug: True
+        dummy_receiver: False
+        debug_prefix: "octa_uart_8"
 
 usb_storage:
   id: usb_storage_id
@@ -881,7 +1039,7 @@ select:
     on_value:
       - if:
           condition:
-            lambda: 'return i == 0;'
+            lambda: 'return id(g_lvgl_ready) && i == 0;'
           then:
             - lvgl.widget.update:
                 id: btn_cv
@@ -912,7 +1070,7 @@ select:
                 text_color: 0x444444
       - if:
           condition:
-            lambda: 'return i == 1;'
+            lambda: 'return id(g_lvgl_ready) && i == 1;'
           then:
             - lvgl.widget.update:
                 id: btn_cc
@@ -943,7 +1101,7 @@ select:
                 text_color: 0x444444
       - if:
           condition:
-            lambda: 'return i == 2;'
+            lambda: 'return id(g_lvgl_ready) && i == 2;'
           then:
             - lvgl.widget.update:
                 id: btn_cp
@@ -1188,9 +1346,13 @@ binary_sensor:
                   lv_obj_set_style_text_color(id(lbl_pwr_on), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_vout_unit), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x4499FF), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_iout_unit), lv_color_hex(0x4499FF), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x1A4A1A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv_unit), lv_color_hex(0x1A4A1A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x1A1A4A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti_unit), lv_color_hex(0x1A1A4A), LV_PART_MAIN);
             else:
               - lvgl.widget.update:
                   id: pwr_ring
@@ -1203,9 +1365,13 @@ binary_sensor:
                   lv_obj_set_style_text_color(id(lbl_pwr_off), lv_color_hex(0x555555), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_pwr_icon), lv_color_hex(0x555555), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_vout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_vout_unit), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_iout), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_iout_unit), lv_color_hex(0x2A2A2A), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_setv), lv_color_hex(0x39FF14), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_setv_unit), lv_color_hex(0x39FF14), LV_PART_MAIN);
                   lv_obj_set_style_text_color(id(lbl_seti), lv_color_hex(0x4499FF), LV_PART_MAIN);
+                  lv_obj_set_style_text_color(id(lbl_seti_unit), lv_color_hex(0x4499FF), LV_PART_MAIN);
       web_server:
         sorting_group_id: opendps_sensors
         sorting_weight: 10
@@ -1472,11 +1638,13 @@ number:
           id: g_vset
           value: !lambda 'return x;'
       - lambda: |-
+          if (!id(g_lvgl_ready)) return;
           id(g_slider_updating) = true;
           lv_slider_set_value(id(sl_v), (int)(x / id(g_vmax) * 10000.0f), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_v));
           id(g_slider_updating) = false;
       - lambda: |-
+          if (!id(g_lvgl_ready)) return;
           char buf[16];
           snprintf(buf, sizeof(buf), "%.2f", x);
           lv_label_set_text(id(lbl_setv), buf);
@@ -1502,9 +1670,11 @@ number:
           id: g_iset
           value: !lambda 'return x;'
       - lambda: |-
+          if (!id(g_lvgl_ready)) return;
           lv_slider_set_value(id(sl_i), (int)(x * 100), LV_ANIM_OFF);
           lv_obj_invalidate(id(sl_i));
       - lambda: |-
+          if (!id(g_lvgl_ready)) return;
           char buf[16];
           snprintf(buf, sizeof(buf), "%.3f", x);
           lv_label_set_text(id(lbl_seti), buf);
@@ -1528,24 +1698,29 @@ number:
           id: g_vmax
           value: !lambda 'return x;'
       - lambda: |-
+          if (!id(g_lvgl_ready)) return;
           lv_obj_invalidate(id(sl_v));
           char buf[8];
           snprintf(buf, sizeof(buf), "%.1f", x * 0.25f); lv_label_set_text(id(lbl_vtick25), buf);
           snprintf(buf, sizeof(buf), "%.1f", x * 0.50f); lv_label_set_text(id(lbl_vtick50), buf);
           snprintf(buf, sizeof(buf), "%.1f", x * 0.75f); lv_label_set_text(id(lbl_vtick75), buf);
           snprintf(buf, sizeof(buf), "%.1fV", x);         lv_label_set_text(id(lbl_vtick100), buf);
-      - lvgl.label.update:
-          id: lbl_vrange
-          text: !lambda |-
-            char buf[16];
-            snprintf(buf, sizeof(buf), "0 - %.1fV", x);
-            return std::string(buf);
-      - lvgl.label.update:
-          id: lbl_vmax_val
-          text: !lambda |-
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%.1fV", x);
-            return std::string(buf);
+      - if:
+          condition:
+            lambda: 'return id(g_lvgl_ready);'
+          then:
+            - lvgl.label.update:
+                id: lbl_vrange
+                text: !lambda |-
+                  char buf[16];
+                  snprintf(buf, sizeof(buf), "0 - %.1fV", x);
+                  return std::string(buf);
+            - lvgl.label.update:
+                id: lbl_vmax_val
+                text: !lambda |-
+                  char buf[8];
+                  snprintf(buf, sizeof(buf), "%.1fV", x);
+                  return std::string(buf);
     web_server:
       sorting_group_id: opendps_control
       sorting_weight: 70
@@ -1567,83 +1742,108 @@ sensor:
     voltage_out:
       id: opendps_output_voltage
       on_value:
-        - lvgl.label.update:
-            id: lbl_vout
-            text: {format: "%.2f", args: [x]}
-            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A);'
-        - lvgl.label.update:
-            id: lbl_vout_g
-            text: {format: "Vout  %.2fV", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_lvgl_ready);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_vout
+                  text: {format: "%.2f", args: [x]}
+                  text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x39FF14) : lv_color_hex(0x2A2A2A);'
+              - lvgl.label.update:
+                  id: lbl_vout_g
+                  text: {format: "Vout  %.2fV", args: [x]}
         - lambda: |-
-            float vset = id(opendps_voltage_set).state;
-            if (isnan(vset) || vset <= 0.01f) { id(g_chart_v_val) = 0; return; }
-            int v = (int)(x / vset * 1000.0f);
+            int v = (int)(x * 10.0f + 0.5f);
             if (v < 0) v = 0;
-            if (v > 1000) v = 1000;
             id(g_chart_v_val) = v;
-        - lvgl.chart.set_next_value:
-            id: chart_main
-            series_id: ser_v
-            value: !lambda 'return id(g_chart_v_val);'
     current_out:
       id: opendps_ouput_current
       on_value:
-        - lvgl.label.update:
-            id: lbl_iout
-            text: {format: "%.3f", args: [x]}
-            text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A);'
-        - lvgl.label.update:
-            id: lbl_iout_g
-            text: {format: "Iout  %.3fA", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_lvgl_ready);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_iout
+                  text: {format: "%.3f", args: [x]}
+                  text_color: !lambda 'return id(g_output_on) ? lv_color_hex(0x4499FF) : lv_color_hex(0x2A2A2A);'
+              - lvgl.label.update:
+                  id: lbl_iout_g
+                  text: {format: "Iout  %.3fA", args: [x]}
         - lambda: |-
-            float iset = id(opendps_current_set).state;
-            if (isnan(iset) || iset <= 0.001f) { id(g_chart_i_val) = 0; return; }
-            int v = (int)(x / iset * 1000.0f);
+            int v = (int)(x * 100.0f + 0.5f);
             if (v < 0) v = 0;
-            if (v > 1000) v = 1000;
             id(g_chart_i_val) = v;
-        - lvgl.chart.set_next_value:
-            id: chart_main
-            series_id: ser_i
-            value: !lambda 'return id(g_chart_i_val);'
 
     power_out:
       id: opendps_output_power
       on_value:
-        - lvgl.label.update:
-            id: lbl_pout_g
-            text: {format: "Pout  %.2fW", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_lvgl_ready);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_pout_g
+                  text: {format: "Pout  %.2fW", args: [x]}
         - lambda: |-
             float vset = id(opendps_voltage_set).state;
             float iset = id(opendps_current_set).state;
             float pmax = vset * iset;
-            if (isnan(pmax) || pmax <= 0.001f) { id(g_chart_p_val) = 0; return; }
-            int v = (int)(x / pmax * 1000.0f);
+            // Normalize power to the V-axis range (0..Vset*1.15*10) so it overlays correctly
+            float v_axis_max = vset * 1.15f * 10.0f;
+            if (isnan(pmax) || pmax <= 0.001f || v_axis_max <= 0.001f) { id(g_chart_p_val) = 0; return; }
+            int v = (int)(x / pmax * v_axis_max + 0.5f);
             if (v < 0) v = 0;
-            if (v > 1000) v = 1000;
             id(g_chart_p_val) = v;
-        - lvgl.chart.set_next_value:
-            id: chart_main
-            series_id: ser_p
-            value: !lambda 'return id(g_chart_p_val);'
     voltage_set:
       id: opendps_voltage_set
       on_value:
         - lambda: |-
             if (!id(g_ui_active))
               id(voltage_number).make_call().set_value(x).perform();
+            // Update V setpoint global and chart primary-Y axis range
+            id(g_chart_vset_val) = (int)(x * 10.0f + 0.5f);
+            if (!id(g_lvgl_ready)) return;
+            int v_max = (int)(x * 1.15f * 10.0f + 0.5f);
+            if (v_max < 10) v_max = 10;
+            lv_chart_set_range(id(chart_main), LV_CHART_AXIS_PRIMARY_Y, 0, v_max);
+            // Update left scale labels (5 ticks: 0%, 25%, 50%, 75%, 100% of Vset*1.15)
+            float step = x * 1.15f / 4.0f;
+            lv_label_set_text_fmt(id(lbl_scale_v4), "%.1f", x * 1.15f);
+            lv_label_set_text_fmt(id(lbl_scale_v3), "%.1f", step * 3.0f);
+            lv_label_set_text_fmt(id(lbl_scale_v2), "%.1f", step * 2.0f);
+            lv_label_set_text_fmt(id(lbl_scale_v1), "%.1f", step * 1.0f);
+            lv_label_set_text_fmt(id(lbl_scale_v0), "0.0");
     current_set:
       id: opendps_current_set
       on_value:
         - lambda: |-
             if (!id(g_ui_active))
               id(current_number).make_call().set_value(x).perform();
+            // Update I setpoint global and chart secondary-Y axis range
+            id(g_chart_iset_val) = (int)(x * 100.0f + 0.5f);
+            if (!id(g_lvgl_ready)) return;
+            int i_max = (int)(x * 1.15f * 100.0f + 0.5f);
+            if (i_max < 10) i_max = 10;
+            lv_chart_set_range(id(chart_main), LV_CHART_AXIS_SECONDARY_Y, 0, i_max);
+            // Update right scale labels (5 ticks: 0%, 25%, 50%, 75%, 100% of Iset*1.15)
+            float step = x * 1.15f / 4.0f;
+            lv_label_set_text_fmt(id(lbl_scale_i4), "%.2f", x * 1.15f);
+            lv_label_set_text_fmt(id(lbl_scale_i3), "%.2f", step * 3.0f);
+            lv_label_set_text_fmt(id(lbl_scale_i2), "%.2f", step * 2.0f);
+            lv_label_set_text_fmt(id(lbl_scale_i1), "%.2f", step * 1.0f);
+            lv_label_set_text_fmt(id(lbl_scale_i0), "0.00");
     voltage_in:
       id: opendps_input_voltage
       on_value:
-        - lvgl.label.update:
-            id: lbl_vin
-            text: {format: "%.2fV", args: [x]}
+        - if:
+            condition:
+              lambda: 'return id(g_lvgl_ready);'
+            then:
+              - lvgl.label.update:
+                  id: lbl_vin
+                  text: {format: "%.2fV", args: [x]}
 
 script:
   - id: opendps_on_connect_init
@@ -1852,6 +2052,98 @@ script:
       - lvgl.widget.disable: fw_flash_btn
       - script.execute: fw_refresh_list
 
+  # Rebuilds the dir list of log_dir_list from current g_log_cwd (directories only).
+  - id: log_refresh_list
+    mode: restart
+    then:
+      - lambda: |-
+          lv_obj_t *list = id(log_dir_list);
+          lv_obj_clean(list);
+
+          std::string cwd = id(g_log_cwd);
+          lv_label_set_text(id(log_breadcrumb), cwd.c_str());
+          lv_label_set_text(id(log_dir_selected_lbl), cwd.c_str());
+
+          std::vector<std::string> dirs;
+
+          DIR *dir = opendir(cwd.c_str());
+          if (!dir) {
+            lv_obj_t *err = lv_list_add_text(list, "(cannot open directory)");
+            lv_obj_set_style_text_color(err, lv_color_hex(0xFF6666), 0);
+            return;
+          }
+          struct dirent *ent;
+          while ((ent = readdir(dir)) != nullptr) {
+            std::string name = ent->d_name;
+            if (name == "." || name == "..") continue;
+            std::string path = cwd + "/" + name;
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) dirs.push_back(name);
+          }
+          closedir(dir);
+          std::sort(dirs.begin(), dirs.end());
+
+          auto delete_cb = [](lv_event_t *e) {
+            void *ud = lv_obj_get_user_data((lv_obj_t *)lv_event_get_target(e));
+            uintptr_t p = (uintptr_t)ud;
+            if (p == 0) return;
+            char *s = (char *)(p & ~(uintptr_t)1);
+            delete[] s;
+          };
+          auto click_cb = [](lv_event_t *e) {
+            lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+            uintptr_t p = (uintptr_t)lv_obj_get_user_data(btn);
+            if (p == 0) {
+              std::string cwd = id(g_log_cwd);
+              size_t pos = cwd.find_last_of('/');
+              if (pos != std::string::npos && pos > 0)
+                id(g_log_cwd) = cwd.substr(0, pos);
+              id(log_refresh_list).execute();
+              return;
+            }
+            char *s = (char *)(p & ~(uintptr_t)1);
+            id(g_log_cwd) = s;
+            lv_label_set_text(id(log_breadcrumb), s);
+            id(log_refresh_list).execute();
+          };
+
+          if (cwd != "/sdcard" && cwd != "/usb" && cwd != "/nfs" && cwd != "/") {
+            lv_obj_t *up_btn = lv_list_add_button(list, LV_SYMBOL_UP, "..  (parent)");
+            lv_obj_set_user_data(up_btn, nullptr);
+            lv_obj_add_event_cb(up_btn, click_cb, LV_EVENT_CLICKED, nullptr);
+          }
+          for (size_t i = 0; i < dirs.size(); i++) {
+            std::string full = cwd + "/" + dirs[i];
+            char *s = new char[full.size() + 1];
+            memcpy(s, full.c_str(), full.size() + 1);
+            lv_obj_t *b = lv_list_add_button(list, LV_SYMBOL_DIRECTORY, dirs[i].c_str());
+            lv_obj_set_style_text_color(b, lv_color_hex(0xCCCCCC), 0);
+            lv_obj_set_user_data(b, (void *)((uintptr_t)s | 1));
+            lv_obj_add_event_cb(b, click_cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_add_event_cb(b, delete_cb, LV_EVENT_DELETE, nullptr);
+          }
+          if (dirs.empty()) {
+            lv_obj_t *e = lv_list_add_text(list, "(no subdirectories)");
+            lv_obj_set_style_text_color(e, lv_color_hex(0x777777), 0);
+          }
+
+  - id: log_set_storage
+    mode: restart
+    parameters:
+      which: int
+    then:
+      - globals.set:
+          id: g_log_storage
+          value: !lambda 'return which;'
+      - lambda: |-
+          switch (which) {
+            case 0: id(g_log_cwd) = "/sdcard"; break;
+            case 1: id(g_log_cwd) = "/usb"; break;
+            case 2: id(g_log_cwd) = "/nfs"; break;
+          }
+      - script.execute: log_refresh_list
+
   # Trigger the firmware flash using the OpenDPS hub
   - id: fw_flash
     mode: single
@@ -1975,11 +2267,15 @@ script:
 
           // ── Set value labels ──────────────────────────────────────────
           lv_obj_set_style_text_color(id(lbl_setv), pwr ? c_acc_dim : c_volt, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_setv_unit), pwr ? c_acc_dim : c_volt, LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_seti), pwr ? c_curr_dim : c_curr, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_seti_unit), pwr ? c_curr_dim : c_curr, LV_PART_MAIN);
 
           // ── Readout labels ────────────────────────────────────────────
           lv_obj_set_style_text_color(id(lbl_vout), pwr ? c_volt : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_vout_unit), pwr ? c_volt : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
           lv_obj_set_style_text_color(id(lbl_iout), pwr ? c_curr : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(lbl_iout_unit), pwr ? c_curr : lv_color_hex(0x2A2A2A), LV_PART_MAIN);
 
           // ── Tab bar ───────────────────────────────────────────────────
           // Active tab determined by current page — just set all to dim, active page handler will correct
@@ -2051,60 +2347,73 @@ script:
           char buf[16];
           snprintf(buf, sizeof(buf), "%d / %d", s + 1, id(preset_count));
           lv_label_set_text(id(lbl_edit_slot), buf);
-          snprintf(buf, sizeof(buf), "%.4g", id(g_edit_v));
+          snprintf(buf, sizeof(buf), "%.2f", id(g_edit_v));
           lv_label_set_text(id(lbl_edit_v), buf);
-          snprintf(buf, sizeof(buf), "%.4g", id(g_edit_i));
+          snprintf(buf, sizeof(buf), "%.3f", id(g_edit_i));
           lv_label_set_text(id(lbl_edit_i), buf);
-          // Update preset count label
-          snprintf(buf, sizeof(buf), "%d", id(preset_count));
-          lv_label_set_text(id(lbl_preset_count), buf);
-          // Save disabled if V=0 or I=0
-          bool save_ok = (id(g_edit_v) > 0.0f) && (id(g_edit_i) > 0.0f);
+          // Show Save/Add only when unsaved changes exist and values are valid
+          bool save_ok = id(g_preset_new_unsaved) && (id(g_edit_v) > 0.0f) && (id(g_edit_i) > 0.0f);
           if (save_ok)
-            lv_obj_clear_state(id(btn_preset_edit_save), LV_STATE_DISABLED);
+            lv_obj_clear_flag(id(btn_preset_edit_save), LV_OBJ_FLAG_HIDDEN);
           else
-            lv_obj_add_state(id(btn_preset_edit_save), LV_STATE_DISABLED);
-          // Count-inc disabled while a new unsaved slot exists or count at max
-          bool inc_ok = !id(g_preset_new_unsaved) && (id(preset_count) < 12);
-          if (inc_ok)
-            lv_obj_clear_state(id(btn_preset_count_inc), LV_STATE_DISABLED);
+            lv_obj_add_flag(id(btn_preset_edit_save), LV_OBJ_FLAG_HIDDEN);
+          // Add (new slot) visible only when unsaved and count below max
+          bool add_ok = id(g_preset_new_unsaved) && (id(preset_count) <= 12);
+          if (add_ok)
+            lv_obj_clear_flag(id(btn_preset_add_new), LV_OBJ_FLAG_HIDDEN);
           else
-            lv_obj_add_state(id(btn_preset_count_inc), LV_STATE_DISABLED);
+            lv_obj_add_flag(id(btn_preset_add_new), LV_OBJ_FLAG_HIDDEN);
 
-  # Voltage decrement (0.1V steps, min 0.1)
-  - id: scr_edit_v_step
+  # Voltage decrement — step size accelerates with hold count: 0.01 → 0.1 → 1.0 V
+  - id: scr_edit_v_dec
     then:
       - lambda: |-
-          float v = roundf((id(g_edit_v) - 0.1f) * 10.0f) / 10.0f;
-          if (v < 0.1f) v = 0.1f;
+          int n = id(g_v_hold_count);
+          float step = (n < 5) ? 0.01f : (n < 15) ? 0.1f : 1.0f;
+          float v = roundf((id(g_edit_v) - step) * 1000.0f) / 1000.0f;
+          if (v < 0.0f) v = 0.0f;
           id(g_edit_v) = v;
+          id(g_v_hold_count) = n + 1;
+          id(g_preset_new_unsaved) = true;
           id(scr_update_edit_labels).execute();
 
-  # Voltage increment (0.1V steps, max 50.0)
-  - id: scr_edit_v_step_up
+  # Voltage increment — step size accelerates with hold count: 0.01 → 0.1 → 1.0 V
+  - id: scr_edit_v_inc
     then:
       - lambda: |-
-          float v = roundf((id(g_edit_v) + 0.1f) * 10.0f) / 10.0f;
+          int n = id(g_v_hold_count);
+          float step = (n < 5) ? 0.01f : (n < 15) ? 0.1f : 1.0f;
+          float v = roundf((id(g_edit_v) + step) * 1000.0f) / 1000.0f;
           if (v > 50.0f) v = 50.0f;
           id(g_edit_v) = v;
+          id(g_v_hold_count) = n + 1;
+          id(g_preset_new_unsaved) = true;
           id(scr_update_edit_labels).execute();
 
-  # Current decrement (0.1A steps, min 0.1)
-  - id: scr_edit_i_step
+  # Current decrement — step size accelerates with hold count: 0.001 → 0.01 → 0.1 A
+  - id: scr_edit_i_dec
     then:
       - lambda: |-
-          float i = roundf((id(g_edit_i) - 0.1f) * 10.0f) / 10.0f;
-          if (i < 0.1f) i = 0.1f;
+          int n = id(g_i_hold_count);
+          float step = (n < 5) ? 0.001f : (n < 15) ? 0.01f : 0.1f;
+          float i = roundf((id(g_edit_i) - step) * 10000.0f) / 10000.0f;
+          if (i < 0.0f) i = 0.0f;
           id(g_edit_i) = i;
+          id(g_i_hold_count) = n + 1;
+          id(g_preset_new_unsaved) = true;
           id(scr_update_edit_labels).execute();
 
-  # Current increment (0.1A steps, max 5.0)
-  - id: scr_edit_i_step_up
+  # Current increment — step size accelerates with hold count: 0.001 → 0.01 → 0.1 A
+  - id: scr_edit_i_inc
     then:
       - lambda: |-
-          float i = roundf((id(g_edit_i) + 0.1f) * 10.0f) / 10.0f;
+          int n = id(g_i_hold_count);
+          float step = (n < 5) ? 0.001f : (n < 15) ? 0.01f : 0.1f;
+          float i = roundf((id(g_edit_i) + step) * 10000.0f) / 10000.0f;
           if (i > 5.0f) i = 5.0f;
           id(g_edit_i) = i;
+          id(g_i_hold_count) = n + 1;
+          id(g_preset_new_unsaved) = true;
           id(scr_update_edit_labels).execute();
 
   # Save edited preset to the correct global, then rebuild bar and close overlay
@@ -2131,6 +2440,10 @@ script:
             default: break;
           }
           id(g_preset_new_unsaved) = false;
+          id(g_v_hold_count) = 0;
+          id(g_i_hold_count) = 0;
+          lv_obj_add_flag(id(btn_preset_edit_save), LV_OBJ_FLAG_HIDDEN);
+          lv_obj_add_flag(id(btn_preset_add_new), LV_OBJ_FLAG_HIDDEN);
           lv_obj_add_flag(id(overlay_preset_editor), LV_OBJ_FLAG_HIDDEN);
       - script.execute: scr_rebuild_presets
 
@@ -2323,8 +2636,10 @@ lvgl:
   pad_all: 0
   scrollbar_mode: "off"
   scroll_on_focus: false
+  paused: true
 
   on_boot:
+    - lambda: 'id(g_lvgl_ready) = true;'
     - script.execute: scr_theme_apply_full
 
   # =========================================================
@@ -2435,7 +2750,7 @@ lvgl:
           widgets:
             - button:
                 id: tab_btn_main
-                width: 337
+                width: 341
                 height: 80
                 bg_color: 0x1A1A1A
                 border_width: 2
@@ -2465,7 +2780,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_graphs
-                width: 338
+                width: 342
                 height: 80
                 bg_color: 0x111111
                 border_width: 2
@@ -2495,7 +2810,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_settings
-                width: 337
+                width: 341
                 height: 80
                 bg_color: 0x111111
                 border_width: 2
@@ -2537,6 +2852,7 @@ lvgl:
           border_width: 0
           radius: 0
           scrollbar_mode: "off"
+          scrollable: false
           hidden: true
 
           widgets:
@@ -2550,36 +2866,33 @@ lvgl:
                 border_color: 0x39FF14
                 border_width: 1
                 radius: 8
-                pad_all: 20
+                pad_all: 0
                 scrollbar_mode: "off"
                 scrollable: false
-                layout:
-                  type: FLEX
-                  flex_flow: COLUMN
-                  flex_align_main: SPACE_BETWEEN
-                  flex_align_cross: CENTER
 
                 widgets:
-                  # Title row: "Edit Preset  < N / M >"
+                  # Slot navigator row: < N/M >
                   - obj:
+                      x: 20
+                      y: 20
                       width: 660
-                      height: 36
+                      height: 60
                       bg_opa: TRANSP
                       border_width: 0
+                      pad_all: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
-                        flex_align_main: SPACE_BETWEEN
+                        flex_align_main: CENTER
                         flex_align_cross: CENTER
                       widgets:
-                        - label:
-                            text: "Edit Preset"
-                            text_color: 0xCCCCCC
-                            text_font: montserrat_20
+                        # < N / M > nav group
                         - obj:
                             bg_opa: TRANSP
                             border_width: 0
+                            pad_all: 0
                             scrollbar_mode: "off"
                             width: size_content
                             height: size_content
@@ -2591,8 +2904,8 @@ lvgl:
                             widgets:
                               - button:
                                   id: btn_preset_edit_prev
-                                  width: 40
-                                  height: 32
+                                  width: 44
+                                  height: 44
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
@@ -2612,10 +2925,12 @@ lvgl:
                                   text: "1 / 8"
                                   text_color: 0xFFFF66
                                   text_font: montserrat_16
+                                  width: 60
+                                  align: CENTER
                               - button:
                                   id: btn_preset_edit_next
-                                  width: 40
-                                  height: 32
+                                  width: 44
+                                  height: 44
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
@@ -2630,105 +2945,17 @@ lvgl:
                                         text_color: 0xCCCCCC
                                         text_font: montserrat_16
 
-                  # Active presets count row
-                  - obj:
-                      width: 660
-                      height: 48
-                      bg_opa: TRANSP
-                      border_width: 0
-                      scrollbar_mode: "off"
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_BETWEEN
-                        flex_align_cross: CENTER
-                      widgets:
-                        - label:
-                            text: "Active presets"
-                            text_color: 0x888888
-                            text_font: montserrat_16
-                        - obj:
-                            bg_opa: TRANSP
-                            border_width: 0
-                            scrollbar_mode: "off"
-                            width: size_content
-                            height: size_content
-                            layout:
-                              type: FLEX
-                              flex_flow: ROW
-                              flex_align_cross: CENTER
-                              pad_column: 12
-                            widgets:
-                              - button:
-                                  id: btn_preset_count_dec
-                                  width: 40
-                                  height: 36
-                                  bg_color: 0x2A2A2A
-                                  radius: 4
-                                  on_click:
-                                    - lambda: |-
-                                        int cnt = id(preset_count);
-                                        if (cnt <= 1) return;
-                                        id(preset_count) = cnt - 1;
-                                        if (id(g_edit_slot) >= id(preset_count))
-                                          id(g_edit_slot) = id(preset_count) - 1;
-                                        id(g_preset_new_unsaved) = false;
-                                        id(scr_update_edit_labels).execute();
-                                        id(scr_rebuild_presets).execute();
-                                  widgets:
-                                    - label:
-                                        align: CENTER
-                                        text: "−"
-                                        text_color: 0xCCCCCC
-                                        text_font: montserrat_16
-                              - label:
-                                  id: lbl_preset_count
-                                  text: "8"
-                                  text_color: 0xFFFF66
-                                  text_font: montserrat_16
-                                  width: 28
-                                  align: CENTER
-                              - button:
-                                  id: btn_preset_count_inc
-                                  width: 40
-                                  height: 36
-                                  bg_color: 0x2A2A2A
-                                  radius: 4
-                                  on_click:
-                                    - lambda: |-
-                                        int cnt = id(preset_count);
-                                        if (cnt >= 12 || id(g_preset_new_unsaved)) return;
-                                        id(preset_count) = cnt + 1;
-                                        // New slot gets 0/0 as sentinel
-                                        float *vv[12] = {
-                                          &id(preset_v_0),  &id(preset_v_1),  &id(preset_v_2),  &id(preset_v_3),
-                                          &id(preset_v_4),  &id(preset_v_5),  &id(preset_v_6),  &id(preset_v_7),
-                                          &id(preset_v_8),  &id(preset_v_9),  &id(preset_v_10), &id(preset_v_11)
-                                        };
-                                        float *ii[12] = {
-                                          &id(preset_i_0),  &id(preset_i_1),  &id(preset_i_2),  &id(preset_i_3),
-                                          &id(preset_i_4),  &id(preset_i_5),  &id(preset_i_6),  &id(preset_i_7),
-                                          &id(preset_i_8),  &id(preset_i_9),  &id(preset_i_10), &id(preset_i_11)
-                                        };
-                                        *vv[cnt] = 0.0f;
-                                        *ii[cnt] = 0.0f;
-                                        id(g_edit_slot) = cnt;  // auto-select new slot
-                                        id(g_preset_new_unsaved) = true;
-                                        id(scr_update_edit_labels).execute();
-                                  widgets:
-                                    - label:
-                                        align: CENTER
-                                        text: "+"
-                                        text_color: 0xCCCCCC
-                                        text_font: montserrat_16
-
                   # Voltage row
                   - obj:
+                      x: 20
+                      y: 95
                       width: 660
-                      height: 60
+                      height: 110
                       bg_opa: TRANSP
                       border_width: 0
+                      pad_all: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -2742,6 +2969,7 @@ lvgl:
                         - obj:
                             bg_opa: TRANSP
                             border_width: 0
+                            pad_all: 0
                             scrollbar_mode: "off"
                             width: size_content
                             height: size_content
@@ -2753,17 +2981,24 @@ lvgl:
                             widgets:
                               - button:
                                   id: btn_edit_v_dec
-                                  width: 48
-                                  height: 48
+                                  width: 60
+                                  height: 60
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
                                     - lambda: |-
-                                        id(scr_edit_v_step).execute();
+                                        id(g_v_hold_count) = 0;
+                                        id(scr_edit_v_dec).execute();
+                                  on_long_press_repeat:
+                                    - lambda: |-
+                                        id(scr_edit_v_dec).execute();
+                                  on_release:
+                                    - lambda: |-
+                                        id(g_v_hold_count) = 0;
                                   widgets:
                                     - label:
                                         align: CENTER
-                                        text: "−"
+                                        text: "-"
                                         text_color: 0xCCCCCC
                                         text_font: montserrat_20
                               - label:
@@ -2775,13 +3010,20 @@ lvgl:
                                   align: CENTER
                               - button:
                                   id: btn_edit_v_inc
-                                  width: 48
-                                  height: 48
+                                  width: 60
+                                  height: 60
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
                                     - lambda: |-
-                                        id(scr_edit_v_step_up).execute();
+                                        id(g_v_hold_count) = 0;
+                                        id(scr_edit_v_inc).execute();
+                                  on_long_press_repeat:
+                                    - lambda: |-
+                                        id(scr_edit_v_inc).execute();
+                                  on_release:
+                                    - lambda: |-
+                                        id(g_v_hold_count) = 0;
                                   widgets:
                                     - label:
                                         align: CENTER
@@ -2791,11 +3033,15 @@ lvgl:
 
                   # Current row
                   - obj:
+                      x: 20
+                      y: 220
                       width: 660
-                      height: 60
+                      height: 110
                       bg_opa: TRANSP
                       border_width: 0
+                      pad_all: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -2809,6 +3055,7 @@ lvgl:
                         - obj:
                             bg_opa: TRANSP
                             border_width: 0
+                            pad_all: 0
                             scrollbar_mode: "off"
                             width: size_content
                             height: size_content
@@ -2820,17 +3067,24 @@ lvgl:
                             widgets:
                               - button:
                                   id: btn_edit_i_dec
-                                  width: 48
-                                  height: 48
+                                  width: 60
+                                  height: 60
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
                                     - lambda: |-
-                                        id(scr_edit_i_step).execute();
+                                        id(g_i_hold_count) = 0;
+                                        id(scr_edit_i_dec).execute();
+                                  on_long_press_repeat:
+                                    - lambda: |-
+                                        id(scr_edit_i_dec).execute();
+                                  on_release:
+                                    - lambda: |-
+                                        id(g_i_hold_count) = 0;
                                   widgets:
                                     - label:
                                         align: CENTER
-                                        text: "−"
+                                        text: "-"
                                         text_color: 0xCCCCCC
                                         text_font: montserrat_20
                               - label:
@@ -2842,13 +3096,20 @@ lvgl:
                                   align: CENTER
                               - button:
                                   id: btn_edit_i_inc
-                                  width: 48
-                                  height: 48
+                                  width: 60
+                                  height: 60
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
                                     - lambda: |-
-                                        id(scr_edit_i_step_up).execute();
+                                        id(g_i_hold_count) = 0;
+                                        id(scr_edit_i_inc).execute();
+                                  on_long_press_repeat:
+                                    - lambda: |-
+                                        id(scr_edit_i_inc).execute();
+                                  on_release:
+                                    - lambda: |-
+                                        id(g_i_hold_count) = 0;
                                   widgets:
                                     - label:
                                         align: CENTER
@@ -2856,13 +3117,17 @@ lvgl:
                                         text_color: 0xCCCCCC
                                         text_font: montserrat_20
 
-                  # Delete / Cancel / Save row
+                  # Delete / Cancel / Save / Add row
                   - obj:
+                      x: 20
+                      y: 345
                       width: 660
-                      height: 48
+                      height: 60
                       bg_opa: TRANSP
                       border_width: 0
+                      pad_all: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -2873,14 +3138,14 @@ lvgl:
                         - button:
                             id: btn_preset_edit_delete
                             width: 120
-                            height: 40
+                            height: 52
                             bg_color: 0x3A1A1A
                             border_color: 0xFF4444
                             border_width: 1
                             radius: 4
                             on_click:
                               - lambda: |-
-                                  id(scr_delete_preset).execute();
+                                  lv_obj_clear_flag(id(overlay_preset_delete_confirm), LV_OBJ_FLAG_HIDDEN);
                             widgets:
                               - label:
                                   align: CENTER
@@ -2903,12 +3168,14 @@ lvgl:
                               - button:
                                   id: btn_preset_edit_cancel
                                   width: 120
-                                  height: 40
+                                  height: 52
                                   bg_color: 0x2A2A2A
                                   radius: 4
                                   on_click:
                                     - lambda: |-
                                         id(g_preset_new_unsaved) = false;
+                                        id(g_v_hold_count) = 0;
+                                        id(g_i_hold_count) = 0;
                                         lv_obj_add_flag(id(overlay_preset_editor), LV_OBJ_FLAG_HIDDEN);
                                   widgets:
                                     - label:
@@ -2919,13 +3186,12 @@ lvgl:
                               - button:
                                   id: btn_preset_edit_save
                                   width: 120
-                                  height: 40
+                                  height: 52
                                   bg_color: 0x1A3A1A
                                   border_color: 0x39FF14
                                   border_width: 1
                                   radius: 4
-                                  state:
-                                    disabled: true
+                                  hidden: true
                                   on_click:
                                     - lambda: |-
                                         id(scr_save_preset).execute();
@@ -2934,6 +3200,112 @@ lvgl:
                                         align: CENTER
                                         text: "Save"
                                         text_color: 0x39FF14
+                                        text_font: montserrat_16
+                              - button:
+                                  id: btn_preset_add_new
+                                  width: 120
+                                  height: 52
+                                  bg_color: 0x1A3A1A
+                                  border_color: 0x39FF14
+                                  border_width: 1
+                                  radius: 4
+                                  hidden: true
+                                  on_click:
+                                    - lambda: |-
+                                        int cnt = id(preset_count);
+                                        if (cnt >= 12) return;
+                                        float *vv[12] = {
+                                          &id(preset_v_0),  &id(preset_v_1),  &id(preset_v_2),  &id(preset_v_3),
+                                          &id(preset_v_4),  &id(preset_v_5),  &id(preset_v_6),  &id(preset_v_7),
+                                          &id(preset_v_8),  &id(preset_v_9),  &id(preset_v_10), &id(preset_v_11)
+                                        };
+                                        float *ii[12] = {
+                                          &id(preset_i_0),  &id(preset_i_1),  &id(preset_i_2),  &id(preset_i_3),
+                                          &id(preset_i_4),  &id(preset_i_5),  &id(preset_i_6),  &id(preset_i_7),
+                                          &id(preset_i_8),  &id(preset_i_9),  &id(preset_i_10), &id(preset_i_11)
+                                        };
+                                        *vv[cnt] = id(g_edit_v);
+                                        *ii[cnt] = id(g_edit_i);
+                                        id(preset_count) = cnt + 1;
+                                        id(g_edit_slot) = cnt;
+                                        id(scr_save_preset).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "Add"
+                                        text_color: 0x39FF14
+                                        text_font: montserrat_16
+
+                  # Delete confirmation overlay (shown over the preset editor dialog)
+                  - obj:
+                      id: overlay_preset_delete_confirm
+                      x: 0
+                      y: 0
+                      width: 700
+                      height: 440
+                      bg_color: 0x111111
+                      bg_opa: 90%
+                      border_width: 0
+                      radius: 8
+                      scrollbar_mode: "off"
+                      scrollable: false
+                      hidden: true
+                      widgets:
+                        - label:
+                            id: lbl_delete_confirm_text
+                            x: 0
+                            y: 160
+                            width: 700
+                            align: TOP_MID
+                            text: "Delete this preset?"
+                            text_color: 0xFFFFFF
+                            text_font: montserrat_20
+                        - obj:
+                            x: 175
+                            y: 240
+                            width: 350
+                            height: 52
+                            bg_opa: TRANSP
+                            border_width: 0
+                            scrollbar_mode: "off"
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_main: SPACE_BETWEEN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - button:
+                                  id: btn_delete_confirm_cancel
+                                  width: 140
+                                  height: 52
+                                  bg_color: 0x2A2A2A
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        lv_obj_add_flag(id(overlay_preset_delete_confirm), LV_OBJ_FLAG_HIDDEN);
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "Cancel"
+                                        text_color: 0xAAAAAA
+                                        text_font: montserrat_16
+                              - button:
+                                  id: btn_delete_confirm_ok
+                                  width: 140
+                                  height: 52
+                                  bg_color: 0x3A1A1A
+                                  border_color: 0xFF4444
+                                  border_width: 1
+                                  radius: 4
+                                  on_click:
+                                    - lambda: |-
+                                        lv_obj_add_flag(id(overlay_preset_delete_confirm), LV_OBJ_FLAG_HIDDEN);
+                                        id(scr_delete_preset).execute();
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "Delete"
+                                        text_color: 0xFF4444
                                         text_font: montserrat_16
 
       # ── THEME EDITOR OVERLAY ─────────────────────────────────────────
@@ -2948,6 +3320,7 @@ lvgl:
           border_width: 0
           radius: 0
           scrollbar_mode: "off"
+          scrollable: false
           hidden: true
 
           widgets:
@@ -2961,23 +3334,21 @@ lvgl:
                 border_color: 0x39FF14
                 border_width: 1
                 radius: 8
-                pad_all: 20
+                pad_all: 0
                 scrollbar_mode: "off"
                 scrollable: false
-                layout:
-                  type: FLEX
-                  flex_flow: COLUMN
-                  flex_align_main: SPACE_BETWEEN
-                  flex_align_cross: CENTER
 
                 widgets:
                   # Title + scheme selector row
                   - obj:
+                      x: 20
+                      y: 20
                       width: 660
                       height: 40
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3045,11 +3416,14 @@ lvgl:
 
                   # Color swatch overview row
                   - obj:
+                      x: 20
+                      y: 68
                       width: 660
                       height: 40
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3143,11 +3517,14 @@ lvgl:
                   # Tapping the textarea opens the color keyboard sub-overlay.
                   # accent
                   - obj:
+                      x: 20
+                      y: 116
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3170,7 +3547,7 @@ lvgl:
                         - textarea:
                             id: ce_input_0
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "39FF14"
                             text_color: 0xEEEEEE
@@ -3190,11 +3567,14 @@ lvgl:
 
                   # voltage
                   - obj:
+                      x: 20
+                      y: 178
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3217,7 +3597,7 @@ lvgl:
                         - textarea:
                             id: ce_input_1
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "39FF14"
                             text_color: 0xEEEEEE
@@ -3237,11 +3617,14 @@ lvgl:
 
                   # current
                   - obj:
+                      x: 20
+                      y: 240
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3264,7 +3647,7 @@ lvgl:
                         - textarea:
                             id: ce_input_2
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "4499FF"
                             text_color: 0xEEEEEE
@@ -3284,11 +3667,14 @@ lvgl:
 
                   # bg main
                   - obj:
+                      x: 20
+                      y: 302
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3312,7 +3698,7 @@ lvgl:
                         - textarea:
                             id: ce_input_3
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "1E1E1E"
                             text_color: 0xEEEEEE
@@ -3332,11 +3718,14 @@ lvgl:
 
                   # bg panel
                   - obj:
+                      x: 20
+                      y: 364
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3360,7 +3749,7 @@ lvgl:
                         - textarea:
                             id: ce_input_4
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "141414"
                             text_color: 0xEEEEEE
@@ -3380,11 +3769,14 @@ lvgl:
 
                   # text dim
                   - obj:
+                      x: 20
+                      y: 426
                       width: 660
-                      height: 36
+                      height: 54
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3407,7 +3799,7 @@ lvgl:
                         - textarea:
                             id: ce_input_5
                             width: 120
-                            height: 32
+                            height: 54
                             one_line: true
                             text: "555555"
                             text_color: 0xEEEEEE
@@ -3427,11 +3819,14 @@ lvgl:
 
                   # Apply / Cancel row
                   - obj:
+                      x: 20
+                      y: 492
                       width: 660
                       height: 48
                       bg_opa: TRANSP
                       border_width: 0
                       scrollbar_mode: "off"
+                      scrollable: false
                       layout:
                         type: FLEX
                         flex_flow: ROW
@@ -3549,6 +3944,13 @@ lvgl:
                             radius: 4
                             on_click:
                               - lambda: |-
+                                  lv_obj_t *inputs[6] = {
+                                    id(ce_input_0), id(ce_input_1), id(ce_input_2),
+                                    id(ce_input_3), id(ce_input_4), id(ce_input_5)
+                                  };
+                                  int tok = id(g_editing_color_token);
+                                  if (tok >= 0 && tok < 6)
+                                    lv_obj_clear_flag(inputs[tok], LV_OBJ_FLAG_HIDDEN);
                                   lv_obj_add_flag(id(overlay_color_kb), LV_OBJ_FLAG_HIDDEN);
                             widgets:
                               - label:
@@ -3566,16 +3968,21 @@ lvgl:
                             on_click:
                               - lambda: |-
                                   const char *txt = lv_textarea_get_text(id(ce_kb_input));
-                                  // Strip leading # if present
                                   if (txt[0] == '#') txt++;
-                                  // Must be exactly 6 hex chars
                                   size_t len = strlen(txt);
+                                  lv_obj_t *inputs[6] = {
+                                    id(ce_input_0), id(ce_input_1), id(ce_input_2),
+                                    id(ce_input_3), id(ce_input_4), id(ce_input_5)
+                                  };
+                                  int tok = id(g_editing_color_token);
+                                  if (tok >= 0 && tok < 6)
+                                    lv_obj_clear_flag(inputs[tok], LV_OBJ_FLAG_HIDDEN);
                                   if (len != 6) {
                                     lv_obj_add_flag(id(overlay_color_kb), LV_OBJ_FLAG_HIDDEN);
                                     return;
                                   }
                                   uint32_t val = (uint32_t)strtol(txt, nullptr, 16);
-                                  switch (id(g_editing_color_token)) {
+                                  switch (tok) {
                                     case 0: id(theme_accent)   = (int)val; break;
                                     case 1: id(theme_voltage)  = (int)val; break;
                                     case 2: id(theme_current)  = (int)val; break;
@@ -3583,7 +3990,7 @@ lvgl:
                                     case 4: id(theme_bg_panel) = (int)val; break;
                                     case 5: id(theme_text_dim) = (int)val; break;
                                   }
-                                  id(g_theme_scheme) = 0;  // switch to Custom
+                                  id(g_theme_scheme) = 0;
                                   id(scr_update_theme_labels).execute();
                                   lv_obj_add_flag(id(overlay_color_kb), LV_OBJ_FLAG_HIDDEN);
                             widgets:
@@ -3609,89 +4016,25 @@ lvgl:
 
           widgets:
             - obj:
-                x: 62
-                y: 30
-                width: 900
-                height: 540
+                x: 112
+                y: 60
+                width: 800
+                height: 480
                 bg_color: 0x1C1C1C
                 border_color: 0x4499FF
                 border_width: 1
                 radius: 8
-                pad_all: 20
+                pad_all: 0
                 scrollbar_mode: "off"
                 scrollable: false
-                layout:
-                  type: FLEX
-                  flex_flow: COLUMN
-                  flex_align_main: SPACE_BETWEEN
-                  flex_align_cross: CENTER
 
                 widgets:
-                  # Title row
-                  - obj:
-                      width: 860
-                      height: 36
-                      bg_opa: TRANSP
-                      border_width: 0
-                      pad_all: 0
-                      scrollbar_mode: "off"
-                      scrollable: false
-                      layout:
-                        type: FLEX
-                        flex_flow: ROW
-                        flex_align_main: SPACE_BETWEEN
-                        flex_align_cross: CENTER
-                      widgets:
-                        - label:
-                            text: "Calibration Values"
-                            text_color: 0x4499FF
-                            text_font: montserrat_20
-                        - button:
-                            id: btn_cal_refresh
-                            width: 100
-                            height: 32
-                            bg_color: 0x1A2A3A
-                            border_color: 0x4499FF
-                            border_width: 1
-                            radius: 4
-                            on_click:
-                              - lambda: |-
-                                  id(opendps_id).request_calibration_report();
-                              - delay: 500ms
-                              - lambda: |-
-                                  auto &cal = id(opendps_id).get_calibration_data();
-                                  char buf[32];
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);   id(input_v_adc_k).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);   id(input_v_adc_c).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);   id(input_v_dac_k).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);   id(input_v_dac_c).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);   id(input_a_adc_k).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);   id(input_a_adc_c).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);   id(input_a_dac_k).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);   id(input_a_dac_c).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k); id(input_vin_adc_k).publish_state(buf);
-                                  snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c); id(input_vin_adc_c).publish_state(buf);
-                                  lv_textarea_set_text(id(cal_ta_v_adc_k),   id(input_v_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_adc_c),   id(input_v_adc_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_dac_k),   id(input_v_dac_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_dac_c),   id(input_v_dac_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_adc_k),   id(input_a_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_adc_c),   id(input_a_adc_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_dac_k),   id(input_a_dac_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_dac_c),   id(input_a_dac_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_vin_adc_k), id(input_vin_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_vin_adc_c), id(input_vin_adc_c).state.c_str());
-                            widgets:
-                              - label:
-                                  align: CENTER
-                                  text: "Refresh"
-                                  text_color: 0x4499FF
-                                  text_font: montserrat_14
-
                   # Cal values grid — two columns side by side
                   - obj:
-                      width: 860
-                      height: 360
+                      x: 20
+                      y: 20
+                      width: 760
+                      height: 310
                       bg_opa: TRANSP
                       border_width: 0
                       pad_all: 0
@@ -3707,8 +4050,8 @@ lvgl:
                       widgets:
                         # Left column: voltage cal
                         - obj:
-                            width: 422
-                            height: 360
+                            width: 370
+                            height: 220
                             bg_color: 0x222222
                             border_color: 0x333333
                             border_width: 1
@@ -3729,8 +4072,8 @@ lvgl:
                                   text_color: 0x39FF14
                                   text_font: montserrat_14
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3743,27 +4086,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "V_ADC_K"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_v_adc_k
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_v_adc_k
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 0;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_v_adc_k).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_v_adc_k
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_v_adc_k),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_v_adc_k
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3776,27 +4135,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "V_ADC_C"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_v_adc_c
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_v_adc_c
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 1;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_v_adc_c).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_v_adc_c
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_v_adc_c),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_v_adc_c
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3809,27 +4184,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "V_DAC_K"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_v_dac_k
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_v_dac_k
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 2;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_v_dac_k).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_v_dac_k
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_v_dac_k),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_v_dac_k
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3842,29 +4233,45 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "V_DAC_C"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_v_dac_c
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_v_dac_c
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 3;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_v_dac_c).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_v_dac_c
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_v_dac_c),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_v_dac_c
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
 
                         # Right column: current + vin cal
                         - obj:
-                            width: 422
-                            height: 360
+                            width: 370
+                            height: 310
                             bg_color: 0x222222
                             border_color: 0x333333
                             border_width: 1
@@ -3885,8 +4292,8 @@ lvgl:
                                   text_color: 0x4499FF
                                   text_font: montserrat_14
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3899,27 +4306,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "A_ADC_K"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_a_adc_k
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_a_adc_k
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 4;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_a_adc_k).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_a_adc_k
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_a_adc_k),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_a_adc_k
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3932,27 +4355,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "A_ADC_C"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_a_adc_c
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_a_adc_c
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 5;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_a_adc_c).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_a_adc_c
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_a_adc_c),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_a_adc_c
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3965,27 +4404,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "A_DAC_K"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_a_dac_k
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_a_dac_k
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 6;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_a_dac_k).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_a_dac_k
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_a_dac_k),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_a_dac_k
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -3998,27 +4453,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "A_DAC_C"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_a_dac_c
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_a_dac_c
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 7;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_a_dac_c).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_a_dac_c
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_a_dac_c),   LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_a_dac_c
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -4031,27 +4502,43 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "VIN_ADC_K"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_vin_adc_k
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_vin_adc_k
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 8;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_vin_adc_k).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_vin_adc_k
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_vin_adc_k), LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_vin_adc_k
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
                               - obj:
-                                  width: 398
-                                  height: 36
+                                  width: 346
+                                  height: 34
                                   bg_opa: TRANSP
                                   border_width: 0
                                   pad_all: 0
@@ -4064,29 +4551,47 @@ lvgl:
                                     flex_align_cross: CENTER
                                   widgets:
                                     - label:
-                                        width: 90
-                                        height: 36
                                         text: "VIN_ADC_C"
                                         text_color: 0x888888
-                                        text_font: montserrat_14
+                                        text_font: montserrat_12
+                                        width: 74
                                     - textarea:
-                                        id: cal_ta_vin_adc_c
-                                        width: 200
-                                        height: 36
-                                        text: "—"
-                                        text_font: montserrat_14
+                                        id: ta_cal_vin_adc_c
+                                        width: 260
+                                        height: 32
                                         one_line: true
-                                        on_focus:
+                                        text_font: montserrat_12
+                                        text_color: 0xDDDDDD
+                                        bg_color: 0x111122
+                                        border_color: 0x334466
+                                        border_width: 1
+                                        radius: 3
+                                        on_click:
                                           - lambda: |-
-                                              id(g_cal_editing_field) = 9;
-                                              lv_textarea_set_text(id(cal_kb_input), id(cal_ta_vin_adc_c).state.c_str());
-                                          - lvgl.widget.show: overlay_cal_kb
-                                          - lvgl.widget.hide: cal_ta_vin_adc_c
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_v_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_adc_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_k),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_a_dac_c),   lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_k), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x334466), 0);
+                                              lv_obj_set_style_border_color(id(ta_cal_vin_adc_c), lv_color_hex(0x4499FF), 0);
+                                              lv_obj_set_style_border_side(id(ta_cal_vin_adc_c), LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
+                                          - lvgl.keyboard.update:
+                                              id: cal_val_keyboard
+                                              textarea: ta_cal_vin_adc_c
+                                          - lvgl.widget.show: cal_kb_panel
+                                        text: "—"
 
-                  # Action buttons row
+                  # Cal file path row (always visible at bottom of overlay)
                   - obj:
-                      width: 860
-                      height: 48
+                      x: 20
+                      y: 342
+                      width: 760
+                      height: 36
                       bg_opa: TRANSP
                       border_width: 0
                       pad_all: 0
@@ -4097,36 +4602,30 @@ lvgl:
                         flex_flow: ROW
                         flex_align_main: SPACE_BETWEEN
                         flex_align_cross: CENTER
-                        pad_column: 8
                       widgets:
+                        - label:
+                            text: "Cal file:"
+                            text_color: 0x888888
+                            text_font: montserrat_12
+                            width: 58
+                        - label:
+                            id: lbl_cal_file_inoverlay
+                            text: !lambda 'return id(cal_backup_path);'
+                            text_color: 0x666688
+                            text_font: montserrat_12
+                            long_mode: DOT
+                            flex_grow: 1
                         - button:
-                            id: btn_cal_save
-                            width: 180
-                            height: 40
+                            id: btn_cal_refresh
+                            width: 80
+                            height: 28
                             bg_color: 0x1A2A3A
                             border_color: 0x4499FF
                             border_width: 1
-                            radius: 4
+                            radius: 3
                             on_click:
                               - lambda: |-
-                                  id(opendps_id).save_calibration_to_storage();
-                            widgets:
-                              - label:
-                                  align: CENTER
-                                  text: "Save to Storage"
-                                  text_color: 0x4499FF
-                                  text_font: montserrat_14
-                        - button:
-                            id: btn_cal_restore
-                            width: 200
-                            height: 40
-                            bg_color: 0x2A2A1A
-                            border_color: 0xFFFF66
-                            border_width: 1
-                            radius: 4
-                            on_click:
-                              - lambda: |-
-                                  id(opendps_id).restore_calibration_from_storage();
+                                  id(opendps_id).request_calibration_report();
                               - delay: 500ms
                               - lambda: |-
                                   auto &cal = id(opendps_id).get_calibration_data();
@@ -4141,51 +4640,81 @@ lvgl:
                                   snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);   id(input_a_dac_c).publish_state(buf);
                                   snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k); id(input_vin_adc_k).publish_state(buf);
                                   snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c); id(input_vin_adc_c).publish_state(buf);
-                                  lv_textarea_set_text(id(cal_ta_v_adc_k),   id(input_v_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_adc_c),   id(input_v_adc_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_dac_k),   id(input_v_dac_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_v_dac_c),   id(input_v_dac_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_adc_k),   id(input_a_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_adc_c),   id(input_a_adc_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_dac_k),   id(input_a_dac_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_a_dac_c),   id(input_a_dac_c).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_vin_adc_k), id(input_vin_adc_k).state.c_str());
-                                  lv_textarea_set_text(id(cal_ta_vin_adc_c), id(input_vin_adc_c).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_v_adc_k),   id(input_v_adc_k).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_v_adc_c),   id(input_v_adc_c).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_v_dac_k),   id(input_v_dac_k).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_v_dac_c),   id(input_v_dac_c).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_a_adc_k),   id(input_a_adc_k).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_a_adc_c),   id(input_a_adc_c).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_a_dac_k),   id(input_a_dac_k).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_a_dac_c),   id(input_a_dac_c).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_vin_adc_k), id(input_vin_adc_k).state.c_str());
+                                  lv_textarea_set_text(id(ta_cal_vin_adc_c), id(input_vin_adc_c).state.c_str());
                             widgets:
                               - label:
                                   align: CENTER
-                                  text: "Restore from Storage"
-                                  text_color: 0xFFFF66
-                                  text_font: montserrat_14
+                                  text: "Refresh"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_12
+
+                  # Action buttons row
+                  - obj:
+                      x: 20
+                      y: 430
+                      width: 760
+                      height: 40
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      scrollable: false
+                      layout:
+                        type: FLEX
+                        flex_flow: ROW
+                        flex_align_main: SPACE_BETWEEN
+                        flex_align_cross: CENTER
+                        pad_column: 8
+                      widgets:
                         - button:
-                            id: btn_cal_apply
+                            id: btn_cal_save
                             width: 160
                             height: 40
-                            bg_color: 0x1A3A1A
-                            border_color: 0x39FF14
+                            bg_color: 0x1A2A3A
+                            border_color: 0x4499FF
                             border_width: 1
                             radius: 4
                             on_click:
                               - lambda: |-
-                                  id(opendps_id).set_calibration("v_adc_k", atof(id(cal_ta_v_adc_k).state.c_str()));
-                                  id(opendps_id).set_calibration("v_adc_c", atof(id(cal_ta_v_adc_c).state.c_str()));
-                                  id(opendps_id).set_calibration("v_dac_k", atof(id(cal_ta_v_dac_k).state.c_str()));
-                                  id(opendps_id).set_calibration("v_dac_c", atof(id(cal_ta_v_dac_c).state.c_str()));
-                                  id(opendps_id).set_calibration("a_adc_k", atof(id(cal_ta_a_adc_k).state.c_str()));
-                                  id(opendps_id).set_calibration("a_adc_c", atof(id(cal_ta_a_adc_c).state.c_str()));
-                                  id(opendps_id).set_calibration("a_dac_k", atof(id(cal_ta_a_dac_k).state.c_str()));
-                                  id(opendps_id).set_calibration("a_dac_c", atof(id(cal_ta_a_dac_c).state.c_str()));
-                                  id(opendps_id).set_calibration("vin_adc_k", atof(id(cal_ta_vin_adc_k).state.c_str()));
-                                  id(opendps_id).set_calibration("vin_adc_c", atof(id(cal_ta_vin_adc_c).state.c_str()));
+                                  id(opendps_id).request_calibration_report();
+                              - delay: 500ms
+                              - lambda: |-
+                                  id(opendps_id).save_calibration_to_storage();
                             widgets:
                               - label:
                                   align: CENTER
-                                  text: "Apply to DPS"
-                                  text_color: 0x39FF14
+                                  text: "Save to SD"
+                                  text_color: 0x4499FF
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_restore
+                            width: 160
+                            height: 40
+                            bg_color: 0x2A2A1A
+                            border_color: 0xFFFF66
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  id(opendps_id).restore_calibration_from_storage();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Restore"
+                                  text_color: 0xFFFF66
                                   text_font: montserrat_14
                         - button:
                             id: btn_cal_clear
-                            width: 80
+                            width: 120
                             height: 40
                             bg_color: 0x3A1A1A
                             border_color: 0xFF4444
@@ -4201,6 +4730,57 @@ lvgl:
                                   text_color: 0xFF4444
                                   text_font: montserrat_14
                         - button:
+                            id: btn_cal_assistant
+                            width: 160
+                            height: 40
+                            bg_color: 0x1A3A2A
+                            border_color: 0x39FF14
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  lv_obj_add_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
+                              - lambda: |-
+                                  id(opendps_id).start_calibration_assistant();
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Assistant"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_14
+                        - button:
+                            id: btn_cal_set
+                            width: 80
+                            height: 40
+                            bg_color: 0x1A3A1A
+                            border_color: 0x39FF14
+                            border_width: 1
+                            radius: 4
+                            on_click:
+                              - lambda: |-
+                                  auto read = [](lv_obj_t *ta, const std::string &fallback) -> float {
+                                    const char *t = lv_textarea_get_text(ta);
+                                    if (!t || t[0] == '\0' || t[0] == '-') return atof(fallback.c_str());
+                                    return atof(t);
+                                  };
+                                  id(opendps_id).set_calibration("V_ADC_K",   read(id(ta_cal_v_adc_k),   id(input_v_adc_k).state));
+                                  id(opendps_id).set_calibration("V_ADC_C",   read(id(ta_cal_v_adc_c),   id(input_v_adc_c).state));
+                                  id(opendps_id).set_calibration("V_DAC_K",   read(id(ta_cal_v_dac_k),   id(input_v_dac_k).state));
+                                  id(opendps_id).set_calibration("V_DAC_C",   read(id(ta_cal_v_dac_c),   id(input_v_dac_c).state));
+                                  id(opendps_id).set_calibration("A_ADC_K",   read(id(ta_cal_a_adc_k),   id(input_a_adc_k).state));
+                                  id(opendps_id).set_calibration("A_ADC_C",   read(id(ta_cal_a_adc_c),   id(input_a_adc_c).state));
+                                  id(opendps_id).set_calibration("A_DAC_K",   read(id(ta_cal_a_dac_k),   id(input_a_dac_k).state));
+                                  id(opendps_id).set_calibration("A_DAC_C",   read(id(ta_cal_a_dac_c),   id(input_a_dac_c).state));
+                                  id(opendps_id).set_calibration("VIN_ADC_K", read(id(ta_cal_vin_adc_k), id(input_vin_adc_k).state));
+                                  id(opendps_id).set_calibration("VIN_ADC_C", read(id(ta_cal_vin_adc_c), id(input_vin_adc_c).state));
+                                  lv_obj_add_flag(id(cal_kb_panel), LV_OBJ_FLAG_HIDDEN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "Set"
+                                  text_color: 0x39FF14
+                                  text_font: montserrat_14
+                        - button:
                             id: btn_cal_close
                             width: 80
                             height: 40
@@ -4209,6 +4789,7 @@ lvgl:
                             on_click:
                               - lambda: |-
                                   lv_obj_add_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
+                                  lv_obj_add_flag(id(cal_kb_panel), LV_OBJ_FLAG_HIDDEN);
                             widgets:
                               - label:
                                   align: CENTER
@@ -4216,69 +4797,408 @@ lvgl:
                                   text_color: 0xAAAAAA
                                   text_font: montserrat_14
 
-                  # Cal keyboard sub-overlay
+                  # Keyboard — shown below left column when a cal textarea is tapped
                   - obj:
-                      id: overlay_cal_kb
-                      x: 0
-                      y: 0
-                      width: 900
-                      height: 540
-                      bg_color: 0x111111
-                      bg_opa: 95%
-                      border_width: 0
-                      radius: 8
-                      pad_all: 20
-                      scrollbar_mode: "off"
-                      scrollable: false
+                      id: cal_kb_panel
                       hidden: true
+                      x: 20
+                      y: 248
+                      width: 370
+                      height: 180
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      widgets:
+                        - keyboard:
+                            id: cal_val_keyboard
+                            mode: NUMBER
+                            width: 370
+                            height: 180
+
+      # Cal path text-input overlay (child of overlay_cal_editor's parent obj, shown above it)
+      - obj:
+          id: overlay_cal_path
+          hidden: true
+          x: 162
+          y: 140
+          width: 700
+          height: 380
+          bg_color: 0x1A1A2A
+          border_color: 0x4499FF
+          border_width: 2
+          radius: 10
+          pad_all: 16
+          scrollbar_mode: "off"
+          layout:
+            type: FLEX
+            flex_flow: COLUMN
+            flex_align_main: SPACE_BETWEEN
+            flex_align_cross: STRETCH
+            pad_row: 10
+          widgets:
+            - label:
+                text: "Calibration file path"
+                text_color: 0x4499FF
+                text_font: montserrat_16
+                align: CENTER
+            - textarea:
+                id: cal_path_textarea
+                width: 660
+                height: 42
+                one_line: true
+                text_font: montserrat_14
+                bg_color: 0x111122
+                border_color: 0x4499FF
+                border_width: 1
+                radius: 4
+            - keyboard:
+                id: cal_path_keyboard
+                mode: TEXT_LOWER
+                textarea: cal_path_textarea
+                width: 660
+                height: 210
+            - obj:
+                width: 660
+                height: 44
+                bg_opa: TRANSP
+                border_width: 0
+                pad_all: 0
+                scrollbar_mode: "off"
+                layout:
+                  type: FLEX
+                  flex_flow: ROW
+                  flex_align_main: SPACE_BETWEEN
+                  flex_align_cross: CENTER
+                widgets:
+                  - button:
+                      width: 160
+                      height: 40
+                      bg_color: 0x333333
+                      radius: 6
+                      on_click:
+                        - lambda: |-
+                            lv_obj_add_flag(id(overlay_cal_path), LV_OBJ_FLAG_HIDDEN);
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text: "Cancel"
+                            text_color: 0xCCCCCC
+                            text_font: montserrat_16
+                  - button:
+                      width: 160
+                      height: 40
+                      bg_color: 0x1A2A3A
+                      border_color: 0x4499FF
+                      border_width: 2
+                      radius: 6
+                      on_click:
+                        - lambda: |-
+                            std::string val = lv_textarea_get_text(id(cal_path_textarea));
+                            if (!val.empty()) {
+                              id(cal_backup_path) = val;
+                              id(input_backup_path).publish_state(val);
+                              lv_label_set_text(id(lbl_cal_file_inoverlay), val.c_str());
+                            }
+                            lv_obj_add_flag(id(overlay_cal_path), LV_OBJ_FLAG_HIDDEN);
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text: "Confirm"
+                            text_color: 0x4499FF
+                            text_font: montserrat_16
+
+      # ── Log directory browser overlay ────────────────────────────────
+      - obj:
+          id: overlay_log_dir
+          hidden: true
+          x: 82
+          y: 80
+          width: 860
+          height: 480
+          bg_color: 0x1A1A1A
+          border_color: 0x4499FF
+          border_width: 2
+          radius: 10
+          pad_all: 12
+          scrollbar_mode: "off"
+          layout:
+            type: FLEX
+            flex_flow: COLUMN
+            flex_align_main: START
+            flex_align_cross: STRETCH
+            pad_row: 10
+
+          widgets:
+            # Title bar
+            - obj:
+                width: 836
+                height: 40
+                bg_opa: TRANSP
+                border_width: 0
+                pad_all: 0
+                scrollbar_mode: "off"
+                layout:
+                  type: FLEX
+                  flex_flow: ROW
+                  flex_align_main: SPACE_BETWEEN
+                  flex_align_cross: CENTER
+                widgets:
+                  - label:
+                      text: "SELECT LOG DIRECTORY"
+                      text_color: 0x4499FF
+                      text_font: montserrat_20
+                  - button:
+                      width: 80
+                      height: 32
+                      bg_color: 0x333333
+                      border_width: 0
+                      radius: 4
+                      on_click:
+                        - lambda: |-
+                            lv_obj_add_flag(id(overlay_log_dir), LV_OBJ_FLAG_HIDDEN);
+                      widgets:
+                        - label:
+                            align: CENTER
+                            text: "Cancel"
+                            text_color: 0xCCCCCC
+                            text_font: montserrat_14
+
+            # Content row: source selector + directory browser
+            - obj:
+                width: 836
+                height: 370
+                bg_opa: TRANSP
+                border_width: 0
+                pad_all: 0
+                scrollbar_mode: "off"
+                layout:
+                  type: FLEX
+                  flex_flow: ROW
+                  flex_align_main: START
+                  flex_align_cross: STRETCH
+                  pad_column: 10
+
+                widgets:
+                  # ── Left: storage source selector ──────────────
+                  - obj:
+                      width: 160
+                      height: 370
+                      bg_color: 0x1C1C1C
+                      border_color: 0x2A2A2A
+                      border_width: 1
+                      radius: 8
+                      pad_all: 10
+                      scrollbar_mode: "off"
                       layout:
                         type: FLEX
                         flex_flow: COLUMN
-                        flex_align_main: SPACE_BETWEEN
-                        flex_align_cross: CENTER
+                        flex_align_main: START
+                        flex_align_cross: STRETCH
+                        pad_row: 8
+
                       widgets:
-                        - textarea:
-                            id: cal_kb_input
-                            width: 400
-                            height: 44
-                            text: ""
-                            text_font: montserrat_16
-                            one_line: true
-                        - keyboard:
-                            id: cal_kb
-                            width: 860
-                            height: 300
-                            mode: NUMBER
-                            textarea: cal_kb_input
+                        - label:
+                            text: "SOURCE"
+                            text_color: 0x888888
+                            text_font: montserrat_14
+
                         - button:
+                            id: log_src_sd
                             width: 140
-                            height: 44
-                            bg_color: 0x2A4A2A
-                            border_color: 0x39FF14
+                            height: 48
+                            bg_color: 0x1A2A3A
+                            border_color: 0x4499FF
                             border_width: 2
+                            border_side: BOTTOM
                             radius: 6
+                            on_click:
+                              - script.execute:
+                                  id: log_set_storage
+                                  which: 0
+                              - lambda: |-
+                                  lv_obj_set_style_border_side(id(log_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_usb), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
                             widgets:
                               - label:
                                   align: CENTER
-                                  text: "OK"
-                                  text_color: 0x39FF14
+                                  text: "SD card"
+                                  text_color: 0xEEEEEE
                                   text_font: montserrat_16
+
+                        - button:
+                            id: log_src_usb
+                            width: 140
+                            height: 48
+                            bg_color: 0x222222
+                            border_color: 0x4499FF
+                            border_width: 2
+                            border_side: NONE
+                            radius: 6
                             on_click:
+                              - script.execute:
+                                  id: log_set_storage
+                                  which: 1
                               - lambda: |-
-                                  const char *val = lv_textarea_get_text(id(cal_kb_input));
-                                  int f = id(g_cal_editing_field);
-                                  if (f == 0) { lv_textarea_set_text(id(cal_ta_v_adc_k),   val); id(input_v_adc_k).publish_state(val);   lv_obj_clear_flag(id(cal_ta_v_adc_k),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 1) { lv_textarea_set_text(id(cal_ta_v_adc_c),   val); id(input_v_adc_c).publish_state(val);   lv_obj_clear_flag(id(cal_ta_v_adc_c),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 2) { lv_textarea_set_text(id(cal_ta_v_dac_k),   val); id(input_v_dac_k).publish_state(val);   lv_obj_clear_flag(id(cal_ta_v_dac_k),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 3) { lv_textarea_set_text(id(cal_ta_v_dac_c),   val); id(input_v_dac_c).publish_state(val);   lv_obj_clear_flag(id(cal_ta_v_dac_c),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 4) { lv_textarea_set_text(id(cal_ta_a_adc_k),   val); id(input_a_adc_k).publish_state(val);   lv_obj_clear_flag(id(cal_ta_a_adc_k),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 5) { lv_textarea_set_text(id(cal_ta_a_adc_c),   val); id(input_a_adc_c).publish_state(val);   lv_obj_clear_flag(id(cal_ta_a_adc_c),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 6) { lv_textarea_set_text(id(cal_ta_a_dac_k),   val); id(input_a_dac_k).publish_state(val);   lv_obj_clear_flag(id(cal_ta_a_dac_k),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 7) { lv_textarea_set_text(id(cal_ta_a_dac_c),   val); id(input_a_dac_c).publish_state(val);   lv_obj_clear_flag(id(cal_ta_a_dac_c),   LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 8) { lv_textarea_set_text(id(cal_ta_vin_adc_k), val); id(input_vin_adc_k).publish_state(val); lv_obj_clear_flag(id(cal_ta_vin_adc_k), LV_OBJ_FLAG_HIDDEN); }
-                                  if (f == 9) { lv_textarea_set_text(id(cal_ta_vin_adc_c), val); id(input_vin_adc_c).publish_state(val); lv_obj_clear_flag(id(cal_ta_vin_adc_c), LV_OBJ_FLAG_HIDDEN); }
-                                  lv_obj_add_flag(id(overlay_cal_kb), LV_OBJ_FLAG_HIDDEN);
-                              - lvgl.widget.hide: fw_url_overlay
+                                  lv_obj_set_style_border_side(id(log_src_usb), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "USB drive"
+                                  text_color: 0xEEEEEE
+                                  text_font: montserrat_16
+
+                        - button:
+                            id: log_src_nfs
+                            width: 140
+                            height: 48
+                            bg_color: 0x222222
+                            border_color: 0x4499FF
+                            border_width: 2
+                            border_side: NONE
+                            radius: 6
+                            on_click:
+                              - script.execute:
+                                  id: log_set_storage
+                                  which: 2
+                              - lambda: |-
+                                  lv_obj_set_style_border_side(id(log_src_nfs), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_sd),  (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                                  lv_obj_set_style_border_side(id(log_src_usb), (lv_border_side_t)LV_BORDER_SIDE_NONE,   LV_PART_MAIN);
+                            widgets:
+                              - label:
+                                  align: CENTER
+                                  text: "NFS share"
+                                  text_color: 0xEEEEEE
+                                  text_font: montserrat_16
+
+                  # ── Right: directory browser + confirm bar ──────
+                  - obj:
+                      width: 666
+                      height: 370
+                      bg_opa: TRANSP
+                      border_width: 0
+                      pad_all: 0
+                      scrollbar_mode: "off"
+                      layout:
+                        type: FLEX
+                        flex_flow: COLUMN
+                        flex_align_main: START
+                        flex_align_cross: STRETCH
+                        pad_row: 8
+
+                      widgets:
+                        - obj:
+                            width: 666
+                            height: 314
+                            bg_color: 0x1C1C1C
+                            border_color: 0x2A2A2A
+                            border_width: 1
+                            radius: 8
+                            pad_all: 0
+                            scrollbar_mode: "off"
+                            widgets:
+                              # Breadcrumb
+                              - obj:
+                                  x: 0
+                                  y: 0
+                                  width: 666
+                                  height: 36
+                                  bg_color: 0x141414
+                                  border_width: 0
+                                  radius: 0
+                                  pad_left: 12
+                                  pad_right: 8
+                                  pad_top: 6
+                                  pad_bottom: 6
+                                  scrollbar_mode: "off"
+                                  layout:
+                                    type: FLEX
+                                    flex_flow: ROW
+                                    flex_align_main: SPACE_BETWEEN
+                                    flex_align_cross: CENTER
+                                  widgets:
+                                    - label:
+                                        id: log_breadcrumb
+                                        text: "/sdcard"
+                                        text_color: 0xAAAAAA
+                                        text_font: montserrat_14
+                                    - button:
+                                        width: 80
+                                        height: 24
+                                        bg_color: 0x2A2A2A
+                                        radius: 4
+                                        on_click:
+                                          - script.execute: log_refresh_list
+                                        widgets:
+                                          - label:
+                                              align: CENTER
+                                              text: "Refresh"
+                                              text_color: 0x4499FF
+                                              text_font: montserrat_14
+                              # Directory list
+                              - list:
+                                  id: log_dir_list
+                                  x: 0
+                                  y: 36
+                                  width: 666
+                                  height: 278
+                                  bg_color: 0x0F0F0F
+                                  border_width: 0
+                                  radius: 0
+                                  scrollbar_mode: AUTO
+
+                        # Confirm bar: shows current path + Confirm button
+                        - obj:
+                            width: 666
+                            height: 48
+                            bg_color: 0x1C1C1C
+                            border_color: 0x2A2A2A
+                            border_width: 1
+                            radius: 8
+                            pad_left: 12
+                            pad_right: 12
+                            pad_top: 6
+                            pad_bottom: 6
+                            scrollbar_mode: "off"
+                            layout:
+                              type: FLEX
+                              flex_flow: ROW
+                              flex_align_main: SPACE_BETWEEN
+                              flex_align_cross: CENTER
+                            widgets:
+                              - label:
+                                  id: log_dir_selected_lbl
+                                  text: "(navigate to select)"
+                                  text_color: 0xCCCCCC
+                                  text_font: montserrat_14
+                                  long_mode: DOT
+                                  width: 400
+                              - button:
+                                  id: log_dir_confirm_btn
+                                  width: 200
+                                  height: 36
+                                  bg_color: 0x1A2A3A
+                                  border_color: 0x4499FF
+                                  border_width: 2
+                                  radius: 6
+                                  on_click:
+                                    - lambda: |-
+                                        std::string sel = id(g_log_cwd);
+                                        if (!sel.empty()) {
+                                          id(g_log_dir) = sel;
+                                          lv_label_set_text(id(lbl_log_dir), sel.c_str());
+                                        }
+                                        lv_obj_add_flag(id(overlay_log_dir), LV_OBJ_FLAG_HIDDEN);
+                                  widgets:
+                                    - label:
+                                        align: CENTER
+                                        text: "Use this directory"
+                                        text_color: 0x4499FF
+                                        text_font: montserrat_14
 
   pages:
     # =========================================================
@@ -4519,6 +5439,7 @@ lvgl:
                               text_font: roboto_mono_48
                           - label:
                               text: "V"
+                              id: lbl_setv_unit
                               text_color: 0x39FF14
                               text_font: montserrat_20
                               y: -6
@@ -4570,6 +5491,7 @@ lvgl:
                               text_font: roboto_mono_48
                           - label:
                               text: "V"
+                              id: lbl_vout_unit
                               text_color: 0x222222
                               text_font: montserrat_20
                               y: -6
@@ -4776,6 +5698,7 @@ lvgl:
                               text_font: roboto_mono_48
                           - label:
                               text: "A"
+                              id: lbl_seti_unit
                               text_color: 0x4499FF
                               text_font: montserrat_20
                               y: -6
@@ -4827,6 +5750,7 @@ lvgl:
                               text_font: roboto_mono_48
                           - label:
                               text: "A"
+                              id: lbl_iout_unit
                               text_color: 0x222233
                               text_font: montserrat_20
                               y: -6
@@ -5170,24 +6094,24 @@ lvgl:
               - label:
                   id: lbl_vout_g
                   text: "\u25CF  Vout  --.-V"
-                  text_color: 0x4499FF
+                  text_color: 0x00EEFF
                   text_font: montserrat_16
               - label:
                   id: lbl_iout_g
                   text: "\u25CF  Iout  -.---A"
-                  text_color: 0xFFAA22
+                  text_color: 0xFF7700
                   text_font: montserrat_16
               - label:
                   id: lbl_pout_g
                   text: "\u25CF  Pout  --.-W"
-                  text_color: 0xFF44CC
+                  text_color: 0xFF00CC
                   text_font: montserrat_16
               - label:
-                  text: "60s  /  % du setpoint"
+                  text: "60s  /  actual V & A  |  setpoint lines dim"
                   text_color: 0x555555
                   text_font: montserrat_12
 
-        # Single combined chart: x=0, y=120, w=1024, h=400
+        # Chart area: left scale (V) + chart + right scale (A)
         - obj:
             x: 0
             y: 120
@@ -5197,43 +6121,145 @@ lvgl:
             border_color: 0x004408
             border_width: 1
             radius: 8
-            pad_all: 12
+            pad_top: 8
+            pad_bottom: 8
+            pad_left: 0
+            pad_right: 0
             scrollbar_mode: "off"
             layout:
               type: FLEX
               flex_flow: ROW
-              flex_align_cross: CENTER
+              flex_align_cross: STRETCH
               pad_column: 0
 
             widgets:
+              # ── Left V scale ──────────────────────────────────────
+              - obj:
+                  width: 48
+                  height: 384
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: END
+                  widgets:
+                    - label:
+                        id: lbl_scale_v4
+                        text: "--.-"
+                        text_color: 0x2255AA
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_v3
+                        text: "--.-"
+                        text_color: 0x2255AA
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_v2
+                        text: "--.-"
+                        text_color: 0x2255AA
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_v1
+                        text: "--.-"
+                        text_color: 0x2255AA
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_v0
+                        text: "0.0"
+                        text_color: 0x2255AA
+                        text_font: montserrat_12
+
+              # ── Main chart ────────────────────────────────────────
               - chart:
                   id: chart_main
-                  width: 1000
-                  height: 376
+                  width: 928
+                  height: 384
                   type: LINE
-                  point_count: 60
+                  point_count: 240
                   update_mode: SHIFT
                   bg_color: 0x070F07
                   border_color: 0x003306
                   border_width: 1
-                  div_line_count_hor: 5
+                  div_line_count_hor: 4
                   div_line_count_ver: 6
                   items:
                     line_width: 2
                   indicator:
-                    radius: 3
-                    width: 6
-                    height: 6
+                    radius: 0
+                    width: 0
+                    height: 0
                   axis_primary_y:
                     min_value: 0
-                    max_value: 1000
+                    max_value: 575   # placeholder; updated at runtime from voltage_set
+                  axis_secondary_y:
+                    min_value: 0
+                    max_value: 575   # placeholder; updated at runtime from current_set
                   series:
+                    # Actual curves — neon, PRIMARY_Y
                     - id: ser_v
-                      color: 0x4499FF
+                      color: 0x00EEFF
+                      axis: PRIMARY_Y
+                    # Vset line — dim blue, PRIMARY_Y
+                    - id: ser_vset
+                      color: 0x1A3D66
+                      axis: PRIMARY_Y
+                    # Actual current — neon orange, SECONDARY_Y
                     - id: ser_i
-                      color: 0xFFAA22
+                      color: 0xFF7700
+                      axis: SECONDARY_Y
+                    # Iset line — dim orange, SECONDARY_Y
+                    - id: ser_iset
+                      color: 0x553300
+                      axis: SECONDARY_Y
+                    # Power overlay — neon pink, PRIMARY_Y (proportional to V range)
                     - id: ser_p
-                      color: 0xFF44CC
+                      color: 0xFF00CC
+                      axis: PRIMARY_Y
+
+              # ── Right A scale ─────────────────────────────────────
+              - obj:
+                  width: 48
+                  height: 384
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollbar_mode: "off"
+                  layout:
+                    type: FLEX
+                    flex_flow: COLUMN
+                    flex_align_main: SPACE_BETWEEN
+                    flex_align_cross: START
+                  widgets:
+                    - label:
+                        id: lbl_scale_i4
+                        text: "-.-"
+                        text_color: 0x885500
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_i3
+                        text: "-.-"
+                        text_color: 0x885500
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_i2
+                        text: "-.-"
+                        text_color: 0x885500
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_i1
+                        text: "-.-"
+                        text_color: 0x885500
+                        text_font: montserrat_12
+                    - label:
+                        id: lbl_scale_i0
+                        text: "0.00"
+                        text_color: 0x885500
+                        text_font: montserrat_12
+
 
     # =========================================================
     # PAGE: SETTINGS  (content area y=40..560, 520px tall)
@@ -5246,9 +6272,9 @@ lvgl:
       widgets:
         - obj:
             x: 16
-            y: 40
+            y: 52
             width: 992
-            height: 508
+            height: 460
             bg_color: 0x1C1C1C
             border_color: 0x2A2A2A
             border_width: 1
@@ -5295,10 +6321,14 @@ lvgl:
                           pad_row: 10
 
                         widgets:
+                          - label:
+                              text: "DPS Screen Brightness"
+                              text_color: 0x888888
+                              text_font: montserrat_14
                           # DPS brightness
                           - obj:
                               width: 474
-                              height: 100
+                              height: 56
                               bg_color: 0x222222
                               border_color: 0x333333
                               border_width: 1
@@ -5309,28 +6339,8 @@ lvgl:
                                 type: FLEX
                                 flex_flow: COLUMN
                                 flex_align_cross: STRETCH
-                                pad_row: 10
+                                pad_row: 0
                               widgets:
-                                - obj:
-                                    width: 446
-                                    height: 20
-                                    bg_opa: TRANSP
-                                    border_width: 0
-                                    scrollbar_mode: "off"
-                                    layout:
-                                      type: FLEX
-                                      flex_flow: ROW
-                                      flex_align_main: SPACE_BETWEEN
-                                    widgets:
-                                      - label:
-                                          text: "DPS Brightness"
-                                          text_color: 0xCCCCCC
-                                          text_font: montserrat_16
-                                      - label:
-                                          id: lbl_bright
-                                          text: "80%"
-                                          text_color: 0xFFFF66
-                                          text_font: montserrat_16
                                 - slider:
                                     id: sl_bright
                                     width: 446
@@ -5362,12 +6372,11 @@ lvgl:
                                       - lambda: |-
                                           if (id(opendps_id).is_connected())
                                             id(opendps_id).set_brightness(x);
-                                      - lvgl.label.update:
-                                          id: lbl_bright
-                                          text:
-                                            format: "%d%%"
-                                            args: [x]
 
+                          - label:
+                              text: "LCD Backlight Brightness"
+                              text_color: 0x888888
+                              text_font: montserrat_14
                           # LCD backlight
                           - obj:
                               width: 474
@@ -5384,26 +6393,6 @@ lvgl:
                                 flex_align_cross: STRETCH
                                 pad_row: 10
                               widgets:
-                                - obj:
-                                    width: 446
-                                    height: 20
-                                    bg_opa: TRANSP
-                                    border_width: 0
-                                    scrollbar_mode: "off"
-                                    layout:
-                                      type: FLEX
-                                      flex_flow: ROW
-                                      flex_align_main: SPACE_BETWEEN
-                                    widgets:
-                                      - label:
-                                          text: "LCD Backlight"
-                                          text_color: 0xCCCCCC
-                                          text_font: montserrat_16
-                                      - label:
-                                          id: lbl_lcd_bright
-                                          text: "100%"
-                                          text_color: 0xFFFF66
-                                          text_font: montserrat_16
                                 - slider:
                                     id: sl_lcd_bright
                                     width: 446
@@ -5434,11 +6423,6 @@ lvgl:
                                     on_value:
                                       - lambda: |-
                                           id(lcd_backlight).make_call().set_brightness(x / 100.0f).perform();
-                                      - lvgl.label.update:
-                                          id: lbl_lcd_bright
-                                          text:
-                                            format: "%d%%"
-                                            args: [x]
 
                           # V-Max stepper
                           - obj:
@@ -5487,7 +6471,7 @@ lvgl:
                                           widgets:
                                             - label:
                                                 align: CENTER
-                                                text: "−"
+                                                text: "-"
                                                 text_color: 0xCCCCCC
                                                 text_font: montserrat_16
                                       - label:
@@ -5518,34 +6502,6 @@ lvgl:
                                                 text_color: 0xCCCCCC
                                                 text_font: montserrat_16
 
-                          # Calibration file path
-                          - obj:
-                              width: 474
-                              height: 56
-                              bg_color: 0x222222
-                              border_color: 0x333333
-                              border_width: 1
-                              radius: 6
-                              pad_all: 14
-                              scrollbar_mode: "off"
-                              layout:
-                                type: FLEX
-                                flex_flow: ROW
-                                flex_align_main: SPACE_BETWEEN
-                                flex_align_cross: CENTER
-                              widgets:
-                                - label:
-                                    text: "Cal file"
-                                    text_color: 0xCCCCCC
-                                    text_font: montserrat_14
-                                - label:
-                                    id: lbl_cal_file
-                                    text: !lambda 'return id(cal_backup_path);'
-                                    text_color: 0x888888
-                                    text_font: montserrat_14
-                                    long_mode: DOT
-
-                          # Datalogger directory
                           - obj:
                               width: 474
                               height: 56
@@ -5567,10 +6523,28 @@ lvgl:
                                     text_font: montserrat_14
                                 - label:
                                     id: lbl_log_dir
-                                    text: "/sdcard/logs"
+                                    text: !lambda 'return id(g_log_dir);'
                                     text_color: 0x888888
                                     text_font: montserrat_14
                                     long_mode: DOT
+                                    flex_grow: 1
+                                - button:
+                                    width: 52
+                                    height: 30
+                                    bg_color: 0x1A2A3A
+                                    border_color: 0x4499FF
+                                    border_width: 1
+                                    radius: 4
+                                    on_click:
+                                      - lambda: |-
+                                          lv_obj_clear_flag(id(overlay_log_dir), LV_OBJ_FLAG_HIDDEN);
+                                      - script.execute: log_refresh_list
+                                    widgets:
+                                      - label:
+                                          align: CENTER
+                                          text: "Dir"
+                                          text_color: 0x4499FF
+                                          text_font: montserrat_14
 
                     # ── RIGHT COLUMN: overlay buttons ────────────────────
                     - obj:
@@ -5698,6 +6672,31 @@ lvgl:
                                     radius: 4
                                     on_click:
                                       - lambda: |-
+                                          id(opendps_id).request_calibration_report();
+                                      - delay: 500ms
+                                      - lambda: |-
+                                          auto &cal = id(opendps_id).get_calibration_data();
+                                          char buf[32];
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_k);   id(input_v_adc_k).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.v_adc_c);   id(input_v_adc_c).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_k);   id(input_v_dac_k).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.v_dac_c);   id(input_v_dac_c).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_k);   id(input_a_adc_k).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.a_adc_c);   id(input_a_adc_c).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_k);   id(input_a_dac_k).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.a_dac_c);   id(input_a_dac_c).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_k); id(input_vin_adc_k).publish_state(buf);
+                                          snprintf(buf, sizeof(buf), "%.6f", cal.vin_adc_c); id(input_vin_adc_c).publish_state(buf);
+                                          lv_textarea_set_text(id(ta_cal_v_adc_k),   id(input_v_adc_k).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_v_adc_c),   id(input_v_adc_c).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_v_dac_k),   id(input_v_dac_k).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_v_dac_c),   id(input_v_dac_c).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_a_adc_k),   id(input_a_adc_k).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_a_adc_c),   id(input_a_adc_c).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_a_dac_k),   id(input_a_dac_k).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_a_dac_c),   id(input_a_dac_c).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_vin_adc_k), id(input_vin_adc_k).state.c_str());
+                                          lv_textarea_set_text(id(ta_cal_vin_adc_c), id(input_vin_adc_c).state.c_str());
                                           lv_obj_clear_flag(id(overlay_cal_editor), LV_OBJ_FLAG_HIDDEN);
                                     widgets:
                                       - label:
@@ -5784,15 +6783,15 @@ lvgl:
                                           text_font: montserrat_16
 
         # ==============================================================
-        # FIRMWARE OVERLAY  (hidden by default, 860x640 centered)
+        # FIRMWARE OVERLAY
         # ==============================================================
         - obj:
             id: overlay_firmware
             hidden: true
             x: 82
-            y: 80
+            y: 52
             width: 860
-            height: 640
+            height: 460
             bg_color: 0x1A1A1A
             border_color: 0xFFAA22
             border_width: 2
@@ -5807,44 +6806,10 @@ lvgl:
               pad_row: 10
 
             widgets:
-              # Title bar
-              - obj:
-                  width: 836
-                  height: 40
-                  bg_opa: TRANSP
-                  border_width: 0
-                  pad_all: 0
-                  scrollbar_mode: "off"
-                  layout:
-                    type: FLEX
-                    flex_flow: ROW
-                    flex_align_main: SPACE_BETWEEN
-                    flex_align_cross: CENTER
-                  widgets:
-                    - label:
-                        text: "FIRMWARE UPDATE"
-                        text_color: 0xFFAA22
-                        text_font: montserrat_20
-                    - button:
-                        width: 80
-                        height: 32
-                        bg_color: 0x333333
-                        border_width: 0
-                        radius: 4
-                        on_click:
-                          - lambda: |-
-                              lv_obj_add_flag(id(overlay_firmware), LV_OBJ_FLAG_HIDDEN);
-                        widgets:
-                          - label:
-                              align: CENTER
-                              text: "Close"
-                              text_color: 0xCCCCCC
-                              text_font: montserrat_14
-
               # Content row: left (source selector) + right (browser + action)
               - obj:
                   width: 836
-                  height: 566
+                  height: 436
                   bg_opa: TRANSP
                   border_width: 0
                   pad_all: 0
@@ -5860,7 +6825,7 @@ lvgl:
                     # ── Left: source selector (w=180) ────────────────────
                     - obj:
                         width: 180
-                        height: 566
+                        height: 436
                         bg_color: 0x1C1C1C
                         border_color: 0x2A2A2A
                         border_width: 1
@@ -6017,7 +6982,7 @@ lvgl:
                     # ── Right: file browser + action bar ─────────────────
                     - obj:
                         width: 646
-                        height: 566
+                        height: 436
                         bg_opa: TRANSP
                         border_width: 0
                         pad_all: 0
@@ -6033,7 +6998,7 @@ lvgl:
                           # File browser panel
                           - obj:
                               width: 646
-                              height: 502
+                              height: 372
                               bg_color: 0x1C1C1C
                               border_color: 0x2A2A2A
                               border_width: 1
@@ -6085,7 +7050,7 @@ lvgl:
                                     x: 0
                                     y: 36
                                     width: 646
-                                    height: 466
+                                    height: 336
                                     bg_color: 0x0F0F0F
                                     border_width: 0
                                     radius: 0
@@ -6110,13 +7075,28 @@ lvgl:
                                 flex_align_main: SPACE_BETWEEN
                                 flex_align_cross: CENTER
                               widgets:
+                                - button:
+                                    width: 100
+                                    height: 44
+                                    bg_color: 0x333333
+                                    border_width: 0
+                                    radius: 6
+                                    on_click:
+                                      - lambda: |-
+                                          lv_obj_add_flag(id(overlay_firmware), LV_OBJ_FLAG_HIDDEN);
+                                    widgets:
+                                      - label:
+                                          align: CENTER
+                                          text: "Back"
+                                          text_color: 0xCCCCCC
+                                          text_font: montserrat_16
                                 - label:
                                     id: fw_selected_lbl
                                     text: "(no file selected)"
                                     text_color: 0xCCCCCC
                                     text_font: montserrat_14
                                     long_mode: DOT
-                                    width: 380
+                                    width: 260
                                 - button:
                                     id: fw_flash_btn
                                     width: 200
@@ -6145,7 +7125,7 @@ lvgl:
                   x: 0
                   y: 0
                   width: 860
-                  height: 640
+                  height: 460
                   bg_color: 0x000000
                   bg_opa: 90%
                   border_width: 0
@@ -6154,9 +7134,9 @@ lvgl:
                   widgets:
                     - obj:
                         x: 30
-                        y: 80
+                        y: 10
                         width: 800
-                        height: 460
+                        height: 440
                         bg_color: 0x1C1C1C
                         border_color: 0x39FF14
                         border_width: 2
@@ -6260,7 +7240,7 @@ lvgl:
                   x: 0
                   y: 0
                   width: 860
-                  height: 640
+                  height: 460
                   bg_color: 0x000000
                   bg_opa: 90%
                   border_width: 0
@@ -6269,7 +7249,7 @@ lvgl:
                   widgets:
                     - obj:
                         x: 130
-                        y: 170
+                        y: 90
                         width: 600
                         height: 280
                         bg_color: 0x1C1C1C
@@ -6354,7 +7334,7 @@ lvgl:
                   x: 0
                   y: 0
                   width: 860
-                  height: 640
+                  height: 460
                   bg_color: 0x000000
                   bg_opa: 90%
                   border_width: 0
@@ -6363,7 +7343,7 @@ lvgl:
                   widgets:
                     - obj:
                         x: 30
-                        y: 120
+                        y: 50
                         width: 800
                         height: 360
                         bg_color: 0x1C1C1C
@@ -6435,7 +7415,7 @@ lvgl:
             id: overlay_about
             hidden: true
             x: 212
-            y: 80
+            y: 72
             width: 600
             height: 440
             bg_color: 0x1A1A2A
@@ -6443,7 +7423,8 @@ lvgl:
             border_width: 2
             radius: 10
             pad_all: 24
-            scrollbar_mode: "off"
+            scrollbar_mode: "auto"
+            scrollable: true
             layout:
               type: FLEX
               flex_flow: COLUMN
