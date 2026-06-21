@@ -227,8 +227,6 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_SOC_SPIRAM_SUPPORTED", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_USE", True)
-    if config[CONF_MODE] == TYPE_HEX:
-        add_idf_sdkconfig_option("CONFIG_SPIRAM_SPEED_250M", True)
     add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_CAPS_ALLOC", True)
     add_idf_sdkconfig_option(
         "CONFIG_SPIRAM_IGNORE_NOTFOUND", config[CONF_IGNORE_NOT_FOUND]
