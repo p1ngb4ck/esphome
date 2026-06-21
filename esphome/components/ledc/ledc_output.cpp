@@ -169,13 +169,16 @@ void LEDCOutput::setup() {
 #if !defined(CLANG_TIDY)
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 0)
     PERIPH_RCC_ATOMIC() { ledc_ll_reset_register(0); }
-#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
     PERIPH_RCC_ATOMIC() {
       ledc_ll_enable_reset_reg(true);
       ledc_ll_enable_reset_reg(false);
     }
 #else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     periph_module_reset(PERIPH_LEDC_MODULE);
+#pragma GCC diagnostic pop
 #endif
 #endif
     ledc_peripheral_reset_done = true;
