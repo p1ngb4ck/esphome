@@ -235,7 +235,7 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
     return false;
   }
   if (!xdr.decode_uint64(this->fsid)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fsid, position=%zu, size=%zu", xdr.position(), xdr.size());
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fsid, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
   if (!xdr.decode_uint64(this->fileid)) {
@@ -274,7 +274,7 @@ bool NFSFileAttr::decode(XDRBuffer &xdr) {
   this->ctime_sec = ctime_sec_32;
 
   if (!xdr.decode_uint32(this->ctime_nsec)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%zu, size=%zu", xdr.position(), xdr.size());
+    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
 
@@ -310,7 +310,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
   uint32_t xid, msg_type, reply_status;
 
   if (!xdr.decode_uint32(xid)) {
-    ESP_LOGE(TAG, "Failed to decode XID, position=%zu size=%zu", xdr.position(), xdr.size());
+    ESP_LOGE(TAG, "Failed to decode XID, position=%" PRIu32 " size=%" PRIu32, (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
   if (xid != expected_xid) {
@@ -352,7 +352,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
   // Accept status
   uint32_t accept_status;
   if (!xdr.decode_uint32(accept_status)) {
-    ESP_LOGE(TAG, "Failed to decode accept_status, position=%zu, size=%zu", xdr.position(), xdr.size());
+    ESP_LOGE(TAG, "Failed to decode accept_status, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
 
@@ -932,7 +932,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   }
 
   if (total_read < response_length) {
-    ESP_LOGE(TAG, "Timeout waiting for full response: got %zu / %u bytes", total_read, response_length);
+    ESP_LOGE(TAG, "Timeout waiting for full response: got %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_read, response_length);
     return false;
   }
 
@@ -946,7 +946,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 //========================================================================
 
 bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &port) {
-  ESP_LOGD(TAG, "Querying portmapper for program %u version %u", program, version);
+  ESP_LOGD(TAG, "Querying portmapper for program %" PRIu32 " version %" PRIu32, program, version);
 
   // Build PMAP GETPORT call
   uint32_t xid = RPCClient::generate_xid();
@@ -972,9 +972,9 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
     // parse_reply returns false if accept_status != RPC_SUCCESS
     // For portmapper, PROG_UNAVAIL means program not registered (valid response)
     if (accept_status == RPC_PROG_UNAVAIL) {
-      ESP_LOGI(TAG, "Program %u version %u not registered with portmapper", program, version);
+      ESP_LOGI(TAG, "Program %" PRIu32 " version %" PRIu32 " not registered with portmapper", program, version);
     } else {
-      ESP_LOGE(TAG, "Portmapper RPC failed with status %u", static_cast<uint32_t>(accept_status));
+      ESP_LOGE(TAG, "Portmapper RPC failed with status %" PRIu32, static_cast<uint32_t>(accept_status));
     }
     return false;
   }
@@ -987,12 +987,12 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
   }
 
   if (port_result == 0) {
-    ESP_LOGI(TAG, "Portmapper returned port 0 - program %u version %u not registered", program, version);
+    ESP_LOGI(TAG, "Portmapper returned port 0 - program %" PRIu32 " version %" PRIu32 " not registered", program, version);
     return false;
   }
 
   port = static_cast<uint16_t>(port_result);
-  ESP_LOGI(TAG, "Discovered port %u for program %u version %u via portmapper", port, program, version);
+  ESP_LOGI(TAG, "Discovered port %u for program %" PRIu32 " version %" PRIu32 " via portmapper", port, program, version);
   return true;
 }
 
@@ -1001,7 +1001,7 @@ bool NFSClient::query_portmapper_(uint32_t program, uint32_t version, uint16_t &
 //========================================================================
 
 bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh) {
-  ESP_LOGD(TAG, "Mounting export: %s with UID=%u, GID=%u", export_path.c_str(), this->uid_, this->gid_);
+  ESP_LOGD(TAG, "Mounting export: %s with UID=%" PRIu32 ", GID=%" PRIu32, export_path.c_str(), this->uid_, this->gid_);
 
   // Build MOUNT MNT call
   uint32_t xid = RPCClient::generate_xid();
@@ -1062,7 +1062,7 @@ bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh)
         error_str = "MNT3ERR_SERVERFAULT (Server fault)";
         break;
     }
-    ESP_LOGE(TAG, "MOUNT failed: %s (status %u)", error_str, mount_status);
+    ESP_LOGE(TAG, "MOUNT failed: %s (status %" PRIu32 ")", error_str, mount_status);
     ESP_LOGE(TAG, "Check NFS server export configuration:");
     ESP_LOGE(TAG, "  - Verify export path exists on server");
     ESP_LOGE(TAG, "  - Check /etc/exports allows access from %s", inet_ntoa(this->server_addr_.sin_addr));
@@ -1076,7 +1076,7 @@ bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh)
     return false;
   }
 
-  ESP_LOGD(TAG, "MOUNT successful, file handle size: %zu", fh.data.size());
+  ESP_LOGD(TAG, "MOUNT successful, file handle size: %" PRIu32, (uint32_t) fh.data.size());
   return true;
 }
 
@@ -1266,7 +1266,7 @@ bool NFSClient::nfs_lookup_(const NFSFileHandle &dir_fh, const std::string &name
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "LOOKUP failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "LOOKUP failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1300,7 +1300,7 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     return false;
   }
 
-  ESP_LOGD(TAG, "GETATTR: response buffer size=%zu, position=%zu", response.size(), response.position());
+  ESP_LOGD(TAG, "GETATTR: response buffer size=%" PRIu32 ", position=%" PRIu32, (uint32_t) response.size(), (uint32_t) response.position());
 
   RPCAcceptStatus rpc_status;
   if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
@@ -1311,12 +1311,12 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status)) {
-    ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status, position=%zu, size=%zu", response.position(),
+    ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) response.position(),
              response.size());
     return false;
   }
   if (nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "GETATTR failed: NFS status=%u (NFS3_OK=%u)", nfs_status, NFS3_OK);
+    ESP_LOGW(TAG, "GETATTR failed: NFS status=%" PRIu32 " (NFS3_OK=%lu)", nfs_status, NFS3_OK);
     return false;
   }
 
@@ -1325,7 +1325,7 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
 }
 
 bool NFSClient::nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t count, std::vector<uint8_t> &data) {
-  ESP_LOGVV(TAG, "NFS READ: offset=%llu, count=%u", offset, count);
+  ESP_LOGVV(TAG, "NFS READ: offset=%llu, count=%" PRIu32, offset, count);
 
   uint32_t xid = RPCClient::generate_xid();
   XDRBuffer request;
@@ -1349,7 +1349,7 @@ bool NFSClient::nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t cou
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "READ failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "READ failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1372,12 +1372,12 @@ bool NFSClient::nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t cou
     return false;
   }
 
-  ESP_LOGVV(TAG, "NFS READ: read %u bytes, EOF=%d", bytes_read, eof);
+  ESP_LOGVV(TAG, "NFS READ: read %" PRIu32 " bytes, EOF=%d", bytes_read, eof);
   return true;
 }
 
 bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8_t *data, size_t length) {
-  ESP_LOGVV(TAG, "NFS WRITE: offset=%llu, length=%zu", offset, length);
+  ESP_LOGVV(TAG, "NFS WRITE: offset=%llu, length=%" PRIu32, offset, (uint32_t) length);
 
   uint32_t xid = RPCClient::generate_xid();
   XDRBuffer request;
@@ -1403,7 +1403,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "WRITE failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "WRITE failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1443,12 +1443,12 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
     return false;
   }
 
-  ESP_LOGVV(TAG, "NFS WRITE: wrote %u bytes", bytes_written);
+  ESP_LOGVV(TAG, "NFS WRITE: wrote %" PRIu32 " bytes", bytes_written);
   return (bytes_written == length);
 }
 
 bool NFSClient::nfs_create_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh) {
-  ESP_LOGD(TAG, "NFS CREATE: %s (mode 0%o)", name.c_str(), mode);
+  ESP_LOGD(TAG, "NFS CREATE: %s (mode 0%" PRIo32 ")", name.c_str(), (uint32_t) mode);
 
   uint32_t xid = RPCClient::generate_xid();
   XDRBuffer request;
@@ -1483,7 +1483,7 @@ bool NFSClient::nfs_create_(const NFSFileHandle &dir_fh, const std::string &name
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "CREATE failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "CREATE failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1520,7 +1520,7 @@ bool NFSClient::nfs_remove_(const NFSFileHandle &dir_fh, const std::string &name
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "REMOVE failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "REMOVE failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1528,7 +1528,7 @@ bool NFSClient::nfs_remove_(const NFSFileHandle &dir_fh, const std::string &name
 }
 
 bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh) {
-  ESP_LOGD(TAG, "NFS MKDIR: %s (mode 0%o)", name.c_str(), mode);
+  ESP_LOGD(TAG, "NFS MKDIR: %s (mode 0%" PRIo32 ")", name.c_str(), (uint32_t) mode);
 
   uint32_t xid = RPCClient::generate_xid();
   XDRBuffer request;
@@ -1562,7 +1562,7 @@ bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name,
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "MKDIR failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "MKDIR failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1599,7 +1599,7 @@ bool NFSClient::nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name)
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "RMDIR failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "RMDIR failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1633,7 +1633,7 @@ bool NFSClient::nfs_rename_(const NFSFileHandle &from_dir_fh, const std::string 
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "RENAME failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "RENAME failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
@@ -1674,7 +1674,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     // Parse NFS status
     uint32_t nfs_status;
     if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-      ESP_LOGW(TAG, "READDIRPLUS failed: status=%u", nfs_status);
+      ESP_LOGW(TAG, "READDIRPLUS failed: status=%" PRIu32, nfs_status);
       return false;
     }
 
@@ -1751,7 +1751,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     if (eof) {
-      ESP_LOGI(TAG, "READDIRPLUS: Got %zu entries", entries.size());
+      ESP_LOGI(TAG, "READDIRPLUS: Got %" PRIu32 " entries", (uint32_t) entries.size());
       break;
     }
 
@@ -1806,7 +1806,7 @@ bool NFSClient::read_file(const std::string &path, std::vector<uint8_t> &data) {
     offset += chunk.size();
   }
 
-  ESP_LOGI(TAG, "Read file: %s (%zu bytes)", path.c_str(), data.size());
+  ESP_LOGI(TAG, "Read file: %s (%" PRIu32 " bytes)", path.c_str(), (uint32_t) data.size());
   return true;
 }
 
@@ -1880,7 +1880,7 @@ bool NFSClient::read_file_chunk(const std::string &path, uint8_t *buffer, size_t
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "READ failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "READ failed: status=%" PRIu32, nfs_status);
     this->cached_path_.clear();
     return false;
   }
@@ -1903,13 +1903,13 @@ bool NFSClient::read_file_chunk(const std::string &path, uint8_t *buffer, size_t
   // Decode data directly into caller's buffer (no intermediate allocation)
   size_t actual_bytes;
   if (!response.decode_opaque_to_buffer(buffer, max_len, actual_bytes)) {
-    ESP_LOGW(TAG, "Failed to decode file data at offset %zu", offset);
+    ESP_LOGW(TAG, "Failed to decode file data at offset %" PRIu32, (uint32_t) offset);
     this->cached_path_.clear();
     return false;
   }
 
   bytes_read = actual_bytes;
-  ESP_LOGVV(TAG, "Read file chunk: %s (offset=%zu, bytes_read=%zu)", path.c_str(), offset, bytes_read);
+  ESP_LOGVV(TAG, "Read file chunk: %s (offset=%" PRIu32 ", bytes_read=%" PRIu32 ")", path.c_str(), (uint32_t) offset, (uint32_t) bytes_read);
   return true;
 }
 
@@ -1943,7 +1943,7 @@ bool NFSClient::write_file(const std::string &path, const uint8_t *data, size_t 
     offset += to_write;
   }
 
-  ESP_LOGI(TAG, "Wrote file: %s (%zu bytes)", path.c_str(), length);
+  ESP_LOGI(TAG, "Wrote file: %s (%" PRIu32 " bytes)", path.c_str(), (uint32_t) length);
   return true;
 }
 
@@ -1975,7 +1975,7 @@ bool NFSClient::write_file_chunk(const std::string &path, const uint8_t *data, s
 
   // Write chunk at offset
   if (!this->nfs_write_(fh, offset, data, length)) {
-    ESP_LOGE(TAG, "Failed to write chunk at offset %zu", offset);
+    ESP_LOGE(TAG, "Failed to write chunk at offset %" PRIu32, (uint32_t) offset);
     return false;
   }
 
@@ -2079,7 +2079,7 @@ bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
   // Parse NFS status
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "FSSTAT failed: status=%u", nfs_status);
+    ESP_LOGW(TAG, "FSSTAT failed: status=%" PRIu32, nfs_status);
     return false;
   }
 
