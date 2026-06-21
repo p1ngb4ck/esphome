@@ -67,7 +67,7 @@ void FileManager::dump_config() {
     ESP_LOGCONFIG(TAG, "  Watch File: %s", this->watch_file_.c_str());
   }
 
-  ESP_LOGCONFIG(TAG, "  Scan Interval: %u ms", this->scan_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Scan Interval: %" PRIu32 " ms", this->scan_interval_ms_);
 
   if (!this->patterns_.empty()) {
     ESP_LOGCONFIG(TAG, "  Patterns:");

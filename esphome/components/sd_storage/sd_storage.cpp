@@ -44,7 +44,7 @@ void SdMmc::setup() {
   ESP_LOGI(TAG, "  Slot: %d", this->slot_);
 
   if (this->cs_pin_ != 0) {
-    ESP_LOGI(TAG, "  Power control pin: %d", this->cs_pin_);
+    ESP_LOGI(TAG, "  Power control pin: %p", (void*) this->cs_pin_);
     this->cs_pin_->setup();
   }
 

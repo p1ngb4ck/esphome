@@ -1073,7 +1073,7 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
       if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
         count++;
         if (count >= MAX_DIR_ENTRIES) {
-          ESP_LOGW(TAG, "Directory %s has more than %zu entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
+          ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), (uint32_t) MAX_DIR_ENTRIES);
           break;
         }
       }
@@ -2469,7 +2469,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
   if (is_virtual_root) {
     // List local mount points from storage
     const auto &mounts = this->storage_->get_mounts();
-    ESP_LOGI(TAG, "Virtual root - listing %d local mount points", mounts.size());
+    ESP_LOGI(TAG, "Virtual root - listing %" PRIu32 " local mount points", (uint32_t) mounts.size());
 
     for (const auto &mount : mounts) {
       FileInfo info;
@@ -2512,7 +2512,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
 
     // List network storage mount points
     const auto &network_storage = this->storage_->get_network_storage();
-    ESP_LOGI(TAG, "Virtual root - listing %d network storage mount points", network_storage.size());
+    ESP_LOGI(TAG, "Virtual root - listing %" PRIu32 " network storage mount points", (uint32_t) network_storage.size());
 
     for (const auto *net_storage : network_storage) {
       if (net_storage == nullptr)
@@ -2558,7 +2558,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
         request->send(500, "text/plain", "Failed to list directory on network storage");
         return;
       }
-      ESP_LOGI(TAG, "Found %d files/folders in %s", entries.size(), filepath.c_str());
+      ESP_LOGI(TAG, "Found %" PRIu32 " files/folders in %s", (uint32_t) entries.size(), filepath.c_str());
       for (const auto &entry : entries) {
         FileInfo info;
         info.name = entry.name;
@@ -2571,7 +2571,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       // Local storage path
       ESP_LOGI(TAG, "Listing local directory: %s", filepath.c_str());
       esphome::FixedVector<FileInfo> files = this->list_directory(filepath);
-      ESP_LOGI(TAG, "Found %d files/folders in %s", files.size(), filepath.c_str());
+      ESP_LOGI(TAG, "Found %" PRIu32 " files/folders in %s", (uint32_t) files.size(), filepath.c_str());
       for (const auto &info : files) {
         html += this->generate_file_row(info, this->url_prefix_);
       }
@@ -2721,7 +2721,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
     esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
     if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
+      ESP_LOGW(TAG, "Download cancelled or connection closed at %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
       success = false;
       break;
     }
@@ -2730,7 +2730,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
     // Log progress every ~3MB
     if (file_size > 3 * 1024 * 1024 && (total_sent % (3 * 1024 * 1024) < FILE_BUFFER_SIZE)) {
-      ESP_LOGI(TAG, "Download progress: %zu / %zu MB (%.1f%%)", total_sent / (1024 * 1024), file_size / (1024 * 1024),
+      ESP_LOGI(TAG, "Download progress: %" PRIu32 " / %" PRIu32 " MB (%.1f%%)", (uint32_t)(total_sent / (1024 * 1024)), (uint32_t)(file_size / (1024 * 1024)),
                (float) total_sent / file_size * 100.0f);
     }
   }
@@ -2740,9 +2740,9 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   // Send final empty chunk to signal completion
   if (success) {
     httpd_resp_send_chunk(req, nullptr, 0);
-    ESP_LOGI(TAG, "Download completed: %zu bytes", total_sent);
+    ESP_LOGI(TAG, "Download completed: %" PRIu32 " bytes", (uint32_t) total_sent);
   } else {
-    ESP_LOGW(TAG, "Download incomplete: %zu / %zu bytes", total_sent, file_size);
+    ESP_LOGW(TAG, "Download incomplete: %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
   }
 }
 
@@ -2828,7 +2828,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
     fflush(file);  // Ensure data is written immediately
 
     if (written != static_cast<size_t>(received)) {
-      ESP_LOGE(TAG, "Failed to write to file: wrote %zu of %d bytes", written, received);
+      ESP_LOGE(TAG, "Failed to write to file: wrote %" PRIu32 " of %d bytes", (uint32_t) written, received);
       success = false;
       break;
     }
@@ -2851,7 +2851,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
 
     // Log progress every ~50KB
     if (current_transferred % (50 * 1024) < FILE_BUFFER_SIZE) {
-      ESP_LOGD(TAG, "Upload progress: %zu / %zu bytes (%.1f%%)", current_transferred, current_total,
+      ESP_LOGD(TAG, "Upload progress: %" PRIu32 " / %" PRIu32 " bytes (%.1f%%)", (uint32_t) current_transferred, (uint32_t) current_total,
                (float) current_transferred / current_total * 100.0f);
     }
   }
@@ -2865,7 +2865,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   portEXIT_CRITICAL(&this->progress_mutex_);
 
   if (success) {
-    ESP_LOGI(TAG, "Upload complete: %zu bytes", final_transferred);
+    ESP_LOGI(TAG, "Upload complete: %" PRIu32 " bytes", (uint32_t) final_transferred);
     request->send(200, "text/plain", "File uploaded successfully");
   } else {
     ESP_LOGE(TAG, "Upload failed");

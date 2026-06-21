@@ -1312,7 +1312,7 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
   uint32_t nfs_status;
   if (!response.decode_uint32(nfs_status)) {
     ESP_LOGW(TAG, "GETATTR failed: could not decode NFS status, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) response.position(),
-             response.size());
+             (uint32_t) response.size());
     return false;
   }
   if (nfs_status != NFS3_OK) {

@@ -47,7 +47,7 @@ void OpenDPS::setup() {
     if (this->bootloader_legacy_) {
       // Legacy bootloader starts at whatever baud was saved (stored in upgrade_flag)
       uint32_t boot_baud = (upgrade_flag > 1) ? upgrade_flag : this->firmware_baud_rate_;
-      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u", boot_baud);
+      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %" PRIu32, boot_baud);
       this->parent_->flush();
       this->parent_->set_baud_rate(boot_baud);
       this->parent_->load_settings();
@@ -108,7 +108,7 @@ void OpenDPS::loop() {
       this->upgrade_bootloader_ready_time_ = 0;
       // Switch to faster baud if configured, before first data chunk (new bootloader only)
       if (!this->bootloader_legacy_ && this->bootloader_baud_rate_ > 0 && this->bootloader_baud_rate_ != 9600) {
-        ESP_LOGI(TAG, "Switching bootloader to %u for data transfer", this->bootloader_baud_rate_);
+        ESP_LOGI(TAG, "Switching bootloader to %" PRIu32 " for data transfer", this->bootloader_baud_rate_);
         std::vector<uint8_t> payload;
         this->pack8_(payload, CMD_SET_BAUD);
         this->pack8_(payload, (this->bootloader_baud_rate_ >> 24) & 0xFF);
@@ -158,7 +158,7 @@ void OpenDPS::loop() {
         this->upgrade_retry_count_ = 0;
         // Restore firmware baud rate if we switched for bootloader
         if (this->firmware_baud_rate_ > 0) {
-          ESP_LOGI(TAG, "Restoring UART baud rate to %u", this->firmware_baud_rate_);
+          ESP_LOGI(TAG, "Restoring UART baud rate to %" PRIu32, this->firmware_baud_rate_);
           this->parent_->flush();
           this->parent_->set_baud_rate(this->firmware_baud_rate_);
           this->parent_->load_settings();
@@ -179,7 +179,7 @@ void OpenDPS::loop() {
 
 void OpenDPS::dump_config() {
   ESP_LOGCONFIG(TAG, "OpenDPS:");
-  ESP_LOGCONFIG(TAG, "  Update Interval: %dms", this->update_interval_);
+  ESP_LOGCONFIG(TAG, "  Update Interval: %" PRIu32 "ms", this->update_interval_);
 #if defined(USE_SOCKET_IMPL_LWIP_TCP) || defined(USE_SOCKET_IMPL_BSD_SOCKETS)
   if (this->tcp_bridge_enabled_) {
     ESP_LOGCONFIG(TAG, "  TCP Bridge: Enabled on port %d", this->tcp_bridge_port_);
@@ -370,7 +370,7 @@ void OpenDPS::send_frame_(const std::vector<uint8_t> &payload) {
 
   // Log frame details (at DEBUG level for upgrade frames which can be large)
   if (payload.size() > 100) {
-    ESP_LOGD(TAG, "TX Frame: payload_len=%u, crc=0x%04X, frame_len=%u", payload.size(), crc, frame.size());
+    ESP_LOGD(TAG, "TX Frame: payload_len=%" PRIu32 ", crc=0x%04X, frame_len=%" PRIu32, (uint32_t) payload.size(), crc, (uint32_t) frame.size());
     // Log first few bytes for debugging
     if (frame.size() >= 10) {
       ESP_LOGD(TAG, "TX Frame start: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", frame[0], frame[1], frame[2],
@@ -378,7 +378,7 @@ void OpenDPS::send_frame_(const std::vector<uint8_t> &payload) {
     }
   } else {
     char hex_buf[format_hex_pretty_size(64)];
-    ESP_LOGV(TAG, "TX Frame (%u bytes): %s", frame.size(), format_hex_pretty_to(hex_buf, frame));
+    ESP_LOGV(TAG, "TX Frame (%" PRIu32 " bytes): %s", (uint32_t) frame.size(), format_hex_pretty_to(hex_buf, frame));
   }
 
   // Send frame
@@ -404,7 +404,7 @@ bool OpenDPS::read_frame_() {
 
     // Check for frame timeout
     if (this->receiving_frame_ && (now - this->frame_start_time_) > FRAME_TIMEOUT_MS) {
-      ESP_LOGW(TAG, "Frame timeout, resetting buffer (had %u bytes)", this->rx_buffer_.size());
+      ESP_LOGW(TAG, "Frame timeout, resetting buffer (had %" PRIu32 " bytes)", (uint32_t) this->rx_buffer_.size());
       this->rx_buffer_.clear();
       this->receiving_frame_ = false;
     }
@@ -427,7 +427,7 @@ bool OpenDPS::read_frame_() {
         this->receiving_frame_ = false;
 
         char hex_buf[format_hex_pretty_size(64)];
-        ESP_LOGV(TAG, "RX Frame (%d bytes): %s", this->rx_buffer_.size(),
+        ESP_LOGV(TAG, "RX Frame (%" PRIu32 " bytes): %s", (uint32_t) this->rx_buffer_.size(),
                  format_hex_pretty_to(hex_buf, this->rx_buffer_));
 
         // Validate frame
@@ -704,7 +704,7 @@ void OpenDPS::process_frame_(const std::vector<uint8_t> &payload) {
           // New firmware starts at 9600; if operational baud differs, send cmd_set_baud
           uint32_t target_baud = (this->firmware_baud_rate_ > 0) ? this->firmware_baud_rate_ : 9600;
           if (target_baud != 9600) {
-            ESP_LOGI(TAG, "Sending cmd_set_baud %u to new firmware", target_baud);
+            ESP_LOGI(TAG, "Sending cmd_set_baud %" PRIu32 " to new firmware", target_baud);
             this->set_uart_baud(target_baud);
           } else if (this->firmware_baud_rate_ > 0 && this->firmware_baud_rate_ != this->parent_->get_baud_rate()) {
             // firmware_baud_rate_ was 9600 but ESPHome UART may have been changed during upgrade
@@ -911,7 +911,7 @@ void OpenDPS::set_uart_baud(uint32_t baud) {
     }
   }
   if (!valid) {
-    ESP_LOGE(TAG, "Invalid baud rate: %u (valid: 9600, 19200, 38400, 57600, 115200)", baud);
+    ESP_LOGE(TAG, "Invalid baud rate: %" PRIu32 " (valid: 9600, 19200, 38400, 57600, 115200)", baud);
     return;
   }
 
@@ -927,7 +927,7 @@ void OpenDPS::set_uart_baud(uint32_t baud) {
   this->parent_->flush();
   this->parent_->set_baud_rate(baud);
   this->parent_->load_settings();
-  ESP_LOGI(TAG, "UART baud rate changed to %u", baud);
+  ESP_LOGI(TAG, "UART baud rate changed to %" PRIu32, baud);
 }
 
 void OpenDPS::lock(bool locked) {
@@ -1203,9 +1203,9 @@ void OpenDPS::start_calibration_assistant() {
   ESP_LOGI(TAG, "  - A known load capable of handling the required power");
   ESP_LOGI(TAG, "  - A thick wire for shorting the output");
   ESP_LOGI(TAG, "  - 2 stable input voltages");
-  ESP_LOGI(TAG, "");
+  ESP_LOGI(TAG, " ");
   ESP_LOGI(TAG, "ENSURE NOTHING IS CONNECTED TO OUTPUT BEFORE STARTING!");
-  ESP_LOGI(TAG, "");
+  ESP_LOGI(TAG, " ");
 
   // Start with input voltage calibration
   this->cal_assistant_state_ = CAL_VIN_LOW_WAIT_INPUT;
@@ -1350,7 +1350,7 @@ void OpenDPS::cal_assistant_process_() {
       ESP_LOGI(TAG, "STEP 1b: Input Voltage Calibration (High Point)");
       ESP_LOGI(TAG, "========================================");
       ESP_LOGI(TAG, "UART communication paused - OpenDPS can be powered off safely.");
-      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, " ");
       ESP_LOGI(TAG, "  1. Power OFF the OpenDPS device");
       ESP_LOGI(TAG, "  2. Disconnect the lower supply voltage");
       ESP_LOGI(TAG, "  3. Connect the HIGHER supply voltage");
@@ -1358,7 +1358,7 @@ void OpenDPS::cal_assistant_process_() {
       ESP_LOGI(TAG, "  5. Measure the higher supply voltage with a multimeter");
       ESP_LOGI(TAG, "  6. Enter the measured voltage (mV) in the Calibration Input field");
       ESP_LOGI(TAG, "  7. Press the Calibration Step button");
-      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, " ");
       ESP_LOGI(TAG, "UART will resume automatically when Step is pressed.");
       break;
 
@@ -1448,7 +1448,7 @@ void OpenDPS::cal_assistant_process_() {
         this->request_calibration_report();
 
         this->cal_assistant_state_ = CAL_VOUT_LOW_WAIT_INPUT;
-        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, " ");
         ESP_LOGI(TAG, "Calibration Point 1 of 2 (10%% of max)");
         ESP_LOGI(TAG, "V_DAC set to: %d", v_dac_low);
         ESP_LOGI(TAG, "Measure the OUTPUT VOLTAGE with a multimeter");
@@ -1536,13 +1536,13 @@ void OpenDPS::cal_assistant_process_() {
       float v_max_current = this->cal_max_dps_current_ * this->cal_load_resistance_ * 1000.0f;
       float max_output_mv = std::min({v_max_input, v_max_wattage, v_max_current});
 
-      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, " ");
       ESP_LOGI(TAG, "Calibration parameters:");
       ESP_LOGI(TAG, "  Max DPS current: %.1f A", this->cal_max_dps_current_);
       ESP_LOGI(TAG, "  Load resistance: %.2f Ohm", this->cal_load_resistance_);
       ESP_LOGI(TAG, "  Load max wattage: %.1f W", this->cal_load_max_wattage_);
       ESP_LOGI(TAG, "  Max safe output voltage: %.0f mV", max_output_mv);
-      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, " ");
       ESP_LOGI(TAG, "Connect the load to the output of the DPS");
       ESP_LOGI(TAG, "Then call step to continue:");
       ESP_LOGI(TAG, "  opendps.calibration_assistant_step: 0");
@@ -1765,7 +1765,7 @@ void OpenDPS::cal_assistant_collect_sample_() {
       this->cal_samples_x_.push_back(static_cast<float>(v_dac_high));  // Store DAC value
 
       this->cal_assistant_state_ = CAL_VOUT_HIGH_WAIT_INPUT;
-      ESP_LOGI(TAG, "");
+      ESP_LOGI(TAG, " ");
       ESP_LOGI(TAG, "Calibration Point 2 of 2 (90%% of max)");
       ESP_LOGI(TAG, "V_DAC set to: %d", v_dac_high);
       ESP_LOGI(TAG, "Measure the OUTPUT VOLTAGE with a multimeter");
@@ -2634,7 +2634,7 @@ void OpenDPS::stop_datalog() {
 
   this->datalog_active_ = false;
 
-  ESP_LOGI(TAG, "Datalogger stopped: %u samples logged to %s", this->datalog_sample_count_,
+  ESP_LOGI(TAG, "Datalogger stopped: %" PRIu32 " samples logged to %s", this->datalog_sample_count_,
            this->datalog_filepath_.c_str());
 }
 
@@ -2807,7 +2807,7 @@ void OpenDPS::start_upgrade_sequence_() {
   if (this->bootloader_legacy_) {
     uint32_t boot_baud = (this->bootloader_baud_rate_ > 0) ? this->bootloader_baud_rate_ : this->firmware_baud_rate_;
     if (boot_baud != this->firmware_baud_rate_) {
-      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %u (was %u)", boot_baud, this->firmware_baud_rate_);
+      ESP_LOGI(TAG, "Legacy bootloader: switching UART to %" PRIu32 " (was %" PRIu32 ")", boot_baud, this->firmware_baud_rate_);
       this->parent_->flush();
       this->parent_->set_baud_rate(boot_baud);
       this->parent_->load_settings();
@@ -2815,7 +2815,7 @@ void OpenDPS::start_upgrade_sequence_() {
     this->upgrade_state_pref_.save(&boot_baud);
   } else {
     if (this->firmware_baud_rate_ != 9600) {
-      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %u)", this->firmware_baud_rate_);
+      ESP_LOGI(TAG, "Switching UART to 9600 for bootloader (was %" PRIu32 ")", this->firmware_baud_rate_);
       this->parent_->flush();
       this->parent_->set_baud_rate(9600);
       this->parent_->load_settings();
@@ -3054,14 +3054,14 @@ void OpenDPS::loop_tcp_bridge_() {
       this->flush();
     } else if (tcp_len == 0) {
       // Connection closed gracefully - start grace period
-      ESP_LOGI(TAG, "TCP bridge: client disconnected - starting %ums grace period",
+      ESP_LOGI(TAG, "TCP bridge: client disconnected - starting %" PRIu32 "ms grace period",
                this->tcp_bridge_disconnect_delay_ms_);
       this->tcp_client_socket_.reset();
       this->tcp_client_disconnect_time_ = now;
       return;
     } else if (tcp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
       // Error - start grace period
-      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - starting %ums grace period", errno,
+      ESP_LOGI(TAG, "TCP bridge: client disconnected (error %d) - starting %" PRIu32 "ms grace period", errno,
                this->tcp_bridge_disconnect_delay_ms_);
       this->tcp_client_socket_.reset();
       this->tcp_client_disconnect_time_ = now;
