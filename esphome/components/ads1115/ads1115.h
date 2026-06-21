@@ -46,7 +46,7 @@ enum ADS1115Samplerate {
   ADS1115_860SPS = 0b111
 };
 
-class ADS1115Component : public Component, public i2c::I2CDevice {
+class ADS1115Component final : public Component, public i2c::I2CDevice {
  public:
   void setup() override;
   void loop() override;
