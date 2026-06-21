@@ -48,7 +48,7 @@ void HttpFileBrowser::setup() {
 #if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
   this->buffer_pool_ = (uint8_t *) heap_caps_malloc(this->buffer_pool_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->buffer_pool_ != nullptr) {
-    ESP_LOGI(TAG, "Allocated %" PRIu32 " byte buffer pool from PSRAM (%" PRIu32 " KB per buffer)", (uint32_t) this->buffer_pool_size_,
+    ESP_LOGI(TAG, "Allocated %zu byte buffer pool from PSRAM (%zu KB per buffer)", this->buffer_pool_size_,
              FILE_BUFFER_SIZE / 1024);
   } else {
     ESP_LOGW(TAG, "PSRAM allocation failed, using heap for buffer pool");
@@ -56,7 +56,7 @@ void HttpFileBrowser::setup() {
   }
 #else
   this->buffer_pool_ = (uint8_t *) malloc(this->buffer_pool_size_);
-  ESP_LOGI(TAG, "Allocated %" PRIu32 " byte buffer pool from heap (%" PRIu32 " KB per buffer)", (uint32_t) this->buffer_pool_size_,
+  ESP_LOGI(TAG, "Allocated %zu byte buffer pool from heap (%zu KB per buffer)", this->buffer_pool_size_,
            FILE_BUFFER_SIZE / 1024);
 #endif
 
@@ -269,28 +269,28 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
 
   // Check for API endpoints
   if (uri.find((this->url_prefix_ + "/api/copy").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API COPY endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API COPY endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_copy(request);
   } else if (uri.find((this->url_prefix_ + "/api/move").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API MOVE endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API MOVE endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_move(request);
   } else if (uri.find((this->url_prefix_ + "/api/rename").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API RENAME endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API RENAME endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_rename(request);
   } else if (uri.find((this->url_prefix_ + "/api/mkdir").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API MKDIR endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API MKDIR endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_mkdir(request);
   } else if (uri.find((this->url_prefix_ + "/api/delete").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API DELETE endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API DELETE endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_delete(request);
   } else if (uri.find((this->url_prefix_ + "/api/mount").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API MOUNT endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API MOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_mount(request);
   } else if (uri.find((this->url_prefix_ + "/api/unmount").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API UNMOUNT endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API UNMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_unmount(request);
   } else if (uri.find((this->url_prefix_ + "/api/remount").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API REMOUNT endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API REMOUNT endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_remount(request);
   } else if (uri.find((this->url_prefix_ + "/api/fileinfo").c_str()) == 0 && request->method() == HTTP_GET) {
     this->handle_api_fileinfo(request);
@@ -307,7 +307,7 @@ void HttpFileBrowser::handleRequest(AsyncWebServerRequest *request) {
     ESP_LOGD(TAG, "API CANCEL endpoint hit");
     this->handle_api_cancel(request);
   } else if (uri.find((this->url_prefix_ + "/api/upload_chunk").c_str()) == 0 && request->method() == HTTP_POST) {
-    ESP_LOGD(TAG, "API UPLOAD_CHUNK endpoint hit, body_buffer size: %" PRIu32, (uint32_t) this->body_buffer_.size());
+    ESP_LOGD(TAG, "API UPLOAD_CHUNK endpoint hit, body_buffer size: %zu", this->body_buffer_.size());
     this->handle_api_upload_chunk(request);
   } else if (request->method() == HTTP_GET) {
     // Handle GET request (directory listing or file download)
@@ -539,7 +539,7 @@ bool HttpFileBrowser::handle_network_file_download(AsyncWebServerRequest *reques
     return false;
   }
   size_t file_size = file_stat.st_size;
-  ESP_LOGD(TAG, "Network storage file size for %s: %" PRIu32 " bytes", path.c_str(), (uint32_t) file_size);
+  ESP_LOGD(TAG, "Network storage file size for %s: %zu bytes", path.c_str(), file_size);
 
   // For now, read entire file into memory
   // TODO: Implement streaming with AsyncResponseStream when web_server_idf supports it
@@ -563,7 +563,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
                                    uint8_t *data, size_t len, bool final) {
   // Only log at milestones to avoid flooding logs with hundreds of tiny chunk calls
   if (index == 0 || final || (index % 1048576 == 0)) {  // Log at start, end, and every 1MB
-    ESP_LOGD(TAG, "handleUpload: filename='%s', index=%" PRIu32 ", len=%" PRIu32 ", final=%d", filename.c_str(), (uint32_t) index, (uint32_t) len, final);
+    ESP_LOGD(TAG, "handleUpload: filename='%s', index=%zu, len=%zu, final=%d", filename.c_str(), index, len, final);
   }
 
   // Check authentication if enabled
@@ -628,7 +628,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       auto *filesize_param = request->getParam("filesize");
       if (filesize_param) {
         expected_size = std::stoul(filesize_param->value().c_str());
-        ESP_LOGI(TAG, "Expected upload size from query param: %" PRIu32 " bytes (network storage)", (uint32_t) expected_size);
+        ESP_LOGI(TAG, "Expected upload size from query param: %zu bytes (network storage)", expected_size);
       } else {
         ESP_LOGW(TAG, "No filesize query parameter found - network storage requires known file size");
       }
@@ -660,18 +660,18 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
 #if defined(USE_ESP_IDF) && defined(HTTP_FILE_BROWSER_USE_PSRAM)
       this->chunk_buffer_ = (uint8_t *) heap_caps_malloc(this->chunk_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
       if (this->chunk_buffer_ != nullptr) {
-        ESP_LOGD(TAG, "Allocated %" PRIu32 " byte upload buffer from PSRAM", (uint32_t) this->chunk_buffer_size_);
+        ESP_LOGD(TAG, "Allocated %zu byte upload buffer from PSRAM", this->chunk_buffer_size_);
       } else {
-        ESP_LOGW(TAG, "PSRAM allocation failed for %" PRIu32 " bytes, using heap", (uint32_t) this->chunk_buffer_size_);
+        ESP_LOGW(TAG, "PSRAM allocation failed for %zu bytes, using heap", this->chunk_buffer_size_);
         this->chunk_buffer_ = (uint8_t *) malloc(this->chunk_buffer_size_);
       }
 #else
       this->chunk_buffer_ = (uint8_t *) malloc(this->chunk_buffer_size_);
-      ESP_LOGD(TAG, "Allocated %" PRIu32 " byte upload buffer from heap", (uint32_t) this->chunk_buffer_size_);
+      ESP_LOGD(TAG, "Allocated %zu byte upload buffer from heap", this->chunk_buffer_size_);
 #endif
 
       if (this->chunk_buffer_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate %" PRIu32 " bytes for network upload!", (uint32_t) this->chunk_buffer_size_);
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for network upload!", this->chunk_buffer_size_);
         portENTER_CRITICAL(&this->progress_mutex_);
         this->progress_.in_progress = false;
         portEXIT_CRITICAL(&this->progress_mutex_);
@@ -702,7 +702,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
     auto *filesize_param = request->getParam("filesize");
     if (filesize_param) {
       expected_size = std::stoul(filesize_param->value().c_str());
-      ESP_LOGI(TAG, "Expected upload size from query param: %" PRIu32 " bytes", (uint32_t) expected_size);
+      ESP_LOGI(TAG, "Expected upload size from query param: %zu bytes", expected_size);
     } else {
       ESP_LOGW(TAG, "No filesize query parameter found in upload request");
     }
@@ -823,7 +823,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       // Network storage - accumulate data in buffer
       // Check if we have enough space in buffer
       if (current_transferred + len > this->chunk_buffer_size_) {
-        ESP_LOGE(TAG, "Network storage upload buffer overflow: %" PRIu32 " + %" PRIu32 " > %" PRIu32, (uint32_t) current_transferred, (uint32_t) len,
+        ESP_LOGE(TAG, "Network storage upload buffer overflow: %zu + %zu > %zu", current_transferred, len,
                  this->chunk_buffer_size_);
 
         // Clean up
@@ -893,7 +893,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       size_t final_size = this->progress_.transferred_bytes;
       portEXIT_CRITICAL(&this->progress_mutex_);
 
-      ESP_LOGI(TAG, "Writing %" PRIu32 " bytes to network storage: %s", (uint32_t) final_size, upload_path.c_str());
+      ESP_LOGI(TAG, "Writing %zu bytes to network storage: %s", final_size, upload_path.c_str());
 
       // Get network storage for path
       storage::NetworkStorage *net_storage = nullptr;
@@ -921,7 +921,7 @@ void HttpFileBrowser::handleUpload(AsyncWebServerRequest *request, const Platfor
       portEXIT_CRITICAL(&this->progress_mutex_);
 
       if (success) {
-        ESP_LOGI(TAG, "Network storage upload completed: %s (%" PRIu32 " bytes)", upload_path.c_str(), (uint32_t) final_size);
+        ESP_LOGI(TAG, "Network storage upload completed: %s (%zu bytes)", upload_path.c_str(), final_size);
         request->send(201, "text/plain", "File uploaded successfully");
       } else {
         ESP_LOGE(TAG, "Network storage upload failed: %s", upload_path.c_str());
@@ -949,13 +949,13 @@ void HttpFileBrowser::handleBody(AsyncWebServerRequest *request, uint8_t *data, 
 
   // Accumulate body data in buffer
   if (index == 0) {
-    ESP_LOGD(TAG, "handleBody called: total=%" PRIu32 " bytes", (uint32_t) total);
+    ESP_LOGD(TAG, "handleBody called: total=%zu bytes", total);
     this->body_buffer_.clear();
     this->body_buffer_.reserve(total);
   }
 
   this->body_buffer_.append(reinterpret_cast<char *>(data), len);
-  ESP_LOGV(TAG, "handleBody: appended %" PRIu32 " bytes (total now: %" PRIu32 "/%" PRIu32 ")", (uint32_t) len, (uint32_t) this->body_buffer_.size(), (uint32_t) total);
+  ESP_LOGV(TAG, "handleBody: appended %zu bytes (total now: %zu/%zu)", len, this->body_buffer_.size(), total);
 }
 
 // Helper methods
@@ -1041,7 +1041,7 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
 
         for (const auto &entry : entries) {
           if (files.size() >= MAX_DIR_ENTRIES) {
-            ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), (uint32_t) MAX_DIR_ENTRIES);
+            ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
             break;
           }
 
@@ -1073,7 +1073,7 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
       if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
         count++;
         if (count >= MAX_DIR_ENTRIES) {
-          ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), (uint32_t) MAX_DIR_ENTRIES);
+          ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
           break;
         }
       }
@@ -2469,7 +2469,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
   if (is_virtual_root) {
     // List local mount points from storage
     const auto &mounts = this->storage_->get_mounts();
-    ESP_LOGI(TAG, "Virtual root - listing %" PRIu32 " local mount points", (uint32_t) mounts.size());
+    ESP_LOGI(TAG, "Virtual root - listing %zu local mount points", mounts.size());
 
     for (const auto &mount : mounts) {
       FileInfo info;
@@ -2512,7 +2512,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
 
     // List network storage mount points
     const auto &network_storage = this->storage_->get_network_storage();
-    ESP_LOGI(TAG, "Virtual root - listing %" PRIu32 " network storage mount points", (uint32_t) network_storage.size());
+    ESP_LOGI(TAG, "Virtual root - listing %zu network storage mount points", network_storage.size());
 
     for (const auto *net_storage : network_storage) {
       if (net_storage == nullptr)
@@ -2558,7 +2558,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
         request->send(500, "text/plain", "Failed to list directory on network storage");
         return;
       }
-      ESP_LOGI(TAG, "Found %" PRIu32 " files/folders in %s", (uint32_t) entries.size(), filepath.c_str());
+      ESP_LOGI(TAG, "Found %zu files/folders in %s", entries.size(), filepath.c_str());
       for (const auto &entry : entries) {
         FileInfo info;
         info.name = entry.name;
@@ -2571,7 +2571,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       // Local storage path
       ESP_LOGI(TAG, "Listing local directory: %s", filepath.c_str());
       esphome::FixedVector<FileInfo> files = this->list_directory(filepath);
-      ESP_LOGI(TAG, "Found %" PRIu32 " files/folders in %s", (uint32_t) files.size(), filepath.c_str());
+      ESP_LOGI(TAG, "Found %zu files/folders in %s", files.size(), filepath.c_str());
       for (const auto &info : files) {
         html += this->generate_file_row(info, this->url_prefix_);
       }
@@ -2623,7 +2623,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     }
     size_t file_size = file_stat.st_size;
 
-    ESP_LOGI(TAG, "Network storage file size: %" PRIu32 " bytes, starting chunked download", (uint32_t) file_size);
+    ESP_LOGI(TAG, "Network storage file size: %zu bytes, starting chunked download", file_size);
 
     // Set response headers
     httpd_resp_set_type(req, mime_type.c_str());
@@ -2641,7 +2641,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
       size_t bytes_read = 0;
       if (!net_storage->read_file_chunk(relative_path, buffer, total_sent, FILE_BUFFER_SIZE, bytes_read)) {
-        ESP_LOGE(TAG, "Failed to read chunk at offset %" PRIu32 " from network storage", (uint32_t) total_sent);
+        ESP_LOGE(TAG, "Failed to read chunk at offset %zu from network storage", total_sent);
         success = false;
         break;
       }
@@ -2653,7 +2653,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
       esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
       if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Download cancelled or connection closed at %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
+        ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
         success = false;
         break;
       }
@@ -2662,7 +2662,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
       // Log progress every ~3MB
       if (file_size > 3 * 1024 * 1024 && (total_sent % (3 * 1024 * 1024) < FILE_BUFFER_SIZE)) {
-        ESP_LOGI(TAG, "Download progress: %" PRIu32 " / %" PRIu32 " MB (%.1f%%)", (uint32_t)(total_sent / (1024 * 1024)), (uint32_t)(file_size / (1024 * 1024)),
+        ESP_LOGI(TAG, "Download progress: %zu / %zu MB (%.1f%%)", total_sent / (1024 * 1024), file_size / (1024 * 1024),
                  (float) total_sent / file_size * 100.0f);
       }
     }
@@ -2670,9 +2670,9 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     // Send final empty chunk to signal completion
     if (success) {
       httpd_resp_send_chunk(req, nullptr, 0);
-      ESP_LOGI(TAG, "Download completed: %" PRIu32 " bytes", (uint32_t) total_sent);
+      ESP_LOGI(TAG, "Download completed: %zu bytes", total_sent);
     } else {
-      ESP_LOGW(TAG, "Download incomplete: %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
+      ESP_LOGW(TAG, "Download incomplete: %zu / %zu bytes", total_sent, file_size);
     }
 
     return;
@@ -2687,7 +2687,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   }
   size_t file_size = file_stat.st_size;
 
-  ESP_LOGI(TAG, "Starting local file download: %s (size: %" PRIu32 " bytes)", filename.c_str(), (uint32_t) file_size);
+  ESP_LOGI(TAG, "Starting local file download: %s (size: %zu bytes)", filename.c_str(), file_size);
 
   // Open file
   FILE *file = fopen(filepath.c_str(), "rb");
@@ -2714,14 +2714,14 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
     size_t bytes_read = fread(buffer, 1, to_read, file);
 
     if (bytes_read == 0) {
-      ESP_LOGE(TAG, "Failed to read chunk at offset %" PRIu32, (uint32_t) total_sent);
+      ESP_LOGE(TAG, "Failed to read chunk at offset %zu", total_sent);
       success = false;
       break;
     }
 
     esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buffer), bytes_read);
     if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Download cancelled or connection closed at %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
+      ESP_LOGW(TAG, "Download cancelled or connection closed at %zu / %zu bytes", total_sent, file_size);
       success = false;
       break;
     }
@@ -2730,7 +2730,7 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
 
     // Log progress every ~3MB
     if (file_size > 3 * 1024 * 1024 && (total_sent % (3 * 1024 * 1024) < FILE_BUFFER_SIZE)) {
-      ESP_LOGI(TAG, "Download progress: %" PRIu32 " / %" PRIu32 " MB (%.1f%%)", (uint32_t)(total_sent / (1024 * 1024)), (uint32_t)(file_size / (1024 * 1024)),
+      ESP_LOGI(TAG, "Download progress: %zu / %zu MB (%.1f%%)", total_sent / (1024 * 1024), file_size / (1024 * 1024),
                (float) total_sent / file_size * 100.0f);
     }
   }
@@ -2740,9 +2740,9 @@ void HttpFileBrowser::handle_file_download(AsyncWebServerRequest *request, const
   // Send final empty chunk to signal completion
   if (success) {
     httpd_resp_send_chunk(req, nullptr, 0);
-    ESP_LOGI(TAG, "Download completed: %" PRIu32 " bytes", (uint32_t) total_sent);
+    ESP_LOGI(TAG, "Download completed: %zu bytes", total_sent);
   } else {
-    ESP_LOGW(TAG, "Download incomplete: %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_sent, (uint32_t) file_size);
+    ESP_LOGW(TAG, "Download incomplete: %zu / %zu bytes", total_sent, file_size);
   }
 }
 
@@ -2786,7 +2786,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   this->progress_.start_time = millis();
   portEXIT_CRITICAL(&this->progress_mutex_);
 
-  ESP_LOGI(TAG, "Starting upload: %s (%" PRIu32 " bytes, handler address: %p)", upload_path.c_str(), (uint32_t) request->contentLength(),
+  ESP_LOGI(TAG, "Starting upload: %s (%zu bytes, handler address: %p)", upload_path.c_str(), request->contentLength(),
            (void *) this);
 
   // Open file for writing
@@ -2807,7 +2807,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   uint8_t *buffer = this->upload_buffer_;
   bool success = true;
 
-  ESP_LOGI(TAG, "Reading upload data: %" PRIu32 " bytes total", (uint32_t) remaining);
+  ESP_LOGI(TAG, "Reading upload data: %zu bytes total", remaining);
 
   // Read and write in chunks
   size_t chunks_since_yield = 0;
@@ -2828,7 +2828,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
     fflush(file);  // Ensure data is written immediately
 
     if (written != static_cast<size_t>(received)) {
-      ESP_LOGE(TAG, "Failed to write to file: wrote %" PRIu32 " of %d bytes", (uint32_t) written, received);
+      ESP_LOGE(TAG, "Failed to write to file: wrote %zu of %d bytes", written, received);
       success = false;
       break;
     }
@@ -2851,7 +2851,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
 
     // Log progress every ~50KB
     if (current_transferred % (50 * 1024) < FILE_BUFFER_SIZE) {
-      ESP_LOGD(TAG, "Upload progress: %" PRIu32 " / %" PRIu32 " bytes (%.1f%%)", (uint32_t) current_transferred, (uint32_t) current_total,
+      ESP_LOGD(TAG, "Upload progress: %zu / %zu bytes (%.1f%%)", current_transferred, current_total,
                (float) current_transferred / current_total * 100.0f);
     }
   }
@@ -2865,7 +2865,7 @@ void HttpFileBrowser::handle_file_upload(AsyncWebServerRequest *request, const s
   portEXIT_CRITICAL(&this->progress_mutex_);
 
   if (success) {
-    ESP_LOGI(TAG, "Upload complete: %" PRIu32 " bytes", (uint32_t) final_transferred);
+    ESP_LOGI(TAG, "Upload complete: %zu bytes", final_transferred);
     request->send(200, "text/plain", "File uploaded successfully");
   } else {
     ESP_LOGE(TAG, "Upload failed");
@@ -3911,7 +3911,7 @@ void HttpFileBrowser::handle_api_progress(AsyncWebServerRequest *request) {
       ESP_LOGD(TAG, "Progress poll: delete operation, %d/%d items", processed_items, total_items);
     } else {
       ESP_LOGD(TAG, "Progress poll: %s operation, %" PRIu32 "/%" PRIu32 " bytes", operation.c_str(),
-               (uint32_t) transferred_bytes, (uint32_t) total_bytes);
+               transferred_bytes, total_bytes);
     }
   } else {
     ESP_LOGD(TAG, "Progress poll: no operation in progress");
@@ -3986,8 +3986,8 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   // Also log around potential failure threshold (chunks 170-180)
   if (chunk_index % 50 == 0 || chunk_index == 0 || chunk_index == total_chunks - 1 ||
       (chunk_index >= 170 && chunk_index <= 180)) {
-    ESP_LOGD(TAG, "Upload chunk: file=%s, chunk=%d/%d, path=%s, size=%" PRIu32 ", free_heap=%" PRIu32, filename.c_str(),
-             chunk_index, total_chunks, path.c_str(), (uint32_t) file_size, esp_get_free_heap_size());
+    ESP_LOGD(TAG, "Upload chunk: file=%s, chunk=%d/%d, path=%s, size=%zu, free_heap=%" PRIu32, filename.c_str(),
+             chunk_index, total_chunks, path.c_str(), file_size, esp_get_free_heap_size());
   }
 
   // Convert path to filesystem path
@@ -4268,8 +4268,8 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
     // Log only every 50th chunk, first, and last
     if (chunk_index % 50 == 0 || chunk_index == 0 || chunk_index == total_chunks - 1 ||
         (chunk_index >= 170 && chunk_index <= 180)) {
-      ESP_LOGD(TAG, "Wrote chunk %d: %" PRIu32 " bytes (total: %" PRIu32 "/%" PRIu32 "), free_heap=%" PRIu32,
-               chunk_index, (uint32_t) written, (uint32_t) this->progress_.transferred_bytes, (uint32_t) file_size,
+      ESP_LOGD(TAG, "Wrote chunk %d: %zu bytes (total: %zu/%zu), free_heap=%" PRIu32,
+               chunk_index, written, this->progress_.transferred_bytes, file_size,
                esp_get_free_heap_size());
     }
   }
