@@ -169,7 +169,7 @@ void LEDCOutput::setup() {
 #if !defined(CLANG_TIDY)
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 0)
     PERIPH_RCC_ATOMIC() { ledc_ll_reset_register(0); }
-#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 0)
+#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
     PERIPH_RCC_ATOMIC() {
       ledc_ll_enable_reset_reg(true);
       ledc_ll_enable_reset_reg(false);
