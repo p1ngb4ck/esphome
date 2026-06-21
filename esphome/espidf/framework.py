@@ -503,6 +503,42 @@ def _patch_tools_json_for_linux_arm64(framework_path: Path) -> None:
         )
 
 
+def _patch_periph_ctrl_literal_suffix(framework_path: Path) -> None:
+    """Fix missing space between string literal and CONFIG_IDF_TARGET macro in periph_ctrl.h.
+
+    IDF 5.5.x has a C++11 -Wliteral-suffix warning in periph_ctrl.h line 88:
+        deprecated("This function is not functional on "CONFIG_IDF_TARGET)
+    The space between the string literal and the macro is required by C++11.
+    Idempotent: already-patched files are a no-op.
+    """
+    periph_ctrl_h = (
+        framework_path
+        / "components"
+        / "esp_hw_support"
+        / "include"
+        / "esp_private"
+        / "periph_ctrl.h"
+    )
+    if not periph_ctrl_h.is_file():
+        return
+
+    old = '"This function is not functional on "CONFIG_IDF_TARGET'
+    new = '"This function is not functional on " CONFIG_IDF_TARGET'
+
+    try:
+        content = periph_ctrl_h.read_text(encoding="utf-8")
+    except OSError as e:
+        _LOGGER.warning("Could not read %s for literal-suffix patch (%s); skipping.", periph_ctrl_h, e)
+        return
+
+    if old not in content:
+        return  # already patched or not present
+
+    patched = content.replace(old, new)
+    write_file_if_changed(periph_ctrl_h, patched)
+    _LOGGER.info("Patched %s to fix -Wliteral-suffix (missing space before CONFIG_IDF_TARGET).", periph_ctrl_h)
+
+
 def _check_esphome_idf_framework_install(
     version: str,
     targets: list[str],
@@ -603,6 +639,10 @@ def _check_esphome_idf_framework_install(
     # fresh extracts — idempotent and cheap, and lets a build dir carrying
     # a pre-patch tools.json get fixed up without forcing a clean.
     _patch_tools_json_for_linux_arm64(framework_path)
+
+    # Fix -Wliteral-suffix in periph_ctrl.h (missing space before CONFIG_IDF_TARGET macro).
+    # Idempotent and cheap — safe to run on every invocation.
+    _patch_periph_ctrl_literal_suffix(framework_path)
 
     # 3. Check if the framework tools are the same and correctly installed
     if not install:
