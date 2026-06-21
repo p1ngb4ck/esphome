@@ -404,6 +404,7 @@ def generate_cmakelists_txt(component: IDFComponent) -> str:
         ]
     )
     content += f"  REQUIRES {str_requires}\n"
+    content += "  PRIV_REQUIRES src\n"
     content += ")\n"
 
     # Add public and private build flags
