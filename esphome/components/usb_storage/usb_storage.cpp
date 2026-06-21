@@ -10,29 +10,6 @@
 namespace esphome {
 namespace usb_storage {
 
-static const usb_standard_desc_t *next_interface_desc(const usb_standard_desc_t *desc, size_t len, size_t *offset) {
-  return usb_parse_next_descriptor_of_type(desc, len, USB_W_VALUE_DT_INTERFACE, (int *) offset);
-}
-
-static const usb_intf_desc_t *find_msc_interface(const usb_config_desc_t *config_desc) {
-  size_t offset = 0;
-  size_t total_length = config_desc->wTotalLength;
-  const usb_standard_desc_t *next_desc = (const usb_standard_desc_t *) config_desc;
-
-  next_desc = next_interface_desc(next_desc, total_length, &offset);
-
-  while (next_desc) {
-    const usb_intf_desc_t *ifc_desc = (const usb_intf_desc_t *) next_desc;
-
-    if (ifc_desc->bInterfaceClass == USB_CLASS_MASS_STORAGE && ifc_desc->bInterfaceSubClass == SCSI_COMMAND_SET &&
-        ifc_desc->bInterfaceProtocol == BULK_ONLY_TRANSFER) {
-      return ifc_desc;
-    }
-
-    next_desc = next_interface_desc(next_desc, total_length, &offset);
-  };
-  return NULL;
-}
 
 int8_t USBStorageHost::find_free_slot(void) {
   for (int i = 0; i < MAX_MSC_DEVICES; i++) {
