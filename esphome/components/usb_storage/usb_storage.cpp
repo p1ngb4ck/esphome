@@ -34,15 +34,6 @@ static const usb_intf_desc_t *find_msc_interface(const usb_config_desc_t *config
   return NULL;
 }
 
-static bool is_mass_storage_device(usb_config_desc_t *config_desc) {
-  if (find_msc_interface(config_desc)) {
-    return true;
-  } else {
-    ESP_LOGV(TAG, "Connected USB device is not MSC");
-    return false;
-  }
-}
-
 int8_t USBStorageHost::find_free_slot(void) {
   for (int i = 0; i < MAX_MSC_DEVICES; i++) {
     if (this->msc_devices_[i] == NULL) {

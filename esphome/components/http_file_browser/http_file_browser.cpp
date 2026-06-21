@@ -1041,7 +1041,7 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
 
         for (const auto &entry : entries) {
           if (files.size() >= MAX_DIR_ENTRIES) {
-            ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
+            ESP_LOGW(TAG, "Directory %s has more than %zu entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
             break;
           }
 
@@ -1073,7 +1073,7 @@ esphome::FixedVector<FileInfo> HttpFileBrowser::list_directory(const std::string
       if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
         count++;
         if (count >= MAX_DIR_ENTRIES) {
-          ESP_LOGW(TAG, "Directory %s has more than %" PRIu32 " entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
+          ESP_LOGW(TAG, "Directory %s has more than %zu entries, truncating", path.c_str(), MAX_DIR_ENTRIES);
           break;
         }
       }
@@ -3910,7 +3910,7 @@ void HttpFileBrowser::handle_api_progress(AsyncWebServerRequest *request) {
     if (operation == "delete") {
       ESP_LOGD(TAG, "Progress poll: delete operation, %d/%d items", processed_items, total_items);
     } else {
-      ESP_LOGD(TAG, "Progress poll: %s operation, %" PRIu32 "/%" PRIu32 " bytes", operation.c_str(),
+      ESP_LOGD(TAG, "Progress poll: %s operation, %zu/%zu bytes", operation.c_str(),
                transferred_bytes, total_bytes);
     }
   } else {
