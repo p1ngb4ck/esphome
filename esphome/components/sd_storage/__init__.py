@@ -18,9 +18,6 @@ CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = []
 
-# Mark requirements early so ESP32 component can check them during its own to_code()
-esp32.require_vfs_dir()
-esp32.require_fatfs()
 
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
 SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component)
@@ -221,6 +218,8 @@ FINAL_VALIDATE_SCHEMA = _final_validate_spi_interface
 
 
 async def to_code(config):
+    esp32.require_vfs_dir()
+    esp32.require_fatfs()
     # Re-enable fatfs IDF component (excluded by default) - needed for esp_vfs_fat
     esp32.include_builtin_idf_component("fatfs")
     var = cg.new_Pvariable(config[CONF_ID])
