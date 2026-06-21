@@ -3397,8 +3397,8 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
   // Create task parameters
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
-  ESP_LOGI(TAG, "Copy: %s, size %lld bytes, free_heap=%zu", is_directory ? "directory" : "file", (long long) file_size,
-           esp_get_free_heap_size());
+  ESP_LOGI(TAG, "Copy: %s, size %lld bytes, free_heap=%" PRIu32, is_directory ? "directory" : "file",
+           (long long) file_size, esp_get_free_heap_size());
 
   auto *task_params = new CopyTaskParams{this, source, destination, file_size, track_progress, is_directory};
 
@@ -3409,7 +3409,7 @@ void HttpFileBrowser::handle_api_copy(AsyncWebServerRequest *request) {
     ESP_LOGI(TAG, "Copy task created successfully");
     request->send(200, "application/json", "{\"success\":true}");
   } else {
-    ESP_LOGE(TAG, "Failed to create copy task (heap: %zu)", esp_get_free_heap_size());
+    ESP_LOGE(TAG, "Failed to create copy task (heap: %lu)", esp_get_free_heap_size());
     delete task_params;
     request->send(500, "application/json", "{\"error\":\"Failed to start copy operation\"}");
   }
@@ -3477,8 +3477,8 @@ void HttpFileBrowser::handle_api_move(AsyncWebServerRequest *request) {
   // Create task parameters
   // Always track progress for consistent modal behavior (overhead is minimal)
   bool track_progress = true;
-  ESP_LOGI(TAG, "Move: %s, size %lld bytes, free_heap=%zu", is_directory ? "directory" : "file", (long long) file_size,
-           esp_get_free_heap_size());
+  ESP_LOGI(TAG, "Move: %s, size %lld bytes, free_heap=%" PRIu32, is_directory ? "directory" : "file",
+           (long long) file_size, esp_get_free_heap_size());
 
   auto *task_params = new MoveTaskParams{this, source, destination, file_size, track_progress, is_directory};
 
@@ -3835,7 +3835,7 @@ void HttpFileBrowser::handle_api_progress(AsyncWebServerRequest *request) {
   if (in_progress && start_time > 0) {
     uint32_t elapsed_ms = millis() - start_time;
     if (elapsed_ms > 300000) {  // 5 minutes
-      ESP_LOGW(TAG, "Auto-clearing stuck operation: %s (elapsed: %u ms)", operation.c_str(), elapsed_ms);
+      ESP_LOGW(TAG, "Auto-clearing stuck operation: %s (elapsed: %" PRIu32 " ms)", operation.c_str(), elapsed_ms);
       this->progress_.in_progress = false;
       in_progress = false;
     }
@@ -3910,7 +3910,8 @@ void HttpFileBrowser::handle_api_progress(AsyncWebServerRequest *request) {
     if (operation == "delete") {
       ESP_LOGD(TAG, "Progress poll: delete operation, %d/%d items", processed_items, total_items);
     } else {
-      ESP_LOGD(TAG, "Progress poll: %s operation, %zu/%zu bytes", operation.c_str(), transferred_bytes, total_bytes);
+      ESP_LOGD(TAG, "Progress poll: %s operation, %" PRIu32 "/%" PRIu32 " bytes", operation.c_str(),
+               (uint32_t) transferred_bytes, (uint32_t) total_bytes);
     }
   } else {
     ESP_LOGD(TAG, "Progress poll: no operation in progress");
@@ -3985,8 +3986,8 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
   // Also log around potential failure threshold (chunks 170-180)
   if (chunk_index % 50 == 0 || chunk_index == 0 || chunk_index == total_chunks - 1 ||
       (chunk_index >= 170 && chunk_index <= 180)) {
-    ESP_LOGD(TAG, "Upload chunk: file=%s, chunk=%d/%d, path=%s, size=%zu, free_heap=%zu", filename.c_str(), chunk_index,
-             total_chunks, path.c_str(), file_size, esp_get_free_heap_size());
+    ESP_LOGD(TAG, "Upload chunk: file=%s, chunk=%d/%d, path=%s, size=%" PRIu32 ", free_heap=%" PRIu32, filename.c_str(),
+             chunk_index, total_chunks, path.c_str(), (uint32_t) file_size, esp_get_free_heap_size());
   }
 
   // Convert path to filesystem path
@@ -4267,8 +4268,9 @@ void HttpFileBrowser::handle_api_upload_chunk(AsyncWebServerRequest *request) {
     // Log only every 50th chunk, first, and last
     if (chunk_index % 50 == 0 || chunk_index == 0 || chunk_index == total_chunks - 1 ||
         (chunk_index >= 170 && chunk_index <= 180)) {
-      ESP_LOGD(TAG, "Wrote chunk %d: %zu bytes (total: %zu/%zu), free_heap=%zu", chunk_index, written,
-               this->progress_.transferred_bytes, file_size, esp_get_free_heap_size());
+      ESP_LOGD(TAG, "Wrote chunk %d: %" PRIu32 " bytes (total: %" PRIu32 "/%" PRIu32 "), free_heap=%" PRIu32,
+               chunk_index, (uint32_t) written, (uint32_t) this->progress_.transferred_bytes, (uint32_t) file_size,
+               esp_get_free_heap_size());
     }
   }
 

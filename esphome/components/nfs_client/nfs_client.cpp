@@ -156,7 +156,7 @@ bool XDRBuffer::decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t 
 
   // Check if caller's buffer is large enough
   if (length > max_len) {
-    ESP_LOGE("XDRBuffer", "Buffer too small: need %u, have %zu", length, max_len);
+    ESP_LOGE("XDRBuffer", "Buffer too small: need %" PRIu32 ", have %" PRIu32, (uint32_t) length, (uint32_t) max_len);
     return false;
   }
 
@@ -314,7 +314,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
     return false;
   }
   if (xid != expected_xid) {
-    ESP_LOGE(TAG, "XID mismatch: expected %u, got %u", expected_xid, xid);
+    ESP_LOGE(TAG, "XID mismatch: expected %" PRIu32 ", got %" PRIu32, expected_xid, xid);
     return false;
   }
 
@@ -323,7 +323,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
     return false;
   }
   if (msg_type != RPC_REPLY) {
-    ESP_LOGE(TAG, "Not an RPC reply, got: %u", msg_type);
+    ESP_LOGE(TAG, "Not an RPC reply, got: %" PRIu32, msg_type);
     return false;
   }
 
@@ -333,7 +333,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
   }
 
   if (reply_status != RPC_MSG_ACCEPTED) {
-    ESP_LOGE(TAG, "RPC message denied, status: %u", reply_status);
+    ESP_LOGE(TAG, "RPC message denied, status: %" PRIu32, reply_status);
     return false;
   }
 
@@ -358,7 +358,7 @@ bool RPCClient::parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStat
 
   status = static_cast<RPCAcceptStatus>(accept_status);
   if (status != RPC_SUCCESS) {
-    ESP_LOGE(TAG, "RPC not successful, status: %u", static_cast<uint32_t>(status));
+    ESP_LOGE(TAG, "RPC not successful, status: %" PRIu32, static_cast<uint32_t>(status));
     return false;
   }
   return true;
@@ -405,7 +405,7 @@ void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "Setting up NFS Client...");
   ESP_LOGCONFIG(TAG, "  Server: %s:%u", this->server_.c_str(), this->port_);
   ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
-  ESP_LOGCONFIG(TAG, "  UID: %u, GID: %u", this->uid_, this->gid_);
+  ESP_LOGCONFIG(TAG, "  UID: %" PRIu32 ", GID: %" PRIu32, this->uid_, this->gid_);
 
   if (!this->mount_path_.empty()) {
     ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
@@ -454,7 +454,7 @@ void NFSClient::loop() {
         ESP_LOGD(TAG, "Connected to portmapper, querying for MOUNT service...");
         this->mount_state_ = MountState::QUERYING_PMAP_MOUNT;
       } else {
-        ESP_LOGW(TAG, "Failed to connect to portmapper, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to connect to portmapper, will retry in %" PRIu32 " seconds", this->mount_retry_interval_ / 1000);
         this->mount_state_ = MountState::FAILED;
         this->last_mount_attempt_ = now;
       }
@@ -469,7 +469,7 @@ void NFSClient::loop() {
         this->close_connection_();
         this->mount_state_ = MountState::CONNECTING_MOUNT;
       } else {
-        ESP_LOGW(TAG, "Failed to query portmapper for MOUNT, will retry in %u seconds",
+        ESP_LOGW(TAG, "Failed to query portmapper for MOUNT, will retry in %" PRIu32 " seconds",
                  this->mount_retry_interval_ / 1000);
         this->close_connection_();
         this->mount_state_ = MountState::FAILED;
@@ -483,7 +483,7 @@ void NFSClient::loop() {
         ESP_LOGD(TAG, "Connected to MOUNT service, attempting mount...");
         this->mount_state_ = MountState::MOUNTING;
       } else {
-        ESP_LOGW(TAG, "Failed to connect to MOUNT service, will retry in %u seconds",
+        ESP_LOGW(TAG, "Failed to connect to MOUNT service, will retry in %" PRIu32 " seconds",
                  this->mount_retry_interval_ / 1000);
         this->mount_state_ = MountState::FAILED;
         this->last_mount_attempt_ = now;
@@ -500,7 +500,7 @@ void NFSClient::loop() {
         this->close_connection_();
         this->mount_state_ = MountState::QUERYING_PMAP_NFS;
       } else {
-        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %u seconds", this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %" PRIu32 " seconds", this->mount_retry_interval_ / 1000);
         this->disconnect_();
         this->mount_state_ = MountState::FAILED;
         this->last_mount_attempt_ = now;
@@ -752,7 +752,7 @@ bool NFSClient::connect_() {
   if (setsockopt(this->socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
     ESP_LOGW(TAG, "Failed to set receive timeout: errno %d", errno);
   } else {
-    ESP_LOGD(TAG, "Set socket receive timeout to %d seconds", tv.tv_sec);
+    ESP_LOGD(TAG, "Set socket receive timeout to %lld seconds", (long long) tv.tv_sec);
   }
 
   this->connected_ = true;
@@ -847,7 +847,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   response_length &= 0x7FFFFFFF;  // Clear high bit
 
   if (response_length > 65536) {  // Sanity check
-    ESP_LOGE(TAG, "Response too large: %u bytes", response_length);
+    ESP_LOGE(TAG, "Response too large: %" PRIu32 " bytes", response_length);
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
@@ -860,8 +860,8 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   while (total_received < response_length) {
     int received = recv(this->socket_, response_data.data() + total_received, response_length - total_received, 0);
     if (received <= 0) {
-      ESP_LOGE(TAG, "Failed to receive RPC response data: received=%d, expected=%u, total_received=%zu, errno=%d",
-               received, response_length, total_received, errno);
+      ESP_LOGE(TAG, "Failed to receive RPC response data: received=%d, expected=%" PRIu32 ", total_received=%" PRIu32 ", errno=%d",
+               received, response_length, (uint32_t) total_received, errno);
       close(this->socket_);
       this->socket_ = -1;
       this->connected_ = false;
@@ -906,7 +906,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   response_length &= 0x7FFFFFFF;
 
   if (response_length > 65536) {  // Sanity check
-    ESP_LOGE(TAG, "Response too large: %u bytes", response_length);
+    ESP_LOGE(TAG, "Response too large: %" PRIu32 " bytes", response_length);
     return false;
   }
 
