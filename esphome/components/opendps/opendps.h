@@ -140,38 +140,38 @@ enum CalibrationAssistantState : uint8_t {
 
   // === Input Voltage Calibration (two-point) ===
   // User connects lower supply voltage, enters measured mV
-  CAL_VIN_LOW_WAIT_INPUT,  // Waiting for user to enter measured Vin LOW in mV
-  CAL_VIN_LOW_RECORD,      // Record ADC reading for low point
+  CAL_VIN_LOW_WAIT_INPUT = 1,  // Waiting for user to enter measured Vin LOW in mV
+  CAL_VIN_LOW_RECORD = 2,      // Record ADC reading for low point
   // UART paused: user swaps supply, enters higher voltage mV, presses step to resume + record
-  CAL_UART_PAUSED,      // UART reading suspended, step resumes and records Vin HIGH
-  CAL_VIN_HIGH_RECORD,  // Record ADC reading for high point
-  CAL_VIN_CALCULATE,    // Calculate VIN_ADC_K and VIN_ADC_C
+  CAL_UART_PAUSED = 3,      // UART reading suspended, step resumes and records Vin HIGH
+  CAL_VIN_HIGH_RECORD = 4,  // Record ADC reading for high point
+  CAL_VIN_CALCULATE = 5,    // Calculate VIN_ADC_K and VIN_ADC_C
 
   // === Output Voltage Calibration ===
-  CAL_VOUT_SWEEP,            // Auto-sweep to find max V_DAC (no user input)
-  CAL_VOUT_LOW_WAIT_INPUT,   // Set V_DAC to 10%, wait for user measured mV
-  CAL_VOUT_LOW_RECORD,       // Record V_ADC for low point
-  CAL_VOUT_HIGH_WAIT_INPUT,  // Set V_DAC to 90%, wait for user measured mV
-  CAL_VOUT_HIGH_RECORD,      // Record V_ADC for high point
-  CAL_VOUT_CALCULATE,        // Calculate V_ADC_K/C and V_DAC_K/C
+  CAL_VOUT_SWEEP = 10,            // Auto-sweep to find max V_DAC (no user input)
+  CAL_VOUT_LOW_WAIT_INPUT = 11,   // Set V_DAC to 10%, wait for user measured mV
+  CAL_VOUT_LOW_RECORD = 12,       // Record V_ADC for low point
+  CAL_VOUT_HIGH_WAIT_INPUT = 13,  // Set V_DAC to 90%, wait for user measured mV
+  CAL_VOUT_HIGH_RECORD = 14,      // Record V_ADC for high point
+  CAL_VOUT_CALCULATE = 15,        // Calculate V_ADC_K/C and V_DAC_K/C
 
   // === Output Current Calibration (requires load) ===
-  CAL_IOUT_MAX_CURRENT_INPUT,      // User enters max DPS current (A)
-  CAL_IOUT_LOAD_RESISTANCE_INPUT,  // User enters load resistance (Ohm)
-  CAL_IOUT_LOAD_WATTAGE_INPUT,     // User enters load max wattage (W)
-  CAL_IOUT_CONNECT_LOAD,           // User connects load, presses step to confirm
-  CAL_IOUT_SWEEP,                  // Auto-sweep current readings (no user input)
-  CAL_IOUT_CALCULATE,              // Calculate A_ADC_K and A_ADC_C
+  CAL_IOUT_MAX_CURRENT_INPUT = 20,      // User enters max DPS current (A)
+  CAL_IOUT_LOAD_RESISTANCE_INPUT = 21,  // User enters load resistance (Ohm)
+  CAL_IOUT_LOAD_WATTAGE_INPUT = 22,     // User enters load max wattage (W)
+  CAL_IOUT_CONNECT_LOAD = 23,           // User connects load, presses step to confirm
+  CAL_IOUT_SWEEP = 24,                  // Auto-sweep current readings (no user input)
+  CAL_IOUT_CALCULATE = 25,              // Calculate A_ADC_K and A_ADC_C
 
   // === Constant Current (CC) Calibration (requires short) ===
-  CAL_CC_SHORT_OUTPUT,   // User shorts output, presses step to confirm
-  CAL_CC_SWEEP,          // Auto-sweep A_DAC range to find linear region (no user input)
-  CAL_CC_MEASURE_SWEEP,  // Measure current at points in linear range (no user input)
-  CAL_CC_CALCULATE,      // Calculate A_DAC_K and A_DAC_C
+  CAL_CC_SHORT_OUTPUT = 30,   // User shorts output, presses step to confirm
+  CAL_CC_SWEEP = 31,          // Auto-sweep A_DAC range to find linear region (no user input)
+  CAL_CC_MEASURE_SWEEP = 32,  // Measure current at points in linear range (no user input)
+  CAL_CC_CALCULATE = 33,      // Calculate A_DAC_K and A_DAC_C
 
   // === Done ===
-  CAL_COMPLETE,
-  CAL_ERROR
+  CAL_COMPLETE = 40,
+  CAL_ERROR = 41
 };
 
 // Calibration report data (raw ADC/DAC readings and calibration coefficients)
