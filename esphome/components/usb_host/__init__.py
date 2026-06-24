@@ -99,7 +99,7 @@ async def register_usb_client(config):
 
 
 _ESP_USB_REPO = "https://github.com/espressif/esp-usb.git"
-_ESP_USB_REF = "usb-v1.4.1"
+_ESP_USB_REF = "master"
 _ESP_USB_SRCS = [
     "enum.c",
     "ext_hub.c",
