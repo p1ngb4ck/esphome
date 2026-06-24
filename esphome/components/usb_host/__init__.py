@@ -99,7 +99,7 @@ async def register_usb_client(config):
 
 
 _ESP_USB_REPO = "https://github.com/espressif/esp-usb.git"
-_ESP_USB_REF = "usb-v1.4.1"
+_ESP_USB_REF = "master"
 # Source files to copy from espressif/usb into the IDF usb component.
 # usb_phy.c is intentionally excluded — the managed component pulls it from
 # IDF itself (it's P4-specific and not in the managed repo).
