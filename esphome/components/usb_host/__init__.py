@@ -142,10 +142,6 @@ def _patch_usb_host_dual_phy() -> None:
     if not usb_dir.is_dir():
         return
 
-    sentinel = "root_hub_ports[HCD_NUM_PORTS]"
-    if sentinel in (usb_dir / "hub.c").read_text(encoding="utf-8"):
-        return  # already patched
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = _Path(tmp)
         _LOGGER.info("Cloning espressif/usb %s for dual-host patch...", _ESP_USB_REF)
