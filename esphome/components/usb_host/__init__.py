@@ -119,6 +119,13 @@ _ESP_USB_PRIVATE_HDRS = [
     "usbh.h",
     "usb_private.h",
 ]
+_ESP_USB_PUBLIC_HDRS = [
+    "usb_helpers.h",
+    "usb_host.h",
+    "usb_types_ch11.h",
+    "usb_types_ch9.h",
+    "usb_types_stack.h",
+]
 
 
 def _patch_usb_host_dual_phy() -> None:
@@ -177,6 +184,16 @@ def _patch_usb_host_dual_phy() -> None:
                 shutil.copy2(src, dst)
             else:
                 _LOGGER.warning("espressif/usb: private header not found: %s", src)
+
+        pub_inc_dst = usb_dir / "include" / "usb"
+        pub_inc_dst.mkdir(parents=True, exist_ok=True)
+        for fname in _ESP_USB_PUBLIC_HDRS:
+            src = src_root / "include" / "usb" / fname
+            dst = pub_inc_dst / fname
+            if src.is_file():
+                shutil.copy2(src, dst)
+            else:
+                _LOGGER.warning("espressif/usb: public header not found: %s", src)
 
     _LOGGER.info(
         "Patched managed_components/espressif__usb with espressif/usb %s for dual-host on ESP32-P4.",
