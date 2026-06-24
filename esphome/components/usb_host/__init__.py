@@ -93,6 +93,136 @@ async def register_usb_client(config):
     return var
 
 
+def _patch_usb_host_dual_phy() -> None:
+    """Patch IDF usb_host.c to support dual-PHY init on ESP32-P4.
+
+    IDF 5.5.x initialises only one PHY regardless of peripheral_map bits.
+    Replace the single-PHY block with a loop over all enabled bits so that
+    both HS and FS controllers are initialised when dual_host is enabled.
+    Idempotent: already-patched files are a no-op.
+    """
+    from esphome.espidf.toolchain import _get_idf_path
+
+    idf_path = _get_idf_path()
+    if idf_path is None:
+        return
+    usb_host_c = idf_path / "components" / "usb" / "usb_host.c"
+    if not usb_host_c.is_file():
+        return
+
+    try:
+        content = usb_host_c.read_text(encoding="utf-8")
+    except OSError as e:
+        _LOGGER.warning("Could not read %s for dual-PHY patch: %s", usb_host_c, e)
+        return
+
+    if "PHY install error for port" in content:
+        return  # already patched
+
+    old_struct = "        usb_phy_handle_t phy_handle;    // Will be NULL if host library is installed with skip_phy_setup"
+    new_struct = "        usb_phy_handle_t phy_handles[SOC_USB_OTG_PERIPH_NUM];  // patched: one per port"
+
+    old_init = (
+        "    // Install USB PHY (if necessary). USB PHY driver will also enable the underlying Host Controller\n"
+        "    if (!config->skip_phy_setup) {\n"
+        "        bool init_utmi_phy = false; // Default value for Linux simulation\n"
+        "\n"
+        "#if SOC_USB_OTG_SUPPORTED // In case we run on a real target, select the PHY from usb_dwc_info description structure\n"
+        "        // Right now we support only one peripheral, can be extended in future\n"
+        "        int peripheral_index = 0;\n"
+        "        if (peripheral_map & BIT1) {\n"
+        "            peripheral_index = 1;\n"
+        "        }\n"
+        "        init_utmi_phy = (usb_dwc_info.controllers[peripheral_index].supported_phys == USB_PHY_INST_UTMI_0);\n"
+        "#endif // SOC_USB_OTG_SUPPORTED\n"
+        "\n"
+        "        // Host Library defaults to internal PHY\n"
+        "        usb_phy_config_t phy_config = {\n"
+        "            .controller = USB_PHY_CTRL_OTG,\n"
+        "            .target = init_utmi_phy ? USB_PHY_TARGET_UTMI : USB_PHY_TARGET_INT,\n"
+        "            .otg_mode = USB_OTG_MODE_HOST,\n"
+        "            .otg_speed = USB_PHY_SPEED_UNDEFINED,   // In Host mode, the speed is determined by the connected device\n"
+        "            .ext_io_conf = NULL,\n"
+        "            .otg_io_conf = NULL,\n"
+        "        };\n"
+        "        ret = usb_new_phy(&phy_config, &host_lib_obj->constant.phy_handle);\n"
+        "        if (ret != ESP_OK) {\n"
+        '            ESP_LOGE(USB_HOST_TAG, "PHY install error: %s", esp_err_to_name(ret));\n'
+        "            goto phy_err;\n"
+        "        }\n"
+        "    }"
+    )
+    new_init = (
+        "    // Install USB PHY for each enabled peripheral (patched by ESPHome for dual-host on ESP32-P4)\n"
+        "    if (!config->skip_phy_setup) {\n"
+        "        memset(host_lib_obj->constant.phy_handles, 0, sizeof(host_lib_obj->constant.phy_handles));\n"
+        "        for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
+        "            if (!(peripheral_map & BIT(i))) {\n"
+        "                continue;\n"
+        "            }\n"
+        "            bool init_utmi_phy = false;\n"
+        "#if SOC_USB_OTG_SUPPORTED\n"
+        "            init_utmi_phy = (usb_dwc_info.controllers[i].supported_phys == USB_PHY_INST_UTMI_0);\n"
+        "#endif\n"
+        "            usb_phy_config_t phy_config = {\n"
+        "                .controller = USB_PHY_CTRL_OTG,\n"
+        "                .target = init_utmi_phy ? USB_PHY_TARGET_UTMI : USB_PHY_TARGET_INT,\n"
+        "                .otg_mode = USB_OTG_MODE_HOST,\n"
+        "                .otg_speed = USB_PHY_SPEED_UNDEFINED,\n"
+        "                .ext_io_conf = NULL,\n"
+        "                .otg_io_conf = NULL,\n"
+        "            };\n"
+        "            ret = usb_new_phy(&phy_config, &host_lib_obj->constant.phy_handles[i]);\n"
+        "            if (ret != ESP_OK) {\n"
+        '                ESP_LOGE(USB_HOST_TAG, "PHY install error for port %d: %s", i, esp_err_to_name(ret));\n'
+        "                goto phy_err;\n"
+        "            }\n"
+        "        }\n"
+        "    }"
+    )
+
+    old_del_install = (
+        "    if (host_lib_obj->constant.phy_handle) {\n"
+        "        ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));\n"
+        "    }\n"
+        "phy_err:"
+    )
+    new_del_install = (
+        "    for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
+        "        if (host_lib_obj->constant.phy_handles[i]) {\n"
+        "            ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handles[i]));\n"
+        "        }\n"
+        "    }\n"
+        "phy_err:"
+    )
+
+    old_del_uninstall = (
+        "    // If the USB PHY was setup, then delete it\n"
+        "    if (host_lib_obj->constant.phy_handle) {\n"
+        "        ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));\n"
+        "    }"
+    )
+    new_del_uninstall = (
+        "    // If the USB PHY was setup, then delete it\n"
+        "    for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
+        "        if (host_lib_obj->constant.phy_handles[i]) {\n"
+        "            ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handles[i]));\n"
+        "        }\n"
+        "    }"
+    )
+
+    if old_struct not in content or old_init not in content:
+        _LOGGER.warning("usb_host.c: expected patterns not found, skipping dual-PHY patch.")
+        return
+
+    content = content.replace(old_struct, new_struct)
+    content = content.replace(old_init, new_init)
+    content = content.replace(old_del_install, new_del_install)
+    content = content.replace(old_del_uninstall, new_del_uninstall)
+    write_file_if_changed(usb_host_c, content)
+    _LOGGER.info("Patched %s for dual-PHY init (ESP32-P4 dual USB host).", usb_host_c)
+
+
 async def to_code(config: ConfigType) -> None:
     # espressif/usb 1.4.1 supports IDF >= 5.5.3 and adds dual-host on P4.
     # Use it unconditionally — on IDF 5.x it overrides the built-in usb component
@@ -111,6 +241,7 @@ async def to_code(config: ConfigType) -> None:
 
     if config.get(CONF_DUAL_HOST):
         cg.add(var.set_dual_host(True))
+        _patch_usb_host_dual_phy()
 
     for device in config.get(CONF_DEVICES) or ():
         await register_usb_client(device)
