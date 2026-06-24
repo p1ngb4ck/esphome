@@ -13,7 +13,6 @@ import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID
 from esphome.core import CORE
 from esphome.cpp_types import Component
-from esphome.espidf.toolchain import _get_idf_path
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,23 +122,24 @@ _ESP_USB_PRIVATE_HDRS = [
 
 
 def _patch_usb_host_dual_phy() -> None:
-    """Replace IDF 5.5.x USB host sources with espressif/usb 1.4.1 for dual-host on ESP32-P4.
+    """Overwrite the downloaded espressif/usb managed component sources with master.
 
-    IDF 5.5.x usb_host.c, hub.c, and hcd_dwc.c only support a single root port.
-    espressif/usb 1.4.1 adds full dual-port support (HCD_NUM_PORTS loop in hub,
-    PHY init loop in usb_host, per-port HCD in hcd_dwc).
-    Idempotent: skips if already patched (sentinel string present).
+    The managed component espressif/usb 1.4.1 from the registry lacks dual-port
+    hub support. Clone master (which has it) and copy src/ and private_include/
+    into the build's managed_components/espressif__usb/ — those are the files
+    actually compiled by IDF.
     """
     import shutil
     import subprocess
     import tempfile
     from pathlib import Path as _Path
 
-    idf_path = _get_idf_path()
-    if idf_path is None:
-        return
-    usb_dir = _Path(idf_path) / "components" / "usb"
+    usb_dir = _Path(CORE.build_path) / "managed_components" / "espressif__usb"
     if not usb_dir.is_dir():
+        _LOGGER.warning(
+            "managed_components/espressif__usb not found at %s — dual-host patch skipped",
+            usb_dir,
+        )
         return
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -162,7 +162,7 @@ def _patch_usb_host_dual_phy() -> None:
 
         for fname in _ESP_USB_SRCS:
             src = src_root / "src" / fname
-            dst = usb_dir / fname
+            dst = usb_dir / "src" / fname
             if src.is_file():
                 shutil.copy2(src, dst)
             else:
@@ -179,7 +179,7 @@ def _patch_usb_host_dual_phy() -> None:
                 _LOGGER.warning("espressif/usb: private header not found: %s", src)
 
     _LOGGER.info(
-        "Patched IDF USB host sources with espressif/usb %s for dual-host on ESP32-P4.",
+        "Patched managed_components/espressif__usb with espressif/usb %s for dual-host on ESP32-P4.",
         _ESP_USB_REF,
     )
 
