@@ -14,7 +14,6 @@ from esphome.const import CONF_DEVICES, CONF_ID
 from esphome.core import CORE
 from esphome.cpp_types import Component
 from esphome.espidf.toolchain import _get_idf_path
-from esphome.helpers import write_file_if_changed
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -99,132 +98,99 @@ async def register_usb_client(config):
     return var
 
 
-def _patch_usb_host_dual_phy() -> None:
-    """Patch IDF usb_host.c to support dual-PHY init on ESP32-P4.
+_ESP_USB_REPO = "https://github.com/espressif/esp-usb.git"
+_ESP_USB_REF = "usb-v1.4.1"
+# Source files to copy from espressif/usb into the IDF usb component.
+# usb_phy.c is intentionally excluded — the managed component pulls it from
+# IDF itself (it's P4-specific and not in the managed repo).
+_ESP_USB_SRCS = [
+    "enum.c",
+    "ext_hub.c",
+    "ext_port.c",
+    "hcd_dwc.c",
+    "hub.c",
+    "usbh.c",
+    "usb_helpers.c",
+    "usb_host.c",
+    "usb_private.c",
+]
+_ESP_USB_PRIVATE_HDRS = [
+    "enum.h",
+    "ext_hub.h",
+    "ext_port.h",
+    "hcd.h",
+    "hub.h",
+    "usbh.h",
+    "usb_private.h",
+]
 
-    IDF 5.5.x initialises only one PHY regardless of peripheral_map bits.
-    Replace the single-PHY block with a loop over all enabled bits so that
-    both HS and FS controllers are initialised when dual_host is enabled.
-    Idempotent: already-patched files are a no-op.
+
+def _patch_usb_host_dual_phy() -> None:
+    """Replace IDF 5.5.x USB host sources with espressif/usb 1.4.1 for dual-host on ESP32-P4.
+
+    IDF 5.5.x usb_host.c, hub.c, and hcd_dwc.c only support a single root port.
+    espressif/usb 1.4.1 adds full dual-port support (HCD_NUM_PORTS loop in hub,
+    PHY init loop in usb_host, per-port HCD in hcd_dwc).
+    Idempotent: skips if already patched (sentinel string present).
     """
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path as _Path
+
     idf_path = _get_idf_path()
     if idf_path is None:
         return
-    usb_host_c = idf_path / "components" / "usb" / "usb_host.c"
-    if not usb_host_c.is_file():
+    usb_dir = _Path(idf_path) / "components" / "usb"
+    if not usb_dir.is_dir():
         return
 
-    try:
-        content = usb_host_c.read_text(encoding="utf-8")
-    except OSError as e:
-        _LOGGER.warning("Could not read %s for dual-PHY patch: %s", usb_host_c, e)
-        return
-
-    if "PHY install error for port" in content:
+    # Sentinel: managed component's hub.c uses root_hub_ports[] array
+    sentinel = "root_hub_ports[HCD_NUM_PORTS]"
+    if sentinel in (usb_dir / "hub.c").read_text(encoding="utf-8"):
         return  # already patched
 
-    old_struct = "        usb_phy_handle_t phy_handle;    // Will be NULL if host library is installed with skip_phy_setup"
-    new_struct = "        usb_phy_handle_t phy_handles[SOC_USB_OTG_PERIPH_NUM];  // patched: one per port"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _Path(tmp)
+        _LOGGER.info("Cloning espressif/usb %s for dual-host patch...", _ESP_USB_REF)
+        result = subprocess.run(
+            [
+                "git", "clone", "--depth=1", "--branch", _ESP_USB_REF,
+                _ESP_USB_REPO, str(tmp_path / "esp-usb"),
+            ],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            _LOGGER.warning(
+                "Failed to clone espressif/usb: %s", result.stderr.decode()
+            )
+            return
 
-    old_init = (
-        "    // Install USB PHY (if necessary). USB PHY driver will also enable the underlying Host Controller\n"
-        "    if (!config->skip_phy_setup) {\n"
-        "        bool init_utmi_phy = false; // Default value for Linux simulation\n"
-        "\n"
-        "#if SOC_USB_OTG_SUPPORTED // In case we run on a real target, select the PHY from usb_dwc_info description structure\n"
-        "        // Right now we support only one peripheral, can be extended in future\n"
-        "        int peripheral_index = 0;\n"
-        "        if (peripheral_map & BIT1) {\n"
-        "            peripheral_index = 1;\n"
-        "        }\n"
-        "        init_utmi_phy = (usb_dwc_info.controllers[peripheral_index].supported_phys == USB_PHY_INST_UTMI_0);\n"
-        "#endif // SOC_USB_OTG_SUPPORTED\n"
-        "\n"
-        "        // Host Library defaults to internal PHY\n"
-        "        usb_phy_config_t phy_config = {\n"
-        "            .controller = USB_PHY_CTRL_OTG,\n"
-        "            .target = init_utmi_phy ? USB_PHY_TARGET_UTMI : USB_PHY_TARGET_INT,\n"
-        "            .otg_mode = USB_OTG_MODE_HOST,\n"
-        "            .otg_speed = USB_PHY_SPEED_UNDEFINED,   // In Host mode, the speed is determined by the connected device\n"
-        "            .ext_io_conf = NULL,\n"
-        "            .otg_io_conf = NULL,\n"
-        "        };\n"
-        "        ret = usb_new_phy(&phy_config, &host_lib_obj->constant.phy_handle);\n"
-        "        if (ret != ESP_OK) {\n"
-        '            ESP_LOGE(USB_HOST_TAG, "PHY install error: %s", esp_err_to_name(ret));\n'
-        "            goto phy_err;\n"
-        "        }\n"
-        "    }"
-    )
-    new_init = (
-        "    // Install USB PHY for each enabled peripheral (patched by ESPHome for dual-host on ESP32-P4)\n"
-        "    if (!config->skip_phy_setup) {\n"
-        "        memset(host_lib_obj->constant.phy_handles, 0, sizeof(host_lib_obj->constant.phy_handles));\n"
-        "        for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
-        "            if (!(peripheral_map & BIT(i))) {\n"
-        "                continue;\n"
-        "            }\n"
-        "            bool init_utmi_phy = false;\n"
-        "#if SOC_USB_OTG_SUPPORTED\n"
-        "            init_utmi_phy = (usb_dwc_info.controllers[i].supported_phys == USB_PHY_INST_UTMI_0);\n"
-        "#endif\n"
-        "            usb_phy_config_t phy_config = {\n"
-        "                .controller = USB_PHY_CTRL_OTG,\n"
-        "                .target = init_utmi_phy ? USB_PHY_TARGET_UTMI : USB_PHY_TARGET_INT,\n"
-        "                .otg_mode = USB_OTG_MODE_HOST,\n"
-        "                .otg_speed = USB_PHY_SPEED_UNDEFINED,\n"
-        "                .ext_io_conf = NULL,\n"
-        "                .otg_io_conf = NULL,\n"
-        "            };\n"
-        "            ret = usb_new_phy(&phy_config, &host_lib_obj->constant.phy_handles[i]);\n"
-        "            if (ret != ESP_OK) {\n"
-        '                ESP_LOGE(USB_HOST_TAG, "PHY install error for port %d: %s", i, esp_err_to_name(ret));\n'
-        "                goto phy_err;\n"
-        "            }\n"
-        "        }\n"
-        "    }"
-    )
+        src_root = tmp_path / "esp-usb" / "host" / "usb"
 
-    old_del_install = (
-        "    if (host_lib_obj->constant.phy_handle) {\n"
-        "        ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));\n"
-        "    }\n"
-        "phy_err:"
-    )
-    new_del_install = (
-        "    for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
-        "        if (host_lib_obj->constant.phy_handles[i]) {\n"
-        "            ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handles[i]));\n"
-        "        }\n"
-        "    }\n"
-        "phy_err:"
-    )
+        for fname in _ESP_USB_SRCS:
+            src = src_root / "src" / fname
+            dst = usb_dir / fname
+            if src.is_file():
+                shutil.copy2(src, dst)
+            else:
+                _LOGGER.warning("espressif/usb: source file not found: %s", src)
 
-    old_del_uninstall = (
-        "    // If the USB PHY was setup, then delete it\n"
-        "    if (host_lib_obj->constant.phy_handle) {\n"
-        "        ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));\n"
-        "    }"
-    )
-    new_del_uninstall = (
-        "    // If the USB PHY was setup, then delete it\n"
-        "    for (int i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {\n"
-        "        if (host_lib_obj->constant.phy_handles[i]) {\n"
-        "            ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handles[i]));\n"
-        "        }\n"
-        "    }"
-    )
+        priv_inc_dst = usb_dir / "private_include"
+        priv_inc_dst.mkdir(exist_ok=True)
+        for fname in _ESP_USB_PRIVATE_HDRS:
+            src = src_root / "private_include" / fname
+            dst = priv_inc_dst / fname
+            if src.is_file():
+                shutil.copy2(src, dst)
+            else:
+                _LOGGER.warning("espressif/usb: private header not found: %s", src)
 
-    if old_struct not in content or old_init not in content:
-        _LOGGER.warning("usb_host.c: expected patterns not found, skipping dual-PHY patch.")
-        return
-
-    content = content.replace(old_struct, new_struct)
-    content = content.replace(old_init, new_init)
-    content = content.replace(old_del_install, new_del_install)
-    content = content.replace(old_del_uninstall, new_del_uninstall)
-    write_file_if_changed(usb_host_c, content)
-    _LOGGER.info("Patched %s for dual-PHY init (ESP32-P4 dual USB host).", usb_host_c)
+    _LOGGER.info(
+        "Patched IDF %s USB host sources with espressif/usb %s for dual-host on ESP32-P4.",
+        idf_path,
+        _ESP_USB_REF,
+    )
 
 
 async def to_code(config: ConfigType) -> None:
