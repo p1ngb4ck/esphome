@@ -1,3 +1,5 @@
+import logging
+
 import esphome.codegen as cg
 from esphome.components.esp32 import (
     VARIANT_ESP32P4,
@@ -11,7 +13,11 @@ import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID
 from esphome.core import CORE
 from esphome.cpp_types import Component
+from esphome.espidf.toolchain import _get_idf_path
+from esphome.helpers import write_file_if_changed
 from esphome.types import ConfigType
+
+_LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
@@ -101,8 +107,6 @@ def _patch_usb_host_dual_phy() -> None:
     both HS and FS controllers are initialised when dual_host is enabled.
     Idempotent: already-patched files are a no-op.
     """
-    from esphome.espidf.toolchain import _get_idf_path
-
     idf_path = _get_idf_path()
     if idf_path is None:
         return
