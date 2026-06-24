@@ -8,7 +8,7 @@ from esphome.const import (
     CONF_SAMPLE_RATE,
 )
 
-from .. import CONF_USB_AUDIO_ID, USBAudioComponent, usb_audio_ns
+from .. import CONF_USB_AUDIO_ID, USBAudioClient, usb_audio_ns
 
 USBAudioSpeaker = usb_audio_ns.class_("USBAudioSpeaker", speaker.Speaker, cg.Component)
 
@@ -41,7 +41,7 @@ CONFIG_SCHEMA = cv.All(
         cv.Schema(
             {
                 cv.GenerateID(): cv.declare_id(USBAudioSpeaker),
-                cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioComponent),
+                cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioClient),
                 cv.Optional(CONF_SAMPLE_RATE, default=48000): cv.int_range(
                     min=8000, max=96000
                 ),
@@ -62,7 +62,6 @@ async def to_code(config):
     await cg.register_component(var, config)
     await speaker.register_speaker(var, config)
 
-    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
     await cg.register_parented(var, config[CONF_USB_AUDIO_ID])
 
     sample_rate = int(config[CONF_SAMPLE_RATE])
@@ -75,5 +74,6 @@ async def to_code(config):
     cg.add(var.set_channels(channels))
     cg.add(var.set_write_timeout(write_timeout))
 
+    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
     cg.add(parent.set_speaker(var))
     cg.add(parent.set_speaker_params(channels, bits_per_sample, sample_rate))

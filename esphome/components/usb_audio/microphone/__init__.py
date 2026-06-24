@@ -9,7 +9,7 @@ from esphome.const import (
     CONF_SAMPLE_RATE,
 )
 
-from .. import CONF_USB_AUDIO_ID, USBAudioComponent, usb_audio_ns
+from .. import CONF_USB_AUDIO_ID, USBAudioClient, usb_audio_ns
 
 USBAudioMicrophone = usb_audio_ns.class_(
     "USBAudioMicrophone", microphone.Microphone, cg.Component
@@ -67,7 +67,7 @@ CONFIG_SCHEMA = cv.All(
         cv.Schema(
             {
                 cv.GenerateID(): cv.declare_id(USBAudioMicrophone),
-                cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioComponent),
+                cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioClient),
                 cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.int_range(
                     min=8000, max=96000
                 ),

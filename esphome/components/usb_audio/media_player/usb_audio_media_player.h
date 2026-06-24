@@ -2,14 +2,15 @@
 
 #include "esphome/core/defines.h"
 
-#if defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 
 #include "esphome/components/speaker/media_player/speaker_media_player.h"
 #include "esphome/components/usb_audio/usb_audio.h"
 
-namespace esphome::usb_audio {
+namespace esphome {
+namespace usb_audio {
 
-class USBAudioMediaPlayer : public speaker::SpeakerMediaPlayer, public Parented<USBAudioComponent> {
+class USBAudioMediaPlayer : public speaker::SpeakerMediaPlayer, public Parented<USBAudioClient> {
  public:
   void setup() override;
   void loop() override;
@@ -23,6 +24,7 @@ class USBAudioMediaPlayer : public speaker::SpeakerMediaPlayer, public Parented<
   bool stop_sent_{false};
 };
 
-}  // namespace esphome::usb_audio
+}  // namespace usb_audio
+}  // namespace esphome
 
-#endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

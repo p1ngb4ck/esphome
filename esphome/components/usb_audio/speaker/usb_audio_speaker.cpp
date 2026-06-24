@@ -1,6 +1,6 @@
 #include "usb_audio_speaker.h"
 
-#if defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 
 #include "../usb_audio.h"
 
@@ -12,7 +12,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-namespace esphome::usb_audio {
+namespace esphome {
+namespace usb_audio {
 
 static const char *const TAG_SPK = "usb_audio.spk";
 
@@ -307,8 +308,9 @@ void USBAudioSpeaker::set_mute_state(bool mute_state) {
   }
 }
 
-bool USBAudioSpeaker::ensure_started_() { return this->parent_->ensure_started(USBAudioComponent::Endpoint::SPEAKER); }
+bool USBAudioSpeaker::ensure_started_() { return this->parent_->ensure_started_speaker(); }
 
-}  // namespace esphome::usb_audio
+}  // namespace usb_audio
+}  // namespace esphome
 
-#endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

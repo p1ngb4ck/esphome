@@ -22,7 +22,7 @@ from esphome.const import (
 )
 from esphome.core import CORE, HexInt
 
-from .. import CONF_USB_AUDIO_ID, USBAudioComponent, usb_audio_ns
+from .. import CONF_USB_AUDIO_ID, USBAudioClient, usb_audio_ns
 
 DEPENDENCIES = ["usb_audio", "speaker"]
 
@@ -38,7 +38,7 @@ AudioStreamInfo = audio.audio_ns.class_("AudioStreamInfo")
 USBAudioMediaPlayer = usb_audio_ns.class_(
     "USBAudioMediaPlayer",
     SpeakerMediaPlayerBase,
-    cg.Parented.template(USBAudioComponent),
+    cg.Parented.template(USBAudioClient),
 )
 
 
@@ -134,7 +134,7 @@ def _read_audio_file_and_type(file_config):
 CONFIG_SCHEMA = cv.All(
     media_player.media_player_schema(USBAudioMediaPlayer).extend(
         {
-            cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioComponent),
+            cv.GenerateID(CONF_USB_AUDIO_ID): cv.use_id(USBAudioClient),
             cv.Required(
                 speaker_mp.CONF_ANNOUNCEMENT_PIPELINE
             ): speaker_mp.PIPELINE_SCHEMA,

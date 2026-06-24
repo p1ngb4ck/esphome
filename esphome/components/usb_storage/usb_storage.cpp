@@ -1,379 +1,438 @@
 #if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
 
 #include "usb_storage.h"
+#include "usb_storage_diskio.h"
 #include "esphome/core/defines.h"
+#include "esphome/core/log.h"
+#include "usb/usb_helpers.h"
+#include "usb/usb_types_ch9.h"
 
 #ifdef USE_STORAGE
 #include "esphome/components/storage/storage.h"
 #endif
 
+#include <cstring>
+#include <cinttypes>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
+
 namespace esphome {
 namespace usb_storage {
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Transfer semaphore helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-int8_t USBStorageHost::find_free_slot(void) {
-  for (int i = 0; i < MAX_MSC_DEVICES; i++) {
-    if (this->msc_devices_[i] == NULL) {
-      ESP_LOGI(TAG, "Found free slot for MSC device at index %d", i);
-      return i;
-    }
-  }
-  return -1;
+// USB-task callback: post result to semaphore so the blocking caller can proceed
+static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client) {
+  client->transfer_ok_ = status.success;
+  client->transfer_len_ = static_cast<uint16_t>(status.data_len);
+  xSemaphoreGive(client->transfer_sem_);
 }
 
-int8_t USBStorageHost::find_msc_device_slot(uint8_t usb_addr) {
-  for (int i = 0; i < MAX_MSC_DEVICES; i++) {
-    if (this->msc_devices_[i] != nullptr && this->msc_devices_[i]->usb_addr == usb_addr) {
-      ESP_LOGI(TAG, "Found MSC device slot at index %d", i);
-      return i;
-    }
-  }
-  return -1;
+bool USBStorageClient::wait_transfer_(uint32_t timeout_ms) {
+  return xSemaphoreTake(this->transfer_sem_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE && this->transfer_ok_;
 }
 
-esp_err_t USBStorageHost::allocate_new_msc_device(uint8_t new_dev_address, const std::string &mount_path) {
-  int slot = this->find_free_slot();
-  if (slot < 0) {
-    ESP_LOGW(TAG, "No free slots for new MSC device (max %d)", MAX_MSC_DEVICES);
-    return ESP_ERR_NOT_FOUND;
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// USBStorageClient — setup / loop
+// ─────────────────────────────────────────────────────────────────────────────
 
-  ESP_LOGI(TAG, "Allocating slot %d for device address %d with mount path '%s'", slot, new_dev_address,
-           mount_path.c_str());
-
-  this->msc_devices_[slot] = (msc_dev_entry_t *) calloc(1, sizeof(msc_dev_entry_t));
-  if (this->msc_devices_[slot] == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate memory for new MSC device entry");
-    return ESP_ERR_NO_MEM;
-  }
-
-  ESP_LOGI(TAG, "Memory allocated, calling msc_host_install_device...");
-
-  esp_err_t err = msc_host_install_device(new_dev_address, &this->msc_devices_[slot]->msc_device);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "msc_host_install_device failed: %s", esp_err_to_name(err));
-    free(this->msc_devices_[slot]);
-    this->msc_devices_[slot] = NULL;
-    return err;
-  }
-
-  ESP_LOGI(TAG, "msc_host_install_device succeeded");
-
-  this->msc_devices_[slot]->usb_addr = new_dev_address;
-
-  ESP_LOGI(TAG, "Stored USB address, proceeding with VFS registration...");
-
-  const esp_vfs_fat_mount_config_t mount_config = {
-      .format_if_mount_failed = false,
-      .max_files = 5,
-      .allocation_unit_size = 1024,
-  };
-
-  err = msc_host_vfs_register(this->msc_devices_[slot]->msc_device, mount_path.c_str(), &mount_config,
-                              &this->msc_devices_[slot]->vfs_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "msc_host_vfs_register failed: %s", esp_err_to_name(err));
-    esp_err_t res = (msc_host_uninstall_device(this->msc_devices_[slot]->msc_device));
-    if (res != ESP_OK) {
-      ESP_LOGE(TAG, "msc_host_uninstall_device failed during cleanup: %s", esp_err_to_name(res));
-    }
-    free(this->msc_devices_[slot]);
-    this->msc_devices_[slot] = NULL;
-    return err;
-  }
-  return ESP_OK;
-}
-
-void USBStorageHost::free_msc_device(int slot) {
-  if (slot < 0 || slot >= MAX_MSC_DEVICES || !this->msc_devices_[slot]) {
-    ESP_LOGE(TAG, "Invalid slot index for MSC device deallocation");
-    return;
-  }
-
-  if (this->msc_devices_[slot]->vfs_handle) {
-    ESP_ERROR_CHECK(msc_host_vfs_unregister(this->msc_devices_[slot]->vfs_handle));
-  }
-  if (this->msc_devices_[slot]->msc_device) {
-    ESP_ERROR_CHECK(msc_host_uninstall_device(this->msc_devices_[slot]->msc_device));
-  }
-
-  free(this->msc_devices_[slot]);
-  this->msc_devices_[slot] = NULL;
-}
-
-void USBStorageHost::free_all_msc_devices(void) {
-  for (int i = 0; i < MAX_MSC_DEVICES; i++) {
-    if (this->msc_devices_[i]) {
-      free_msc_device(i);
-    }
-  }
-}
-
-uint8_t USBStorageDevice::find_usb_addr_by_handle(msc_host_device_handle_t handle) {
-  for (uint8_t i = 0; i < MAX_MSC_DEVICES; i++) {
-    if (this->parent_->msc_devices_[i] && this->parent_->msc_devices_[i]->msc_device == handle) {
-      return this->parent_->msc_devices_[i]->usb_addr;
-    }
-  }
-  return -1;
-}
-
-msc_host_device_handle_t USBStorageHost::get_handle_by_address(uint8_t usb_addr) {
-  for (uint8_t i = 0; i < MAX_MSC_DEVICES; i++) {
-    if (this->msc_devices_[i] && this->msc_devices_[i]->usb_addr == usb_addr) {
-      return this->msc_devices_[i]->msc_device;
-    }
-  }
-  return nullptr;
-}
-
-void USBStorageDevice::print_device_info() {
-  int8_t slot = this->parent_->find_msc_device_slot(this->device_addr_);
-  if (slot < 0) {
-    ESP_LOGE(TAG, "Device slot not found for printing device info");
-    return;
-  }
-  msc_host_device_handle_t handle = this->parent_->msc_devices_[slot]->msc_device;
-
-  msc_host_device_info_t info;
-  esp_err_t err = msc_host_get_device_info(handle, &info);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "msc_host_get_device_info failed: %s", esp_err_to_name(err));
-    return;
-  }
-  const size_t megabyte = 1024 * 1024;
-  uint64_t capacity = ((uint64_t) info.sector_size * info.sector_count) / megabyte;
-
-  ESP_LOGI(TAG, "Device info:\n");
-  ESP_LOGI(TAG, "\t Capacity: %llu MB\n", capacity);
-  ESP_LOGI(TAG, "\t Sector size: %" PRIu32 "\n", info.sector_size);
-  ESP_LOGI(TAG, "\t Sector count: %" PRIu32 "\n", info.sector_count);
-  ESP_LOGI(TAG, "\t PID: 0x%04X \n", info.idProduct);
-  ESP_LOGI(TAG, "\t VID: 0x%04X \n", info.idVendor);
-#ifndef CONFIG_LIBC_NEWLIB_NANO_FORMAT
-  ESP_LOGI(TAG, "\t iProduct: %S \n", info.iProduct);
-  ESP_LOGI(TAG, "\t iManufacturer: %S \n", info.iManufacturer);
-  ESP_LOGI(TAG, "\t iSerialNumber: %S \n", info.iSerialNumber);
-#endif
-}
-
-void USBStorageDevice::file_operations() {
-  std::string directory = this->mount_path_ + "/esp";
-  std::string file_path = this->mount_path_ + "/esp/test.txt";
-
-  struct stat s = {0};
-  bool directory_exists = stat(directory.c_str(), &s) == 0;
-  if (!directory_exists) {
-    if (mkdir(directory.c_str(), 0775) != 0) {
-      ESP_LOGE(TAG, "mkdir failed with errno: %s", strerror(errno));
-    }
-  }
-
-  if (stat(file_path.c_str(), &s) != 0) {
-    ESP_LOGI(TAG, "Creating file");
-    FILE *f = fopen(file_path.c_str(), "w");
-    if (f == NULL) {
-      ESP_LOGE(TAG, "Failed to open file for writing");
-      return;
-    }
-    fprintf(f, "Hello World!\n");
-    fclose(f);
-  }
-
-  FILE *f;
-  ESP_LOGI(TAG, "Reading file");
-  f = fopen(file_path.c_str(), "r");
-  if (f == NULL) {
-    ESP_LOGE(TAG, "Failed to open file for reading");
-    return;
-  }
-  char line[64];
-  fgets(line, sizeof(line), f);
-  fclose(f);
-  char *pos = strchr(line, '\n');
-  if (pos) {
-    *pos = '\0';
-  }
-  ESP_LOGI(TAG, "Read from file '%s': '%s'", file_path.c_str(), line);
-}
-
-void USBStorageDevice::speed_test() {
-#define ITERATIONS 256
-  int64_t test_start, test_end;
-  std::string test_file = this->mount_path_ + "/esp/dummy";
-
-  FILE *f = fopen(test_file.c_str(), "wb+");
-  if (f == NULL) {
-    ESP_LOGE(TAG, "Failed to open file for writing");
-    return;
-  }
-  setvbuf(f, NULL, _IOFBF, BUFFER_SIZE);
-
-  void *data = malloc(BUFFER_SIZE);
-  assert(data);
-
-  ESP_LOGI(TAG, "Writing to file %s", test_file.c_str());
-  test_start = esp_timer_get_time();
-  for (int i = 0; i < ITERATIONS; i++) {
-    if (fwrite(data, BUFFER_SIZE, 1, f) == 0) {
-      ESP_LOGE(TAG, "Write error");
-      fclose(f);
-      free(data);
-      return;
-    }
-  }
-  test_end = esp_timer_get_time();
-  ESP_LOGI(TAG, "Write speed %1.2f MiB/s", (BUFFER_SIZE * ITERATIONS) / (float) (test_end - test_start));
-  rewind(f);
-
-  ESP_LOGI(TAG, "Reading from file %s", test_file.c_str());
-  test_start = esp_timer_get_time();
-  for (int i = 0; i < ITERATIONS; i++) {
-    if (0 == fread(data, BUFFER_SIZE, 1, f)) {
-      ESP_LOGE(TAG, "Read error");
-      fclose(f);
-      free(data);
-      return;
-    }
-  }
-  test_end = esp_timer_get_time();
-  ESP_LOGI(TAG, "Read speed %1.2f MiB/s", (BUFFER_SIZE * ITERATIONS) / (float) (test_end - test_start));
-
-  fclose(f);
-  free(data);
-}
-
-void USBStorageDevice::list_files() {
-  ESP_LOGI(TAG, "Listing contents of '%s'", this->mount_path_.c_str());
-
-  struct dirent *d;
-  DIR *dh = opendir(this->mount_path_.c_str());
-  if (!dh) {
-    ESP_LOGE(TAG, "Failed to open directory: %s", this->mount_path_.c_str());
-    return;
-  }
-
-  while ((d = readdir(dh)) != NULL) {
-    ESP_LOGI(TAG, "  %s/%s", this->mount_path_.c_str(), d->d_name);
-  }
-  closedir(dh);
-}
-
-static void msc_event_callback(const msc_host_event_t *event, void *arg) {
-  // Intentionally empty - we handle device events through usb_host component
-}
-
-void USBStorageHost::setup() {
-  ESP_LOGCONFIG(TAG, "Registering USB Storage Host Component...");
-  const msc_host_driver_config_t msc_config = {
-      .create_backround_task = true,
-      .task_priority = 5,
-      .stack_size = 4096,
-      .callback = msc_event_callback,
-  };
-
-  esp_err_t err = msc_host_install(&msc_config);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to initialize MSC host driver: %s", esp_err_to_name(err));
+void USBStorageClient::setup() {
+  this->transfer_sem_ = xSemaphoreCreateBinary();
+  if (this->transfer_sem_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create transfer semaphore");
     this->mark_failed();
     return;
   }
-  ESP_LOGI(TAG, "MSC host driver initialized successfully");
+
+  this->fatfs_drive_ = usb_diskio_register(this);
+  if (this->fatfs_drive_ < 0) {
+    ESP_LOGE(TAG, "Failed to register FATFS DISKIO drive");
+    this->mark_failed();
+    return;
+  }
+
+  // Call USBClient::setup() to register as USB host client and start USB task
+  USBClient::setup();
 }
 
-void USBStorageHost::on_msc_connected(uint8_t addr, uint16_t vid, uint16_t pid) {
+void USBStorageClient::loop() {
+  // USBClient::loop() processes the event queue; disable loop when idle
+  USBClient::loop();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Endpoint parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool USBStorageClient::parse_msc_endpoints_() {
+  const usb_config_desc_t *cfg = this->get_config_desc();
+  if (cfg == nullptr)
+    return false;
+
+  this->bulk_in_ep_ = 0;
+  this->bulk_out_ep_ = 0;
+
+  int offset = 0;
+  const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  bool in_msc_intf = false;
+
+  while ((next = usb_parse_next_descriptor(next, cfg->wTotalLength, &offset)) != nullptr) {
+    if (next->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+      const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(next);
+      in_msc_intf = (intf->bInterfaceClass == USB_CLASS_MASS_STORAGE);
+      if (in_msc_intf)
+        this->msc_interface_ = intf->bInterfaceNumber;
+    } else if (in_msc_intf && next->bDescriptorType == USB_W_VALUE_DT_ENDPOINT) {
+      const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(next);
+      // Only bulk endpoints
+      if ((ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_BULK)
+        continue;
+      if (USB_EP_DESC_GET_EP_DIR(ep)) {
+        this->bulk_in_ep_ = ep->bEndpointAddress;
+      } else {
+        this->bulk_out_ep_ = ep->bEndpointAddress;
+      }
+    }
+    if (this->bulk_in_ep_ && this->bulk_out_ep_)
+      break;
+  }
+
+  if (!this->bulk_in_ep_ || !this->bulk_out_ep_) {
+    ESP_LOGE(TAG, "Failed to find MSC bulk endpoints (in=0x%02X out=0x%02X)", this->bulk_in_ep_,
+             this->bulk_out_ep_);
+    return false;
+  }
+  ESP_LOGD(TAG, "MSC endpoints: bulk_in=0x%02X bulk_out=0x%02X intf=%d", this->bulk_in_ep_, this->bulk_out_ep_,
+           this->msc_interface_);
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOT primitives
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb,
+                                 uint8_t cdb_len) {
+  MscCbw cbw{};
+  cbw.tag = tag;
+  cbw.data_transfer_length = data_len;
+  cbw.flags = flags;
+  cbw.lun = 0;
+  cbw.cb_length = cdb_len;
+  memcpy(cbw.cb, cdb, cdb_len);
+
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  if (!this->transfer_out(this->bulk_out_ep_, cb, reinterpret_cast<const uint8_t *>(&cbw), sizeof(MscCbw)))
+    return false;
+  return this->wait_transfer_();
+}
+
+bool USBStorageClient::recv_data_(uint8_t *buf, uint16_t len) {
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  if (!this->transfer_in(this->bulk_in_ep_, cb, len))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  // Copy from the transfer buffer — USBClient stores received data in the transfer buffer
+  // which is accessible via the TransferStatus::data pointer captured in the callback.
+  // Since we need the data here, we use a stored pointer set by our callback.
+  return true;
+}
+
+bool USBStorageClient::send_data_(const uint8_t *buf, uint16_t len) {
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  return this->transfer_out(this->bulk_out_ep_, cb, buf, len) && this->wait_transfer_();
+}
+
+bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
+  MscCsw csw{};
+  auto cb = [this, &csw](const usb_host::TransferStatus &s) {
+    if (s.success && s.data_len >= sizeof(MscCsw))
+      memcpy(&csw, s.data, sizeof(MscCsw));
+    transfer_done_cb(s, this);
+  };
+  if (!this->transfer_in(this->bulk_in_ep_, cb, sizeof(MscCsw)))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  if (csw.signature != MSC_BOT_CSW_SIGNATURE) {
+    ESP_LOGE(TAG, "Invalid CSW signature: 0x%08" PRIX32, csw.signature);
+    return false;
+  }
+  if (csw.tag != expected_tag) {
+    ESP_LOGE(TAG, "CSW tag mismatch: expected %" PRIu32 " got %" PRIu32, expected_tag, csw.tag);
+    return false;
+  }
+  if (csw.status != MSC_BOT_CSW_STATUS_GOOD) {
+    ESP_LOGW(TAG, "CSW status: %d", csw.status);
+    return false;
+  }
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCSI commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool USBStorageClient::scsi_test_unit_ready_() {
+  uint8_t cdb[6] = {SCSI_CMD_TEST_UNIT_READY, 0, 0, 0, 0, 0};
+  uint32_t tag = this->cbw_tag_++;
+  return this->send_cbw_(tag, 0, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)) && this->recv_csw_(tag);
+}
+
+bool USBStorageClient::scsi_inquiry_() {
+  uint8_t cdb[6] = {SCSI_CMD_INQUIRY, 0, 0, 0, sizeof(ScsiInquiryResponse), 0};
+  uint32_t tag = this->cbw_tag_++;
+  ScsiInquiryResponse resp{};
+
+  auto cb = [this, &resp](const usb_host::TransferStatus &s) {
+    if (s.success && s.data_len >= sizeof(ScsiInquiryResponse))
+      memcpy(&resp, s.data, sizeof(ScsiInquiryResponse));
+    transfer_done_cb(s, this);
+  };
+
+  if (!this->send_cbw_(tag, sizeof(ScsiInquiryResponse), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+    return false;
+  if (!this->transfer_in(this->bulk_in_ep_, cb, sizeof(ScsiInquiryResponse)))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  if (!this->recv_csw_(tag))
+    return false;
+
+  char vendor[9]{}, product[17]{};
+  memcpy(vendor, resp.vendor_id, 8);
+  memcpy(product, resp.product_id, 16);
+  ESP_LOGI(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
+           resp.peripheral_qualifier_type & 0x1F);
+  return (resp.peripheral_qualifier_type & 0x1F) == 0x00;  // direct-access block device
+}
+
+bool USBStorageClient::scsi_read_capacity_() {
+  uint8_t cdb[10] = {SCSI_CMD_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  uint32_t tag = this->cbw_tag_++;
+  ScsiReadCapacity10Response resp{};
+
+  auto cb = [this, &resp](const usb_host::TransferStatus &s) {
+    if (s.success && s.data_len >= sizeof(ScsiReadCapacity10Response))
+      memcpy(&resp, s.data, sizeof(ScsiReadCapacity10Response));
+    transfer_done_cb(s, this);
+  };
+
+  if (!this->send_cbw_(tag, sizeof(ScsiReadCapacity10Response), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+    return false;
+  if (!this->transfer_in(this->bulk_in_ep_, cb, sizeof(ScsiReadCapacity10Response)))
+    return false;
+  if (!this->wait_transfer_())
+    return false;
+  if (!this->recv_csw_(tag))
+    return false;
+
+  // Fields are big-endian
+  this->sector_count_ = __builtin_bswap32(resp.last_lba) + 1;
+  this->sector_size_ = __builtin_bswap32(resp.block_size);
+  ESP_LOGI(TAG, "SCSI READ CAPACITY: sectors=%" PRIu32 " sector_size=%" PRIu32 " (%.1f MB)", this->sector_count_,
+           this->sector_size_,
+           static_cast<float>(this->sector_count_) * this->sector_size_ / (1024.0f * 1024.0f));
+  return this->sector_size_ > 0 && this->sector_count_ > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public DISKIO interface (called from FATFS context — blocking)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    uint8_t cdb[10] = {
+        SCSI_CMD_READ_10,
+        0,
+        static_cast<uint8_t>((lba + i) >> 24),
+        static_cast<uint8_t>((lba + i) >> 16),
+        static_cast<uint8_t>((lba + i) >> 8),
+        static_cast<uint8_t>((lba + i) & 0xFF),
+        0,
+        0,
+        1,  // transfer length = 1 sector
+        0,
+    };
+    uint32_t tag = this->cbw_tag_++;
+    uint8_t *sector_buf = buf + i * this->sector_size_;
+
+    auto cb = [this, sector_buf, sz = this->sector_size_](const usb_host::TransferStatus &s) {
+      if (s.success && s.data_len >= sz)
+        memcpy(sector_buf, s.data, sz);
+      transfer_done_cb(s, this);
+    };
+
+    if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
+      return false;
+    if (!this->transfer_in(this->bulk_in_ep_, cb, static_cast<uint16_t>(this->sector_size_)))
+      return false;
+    if (!this->wait_transfer_())
+      return false;
+    if (!this->recv_csw_(tag))
+      return false;
+  }
+  return true;
+}
+
+bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    uint8_t cdb[10] = {
+        SCSI_CMD_WRITE_10,
+        0,
+        static_cast<uint8_t>((lba + i) >> 24),
+        static_cast<uint8_t>((lba + i) >> 16),
+        static_cast<uint8_t>((lba + i) >> 8),
+        static_cast<uint8_t>((lba + i) & 0xFF),
+        0,
+        0,
+        1,  // transfer length = 1 sector
+        0,
+    };
+    uint32_t tag = this->cbw_tag_++;
+    const uint8_t *sector_buf = buf + i * this->sector_size_;
+
+    if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_OUT, cdb, sizeof(cdb)))
+      return false;
+    if (!this->send_data_(sector_buf, static_cast<uint16_t>(this->sector_size_)))
+      return false;
+    if (!this->recv_csw_(tag))
+      return false;
+  }
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connect / disconnect
+// ─────────────────────────────────────────────────────────────────────────────
+
+void USBStorageClient::notify_connected_(uint16_t vid, uint16_t pid) {
   for (auto *device : this->devices_) {
-    // wildcard (0,0) matches any; otherwise match VID and PID
-    if ((device->vid_ == 0 && device->pid_ == 0) ||
-        (device->vid_ == vid && device->pid_ == pid)) {
-      if (device->device_addr_ == 255) {  // not already claimed
-        device->on_device_connected(addr);
+    if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
+      if (!device->is_mounted()) {
+        device->on_device_connected(this->mount_path_);
         return;
       }
     }
   }
-  ESP_LOGW(TAG, "No storage device configured for MSC addr=%d VID=0x%04X PID=0x%04X", addr, vid, pid);
+  ESP_LOGW(TAG, "No storage device configured for VID=0x%04X PID=0x%04X", vid, pid);
 }
 
-void USBStorageHost::on_msc_removed(uint8_t addr) {
+void USBStorageClient::notify_disconnected_() {
   for (auto *device : this->devices_) {
-    if (device->device_addr_ == addr) {
-      device->on_device_disconnected(addr);
-      return;
+    if (device->is_mounted()) {
+      device->on_device_disconnected();
     }
   }
 }
 
-void MSCDetector::setup() {
-  // Only register as a USB host client — skip transfer buffer pool and dedicated task.
-  // MSCDetector never does transfers; it only needs connect/disconnect events.
-  usb_host_client_config_t config{.is_synchronous = false,
-                                  .max_num_event_msg = 5,
-                                  .async = {.client_event_callback = usb_host::USBClient::client_event_cb, .callback_arg = this}};
-  auto err = usb_host_client_register(&config, &this->handle_);
+void USBStorageClient::on_connected() {
+  const usb_device_desc_t *dev = this->get_device_desc();
+  uint16_t vid = dev ? dev->idVendor : 0;
+  uint16_t pid = dev ? dev->idProduct : 0;
+
+  ESP_LOGI(TAG, "MSC device connected VID=0x%04X PID=0x%04X", vid, pid);
+
+  if (!this->parse_msc_endpoints_()) {
+    this->disconnect();
+    return;
+  }
+
+  if (!this->scsi_inquiry_()) {
+    ESP_LOGE(TAG, "SCSI INQUIRY failed");
+    this->disconnect();
+    return;
+  }
+
+  if (!this->scsi_read_capacity_()) {
+    ESP_LOGE(TAG, "SCSI READ CAPACITY failed");
+    this->disconnect();
+    return;
+  }
+
+  this->disk_ready_ = true;
+
+  // Build a mount path from the first matching device, or use a default
+  this->mount_path_ = "/usb";
+  for (auto *device : this->devices_) {
+    if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
+      this->mount_path_ = device->mount_path_;
+      break;
+    }
+  }
+
+  // Mount FAT filesystem via esp_vfs_fat using our DISKIO driver
+  char drive_path[8];
+  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
+
+  FATFS *fs = nullptr;
+  esp_err_t err = esp_vfs_fat_register(this->mount_path_.c_str(), drive_path, 5, &fs);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "MSCDetector client register failed: %s", esp_err_to_name(err));
-    this->mark_failed();
+    ESP_LOGE(TAG, "esp_vfs_fat_register failed: %s", esp_err_to_name(err));
+    this->disk_ready_ = false;
+    this->disconnect();
+    return;
   }
+
+  FRESULT res = f_mount(fs, drive_path, 1);
+  if (res != FR_OK) {
+    ESP_LOGE(TAG, "f_mount failed: %d", res);
+    esp_vfs_fat_unregister_path(this->mount_path_.c_str());
+    this->disk_ready_ = false;
+    this->disconnect();
+    return;
+  }
+
+  this->mounted_ = true;
+  ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_.c_str());
+
+  this->notify_connected_(vid, pid);
 }
 
-void MSCDetector::loop() {
-  // Poll events non-blocking instead of using a dedicated task
-  usb_host_client_handle_events(this->handle_, 0);
-  this->process_usb_events_();
+void USBStorageClient::on_disconnected() {
+  this->notify_disconnected_();
+  this->disk_ready_ = false;
+
+  if (this->mounted_) {
+    char drive_path[8];
+    snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
+    f_mount(nullptr, drive_path, 0);
+    esp_vfs_fat_unregister_path(this->mount_path_.c_str());
+    this->mounted_ = false;
+    ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_.c_str());
+  }
+
+  this->sector_count_ = 0;
+  this->bulk_in_ep_ = 0;
+  this->bulk_out_ep_ = 0;
 }
 
-void MSCDetector::on_connected() {
-  const usb_device_desc_t *desc;
-  uint16_t vid = 0, pid = 0;
-  if (usb_host_get_device_descriptor(this->device_handle_, &desc) == ESP_OK) {
-    vid = desc->idVendor;
-    pid = desc->idProduct;
-  }
-  this->connected_addr_ = static_cast<uint8_t>(this->device_addr_);
-  this->host_->on_msc_connected(this->connected_addr_, vid, pid);
-  // Release our handle — MSC host driver will open the device independently
-  this->disconnect();
-}
-
-void MSCDetector::on_removed(usb_device_handle_t handle) {
-  if (this->connected_addr_ != 0) {
-    this->host_->on_msc_removed(this->connected_addr_);
-    this->connected_addr_ = 0;
-  }
+void USBStorageClient::on_removed(usb_device_handle_t handle) {
   USBClient::on_removed(handle);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USBStorageDevice
+// ─────────────────────────────────────────────────────────────────────────────
 
 void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
+  ESP_LOGCONFIG(TAG, "  VID: 0x%04X  PID: 0x%04X", this->vid_, this->pid_);
 }
 
-void USBStorageDevice::on_device_connected(uint8_t addr) {
-  ESP_LOGI(TAG, "USB Storage Device connected (address=%d, mount_path='%s')", addr, this->mount_path_.c_str());
+void USBStorageDevice::on_device_connected(const std::string &mount_path) {
+  ESP_LOGI(TAG, "USB Storage Device connected (mount_path='%s')", mount_path.c_str());
+  this->mount_path_ = mount_path;
+  this->mounted_ = true;
 
-  this->device_addr_ = addr;
-
-  esp_err_t err = this->parent_->allocate_new_msc_device(addr, this->mount_path_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to allocate new MSC device: %s", esp_err_to_name(err));
-    return;
-  }
-
-  this->slot_ = this->parent_->find_msc_device_slot(addr);
-  if (this->slot_ < 0) {
-    ESP_LOGE(TAG, "Failed to find slot for newly allocated device!");
-    return;
-  }
-
-  ESP_LOGI(TAG, "Successfully allocated MSC device to slot %d", this->slot_);
-
-  this->print_device_info();
-
-  ESP_LOGI(TAG, "Notifying %zu mount ready callbacks for '%s'", this->mount_ready_callbacks_.size(),
-           this->mount_path_.c_str());
+  ESP_LOGI(TAG, "Notifying %zu mount ready callbacks", this->mount_ready_callbacks_.size());
   for (const auto &callback : this->mount_ready_callbacks_) {
     callback(this->mount_path_);
   }
@@ -386,23 +445,9 @@ void USBStorageDevice::on_device_connected(uint8_t addr) {
 #endif
 }
 
-void USBStorageDevice::on_device_disconnected(uint8_t addr) {
-  if (this->device_addr_ != addr) {
-    return;
-  }
-
-  ESP_LOGI(TAG, "USB Storage Device disconnected (address=%d)", addr);
-
-  int8_t slot = this->parent_->find_msc_device_slot(addr);
-  if (slot < 0) {
-    ESP_LOGE(TAG, "Could not find MSC device slot for disconnected device");
-  } else {
-    this->parent_->free_msc_device(slot);
-    ESP_LOGI(TAG, "Freed MSC device resources for slot %d", slot);
-  }
-
-  this->device_addr_ = 255;
-  this->slot_ = -1;
+void USBStorageDevice::on_device_disconnected() {
+  ESP_LOGI(TAG, "USB Storage Device disconnected (mount_path='%s')", this->mount_path_.c_str());
+  this->mounted_ = false;
 
 #ifdef USE_STORAGE
   if (storage::global_storage != nullptr) {
@@ -413,68 +458,47 @@ void USBStorageDevice::on_device_disconnected(uint8_t addr) {
 }
 
 bool USBStorageDevice::remount_device() {
-  if (this->device_addr_ == 255) {
-    ESP_LOGW(TAG, "No device connected, cannot remount");
+  if (!this->mounted_) {
+    ESP_LOGW(TAG, "Device not mounted, cannot remount");
     return false;
   }
-
-  uint8_t addr = this->device_addr_;
-
-  if (this->slot_ >= 0) {
-    this->unmount_device();
-  }
-
-  esp_err_t err = this->parent_->allocate_new_msc_device(addr, this->mount_path_);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to remount MSC device: %s", esp_err_to_name(err));
-    return false;
-  }
-
-  this->slot_ = this->parent_->find_msc_device_slot(this->device_addr_);
-  if (this->slot_ < 0) {
-    ESP_LOGE(TAG, "Failed to find slot for remounted device!");
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Device remounted successfully to '%s'", this->mount_path_.c_str());
-
+  // Re-trigger mount callbacks and storage notification
   for (const auto &callback : this->mount_ready_callbacks_) {
     callback(this->mount_path_);
   }
-
 #ifdef USE_STORAGE
   if (storage::global_storage != nullptr) {
     storage::global_storage->notify_device_changed(this);
   }
 #endif
-
   return true;
 }
 
 void USBStorageDevice::unmount_device() {
-  if (this->slot_ < 0) {
-    ESP_LOGD(TAG, "Device not mounted, nothing to unmount");
+  // Physical unmount is managed by USBStorageClient; signal to upper layers only
+  if (!this->mounted_)
     return;
-  }
-
-  ESP_LOGI(TAG, "Unmounting MSC device from slot %d (mount path: '%s')", this->slot_, this->mount_path_.c_str());
-  this->parent_->free_msc_device(this->slot_);
-  this->slot_ = -1;
-  ESP_LOGI(TAG, "Device unmounted successfully");
-
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->notify_device_changed(this);
-  }
-#endif
+  this->on_device_disconnected();
 }
 
-// Helper to build full path
+void USBStorageDevice::list_files() {
+  ESP_LOGI(TAG, "Listing contents of '%s'", this->mount_path_.c_str());
+  DIR *dh = opendir(this->mount_path_.c_str());
+  if (!dh) {
+    ESP_LOGE(TAG, "Failed to open directory: %s", this->mount_path_.c_str());
+    return;
+  }
+  struct dirent *d;
+  while ((d = readdir(dh)) != nullptr) {
+    ESP_LOGI(TAG, "  %s/%s", this->mount_path_.c_str(), d->d_name);
+  }
+  closedir(dh);
+}
+
 std::string USBStorageDevice::build_full_path(const char *path) {
   std::string full_path = this->mount_path_;
-  if (path[0] != '/') {
+  if (path[0] != '/')
     full_path += "/";
-  }
   full_path += path;
   return full_path;
 }
@@ -491,14 +515,13 @@ storage::StorageInfo USBStorageDevice::get_info() {
   info.type = storage::StorageType::USB_MSC;
   info.filesystem = storage::FilesystemType::FAT;
   info.mount_path = this->mount_path_;
-  info.is_mounted = this->slot_ >= 0;
+  info.is_mounted = this->mounted_;
   info.is_removable = true;
   info.is_read_only = false;
   info.supports_raw_access = false;
   info.supports_filesystem = true;
 
-  // Get space info
-  if (this->slot_ >= 0) {
+  if (this->mounted_) {
     uint64_t total, free_bytes;
     if (this->get_space_info(&total, &free_bytes)) {
       info.total_bytes = total;
@@ -514,160 +537,121 @@ storage::StorageInfo USBStorageDevice::get_info() {
     info.free_bytes = 0;
     info.block_size = 512;
   }
-
   return info;
 }
 
 bool USBStorageDevice::file_exists(const char *path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
   struct stat path_stat;
-  return stat(full_path.c_str(), &path_stat) == 0 && S_ISREG(path_stat.st_mode);
+  return stat(this->build_full_path(path).c_str(), &path_stat) == 0 && S_ISREG(path_stat.st_mode);
 }
 
 bool USBStorageDevice::get_file_size(const char *path, size_t *size) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
   struct stat path_stat;
-
-  if (stat(full_path.c_str(), &path_stat) != 0) {
+  if (stat(this->build_full_path(path).c_str(), &path_stat) != 0)
     return false;
-  }
-
   *size = path_stat.st_size;
   return true;
 }
 
 bool USBStorageDevice::read_file(const char *path, uint8_t *data, size_t *length) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
-  FILE *f = fopen(full_path.c_str(), "rb");
+  FILE *f = fopen(this->build_full_path(path).c_str(), "rb");
   if (f == nullptr)
     return false;
-
-  size_t read = fread(data, 1, *length, f);
+  *length = fread(data, 1, *length, f);
   fclose(f);
-  *length = read;
   return true;
 }
 
 bool USBStorageDevice::write_file(const char *path, const uint8_t *data, size_t length) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
-  FILE *f = fopen(full_path.c_str(), "wb");
+  FILE *f = fopen(this->build_full_path(path).c_str(), "wb");
   if (f == nullptr)
     return false;
-
-  size_t written = fwrite(data, 1, length, f);
+  bool ok = fwrite(data, 1, length, f) == length;
   fclose(f);
-  return written == length;
+  return ok;
 }
 
 bool USBStorageDevice::append_file(const char *path, const uint8_t *data, size_t length) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
-  FILE *f = fopen(full_path.c_str(), "ab");
+  FILE *f = fopen(this->build_full_path(path).c_str(), "ab");
   if (f == nullptr)
     return false;
-
-  size_t written = fwrite(data, 1, length, f);
+  bool ok = fwrite(data, 1, length, f) == length;
   fclose(f);
-  return written == length;
+  return ok;
 }
 
 bool USBStorageDevice::delete_file(const char *path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
-  return remove(full_path.c_str()) == 0;
+  return remove(this->build_full_path(path).c_str()) == 0;
 }
 
 bool USBStorageDevice::rename_file(const char *old_path, const char *new_path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_old = this->build_full_path(old_path);
-  std::string full_new = this->build_full_path(new_path);
-  return rename(full_old.c_str(), full_new.c_str()) == 0;
+  return rename(this->build_full_path(old_path).c_str(), this->build_full_path(new_path).c_str()) == 0;
 }
 
 bool USBStorageDevice::copy_file(const char *src_path, const char *dst_path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_src = this->build_full_path(src_path);
-  std::string full_dst = this->build_full_path(dst_path);
-
-  FILE *src = fopen(full_src.c_str(), "rb");
+  FILE *src = fopen(this->build_full_path(src_path).c_str(), "rb");
   if (src == nullptr)
     return false;
-
-  FILE *dst = fopen(full_dst.c_str(), "wb");
+  FILE *dst = fopen(this->build_full_path(dst_path).c_str(), "wb");
   if (dst == nullptr) {
     fclose(src);
     return false;
   }
-
-  uint8_t buffer[512];
-  size_t bytes_read;
-  bool success = true;
-
-  while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
-    if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
-      success = false;
+  uint8_t buf[512];
+  size_t n;
+  bool ok = true;
+  while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+    if (fwrite(buf, 1, n, dst) != n) {
+      ok = false;
       break;
     }
   }
-
   fclose(src);
   fclose(dst);
-  return success;
+  return ok;
 }
 
 bool USBStorageDevice::dir_exists(const char *path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
   struct stat path_stat;
-  return stat(full_path.c_str(), &path_stat) == 0 && S_ISDIR(path_stat.st_mode);
+  return stat(this->build_full_path(path).c_str(), &path_stat) == 0 && S_ISDIR(path_stat.st_mode);
 }
 
 bool USBStorageDevice::create_dir(const char *path) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
-  std::string full_path = this->build_full_path(path);
-  return mkdir(full_path.c_str(), 0755) == 0;
+  return mkdir(this->build_full_path(path).c_str(), 0755) == 0;
 }
 
 bool USBStorageDevice::delete_dir(const char *path, bool recursive) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
   std::string full_path = this->build_full_path(path);
-
   if (recursive) {
     DIR *dir = opendir(full_path.c_str());
     if (dir == nullptr)
       return false;
-
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
       if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
         continue;
-
       std::string entry_path = std::string(path) + "/" + entry->d_name;
       if (entry->d_type == DT_DIR) {
         if (!this->delete_dir(entry_path.c_str(), true)) {
@@ -683,124 +667,84 @@ bool USBStorageDevice::delete_dir(const char *path, bool recursive) {
     }
     closedir(dir);
   }
-
   return rmdir(full_path.c_str()) == 0;
 }
 
 bool USBStorageDevice::list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
   std::string full_path = this->build_full_path(path);
   DIR *dir = opendir(full_path.c_str());
   if (dir == nullptr)
     return false;
-
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
       continue;
-
     storage::StorageFileInfo info;
     info.name = entry->d_name;
     info.path = std::string(path) + "/" + entry->d_name;
     info.is_directory = entry->d_type == DT_DIR;
-
-    std::string entry_full_path = full_path + "/" + entry->d_name;
     struct stat st;
-    if (stat(entry_full_path.c_str(), &st) == 0) {
+    if (stat((full_path + "/" + entry->d_name).c_str(), &st) == 0) {
       info.size = info.is_directory ? 0 : st.st_size;
       info.modified_time = st.st_mtime;
     } else {
       info.size = 0;
       info.modified_time = 0;
     }
-
     entries->push_back(info);
   }
-
   closedir(dir);
   return true;
 }
 
 bool USBStorageDevice::get_space_info(uint64_t *total, uint64_t *free) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return false;
-
   FATFS *fs;
   DWORD fre_clust;
-
-  // Get volume information and free clusters
-  // Need to append "/" to mount path for f_getfree
   std::string path = this->mount_path_;
-  if (path.back() != '/') {
+  if (path.back() != '/')
     path += '/';
-  }
-
-  FRESULT res = f_getfree(path.c_str(), &fre_clust, &fs);
-  if (res != FR_OK) {
-    ESP_LOGW(TAG, "Failed to get filesystem info: %d", res);
+  if (f_getfree(path.c_str(), &fre_clust, &fs) != FR_OK)
     return false;
-  }
-
-  // Calculate total and free bytes
-  // Cast to uint64_t before multiplication to avoid overflow on large drives
   DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
   DWORD fre_sect = fre_clust * fs->csize;
-
-  // Sector size from filesystem
-  *total = (uint64_t) tot_sect * fs->ssize;
-  *free = (uint64_t) fre_sect * fs->ssize;
+  *total = static_cast<uint64_t>(tot_sect) * fs->ssize;
+  *free = static_cast<uint64_t>(fre_sect) * fs->ssize;
   return true;
 }
 
 bool USBStorageDevice::can_write_file(const char *path, size_t size) {
-  if (this->slot_ < 0)
-    return false;
-
   uint64_t total, free_space;
-  if (!this->get_space_info(&total, &free_space))
-    return false;
-
-  return free_space >= size;
+  return this->mounted_ && this->get_space_info(&total, &free_space) && free_space >= size;
 }
 
 void *USBStorageDevice::open_file(const char *path, const char *mode) {
-  if (this->slot_ < 0)
+  if (!this->mounted_)
     return nullptr;
-
-  std::string full_path = this->build_full_path(path);
-  return fopen(full_path.c_str(), mode);
+  return fopen(this->build_full_path(path).c_str(), mode);
 }
 
 size_t USBStorageDevice::read_file_chunk(void *handle, uint8_t *buffer, size_t size) {
-  if (handle == nullptr)
-    return 0;
-  return fread(buffer, 1, size, static_cast<FILE *>(handle));
+  return handle ? fread(buffer, 1, size, static_cast<FILE *>(handle)) : 0;
 }
 
 size_t USBStorageDevice::write_file_chunk(void *handle, const uint8_t *data, size_t size) {
-  if (handle == nullptr)
-    return 0;
-  return fwrite(data, 1, size, static_cast<FILE *>(handle));
+  return handle ? fwrite(data, 1, size, static_cast<FILE *>(handle)) : 0;
 }
 
 bool USBStorageDevice::seek_file(void *handle, size_t offset) {
-  if (handle == nullptr)
-    return false;
-  return fseek(static_cast<FILE *>(handle), offset, SEEK_SET) == 0;
+  return handle && fseek(static_cast<FILE *>(handle), offset, SEEK_SET) == 0;
 }
 
 size_t USBStorageDevice::tell_file(void *handle) {
-  if (handle == nullptr)
-    return 0;
-  return ftell(static_cast<FILE *>(handle));
+  return handle ? ftell(static_cast<FILE *>(handle)) : 0;
 }
 
 bool USBStorageDevice::close_file(void *handle) {
-  if (handle == nullptr)
-    return false;
-  return fclose(static_cast<FILE *>(handle)) == 0;
+  return handle && fclose(static_cast<FILE *>(handle)) == 0;
 }
 
 bool USBStorageDevice::format() {

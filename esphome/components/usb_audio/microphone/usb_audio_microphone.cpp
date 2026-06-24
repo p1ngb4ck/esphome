@@ -1,6 +1,6 @@
 #include "usb_audio_microphone.h"
 
-#if defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 
 #include "../usb_audio.h"
 
@@ -13,7 +13,8 @@ extern "C" {
 #include "esp_err.h"
 }
 
-namespace esphome::usb_audio {
+namespace esphome {
+namespace usb_audio {
 
 static const char *const TAG_MIC = "usb_audio.mic";
 
@@ -54,8 +55,8 @@ void USBAudioMicrophone::start() {
     return;
   }
 
-  if (!this->parent_->ensure_started(USBAudioComponent::Endpoint::MICROPHONE)) {
-    ESP_LOGE(TAG_MIC, "USB host not started");
+  if (!this->parent_->ensure_started_microphone()) {
+    ESP_LOGE(TAG_MIC, "USB audio not connected");
     this->status_set_warning();
     return;
   }
@@ -85,7 +86,6 @@ void USBAudioMicrophone::stop() {
 
   this->running_ = false;
   if (this->task_handle_ != nullptr) {
-    // Wait for the task to finish
     while (this->task_handle_ != nullptr) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -138,14 +138,12 @@ void USBAudioMicrophone::mic_task_loop_() {
     if (err == ESP_OK && bytes_read > 0) {
       this->enqueue_frame_(this->read_buffer_.data(), bytes_read);
     } else if (err == ESP_ERR_TIMEOUT) {
-      // No data available right now; yield to avoid starving lower priority tasks.
       vTaskDelay(pdMS_TO_TICKS(READ_TIMEOUT_MS));
       continue;
     } else if (err == ESP_ERR_INVALID_STATE) {
-      // Stream not active yet (e.g. device starting or suspended); yield before retrying.
       vTaskDelay(pdMS_TO_TICKS(READ_TIMEOUT_MS));
       continue;
-    } else if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    } else if (err != ESP_OK) {
       ESP_LOGW(TAG_MIC, "Read error: %s", esp_err_to_name(err));
       vTaskDelay(pdMS_TO_TICKS(READ_TIMEOUT_MS));
     }
@@ -211,6 +209,7 @@ void USBAudioMicrophone::enqueue_frame_(const uint8_t *data, size_t length) {
   this->pending_frames_.push_back(std::move(frame));
 }
 
-}  // namespace esphome::usb_audio
+}  // namespace usb_audio
+}  // namespace esphome
 
-#endif  // defined(USE_ESP32) && defined(USE_USB_AUDIO)
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

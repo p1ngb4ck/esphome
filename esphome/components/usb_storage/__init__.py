@@ -4,7 +4,6 @@ from esphome.components.esp32 import (
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
-    add_idf_component,
     include_builtin_idf_component,
     only_on_variant,
     require_fatfs,
@@ -23,20 +22,21 @@ CONF_MOUNT_PATH = "mount_path"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_ON_MOUNTED = "on_mounted"
-CONF_DETECTOR_ID = "detector_id"
 
 require_vfs_dir()
 require_fatfs()
 
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
-USBStorageHost = usb_storage_ns.class_("USBStorageHost", cg.Component)
-MSCDetector = usb_storage_ns.class_(
-    "MSCDetector", usb_host_ns.class_("USBClient"), cg.Component
+
+USBStorageClient = usb_storage_ns.class_(
+    "USBStorageClient",
+    usb_host_ns.class_("USBClient"),
+    cg.Component,
 )
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
     cg.Component,
-    cg.Parented.template(USBStorageHost),
+    cg.Parented.template(USBStorageClient),
 )
 
 # Automation classes
@@ -51,16 +51,15 @@ DeviceMountedCondition = usb_storage_ns.class_(
 )
 
 
-async def register_usb_storage_handler(device_config, storage_host):
+async def register_usb_storage_device(device_config, storage_client):
     var = cg.new_Pvariable(device_config[CONF_ID])
     await cg.register_component(var, device_config)
-    cg.add(var.set_parent(storage_host))
+    cg.add(var.set_parent(storage_client))
     cg.add(var.set_mount_path(device_config[CONF_MOUNT_PATH]))
     cg.add(var.set_id(str(device_config[CONF_ID])))
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
-    # Register with the host so it can dispatch connect/disconnect events
-    cg.add(storage_host.add_device(var))
+    cg.add(storage_client.add_device(var))
 
     for conf in device_config.get(CONF_ON_MOUNTED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
@@ -88,8 +87,7 @@ DEVICE_SCHEMA = cv.COMPONENT_SCHEMA.extend(
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
-            cv.GenerateID(): cv.declare_id(USBStorageHost),
-            cv.GenerateID(CONF_DETECTOR_ID): cv.declare_id(MSCDetector),
+            cv.GenerateID(): cv.declare_id(USBStorageClient),
             cv.Optional(CONF_DEVICES): cv.ensure_list(DEVICE_SCHEMA),
         }
     ),
@@ -99,20 +97,17 @@ CONFIG_SCHEMA = cv.All(
 
 async def to_code(config):
     include_builtin_idf_component("fatfs")
-    add_idf_component(name="espressif/usb_host_msc", ref="1.1.4")
 
-    # Create USBStorageHost
+    # USBStorageClient extends USBClient — create directly (no VID/PID constructor args;
+    # class filtering via get_interface_class() handles MSC device selection in C++).
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    # Create MSCDetector — the single USBClient that watches for MSC devices
-    detector = cg.new_Pvariable(config[CONF_DETECTOR_ID], var)
-    await cg.register_component(detector, {})
-
-    CORE.data.setdefault("usb_storage_devices", [])
     for device in config.get(CONF_DEVICES) or ():
-        device_var = await register_usb_storage_handler(device, var)
-        CORE.data["usb_storage_devices"].append(device_var)
+        await register_usb_storage_device(device, var)
+
+    cg.add_define("USE_USB_BULK_TRANSFERS")
+    cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
 
 # Actions
