@@ -1381,6 +1381,7 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
+KEY_FATFS_VOLUME_COUNT = "fatfs_volume_count"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1479,6 +1480,16 @@ def require_fatfs() -> None:
     This prevents FATFS from being disabled when disable_fatfs is set.
     """
     CORE.data[KEY_ESP32][KEY_FATFS_REQUIRED] = True
+
+
+def require_fatfs_volume_count(count: int) -> None:
+    """Request a minimum CONFIG_FATFS_VOLUME_COUNT value.
+
+    Multiple components may call this; the maximum requested value is used.
+    Call require_fatfs() as well — this only adjusts the count, not the enable flag.
+    """
+    data = CORE.data[KEY_ESP32]
+    data[KEY_FATFS_VOLUME_COUNT] = max(data.get(KEY_FATFS_VOLUME_COUNT, 2), count)
 
 
 def require_adc_oneshot_iram() -> None:
@@ -2514,7 +2525,8 @@ async def to_code(config):
         # Only set LFN_HEAP=y; do not write LFN_NONE=n as that can cause Kconfig
         # to reset the entire choice to its default (NONE), overriding user settings.
         add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 2)
+        volume_count = CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUME_COUNT, 2)
+        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volume_count)
     elif advanced[CONF_DISABLE_FATFS]:
         add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
         # Kconfig range is [1,10]; 0 gets clamped to the default.
