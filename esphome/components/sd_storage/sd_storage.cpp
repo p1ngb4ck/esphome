@@ -16,6 +16,7 @@
 #include "driver/sdmmc_host.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_idf_version.h"
 
 #if defined(ESP32_USE_VARIANT_ESP32P4)
 #define SDMMC_FREQ_HIGHSPEED
@@ -108,13 +109,17 @@ bool SdMmc::mount_card() {
   // Enable internal pull-ups for SD card communication
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
-  // Initialize host
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
+  // IDF 6.x: esp_vfs_fat_sdmmc_mount calls sdmmc_host_init + sdmmc_host_init_slot internally
+  // via the new sd_host layer. Calling it here first causes "slot is not available" because
+  // sd_host rejects duplicate slot registration. On IDF <6.0 this pre-init was harmless.
   ESP_LOGI(TAG, "Initializing SDMMC slot %d", this->slot_);
   esp_err_t ret = sdmmc_host_init_slot(host.slot, &slot_config);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to init SDMMC slot %d: %s", this->slot_, esp_err_to_name(ret));
     return false;
   }
+#endif
 
   // Mount filesystem with retry logic
   const char *mount_point = this->mount_path_.c_str();
