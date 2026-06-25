@@ -99,114 +99,68 @@ async def register_usb_client(config):
 
 _ESP_USB_REPO = "https://github.com/espressif/esp-usb.git"
 _ESP_USB_REF = "master"
-_ESP_USB_SRCS = [
-    "enum.c",
-    "ext_hub.c",
-    "ext_port.c",
-    "hcd_dwc.c",
-    "hub.c",
-    "usbh.c",
-    "usb_helpers.c",
-    "usb_host.c",
-    "usb_private.c",
-]
-_ESP_USB_PRIVATE_HDRS = [
-    "enum.h",
-    "ext_hub.h",
-    "ext_port.h",
-    "hcd.h",
-    "hub.h",
-    "usbh.h",
-    "usb_private.h",
-]
-_ESP_USB_PUBLIC_HDRS = [
-    "usb_helpers.h",
-    "usb_host.h",
-    "usb_types_ch11.h",
-    "usb_types_ch9.h",
-    "usb_types_stack.h",
-]
 
 
-def _patch_usb_host_dual_phy() -> None:
-    """Overwrite the downloaded espressif/usb managed component sources with master.
+def _prepare_dual_host_usb_override() -> str | None:
+    """Clone espressif/usb master into the build dir and return the local component path.
 
-    The managed component espressif/usb 1.4.1 from the registry lacks dual-port
-    hub support. Clone master (which has it) and copy src/ and private_include/
-    into the build's managed_components/espressif__usb/ — those are the files
-    actually compiled by IDF.
+    The registry release (1.4.1) lacks dual-port hub support. By cloning master
+    and registering the local copy as override_path, IDF uses those sources
+    directly — no timing issues with managed_components download order.
+    Returns the path to the local component root (host/usb/), or None on failure.
     """
-    import shutil
     import subprocess
-    import tempfile
     from pathlib import Path as _Path
 
-    usb_dir = _Path(CORE.build_path) / "managed_components" / "espressif__usb"
-    if not usb_dir.is_dir():
+    override_dir = _Path(CORE.build_path) / "esphome_usb_override"
+    clone_dir = override_dir / "esp-usb"
+    component_dir = clone_dir / "host" / "usb"
+
+    if component_dir.is_dir():
+        _LOGGER.info("espressif/usb override already cloned at %s", component_dir)
+        return str(component_dir)
+
+    override_dir.mkdir(parents=True, exist_ok=True)
+    _LOGGER.info("Cloning espressif/usb %s for dual-host override...", _ESP_USB_REF)
+    result = subprocess.run(
+        [
+            "git", "clone", "--depth=1", "--branch", _ESP_USB_REF,
+            _ESP_USB_REPO, str(clone_dir),
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
         _LOGGER.warning(
-            "managed_components/espressif__usb not found at %s — dual-host patch skipped",
-            usb_dir,
+            "Failed to clone espressif/usb: %s", result.stderr.decode()
         )
-        return
+        return None
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = _Path(tmp)
-        _LOGGER.info("Cloning espressif/usb %s for dual-host patch...", _ESP_USB_REF)
-        result = subprocess.run(
-            [
-                "git", "clone", "--depth=1", "--branch", _ESP_USB_REF,
-                _ESP_USB_REPO, str(tmp_path / "esp-usb"),
-            ],
-            capture_output=True,
+    if not component_dir.is_dir():
+        _LOGGER.warning(
+            "espressif/usb cloned but host/usb/ not found at %s", component_dir
         )
-        if result.returncode != 0:
-            _LOGGER.warning(
-                "Failed to clone espressif/usb: %s", result.stderr.decode()
-            )
-            return
-
-        src_root = tmp_path / "esp-usb" / "host" / "usb"
-
-        for fname in _ESP_USB_SRCS:
-            src = src_root / "src" / fname
-            dst = usb_dir / "src" / fname
-            if src.is_file():
-                shutil.copy2(src, dst)
-            else:
-                _LOGGER.warning("espressif/usb: source file not found: %s", src)
-
-        priv_inc_dst = usb_dir / "private_include"
-        priv_inc_dst.mkdir(exist_ok=True)
-        for fname in _ESP_USB_PRIVATE_HDRS:
-            src = src_root / "private_include" / fname
-            dst = priv_inc_dst / fname
-            if src.is_file():
-                shutil.copy2(src, dst)
-            else:
-                _LOGGER.warning("espressif/usb: private header not found: %s", src)
-
-        pub_inc_dst = usb_dir / "include" / "usb"
-        pub_inc_dst.mkdir(parents=True, exist_ok=True)
-        for fname in _ESP_USB_PUBLIC_HDRS:
-            src = src_root / "include" / "usb" / fname
-            dst = pub_inc_dst / fname
-            if src.is_file():
-                shutil.copy2(src, dst)
-            else:
-                _LOGGER.warning("espressif/usb: public header not found: %s", src)
+        return None
 
     _LOGGER.info(
-        "Patched managed_components/espressif__usb with espressif/usb %s for dual-host on ESP32-P4.",
-        _ESP_USB_REF,
+        "espressif/usb %s cloned to %s for dual-host on ESP32-P4.", _ESP_USB_REF, component_dir
     )
+    return str(component_dir)
 
 
 async def to_code(config: ConfigType) -> None:
-    # espressif/usb 1.4.1 supports IDF >= 5.5.3 and adds dual-host on P4.
-    # Use it unconditionally — on IDF 5.x it overrides the built-in usb component
-    # (pulling usb_phy.c from the overridden dir automatically via its CMakeLists).
-    # On IDF >= 6.0 it is the primary component anyway.
-    add_idf_component(name="espressif/usb", ref="1.4.1")
+    if config.get(CONF_DUAL_HOST):
+        # Clone espressif/usb master (dual-port capable) into build dir and
+        # use override_path so IDF compiles those sources directly — bypassing
+        # the registry download which would be 1.4.1 (single-port hub).
+        override_path = _prepare_dual_host_usb_override()
+        if override_path:
+            add_idf_component(name="espressif/usb", override_path=override_path)
+        else:
+            _LOGGER.warning("dual_host: override clone failed, falling back to registry 1.4.1")
+            add_idf_component(name="espressif/usb", ref="1.4.1")
+    else:
+        add_idf_component(name="espressif/usb", ref="1.4.1")
+
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
         add_idf_sdkconfig_option("CONFIG_USB_HOST_HUBS_SUPPORTED", True)
@@ -219,7 +173,6 @@ async def to_code(config: ConfigType) -> None:
 
     if config.get(CONF_DUAL_HOST):
         cg.add(var.set_dual_host(True))
-        _patch_usb_host_dual_phy()
 
     for device in config.get(CONF_DEVICES) or ():
         await register_usb_client(device)
