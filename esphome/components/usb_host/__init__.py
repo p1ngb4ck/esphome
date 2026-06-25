@@ -97,69 +97,8 @@ async def register_usb_client(config):
     return var
 
 
-_ESP_USB_REPO = "https://github.com/espressif/esp-usb.git"
-_ESP_USB_REF = "master"
-
-
-def _prepare_dual_host_usb_override() -> str | None:
-    """Clone espressif/usb master into the build dir and return the local component path.
-
-    The registry release (1.4.1) lacks dual-port hub support. By cloning master
-    and registering the local copy as override_path, IDF uses those sources
-    directly — no timing issues with managed_components download order.
-    Returns the path to the local component root (host/usb/), or None on failure.
-    """
-    import subprocess
-    from pathlib import Path as _Path
-
-    override_dir = _Path(CORE.build_path) / "esphome_usb_override"
-    clone_dir = override_dir / "esp-usb"
-    component_dir = clone_dir / "host" / "usb"
-
-    if component_dir.is_dir():
-        _LOGGER.info("espressif/usb override already cloned at %s", component_dir)
-        return str(component_dir)
-
-    override_dir.mkdir(parents=True, exist_ok=True)
-    _LOGGER.info("Cloning espressif/usb %s for dual-host override...", _ESP_USB_REF)
-    result = subprocess.run(
-        [
-            "git", "clone", "--depth=1", "--branch", _ESP_USB_REF,
-            _ESP_USB_REPO, str(clone_dir),
-        ],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        _LOGGER.warning(
-            "Failed to clone espressif/usb: %s", result.stderr.decode()
-        )
-        return None
-
-    if not component_dir.is_dir():
-        _LOGGER.warning(
-            "espressif/usb cloned but host/usb/ not found at %s", component_dir
-        )
-        return None
-
-    _LOGGER.info(
-        "espressif/usb %s cloned to %s for dual-host on ESP32-P4.", _ESP_USB_REF, component_dir
-    )
-    return str(component_dir)
-
-
 async def to_code(config: ConfigType) -> None:
-    if config.get(CONF_DUAL_HOST):
-        # Clone espressif/usb master (dual-port capable) into build dir and
-        # use override_path so IDF compiles those sources directly — bypassing
-        # the registry download which would be 1.4.1 (single-port hub).
-        override_path = _prepare_dual_host_usb_override()
-        if override_path:
-            add_idf_component(name="espressif/usb", override_path=override_path)
-        else:
-            _LOGGER.warning("dual_host: override clone failed, falling back to registry 1.4.1")
-            add_idf_component(name="espressif/usb", ref="1.4.1")
-    else:
-        add_idf_component(name="espressif/usb", ref="1.4.1")
+    add_idf_component(name="espressif/usb", ref="1.4.1")
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
