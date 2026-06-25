@@ -342,6 +342,12 @@ void USBStorageClient::on_connected() {
     return;
   }
 
+  if (!this->claim_interface(this->msc_interface_, 0)) {
+    ESP_LOGE(TAG, "Failed to claim MSC interface %d", this->msc_interface_);
+    this->disconnect();
+    return;
+  }
+
   if (!this->scsi_inquiry_()) {
     ESP_LOGE(TAG, "SCSI INQUIRY failed");
     this->disconnect();
