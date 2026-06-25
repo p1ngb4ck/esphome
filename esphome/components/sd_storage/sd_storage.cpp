@@ -133,7 +133,7 @@ bool SdMmc::mount_card() {
   card = (sdmmc_card_t *) malloc(sizeof(sdmmc_card_t));
 
   // Attempt to mount with retries
-  ret = ESP_FAIL;
+  esp_err_t ret = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
     ESP_LOGI(TAG, "Mounting SD card on slot %d to '%s' (attempt %d/3)...", this->slot_, mount_point, attempt);
     ret = esp_vfs_fat_sdmmc_mount(mount_point, &host, &slot_config, &mount_config, &card);
