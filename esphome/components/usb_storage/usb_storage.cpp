@@ -25,7 +25,7 @@ namespace usb_storage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // USB-task callback: post result to semaphore so the blocking caller can proceed
-static void transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client) {
+void USBStorageClient::transfer_done_cb_(const usb_host::TransferStatus &status, USBStorageClient *client) {
   client->transfer_ok_ = status.success;
   client->transfer_len_ = static_cast<uint16_t>(status.data_len);
   xSemaphoreGive(client->transfer_sem_);
@@ -124,14 +124,14 @@ bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags,
   cbw.cb_length = cdb_len;
   memcpy(cbw.cb, cdb, cdb_len);
 
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
   if (!this->transfer_out(this->bulk_out_ep_, cb, reinterpret_cast<const uint8_t *>(&cbw), sizeof(MscCbw)))
     return false;
   return this->wait_transfer_();
 }
 
 bool USBStorageClient::recv_data_(uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
   if (!this->transfer_in(this->bulk_in_ep_, cb, len))
     return false;
   if (!this->wait_transfer_())
@@ -143,7 +143,7 @@ bool USBStorageClient::recv_data_(uint8_t *buf, uint16_t len) {
 }
 
 bool USBStorageClient::send_data_(const uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
   return this->transfer_out(this->bulk_out_ep_, cb, buf, len) && this->wait_transfer_();
 }
 
@@ -152,7 +152,7 @@ bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
   auto cb = [this, &csw](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(MscCsw))
       memcpy(&csw, s.data, sizeof(MscCsw));
-    transfer_done_cb(s, this);
+    transfer_done_cb_(s, this);
   };
   if (!this->transfer_in(this->bulk_in_ep_, cb, sizeof(MscCsw)))
     return false;
@@ -191,7 +191,7 @@ bool USBStorageClient::scsi_inquiry_() {
   auto cb = [this, &resp](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(ScsiInquiryResponse))
       memcpy(&resp, s.data, sizeof(ScsiInquiryResponse));
-    transfer_done_cb(s, this);
+    transfer_done_cb_(s, this);
   };
 
   if (!this->send_cbw_(tag, sizeof(ScsiInquiryResponse), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -219,7 +219,7 @@ bool USBStorageClient::scsi_read_capacity_() {
   auto cb = [this, &resp](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(ScsiReadCapacity10Response))
       memcpy(&resp, s.data, sizeof(ScsiReadCapacity10Response));
-    transfer_done_cb(s, this);
+    transfer_done_cb_(s, this);
   };
 
   if (!this->send_cbw_(tag, sizeof(ScsiReadCapacity10Response), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -264,7 +264,7 @@ bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
     auto cb = [this, sector_buf, sz = this->sector_size_](const usb_host::TransferStatus &s) {
       if (s.success && s.data_len >= sz)
         memcpy(sector_buf, s.data, sz);
-      transfer_done_cb(s, this);
+      transfer_done_cb_(s, this);
     };
 
     if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -370,7 +370,16 @@ void USBStorageClient::on_connected() {
   snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
 
   FATFS *fs = nullptr;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
+  esp_vfs_fat_conf_t vfs_conf = {
+      .base_path = this->mount_path_.c_str(),
+      .fat_drive = drive_path,
+      .max_files = 5,
+  };
+  esp_err_t err = esp_vfs_fat_register_cfg(&vfs_conf, &fs);
+#else
   esp_err_t err = esp_vfs_fat_register(this->mount_path_.c_str(), drive_path, 5, &fs);
+#endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_vfs_fat_register failed: %s", esp_err_to_name(err));
     this->disk_ready_ = false;

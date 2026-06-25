@@ -3,13 +3,13 @@
 #include "usb_storage_diskio.h"
 #include "usb_storage.h"
 #include "esphome/core/log.h"
-#include "diskio.h"
-#include "ff.h"
+
+namespace {
+static constexpr const char *TAG = "usb_diskio";
+}  // namespace
 
 namespace esphome {
 namespace usb_storage {
-
-static constexpr const char *TAG = "usb_diskio";
 static constexpr int MAX_DRIVES = FF_VOLUMES;
 
 // Per-drive client table — indexed by FATFS drive number
@@ -64,7 +64,7 @@ static DRESULT diskio_ioctl(BYTE drive, BYTE cmd, void *buf) {
   }
 }
 
-static const ff_diskio_driver_t usb_diskio_driver = {
+static const ff_diskio_impl_t usb_diskio_driver = {
     .init = diskio_initialize,
     .status = diskio_status,
     .read = diskio_read,

@@ -4,6 +4,7 @@
 
 #include "ff.h"
 #include "diskio.h"
+#include "diskio_impl.h"
 
 namespace esphome {
 namespace usb_storage {

@@ -28,7 +28,6 @@ namespace esphome {
 namespace usb_storage {
 
 static constexpr const char *TAG = "usb_storage";
-static constexpr uint8_t USB_CLASS_MASS_STORAGE = 0x08;
 
 // Forward declarations
 class USBStorageDevice;
@@ -87,6 +86,7 @@ class USBStorageClient : public usb_host::USBClient {
 
   // Transfer synchronisation — semaphore posted by USB-task callback, taken by caller
   bool wait_transfer_(uint32_t timeout_ms = 5000);
+  static void transfer_done_cb_(const usb_host::TransferStatus &status, USBStorageClient *client);
 
   // VID/PID dispatch to USBStorageDevice instances
   void notify_connected_(uint16_t vid, uint16_t pid);
