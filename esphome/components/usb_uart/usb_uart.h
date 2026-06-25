@@ -188,6 +188,7 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   void set_parity(UARTParityOptions parity) { this->parity_ = parity; }
   void set_debug(bool debug) { this->debug_ = debug; }
   void set_dummy_receiver(bool dummy_receiver) { this->dummy_receiver_ = dummy_receiver; }
+  void set_claim_notification_ep(bool claim) { this->claim_notification_ep_ = claim; }
   void set_debug_prefix(const char *prefix) { this->debug_prefix_ = StringRef(prefix); }
 #ifdef USE_UART_DEBUGGER
 #ifdef UART_DEBUGGER_ADD_SETTINGS
@@ -230,6 +231,7 @@ class USBUartChannel : public uart::UARTComponent, public Parented<USBUartCompon
   const uint8_t index_;
   bool debug_{};
   bool dummy_receiver_{};
+  bool claim_notification_ep_{false};
 };
 
 class USBUartComponent : public usb_host::USBClient {
