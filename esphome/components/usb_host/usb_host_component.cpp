@@ -11,6 +11,14 @@ USBHost *global_usb_host = nullptr;
 
 void USBHost::setup() {
   usb_host_config_t config{};
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  if (this->dual_host_) {
+    // BIT0 = FS peripheral, BIT1 = HS peripheral — both simultaneously.
+    // Requires espressif/usb >= 1.4.0 (peripheral_map field added in that release).
+    config.peripheral_map = BIT(0) | BIT(1);
+    ESP_LOGI(TAG, "USB dual-host enabled (HS + FS)");
+  }
+#endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));
     this->mark_failed();
