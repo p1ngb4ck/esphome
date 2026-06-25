@@ -420,7 +420,8 @@ bool USBClient::transfer_in(uint8_t ep_address, const transfer_cb_t &callback, u
   trq->callback = callback;
   trq->transfer->callback = transfer_callback;
   trq->transfer->bEndpointAddress = ep_address | USB_DIR_IN;
-  trq->transfer->num_bytes = length;
+  // IN transfers: num_bytes must be an integer multiple of MPS
+  trq->transfer->num_bytes = ((length + USB_MAX_PACKET_SIZE - 1) / USB_MAX_PACKET_SIZE) * USB_MAX_PACKET_SIZE;
   if (!global_usb_host->submit_transfer_(trq)) {
     this->release_trq(trq);
     return false;
