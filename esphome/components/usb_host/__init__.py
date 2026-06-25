@@ -60,6 +60,11 @@ def get_max_packet_size() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_PACKET_SIZE, 64)
 
 
+def _default_max_packet_size() -> int:
+    from esphome.components.esp32 import get_esp32_variant
+    return 512 if get_esp32_variant() == VARIANT_ESP32P4 else 64
+
+
 def _dual_host_validator(value):
     """dual_host is only valid (and meaningful) on ESP32-P4."""
     value = cv.boolean(value)
@@ -79,7 +84,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MAX_TRANSFER_REQUESTS, default=16): cv.int_range(
                 min=1, max=32
             ),
-            cv.Optional(CONF_MAX_PACKET_SIZE, default=64): cv.one_of(
+            cv.Optional(CONF_MAX_PACKET_SIZE, default=_default_max_packet_size): cv.one_of(
                 64, 128, 256, 512, 1024, int=True
             ),
             cv.Optional(CONF_DUAL_HOST, default=False): _dual_host_validator,
