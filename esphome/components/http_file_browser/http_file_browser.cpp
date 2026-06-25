@@ -5143,10 +5143,8 @@ bool HttpFileBrowser::perform_directory_copy(const std::string &src_path, const 
 
   // Check for network storage
   storage::NetworkStorage *src_net_storage = nullptr;
-  storage::NetworkStorage *dst_net_storage = nullptr;
   if (this->storage_ != nullptr) {
     src_net_storage = this->storage_->find_network_storage_for_path(src_path);
-    dst_net_storage = this->storage_->find_network_storage_for_path(dst_path);
   }
 
   // Create destination directory
