@@ -421,6 +421,11 @@ void USBStorageClient::on_disconnected() {
     ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_.c_str());
   }
 
+  if (this->msc_interface_ != 0xFF) {
+    this->release_interface(this->msc_interface_);
+    this->msc_interface_ = 0xFF;
+  }
+
   this->sector_count_ = 0;
   this->bulk_in_ep_ = 0;
   this->bulk_out_ep_ = 0;

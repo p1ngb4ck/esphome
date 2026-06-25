@@ -96,7 +96,7 @@ class USBStorageClient : public usb_host::USBClient {
 
   uint8_t bulk_in_ep_{0};
   uint8_t bulk_out_ep_{0};
-  uint8_t msc_interface_{0};
+  uint8_t msc_interface_{0xFF};
 
   uint32_t sector_count_{0};
   uint32_t sector_size_{512};
