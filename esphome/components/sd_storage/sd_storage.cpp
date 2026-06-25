@@ -114,10 +114,12 @@ bool SdMmc::mount_card() {
   // via the new sd_host layer. Calling it here first causes "slot is not available" because
   // sd_host rejects duplicate slot registration. On IDF <6.0 this pre-init was harmless.
   ESP_LOGI(TAG, "Initializing SDMMC slot %d", this->slot_);
-  esp_err_t ret = sdmmc_host_init_slot(host.slot, &slot_config);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to init SDMMC slot %d: %s", this->slot_, esp_err_to_name(ret));
-    return false;
+  {
+    esp_err_t pre_ret = sdmmc_host_init_slot(host.slot, &slot_config);
+    if (pre_ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to init SDMMC slot %d: %s", this->slot_, esp_err_to_name(pre_ret));
+      return false;
+    }
   }
 #endif
 
@@ -133,7 +135,7 @@ bool SdMmc::mount_card() {
   card = (sdmmc_card_t *) malloc(sizeof(sdmmc_card_t));
 
   // Attempt to mount with retries
-  ret = ESP_FAIL;
+  esp_err_t ret = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
     ESP_LOGI(TAG, "Mounting SD card on slot %d to '%s' (attempt %d/3)...", this->slot_, mount_point, attempt);
     ret = esp_vfs_fat_sdmmc_mount(mount_point, &host, &slot_config, &mount_config, &card);
