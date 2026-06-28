@@ -2516,6 +2516,13 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", False)
         add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", False)
 
+    # IDF 6.1.0 Kconfig bug: these symbols use 'default 0' instead of 'default n',
+    # which is invalid in newer Kconfig. Set explicit values to suppress the warning.
+    if idf_version() >= cv.Version(6, 1, 0):
+        add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_MESH_PROVISIONER", False)
+        add_idf_sdkconfig_option("CONFIG_FATFS_PRINT_LLI", False)
+        add_idf_sdkconfig_option("CONFIG_FATFS_PRINT_FLOAT", False)
+
     # FINAL priority: runs after every require_libc_picolibc_newlib_compat() call
     CORE.add_job(_set_libc_picolibc_newlib_compat)
 
