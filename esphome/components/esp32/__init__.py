@@ -2266,7 +2266,9 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_LOG_TAG_LEVEL_IMPL_NONE", True)
 
     # Reduce PHY TX power in the event of a brownout
-    add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
+    # Not applicable on esp32_hosted — PHY lives on the co-processor
+    if "esp32_hosted" not in CORE.config:
+        add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
 
     # Set default CPU frequency
     add_idf_sdkconfig_option(

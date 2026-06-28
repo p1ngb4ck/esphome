@@ -234,7 +234,7 @@ async def to_code(config):
             cg.add_define(
                 "USE_NETWORK_MIN_IPV6_ADDR_COUNT", config[CONF_MIN_IPV6_ADDR_COUNT]
             )
-        if CORE.is_esp32:
+        if CORE.is_esp32 and "esp32_hosted" not in CORE.config:
             if CORE.using_arduino:
                 add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
                 add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", True)
