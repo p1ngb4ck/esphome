@@ -69,13 +69,15 @@ def _default_max_packet_size() -> int:
 
 
 def _dual_host_validator(value):
-    """dual_host is only valid (and meaningful) on ESP32-P4."""
+    """dual_host requires ESP32-P4 and IDF >= 6.0 (needs espressif/usb 1.4.1)."""
     value = cv.boolean(value)
     if value:
         from esphome.components.esp32 import get_esp32_variant
 
         if get_esp32_variant() != VARIANT_ESP32P4:
             raise cv.Invalid("dual_host is only supported on ESP32-P4")
+        if idf_version() < cv.Version(6, 0, 0):
+            raise cv.Invalid("dual_host requires IDF >= 6.0.0")
     return value
 
 
