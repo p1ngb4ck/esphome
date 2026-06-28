@@ -534,15 +534,13 @@ def get_board(core_obj=None):
 def get_download_types(storage_json):
     """Binary-download entries for a built ESP32 firmware.
 
-    Used by:
-    - esphome.dashboard (legacy "Download .bin" button)
-    - device-builder (esphome/device-builder) — same dispatch via
-      ``importlib.import_module(f"esphome.components.{platform}")``
-      then ``module.get_download_types(storage)``. The contract is
-      "returns ``list[dict]`` with at least ``title`` /
-      ``description`` / ``file`` / ``download`` keys"; please keep
-      the shape stable so the new dashboard's download panel
-      doesn't have to special-case per-platform schemas.
+    Used by device-builder (esphome/device-builder), via
+    ``importlib.import_module(f"esphome.components.{platform}")``
+    then ``module.get_download_types(storage)``. The contract is
+    "returns ``list[dict]`` with at least ``title`` /
+    ``description`` / ``file`` / ``download`` keys"; please keep
+    the shape stable so the download panel
+    doesn't have to special-case per-platform schemas.
     """
     return [
         {
@@ -1144,6 +1142,8 @@ def final_validate(config):
     # Imported locally to avoid circular import issues
     from esphome.components.psram import DOMAIN as PSRAM_DOMAIN
 
+    from .gpio import final_validate_pins
+
     errs = []
     conf_fw = config[CONF_FRAMEWORK]
     advanced = conf_fw[CONF_ADVANCED]
@@ -1226,6 +1226,8 @@ def final_validate(config):
                     path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_EXECUTE_FROM_PSRAM],
                 )
             )
+
+    final_validate_pins(full_config)
 
     if (
         config[CONF_FLASH_SIZE] == "32MB"
@@ -2421,14 +2423,14 @@ async def to_code(config):
             add_idf_sdkconfig_option("CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES", True)
             add_idf_sdkconfig_option(
                 "CONFIG_SECURE_BOOT_SIGNING_KEY",
-                str(signed_ota[CONF_SIGNING_KEY].resolve()),
+                signed_ota[CONF_SIGNING_KEY].resolve().as_posix(),
             )
         else:
             # Public key mode — verification only, external signing required
             add_idf_sdkconfig_option("CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES", False)
             add_idf_sdkconfig_option(
                 "CONFIG_SECURE_BOOT_VERIFICATION_KEY",
-                str(signed_ota[CONF_VERIFICATION_KEY].resolve()),
+                signed_ota[CONF_VERIFICATION_KEY].resolve().as_posix(),
             )
 
         cg.add_define("USE_OTA_SIGNED_VERIFICATION")
