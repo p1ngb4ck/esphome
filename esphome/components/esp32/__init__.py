@@ -1968,6 +1968,19 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
         )
 
 
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _write_fatfs_sdkconfig(disable_fatfs: bool):
+    """Write FATFS sdkconfig at FINAL priority so require_fatfs() calls from all
+    components are visible before we decide to enable or disable FATFS."""
+    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
+        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
+        volume_count = CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUME_COUNT, 2)
+        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volume_count)
+    elif disable_fatfs:
+        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
+        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
+
+
 @coroutine_with_priority(CoroPriority.FINAL - 1)
 async def _finalize_arduino_aware_flags():
     """Build flags that depend on whether arduino-esp32 is linked in.
@@ -2524,19 +2537,9 @@ async def to_code(config):
     ):
         add_idf_sdkconfig_option("CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM", True)
 
-    # Disable FATFS support
-    # Components that need FATFS (SD card, etc.) can call require_fatfs()
-    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
-        # Component called require_fatfs() - enable regardless of user setting
-        # Only set LFN_HEAP=y; do not write LFN_NONE=n as that can cause Kconfig
-        # to reset the entire choice to its default (NONE), overriding user settings.
-        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
-        volume_count = CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUME_COUNT, 2)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volume_count)
-    elif advanced[CONF_DISABLE_FATFS]:
-        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
-        # Kconfig range is [1,10]; 0 gets clamped to the default.
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
+    # FATFS sdkconfig is written at FINAL priority so all components have had a
+    # chance to call require_fatfs() before we decide whether to enable or disable it.
+    CORE.add_job(_write_fatfs_sdkconfig, advanced[CONF_DISABLE_FATFS])
 
     for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
         add_idf_sdkconfig_option(name, RawSdkconfigValue(value))
