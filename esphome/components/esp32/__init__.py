@@ -1941,7 +1941,8 @@ async def _reconcile_network_sdkconfig() -> None:
         set_opt("CONFIG_ESP_COEX_SW_COEXIST_ENABLE", False)
 
     # SoftAP support: drop it when WiFi is used without AP mode (IDF only).
-    if not is_arduino and net.wifi and not net.wifi_ap:
+    # Skip on esp32_hosted — symbol is owned by the co-processor component.
+    if not is_arduino and net.wifi and not net.wifi_ap and "esp32_hosted" not in CORE.config:
         set_opt("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", False)
 
     # LWIP DHCP server: a WiFi-AP-mode / enable_lwip_dhcp_server concern (not

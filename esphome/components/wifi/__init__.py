@@ -608,7 +608,8 @@ async def to_code(config):
         request_wifi(ap=CONF_AP in config)
 
     # Disable Enterprise WiFi support if no EAP is configured
-    if CORE.is_esp32:
+    # Skip on esp32_hosted — symbol is owned by the co-processor component
+    if CORE.is_esp32 and "esp32_hosted" not in CORE.config:
         add_idf_sdkconfig_option("CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT", has_eap)
 
     # Only define USE_WIFI_MANUAL_IP if any AP uses manual IP
