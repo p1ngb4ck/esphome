@@ -9,6 +9,7 @@ from esphome.components.esp32 import (
     VARIANT_ESP32S31,
     add_idf_component,
     add_idf_sdkconfig_option,
+    idf_version,
     only_on_variant,
 )
 import esphome.config_validation as cv
