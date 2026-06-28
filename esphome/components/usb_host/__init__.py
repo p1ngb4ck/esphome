@@ -2,9 +2,11 @@ import logging
 
 import esphome.codegen as cg
 from esphome.components.esp32 import (
+    VARIANT_ESP32H4,
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
     add_idf_component,
     add_idf_sdkconfig_option,
     only_on_variant,
@@ -91,7 +93,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
     ),
-    only_on_variant(supported=[VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3]),
+    only_on_variant(
+        supported=[
+            VARIANT_ESP32H4,
+            VARIANT_ESP32P4,
+            VARIANT_ESP32S2,
+            VARIANT_ESP32S3,
+            VARIANT_ESP32S31,
+        ]
+    ),
     _set_max_packet_size,
 )
 
@@ -103,7 +113,9 @@ async def register_usb_client(config):
 
 
 async def to_code(config: ConfigType) -> None:
-    add_idf_component(name="espressif/usb", ref="1.4.1")
+    # IDF 6.0 moved USB host to an external component
+    if idf_version() >= cv.Version(6, 0, 0):
+        add_idf_component(name="espressif/usb", ref="1.4.1")
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
