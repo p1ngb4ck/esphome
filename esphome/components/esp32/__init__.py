@@ -1999,6 +1999,8 @@ async def _patch_idf_kconfig_files():
     for pattern in ("components/bt/**/Kconfig", "components/fatfs/Kconfig"):
         for kconfig_path_str in glob.glob(str(idf_base / pattern), recursive=True):
             kconfig_path = Path(kconfig_path_str)
+            if not kconfig_path.is_file():
+                continue
             original = kconfig_path.read_text()
             patched = original.replace("\tdefault 0\n", "\tdefault n\n").replace(
                 "default 0\n", "default n\n"
