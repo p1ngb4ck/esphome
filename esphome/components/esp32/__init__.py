@@ -2002,11 +2002,26 @@ async def _patch_idf_kconfig_files():
             if not kconfig_path.is_file():
                 continue
             original = kconfig_path.read_text()
-            patched = original.replace("\tdefault 0\n", "\tdefault n\n").replace(
-                "default 0\n", "default n\n"
-            )
-            if patched != original:
-                kconfig_path.write_text(patched)
+            # Only replace 'default 0' for bool symbols, not int/hex symbols.
+            # Track whether we're inside a bool config block and patch only there.
+            lines = original.splitlines(keepends=True)
+            in_bool_config = False
+            changed = False
+            out = []
+            for line in lines:
+                stripped = line.lstrip()
+                if stripped.startswith("config ") or stripped.startswith("menuconfig "):
+                    in_bool_config = False
+                elif stripped.startswith("bool") and in_bool_config is False:
+                    in_bool_config = True
+                elif stripped.startswith(("int ", "int\n", "hex ", "hex\n", "string ")):
+                    in_bool_config = False
+                if in_bool_config and re.match(r"[\t ]*default 0\s*\n", line):
+                    line = line.replace("default 0", "default n", 1)
+                    changed = True
+                out.append(line)
+            if changed:
+                kconfig_path.write_text("".join(out))
                 _LOGGER.debug(
                     "Patched 'default 0' → 'default n' in %s", kconfig_path
                 )
