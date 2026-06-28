@@ -201,7 +201,7 @@ async def to_code(config):
     cg.add(var.set_task_stack_in_psram(config[CONF_TASK_STACK_IN_PSRAM]))
     if config[CONF_TASK_STACK_IN_PSRAM]:
         esp32.add_idf_sdkconfig_option(
-            "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY", True
+            "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM", True
         )
 
     cg.add(var.set_volume_increment(config[speaker_mp.CONF_VOLUME_INCREMENT]))
