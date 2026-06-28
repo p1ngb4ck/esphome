@@ -669,7 +669,8 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
 
     # Apply high performance WiFi settings if high performance networking is enabled
-    if CORE.is_esp32 and has_high_performance_networking():
+    # Skip on esp32_hosted — WiFi runs on the co-processor, these symbols are disabled
+    if CORE.is_esp32 and has_high_performance_networking() and "esp32_hosted" not in CORE.config:
         # Check if PSRAM is guaranteed (set by psram component during final validation)
         psram_guaranteed = psram_is_guaranteed()
 
