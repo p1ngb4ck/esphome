@@ -1,6 +1,7 @@
 from collections.abc import Callable, Iterable
 import contextlib
 from dataclasses import dataclass
+import glob
 import itertools
 import logging
 import os
@@ -52,6 +53,7 @@ from esphome.core import CORE, EsphomeError, HexInt, TimePeriod
 from esphome.core.config import BOARD_MAX_LENGTH
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.espidf.component import generate_idf_components
+from esphome.espidf.toolchain import _get_idf_path
 import esphome.final_validate as fv
 from esphome.helpers import copy_file_if_changed, rmtree, write_file_if_changed
 from esphome.schema_extractors import SCHEMA_EXTRACT, schema_extractor
@@ -1982,6 +1984,32 @@ async def _write_fatfs_sdkconfig(disable_fatfs: bool):
         add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
 
 
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _patch_idf_kconfig_files():
+    """Patch IDF 6.1.0 Kconfig files that use 'default 0' for bool symbols.
+
+    Newer Kconfig parsers reject 'default 0' for boolean symbols and emit
+    warnings. Patch in-place before cmake runs.
+    """
+    if idf_version() < cv.Version(6, 1, 0):
+        return
+    idf_base = _get_idf_path()
+    if idf_base is None:
+        return
+    for pattern in ("components/bt/**/Kconfig", "components/fatfs/Kconfig"):
+        for kconfig_path_str in glob.glob(str(idf_base / pattern), recursive=True):
+            kconfig_path = Path(kconfig_path_str)
+            original = kconfig_path.read_text()
+            patched = original.replace("\tdefault 0\n", "\tdefault n\n").replace(
+                "default 0\n", "default n\n"
+            )
+            if patched != original:
+                kconfig_path.write_text(patched)
+                _LOGGER.debug(
+                    "Patched 'default 0' → 'default n' in %s", kconfig_path
+                )
+
+
 @coroutine_with_priority(CoroPriority.FINAL - 1)
 async def _finalize_arduino_aware_flags():
     """Build flags that depend on whether arduino-esp32 is linked in.
@@ -2548,6 +2576,7 @@ async def to_code(config):
     # FATFS sdkconfig is written at FINAL priority so all components have had a
     # chance to call require_fatfs() before we decide whether to enable or disable it.
     CORE.add_job(_write_fatfs_sdkconfig, advanced[CONF_DISABLE_FATFS])
+    CORE.add_job(_patch_idf_kconfig_files)
 
     for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
         add_idf_sdkconfig_option(name, RawSdkconfigValue(value))
