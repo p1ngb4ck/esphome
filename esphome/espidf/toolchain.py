@@ -1,6 +1,7 @@
 """ESP-IDF direct build API for ESPHome."""
 
 from dataclasses import dataclass, field
+import glob
 import json
 import logging
 import os
@@ -9,7 +10,9 @@ import re
 import shutil
 import subprocess
 
+from esphome.components.esp32 import idf_version
 from esphome.components.esp32.const import KEY_ESP32, KEY_FLASH_SIZE, KEY_IDF_VERSION
+import esphome.config_validation as cv
 from esphome.const import CONF_FRAMEWORK, CONF_SOURCE
 from esphome.core import CORE, EsphomeError
 from esphome.espidf.framework import check_esp_idf_install, get_framework_env
@@ -319,6 +322,36 @@ def _patch_memory_segments():
         _LOGGER.warning("Could not patch memory segments in %s", memory_ld)
 
 
+def _patch_idf_kconfig_files():
+    """Patch IDF Kconfig files to fix 'default 0' → 'default n' for boolean symbols.
+
+    IDF 6.1.0 has Kconfig files that use 'default 0' for bool symbols, which is
+    invalid in newer Kconfig versions and causes parser warnings. Patch in-place
+    before cmake runs so the warnings are suppressed.
+    """
+    if idf_version() < cv.Version(6, 1, 0):
+        return
+
+    idf_base = _get_idf_path()
+    if idf_base is None:
+        return
+    # Patch only the known offending component Kconfig files
+    kconfig_globs = [
+        "components/bt/**/Kconfig",
+        "components/fatfs/Kconfig",
+    ]
+    for pattern in kconfig_globs:
+        for kconfig_path_str in glob.glob(str(idf_base / pattern), recursive=True):
+            kconfig_path = Path(kconfig_path_str)
+            original = kconfig_path.read_text()
+            patched = original.replace("\tdefault 0\n", "\tdefault n\n").replace(
+                "default 0\n", "default n\n"
+            )
+            if patched != original:
+                kconfig_path.write_text(patched)
+                _LOGGER.debug("Patched 'default 0' → 'default n' in %s", kconfig_path)
+
+
 def run_compile(config, verbose: bool) -> int:
     """Compile the ESP-IDF project.
 
@@ -328,6 +361,8 @@ def run_compile(config, verbose: bool) -> int:
     3. Run full build
     """
     from esphome.build_gen.espidf import write_project
+
+    _patch_idf_kconfig_files()
 
     # Check if we need to do discovery phase
     if need_reconfigure():
