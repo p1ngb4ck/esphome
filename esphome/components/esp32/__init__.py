@@ -1996,44 +1996,34 @@ async def _patch_idf_kconfig_files():
     idf_base = _get_idf_path()
     if idf_base is None:
         return
-    for pattern in ("components/bt/**/Kconfig", "components/fatfs/Kconfig"):
+    # Each entry: (glob_pattern, old_string, new_string)
+    # Exact surrounding context prevents accidental matches on other symbols.
+    fixes = [
+        (
+            "components/bt/**/Kconfig",
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default 0\n',
+            'config BT_NIMBLE_MESH_PROVISIONER\n        bool "Enable BLE mesh provisioner"\n        default n\n',
+        ),
+        (
+            "components/fatfs/Kconfig",
+            "        bool \"Make fatfs f_printf() support long long argument\"\n        default 0\n",
+            "        bool \"Make fatfs f_printf() support long long argument\"\n        default n\n",
+        ),
+        (
+            "components/fatfs/Kconfig",
+            "        bool \"Make fatfs f_printf() support floating point argument\"\n        default 0\n",
+            "        bool \"Make fatfs f_printf() support floating point argument\"\n        default n\n",
+        ),
+    ]
+    for pattern, old, new in fixes:
         for kconfig_path_str in glob.glob(str(idf_base / pattern), recursive=True):
             kconfig_path = Path(kconfig_path_str)
             if not kconfig_path.is_file():
                 continue
             original = kconfig_path.read_text()
-            # Only replace 'default 0' for bool symbols, not int/hex/string symbols.
-            # Also restore any 'default n' that was incorrectly written to int symbols
-            # by a previous (buggy) patch run.
-            # Track symbol type across lines within each config block.
-            lines = original.splitlines(keepends=True)
-            sym_type: str | None = None  # 'bool', 'int', 'hex', 'string', or None
-            changed = False
-            out = []
-            for line in lines:
-                stripped = line.lstrip()
-                if stripped.startswith(("config ", "menuconfig ")):
-                    sym_type = None
-                elif sym_type is None:
-                    # First keyword line after config/menuconfig sets the type
-                    for kw in ("bool", "int", "hex", "string", "tristate"):
-                        if stripped == kw or stripped.startswith(kw + " ") or stripped.startswith(kw + "\t"):
-                            sym_type = kw
-                            break
-                if re.match(r"[\t ]*default [0n]\b", line):
-                    if sym_type == "bool" and re.match(r"[\t ]*default 0\s*(\n|$)", line):
-                        line = line.replace("default 0", "default n", 1)
-                        changed = True
-                    elif sym_type in ("int", "hex", "string") and re.match(r"[\t ]*default n\s*(\n|$)", line):
-                        # Restore incorrectly patched int/hex/string default
-                        line = line.replace("default n", "default 0", 1)
-                        changed = True
-                out.append(line)
-            if changed:
-                kconfig_path.write_text("".join(out))
-                _LOGGER.debug(
-                    "Patched 'default 0'/'default n' in %s", kconfig_path
-                )
+            if old in original:
+                kconfig_path.write_text(original.replace(old, new, 1))
+                _LOGGER.debug("Patched Kconfig default in %s", kconfig_path)
 
 
 @coroutine_with_priority(CoroPriority.FINAL - 1)
