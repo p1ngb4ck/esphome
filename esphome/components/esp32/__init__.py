@@ -2002,28 +2002,37 @@ async def _patch_idf_kconfig_files():
             if not kconfig_path.is_file():
                 continue
             original = kconfig_path.read_text()
-            # Only replace 'default 0' for bool symbols, not int/hex symbols.
-            # Track whether we're inside a bool config block and patch only there.
+            # Only replace 'default 0' for bool symbols, not int/hex/string symbols.
+            # Also restore any 'default n' that was incorrectly written to int symbols
+            # by a previous (buggy) patch run.
+            # Track symbol type across lines within each config block.
             lines = original.splitlines(keepends=True)
-            in_bool_config = False
+            sym_type: str | None = None  # 'bool', 'int', 'hex', 'string', or None
             changed = False
             out = []
             for line in lines:
                 stripped = line.lstrip()
-                if stripped.startswith("config ") or stripped.startswith("menuconfig "):
-                    in_bool_config = False
-                elif stripped.startswith("bool") and in_bool_config is False:
-                    in_bool_config = True
-                elif stripped.startswith(("int ", "int\n", "hex ", "hex\n", "string ")):
-                    in_bool_config = False
-                if in_bool_config and re.match(r"[\t ]*default 0\s*\n", line):
-                    line = line.replace("default 0", "default n", 1)
-                    changed = True
+                if stripped.startswith(("config ", "menuconfig ")):
+                    sym_type = None
+                elif sym_type is None:
+                    # First keyword line after config/menuconfig sets the type
+                    for kw in ("bool", "int", "hex", "string", "tristate"):
+                        if stripped == kw or stripped.startswith(kw + " ") or stripped.startswith(kw + "\t"):
+                            sym_type = kw
+                            break
+                if re.match(r"[\t ]*default [0n]\b", line):
+                    if sym_type == "bool" and re.match(r"[\t ]*default 0\s*(\n|$)", line):
+                        line = line.replace("default 0", "default n", 1)
+                        changed = True
+                    elif sym_type in ("int", "hex", "string") and re.match(r"[\t ]*default n\s*(\n|$)", line):
+                        # Restore incorrectly patched int/hex/string default
+                        line = line.replace("default n", "default 0", 1)
+                        changed = True
                 out.append(line)
             if changed:
                 kconfig_path.write_text("".join(out))
                 _LOGGER.debug(
-                    "Patched 'default 0' → 'default n' in %s", kconfig_path
+                    "Patched 'default 0'/'default n' in %s", kconfig_path
                 )
 
 
