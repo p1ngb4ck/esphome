@@ -328,7 +328,7 @@ Respect these constraints to avoid wasting the user's time and destroying their 
 
 ## 3. Core Technologies & Stack
 
-*   **Languages:** Python (>=3.11), C++ (gnu++20)
+*   **Languages:** Python (>=3.12), C++ (gnu++20)
 *   **Frameworks & Runtimes:** PlatformIO, Arduino, ESP-IDF.
 *   **Build Systems:** PlatformIO is the primary build system. CMake is used as an alternative.
 *   **Configuration:** YAML.
