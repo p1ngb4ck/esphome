@@ -17,6 +17,7 @@ CONF_AUTH_ENABLED = "auth_enabled"
 CONF_ASSETS = "assets"
 CONF_CSS_PATH = "css_path"
 CONF_JS_PATH = "js_path"
+CONF_HTML_PATH = "html_path"
 
 http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")
 HttpFileBrowser = http_file_browser_ns.class_("HttpFileBrowser", cg.Component)
@@ -37,6 +38,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PASSWORD): cv.string,
         cv.Optional(CONF_ASSETS): cv.Schema(
             {
+                cv.Optional(CONF_HTML_PATH): cv.string,
                 cv.Optional(CONF_CSS_PATH): cv.string,
                 cv.Optional(CONF_JS_PATH): cv.string,
             }
@@ -65,6 +67,8 @@ async def to_code(config):
             cg.add(var.set_auth(username, password))
 
     if assets := config.get(CONF_ASSETS):
+        if (html_path := assets.get(CONF_HTML_PATH)) is not None:
+            cg.add(var.set_html_path(html_path))
         if (css_path := assets.get(CONF_CSS_PATH)) is not None:
             cg.add(var.set_css_path(css_path))
         if (js_path := assets.get(CONF_JS_PATH)) is not None:

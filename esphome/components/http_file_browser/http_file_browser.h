@@ -92,6 +92,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
     this->password_ = password;
     this->auth_enabled_ = true;
   }
+  void set_html_path(const char *path) { this->html_path_ = path; }
   void set_css_path(const char *path) { this->css_path_ = path; }
   void set_js_path(const char *path) { this->js_path_ = path; }
 
@@ -122,6 +123,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool deletion_enabled_{false};
 
   // Asset paths (nullptr = use built-in)
+  const char *html_path_{nullptr};
   const char *css_path_{nullptr};
   const char *js_path_{nullptr};
 

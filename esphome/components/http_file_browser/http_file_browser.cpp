@@ -95,70 +95,52 @@ std::string HttpFileBrowser::substitute_(const std::string &tmpl, const std::str
 }
 
 bool HttpFileBrowser::try_load_assets_() {
+  std::string html_tmpl = HTTP_FILE_BROWSER_HTML_TEMPLATE;
   std::string css = HTTP_FILE_BROWSER_CSS;
   std::string js = HTTP_FILE_BROWSER_JS;
 
-  // If custom paths are configured, try to load from storage — bail entirely if any fail
-  if (this->css_path_ != nullptr || this->js_path_ != nullptr) {
+  // If any custom paths are configured, storage registry must be ready
+  if (this->html_path_ != nullptr || this->css_path_ != nullptr || this->js_path_ != nullptr) {
     if (this->registry_ == nullptr) {
       ESP_LOGW(TAG, "Storage registry not ready, deferring asset load");
       return false;
     }
-
-    if (this->css_path_ != nullptr) {
-      auto *fs = this->find_filesystem_for_path_(this->css_path_);
-      if (fs == nullptr || !fs->is_mounted()) {
-        ESP_LOGW(TAG, "CSS storage not ready for path: %s", this->css_path_);
-        return false;
-      }
-      FILE *f = fopen(this->css_path_, "r");
-      if (f == nullptr) {
-        ESP_LOGW(TAG, "Cannot open CSS file: %s", this->css_path_);
-        return false;
-      }
-      struct stat st;
-      if (::stat(this->css_path_, &st) != 0 || st.st_size <= 0) {
-        fclose(f);
-        ESP_LOGW(TAG, "Cannot stat CSS file: %s", this->css_path_);
-        return false;
-      }
-      css.resize(static_cast<size_t>(st.st_size));
-      if (fread(&css[0], 1, css.size(), f) != css.size()) {
-        fclose(f);
-        ESP_LOGW(TAG, "CSS file read incomplete: %s", this->css_path_);
-        return false;
-      }
-      fclose(f);
-      ESP_LOGI(TAG, "Loaded CSS from %s (%zu bytes)", this->css_path_, css.size());
-    }
-
-    if (this->js_path_ != nullptr) {
-      auto *fs = this->find_filesystem_for_path_(this->js_path_);
-      if (fs == nullptr || !fs->is_mounted()) {
-        ESP_LOGW(TAG, "JS storage not ready for path: %s", this->js_path_);
-        return false;
-      }
-      FILE *f = fopen(this->js_path_, "r");
-      if (f == nullptr) {
-        ESP_LOGW(TAG, "Cannot open JS file: %s", this->js_path_);
-        return false;
-      }
-      struct stat st;
-      if (::stat(this->js_path_, &st) != 0 || st.st_size <= 0) {
-        fclose(f);
-        ESP_LOGW(TAG, "Cannot stat JS file: %s", this->js_path_);
-        return false;
-      }
-      js.resize(static_cast<size_t>(st.st_size));
-      if (fread(&js[0], 1, js.size(), f) != js.size()) {
-        fclose(f);
-        ESP_LOGW(TAG, "JS file read incomplete: %s", this->js_path_);
-        return false;
-      }
-      fclose(f);
-      ESP_LOGI(TAG, "Loaded JS from %s (%zu bytes)", this->js_path_, js.size());
-    }
   }
+
+  auto load_file = [this](const char *path, std::string &out, const char *label) -> bool {
+    auto *fs = this->find_filesystem_for_path_(path);
+    if (fs == nullptr || !fs->is_mounted()) {
+      ESP_LOGW(TAG, "%s storage not ready for path: %s", label, path);
+      return false;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == nullptr) {
+      ESP_LOGW(TAG, "Cannot open %s file: %s", label, path);
+      return false;
+    }
+    struct stat st;
+    if (::stat(path, &st) != 0 || st.st_size <= 0) {
+      fclose(f);
+      ESP_LOGW(TAG, "Cannot stat %s file: %s", label, path);
+      return false;
+    }
+    out.resize(static_cast<size_t>(st.st_size));
+    if (fread(&out[0], 1, out.size(), f) != out.size()) {
+      fclose(f);
+      ESP_LOGW(TAG, "%s file read incomplete: %s", label, path);
+      return false;
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Loaded %s from %s (%zu bytes)", label, path, out.size());
+    return true;
+  };
+
+  if (this->html_path_ != nullptr && !load_file(this->html_path_, html_tmpl, "HTML"))
+    return false;
+  if (this->css_path_ != nullptr && !load_file(this->css_path_, css, "CSS"))
+    return false;
+  if (this->js_path_ != nullptr && !load_file(this->js_path_, js, "JS"))
+    return false;
 
   // Substitute CSS and JS into the template — TITLE and API_BASE remain as placeholders
   std::string rendered = HTTP_FILE_BROWSER_HTML_TEMPLATE;
@@ -181,7 +163,7 @@ bool HttpFileBrowser::try_load_assets_() {
   memcpy(this->html_buf_, rendered.c_str(), new_len);
   this->html_loaded_ = true;
   ESP_LOGI(TAG, "HTML buffer ready (%zu bytes, %s)", new_len - 1,
-           (this->css_path_ || this->js_path_) ? "custom assets" : "built-in");
+           (this->html_path_ || this->css_path_ || this->js_path_) ? "custom assets" : "built-in");
   return true;
 }
 
