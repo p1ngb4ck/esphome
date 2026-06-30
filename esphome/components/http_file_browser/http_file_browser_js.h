@@ -1,7 +1,7 @@
 #pragma once
+#include "esphome/core/defines.h"
 
-// JavaScript for the file browser UI. The placeholder {API_BASE} is replaced at
-// runtime with the configured url_prefix before serving.
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_JS
 static constexpr const char HTTP_FILE_BROWSER_JS[] = R"JS(
 function fmt_size(b){if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(1)+' GB';}
 function show_progress(title){document.getElementById('progressTitle').textContent=title;document.getElementById('progressBar').style.width='0%';document.getElementById('progressBar').textContent='0%';document.getElementById('progressDetails').textContent='Initializing...';document.getElementById('progressSpeed').textContent='';document.getElementById('progressSource').textContent='-';document.getElementById('progressDest').textContent='-';document.getElementById('progressModal').classList.add('active');poll_progress();}
@@ -22,3 +22,4 @@ async function unmount_device(path){try{const r=await fetch(API_BASE+'/api/unmou
 async function remount_device(path){try{const r=await fetch(API_BASE+'/api/remount',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mount_point='+encodeURIComponent(path)});const d=await r.json();if(d.success)setTimeout(()=>location.reload(),500);else alert('Remount failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
 async function handleUpload(event){event.preventDefault();const file=document.getElementById('uploadFile').files[0];if(!file)return false;const CHUNK=65536;const total=Math.ceil(file.size/CHUNK);show_progress('Uploading '+file.name+'...');for(let i=0;i<total;i++){const blob=file.slice(i*CHUNK,(i+1)*CHUNK);const fd=new FormData();fd.append('filename',file.name);fd.append('chunkIndex',i);fd.append('totalChunks',total);fd.append('path',window.location.pathname.replace(API_BASE,''));fd.append('fileSize',file.size);fd.append('chunk',blob);try{const r=await fetch(API_BASE+'/api/upload_chunk',{method:'POST',body:fd});const d=await r.json();if(!d.success&&!d.cancelled){hide_progress();alert('Upload failed');return false;}}catch(e){hide_progress();alert('Upload error: '+e);return false;}}hide_progress();location.reload();return false;}
 )JS";
+#endif

@@ -95,9 +95,21 @@ std::string HttpFileBrowser::substitute_(const std::string &tmpl, const std::str
 }
 
 bool HttpFileBrowser::try_load_assets_() {
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_HTML
   std::string html_tmpl = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+#else
+  std::string html_tmpl;
+#endif
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_CSS
   std::string css = HTTP_FILE_BROWSER_CSS;
+#else
+  std::string css;
+#endif
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_JS
   std::string js = HTTP_FILE_BROWSER_JS;
+#else
+  std::string js;
+#endif
 
   // If any custom paths are configured, storage registry must be ready
   if (this->html_path_ != nullptr || this->css_path_ != nullptr || this->js_path_ != nullptr) {
@@ -142,8 +154,8 @@ bool HttpFileBrowser::try_load_assets_() {
   if (this->js_path_ != nullptr && !load_file(this->js_path_, js, "JS"))
     return false;
 
-  // Substitute CSS and JS into the template — TITLE and API_BASE remain as placeholders
-  std::string rendered = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+  // Substitute CSS and JS into the template — TITLE, API_BASE, BODY remain as per-request placeholders
+  std::string rendered = html_tmpl;
   rendered = this->substitute_(rendered, "{{CSS}}", css);
   rendered = this->substitute_(rendered, "{{JS}}", js);
 
@@ -794,10 +806,17 @@ std::string HttpFileBrowser::get_filename_from_path(const std::string &path) {
 
 std::string HttpFileBrowser::render_page(const std::string &title, const std::string &body) {
   if (!this->html_loaded_ && !this->try_load_assets_()) {
-    // Assets still not ready — build inline fallback from constants
-    std::string html = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+    // Assets still not ready — build from whatever builtins are available
+    std::string html;
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_HTML
+    html = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+#endif
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_CSS
     html = this->substitute_(html, "{{CSS}}", HTTP_FILE_BROWSER_CSS);
+#endif
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_JS
     html = this->substitute_(html, "{{JS}}", HTTP_FILE_BROWSER_JS);
+#endif
     html = this->substitute_(html, "{{TITLE}}", title);
     html = this->substitute_(html, "{{API_BASE}}", this->url_prefix_);
     html = this->substitute_(html, "{{BODY}}", body);

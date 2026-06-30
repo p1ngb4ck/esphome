@@ -1,5 +1,7 @@
 #pragma once
+#include "esphome/core/defines.h"
 
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_HTML
 static constexpr const char HTTP_FILE_BROWSER_HTML_TEMPLATE[] =
     "<!DOCTYPE html>\n"
     "<html lang=\"en\">\n"
@@ -36,3 +38,4 @@ static constexpr const char HTTP_FILE_BROWSER_HTML_TEMPLATE[] =
     "</script>\n"
     "</body>\n"
     "</html>\n";
+#endif

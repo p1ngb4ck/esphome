@@ -1,5 +1,7 @@
 #pragma once
+#include "esphome/core/defines.h"
 
+#ifdef USE_HTTP_FILE_BROWSER_BUILTIN_CSS
 static constexpr const char HTTP_FILE_BROWSER_CSS[] = R"CSS(
 body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 2rem; background: #f5f5f7; color: #1d1d1f; }
 h1 { color: #0066cc; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 1rem; }
@@ -34,3 +36,4 @@ button.delete:hover { background: #c82333; }
 .progress-speed { margin-top: 0.5rem; font-size: 0.9rem; color: #666; }
 #cancelBtn { margin-top: 1rem; width: 100%; }
 )CSS";
+#endif

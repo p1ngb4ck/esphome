@@ -66,13 +66,19 @@ async def to_code(config):
         ) is not None:
             cg.add(var.set_auth(username, password))
 
-    if assets := config.get(CONF_ASSETS):
-        if (html_path := assets.get(CONF_HTML_PATH)) is not None:
-            cg.add(var.set_html_path(html_path))
-        if (css_path := assets.get(CONF_CSS_PATH)) is not None:
-            cg.add(var.set_css_path(css_path))
-        if (js_path := assets.get(CONF_JS_PATH)) is not None:
-            cg.add(var.set_js_path(js_path))
+    assets = config.get(CONF_ASSETS, {})
+    if (html_path := assets.get(CONF_HTML_PATH)) is not None:
+        cg.add(var.set_html_path(html_path))
+    else:
+        cg.add_define("USE_HTTP_FILE_BROWSER_BUILTIN_HTML")
+    if (css_path := assets.get(CONF_CSS_PATH)) is not None:
+        cg.add(var.set_css_path(css_path))
+    else:
+        cg.add_define("USE_HTTP_FILE_BROWSER_BUILTIN_CSS")
+    if (js_path := assets.get(CONF_JS_PATH)) is not None:
+        cg.add(var.set_js_path(js_path))
+    else:
+        cg.add_define("USE_HTTP_FILE_BROWSER_BUILTIN_JS")
 
     cg.add_define("USE_HTTP_FILE_BROWSER")
 
