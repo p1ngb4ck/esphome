@@ -2,7 +2,6 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import web_server_base
 from esphome.components.esp32 import add_idf_component
-from esphome.components.storage import request_storage_device
 from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME
 
 CODEOWNERS = ["@p1ngb4ck"]
@@ -59,5 +58,3 @@ async def to_code(config):
     cg.add_define("USE_HTTP_FILE_BROWSER")
 
     add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
-
-    request_storage_device()
