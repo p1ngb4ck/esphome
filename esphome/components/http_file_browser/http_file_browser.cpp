@@ -121,8 +121,13 @@ bool HttpFileBrowser::try_load_assets_() {
 
   auto load_file = [this](const char *path, std::string &out, const char *label) -> bool {
     auto *fs = this->find_filesystem_for_path_(path);
-    if (fs == nullptr || !fs->is_mounted()) {
-      ESP_LOGW(TAG, "%s storage not ready for path: %s", label, path);
+    if (fs == nullptr) {
+      ESP_LOGW(TAG, "%s storage not found for path: %s", label, path);
+      return false;
+    }
+    storage::StorageInfo info{};
+    if (fs->get_info(&info) != storage::StorageError::OK || !info.is_mounted) {
+      ESP_LOGW(TAG, "%s storage not mounted for path: %s", label, path);
       return false;
     }
     FILE *f = fopen(path, "r");
