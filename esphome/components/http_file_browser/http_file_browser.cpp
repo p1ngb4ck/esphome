@@ -1,4 +1,7 @@
 #include "http_file_browser.h"
+#include "http_file_browser_css.h"
+#include "http_file_browser_js.h"
+#include "http_file_browser_html.h"
 #include "esphome/components/storage/storage.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
@@ -690,98 +693,23 @@ std::string HttpFileBrowser::get_filename_from_path(const std::string &path) {
 
 
 std::string HttpFileBrowser::generate_html_header(const std::string &title) {
-  std::string html = R"(<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-  <title>)";
+  const char *css = this->css_buf_ ? this->css_buf_ : HTTP_FILE_BROWSER_CSS;
+  std::string html = HTTP_FILE_BROWSER_HTML_PRE_TITLE;
   html += title;
-  html += R"(</title>
-  <style>
-    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 2rem; background: #f5f5f7; color: #1d1d1f; }
-    h1 { color: #0066cc; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 1rem; }
-    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); padding: 2rem; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #e0e0e0; }
-    th { background: #f8f9fa; font-weight: 500; }
-    .file-actions { display: flex; gap: 8px; }
-    button { padding: 6px 12px; border: none; border-radius: 6px; background: #0066cc; color: white; cursor: pointer; transition: background 0.2s; }
-    button:hover { background: #0052a3; }
-    button.delete { background: #dc3545; }
-    button.delete:hover { background: #c82333; }
-    .upload-form { margin-bottom: 2rem; padding: 1rem; background: #f8f9fa; border-radius: 8px; }
-    .upload-form input[type="file"] { margin-right: 1rem; }
-    .breadcrumb { margin-bottom: 1.5rem; font-size: 0.9rem; color: #666; }
-    .breadcrumb a { color: #0066cc; text-decoration: none; }
-    .breadcrumb a:hover { text-decoration: underline; }
-    .breadcrumb span:not(:last-child)::after { display: inline-block; margin: 0 .25rem; content: ">"; }
-    .folder { color: #0066cc; font-weight: 500; }
-    .file-type { color: #666; font-size: 0.9rem; }
-    .header-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
-    .header-actions button { background: #4CAF50; }
-    .header-actions button:hover { background: #45a049; }
-    .progress-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
-    .progress-modal.active { display: flex; }
-    .progress-content { background: white; padding: 2rem; border-radius: 12px; min-width: 400px; box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
-    .progress-title { font-size: 1.2rem; font-weight: 500; margin-bottom: 1rem; color: #1d1d1f; }
-    .progress-bar-container { width: 100%; height: 20px; background: #e0e0e0; border-radius: 10px; overflow: hidden; margin: 1rem 0; }
-    .progress-bar { height: 100%; background: linear-gradient(90deg, #0066cc, #0052a3); width: 0%; transition: width 0.3s ease; display: flex; align-items: center; justify-content: center; color: white; font-size: 0.8rem; font-weight: 500; }
-    .progress-details { color: #666; font-size: 0.9rem; margin-top: 0.5rem; }
-    .progress-file-info { margin-top: 1rem; padding: 1rem; background: #f8f9fa; border-radius: 8px; font-size: 0.85rem; word-break: break-all; }
-    .progress-speed { margin-top: 0.5rem; font-size: 0.9rem; color: #666; }
-    #cancelBtn { margin-top: 1rem; width: 100%; }
-  </style>
-</head>
-<body>
-<div class="container">
-)";
+  html += HTTP_FILE_BROWSER_HTML_PRE_CSS;
+  html += css;
+  html += HTTP_FILE_BROWSER_HTML_POST_CSS;
   return html;
 }
 
 std::string HttpFileBrowser::generate_html_footer() {
-  return R"HTML(
-</div>
-<div id="progressModal" class="progress-modal">
-  <div class="progress-content">
-    <div class="progress-title" id="progressTitle">Processing...</div>
-    <div class="progress-bar-container">
-      <div class="progress-bar" id="progressBar">0%</div>
-    </div>
-    <div class="progress-details" id="progressDetails">Initializing...</div>
-    <div class="progress-speed" id="progressSpeed"></div>
-    <div class="progress-file-info">
-      <div><strong>From:</strong> <span id="progressSource">-</span></div>
-      <div><strong>To:</strong> <span id="progressDest">-</span></div>
-    </div>
-    <button id="cancelBtn" class="delete" onclick="cancelOperation()">Cancel</button>
-  </div>
-</div>
-<script>
-const API_BASE = ')HTML" +
-         this->url_prefix_ + R"HTML(';
-function fmt_size(b){if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(1)+' GB';}
-function show_progress(title){document.getElementById('progressTitle').textContent=title;document.getElementById('progressBar').style.width='0%';document.getElementById('progressBar').textContent='0%';document.getElementById('progressDetails').textContent='Initializing...';document.getElementById('progressSpeed').textContent='';document.getElementById('progressSource').textContent='-';document.getElementById('progressDest').textContent='-';document.getElementById('progressModal').classList.add('active');poll_progress();}
-function hide_progress(){document.getElementById('progressModal').classList.remove('active');}
-let progressInterval=null;
-function poll_progress(){if(progressInterval)clearInterval(progressInterval);progressInterval=setInterval(async()=>{try{const r=await fetch(API_BASE+'/api/progress');const d=await r.json();if(!d.in_progress){clearInterval(progressInterval);progressInterval=null;hide_progress();location.reload();return;}const pct=d.percentage||0;document.getElementById('progressBar').style.width=pct+'%';document.getElementById('progressBar').textContent=pct.toFixed(1)+'%';if(d.source)document.getElementById('progressSource').textContent=d.source;if(d.destination)document.getElementById('progressDest').textContent=d.destination;if(d.avg_speed)document.getElementById('progressSpeed').textContent='Speed: '+fmt_size(d.avg_speed)+'/s';}catch(e){}},500);}
-async function cancelOperation(){try{await fetch(API_BASE+'/api/cancel',{method:'POST'});hide_progress();}catch(e){}}
-function download_file(uri,name){const a=document.createElement('a');a.href=uri;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);}
-async function delete_file(path){if(!confirm('Delete file '+path+'?'))return;try{const r=await fetch(API_BASE+'/api/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'path='+encodeURIComponent(path)});const d=await r.json();if(d.success)location.reload();else alert('Delete failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function delete_directory(path){if(!confirm('Delete directory '+path+' and all contents?'))return;try{const r=await fetch(API_BASE+'/api/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'path='+encodeURIComponent(path)});const d=await r.json();if(d.success){show_progress('Deleting...');location.reload();}else alert('Delete failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function create_directory(){const name=prompt('Enter directory name:');if(!name)return;const current=window.location.pathname;try{const r=await fetch(API_BASE+'/api/mkdir',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'name='+encodeURIComponent(current+'/'+name)});const d=await r.json();if(d.success)location.reload();else alert('Failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function rename_file(path){const name=prompt('New name:',path.split('/').pop());if(!name)return;try{const r=await fetch(API_BASE+'/api/rename',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'source='+encodeURIComponent(path)+'&name='+encodeURIComponent(name)});const d=await r.json();if(d.success)location.reload();else alert('Rename failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function copy_file(path){const dest=prompt('Copy to path:',path);if(!dest||dest===path)return;show_progress('Copying...');try{const r=await fetch(API_BASE+'/api/copy',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'source='+encodeURIComponent(path)+'&destination='+encodeURIComponent(dest)});const d=await r.json();if(!d.success){hide_progress();alert('Copy failed: '+(d.error||'Unknown error'));}}catch(e){hide_progress();alert('Error: '+e);}}
-async function move_file(path){const dest=prompt('Move to path:',path);if(!dest||dest===path)return;show_progress('Moving...');try{const r=await fetch(API_BASE+'/api/move',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'source='+encodeURIComponent(path)+'&destination='+encodeURIComponent(dest)});const d=await r.json();if(!d.success){hide_progress();alert('Move failed: '+(d.error||'Unknown error'));}}catch(e){hide_progress();alert('Error: '+e);}}
-async function show_file_info(path){try{const r=await fetch(API_BASE+'/api/fileinfo?path='+encodeURIComponent(path));const d=await r.json();if(d.error){alert('Error: '+d.error);return;}let msg='Name: '+d.name+'\nPath: '+d.path+'\nSize: '+fmt_size(d.size)+'\nType: '+(d.is_directory?'Directory':'File')+'\nStorage: '+d.storage_type;alert(msg);}catch(e){alert('Error: '+e);}}
-async function mount_device(path){try{const r=await fetch(API_BASE+'/api/mount',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mount_point='+encodeURIComponent(path)});const d=await r.json();if(d.success)setTimeout(()=>location.reload(),500);else alert('Mount failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function unmount_device(path){try{const r=await fetch(API_BASE+'/api/unmount',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mount_point='+encodeURIComponent(path)});const d=await r.json();if(d.success)setTimeout(()=>location.reload(),500);else alert('Unmount failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function remount_device(path){try{const r=await fetch(API_BASE+'/api/remount',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mount_point='+encodeURIComponent(path)});const d=await r.json();if(d.success)setTimeout(()=>location.reload(),500);else alert('Remount failed: '+(d.error||'Unknown error'));}catch(e){alert('Error: '+e);}}
-async function handleUpload(event){event.preventDefault();const file=document.getElementById('uploadFile').files[0];if(!file)return false;const CHUNK=65536;const total=Math.ceil(file.size/CHUNK);show_progress('Uploading '+file.name+'...');for(let i=0;i<total;i++){const blob=file.slice(i*CHUNK,(i+1)*CHUNK);const fd=new FormData();fd.append('filename',file.name);fd.append('chunkIndex',i);fd.append('totalChunks',total);fd.append('path',window.location.pathname.replace(API_BASE,''));fd.append('fileSize',file.size);fd.append('chunk',blob);try{const r=await fetch(API_BASE+'/api/upload_chunk',{method:'POST',body:fd});const d=await r.json();if(!d.success&&!d.cancelled){hide_progress();alert('Upload failed');return false;}}catch(e){hide_progress();alert('Upload error: '+e);return false;}}hide_progress();location.reload();return false;}
-</script>
-</body>
-</html>
-)HTML";
+  const char *js = this->js_buf_ ? this->js_buf_ : HTTP_FILE_BROWSER_JS;
+  std::string html = HTTP_FILE_BROWSER_HTML_PRE_MODAL;
+  html += this->url_prefix_;
+  html += HTTP_FILE_BROWSER_HTML_PRE_JS;
+  html += js;
+  html += HTTP_FILE_BROWSER_HTML_POST_JS;
+  return html;
 }
 
 std::string HttpFileBrowser::generate_breadcrumb(const std::string &current_path) {

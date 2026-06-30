@@ -5,8 +5,8 @@ from esphome.components.esp32 import add_idf_component
 from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["web_server_base", "network"]
-AUTO_LOAD = ["storage"]
+DEPENDENCIES = ["network"]
+AUTO_LOAD = ["storage", "web_server_base"]
 
 CONF_ROOT_PATH = "root_path"
 CONF_URL_PREFIX = "url_prefix"

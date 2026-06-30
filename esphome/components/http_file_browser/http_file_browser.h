@@ -119,6 +119,10 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool download_enabled_{true};
   bool deletion_enabled_{false};
 
+  // Runtime-loaded asset buffers (nullptr = use built-in constants)
+  char *css_buf_{nullptr};
+  char *js_buf_{nullptr};
+
   // Authentication
   std::string username_;
   std::string password_;
