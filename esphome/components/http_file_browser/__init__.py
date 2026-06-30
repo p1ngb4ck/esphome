@@ -14,6 +14,9 @@ CONF_UPLOAD_ENABLED = "upload_enabled"
 CONF_DOWNLOAD_ENABLED = "download_enabled"
 CONF_DELETION_ENABLED = "deletion_enabled"
 CONF_AUTH_ENABLED = "auth_enabled"
+CONF_ASSETS = "assets"
+CONF_CSS_PATH = "css_path"
+CONF_JS_PATH = "js_path"
 
 http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")
 HttpFileBrowser = http_file_browser_ns.class_("HttpFileBrowser", cg.Component)
@@ -32,6 +35,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AUTH_ENABLED, default=False): cv.boolean,
         cv.Optional(CONF_USERNAME): cv.string,
         cv.Optional(CONF_PASSWORD): cv.string,
+        cv.Optional(CONF_ASSETS): cv.Schema(
+            {
+                cv.Optional(CONF_CSS_PATH): cv.string,
+                cv.Optional(CONF_JS_PATH): cv.string,
+            }
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -54,6 +63,12 @@ async def to_code(config):
             password := config.get(CONF_PASSWORD)
         ) is not None:
             cg.add(var.set_auth(username, password))
+
+    if assets := config.get(CONF_ASSETS):
+        if (css_path := assets.get(CONF_CSS_PATH)) is not None:
+            cg.add(var.set_css_path(css_path))
+        if (js_path := assets.get(CONF_JS_PATH)) is not None:
+            cg.add(var.set_js_path(js_path))
 
     cg.add_define("USE_HTTP_FILE_BROWSER")
 

@@ -92,6 +92,8 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
     this->password_ = password;
     this->auth_enabled_ = true;
   }
+  void set_css_path(const char *path) { this->css_path_ = path; }
+  void set_js_path(const char *path) { this->js_path_ = path; }
 
   // Getters
   const std::string &get_root_path() const { return this->root_path_; }
@@ -119,9 +121,14 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool download_enabled_{true};
   bool deletion_enabled_{false};
 
-  // Runtime-loaded asset buffers (nullptr = use built-in constants)
-  char *css_buf_{nullptr};
-  char *js_buf_{nullptr};
+  // Asset paths (nullptr = use built-in)
+  const char *css_path_{nullptr};
+  const char *js_path_{nullptr};
+
+  // Rendered HTML template buffer — allocated in setup(), reloaded from storage if paths configured
+  char *html_buf_{nullptr};
+  size_t html_buf_len_{0};
+  bool html_loaded_{false};
 
   // Authentication
   std::string username_;
@@ -220,6 +227,11 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   storage::NetworkStorage *find_network_for_path_(const std::string &path);
   storage::FilesystemStorage *find_filesystem_for_path_(const std::string &path);
 
+  // Asset loading — called from setup() and on retry; builds full html_buf_ from template + css + js
+  bool try_load_assets_();
+  static char *alloc_psram_or_heap_(size_t size);
+  static std::string substitute_(const std::string &tmpl, const std::string &key, const std::string &value);
+
   // Helper methods
   bool is_directory_writable(const std::string &dir_path);
   std::string uri_to_filepath(const std::string &uri);
@@ -232,8 +244,7 @@ class HttpFileBrowser : public Component, public AsyncWebHandler {
   bool create_dir(const std::string &path);
 
   // HTML generation helpers
-  std::string generate_html_header(const std::string &title);
-  std::string generate_html_footer();
+  std::string render_page(const std::string &title, const std::string &body);
   std::string generate_breadcrumb(const std::string &current_path);
   std::string generate_file_row(const FileInfo &info, const std::string &uri_prefix);
 

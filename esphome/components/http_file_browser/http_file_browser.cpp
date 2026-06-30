@@ -58,6 +58,12 @@ void HttpFileBrowser::setup() {
   this->download_buffer_ = this->buffer_pool_ + FILE_BUFFER_SIZE;
   this->copy_buffer_ = this->buffer_pool_ + (FILE_BUFFER_SIZE * 2);
 
+  // Allocate and build the HTML buffer from the built-in template + defaults.
+  // try_load_assets_() will upgrade to custom storage files if paths are configured.
+  if (!this->try_load_assets_()) {
+    ESP_LOGW(TAG, "Asset load deferred — storage not ready, using built-in defaults");
+  }
+
   auto server = this->base_->get_server();
   if (server) {
     server->addHandler(this);
@@ -65,6 +71,118 @@ void HttpFileBrowser::setup() {
   } else {
     ESP_LOGE(TAG, "Failed to get web server instance");
   }
+}
+
+char *HttpFileBrowser::alloc_psram_or_heap_(size_t size) {
+  char *buf = nullptr;
+#if defined(USE_ESP_IDF)
+  buf = reinterpret_cast<char *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buf != nullptr)
+    return buf;
+#endif
+  buf = reinterpret_cast<char *>(malloc(size));
+  return buf;
+}
+
+std::string HttpFileBrowser::substitute_(const std::string &tmpl, const std::string &key, const std::string &value) {
+  std::string result = tmpl;
+  size_t pos = 0;
+  while ((pos = result.find(key, pos)) != std::string::npos) {
+    result.replace(pos, key.size(), value);
+    pos += value.size();
+  }
+  return result;
+}
+
+bool HttpFileBrowser::try_load_assets_() {
+  std::string css = HTTP_FILE_BROWSER_CSS;
+  std::string js = HTTP_FILE_BROWSER_JS;
+
+  // If custom paths are configured, try to load from storage — bail entirely if any fail
+  if (this->css_path_ != nullptr || this->js_path_ != nullptr) {
+    if (this->registry_ == nullptr) {
+      ESP_LOGW(TAG, "Storage registry not ready, deferring asset load");
+      return false;
+    }
+
+    if (this->css_path_ != nullptr) {
+      auto *fs = this->find_filesystem_for_path_(this->css_path_);
+      if (fs == nullptr || !fs->is_mounted()) {
+        ESP_LOGW(TAG, "CSS storage not ready for path: %s", this->css_path_);
+        return false;
+      }
+      FILE *f = fopen(this->css_path_, "r");
+      if (f == nullptr) {
+        ESP_LOGW(TAG, "Cannot open CSS file: %s", this->css_path_);
+        return false;
+      }
+      struct stat st;
+      if (::stat(this->css_path_, &st) != 0 || st.st_size <= 0) {
+        fclose(f);
+        ESP_LOGW(TAG, "Cannot stat CSS file: %s", this->css_path_);
+        return false;
+      }
+      css.resize(static_cast<size_t>(st.st_size));
+      if (fread(&css[0], 1, css.size(), f) != css.size()) {
+        fclose(f);
+        ESP_LOGW(TAG, "CSS file read incomplete: %s", this->css_path_);
+        return false;
+      }
+      fclose(f);
+      ESP_LOGI(TAG, "Loaded CSS from %s (%zu bytes)", this->css_path_, css.size());
+    }
+
+    if (this->js_path_ != nullptr) {
+      auto *fs = this->find_filesystem_for_path_(this->js_path_);
+      if (fs == nullptr || !fs->is_mounted()) {
+        ESP_LOGW(TAG, "JS storage not ready for path: %s", this->js_path_);
+        return false;
+      }
+      FILE *f = fopen(this->js_path_, "r");
+      if (f == nullptr) {
+        ESP_LOGW(TAG, "Cannot open JS file: %s", this->js_path_);
+        return false;
+      }
+      struct stat st;
+      if (::stat(this->js_path_, &st) != 0 || st.st_size <= 0) {
+        fclose(f);
+        ESP_LOGW(TAG, "Cannot stat JS file: %s", this->js_path_);
+        return false;
+      }
+      js.resize(static_cast<size_t>(st.st_size));
+      if (fread(&js[0], 1, js.size(), f) != js.size()) {
+        fclose(f);
+        ESP_LOGW(TAG, "JS file read incomplete: %s", this->js_path_);
+        return false;
+      }
+      fclose(f);
+      ESP_LOGI(TAG, "Loaded JS from %s (%zu bytes)", this->js_path_, js.size());
+    }
+  }
+
+  // Substitute CSS and JS into the template — TITLE and API_BASE remain as placeholders
+  std::string rendered = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+  rendered = this->substitute_(rendered, "{{CSS}}", css);
+  rendered = this->substitute_(rendered, "{{JS}}", js);
+
+  size_t new_len = rendered.size() + 1;
+
+  if (this->html_buf_ == nullptr || new_len > this->html_buf_len_) {
+    free(this->html_buf_);
+    this->html_buf_ = this->alloc_psram_or_heap_(new_len);
+    if (this->html_buf_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate HTML buffer (%zu bytes)", new_len);
+      this->html_buf_len_ = 0;
+      return false;
+    }
+    this->html_buf_len_ = new_len;
+  }
+
+  memcpy(this->html_buf_, rendered.c_str(), new_len);
+  this->html_loaded_ = true;
+  ESP_LOGI(TAG, "HTML buffer ready (%zu bytes, %s)", new_len - 1,
+           (this->css_path_ || this->js_path_) ? "custom assets" : "built-in");
+  return true;
 }
 
 HttpFileBrowser::~HttpFileBrowser() {
@@ -360,13 +478,13 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     return false;
   }
 
-  std::string html = this->generate_html_header("File Browser");
-  html += "<div class=\"header-actions\"><h1>File Browser</h1>";
-  html += "<button onclick=\"create_directory()\">New Folder</button></div>";
-  html += this->generate_breadcrumb(path);
+  std::string body;
+  body += "<div class=\"header-actions\"><h1>File Browser</h1>";
+  body += "<button onclick=\"create_directory()\">New Folder</button></div>";
+  body += this->generate_breadcrumb(path);
 
   if (this->upload_enabled_) {
-    html += R"HTML(<div class="upload-form">
+    body += R"HTML(<div class="upload-form">
       <form id="uploadForm" onsubmit="return handleUpload(event);">
         <input type="file" name="file" id="uploadFile" required>
         <button type="submit">Upload</button>
@@ -374,48 +492,48 @@ bool HttpFileBrowser::handle_network_directory_listing(AsyncWebServerRequest *re
     </div>)HTML";
   }
 
-  html += R"(<table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Actions</th></tr></thead><tbody>)";
+  body += R"(<table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Actions</th></tr></thead><tbody>)";
 
   for (const auto &entry : lctx.entries) {
     std::string entry_name(entry.name);
     std::string entry_path = Path::join(path, entry_name);
     std::string file_uri = this->url_prefix_ + entry_path;
 
-    html += "<tr><td>";
+    body += "<tr><td>";
     if (entry.is_dir)
-      html += "<a href=\"" + file_uri + "\" class=\"folder\">" + entry_name + "</a>";
+      body += "<a href=\"" + file_uri + "\" class=\"folder\">" + entry_name + "</a>";
     else
-      html += "<span class=\"file\">" + entry_name + "</span>";
-    html += "</td><td>";
+      body += "<span class=\"file\">" + entry_name + "</span>";
+    body += "</td><td>";
     if (!entry.is_dir) {
       if (entry.size < 1024)
-        html += std::to_string(entry.size) + " B";
+        body += std::to_string(entry.size) + " B";
       else if (entry.size < 1024 * 1024)
-        html += std::to_string(entry.size / 1024) + " KB";
+        body += std::to_string(entry.size / 1024) + " KB";
       else
-        html += std::to_string(entry.size / (1024 * 1024)) + " MB";
+        body += std::to_string(entry.size / (1024 * 1024)) + " MB";
     }
-    html += "</td><td>";
-    html += entry.is_dir ? "<span class=\"file-type\">Folder</span>"
+    body += "</td><td>";
+    body += entry.is_dir ? "<span class=\"file-type\">Folder</span>"
                          : "<span class=\"file-type\">" + Path::file_type(entry_name) + "</span>";
-    html += "</td><td class=\"actions\">";
+    body += "</td><td class=\"actions\">";
     if (!entry.is_dir && this->download_enabled_)
-      html += "<button onclick=\"download_file('" + file_uri + "', '" + entry_name + "')\">Download</button>";
-    html += "<button onclick=\"copy_file('" + entry_path + "')\">Copy</button>";
-    html += "<button onclick=\"move_file('" + entry_path + "')\">Move</button>";
-    html += "<button onclick=\"rename_file('" + entry_path + "')\">Rename</button>";
-    html += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
+      body += "<button onclick=\"download_file('" + file_uri + "', '" + entry_name + "')\">Download</button>";
+    body += "<button onclick=\"copy_file('" + entry_path + "')\">Copy</button>";
+    body += "<button onclick=\"move_file('" + entry_path + "')\">Move</button>";
+    body += "<button onclick=\"rename_file('" + entry_path + "')\">Rename</button>";
+    body += "<button onclick=\"show_file_info('" + entry_path + "')\">Info</button>";
     if (this->deletion_enabled_) {
       if (entry.is_dir)
-        html += "<button onclick=\"delete_directory('" + entry_path + "')\">Delete</button>";
+        body += "<button onclick=\"delete_directory('" + entry_path + "')\">Delete</button>";
       else
-        html += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
+        body += "<button onclick=\"delete_file('" + entry_path + "')\">Delete</button>";
     }
-    html += "</td></tr>";
+    body += "</td></tr>";
   }
 
-  html += "</tbody></table>";
-  html += this->generate_html_footer();
+  body += "</tbody></table>";
+  std::string html = this->render_page("File Browser", body);
 
   AsyncWebServerResponse *response = request->beginResponse(200, "text/html", html);
   response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -692,23 +810,21 @@ std::string HttpFileBrowser::get_filename_from_path(const std::string &path) {
 }
 
 
-std::string HttpFileBrowser::generate_html_header(const std::string &title) {
-  const char *css = this->css_buf_ ? this->css_buf_ : HTTP_FILE_BROWSER_CSS;
-  std::string html = HTTP_FILE_BROWSER_HTML_PRE_TITLE;
-  html += title;
-  html += HTTP_FILE_BROWSER_HTML_PRE_CSS;
-  html += css;
-  html += HTTP_FILE_BROWSER_HTML_POST_CSS;
-  return html;
-}
-
-std::string HttpFileBrowser::generate_html_footer() {
-  const char *js = this->js_buf_ ? this->js_buf_ : HTTP_FILE_BROWSER_JS;
-  std::string html = HTTP_FILE_BROWSER_HTML_PRE_MODAL;
-  html += this->url_prefix_;
-  html += HTTP_FILE_BROWSER_HTML_PRE_JS;
-  html += js;
-  html += HTTP_FILE_BROWSER_HTML_POST_JS;
+std::string HttpFileBrowser::render_page(const std::string &title, const std::string &body) {
+  if (!this->html_loaded_ && !this->try_load_assets_()) {
+    // Assets still not ready — build inline fallback from constants
+    std::string html = HTTP_FILE_BROWSER_HTML_TEMPLATE;
+    html = this->substitute_(html, "{{CSS}}", HTTP_FILE_BROWSER_CSS);
+    html = this->substitute_(html, "{{JS}}", HTTP_FILE_BROWSER_JS);
+    html = this->substitute_(html, "{{TITLE}}", title);
+    html = this->substitute_(html, "{{API_BASE}}", this->url_prefix_);
+    html = this->substitute_(html, "{{BODY}}", body);
+    return html;
+  }
+  std::string html = this->html_buf_;
+  html = this->substitute_(html, "{{TITLE}}", title);
+  html = this->substitute_(html, "{{API_BASE}}", this->url_prefix_);
+  html = this->substitute_(html, "{{BODY}}", body);
   return html;
 }
 
@@ -812,13 +928,13 @@ std::string HttpFileBrowser::generate_file_row(const FileInfo &info, const std::
 void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, const std::string &filepath) {
   bool is_virtual_root = (this->root_path_ == "/" && filepath == "/");
 
-  std::string html = this->generate_html_header("File Browser");
-  html += "<div class=\"header-actions\"><h1>File Browser</h1>";
-  html += "<button onclick=\"create_directory()\">New Folder</button></div>";
-  html += this->generate_breadcrumb(filepath);
+  std::string body;
+  body += "<div class=\"header-actions\"><h1>File Browser</h1>";
+  body += "<button onclick=\"create_directory()\">New Folder</button></div>";
+  body += this->generate_breadcrumb(filepath);
 
   if (this->upload_enabled_ && !is_virtual_root) {
-    html += R"HTML(<div class="upload-form">
+    body += R"HTML(<div class="upload-form">
       <form id="uploadForm" onsubmit="return handleUpload(event);">
         <input type="file" name="file" id="uploadFile" required>
         <button type="submit">Upload</button>
@@ -826,15 +942,15 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
     </div>)HTML";
   }
 
-  html += R"(<table><thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr></thead><tbody>)";
+  body += R"(<table><thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr></thead><tbody>)";
 
   if (is_virtual_root) {
     // List all filesystem storage devices
     if (this->registry_ != nullptr) {
       struct FsCtx {
         HttpFileBrowser *self;
-        std::string &html;
-      } fsctx{this, html};
+        std::string &body;
+      } fsctx{this, body};
 
       this->registry_->for_each_filesystem(
           [](storage::FilesystemStorage *s, void *c) {
@@ -864,15 +980,15 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
                 fi.has_space_info = true;
               }
             }
-            ctx->html += ctx->self->generate_file_row(fi, ctx->self->url_prefix_);
+            ctx->body += ctx->self->generate_file_row(fi, ctx->self->url_prefix_);
           },
           &fsctx);
 
       // List all network storage devices
       struct NetCtx {
         HttpFileBrowser *self;
-        std::string &html;
-      } netctx{this, html};
+        std::string &body;
+      } netctx{this, body};
 
       this->registry_->for_each_network(
           [](storage::NetworkStorage *s, void *c) {
@@ -895,7 +1011,7 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
               fi.free_space = info.free_bytes;
               fi.has_space_info = true;
             }
-            ctx->html += ctx->self->generate_file_row(fi, ctx->self->url_prefix_);
+            ctx->body += ctx->self->generate_file_row(fi, ctx->self->url_prefix_);
           },
           &netctx);
     }
@@ -905,9 +1021,9 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
       std::string relative = strip_network_mount_prefix(net_storage, filepath);
       struct ListCtx {
         HttpFileBrowser *self;
-        std::string &html;
+        std::string &body;
         const std::string &base_path;
-      } lctx{this, html, filepath};
+      } lctx{this, body, filepath};
 
       net_storage->list_dir(
           relative.c_str(),
@@ -919,18 +1035,18 @@ void HttpFileBrowser::handle_directory_listing(AsyncWebServerRequest *request, c
             info.is_directory = e->is_dir;
             info.size = e->size;
             info.modified = 0;
-            ctx->html += ctx->self->generate_file_row(info, ctx->self->url_prefix_);
+            ctx->body += ctx->self->generate_file_row(info, ctx->self->url_prefix_);
           },
           &lctx);
     } else {
       esphome::FixedVector<FileInfo> files = this->list_directory(filepath);
       for (const auto &info : files)
-        html += this->generate_file_row(info, this->url_prefix_);
+        body += this->generate_file_row(info, this->url_prefix_);
     }
   }
 
-  html += "</tbody></table>";
-  html += this->generate_html_footer();
+  body += "</tbody></table>";
+  std::string html = this->render_page("File Browser", body);
 
   AsyncWebServerResponse *response = request->beginResponse(200, "text/html", html);
   response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");

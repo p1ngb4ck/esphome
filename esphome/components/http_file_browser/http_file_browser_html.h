@@ -1,24 +1,19 @@
 #pragma once
 
-static constexpr const char HTTP_FILE_BROWSER_HTML_PRE_TITLE[] =
+static constexpr const char HTTP_FILE_BROWSER_HTML_TEMPLATE[] =
     "<!DOCTYPE html>\n"
     "<html lang=\"en\">\n"
     "<head>\n"
     "  <meta charset=\"UTF-8\">\n"
     "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\">\n"
-    "  <title>";
-
-static constexpr const char HTTP_FILE_BROWSER_HTML_PRE_CSS[] =
-    "</title>\n"
-    "  <style>\n";
-
-static constexpr const char HTTP_FILE_BROWSER_HTML_POST_CSS[] =
+    "  <title>{{TITLE}}</title>\n"
+    "  <style>\n"
+    "{{CSS}}\n"
     "  </style>\n"
     "</head>\n"
     "<body>\n"
-    "<div class=\"container\">\n";
-
-static constexpr const char HTTP_FILE_BROWSER_HTML_PRE_MODAL[] =
+    "<div class=\"container\">\n"
+    "{{BODY}}\n"
     "</div>\n"
     "<div id=\"progressModal\" class=\"progress-modal\">\n"
     "  <div class=\"progress-content\">\n"
@@ -36,12 +31,8 @@ static constexpr const char HTTP_FILE_BROWSER_HTML_PRE_MODAL[] =
     "  </div>\n"
     "</div>\n"
     "<script>\n"
-    "const API_BASE = '";
-
-// After API_BASE value is inserted, the JS content follows, then this closing fragment
-static constexpr const char HTTP_FILE_BROWSER_HTML_PRE_JS[] = "';\n";
-
-static constexpr const char HTTP_FILE_BROWSER_HTML_POST_JS[] =
+    "const API_BASE = '{{API_BASE}}';\n"
+    "{{JS}}\n"
     "</script>\n"
     "</body>\n"
     "</html>\n";
