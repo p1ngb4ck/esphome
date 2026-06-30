@@ -2719,7 +2719,7 @@ void HttpFileBrowser::handle_api_exists(AsyncWebServerRequest *request) {
   std::string filepath = this->uri_to_filepath(path_p->value().c_str());
   struct stat st;
   bool exists = (stat(filepath.c_str(), &st) == 0);
-  request->send(200, "application/json", std::string("{\"exists\":") + (exists ? "true" : "false") + "}");
+  request->send(200, "application/json", (std::string("{\"exists\":") + (exists ? "true" : "false") + "}").c_str());
 }
 
 void HttpFileBrowser::handle_api_dirisempty(AsyncWebServerRequest *request) {
@@ -2739,7 +2739,7 @@ void HttpFileBrowser::handle_api_dirisempty(AsyncWebServerRequest *request) {
       return;
     }
     bool empty = this->is_directory_empty(dirpath);
-    request->send(200, "application/json", std::string("{\"is_empty\":") + (empty ? "true" : "false") + "}");
+    request->send(200, "application/json", (std::string("{\"is_empty\":") + (empty ? "true" : "false") + "}").c_str());
   } else {
     struct stat st;
     if (stat(dirpath.c_str(), &st) != 0) {
@@ -2751,7 +2751,7 @@ void HttpFileBrowser::handle_api_dirisempty(AsyncWebServerRequest *request) {
       return;
     }
     bool empty = this->is_directory_empty(dirpath);
-    request->send(200, "application/json", std::string("{\"is_empty\":") + (empty ? "true" : "false") + "}");
+    request->send(200, "application/json", (std::string("{\"is_empty\":") + (empty ? "true" : "false") + "}").c_str());
   }
 }
 
