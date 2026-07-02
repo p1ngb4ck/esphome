@@ -23,26 +23,24 @@ This document provides essential context for AI models interacting with this pro
    - Each runs in its own context
 
 3. **CRITICAL: Development Build Uses external_components:**
-   - **The build uses the OFFICIAL esphome repository code from PyPI/pip**
-   - **Changes to THIS codebase (`/workspaces/esphome/`) are NOT automatically used**
+   - **The build machine is SEPARATE — no access to build logs, compiled output, or installed packages**
+   - **The build uses official upstream ESPHome as the base**
+   - **Changes to THIS codebase (`/home/p1ngb4ck/esphome_testing/`) are NOT automatically used**
    - **Changes are ONLY included via the `external_components:` feature in YAML**
    - **This means:**
-     - Modifying `/workspaces/esphome/esphome/components/esp32/__init__.py` has NO EFFECT on builds
-     - Modifying `/workspaces/esphome/esphome/core/` has NO EFFECT on builds
+     - Modifying `/home/p1ngb4ck/esphome_testing/esphome/components/esp32/__init__.py` has NO EFFECT unless `esp32` is listed in `external_components:`
+     - Modifying `/home/p1ngb4ck/esphome_testing/esphome/core/` has NO EFFECT on builds — core overrides are NOT possible
      - **ONLY files in components listed in `external_components:` are used**
-   - **To use local changes, you must:**
-     - Either add the component to `external_components:` in the YAML
-     - OR install the modified esphome package (`pip install -e .`)
+   - **To use local changes, you MUST add the component to `external_components:` in the YAML**
 
 4. **Never Assume Changes Work:**
-   - DO NOT assume modifying a file in `/workspaces/esphome/` will affect the build
+   - DO NOT assume modifying a file in `/home/p1ngb4ck/esphome_testing/` will affect the build
    - ALWAYS verify what code path is actually being used
    - When debugging, FIRST check if external_components is configured correctly
 
 5. **Common Mistake to Avoid:**
    - Spending time modifying core files (esp32, logger, etc.) when they won't be used
-   - The error traceback shows which files are ACTUALLY being loaded
-   - If it shows `/usr/local/lib/python3.12/site-packages/esphome/`, your changes aren't being used
+   - Core overrides are NOT possible — if a core file needs changing, it must be wrapped/replaced as a component and listed in `external_components:`
 
 ## 3. CRITICAL: AI Behavioral Constraints
 

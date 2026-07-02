@@ -1,62 +1,22 @@
 #pragma once
 #include "esphome/core/defines.h"
 
-#ifdef USE_ESP_IDF
+#ifdef USE_BINARY_STORAGE_LITTLEFS
 #include "binary_storage.h"
-#include "esphome/core/component.h"
 #include "esphome/components/storage/storage.h"
-#include "lfs.h"
-#include <string>
 #include <memory>
-#include <dirent.h>
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
-// Maximum number of simultaneously open files (kept low for MCU memory constraints)
+// Maximum simultaneously open files (kept low for MCU memory constraints)
 static constexpr int LFS_VFS_MAX_FDS = 8;
 
-// Forward declaration
-class LittleFSMount;
+// Forward-declared — defined in littlefs_mount.cpp alongside the VFS callbacks that use it
+struct LfsVfsContext;
 
-/**
- * @brief VFS context structure for LittleFS
- *
- * Holds filesystem state and file descriptor table for VFS operations
- */
-struct LfsVfsContext {
-  lfs_t *lfs;            ///< LittleFS filesystem object
-  lfs_config *cfg;       ///< LittleFS configuration
-  LittleFSMount *mount;  ///< Parent mount object
-
-  // File descriptor table
-  lfs_file_t files[LFS_VFS_MAX_FDS];  ///< File handles
-  bool fd_used[LFS_VFS_MAX_FDS];      ///< FD in-use flags
-  char *fd_paths[LFS_VFS_MAX_FDS];    ///< Paths for fstat support
-};
-
-/**
- * @brief Directory handle wrapper for LittleFS
- */
-struct LfsVfsDir {
-  DIR vfs_dir;           ///< VFS DIR struct (must be first)
-  lfs_dir_t lfs_dir;     ///< LittleFS directory handle
-  struct dirent dirent;  ///< Current directory entry
-  char *path;            ///< Directory path
-};
-
-/**
- * @brief LittleFS mount manager for binary storage devices
- *
- * Mounts BinaryStorage devices (FRAM, EEPROM, Flash) as LittleFS filesystems
- * in the ESP-IDF VFS (Virtual File System).
- *
- * Features:
- * - Auto-format on first mount (optional)
- * - Custom block device adapter for BinaryStorage
- * - Integrates with storage for unified access
- */
-class LittleFSMount : public Component, public storage::MountSpaceProvider {
+// Mounts a BinaryStorage device as a LittleFS filesystem in the ESP-IDF VFS.
+// Extends FilesystemStorage — all file operations go through POSIX/VFS after mount.
+class LittleFSMount : public storage::FilesystemStorage {
  public:
   LittleFSMount() = default;
   ~LittleFSMount();
@@ -67,88 +27,47 @@ class LittleFSMount : public Component, public storage::MountSpaceProvider {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA - 100.0f; }
 
-  /**
-   * @brief list files in the mounted filesystem
-   */
-  void list_files() const;
-
   //========================================================================
-  // Configuration
+  // Configuration setters (called by Python codegen)
   //========================================================================
 
-  /**
-   * @brief Set the binary storage device to mount
-   *
-   * @param storage Pointer to BinaryStorage device
-   */
   void set_storage_device(BinaryStorage *storage) { this->storage_ = storage; }
-
-  /**
-   * @brief Set mount point path
-   *
-   * @param path VFS mount point (e.g., "/fram", "/eeprom")
-   */
-  void set_mount_path(const std::string &path) { this->mount_path_ = path; }
-
-  /**
-   * @brief Set whether to format on mount failure
-   *
-   * @param format If true, will format filesystem if mount fails
-   */
-  void set_auto_format(bool format) {
-    ESP_LOGD("littlefs_mount", "set_auto_format called with: %s", format ? "true" : "false");
-    this->auto_format_ = format;
-  }
+  void set_mount_path(const char *path) { this->mount_path_ = path; }
+  void set_auto_format(bool format) { this->auto_format_ = format; }
 
   //========================================================================
-  // Mount Management
+  // FilesystemStorage interface
   //========================================================================
 
-  /**
-   * @brief Check if filesystem is mounted
-   *
-   * @return true if mounted
-   */
+  storage::StorageError get_info(storage::StorageInfo *info) override;
+  storage::StorageError mount() override;
+  storage::StorageError unmount() override;
+  storage::StorageError format() override;
+  storage::StorageError sync() override;
+  storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
+  storage::StorageError close(storage::FileHandle *handle) override;
+  storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
+                              size_t *bytes_transferred) override;
+  storage::StorageError seek(storage::FileHandle *handle, size_t offset) override;
+  storage::StorageError tell(storage::FileHandle *handle, size_t *position) override;
+  storage::StorageError stat(const char *path, storage::FileStat *stat) override;
+  storage::StorageError list_dir(const char *path, void (*callback)(const storage::FileStat *entry, void *ctx),
+                                 void *ctx) override;
+  storage::StorageError mkdir(const char *path) override;
+  storage::StorageError rmdir(const char *path, bool recursive) override;
+  storage::StorageError remove(const char *path) override;
+  storage::StorageError rename(const char *old_path, const char *new_path) override;
+  storage::StorageError copy(const char *src_path, const char *dst_path) override;
+
+  //========================================================================
+  // Extras
+  //========================================================================
+
   bool is_mounted() const { return this->mounted_; }
-
-  /**
-   * @brief Get mount path
-   *
-   * @return Mount path string
-   */
-  const std::string &get_mount_path() const { return this->mount_path_; }
-
-  /**
-   * @brief Manually unmount filesystem
-   *
-   * @return true on success
-   */
-  bool unmount();
-
-  /**
-   * @brief Manually remount filesystem
-   *
-   * @return true on success
-   */
+  const char *get_mount_path() const { return this->mount_path_; }
   bool remount();
-
-  /**
-   * @brief Format the filesystem
-   *
-   * WARNING: This erases all data!
-   *
-   * @return true on success
-   */
-  bool format();
-
-  /**
-   * @brief Get filesystem space information
-   *
-   * @param total_bytes Output: total space in bytes
-   * @param used_bytes Output: used space in bytes
-   * @return true on success, false if not mounted
-   */
-  bool get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) override;
+  void list_files() const;
 
  protected:
   //========================================================================
@@ -156,52 +75,42 @@ class LittleFSMount : public Component, public storage::MountSpaceProvider {
   //========================================================================
 
   BinaryStorage *storage_{nullptr};
-  std::string mount_path_{"/storage"};
+  const char *mount_path_{"/storage"};
   bool auto_format_{true};
   bool mounted_{false};
 
-  //========================================================================
-  // LittleFS Objects
-  //========================================================================
-
-  std::unique_ptr<lfs_t> lfs_;                   ///< LittleFS filesystem object
-  std::unique_ptr<lfs_config> lfs_cfg_;          ///< LittleFS configuration
-  std::unique_ptr<uint8_t[]> read_buffer_;       ///< Read buffer for LittleFS
-  std::unique_ptr<uint8_t[]> prog_buffer_;       ///< Program buffer for LittleFS
-  std::unique_ptr<uint8_t[]> lookahead_buffer_;  ///< Lookahead buffer for LittleFS
-  void *lfs_context_{nullptr};                   ///< Context for block device callbacks
-  LfsVfsContext *vfs_context_{nullptr};          ///< Context for VFS operations
+  // Pool of FileHandles for open() — no heap allocation per open call
+  storage::FileHandle handle_pool_[LFS_VFS_MAX_FDS]{};
+  // Path storage for handle_pool_ entries (mount_path_ + "/" + filename)
+  char handle_paths_[LFS_VFS_MAX_FDS][storage::STORAGE_MAX_PATH_LEN]{};
 
   //========================================================================
-  // Internal Helpers
+  // LittleFS objects (opaque — lfs_t/lfs_config are managed component types,
+  // only available when building for IDF with managed components downloaded)
   //========================================================================
 
-  /**
-   * @brief Mount the LittleFS filesystem
-   *
-   * @return true on success
-   */
-  bool mount_();
+  void *lfs_{nullptr};
+  void *lfs_cfg_{nullptr};
+  std::unique_ptr<uint8_t[]> read_buffer_;
+  std::unique_ptr<uint8_t[]> prog_buffer_;
+  std::unique_ptr<uint8_t[]> lookahead_buffer_;
+  void *lfs_context_{nullptr};
+  LfsVfsContext *vfs_context_{nullptr};
 
-  /**
-   * @brief Initialize LittleFS configuration
-   *
-   * @return true on success
-   */
+  //========================================================================
+  // Internal helpers
+  //========================================================================
+
   bool init_lfs_config_();
-
-  /**
-   * @brief Register with vfs
-   */
+  bool mount_lfs_();
+  bool unmount_lfs_();
+  bool format_lfs_();
   void register_with_vfs_();
 
-  /**
-   * @brief Register with storage
-   */
-  void register_with_storage_();
+  storage::FileHandle *alloc_handle_(const char *path);
+  void free_handle_(storage::FileHandle *handle);
 };
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
-#endif  // USE_ESP_IDF
+#endif  // USE_BINARY_STORAGE_LITTLEFS

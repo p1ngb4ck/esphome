@@ -8,8 +8,7 @@
 #include <cstring>
 #include <cctype>
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 static const char *const TAG = "i2c_eeprom";
 
@@ -39,8 +38,8 @@ void I2CEeprom::dump_config() {
   ESP_LOGCONFIG(TAG, "I2C EEPROM:");
   LOG_I2C_DEVICE(this);
   ESP_LOGCONFIG(TAG, "  Model: %s", this->model_.c_str());
-  ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
-  ESP_LOGCONFIG(TAG, "  Page Size: %u bytes", this->page_size_);
+  ESP_LOGCONFIG(TAG, "  Capacity: %" PRIu32 " bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+  ESP_LOGCONFIG(TAG, "  Page Size: %" PRIu32 " bytes", (uint32_t) this->page_size_);
   ESP_LOGCONFIG(TAG, "  Addressing: %u-bit", this->addressing_bits_);
 
   if (this->is_failed()) {
@@ -106,8 +105,8 @@ void I2CEeprom::auto_configure_from_model_() {
         this->page_size_ = 128;
       }
 
-      ESP_LOGD(TAG, "Auto-configured: %u Kbit = %u bytes, page=%u, addr=%u-bit", capacity_kbit, this->capacity_,
-               this->page_size_, this->addressing_bits_);
+      ESP_LOGD(TAG, "Auto-configured: %d Kbit = %" PRIu32 " bytes, page=%" PRIu32 ", addr=%u-bit", capacity_kbit,
+               this->capacity_, (uint32_t) this->page_size_, this->addressing_bits_);
     }
   }
 
@@ -154,7 +153,7 @@ bool I2CEeprom::wait_for_write_complete_(uint32_t timeout_ms) {
     delayMicroseconds(100);
   }
 
-  ESP_LOGW(TAG, "Write timeout after %u ms", timeout_ms);
+  ESP_LOGW(TAG, "Write timeout after %" PRIu32 " ms", timeout_ms);
   return false;
 }
 
@@ -174,16 +173,34 @@ bool I2CEeprom::read_block_(uint32_t address, uint8_t *data, size_t length) {
   }
 
   if (err != i2c::ERROR_OK) {
-    ESP_LOGE(TAG, "Read failed at address 0x%04X: %d", address, err);
+    ESP_LOGE(TAG, "Read failed at address 0x%04" PRIx32 ": %d", address, err);
     return false;
   }
 
   return true;
 }
 
-bool I2CEeprom::read(uint32_t address, uint8_t *data, size_t length) {
+storage::StorageError I2CEeprom::read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->read_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::READ_ERROR;
+}
+
+storage::StorageError I2CEeprom::write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->write_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError I2CEeprom::erase(size_t offset, size_t len) { return storage::StorageError::OK; }
+
+storage::StorageError I2CEeprom::format() { return this->BinaryStorage::format(); }
+
+bool I2CEeprom::read_raw(uint32_t address, uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Read address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Read address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -208,7 +225,8 @@ bool I2CEeprom::read(uint32_t address, uint8_t *data, size_t length) {
 
 bool I2CEeprom::write_page_(uint32_t address, const uint8_t *data, size_t length) {
   if (length == 0 || length > this->page_size_) {
-    ESP_LOGE(TAG, "Invalid page write length: %u (max %u)", length, this->page_size_);
+    ESP_LOGE(TAG, "Invalid page write length: %" PRIu32 " (max %" PRIu32 ")", (uint32_t) length,
+             (uint32_t) this->page_size_);
     return false;
   }
 
@@ -234,7 +252,7 @@ bool I2CEeprom::write_page_(uint32_t address, const uint8_t *data, size_t length
   // Write to device
   i2c::ErrorCode err = this->bus_->write(device_addr, write_buffer, write_len);
   if (err != i2c::ERROR_OK) {
-    ESP_LOGE(TAG, "Page write failed at address 0x%04X: %d", address, err);
+    ESP_LOGE(TAG, "Page write failed at address 0x%04" PRIx32 ": %d", address, err);
     return false;
   }
 
@@ -242,9 +260,9 @@ bool I2CEeprom::write_page_(uint32_t address, const uint8_t *data, size_t length
   return this->wait_for_write_complete_();
 }
 
-bool I2CEeprom::write(uint32_t address, const uint8_t *data, size_t length) {
+bool I2CEeprom::write_raw(uint32_t address, const uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Write address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Write address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -266,12 +284,6 @@ bool I2CEeprom::write(uint32_t address, const uint8_t *data, size_t length) {
   return true;
 }
 
-bool I2CEeprom::sync() {
-  // Just ensure device is ready (any pending write is complete)
-  return this->wait_for_write_complete_();
-}
-
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_I2C_EEPROM

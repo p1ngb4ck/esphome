@@ -6,8 +6,7 @@
 #include "diskio.h"
 #include "diskio_impl.h"
 
-namespace esphome {
-namespace usb_storage {
+namespace esphome::usb_storage {
 
 class USBStorageClient;
 
@@ -16,7 +15,6 @@ class USBStorageClient;
 int usb_diskio_register(USBStorageClient *client);
 void usb_diskio_unregister(int drive);
 
-}  // namespace usb_storage
-}  // namespace esphome
+}  // namespace esphome::usb_storage
 
 #endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4

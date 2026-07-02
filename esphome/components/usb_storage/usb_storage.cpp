@@ -7,25 +7,19 @@
 #include "usb/usb_helpers.h"
 #include "usb/usb_types_ch9.h"
 
-#ifdef USE_STORAGE
-#include "esphome/components/storage/storage.h"
-#endif
-
 #include <cstring>
 #include <cinttypes>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <errno.h>
+#include <cerrno>
 
-namespace esphome {
-namespace usb_storage {
+namespace esphome::usb_storage {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Transfer semaphore helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// USB-task callback: post result to semaphore so the blocking caller can proceed
-void USBStorageClient::transfer_done_cb_(const usb_host::TransferStatus &status, USBStorageClient *client) {
+void USBStorageClient::transfer_done_cb(const usb_host::TransferStatus &status, USBStorageClient *client) {
   client->transfer_ok_ = status.success;
   client->transfer_len_ = static_cast<uint16_t>(status.data_len);
   xSemaphoreGive(client->transfer_sem_);
@@ -54,21 +48,17 @@ void USBStorageClient::setup() {
     return;
   }
 
-  // Call USBClient::setup() to register as USB host client and start USB task
   USBClient::setup();
 }
 
-void USBStorageClient::loop() {
-  // USBClient::loop() processes the event queue; disable loop when idle
-  USBClient::loop();
-}
+void USBStorageClient::loop() { USBClient::loop(); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Endpoint parsing
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool USBStorageClient::parse_msc_endpoints_() {
-  const usb_config_desc_t *cfg = this->get_config_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
 
@@ -87,7 +77,6 @@ bool USBStorageClient::parse_msc_endpoints_() {
         this->msc_interface_ = intf->bInterfaceNumber;
     } else if (in_msc_intf && next->bDescriptorType == USB_W_VALUE_DT_ENDPOINT) {
       const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(next);
-      // Only bulk endpoints
       if ((ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_BULK)
         continue;
       if (USB_EP_DESC_GET_EP_DIR(ep)) {
@@ -101,8 +90,7 @@ bool USBStorageClient::parse_msc_endpoints_() {
   }
 
   if (!this->bulk_in_ep_ || !this->bulk_out_ep_) {
-    ESP_LOGE(TAG, "Failed to find MSC bulk endpoints (in=0x%02X out=0x%02X)", this->bulk_in_ep_,
-             this->bulk_out_ep_);
+    ESP_LOGE(TAG, "Failed to find MSC bulk endpoints (in=0x%02X out=0x%02X)", this->bulk_in_ep_, this->bulk_out_ep_);
     return false;
   }
   ESP_LOGD(TAG, "MSC endpoints: bulk_in=0x%02X bulk_out=0x%02X intf=%d", this->bulk_in_ep_, this->bulk_out_ep_,
@@ -114,8 +102,7 @@ bool USBStorageClient::parse_msc_endpoints_() {
 // BOT primitives
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb,
-                                 uint8_t cdb_len) {
+bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags, const uint8_t *cdb, uint8_t cdb_len) {
   MscCbw cbw{};
   cbw.tag = tag;
   cbw.data_transfer_length = data_len;
@@ -124,26 +111,21 @@ bool USBStorageClient::send_cbw_(uint32_t tag, uint32_t data_len, uint8_t flags,
   cbw.cb_length = cdb_len;
   memcpy(cbw.cb, cdb, cdb_len);
 
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
   if (!this->transfer_out(this->bulk_out_ep_, cb, reinterpret_cast<const uint8_t *>(&cbw), sizeof(MscCbw)))
     return false;
   return this->wait_transfer_();
 }
 
 bool USBStorageClient::recv_data_(uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
   if (!this->transfer_in(this->bulk_in_ep_, cb, len))
     return false;
-  if (!this->wait_transfer_())
-    return false;
-  // Copy from the transfer buffer — USBClient stores received data in the transfer buffer
-  // which is accessible via the TransferStatus::data pointer captured in the callback.
-  // Since we need the data here, we use a stored pointer set by our callback.
-  return true;
+  return this->wait_transfer_();
 }
 
 bool USBStorageClient::send_data_(const uint8_t *buf, uint16_t len) {
-  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb_(s, this); };
+  auto cb = [this](const usb_host::TransferStatus &s) { transfer_done_cb(s, this); };
   return this->transfer_out(this->bulk_out_ep_, cb, buf, len) && this->wait_transfer_();
 }
 
@@ -152,7 +134,7 @@ bool USBStorageClient::recv_csw_(uint32_t expected_tag) {
   auto cb = [this, &csw](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(MscCsw))
       memcpy(&csw, s.data, sizeof(MscCsw));
-    transfer_done_cb_(s, this);
+    transfer_done_cb(s, this);
   };
   if (!this->transfer_in(this->bulk_in_ep_, cb, sizeof(MscCsw)))
     return false;
@@ -191,7 +173,7 @@ bool USBStorageClient::scsi_inquiry_() {
   auto cb = [this, &resp](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(ScsiInquiryResponse))
       memcpy(&resp, s.data, sizeof(ScsiInquiryResponse));
-    transfer_done_cb_(s, this);
+    transfer_done_cb(s, this);
   };
 
   if (!this->send_cbw_(tag, sizeof(ScsiInquiryResponse), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -208,7 +190,7 @@ bool USBStorageClient::scsi_inquiry_() {
   memcpy(product, resp.product_id, 16);
   ESP_LOGI(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
            resp.peripheral_qualifier_type & 0x1F);
-  return (resp.peripheral_qualifier_type & 0x1F) == 0x00;  // direct-access block device
+  return (resp.peripheral_qualifier_type & 0x1F) == 0x00;
 }
 
 bool USBStorageClient::scsi_read_capacity_() {
@@ -219,7 +201,7 @@ bool USBStorageClient::scsi_read_capacity_() {
   auto cb = [this, &resp](const usb_host::TransferStatus &s) {
     if (s.success && s.data_len >= sizeof(ScsiReadCapacity10Response))
       memcpy(&resp, s.data, sizeof(ScsiReadCapacity10Response));
-    transfer_done_cb_(s, this);
+    transfer_done_cb(s, this);
   };
 
   if (!this->send_cbw_(tag, sizeof(ScsiReadCapacity10Response), MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -231,12 +213,10 @@ bool USBStorageClient::scsi_read_capacity_() {
   if (!this->recv_csw_(tag))
     return false;
 
-  // Fields are big-endian
   this->sector_count_ = __builtin_bswap32(resp.last_lba) + 1;
   this->sector_size_ = __builtin_bswap32(resp.block_size);
   ESP_LOGI(TAG, "SCSI READ CAPACITY: sectors=%" PRIu32 " sector_size=%" PRIu32 " (%.1f MB)", this->sector_count_,
-           this->sector_size_,
-           static_cast<float>(this->sector_count_) * this->sector_size_ / (1024.0f * 1024.0f));
+           this->sector_size_, static_cast<float>(this->sector_count_) * this->sector_size_ / (1024.0f * 1024.0f));
   return this->sector_size_ > 0 && this->sector_count_ > 0;
 }
 
@@ -255,7 +235,7 @@ bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
         static_cast<uint8_t>((lba + i) & 0xFF),
         0,
         0,
-        1,  // transfer length = 1 sector
+        1,
         0,
     };
     uint32_t tag = this->cbw_tag_++;
@@ -264,7 +244,7 @@ bool USBStorageClient::scsi_read(uint32_t lba, uint8_t *buf, uint32_t count) {
     auto cb = [this, sector_buf, sz = this->sector_size_](const usb_host::TransferStatus &s) {
       if (s.success && s.data_len >= sz)
         memcpy(sector_buf, s.data, sz);
-      transfer_done_cb_(s, this);
+      transfer_done_cb(s, this);
     };
 
     if (!this->send_cbw_(tag, this->sector_size_, MSC_BOT_CBW_FLAGS_IN, cdb, sizeof(cdb)))
@@ -290,7 +270,7 @@ bool USBStorageClient::scsi_write(uint32_t lba, const uint8_t *buf, uint32_t cou
         static_cast<uint8_t>((lba + i) & 0xFF),
         0,
         0,
-        1,  // transfer length = 1 sector
+        1,
         0,
     };
     uint32_t tag = this->cbw_tag_++;
@@ -324,14 +304,13 @@ void USBStorageClient::notify_connected_(uint16_t vid, uint16_t pid) {
 
 void USBStorageClient::notify_disconnected_() {
   for (auto *device : this->devices_) {
-    if (device->is_mounted()) {
+    if (device->is_mounted())
       device->on_device_disconnected();
-    }
   }
 }
 
 void USBStorageClient::on_connected() {
-  const usb_device_desc_t *dev = this->get_device_desc();
+  const usb_device_desc_t *dev = this->get_device_desc_();
   uint16_t vid = dev ? dev->idVendor : 0;
   uint16_t pid = dev ? dev->idProduct : 0;
 
@@ -362,7 +341,7 @@ void USBStorageClient::on_connected() {
 
   this->disk_ready_ = true;
 
-  // Build a mount path from the first matching device, or use a default
+  // Pick mount path from first matching device, fall back to /usb
   this->mount_path_ = "/usb";
   for (auto *device : this->devices_) {
     if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
@@ -371,20 +350,19 @@ void USBStorageClient::on_connected() {
     }
   }
 
-  // Mount FAT filesystem via esp_vfs_fat using our DISKIO driver
   char drive_path[8];
   snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
 
   FATFS *fs = nullptr;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
   esp_vfs_fat_conf_t vfs_conf = {
-      .base_path = this->mount_path_.c_str(),
+      .base_path = this->mount_path_,
       .fat_drive = drive_path,
       .max_files = 5,
   };
   esp_err_t err = esp_vfs_fat_register_cfg(&vfs_conf, &fs);
 #else
-  esp_err_t err = esp_vfs_fat_register(this->mount_path_.c_str(), drive_path, 5, &fs);
+  esp_err_t err = esp_vfs_fat_register(this->mount_path_, drive_path, 5, &fs);
 #endif
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_vfs_fat_register failed: %s", esp_err_to_name(err));
@@ -396,14 +374,14 @@ void USBStorageClient::on_connected() {
   FRESULT res = f_mount(fs, drive_path, 1);
   if (res != FR_OK) {
     ESP_LOGE(TAG, "f_mount failed: %d", res);
-    esp_vfs_fat_unregister_path(this->mount_path_.c_str());
+    esp_vfs_fat_unregister_path(this->mount_path_);
     this->disk_ready_ = false;
     this->disconnect();
     return;
   }
 
   this->mounted_ = true;
-  ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_.c_str());
+  ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_);
 
   this->notify_connected_(vid, pid);
 }
@@ -416,9 +394,9 @@ void USBStorageClient::on_disconnected() {
     char drive_path[8];
     snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
     f_mount(nullptr, drive_path, 0);
-    esp_vfs_fat_unregister_path(this->mount_path_.c_str());
+    esp_vfs_fat_unregister_path(this->mount_path_);
     this->mounted_ = false;
-    ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_.c_str());
+    ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_);
   }
 
   if (this->msc_interface_ != 0xFF) {
@@ -431,352 +409,355 @@ void USBStorageClient::on_disconnected() {
   this->bulk_out_ep_ = 0;
 }
 
-void USBStorageClient::on_removed(usb_device_handle_t handle) {
-  USBClient::on_removed(handle);
-}
+void USBStorageClient::on_removed(usb_device_handle_t handle) { USBClient::on_removed(handle); }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// USBStorageDevice
+// USBStorageDevice — lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
 void USBStorageDevice::setup() { ESP_LOGCONFIG(TAG, "Setting up USB Storage Device"); }
 
 void USBStorageDevice::dump_config() {
   ESP_LOGCONFIG(TAG, "USB Storage Device:");
-  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_.c_str());
+  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_ ? this->mount_path_ : "(none)");
   ESP_LOGCONFIG(TAG, "  VID: 0x%04X  PID: 0x%04X", this->vid_, this->pid_);
 }
 
-void USBStorageDevice::on_device_connected(const std::string &mount_path) {
-  ESP_LOGI(TAG, "USB Storage Device connected (mount_path='%s')", mount_path.c_str());
+void USBStorageDevice::on_device_connected(const char *mount_path) {
+  ESP_LOGI(TAG, "USB Storage Device connected (mount_path='%s')", mount_path);
   this->mount_path_ = mount_path;
-  this->mounted_ = true;
+  this->fs_mounted_ = true;
 
-  ESP_LOGI(TAG, "Notifying %zu mount ready callbacks", this->mount_ready_callbacks_.size());
-  for (const auto &callback : this->mount_ready_callbacks_) {
-    callback(this->mount_path_);
-  }
+  this->on_mounted_.call(mount_path);
 
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->register_device(this);
-    ESP_LOGD(TAG, "Registered USB storage device with storage registry");
-  }
-#endif
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->register_storage(this);
 }
 
 void USBStorageDevice::on_device_disconnected() {
-  ESP_LOGI(TAG, "USB Storage Device disconnected (mount_path='%s')", this->mount_path_.c_str());
-  this->mounted_ = false;
+  ESP_LOGI(TAG, "USB Storage Device disconnected (mount_path='%s')", this->mount_path_ ? this->mount_path_ : "(none)");
+  this->fs_mounted_ = false;
 
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->unregister_device(this);
-    ESP_LOGD(TAG, "Unregistered USB storage device from storage registry");
-  }
-#endif
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->unregister_storage(this);
 }
 
 bool USBStorageDevice::remount_device() {
-  if (!this->mounted_) {
+  if (!this->fs_mounted_) {
     ESP_LOGW(TAG, "Device not mounted, cannot remount");
     return false;
   }
-  // Re-trigger mount callbacks and storage notification
-  for (const auto &callback : this->mount_ready_callbacks_) {
-    callback(this->mount_path_);
-  }
-#ifdef USE_STORAGE
-  if (storage::global_storage != nullptr) {
-    storage::global_storage->notify_device_changed(this);
-  }
-#endif
+  ESP_LOGI(TAG, "Device remounted successfully");
+  this->on_mounted_.call(this->mount_path_);
   return true;
 }
 
 void USBStorageDevice::unmount_device() {
-  // Physical unmount is managed by USBStorageClient; signal to upper layers only
-  if (!this->mounted_)
+  if (!this->fs_mounted_)
     return;
+  ESP_LOGI(TAG, "Device unmounted");
   this->on_device_disconnected();
 }
 
 void USBStorageDevice::list_files() {
-  ESP_LOGI(TAG, "Listing contents of '%s'", this->mount_path_.c_str());
-  DIR *dh = opendir(this->mount_path_.c_str());
+  ESP_LOGI(TAG, "Listing contents of '%s'", this->mount_path_);
+  DIR *dh = opendir(this->mount_path_);
   if (!dh) {
-    ESP_LOGE(TAG, "Failed to open directory: %s", this->mount_path_.c_str());
+    ESP_LOGE(TAG, "Failed to open directory: %s", this->mount_path_);
     return;
   }
   struct dirent *d;
-  while ((d = readdir(dh)) != nullptr) {
-    ESP_LOGI(TAG, "  %s/%s", this->mount_path_.c_str(), d->d_name);
-  }
+  while ((d = readdir(dh)) != nullptr)
+    ESP_LOGI(TAG, "  %s/%s", this->mount_path_, d->d_name);
   closedir(dh);
 }
 
-std::string USBStorageDevice::build_full_path(const char *path) {
-  std::string full_path = this->mount_path_;
-  if (path[0] != '/')
-    full_path += "/";
-  full_path += path;
-  return full_path;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Handle pool helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-#ifdef USE_STORAGE
-//========================================================================
-// StorageDevice Interface Implementation
-//========================================================================
-
-storage::StorageInfo USBStorageDevice::get_info() {
-  storage::StorageInfo info;
-  info.id = this->id_.empty() ? "usb_storage" : this->id_;
-  info.name = "USB Storage";
-  info.type = storage::StorageType::USB_MSC;
-  info.filesystem = storage::FilesystemType::FAT;
-  info.mount_path = this->mount_path_;
-  info.is_mounted = this->mounted_;
-  info.is_removable = true;
-  info.is_read_only = false;
-  info.supports_raw_access = false;
-  info.supports_filesystem = true;
-
-  if (this->mounted_) {
-    uint64_t total, free_bytes;
-    if (this->get_space_info(&total, &free_bytes)) {
-      info.total_bytes = total;
-      info.free_bytes = free_bytes;
-      info.block_size = 512;
-    } else {
-      info.total_bytes = 0;
-      info.free_bytes = 0;
-      info.block_size = 512;
+USBFileHandle *USBStorageDevice::alloc_handle_() {
+  for (auto &h : this->handle_pool_) {
+    if (!h.in_use) {
+      h.in_use = true;
+      h.storage = this;
+      h.file = nullptr;
+      return &h;
     }
-  } else {
-    info.total_bytes = 0;
-    info.free_bytes = 0;
-    info.block_size = 512;
   }
-  return info;
+  return nullptr;
 }
 
-bool USBStorageDevice::file_exists(const char *path) {
-  if (!this->mounted_)
-    return false;
-  struct stat path_stat;
-  return stat(this->build_full_path(path).c_str(), &path_stat) == 0 && S_ISREG(path_stat.st_mode);
+void USBStorageDevice::free_handle_(USBFileHandle *handle) {
+  handle->in_use = false;
+  handle->file = nullptr;
+  handle->path = nullptr;
 }
 
-bool USBStorageDevice::get_file_size(const char *path, size_t *size) {
-  if (!this->mounted_)
-    return false;
-  struct stat path_stat;
-  if (stat(this->build_full_path(path).c_str(), &path_stat) != 0)
-    return false;
-  *size = path_stat.st_size;
-  return true;
+void USBStorageDevice::build_path_(char *out, size_t out_size, const char *path) const {
+  if (path[0] == '/') {
+    snprintf(out, out_size, "%s%s", this->mount_path_, path);
+  } else {
+    snprintf(out, out_size, "%s/%s", this->mount_path_, path);
+  }
 }
 
-bool USBStorageDevice::read_file(const char *path, uint8_t *data, size_t *length) {
-  if (!this->mounted_)
-    return false;
-  FILE *f = fopen(this->build_full_path(path).c_str(), "rb");
-  if (f == nullptr)
-    return false;
-  *length = fread(data, 1, *length, f);
-  fclose(f);
-  return true;
+// ─────────────────────────────────────────────────────────────────────────────
+// FilesystemStorage interface
+// ─────────────────────────────────────────────────────────────────────────────
+
+storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
+  info->id = this->mount_path_;
+  info->name = "USB Storage";
+  info->is_mounted = this->fs_mounted_;
+  info->is_removable = true;
+  info->is_read_only = false;
+  info->block_size = this->parent_->get_sector_size();
+  info->total_bytes = 0;
+  info->free_bytes = 0;
+
+  if (this->fs_mounted_) {
+    FATFS *fs;
+    DWORD fre_clust;
+    char path[8];
+    snprintf(path, sizeof(path), "%s/", this->mount_path_);
+    if (f_getfree(path, &fre_clust, &fs) == FR_OK) {
+      DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
+      DWORD fre_sect = fre_clust * fs->csize;
+      info->total_bytes = static_cast<uint64_t>(tot_sect) * fs->ssize;
+      info->free_bytes = static_cast<uint64_t>(fre_sect) * fs->ssize;
+    }
+  }
+  return storage::StorageError::OK;
 }
 
-bool USBStorageDevice::write_file(const char *path, const uint8_t *data, size_t length) {
-  if (!this->mounted_)
-    return false;
-  FILE *f = fopen(this->build_full_path(path).c_str(), "wb");
-  if (f == nullptr)
-    return false;
-  bool ok = fwrite(data, 1, length, f) == length;
-  fclose(f);
-  return ok;
+// mount/unmount are driven by USBStorageClient events — these are no-ops
+// when called directly (the client owns the FAT mount lifecycle).
+storage::StorageError USBStorageDevice::mount() {
+  return this->fs_mounted_ ? storage::StorageError::OK : storage::StorageError::NOT_READY;
 }
 
-bool USBStorageDevice::append_file(const char *path, const uint8_t *data, size_t length) {
-  if (!this->mounted_)
-    return false;
-  FILE *f = fopen(this->build_full_path(path).c_str(), "ab");
-  if (f == nullptr)
-    return false;
-  bool ok = fwrite(data, 1, length, f) == length;
-  fclose(f);
-  return ok;
+storage::StorageError USBStorageDevice::unmount() {
+  this->unmount_device();
+  return storage::StorageError::OK;
 }
 
-bool USBStorageDevice::delete_file(const char *path) {
-  if (!this->mounted_)
-    return false;
-  return remove(this->build_full_path(path).c_str()) == 0;
+storage::StorageError USBStorageDevice::format() {
+  ESP_LOGW(TAG, "Format not implemented for USB storage");
+  return storage::StorageError::NOT_READY;
 }
 
-bool USBStorageDevice::rename_file(const char *old_path, const char *new_path) {
-  if (!this->mounted_)
-    return false;
-  return rename(this->build_full_path(old_path).c_str(), this->build_full_path(new_path).c_str()) == 0;
+storage::StorageError USBStorageDevice::sync() { return storage::StorageError::OK; }
+
+storage::StorageError USBStorageDevice::open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+
+  USBFileHandle *h = this->alloc_handle_();
+  if (h == nullptr)
+    return storage::StorageError::NO_SPACE;
+
+  this->build_path_(h->path_buf, sizeof(h->path_buf), path);
+  h->path = h->path_buf;
+
+  const char *fmode = "rb";
+  switch (mode) {
+    case storage::OpenMode::WRITE:
+      fmode = "wb";
+      break;
+    case storage::OpenMode::APPEND:
+      fmode = "ab";
+      break;
+    case storage::OpenMode::READ_WRITE:
+      fmode = "r+b";
+      break;
+    default:
+      break;
+  }
+
+  h->file = fopen(h->path_buf, fmode);
+  if (h->file == nullptr) {
+    this->free_handle_(h);
+    return storage::StorageError::NOT_FOUND;
+  }
+
+  handle = h;
+  return storage::StorageError::OK;
 }
 
-bool USBStorageDevice::copy_file(const char *src_path, const char *dst_path) {
-  if (!this->mounted_)
-    return false;
-  FILE *src = fopen(this->build_full_path(src_path).c_str(), "rb");
+storage::StorageError USBStorageDevice::close(storage::FileHandle *handle) {
+  auto *h = static_cast<USBFileHandle *>(handle);
+  if (h->file != nullptr)
+    fclose(h->file);
+  this->free_handle_(h);
+  return storage::StorageError::OK;
+}
+
+storage::StorageError USBStorageDevice::read(storage::FileHandle *handle, uint8_t *buf, size_t len,
+                                             size_t *bytes_transferred) {
+  auto *h = static_cast<USBFileHandle *>(handle);
+  size_t n = fread(buf, 1, len, h->file);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = n;
+  return storage::StorageError::OK;
+}
+
+storage::StorageError USBStorageDevice::write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
+                                              size_t *bytes_transferred) {
+  auto *h = static_cast<USBFileHandle *>(handle);
+  size_t n = fwrite(buf, 1, len, h->file);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = n;
+  return n == len ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError USBStorageDevice::seek(storage::FileHandle *handle, size_t offset) {
+  auto *h = static_cast<USBFileHandle *>(handle);
+  return fseek(h->file, static_cast<int32_t>(offset), SEEK_SET) == 0 ? storage::StorageError::OK
+                                                                  : storage::StorageError::READ_ERROR;
+}
+
+storage::StorageError USBStorageDevice::tell(storage::FileHandle *handle, size_t *position) {
+  auto *h = static_cast<USBFileHandle *>(handle);
+  int32_t pos = static_cast<int32_t>(ftell(h->file));
+  if (pos < 0)
+    return storage::StorageError::READ_ERROR;
+  *position = static_cast<size_t>(pos);
+  return storage::StorageError::OK;
+}
+
+storage::StorageError USBStorageDevice::stat(const char *path, storage::FileStat *st) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(full, sizeof(full), path);
+  struct stat s;
+  if (::stat(full, &s) != 0)
+    return storage::StorageError::NOT_FOUND;
+  snprintf(st->name, sizeof(st->name), "%s", path);
+  st->size = S_ISREG(s.st_mode) ? static_cast<size_t>(s.st_size) : 0;
+  st->is_dir = S_ISDIR(s.st_mode);
+  return storage::StorageError::OK;
+}
+
+storage::StorageError USBStorageDevice::list_dir(const char *path,
+                                                 void (*callback)(const storage::FileStat *entry, void *ctx),
+                                                 void *ctx) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(full, sizeof(full), path);
+  DIR *dir = opendir(full);
+  if (dir == nullptr)
+    return storage::StorageError::NOT_FOUND;
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+      continue;
+    storage::FileStat st{};
+    snprintf(st.name, sizeof(st.name), "%s", entry->d_name);
+    st.is_dir = entry->d_type == DT_DIR;
+    if (!st.is_dir) {
+      char child_rel[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+      if (snprintf(child_rel, sizeof(child_rel), "%s/%s", path, entry->d_name) < static_cast<int>(sizeof(child_rel))) {
+        char entry_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+        this->build_path_(entry_full, sizeof(entry_full), child_rel);
+        struct stat s;
+        if (::stat(entry_full, &s) == 0)
+          st.size = static_cast<size_t>(s.st_size);
+      }
+    }
+    callback(&st, ctx);
+  }
+  closedir(dir);
+  return storage::StorageError::OK;
+}
+
+storage::StorageError USBStorageDevice::mkdir(const char *path) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(full, sizeof(full), path);
+  return ::mkdir(full, 0755) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError USBStorageDevice::rmdir(const char *path, bool recursive) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(full, sizeof(full), path);
+
+  if (recursive) {
+    DIR *dir = opendir(full);
+    if (dir == nullptr)
+      return storage::StorageError::NOT_FOUND;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        continue;
+      char child[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+      if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >= static_cast<int>(sizeof(child)))
+        continue;
+      storage::StorageError err = (entry->d_type == DT_DIR) ? this->rmdir(child, true) : this->remove(child);
+      if (err != storage::StorageError::OK) {
+        closedir(dir);
+        return err;
+      }
+    }
+    closedir(dir);
+  }
+  return ::rmdir(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError USBStorageDevice::remove(const char *path) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(full, sizeof(full), path);
+  return ::remove(full) == 0 ? storage::StorageError::OK : storage::StorageError::NOT_FOUND;
+}
+
+storage::StorageError USBStorageDevice::rename(const char *old_path, const char *new_path) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char old_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  char new_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(old_full, sizeof(old_full), old_path);
+  this->build_path_(new_full, sizeof(new_full), new_path);
+  return ::rename(old_full, new_full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError USBStorageDevice::copy(const char *src_path, const char *dst_path) {
+  if (!this->fs_mounted_)
+    return storage::StorageError::NOT_READY;
+  char src_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  char dst_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+  this->build_path_(src_full, sizeof(src_full), src_path);
+  this->build_path_(dst_full, sizeof(dst_full), dst_path);
+
+  FILE *src = fopen(src_full, "rb");
   if (src == nullptr)
-    return false;
-  FILE *dst = fopen(this->build_full_path(dst_path).c_str(), "wb");
+    return storage::StorageError::NOT_FOUND;
+  FILE *dst = fopen(dst_full, "wb");
   if (dst == nullptr) {
     fclose(src);
-    return false;
+    return storage::StorageError::WRITE_ERROR;
   }
-  uint8_t buf[512];
+  uint8_t buf[256];
   size_t n;
-  bool ok = true;
+  storage::StorageError err = storage::StorageError::OK;
   while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
     if (fwrite(buf, 1, n, dst) != n) {
-      ok = false;
+      err = storage::StorageError::WRITE_ERROR;
       break;
     }
   }
   fclose(src);
   fclose(dst);
-  return ok;
+  return err;
 }
 
-bool USBStorageDevice::dir_exists(const char *path) {
-  if (!this->mounted_)
-    return false;
-  struct stat path_stat;
-  return stat(this->build_full_path(path).c_str(), &path_stat) == 0 && S_ISDIR(path_stat.st_mode);
-}
-
-bool USBStorageDevice::create_dir(const char *path) {
-  if (!this->mounted_)
-    return false;
-  return mkdir(this->build_full_path(path).c_str(), 0755) == 0;
-}
-
-bool USBStorageDevice::delete_dir(const char *path, bool recursive) {
-  if (!this->mounted_)
-    return false;
-  std::string full_path = this->build_full_path(path);
-  if (recursive) {
-    DIR *dir = opendir(full_path.c_str());
-    if (dir == nullptr)
-      return false;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-        continue;
-      std::string entry_path = std::string(path) + "/" + entry->d_name;
-      if (entry->d_type == DT_DIR) {
-        if (!this->delete_dir(entry_path.c_str(), true)) {
-          closedir(dir);
-          return false;
-        }
-      } else {
-        if (!this->delete_file(entry_path.c_str())) {
-          closedir(dir);
-          return false;
-        }
-      }
-    }
-    closedir(dir);
-  }
-  return rmdir(full_path.c_str()) == 0;
-}
-
-bool USBStorageDevice::list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) {
-  if (!this->mounted_)
-    return false;
-  std::string full_path = this->build_full_path(path);
-  DIR *dir = opendir(full_path.c_str());
-  if (dir == nullptr)
-    return false;
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-      continue;
-    storage::StorageFileInfo info;
-    info.name = entry->d_name;
-    info.path = std::string(path) + "/" + entry->d_name;
-    info.is_directory = entry->d_type == DT_DIR;
-    struct stat st;
-    if (stat((full_path + "/" + entry->d_name).c_str(), &st) == 0) {
-      info.size = info.is_directory ? 0 : st.st_size;
-      info.modified_time = st.st_mtime;
-    } else {
-      info.size = 0;
-      info.modified_time = 0;
-    }
-    entries->push_back(info);
-  }
-  closedir(dir);
-  return true;
-}
-
-bool USBStorageDevice::get_space_info(uint64_t *total, uint64_t *free) {
-  if (!this->mounted_)
-    return false;
-  FATFS *fs;
-  DWORD fre_clust;
-  std::string path = this->mount_path_;
-  if (path.back() != '/')
-    path += '/';
-  if (f_getfree(path.c_str(), &fre_clust, &fs) != FR_OK)
-    return false;
-  DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
-  DWORD fre_sect = fre_clust * fs->csize;
-  *total = static_cast<uint64_t>(tot_sect) * fs->ssize;
-  *free = static_cast<uint64_t>(fre_sect) * fs->ssize;
-  return true;
-}
-
-bool USBStorageDevice::can_write_file(const char *path, size_t size) {
-  uint64_t total, free_space;
-  return this->mounted_ && this->get_space_info(&total, &free_space) && free_space >= size;
-}
-
-void *USBStorageDevice::open_file(const char *path, const char *mode) {
-  if (!this->mounted_)
-    return nullptr;
-  return fopen(this->build_full_path(path).c_str(), mode);
-}
-
-size_t USBStorageDevice::read_file_chunk(void *handle, uint8_t *buffer, size_t size) {
-  return handle ? fread(buffer, 1, size, static_cast<FILE *>(handle)) : 0;
-}
-
-size_t USBStorageDevice::write_file_chunk(void *handle, const uint8_t *data, size_t size) {
-  return handle ? fwrite(data, 1, size, static_cast<FILE *>(handle)) : 0;
-}
-
-bool USBStorageDevice::seek_file(void *handle, size_t offset) {
-  return handle && fseek(static_cast<FILE *>(handle), offset, SEEK_SET) == 0;
-}
-
-size_t USBStorageDevice::tell_file(void *handle) {
-  return handle ? ftell(static_cast<FILE *>(handle)) : 0;
-}
-
-bool USBStorageDevice::close_file(void *handle) {
-  return handle && fclose(static_cast<FILE *>(handle)) == 0;
-}
-
-bool USBStorageDevice::format() {
-  ESP_LOGW(TAG, "Format not implemented for USB storage");
-  return false;
-}
-
-bool USBStorageDevice::sync() { return true; }
-
-#endif  // USE_STORAGE
-
-}  // namespace usb_storage
-}  // namespace esphome
+}  // namespace esphome::usb_storage
 
 #endif  // USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3 || USE_ESP32_VARIANT_ESP32P4

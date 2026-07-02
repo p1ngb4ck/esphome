@@ -8,8 +8,7 @@
 #include "esphome/components/spi/spi.h"
 #include "esphome/core/hal.h"
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 /**
  * @brief SPI NOR Flash storage device (W25Q, MX25, AT25 series)
@@ -86,11 +85,17 @@ class SPIFlash : public BinaryStorage,
   uint32_t get_page_size() const override { return this->page_size_; }
   uint32_t get_erase_size() const override { return this->sector_size_; }
 
+  // RawStorage interface
+  storage::StorageError read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError erase(size_t offset, size_t len) override;
+  storage::StorageError format() override;
+
+  // Hardware-level byte access
   bool is_ready() override;
-  bool read(uint32_t address, uint8_t *data, size_t length) override;
-  bool write(uint32_t address, const uint8_t *data, size_t length) override;
-  bool erase_block(uint32_t address) override;
-  bool sync() override;
+  bool read_raw(uint32_t address, uint8_t *data, size_t length);
+  bool write_raw(uint32_t address, const uint8_t *data, size_t length);
+  bool erase_block(uint32_t address);
 
   //========================================================================
   // Flash-Specific Operations
@@ -199,6 +204,13 @@ class SPIFlash : public BinaryStorage,
   bool wait_ready(uint32_t timeout_ms = 5000);
 
   /**
+   * @brief Sync — waits for any in-progress operation to complete
+   *
+   * @return true if device is ready
+   */
+  bool sync();
+
+  /**
    * @brief Enable writes (must be called before any write/erase operation)
    *
    * @return true on success
@@ -244,7 +256,7 @@ class SPIFlash : public BinaryStorage,
   static constexpr uint8_t CMD_RELEASE_POWER_DOWN = 0xAB;
   static constexpr uint8_t CMD_MANUFACTURER_DEVICE_ID = 0x90;
   static constexpr uint8_t CMD_JEDEC_ID = 0x9F;
-  static constexpr uint8_t CMD_READ_DATA = 0x03;
+  static constexpr uint8_t CMD_READ_BYTES = 0x03;
   static constexpr uint8_t CMD_FAST_READ = 0x0B;
   static constexpr uint8_t CMD_READ_UNIQUE_ID = 0x4B;
 
@@ -281,7 +293,7 @@ class SPIFlash : public BinaryStorage,
    *
    * @return true on success
    */
-  bool enable_quad_mode();
+  bool enable_quad_mode_();
 
   /**
    * @brief Disable quad mode in status register
@@ -290,7 +302,7 @@ class SPIFlash : public BinaryStorage,
    *
    * @return true on success
    */
-  bool disable_quad_mode();
+  bool disable_quad_mode_();
 
   /**
    * @brief Write a page (up to 256 bytes, must not cross page boundary)
@@ -358,7 +370,6 @@ class SPIFlash : public BinaryStorage,
   }
 };
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_SPI_FLASH

@@ -7,8 +7,7 @@
 #include "esphome/core/hal.h"
 #include <algorithm>
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 static const char *const TAG = "spi_flash";
 
@@ -20,9 +19,9 @@ void SPIFlash::setup() {
   // Read JEDEC ID for device identification
   this->jedec_id_ = this->read_jedec_id();
 
-  ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06X", this->jedec_id_);
+  ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06" PRIX32, this->jedec_id_);
   ESP_LOGCONFIG(TAG, "  Manufacturer: 0x%02X", this->get_manufacturer_id());
-  ESP_LOGCONFIG(TAG, "  Device ID: 0x%04X", this->get_device_id());
+  ESP_LOGCONFIG(TAG, "  Device ID: 0x%04" PRIX32, (uint32_t) this->get_device_id());
 
   // Auto-configure from JEDEC ID if capacity not set
   if (this->capacity_ == 0 && this->jedec_id_ != 0 && this->jedec_id_ != 0xFFFFFF) {
@@ -53,7 +52,7 @@ void SPIFlash::setup() {
   // Enable quad mode if configured
   if (this->quad_mode_) {
     ESP_LOGCONFIG(TAG, "  Enabling Quad SPI mode...");
-    if (!this->enable_quad_mode()) {
+    if (!this->enable_quad_mode_()) {
       ESP_LOGW(TAG, "  Failed to enable Quad SPI mode, falling back to standard SPI");
       this->quad_mode_ = false;
     } else {
@@ -72,13 +71,14 @@ void SPIFlash::dump_config() {
   LOG_PIN("  CS Pin: ", this->cs_);
   ESP_LOGCONFIG(TAG, "  Model: %s", this->model_.c_str());
   if (this->capacity_ >= 1024 * 1024) {
-    ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f MB)", this->capacity_, this->capacity_ / (1024.0f * 1024.0f));
+    ESP_LOGCONFIG(TAG, "  Capacity: %" PRIu32 " bytes (%.1f MB)", this->capacity_,
+                  this->capacity_ / (1024.0f * 1024.0f));
   } else {
-    ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+    ESP_LOGCONFIG(TAG, "  Capacity: %" PRIu32 " bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
   }
-  ESP_LOGCONFIG(TAG, "  Page Size: %u bytes", this->page_size_);
-  ESP_LOGCONFIG(TAG, "  Sector Size: %u bytes", this->sector_size_);
-  ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06X", this->jedec_id_);
+  ESP_LOGCONFIG(TAG, "  Page Size: %" PRIu32 " bytes", this->page_size_);
+  ESP_LOGCONFIG(TAG, "  Sector Size: %" PRIu32 " bytes", this->sector_size_);
+  ESP_LOGCONFIG(TAG, "  JEDEC ID: 0x%06" PRIX32, this->jedec_id_);
   ESP_LOGCONFIG(TAG, "  Manufacturer: 0x%02X", this->get_manufacturer_id());
   ESP_LOGCONFIG(TAG, "  Quad Mode: %s", this->quad_mode_ ? "Enabled (4x faster)" : "Disabled");
   ESP_LOGCONFIG(TAG, "  4-Byte Addressing: %s", this->four_byte_mode_ ? "Enabled (>16MB)" : "Disabled");
@@ -99,7 +99,8 @@ void SPIFlash::auto_configure_from_jedec_id_() {
   // Codes 11-25 cover 2KB to 32MB (code 25 = 32MB for 256Mbit chips)
   if (capacity_code >= 11 && capacity_code <= 25) {
     this->capacity_ = 1UL << capacity_code;
-    ESP_LOGI(TAG, "Auto-detected capacity: %u bytes (%.1f MB)", this->capacity_, this->capacity_ / (1024.0f * 1024.0f));
+    ESP_LOGI(TAG, "Auto-detected capacity: %" PRIu32 " bytes (%.1f MB)", this->capacity_,
+             this->capacity_ / (1024.0f * 1024.0f));
   }
 
   // Known chip identification
@@ -164,7 +165,7 @@ uint8_t SPIFlash::read_status_register2() {
   return status;
 }
 
-bool SPIFlash::enable_quad_mode() {
+bool SPIFlash::enable_quad_mode_() {
   // Read current status registers
   uint8_t status1 = this->read_status_register();
   uint8_t status2 = this->read_status_register2();
@@ -207,7 +208,7 @@ bool SPIFlash::enable_quad_mode() {
   return true;
 }
 
-bool SPIFlash::disable_quad_mode() {
+bool SPIFlash::disable_quad_mode_() {
   // Read current status registers
   uint8_t status1 = this->read_status_register();
   uint8_t status2 = this->read_status_register2();
@@ -254,7 +255,7 @@ bool SPIFlash::wait_ready(uint32_t timeout_ms) {
     delay(1);
   }
 
-  ESP_LOGW(TAG, "Wait ready timeout after %u ms", timeout_ms);
+  ESP_LOGW(TAG, "Wait ready timeout after %" PRIu32 " ms", timeout_ms);
   return false;
 }
 
@@ -365,7 +366,7 @@ bool SPIFlash::read_data_(uint32_t address, uint8_t *data, size_t length) {
     this->read_array(data, length);
   } else {
     // Standard read command (single SPI line)
-    this->write_byte(CMD_READ_DATA);
+    this->write_byte(CMD_READ_BYTES);
     this->write_address_(address);
     this->read_array(data, length);
   }
@@ -375,9 +376,38 @@ bool SPIFlash::read_data_(uint32_t address, uint8_t *data, size_t length) {
   return true;
 }
 
-bool SPIFlash::read(uint32_t address, uint8_t *data, size_t length) {
+storage::StorageError SPIFlash::read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->read_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::READ_ERROR;
+}
+
+storage::StorageError SPIFlash::write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->write_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError SPIFlash::erase(size_t offset, size_t len) {
+  uint32_t addr = static_cast<uint32_t>(offset);
+  uint32_t end = addr + static_cast<uint32_t>(len);
+  while (addr < end) {
+    if (!this->erase_block(addr))
+      return storage::StorageError::WRITE_ERROR;
+    addr += this->sector_size_;
+  }
+  return storage::StorageError::OK;
+}
+
+storage::StorageError SPIFlash::format() {
+  return this->erase_chip() ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+bool SPIFlash::read_raw(uint32_t address, uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Read address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Read address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -401,7 +431,7 @@ bool SPIFlash::read(uint32_t address, uint8_t *data, size_t length) {
 
 bool SPIFlash::write_page_(uint32_t address, const uint8_t *data, size_t length) {
   if (length == 0 || length > this->page_size_) {
-    ESP_LOGE(TAG, "Invalid page write length: %u (max %u)", length, this->page_size_);
+    ESP_LOGE(TAG, "Invalid page write length: %" PRIu32 " (max %" PRIu32 ")", (uint32_t) length, this->page_size_);
     return false;
   }
 
@@ -423,9 +453,9 @@ bool SPIFlash::write_page_(uint32_t address, const uint8_t *data, size_t length)
   return this->wait_ready();
 }
 
-bool SPIFlash::write(uint32_t address, const uint8_t *data, size_t length) {
+bool SPIFlash::write_raw(uint32_t address, const uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Write address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Write address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -466,17 +496,17 @@ bool SPIFlash::erase_(uint32_t address, uint8_t cmd) {
 }
 
 bool SPIFlash::erase_sector(uint32_t address) {
-  ESP_LOGD(TAG, "Erasing sector at 0x%06X", address & ~(this->sector_size_ - 1));
+  ESP_LOGD(TAG, "Erasing sector at 0x%06" PRIX32, address & ~(this->sector_size_ - 1));
   return this->erase_(address, CMD_SECTOR_ERASE_4K);
 }
 
 bool SPIFlash::erase_block_32k(uint32_t address) {
-  ESP_LOGD(TAG, "Erasing 32KB block at 0x%06X", address & ~0x7FFF);
+  ESP_LOGD(TAG, "Erasing 32KB block at 0x%06" PRIX32, address & ~(uint32_t) 0x7FFF);
   return this->erase_(address, CMD_BLOCK_ERASE_32K);
 }
 
 bool SPIFlash::erase_block_64k(uint32_t address) {
-  ESP_LOGD(TAG, "Erasing 64KB block at 0x%06X", address & ~0xFFFF);
+  ESP_LOGD(TAG, "Erasing 64KB block at 0x%06" PRIX32, address & ~(uint32_t) 0xFFFF);
   return this->erase_(address, CMD_BLOCK_ERASE_64K);
 }
 
@@ -540,7 +570,6 @@ void SPIFlash::wake_up() {
   ESP_LOGD(TAG, "Woke up from power down");
 }
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_SPI_FLASH

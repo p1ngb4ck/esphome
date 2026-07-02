@@ -1,21 +1,29 @@
-"""NFS v3 Client component for ESPHome."""
-
 import esphome.codegen as cg
+from esphome.components.storage import request_storage_device
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PORT
+from esphome.const import (
+    CONF_ID,
+    CONF_PORT,
+    CONF_UID,
+    PLATFORM_BK72XX,
+    PLATFORM_ESP32,
+    PLATFORM_ESP8266,
+    PLATFORM_LN882X,
+    PLATFORM_RTL87XX,
+)
 
-# Constants
+CODEOWNERS = ["@p1ngb4ck"]
+DEPENDENCIES = ["network"]
+AUTO_LOAD = ["storage"]
+
 CONF_SERVER = "server"
 CONF_EXPORT = "export"
 CONF_MOUNT_PATH = "mount_path"
-CONF_UID = "uid"
 CONF_GID = "gid"
 
-# Namespace
 nfs_client_ns = cg.esphome_ns.namespace("nfs_client")
 NFSClient = nfs_client_ns.class_("NFSClient", cg.Component)
 
-# Default values
 DEFAULT_PORT = 2049
 DEFAULT_UID = 0
 DEFAULT_GID = 0
@@ -34,7 +42,6 @@ NFS_SHARE_SCHEMA = cv.Schema(
 
 
 def validate_mount_paths(configs):
-    """Validate that all mount paths are unique."""
     mount_paths = []
     for config in configs:
         if CONF_MOUNT_PATH in config:
@@ -50,26 +57,30 @@ def validate_mount_paths(configs):
 CONFIG_SCHEMA = cv.All(
     cv.ensure_list(NFS_SHARE_SCHEMA),
     validate_mount_paths,
+    cv.only_on(
+        [
+            PLATFORM_BK72XX,
+            PLATFORM_ESP32,
+            PLATFORM_ESP8266,
+            PLATFORM_LN882X,
+            PLATFORM_RTL87XX,
+        ]
+    ),
 )
 
 
 async def to_code(config):
-    """Generate code for NFS client component(s)."""
-    # Add network dependency once
-    cg.add_define("USE_NETWORK")
-
-    # Generate code for each NFS share
     for share_config in config:
         var = cg.new_Pvariable(share_config[CONF_ID])
         await cg.register_component(var, share_config)
 
-        # Configure NFS client
         cg.add(var.set_server(share_config[CONF_SERVER]))
         cg.add(var.set_port(share_config[CONF_PORT]))
         cg.add(var.set_export(share_config[CONF_EXPORT]))
         cg.add(var.set_uid(share_config[CONF_UID]))
         cg.add(var.set_gid(share_config[CONF_GID]))
 
-        # Set mount path if specified
-        if CONF_MOUNT_PATH in share_config:
-            cg.add(var.set_mount_path(share_config[CONF_MOUNT_PATH]))
+        if (mount_path := share_config.get(CONF_MOUNT_PATH)) is not None:
+            cg.add(var.set_mount_path(mount_path))
+
+        request_storage_device()

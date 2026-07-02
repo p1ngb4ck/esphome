@@ -8,13 +8,12 @@
 #include <algorithm>
 #include <vector>
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 static const char *const TAG = "i2c_fram";
 
 // FRAM special addresses
-static constexpr uint8_t FRAM_SLAVE_ID = 0x7C;   // 0xF8 >> 1
+static constexpr uint8_t FRAM_DEVICE_ID = 0x7C;  // 0xF8 >> 1, reserved I2C device ID address
 static constexpr uint8_t FRAM_SLEEP_CMD = 0x86;  //
 
 void I2CFram::setup() {
@@ -25,7 +24,8 @@ void I2CFram::setup() {
     uint16_t density = this->get_density();
     if (density > 0) {
       this->capacity_ = (1UL << density) * 1024UL;  // Convert density to bytes
-      ESP_LOGI(TAG, "Auto-detected size: %u KB (%u bytes)", (1UL << density), this->capacity_);
+      ESP_LOGI(TAG, "Auto-detected size: %" PRIu32 " KB (%" PRIu32 " bytes)", (uint32_t) (1UL << density),
+               this->capacity_);
     } else {
       ESP_LOGW(TAG, "Could not auto-detect size, set it in config!");
     }
@@ -52,7 +52,7 @@ void I2CFram::dump_config() {
   ESP_LOGCONFIG(TAG, "I2C FRAM:");
   LOG_I2C_DEVICE(this);
   ESP_LOGCONFIG(TAG, "  Model: %s", this->model_.c_str());
-  ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
+  ESP_LOGCONFIG(TAG, "  Capacity: %" PRIu32 " bytes (%.1f KB)", this->capacity_, this->capacity_ / 1024.0f);
   ESP_LOGCONFIG(TAG, "  Addressing: %u-bit", this->addressing_bits_);
   ESP_LOGCONFIG(TAG, "  Manufacturer: 0x%04X", this->get_manufacturer_id());
   ESP_LOGCONFIG(TAG, "  Product: 0x%04X", this->get_product_id());
@@ -124,7 +124,7 @@ uint16_t I2CFram::get_meta_data_(uint8_t field) {
   uint8_t addr = this->address_ << 1;
   uint8_t data[3] = {0, 0, 0};
 
-  i2c::ErrorCode err = this->bus_->write_readv(FRAM_SLAVE_ID, &addr, 1, data, 3);
+  i2c::ErrorCode err = this->bus_->write_readv(FRAM_DEVICE_ID, &addr, 1, data, 3);
   if (err != i2c::ERROR_OK)
     return 0;
 
@@ -149,9 +149,27 @@ uint16_t I2CFram::get_product_id() { return this->get_meta_data_(1); }
 
 uint16_t I2CFram::get_density() { return this->get_meta_data_(2); }
 
-bool I2CFram::read(uint32_t address, uint8_t *data, size_t length) {
+storage::StorageError I2CFram::read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->read_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::READ_ERROR;
+}
+
+storage::StorageError I2CFram::write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->write_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError I2CFram::erase(size_t offset, size_t len) { return storage::StorageError::OK; }
+
+storage::StorageError I2CFram::format() { return this->BinaryStorage::format(); }
+
+bool I2CFram::read_raw(uint32_t address, uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Read address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Read address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -174,9 +192,9 @@ bool I2CFram::read(uint32_t address, uint8_t *data, size_t length) {
   return true;
 }
 
-bool I2CFram::write(uint32_t address, const uint8_t *data, size_t length) {
+bool I2CFram::write_raw(uint32_t address, const uint8_t *data, size_t length) {
   if (!this->is_valid_address_(address, length)) {
-    ESP_LOGE(TAG, "Write address out of bounds: 0x%X + %u", address, length);
+    ESP_LOGE(TAG, "Write address out of bounds: 0x%" PRIx32 " + %" PRIu32, address, (uint32_t) length);
     return false;
   }
 
@@ -221,7 +239,7 @@ void I2CFram::sleep() {
   // FRAM sleep command (page 12 of datasheet)
   // Command: S 0xF8 A address A S 0x86 A P
   uint8_t addr = this->address_ << 1;
-  this->bus_->write_readv(FRAM_SLAVE_ID, &addr, 1, nullptr, 0);
+  this->bus_->write_readv(FRAM_DEVICE_ID, &addr, 1, nullptr, 0);
   this->bus_->write_readv(FRAM_SLEEP_CMD >> 1, nullptr, 0, nullptr, 0);
 }
 
@@ -241,7 +259,6 @@ bool I2CFram::wakeup(uint32_t trec) {
   return err == i2c::ERROR_OK;
 }
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_I2C_FRAM

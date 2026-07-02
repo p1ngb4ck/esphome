@@ -6,8 +6,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 static const char *const TAG = "spi_mram";
 
@@ -44,9 +43,8 @@ void SPIMRAM::setup() {
 void SPIMRAM::dump_config() {
   ESP_LOGCONFIG(TAG, "SPI MRAM:");
   ESP_LOGCONFIG(TAG, "  Model: %s", this->model_.c_str());
-  ESP_LOGCONFIG(TAG, "  Capacity: %u bytes (%" PRIu32 " KB)", this->capacity_, this->capacity_ / 1024);
+  ESP_LOGCONFIG(TAG, "  Capacity: %" PRIu32 " bytes (%" PRIu32 " KB)", this->capacity_, this->capacity_ / 1024);
   ESP_LOGCONFIG(TAG, "  Addressing: %u-bit", this->addressing_bits_);
-  ESP_LOGCONFIG(TAG, "  SPI Speed: %u Hz", this->get_data_rate());
   ESP_LOGCONFIG(TAG, "  Features: Unlimited write cycles, instant writes, no erase needed");
 
   uint8_t status = this->read_status_register();
@@ -66,20 +64,38 @@ void SPIMRAM::dump_config() {
 // BinaryStorage Interface
 //========================================================================
 
-bool SPIMRAM::read(uint32_t address, uint8_t *data, size_t length) {
+storage::StorageError SPIMRAM::read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->read_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::READ_ERROR;
+}
+
+storage::StorageError SPIMRAM::write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) {
+  bool ok = this->write_raw(static_cast<uint32_t>(offset), buf, len);
+  if (bytes_transferred != nullptr)
+    *bytes_transferred = ok ? len : 0;
+  return ok ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+}
+
+storage::StorageError SPIMRAM::erase(size_t offset, size_t len) { return storage::StorageError::OK; }
+
+storage::StorageError SPIMRAM::format() { return this->BinaryStorage::format(); }
+
+bool SPIMRAM::read_raw(uint32_t address, uint8_t *data, size_t length) {
   if (address + length > this->capacity_) {
-    ESP_LOGE(TAG, "Read overflow: address 0x%04" PRIX32 " + length %u > capacity %" PRIu32, address, length,
-             this->capacity_);
+    ESP_LOGE(TAG, "Read overflow: address 0x%04" PRIX32 " + length %" PRIu32 " > capacity %" PRIu32, address,
+             (uint32_t) length, this->capacity_);
     return false;
   }
 
   return this->read_data_(address, data, length);
 }
 
-bool SPIMRAM::write(uint32_t address, const uint8_t *data, size_t length) {
+bool SPIMRAM::write_raw(uint32_t address, const uint8_t *data, size_t length) {
   if (address + length > this->capacity_) {
-    ESP_LOGE(TAG, "Write overflow: address 0x%04" PRIX32 " + length %u > capacity %" PRIu32, address, length,
-             this->capacity_);
+    ESP_LOGE(TAG, "Write overflow: address 0x%04" PRIX32 " + length %" PRIu32 " > capacity %" PRIu32, address,
+             (uint32_t) length, this->capacity_);
     return false;
   }
 
@@ -99,26 +115,26 @@ uint8_t SPIMRAM::read_status_register() {
 }
 
 void SPIMRAM::write_status_register(uint8_t value) {
-  this->write_enable();
+  this->write_enable_();
   this->enable();
   this->write_byte(CMD_WRSR);
   this->write_byte(value);
   this->disable();
-  this->write_disable();
+  this->write_disable_();
 }
 
 uint32_t SPIMRAM::clear(uint8_t value) {
   ESP_LOGI(TAG, "Clearing MRAM with value 0x%02X...", value);
 
   // MRAM can write quickly, so we can do larger chunks
-  constexpr size_t CHUNK_SIZE = 256;
-  uint8_t buffer[CHUNK_SIZE];
-  memset(buffer, value, CHUNK_SIZE);
+  constexpr size_t chunk_size = 256;
+  uint8_t buffer[chunk_size];
+  memset(buffer, value, chunk_size);
 
   uint32_t address = 0;
   while (address < this->capacity_) {
-    size_t write_len = std::min(CHUNK_SIZE, (size_t) (this->capacity_ - address));
-    if (!this->write(address, buffer, write_len)) {
+    size_t write_len = std::min(chunk_size, (size_t) (this->capacity_ - address));
+    if (!this->write_raw(address, buffer, write_len)) {
       ESP_LOGE(TAG, "Clear failed at address 0x%04" PRIX32, address);
       return address;
     }
@@ -133,13 +149,13 @@ uint32_t SPIMRAM::clear(uint8_t value) {
 // Internal Helpers
 //========================================================================
 
-void SPIMRAM::write_enable() {
+void SPIMRAM::write_enable_() {
   this->enable();
   this->write_byte(CMD_WREN);
   this->disable();
 }
 
-void SPIMRAM::write_disable() {
+void SPIMRAM::write_disable_() {
   this->enable();
   this->write_byte(CMD_WRDI);
   this->disable();
@@ -149,13 +165,13 @@ bool SPIMRAM::write_data_(uint32_t address, const uint8_t *data, size_t length) 
   // MRAM can write any size instantly (no page boundaries!)
   // But we break it into chunks for SPI efficiency
 
-  constexpr size_t MAX_CHUNK = 256;  // Reasonable SPI transaction size
+  constexpr size_t max_chunk = 256;  // Reasonable SPI transaction size
 
   while (length > 0) {
-    size_t chunk_size = std::min(length, MAX_CHUNK);
+    size_t chunk_size = std::min(length, max_chunk);
 
     // Enable writes
-    this->write_enable();
+    this->write_enable_();
 
     // Start write command
     this->enable();
@@ -174,7 +190,7 @@ bool SPIMRAM::write_data_(uint32_t address, const uint8_t *data, size_t length) 
 
     // MRAM writes are instant - no need to wait!
     // Optionally disable writes (not strictly necessary)
-    this->write_disable();
+    this->write_disable_();
 
     address += chunk_size;
     data += chunk_size;
@@ -186,10 +202,10 @@ bool SPIMRAM::write_data_(uint32_t address, const uint8_t *data, size_t length) 
 
 bool SPIMRAM::read_data_(uint32_t address, uint8_t *data, size_t length) {
   // MRAM can read any size
-  constexpr size_t MAX_CHUNK = 256;  // Reasonable SPI transaction size
+  constexpr size_t max_chunk = 256;  // Reasonable SPI transaction size
 
   while (length > 0) {
-    size_t chunk_size = std::min(length, MAX_CHUNK);
+    size_t chunk_size = std::min(length, max_chunk);
 
     // Start read command
     this->enable();
@@ -214,7 +230,6 @@ bool SPIMRAM::read_data_(uint32_t address, uint8_t *data, size_t length) {
   return true;
 }
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_SPI_MRAM

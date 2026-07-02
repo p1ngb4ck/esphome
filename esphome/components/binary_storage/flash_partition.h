@@ -1,63 +1,16 @@
 #pragma once
-
 #include "esphome/core/defines.h"
-#ifdef USE_BINARY_STORAGE_FLASH_PARTITION
-
-#include "esphome/core/component.h"
-#include "esphome/core/hal.h"
-#include "esp_partition.h"
-#include "spi_flash_mmap.h"
-
-#if CONFIG_IDF_TARGET_ESP32
-#include "esp32/rom/spi_flash.h"
-#elif CONFIG_IDF_TARGET_ESP32S2
-#include "esp32s2/rom/spi_flash.h"
-#elif CONFIG_IDF_TARGET_ESP32S3
-#include "esp32s3/rom/spi_flash.h"
-#elif CONFIG_IDF_TARGET_ESP32C3
-#include "esp32c3/rom/spi_flash.h"
-#elif CONFIG_IDF_TARGET_ESP32H2
-#include "esp32h2/rom/spi_flash.h"
-#elif CONFIG_IDF_TARGET_ESP8684
-#include "esp8684/rom/spi_flash.h"
-#elif __has_include("esp32/rom/spi_flash.h")
-#include "esp32/rom/spi_flash.h"  //IDF 4
-#else
-#include "rom/spi_flash.h"  //IDF 3
-#endif
-#include <string>
 
 #ifdef USE_ESP_IDF
-#include "esp_littlefs.h"
-#endif
-
-#ifdef USE_STORAGE
-#include "esphome/components/storage/storage_device.h"
 #include "esphome/components/storage/storage.h"
-#endif
+#include "esp_partition.h"
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
-/**
- * @brief LittleFS on internal flash partition
- *
- * Uses ESP-IDF's built-in LittleFS support to mount a flash partition.
- * This is simpler than the BinaryStorage approach and doesn't require
- * external memory devices.
- *
- * Partition must be defined in partition table with subtype=littlefs:
- * ```
- * storage, data, littlefs, 0x3D0000, 0x20000,
- * ```
- */
-class FlashPartition : public Component
-#ifdef USE_STORAGE
-    ,
-                       public storage::StorageDevice,
-                       public storage::MountSpaceProvider
-#endif
-{
+// LittleFS on an internal flash partition via ESP-IDF's esp_vfs_littlefs.
+// Simpler than LittleFSMount — IDF handles VFS registration and LittleFS internals.
+// The partition must be defined in the partition table with subtype=littlefs.
+class FlashPartition : public storage::FilesystemStorage {
  public:
   FlashPartition() = default;
   ~FlashPartition();
@@ -69,146 +22,72 @@ class FlashPartition : public Component
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   //========================================================================
-  // Configuration
+  // Configuration setters (called by Python codegen)
   //========================================================================
 
-  /**
-   * @brief Set partition label
-   *
-   * @param label Partition label from partition table
-   */
-  void set_partition_label(const std::string &label) { this->partition_label_ = label; }
-
-  /**
-   * @brief Set mount path
-   *
-   * @param path VFS mount point (e.g., "/littlefs")
-   */
-  void set_mount_path(const std::string &path) { this->mount_path_ = path; }
-
-  /**
-   * @brief Set auto-format on mount failure
-   *
-   * @param format If true, format filesystem if mount fails
-   */
+  void set_partition_label(const char *label) { this->partition_label_ = label; }
+  void set_mount_path(const char *path) { this->mount_path_ = path; }
   void set_auto_format(bool format) { this->auto_format_ = format; }
-
-  /**
-   * @brief Set storage ID for registry
-   *
-   * @param id Storage identifier
-   */
-  void set_storage_id(const std::string &id) { this->storage_id_ = id; }
-
-  /**
-   * @brief Set human-readable name
-   *
-   * @param name Storage name
-   */
-  void set_storage_name(const std::string &name) { this->storage_name_ = name; }
+  void set_storage_id(const char *id) { this->storage_id_ = id; }
+  void set_storage_name(const char *name) { this->storage_name_ = name; }
 
   //========================================================================
-  // Mount Management
+  // FilesystemStorage interface
   //========================================================================
 
-  /**
-   * @brief Check if filesystem is mounted
-   *
-   * @return true if mounted
-   */
+  storage::StorageError get_info(storage::StorageInfo *info) override;
+  storage::StorageError mount() override;
+  storage::StorageError unmount() override;
+  storage::StorageError format() override;
+  storage::StorageError sync() override;
+  storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
+  storage::StorageError close(storage::FileHandle *handle) override;
+  storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
+                              size_t *bytes_transferred) override;
+  storage::StorageError seek(storage::FileHandle *handle, size_t offset) override;
+  storage::StorageError tell(storage::FileHandle *handle, size_t *position) override;
+  storage::StorageError stat(const char *path, storage::FileStat *stat) override;
+  storage::StorageError list_dir(const char *path, void (*callback)(const storage::FileStat *entry, void *ctx),
+                                 void *ctx) override;
+  storage::StorageError mkdir(const char *path) override;
+  storage::StorageError rmdir(const char *path, bool recursive) override;
+  storage::StorageError remove(const char *path) override;
+  storage::StorageError rename(const char *old_path, const char *new_path) override;
+  storage::StorageError copy(const char *src_path, const char *dst_path) override;
+
+  //========================================================================
+  // Extras
+  //========================================================================
+
   bool is_mounted() const { return this->mounted_; }
-
-  /**
-   * @brief Get mount path
-   *
-   * @return Mount path string
-   */
-  const std::string &get_mount_path() const { return this->mount_path_; }
-
-  /**
-   * @brief Unmount filesystem
-   *
-   * @return true on success
-   */
-  bool unmount();
-
-  /**
-   * @brief Remount filesystem
-   *
-   * @return true on success
-   */
+  const char *get_mount_path() const { return this->mount_path_; }
   bool remount();
 
-  /**
-   * @brief Format the filesystem
-   *
-   * WARNING: Destroys all data!
-   *
-   * @return true on success
-   */
-  bool format();
-
-#ifdef USE_STORAGE
-  //========================================================================
-  // StorageDevice Interface
-  //========================================================================
-
-  storage::StorageInfo get_info() override;
-  bool is_available() override { return this->mounted_; }
-
-  // No raw access for partition-based storage
-  bool supports_raw_access() override { return false; }
-
-  // Filesystem access
-  bool supports_filesystem() override { return true; }
-  std::string get_mount_path() override { return this->mount_path_; }
-
-  // File operations
-  bool file_exists(const char *path) override;
-  bool get_file_size(const char *path, size_t *size) override;
-  bool read_file(const char *path, uint8_t *data, size_t *length) override;
-  bool write_file(const char *path, const uint8_t *data, size_t length) override;
-  bool append_file(const char *path, const uint8_t *data, size_t length) override;
-  bool delete_file(const char *path) override;
-  bool rename_file(const char *old_path, const char *new_path) override;
-  bool copy_file(const char *src_path, const char *dst_path) override;
-
-  // Directory operations
-  bool dir_exists(const char *path) override;
-  bool create_dir(const char *path) override;
-  bool delete_dir(const char *path, bool recursive) override;
-  bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
-
-  // Space information (StorageDevice interface - returns free space)
-  bool get_space_info(uint64_t *total, uint64_t *free) override;
-  // MountSpaceProvider interface - returns used space
-  bool get_space_info(uint64_t &total_bytes, uint64_t &used_bytes) override;
-  bool can_write_file(const char *path, size_t size) override;
-
-  // Streaming file access
-  void *open_file(const char *path, const char *mode) override;
-  size_t read_file_chunk(void *handle, uint8_t *buffer, size_t size) override;
-  size_t write_file_chunk(void *handle, const uint8_t *data, size_t size) override;
-  bool seek_file(void *handle, size_t offset) override;
-  size_t tell_file(void *handle) override;
-  bool close_file(void *handle) override;
-#endif
-
  protected:
-  std::string partition_label_;
-  std::string mount_path_{"/littlefs"};
-  std::string storage_id_;
-  std::string storage_name_;
+  const char *partition_label_{nullptr};
+  const char *mount_path_{"/littlefs"};
+  const char *storage_id_{nullptr};
+  const char *storage_name_{nullptr};
   bool auto_format_{true};
   bool mounted_{false};
 
-  /**
-   * @brief Build full VFS path from relative path
-   */
-  std::string build_path_(const char *path) const;
+  // Pool of FileHandles for open() — no heap allocation per open call
+  static constexpr int MAX_OPEN_FILES = 8;
+  storage::FileHandle handle_pool_[MAX_OPEN_FILES]{};
+  char handle_paths_[MAX_OPEN_FILES][storage::STORAGE_MAX_PATH_LEN]{};
+
+  //========================================================================
+  // Internal helpers
+  //========================================================================
+
+  void build_path_(char *out, size_t out_size, const char *path) const;
+  bool unmount_lfs_();
+  bool format_lfs_();
+  storage::FileHandle *alloc_handle_(const char *path);
+  void free_handle_(storage::FileHandle *handle);
 };
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
-#endif  // USE_BINARY_STORAGE_FLASH_PARTITION
+#endif  // USE_ESP_IDF

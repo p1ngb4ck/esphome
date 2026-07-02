@@ -7,26 +7,25 @@ from esphome.components.esp32 import (
     include_builtin_idf_component,
     only_on_variant,
     require_fatfs,
+    require_fatfs_lfn_heap,
+    require_fatfs_lfn_max,
     require_fatfs_volume_count,
     require_vfs_dir,
+    require_vfs_select,
 )
+from esphome.components.storage import request_storage_device
 from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
-from esphome.core import CORE
 
-CODEOWNERS = ["p1ngb4ck"]
+CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["usb_host", "esp32"]
-AUTO_LOAD = []
+AUTO_LOAD = ["storage"]
 
 CONF_MOUNT_PATH = "mount_path"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_ON_MOUNTED = "on_mounted"
-
-require_vfs_dir()
-require_fatfs()
-require_fatfs_volume_count(4)
 
 usb_storage_ns = cg.esphome_ns.namespace("usb_storage")
 
@@ -43,7 +42,7 @@ USBStorageDevice = usb_storage_ns.class_(
 
 # Automation classes
 DeviceMountedTrigger = usb_storage_ns.class_(
-    "DeviceMountedTrigger", automation.Trigger.template(cg.std_string)
+    "DeviceMountedTrigger", automation.Trigger.template(cg.const_char_ptr)
 )
 RemountDeviceAction = usb_storage_ns.class_("RemountDeviceAction", automation.Action)
 UnmountDeviceAction = usb_storage_ns.class_("UnmountDeviceAction", automation.Action)
@@ -58,15 +57,17 @@ async def register_usb_storage_device(device_config, storage_client):
     await cg.register_component(var, device_config)
     cg.add(var.set_parent(storage_client))
     cg.add(var.set_mount_path(device_config[CONF_MOUNT_PATH]))
-    cg.add(var.set_id(str(device_config[CONF_ID])))
+    cg.add(var.set_storage_id(str(device_config[CONF_ID])))
     cg.add(var.set_vid(device_config[CONF_VID]))
     cg.add(var.set_pid(device_config[CONF_PID]))
     cg.add(storage_client.add_device(var))
 
+    request_storage_device()
+
     for conf in device_config.get(CONF_ON_MOUNTED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(
-            trigger, [(cg.std_string, "mount_path")], conf
+            trigger, [(cg.const_char_ptr, "mount_path")], conf
         )
 
     return var
@@ -97,11 +98,19 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-async def to_code(config):
-    include_builtin_idf_component("fatfs")
+FATFS_LFN_MAX = 255
 
-    # USBStorageClient extends USBClient — create directly (no VID/PID constructor args;
-    # class filtering via get_interface_class() handles MSC device selection in C++).
+
+async def to_code(config):
+    require_vfs_dir()
+    require_vfs_select()
+    require_fatfs()
+    require_fatfs_volume_count(4)
+    require_fatfs_lfn_max(FATFS_LFN_MAX)
+    require_fatfs_lfn_heap()
+    include_builtin_idf_component("fatfs")
+    cg.add_define("CONFIG_FATFS_MAX_LFN", FATFS_LFN_MAX)
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

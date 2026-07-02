@@ -1,10 +1,11 @@
 #pragma once
 
+#ifdef USE_ESP_IDF
+
 #include "esphome/core/automation.h"
 #include "esphome/core/defines.h"
 #include "sd_storage_base.h"
 
-// Include the appropriate header based on which mode is enabled
 #if defined(USE_SD_STORAGE_SDMMC)
 #include "sd_storage.h"
 #endif
@@ -13,85 +14,74 @@
 #include "sd_storage_spi.h"
 #endif
 
-namespace esphome {
-namespace sd_storage {
+namespace esphome::sd_storage {
 
-// Triggers - templated to work with both SdMmc and SdSpi
-template<typename T> class CardMountedTrigger : public Trigger<std::string> {
+// Trigger — works with both SdMmc and SdSpi via SdStorageBase
+template<typename T> class CardMountedTrigger : public Trigger<const char *> {
  public:
   explicit CardMountedTrigger(T *parent) {
-    parent->add_mount_ready_callback([this](const std::string &mount_path) { this->trigger(mount_path); });
+    parent->add_on_mounted_callback([this](const char *mount_path) { this->trigger(mount_path); });
   }
 };
 
-// Actions - templated to work with both SdMmc and SdSpi
+// Actions
 template<typename T, typename... Ts> class MountCardAction : public Action<Ts...> {
  public:
-  explicit MountCardAction(T *sd_storage) : sd_storage_(sd_storage) {}
+  explicit MountCardAction(T *parent) : parent_(parent) {}
 
   void play(Ts... x) override {
-    if (this->sd_storage_->mount_card()) {
-      ESP_LOGI("sd_storage", "Card mounted successfully via automation");
-    } else {
-      ESP_LOGE("sd_storage", "Failed to mount card via automation");
-    }
+    bool ok = this->parent_->mount() == storage::StorageError::OK;
+    this->parent_->log_mount_result_(ok);
   }
 
  protected:
-  T *sd_storage_;
+  T *parent_;
 };
 
 template<typename T, typename... Ts> class UnmountCardAction : public Action<Ts...> {
  public:
-  explicit UnmountCardAction(T *sd_storage) : sd_storage_(sd_storage) {}
+  explicit UnmountCardAction(T *parent) : parent_(parent) {}
 
   void play(Ts... x) override {
-    this->sd_storage_->unmount_card();
-    ESP_LOGI("sd_storage", "Card unmounted via automation");
+    this->parent_->unmount();
+    this->parent_->log_unmount_();
   }
 
  protected:
-  T *sd_storage_;
+  T *parent_;
 };
 
 template<typename T, typename... Ts> class ListFilesAction : public Action<Ts...> {
  public:
-  explicit ListFilesAction(T *sd_storage) : sd_storage_(sd_storage) {}
+  explicit ListFilesAction(T *parent) : parent_(parent) {}
 
-  TEMPLATABLE_VALUE(std::string, path)
+  TEMPLATABLE_VALUE(const char *, path)
 
   void play(Ts... x) override {
-    auto path = this->path_.value(x...);
-    if (path.empty()) {
-      path = this->sd_storage_->get_mount_path();
-    }
+    const char *path = this->path_.value(x...);
+    if (path == nullptr || path[0] == '\0')
+      path = this->parent_->get_mount_path();
 
-    ESP_LOGI("sd_storage", "Listing files in: %s", path.c_str());
-    auto files = this->sd_storage_->list_directory(path);
-    for (const auto &file : files) {
-      if (file.is_directory) {
-        ESP_LOGI("sd_storage", "  [DIR]  %s", file.path.c_str());
-      } else {
-        ESP_LOGI("sd_storage", "  [FILE] %s (%u bytes)", file.path.c_str(), file.size);
-      }
-    }
-    ESP_LOGI("sd_storage", "Total: %zu items", files.size());
+    this->parent_->log_list_dir_start_(path);
+    this->parent_->list_dir(
+        path, [](const storage::FileStat *entry, void *ctx) { SdStorageBase::log_list_dir_entry(entry); }, nullptr);
   }
 
  protected:
-  T *sd_storage_;
+  T *parent_;
 };
 
-// Conditions - templated to work with both SdMmc and SdSpi
+// Condition
 template<typename T, typename... Ts> class CardMountedCondition : public Condition<Ts...> {
  public:
-  explicit CardMountedCondition(T *sd_storage) : sd_storage_(sd_storage) {}
+  explicit CardMountedCondition(T *parent) : parent_(parent) {}
 
-  bool check(Ts... x) override { return this->sd_storage_->is_mounted(); }
+  bool check(Ts... x) override { return this->parent_->is_mounted(); }
 
  protected:
-  T *sd_storage_;
+  T *parent_;
 };
 
-}  // namespace sd_storage
-}  // namespace esphome
+}  // namespace esphome::sd_storage
+
+#endif  // USE_ESP_IDF

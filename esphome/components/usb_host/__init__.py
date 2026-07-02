@@ -116,7 +116,7 @@ async def register_usb_client(config):
 
 
 async def to_code(config: ConfigType) -> None:
-    # IDF 6.0 moved USB host to an external component
+    # IDF 6.0 moved USB host to an external component; 1.4.1 requires IDF >= 6.0
     if idf_version() >= cv.Version(6, 0, 0):
         add_idf_component(name="espressif/usb", ref="1.4.1")
 

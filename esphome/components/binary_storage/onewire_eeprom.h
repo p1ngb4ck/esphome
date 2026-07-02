@@ -9,8 +9,7 @@
 #include "esphome/core/hal.h"
 #include <vector>
 
-namespace esphome {
-namespace binary_storage {
+namespace esphome::binary_storage {
 
 /**
  * @brief OneWire EEPROM storage device (DS2431, DS2433, DS28E07)
@@ -82,11 +81,17 @@ class OneWireEEPROM : public BinaryStorage {
   const char *get_device_type() const override { return "onewire_eeprom"; }
   uint32_t get_page_size() const override { return this->page_size_; }
 
-  bool read(uint32_t address, uint8_t *data, size_t length) override;
-  bool write(uint32_t address, const uint8_t *data, size_t length) override;
+  // RawStorage interface
+  storage::StorageError read(size_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write(size_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError erase(size_t offset, size_t len) override;
+  storage::StorageError format() override;
+
+  // Hardware-level byte access
+  bool read_raw(uint32_t address, uint8_t *data, size_t length);
+  bool write_raw(uint32_t address, const uint8_t *data, size_t length);
   bool is_ready() override;
-  bool sync() override { return true; }                         // No buffering
-  bool erase_block(uint32_t address) override { return true; }  // No erase needed
+  bool erase_block(uint32_t address) { return true; }  // No erase needed
 
   //========================================================================
   // OneWire-Specific Operations
@@ -152,40 +157,40 @@ class OneWireEEPROM : public BinaryStorage {
    *
    * @return true if device present
    */
-  bool onewire_reset();
+  bool onewire_reset_();
 
   /**
    * @brief Write a byte to OneWire bus
    *
    * @param data Byte to write
    */
-  void onewire_write_byte(uint8_t data);
+  void onewire_write_byte_(uint8_t data);
 
   /**
    * @brief Read a byte from OneWire bus
    *
    * @return Byte read
    */
-  uint8_t onewire_read_byte();
+  uint8_t onewire_read_byte_();
 
   /**
    * @brief Write a bit to OneWire bus
    *
    * @param bit Bit to write (0 or 1)
    */
-  void onewire_write_bit(bool bit);
+  void onewire_write_bit_(bool bit);
 
   /**
    * @brief Read a bit from OneWire bus
    *
    * @return Bit read (0 or 1)
    */
-  bool onewire_read_bit();
+  bool onewire_read_bit_();
 
   /**
    * @brief Select device on bus (Skip ROM or Match ROM)
    */
-  void onewire_select();
+  void onewire_select_();
 
   /**
    * @brief Calculate CRC-8 (Dallas/Maxim)
@@ -194,7 +199,7 @@ class OneWireEEPROM : public BinaryStorage {
    * @param length Data length
    * @return CRC-8 value
    */
-  uint8_t crc8(const uint8_t *data, size_t length);
+  uint8_t crc8_(const uint8_t *data, size_t length);
 
   /**
    * @brief Calculate CRC-16 (for scratchpad verification)
@@ -203,7 +208,7 @@ class OneWireEEPROM : public BinaryStorage {
    * @param length Data length
    * @return CRC-16 value
    */
-  uint16_t crc16(const uint8_t *data, size_t length);
+  uint16_t crc16_(const uint8_t *data, size_t length);
 
   //========================================================================
   // Memory Access Helpers
@@ -252,7 +257,6 @@ class OneWireEEPROM : public BinaryStorage {
   bool read_memory_(uint16_t address, uint8_t *data, size_t length);
 };
 
-}  // namespace binary_storage
-}  // namespace esphome
+}  // namespace esphome::binary_storage
 
 #endif  // USE_BINARY_STORAGE_ONEWIRE_EEPROM

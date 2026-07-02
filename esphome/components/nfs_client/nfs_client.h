@@ -5,27 +5,20 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/hal.h"
+#include "esphome/components/storage/storage.h"
 
-#ifdef USE_ESP_IDF
+#if defined(USE_ESP_IDF) || defined(USE_ESP32)
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
-#else
+#elif defined(USE_ESP8266) || defined(USE_LIBRETINY)
 #include <WiFiClient.h>
 #endif
 
 #include <string>
 #include <vector>
 #include <memory>
-#include <map>
-#include <sys/stat.h>
 
-// Optional storage integration (soft dependency)
-#if defined(USE_STORAGE)
-#include "esphome/components/storage/network_storage.h"
-#endif
-
-namespace esphome {
-namespace nfs_client {
+namespace esphome::nfs_client {
 
 static const char *const TAG = "nfs_client";
 
@@ -33,19 +26,16 @@ static const char *const TAG = "nfs_client";
 // RPC Protocol Constants (RFC 1831)
 //========================================================================
 
-/// RPC message types
 enum RPCMessageType : uint32_t {
   RPC_CALL = 0,
   RPC_REPLY = 1,
 };
 
-/// RPC reply status
 enum RPCReplyStatus : uint32_t {
   RPC_MSG_ACCEPTED = 0,
   RPC_MSG_DENIED = 1,
 };
 
-/// RPC accept status
 enum RPCAcceptStatus : uint32_t {
   RPC_SUCCESS = 0,
   RPC_PROG_UNAVAIL = 1,
@@ -55,7 +45,6 @@ enum RPCAcceptStatus : uint32_t {
   RPC_SYSTEM_ERR = 5,
 };
 
-/// RPC authentication flavor
 enum RPCAuthFlavor : uint32_t {
   RPC_AUTH_NULL = 0,
   RPC_AUTH_UNIX = 1,
@@ -67,24 +56,19 @@ enum RPCAuthFlavor : uint32_t {
 // NFS Protocol Constants (RFC 1813)
 //========================================================================
 
-/// NFS program number
 static constexpr uint32_t NFS_PROGRAM = 100003;
 static constexpr uint32_t NFS_VERSION_3 = 3;
 
-/// MOUNT program number
 static constexpr uint32_t MOUNT_PROGRAM = 100005;
 static constexpr uint32_t MOUNT_VERSION_3 = 3;
 
-/// Portmapper program number
 static constexpr uint32_t PMAP_PROGRAM = 100000;
 static constexpr uint32_t PMAP_VERSION = 2;
 static constexpr uint16_t PMAP_PORT = 111;
 
-/// NFS ports (use portmapper/rpcbind in production)
 static constexpr uint16_t NFS_DEFAULT_PORT = 2049;
 static constexpr uint16_t MOUNT_DEFAULT_PORT = 2049;
 
-/// NFS v3 procedure numbers
 enum NFSv3Procedure : uint32_t {
   NFSPROC3_NULL = 0,
   NFSPROC3_GETATTR = 1,
@@ -110,7 +94,6 @@ enum NFSv3Procedure : uint32_t {
   NFSPROC3_COMMIT = 21,
 };
 
-/// MOUNT v3 procedure numbers
 enum MOUNTv3Procedure : uint32_t {
   MOUNTPROC3_NULL = 0,
   MOUNTPROC3_MNT = 1,
@@ -120,7 +103,6 @@ enum MOUNTv3Procedure : uint32_t {
   MOUNTPROC3_EXPORT = 5,
 };
 
-/// Portmapper v2 procedure numbers
 enum PMAPv2Procedure : uint32_t {
   PMAPPROC_NULL = 0,
   PMAPPROC_SET = 1,
@@ -130,18 +112,16 @@ enum PMAPv2Procedure : uint32_t {
   PMAPPROC_CALLIT = 5,
 };
 
-/// NFS file types
 enum NFSFileType : uint32_t {
-  NF3REG = 1,   ///< Regular file
-  NF3DIR = 2,   ///< Directory
-  NF3BLK = 3,   ///< Block device
-  NF3CHR = 4,   ///< Character device
-  NF3LNK = 5,   ///< Symbolic link
-  NF3SOCK = 6,  ///< Socket
-  NF3FIFO = 7,  ///< FIFO
+  NF3REG = 1,
+  NF3DIR = 2,
+  NF3BLK = 3,
+  NF3CHR = 4,
+  NF3LNK = 5,
+  NF3SOCK = 6,
+  NF3FIFO = 7,
 };
 
-/// NFS status codes
 enum NFSStatus : uint32_t {
   NFS3_OK = 0,
   NFS3ERR_PERM = 1,
@@ -174,32 +154,20 @@ enum NFSStatus : uint32_t {
   NFS3ERR_JUKEBOX = 10008,
 };
 
-/// Maximum file handle size
 static constexpr size_t NFS_FHSIZE3 = 64;
-
-/// Maximum path component size
 static constexpr size_t NFS_MAXNAMLEN = 255;
-
-/// Maximum path size
 static constexpr size_t NFS_MAXPATHLEN = 1024;
 
 //========================================================================
 // XDR Buffer (RFC 1832)
 //========================================================================
 
-/**
- * @brief XDR (External Data Representation) buffer for encoding/decoding
- *
- * Handles XDR encoding/decoding for RPC and NFS protocols.
- * All data is big-endian and 4-byte aligned.
- */
 class XDRBuffer {
  public:
   XDRBuffer() = default;
   explicit XDRBuffer(size_t capacity) { this->data_.reserve(capacity); }
   explicit XDRBuffer(const std::vector<uint8_t> &data) : data_(data), position_(0) {}
 
-  // Encoding (writing)
   void encode_uint32(uint32_t value);
   void encode_uint64(uint64_t value);
   void encode_bytes(const uint8_t *data, size_t length);
@@ -207,7 +175,6 @@ class XDRBuffer {
   void encode_opaque(const uint8_t *data, size_t length);
   void encode_bool(bool value) { this->encode_uint32(value ? 1 : 0); }
 
-  // Decoding (reading)
   bool decode_uint32(uint32_t &value);
   bool decode_uint64(uint64_t &value);
   bool decode_bytes(uint8_t *data, size_t length);
@@ -216,7 +183,6 @@ class XDRBuffer {
   bool decode_opaque_to_buffer(uint8_t *buffer, size_t max_len, size_t &actual_len);
   bool decode_bool(bool &value);
 
-  // Buffer management
   const std::vector<uint8_t> &data() const { return this->data_; }
   size_t size() const { return this->data_.size(); }
   size_t position() const { return this->position_; }
@@ -226,7 +192,6 @@ class XDRBuffer {
     this->data_.clear();
     this->position_ = 0;
   }
-  // XDR alignment helper
   static size_t align_4(size_t size) { return (size + 3) & ~3; }
 
  protected:
@@ -238,9 +203,6 @@ class XDRBuffer {
 // NFS Structures
 //========================================================================
 
-/**
- * @brief NFS file handle
- */
 struct NFSFileHandle {
   std::vector<uint8_t> data;
 
@@ -253,9 +215,6 @@ struct NFSFileHandle {
   bool decode(XDRBuffer &xdr);
 };
 
-/**
- * @brief NFS file attributes
- */
 struct NFSFileAttr {
   NFSFileType type;
   uint32_t mode;
@@ -293,9 +252,6 @@ struct NFSFileAttr {
   bool decode(XDRBuffer &xdr);
 };
 
-/**
- * @brief NFS directory entry
- */
 struct NFSDirEntry {
   uint64_t fileid;
   std::string name;
@@ -310,21 +266,13 @@ struct NFSDirEntry {
 // RPC Layer
 //========================================================================
 
-/**
- * @brief RPC call/reply handler
- */
 class RPCClient {
  public:
   RPCClient() = default;
 
-  // Build RPC call
   void build_call(XDRBuffer &xdr, uint32_t xid, uint32_t program, uint32_t version, uint32_t procedure,
                   uint32_t uid = 0, uint32_t gid = 0);
-
-  // Parse RPC reply
   bool parse_reply(XDRBuffer &xdr, uint32_t expected_xid, RPCAcceptStatus &status);
-
-  // Generate XID
   static uint32_t generate_xid() { return millis(); }
 
  protected:
@@ -336,43 +284,11 @@ class RPCClient {
 // NFS Client Component
 //========================================================================
 
-/**
- * @brief NFS v3 Client for mounting and accessing NFS shares
- *
- * Implements NFS v3 protocol (RFC 1813) with MOUNT protocol support.
- * Provides read and write access to remote NFS shares.
- *
- * Features:
- * - NFS v3 protocol (RFC 1813)
- * - MOUNT protocol for getting root file handle
- * - RPC/XDR encoding/decoding (RFC 1831/1832)
- * - AUTH_UNIX authentication
- * - File operations: read, write, create, delete
- * - Directory operations: list, create, delete
- * - Storage host integration
- *
- * Example configuration:
- * @code
- * nfs_client:
- *   - id: my_nfs
- *     server: 192.168.1.100
- *     export: /volume1/data
- *     mount_path: /nfs/nas  # For storage
- *     uid: 1000  # Optional, default 0
- *     gid: 1000  # Optional, default 0
- * @endcode
- */
-class NFSClient : public Component
-#if defined(USE_STORAGE)
-    ,
-                  public storage::NetworkStorage
-#endif
-{
+class NFSClient : public storage::NetworkStorage {
  public:
   NFSClient() = default;
   ~NFSClient();
 
-  // Component lifecycle
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -382,105 +298,42 @@ class NFSClient : public Component
   // Configuration
   //========================================================================
 
-  void set_server(const std::string &server) { this->server_ = server; }
+  void set_server(const char *server) { this->server_ = server; }
   void set_port(uint16_t port) { this->port_ = port; }
-  void set_export(const std::string &export_path) { this->export_path_ = export_path; }
-  void set_mount_path(const std::string &mount_path) { this->mount_path_ = mount_path; }
+  void set_export(const char *export_path) { this->export_path_ = export_path; }
+  void set_mount_path(const char *mount_path) { this->mount_path_ = mount_path; }
   void set_uid(uint32_t uid) { this->uid_ = uid; }
   void set_gid(uint32_t gid) { this->gid_ = gid; }
 
-  const std::string &get_mount_path() const { return this->mount_path_; }
-
-  //========================================================================
-  // Storage Host Integration (soft dependency)
-  //========================================================================
-
-  void register_with_storage();
-
-  //========================================================================
-  // NFS Operations
-  //========================================================================
-
+  const char *get_mount_path() const { return this->mount_path_; }
   bool is_mounted() const { return this->mounted_; }
-  bool mount();
-  void unmount();
 
-  // File operations
-#if defined(USE_STORAGE)
-  bool read_file(const std::string &path, std::vector<uint8_t> &data) override;
-  bool read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len,
-                       size_t &bytes_read) override;
-  bool write_file(const std::string &path, const uint8_t *data, size_t length) override;
-  bool write_file_chunk(const std::string &path, const uint8_t *data, size_t offset, size_t length,
-                        bool create = false) override;
-  bool delete_file(const std::string &path) override;
-  bool file_exists(const std::string &path) override;
-#else
-  bool read_file(const std::string &path, std::vector<uint8_t> &data);
-  bool read_file_chunk(const std::string &path, uint8_t *buffer, size_t offset, size_t max_len, size_t &bytes_read);
-  bool write_file(const std::string &path, const uint8_t *data, size_t length);
-  bool write_file_chunk(const std::string &path, const uint8_t *data, size_t offset, size_t length,
-                        bool create = false);
-  bool delete_file(const std::string &path);
-  bool file_exists(const std::string &path);
-#endif
+  //========================================================================
+  // NetworkStorage interface
+  //========================================================================
 
-  // Directory operations
-  bool list_directory(const std::string &path, std::vector<NFSDirEntry> &entries);
-#if defined(USE_STORAGE)
-  bool create_directory(const std::string &path) override;
-  bool delete_directory(const std::string &path) override;
-  bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) override;
-#else
-  bool create_directory(const std::string &path);
-  bool delete_directory(const std::string &path);
-  bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes);
-#endif
+  storage::StorageError get_info(storage::StorageInfo *info) override;
+  storage::StorageError connect() override;
+  storage::StorageError disconnect() override;
+  storage::StorageError read_chunk(const char *path, uint8_t *buf, size_t offset, size_t len,
+                                   size_t *bytes_transferred) override;
+  storage::StorageError write_chunk(const char *path, const uint8_t *buf, size_t offset, size_t len,
+                                    size_t *bytes_transferred) override;
+  storage::StorageError stat(const char *path, storage::FileStat *stat) override;
+  storage::StorageError list_dir(const char *path, void (*callback)(const storage::FileStat *entry, void *ctx),
+                                 void *ctx) override;
+  storage::StorageError mkdir(const char *path) override;
+  storage::StorageError rmdir(const char *path, bool recursive) override;
+  storage::StorageError remove(const char *path) override;
+  storage::StorageError rename(const char *old_path, const char *new_path) override;
+  storage::StorageError copy(const char *src_path, const char *dst_path) override;
 
-  // File info
+  //========================================================================
+  // NFS-specific operations (used internally and optionally by consumers)
+  //========================================================================
+
   bool get_file_attributes(const std::string &path, NFSFileAttr &attr);
-
-  // Wrapper for NetworkStorage stat
-  bool stat(const std::string &path, struct stat &file_stat) override {
-    NFSFileAttr attr;
-    if (!this->get_file_attributes(path, attr)) {
-      return false;
-    }
-    file_stat.st_size = attr.size;
-    file_stat.st_mode = attr.mode;
-    file_stat.st_uid = attr.uid;
-    file_stat.st_gid = attr.gid;
-    file_stat.st_atime = static_cast<time_t>(attr.atime_sec);
-    file_stat.st_mtime = static_cast<time_t>(attr.mtime_sec);
-    file_stat.st_ctime = static_cast<time_t>(attr.ctime_sec);
-    if (attr.type == NF3DIR) {
-      file_stat.st_mode |= S_IFDIR;
-    } else if (attr.type == NF3REG) {
-      file_stat.st_mode |= S_IFREG;
-    } else {
-      file_stat.st_mode |= S_IFREG;  // Default to regular file for other types
-    }
-    return true;
-  }
-
-#if defined(USE_STORAGE)
-  //========================================================================
-  // NetworkStorage Interface Overrides
-  //========================================================================
-
-  // Connection management
-  bool is_connected() const override { return this->mounted_; }
-  const char *get_protocol() const override { return "nfs"; }
-
-  // Directory operations with NetworkStorage::DirEntry conversion
-  bool list_directory(const std::string &path, std::vector<storage::NetworkStorage::DirEntry> &entries) override;
-
-  // Helper to check if path is a directory
-  bool is_directory(const std::string &path) override;
-
-  // Rename/move file or directory (uses native NFS RENAME)
-  bool rename_path(const std::string &old_path, const std::string &new_path) override;
-#endif
+  bool get_space_info(uint64_t &total_bytes, uint64_t &free_bytes);
 
  protected:
   //========================================================================
@@ -490,7 +343,7 @@ class NFSClient : public Component
   std::string server_;
   uint16_t port_{NFS_DEFAULT_PORT};
   std::string export_path_;
-  std::string mount_path_;
+  const char *mount_path_{nullptr};
   uint32_t uid_{0};
   uint32_t gid_{0};
 
@@ -498,9 +351,9 @@ class NFSClient : public Component
   // Connection State
   //========================================================================
 
-#ifdef USE_ESP_IDF
+#if defined(USE_ESP_IDF) || defined(USE_ESP32)
   int socket_{-1};
-#else
+#elif defined(USE_ESP8266) || defined(USE_LIBRETINY)
   std::unique_ptr<WiFiClient> client_;
 #endif
 
@@ -513,28 +366,25 @@ class NFSClient : public Component
   //========================================================================
 
   enum class MountState : uint8_t {
-    IDLE,                 // Not attempted yet
-    CONNECTING_PMAP,      // Connecting to portmapper (port 111)
-    QUERYING_PMAP_MOUNT,  // Querying portmapper for MOUNT port
-    CONNECTING_MOUNT,     // Connecting to MOUNT service
-    MOUNTING,             // Attempting NFS mount
-    QUERYING_PMAP_NFS,    // Querying portmapper for NFS port
-    MOUNTED,              // Successfully mounted
-    FAILED,               // Mount failed, waiting to retry
+    IDLE,
+    CONNECTING_PMAP,
+    QUERYING_PMAP_MOUNT,
+    CONNECTING_MOUNT,
+    MOUNTING,
+    QUERYING_PMAP_NFS,
+    MOUNTED,
+    FAILED,
   };
 
   MountState mount_state_{MountState::IDLE};
   uint32_t last_mount_attempt_{0};
-  uint32_t mount_retry_interval_{30000};  // Retry every 30 seconds
-  bool mount_attempted_in_setup_{false};
+  uint32_t mount_retry_interval_{30000};
 
-#ifdef USE_ESP_IDF
-  // Cached resolved IP address to avoid repeated DNS lookups
+#if defined(USE_ESP_IDF) || defined(USE_ESP32)
   struct sockaddr_in server_addr_ {};
   bool server_addr_resolved_{false};
 #endif
 
-  // Discovered ports from portmapper
   uint16_t mount_port_{0};
   bool mount_port_discovered_{false};
   uint16_t nfs_port_{0};
@@ -545,13 +395,10 @@ class NFSClient : public Component
   //========================================================================
 
   RPCClient rpc_;
-
-  // Shared RPC response buffer (allocated once in setup, reused for all RPC calls)
-  // Size: 65KB to handle largest possible NFSv3 responses
-  uint8_t *rpc_response_buffer_{nullptr};
+  std::unique_ptr<uint8_t[]> rpc_response_buffer_;
 
   //========================================================================
-  // File Handle Cache (for chunked operations)
+  // File Handle Cache (for chunked reads)
   //========================================================================
 
   std::string cached_path_;
@@ -563,25 +410,17 @@ class NFSClient : public Component
   // Internal Operations
   //========================================================================
 
-#ifdef USE_ESP_IDF
+#if defined(USE_ESP_IDF) || defined(USE_ESP32)
   bool resolve_hostname_();
 #endif
-  bool connect_();
-  void close_connection_();  // Close TCP connection without unmounting
-  void disconnect_();        // Unmount and close connection
+  bool connect_tcp_();
+  void close_connection_();
+  void unmount_();
   bool send_rpc_(const XDRBuffer &request, XDRBuffer &response);
   bool query_portmapper_(uint32_t program, uint32_t version, uint16_t &port);
 
-  //========================================================================
-  // MOUNT Protocol
-  //========================================================================
-
   bool mount_export_(const std::string &export_path, NFSFileHandle &fh);
   bool unmount_export_(const std::string &export_path);
-
-  //========================================================================
-  // NFS Protocol Operations
-  //========================================================================
 
   bool nfs_lookup_(const NFSFileHandle &dir_fh, const std::string &name, NFSFileHandle &fh, NFSFileAttr &attr);
   bool nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr);
@@ -592,17 +431,12 @@ class NFSClient : public Component
   bool nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh);
   bool nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name);
   bool nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries);
-  bool nfs_rename_(const NFSFileHandle &from_dir_fh, const std::string &from_name, const NFSFileHandle &to_dir_fh,
-                   const std::string &to_name);
-
-  //========================================================================
-  // Path Resolution
-  //========================================================================
+  bool nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &old_name, const NFSFileHandle &new_dir_fh,
+                   const std::string &new_name);
 
   bool resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFileAttr &attr);
   bool resolve_parent_path_(const std::string &path, NFSFileHandle &parent_fh, std::string &filename);
   std::vector<std::string> split_path_(const std::string &path);
 };
 
-}  // namespace nfs_client
-}  // namespace esphome
+}  // namespace esphome::nfs_client

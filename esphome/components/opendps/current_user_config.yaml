@@ -80,10 +80,13 @@ esp32:
       CONFIG_ESPHOME_ENABLE_PNGLE: "1"
 external_components:
   - source: github://p1ngb4ck/esphome@dev
-    components: [esp32, http_file_browser, nfs_client, opendps, psram, storage, sd_storage, uart, usb_host, usb_storage, usb_uart]
+    components: [esp32, http_file_browser, ledc, nfs_client, opendps, psram, storage, sd_storage, time, uart, usb_host, usb_storage, usb_uart]
     refresh: 0s
   - source: github://p1ngb4ck/lvgl_9.5@main
     components: [font, image, lvgl]
+    refresh: 0s
+  - source: github://p1ngb4ck/esphome_esp-video
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: 0s
 
 logger:
@@ -633,10 +636,34 @@ display:
     model: JC1060P470
     reset_pin: GPIO0
     update_interval: 17ms
-    color_depth: 24
+    color_depth: 16
 
 image:
 
+esp_video:
+  i2c_id: i2c_bus_a
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_xclk_init: true
+  enable_jpeg: true
+  enable_isp: true
+  enable_uvc: false
+  use_heap_allocator: true 
+
+esp_cam_sensor:
+  id: tab7_cam
+  i2c_id: i2c_bus_a
+  sensor_type: ov02c10
+  resolution: "640x368"
+  pixel_format: "RGB565"
+  framerate: 30
+
+lvgl_camera_display:
+  id: camera_display
+  camera_id: tab7_cam
+  canvas_id: camera_canvas
+  update_interval: 33ms
+  
 uart:
   - id: uart1_id
     baud_rate: 19200
@@ -806,6 +833,22 @@ usb_storage:
       mount_path: /usb
 
 switch:
+  - platform: template
+    name: "LVGL Camera Display"
+    id: lvgl_display_enable_switch
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          auto canvas = id(camera_canvas);
+          auto *disp = id(camera_display);
+          if (canvas != nullptr && disp != nullptr) {
+            disp->configure_canvas(canvas);
+            disp->set_enabled(true);     // start refreshing
+          }
+    turn_off_action:
+      - lambda: |-
+          id(camera_display).set_enabled(false);
   - platform: template
     name: "OpenDPS Output"
     id: dps_output_switch
@@ -3116,12 +3159,14 @@ lvgl:
   byte_order: little_endian
   default_font: montserrat_16
   use_ppa: true
-  color_depth: 16
   use_ppa_img: true
+  color_depth: 16
   buffer_size: 100%
   pad_all: 0
   scrollbar_mode: "off"
   scroll_on_focus: false
+  fps_benchmark: true
+  perf_monitor: true
 
   on_boot:
     - lambda: 'id(g_lvgl_ready) = true;'
@@ -3235,7 +3280,7 @@ lvgl:
           widgets:
             - button:
                 id: tab_btn_main
-                width: 341
+                width: 256
                 height: 80
                 bg_color: 0x1A1A1A
                 border_width: 2
@@ -3257,6 +3302,9 @@ lvgl:
                       lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
                       lv_obj_set_style_text_color(id(tab_lbl_settings), dim, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_camera), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_camera), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_camera), dim, LV_PART_MAIN);
                       lv_unlock();
                 widgets:
                   - label:
@@ -3267,7 +3315,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_graphs
-                width: 342
+                width: 256
                 height: 80
                 bg_color: 0x111111
                 border_width: 2
@@ -3289,6 +3337,9 @@ lvgl:
                       lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
                       lv_obj_set_style_text_color(id(tab_lbl_settings), dim, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_camera), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_camera), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_camera), dim, LV_PART_MAIN);
                       lv_unlock();
                 widgets:
                   - label:
@@ -3299,7 +3350,7 @@ lvgl:
                       text_font: montserrat_16
             - button:
                 id: tab_btn_settings
-                width: 341
+                width: 256
                 height: 80
                 bg_color: 0x111111
                 border_width: 2
@@ -3321,12 +3372,50 @@ lvgl:
                       lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
                       lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
                       lv_obj_set_style_text_color(id(tab_lbl_graphs), dim, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_camera), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_camera), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_camera), dim, LV_PART_MAIN);
                       lv_unlock();
                 widgets:
                   - label:
                       id: tab_lbl_settings
                       align: CENTER
                       text: "SETTINGS"
+                      text_color: 0x555555
+                      text_font: montserrat_16
+            - button:
+                id: tab_btn_camera
+                width: 256
+                height: 80
+                bg_color: 0x111111
+                border_width: 2
+                border_side: NONE
+                border_color: 0x39FF14
+                radius: 0
+                on_click:
+                  - lvgl.page.show: camera_page
+                  - lambda: |-
+                      lv_lock();
+                      lv_color_t acc = lv_color_hex((uint32_t)id(theme_accent));
+                      lv_color_t dim = lv_color_hex((uint32_t)id(theme_text_dim));
+                      lv_obj_set_style_bg_color(id(tab_btn_camera), lv_color_hex(0x1A1A1A), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_camera), (lv_border_side_t)LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_camera), acc, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_settings), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_settings), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_settings), dim, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_main), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_main), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_main), dim, LV_PART_MAIN);
+                      lv_obj_set_style_bg_color(id(tab_btn_graphs), lv_color_hex(0x111111), LV_PART_MAIN);
+                      lv_obj_set_style_border_side(id(tab_btn_graphs), (lv_border_side_t)LV_BORDER_SIDE_NONE, LV_PART_MAIN);
+                      lv_obj_set_style_text_color(id(tab_lbl_graphs), dim, LV_PART_MAIN);
+                      lv_unlock();
+                widgets:
+                  - label:
+                      id: tab_lbl_camera
+                      align: CENTER
+                      text: "CAMERA"
                       text_color: 0x555555
                       text_font: montserrat_16
 
@@ -9086,3 +9175,15 @@ lvgl:
                         text: "Close"
                         text_color: 0xCCCCCC
                         text_font: montserrat_16
+    - id: camera_page
+      widgets:
+        - canvas:
+            id: camera_canvas
+            width: 640
+            height: 368
+            x: 192
+            y: 60
+            bg_color: 0x000000
+            border_width: 0
+            radius: 0
+            pad_all: 0
