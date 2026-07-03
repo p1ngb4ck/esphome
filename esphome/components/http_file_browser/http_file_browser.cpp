@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <unistd.h>
 #ifdef USE_ESP_IDF
+#include <esp_vfs.h>
 #include <esp_vfs_fat.h>
 #include <diskio_impl.h>
 #include <esp_heap_caps.h>
