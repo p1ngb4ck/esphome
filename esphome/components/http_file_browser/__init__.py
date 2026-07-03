@@ -12,9 +12,6 @@ from esphome.core import CORE, coroutine_with_priority
 CODEOWNERS = ["@esphome/core"]
 DEPENDENCIES = ["storage", "web_server_base"]
 
-# http_file_browser uses VFS directory functions (opendir, readdir, mkdir, rmdir)
-# Ensure CONFIG_VFS_SUPPORT_DIR is enabled
-require_vfs_dir()
 AUTO_LOAD = []
 
 http_file_browser_ns = cg.esphome_ns.namespace("http_file_browser")
@@ -80,6 +77,7 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     # Re-enable fatfs IDF component (excluded by default) - needed for esp_vfs_fat_info()
     include_builtin_idf_component("fatfs")
+    require_vfs_dir()
     cg.add_define("USE_HTTP_FILE_BROWSER")
     cg.add_define("USE_WEBSERVER_OTA")  # Enable multipart upload support
     if CORE.is_esp32:
