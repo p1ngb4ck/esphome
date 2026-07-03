@@ -7,27 +7,15 @@
 #include "sd_storage_base.h"
 #include "esphome/core/gpio.h"
 
-#ifdef USE_STORAGE
-#include "esphome/components/storage/storage_device.h"
-#endif
-
-namespace esphome {
-namespace sd_storage {
+namespace esphome::sd_storage {
 
 static const char *const TAG = "sd_storage";
 
-enum MemoryUnits : short { Byte = 0, KiloByte = 1, MegaByte = 2, GigaByte = 3, TeraByte = 4, PetaByte = 5 };
-
-#ifdef USE_STORAGE
-class SdMmc : public SdStorageBase, public storage::StorageDevice {
-#else
 class SdMmc : public SdStorageBase {
-#endif
  public:
   void setup() override;
   void loop() override;
   void dump_config() override;
-  // Run at HARDWARE priority (800) to complete SD mounting before other devices initialize
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   // Pin configuration
@@ -40,89 +28,17 @@ class SdMmc : public SdStorageBase {
   void set_mode_1bit(bool mode_1bit) { this->mode_1bit_ = mode_1bit; }
   void set_cs_pin(GPIOPin *pin) { this->cs_pin_ = pin; }
   void set_slot(uint8_t slot) { this->slot_ = slot; }
-  void set_mount_path(const std::string &path) { this->mount_path_ = path; }
-  void set_id(const std::string &id) { this->id_ = id; }
 
-  // File operations
-  bool write_file(const std::string &path, const std::string &data);
-  bool append_file(const std::string &path, const std::string &data);
-  std::string read_file(const std::string &path);
-  bool delete_file(const std::string &path);
-
-  // Directory operations
-  bool create_directory(const std::string &path);
-  bool remove_directory(const std::string &path);
-  std::vector<FileInfo> list_directory(const std::string &path);
-
-  // Utility functions
-  bool is_directory(const std::string &path);
-  uint32_t file_size(const std::string &path);
-
-  // Card info
-  CardType get_card_type() const { return this->card_type_; }
-  bool is_mounted() const { return this->is_mounted_; }
-  uint64_t get_total_bytes() const { return this->total_bytes_; }
-  uint64_t get_used_bytes() const { return this->used_bytes_; }
-  uint64_t get_free_bytes() const;
-
-  // Public mount/unmount methods for external control
-  bool mount_card();
-  void unmount_card();
-
-  // Mount notification system for storage consumers
-  void add_mount_ready_callback(const mount_ready_callback_t &callback) {
-    this->mount_ready_callbacks_.push_back(callback);
-  }
-  const std::string &get_mount_path() const { return this->mount_path_; }
-
-#ifdef USE_STORAGE
-  //========================================================================
-  // StorageDevice Interface Implementation
-  //========================================================================
-
-  // Device Information (required)
-  storage::StorageInfo get_info() override;
-  bool is_available() override { return this->is_mounted_; }
-
-  // Filesystem Access
-  bool supports_filesystem() override { return true; }
-  std::string get_mount_path() override { return this->mount_path_; }
-
-  // File Operations
-  bool file_exists(const char *path) override;
-  bool get_file_size(const char *path, size_t *size) override;
-  bool read_file(const char *path, uint8_t *data, size_t *length) override;
-  bool write_file(const char *path, const uint8_t *data, size_t length) override;
-  bool append_file(const char *path, const uint8_t *data, size_t length) override;
-  bool delete_file(const char *path) override;
-  bool rename_file(const char *old_path, const char *new_path) override;
-  bool copy_file(const char *src_path, const char *dst_path) override;
-
-  // Directory Operations
-  bool dir_exists(const char *path) override;
-  bool create_dir(const char *path) override;
-  bool delete_dir(const char *path, bool recursive = false) override;
-  bool list_dir(const char *path, std::vector<storage::StorageFileInfo> *entries) override;
-
-  // Space Information
-  bool get_space_info(uint64_t *total, uint64_t *free) override;
-  bool can_write_file(const char *path, size_t size) override;
-
-  // Streaming File Access
-  void *open_file(const char *path, const char *mode) override;
-  size_t read_file_chunk(void *handle, uint8_t *buffer, size_t size) override;
-  size_t write_file_chunk(void *handle, const uint8_t *data, size_t size) override;
-  bool seek_file(void *handle, size_t offset) override;
-  size_t tell_file(void *handle) override;
-  bool close_file(void *handle) override;
-
-  // Maintenance
-  bool format() override;
-  bool sync() override;
-#endif
+  storage::StorageError mount() override;
+  storage::StorageError unmount() override;
 
  protected:
-  // Pin configuration
+  SdFileHandle *get_handle_pool() override { return this->handle_pool_; }
+  uint64_t get_free_bytes_impl() const override;
+  uint32_t get_block_size_impl() const override { return this->block_size_; }
+
+  bool update_card_info();
+
   uint8_t clk_pin_{0};
   uint8_t cmd_pin_{0};
   uint8_t data0_pin_{0};
@@ -132,26 +48,11 @@ class SdMmc : public SdStorageBase {
   GPIOPin *cs_pin_{nullptr};
   bool mode_1bit_{false};
   uint8_t slot_{0};
+  uint32_t block_size_{512};
 
-  // Card state
-  CardType card_type_{CardType::UNKNOWN};
-  bool is_mounted_{false};
-  uint64_t total_bytes_{0};
-  uint64_t used_bytes_{0};
-
-  // Mount configuration and callbacks
-  std::string mount_path_{"/sdcard"};                          // Default mount path
-  std::string id_;                                             // Unique identifier for storage registry
-  std::vector<mount_ready_callback_t> mount_ready_callbacks_;  // Callbacks to notify when mount is ready
-
-  // Mount management (internal)
-  bool update_card_info();
-
-  // Helper to build full path
-  std::string build_full_path(const char *path);
+  SdFileHandle handle_pool_[MAX_OPEN_FILES]{};
 };
 
-}  // namespace sd_storage
-}  // namespace esphome
+}  // namespace esphome::sd_storage
 
 #endif  // USE_SD_STORAGE_SDMMC
