@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <cerrno>
+#include <unistd.h>
 
 namespace esphome::usb_storage {
 
@@ -707,7 +708,7 @@ storage::StorageError USBStorageDevice::rmdir(const char *path, bool recursive) 
     }
     closedir(dir);
   }
-  return ::rmdir(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  return ::unlink(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
 }
 
 storage::StorageError USBStorageDevice::remove(const char *path) {
