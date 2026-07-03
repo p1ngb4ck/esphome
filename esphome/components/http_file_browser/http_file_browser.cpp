@@ -3112,7 +3112,7 @@ bool HttpFileBrowser::recursive_delete_directory(const std::string &path, bool t
 
   // Delete the directory itself
   if (success) {
-    if (rmdir(path.c_str()) != 0) {
+    if (unlink(path.c_str()) != 0) {
       ESP_LOGE(TAG, "Failed to delete directory: %s (errno: %d, %s)", path.c_str(), errno, strerror(errno));
       return false;
     }
