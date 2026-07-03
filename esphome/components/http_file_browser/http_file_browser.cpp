@@ -20,6 +20,7 @@
 #include <ctime>
 #include <cstring>
 #include <cerrno>
+#include <unistd.h>
 #ifdef USE_ESP_IDF
 #include <esp_vfs_fat.h>
 #include <diskio_impl.h>
@@ -1159,7 +1160,7 @@ bool HttpFileBrowser::delete_path(const std::string &path, bool is_directory) {
 
   // Use VFS for local storage
   if (is_directory) {
-    return rmdir(path.c_str()) == 0;
+    return unlink(path.c_str()) == 0;
   } else {
     return remove(path.c_str()) == 0;
   }
