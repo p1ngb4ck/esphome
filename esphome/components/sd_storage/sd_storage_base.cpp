@@ -3,12 +3,19 @@
 #include "esphome/core/log.h"
 #include <sys/stat.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
 #include "esphome/components/storage/storage.h"
 
 namespace esphome::sd_storage {
+
+using storage::FileHandle;
+using storage::FileStat;
+using storage::OpenMode;
+using storage::StorageError;
+using storage::StorageInfo;
 
 static const char *const TAG_BASE = "sd_storage";
 
@@ -246,7 +253,7 @@ storage::StorageError SdStorageBase::rmdir(const char *path, bool recursive) {
     closedir(dir);
   }
 
-  return ::rmdir(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  return ::unlink(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
 }
 
 storage::StorageError SdStorageBase::remove(const char *path) {

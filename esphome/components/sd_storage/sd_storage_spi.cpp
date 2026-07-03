@@ -4,6 +4,7 @@
 
 #include "esphome/core/log.h"
 #include <cerrno>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -24,6 +25,12 @@ extern "C" {
 static constexpr int SD_OCR_SDHC_CAP = (1 << 30);
 
 namespace esphome::sd_storage {
+
+using storage::FileHandle;
+using storage::FileStat;
+using storage::OpenMode;
+using storage::StorageError;
+using storage::StorageInfo;
 
 void SdSpi::setup() {
   ESP_LOGI(TAG_SPI, "Initializing SD card in SPI mode");
@@ -122,8 +129,8 @@ StorageError SdSpi::mount() {
   this->is_mounted_ = true;
   this->update_card_info();
 
-  ESP_LOGI(TAG_SPI, "SD card mounted at %s (max %d kHz, real %d kHz)", this->mount_path_, this->card_->max_freq_khz,
-           this->card_->real_freq_khz);
+  ESP_LOGI(TAG_SPI, "SD card mounted at %s (max %" PRIu32 " kHz, real %" PRIu32 " kHz)", this->mount_path_,
+           this->card_->max_freq_khz, this->card_->real_freq_khz);
 
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->register_storage(this);
