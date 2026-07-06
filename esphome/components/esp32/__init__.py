@@ -1966,7 +1966,15 @@ async def _reconcile_network_sdkconfig() -> None:
 
     # SoftAP support: drop it when WiFi is used without AP mode (IDF only).
     # Skip on esp32_hosted — symbol is owned by the co-processor component.
-    if not is_arduino and net.wifi and not net.wifi_ap and "esp32_hosted" not in CORE.config:
+    # Skip on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer satisfied there,
+    # so IDF disables it and flags any user-set value as a "disabled symbol" warning.
+    if (
+        not is_arduino
+        and net.wifi
+        and not net.wifi_ap
+        and "esp32_hosted" not in CORE.config
+        and idf_version() < cv.Version(6, 1, 0)
+    ):
         set_opt("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", False)
 
     # LWIP DHCP server: a WiFi-AP-mode / enable_lwip_dhcp_server concern (not
@@ -2363,7 +2371,9 @@ async def to_code(config):
 
     # Reduce PHY TX power in the event of a brownout
     # Not applicable on esp32_hosted — PHY lives on the co-processor
-    if "esp32_hosted" not in CORE.config:
+    # Not applicable on IDF >= 6.1.0 — the symbol's Kconfig dependency is no longer
+    # satisfied there, so IDF disables it and flags any user-set value as a warning.
+    if "esp32_hosted" not in CORE.config and idf_version() < cv.Version(6, 1, 0):
         add_idf_sdkconfig_option("CONFIG_ESP_PHY_REDUCE_TX_POWER", True)
 
     # Set default CPU frequency
