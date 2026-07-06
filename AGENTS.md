@@ -308,6 +308,15 @@ This document provides essential context for AI models interacting with this pro
     *   Including `defines.h` is essential for any component using conditional compilation
     *   **Both .h and .cpp files need the include** - the header for declarations, the implementation for definitions
 
+### ABSOLUTE RULE: No C Standard Library / POSIX Usage, Ever — No Exceptions
+
+**This means ALL of it, not a specific subset. Do not interpret this narrowly. If the user says "no C standard libs," that means literally zero C standard library or POSIX usage anywhere in code you write — not just the ones already called out elsewhere in this document.**
+
+*   Never `#include` or call anything from the C standard library or POSIX (this includes but is not limited to `<cstring>`, `<cstdio>`, `<cerrno>`, `<sys/stat.h>`, `<dirent.h>`, `<unistd.h>`, `<cstdlib>`, `<ctime>`, and every function they declare — `strlen`, `strcmp`, `memcpy`, `malloc`, `printf`, `errno`, `opendir`, etc.).
+*   This is ESP-IDF, not a desktop OS — assume nothing is available just because it's "standard C/C++." Use ESPHome's own helpers (`esphome/core/helpers.h`: `StringRef`, `StaticVector`, `FixedVector`, etc.) and ESP-IDF's native APIs instead.
+*   Before writing any code, verify the real ESP-IDF/ESPHome-native equivalent exists and use it. When unsure, check the actual installed framework headers or ask — never fall back to a C standard library call because it seems simpler or "obviously available."
+*   This rule is final and not open to reinterpretation, narrowing, or exceptions in any future conversation.
+
 ### Core Principle
 
 **The time waste is not in the user teaching boundaries - it's in the AI violating those boundaries and forcing the user to stop everything to correct violations.**
