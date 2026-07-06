@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\n[opendps] Fix TCP bridge crash by deferring setup until network ready\n\n- Move tcp_bridge_enabled_ and tcp_bridge_port_ outside #ifdef block\n  so Python codegen works regardless of socket support\n- Add tcp_bridge_initialized_ flag to track setup state\n- Defer TCP bridge socket setup to loop\\(\\) instead of setup\\(\\)\n- Check network::is_connected\\(\\) before initializing sockets\n- This prevents crashes when ESP32 boots before network is ready\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git clone:*)",
+      "WebFetch(domain:docs.rs-online.com)"
+    ]
+  }
+}
