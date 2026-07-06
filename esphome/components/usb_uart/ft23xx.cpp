@@ -112,39 +112,40 @@ static int ftdi_to_clkbits(int baudrate, unsigned int clk, int clk_div, uint32_t
   return best_baud;
 }
 
-struct FtdiBaudrate {
-  uint16_t value;
-  uint16_t ftdi_index;
-};
-
-static FtdiBaudrate ftdi_convert_baudrate(int baudrate, uint8_t chip_type, uint8_t channel_index) {
+static int ftdi_convert_baudrate(int baudrate, uint8_t chip_type, uint8_t channel_index, uint16_t *value,
+                                 uint16_t *index) {
+  int best_baud;
   uint32_t encoded_divisor;
+
+  if (baudrate <= 0) {
+    return -1;
+  }
 
   static constexpr uint32_t H_CLK = 120000000;
   static constexpr uint32_t C_CLK = 48000000;
   if ((chip_type == TYPE_2232H) || (chip_type == TYPE_4232H) || (chip_type == TYPE_232H)) {
     if (baudrate * 10 > H_CLK / 0x3fff) {
-      ftdi_to_clkbits(baudrate, H_CLK, 10, &encoded_divisor);
+      best_baud = ftdi_to_clkbits(baudrate, H_CLK, 10, &encoded_divisor);
       encoded_divisor |= 0x20000; /* switch on CLK/10*/
     } else {
-      ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
+      best_baud = ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
     }
   } else if ((chip_type == TYPE_BM) || (chip_type == TYPE_2232C) || (chip_type == TYPE_R) || (chip_type == TYPE_230X)) {
-    ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
+    best_baud = ftdi_to_clkbits(baudrate, C_CLK, 16, &encoded_divisor);
   } else {
-    ftdi_to_clkbits_am(baudrate, &encoded_divisor);
+    best_baud = ftdi_to_clkbits_am(baudrate, &encoded_divisor);
   }
 
-  FtdiBaudrate result;
-  result.value = (uint16_t) (encoded_divisor & 0xFFFF);
+  *value = (uint16_t) (encoded_divisor & 0xFFFF);
   if (chip_type == TYPE_2232H || chip_type == TYPE_4232H || chip_type == TYPE_232H) {
-    result.ftdi_index = (uint16_t) (encoded_divisor >> 8);
-    result.ftdi_index &= 0xFF00;
-    result.ftdi_index |= (channel_index + 1);
+    *index = (uint16_t) (encoded_divisor >> 8);
+    *index &= 0xFF00;
+    *index |= (channel_index + 1);
   } else {
-    result.ftdi_index = (uint16_t) (encoded_divisor >> 16);
+    *index = (uint16_t) (encoded_divisor >> 16);
   }
-  return result;
+
+  return best_baud;
 }
 
 static optional<CdcEps> get_uart(const usb_config_desc_t *config_desc, uint8_t intf_idx) {
@@ -296,10 +297,11 @@ int USBUartTypeFT23XX::set_baudrate_(USBUartChannel *channel, uint32_t baudrate)
   if (baudrate == 0) {
     baudrate = channel->baud_rate_;
   }
-  auto config = ftdi_convert_baudrate(baudrate, this->chip_type_, channel->index_);
-  ESP_LOGD(TAG, "Baudrate: %" PRIu32 ", value=0x%04X, ftdi_index=0x%04X", baudrate, config.value, config.ftdi_index);
-  uint16_t usb_index = (config.ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
-  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, config.value, usb_index, callback);
+  uint16_t value = 0, ftdi_index = 0;
+  ftdi_convert_baudrate(baudrate, this->chip_type_, channel->index_, &value, &ftdi_index);
+  ESP_LOGD(TAG, "Baudrate: %" PRIu32 ", value=0x%04X, ftdi_index=0x%04X", baudrate, value, ftdi_index);
+  uint16_t usb_index = (ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
+  bool ok = this->control_transfer(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, value, usb_index, callback);
   if (!ok) {
     ESP_LOGE(TAG, "Set baudrate control_transfer submit failed");
     channel->initialised_.store(false);
@@ -446,6 +448,19 @@ void USBUartTypeFT23XX::on_rx_overflow(USBUartChannel *channel) {
   channel->input_buffer_.clear();
 }
 
+void USBUartTypeFT23XX::enable_channels() {
+  if (!this->channels_.empty() && this->channels_[0]->initialised_.load()) {
+    this->reset_(this->channels_[0]);
+  }
+
+  for (auto *channel : this->channels_) {
+    if (!channel->initialised_.load())
+      continue;
+    channel->input_started_.store(false);
+    channel->output_started_.store(false);
+  }
+}
+
 bool USBUartTypeFT23XX::config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok,
                                     const uint8_t *response) {
   // On reload (settings change on an open channel) skip the SIO reset; the FTDI set_termios
@@ -458,11 +473,11 @@ bool USBUartTypeFT23XX::config_step(USBUartChannel *channel, uint8_t step, bool 
                              channel->cdc_dev_.bulk_interface_number + 1);
       return true;
     case 1: {  // set baudrate
-      auto config = ftdi_convert_baudrate(channel->baud_rate_, this->chip_type_, channel->index_);
-      uint16_t usb_index = (config.ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
-      ESP_LOGD(TAG, "Baudrate: %u, value=0x%04X, ftdi_index=0x%04X", (unsigned) channel->baud_rate_, config.value,
-               config.ftdi_index);
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, config.value, usb_index);
+      uint16_t value = 0, ftdi_index = 0;
+      ftdi_convert_baudrate(channel->baud_rate_, this->chip_type_, channel->index_, &value, &ftdi_index);
+      uint16_t usb_index = (ftdi_index & 0xFF00) | (channel->cdc_dev_.bulk_interface_number + 1);
+      ESP_LOGD(TAG, "Baudrate: %" PRIu32 ", value=0x%04X, ftdi_index=0x%04X", channel->baud_rate_, value, ftdi_index);
+      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, 0x03, value, usb_index);
       return true;
     }
     case 2: {  // set line properties (data bits / parity / stop bits)

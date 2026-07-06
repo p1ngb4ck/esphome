@@ -15,6 +15,7 @@ extern "C" {
 #include "esp_vfs_fat.h"
 }
 #include "ff.h"
+#include "diskio_sdmmc.h"
 #include "esphome/components/storage/storage.h"
 
 #ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
@@ -97,7 +98,7 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_);
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
   ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", spi::Utility::get_pin_no(this->cs_));
-  LOG_PIN("  CD Pin: ", this->cd_pin_);
+  log_pin(TAG_SPI, "  CD Pin: ", this->cd_pin_);
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG_SPI, "  Total bytes: %" PRIu64, this->total_bytes_);
@@ -165,10 +166,11 @@ StorageError SdSpi::mount() {
   }
 
   this->is_mounted_ = true;
+  this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
   this->update_card_info();
 
   ESP_LOGI(TAG_SPI, "SD card mounted at %s (max %" PRIu32 " kHz, real %" PRIu32 " kHz)", this->mount_path_,
-           this->card_->max_freq_khz, this->card_->real_freq_khz);
+           static_cast<uint32_t>(this->card_->max_freq_khz), static_cast<uint32_t>(this->card_->real_freq_khz));
 
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->register_storage(this);
