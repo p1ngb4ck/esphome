@@ -370,7 +370,7 @@ def _consume_wifi_sockets(config: ConfigType) -> ConfigType:
     DHCP/DNS). On ESP32, CONFIG_LWIP_MAX_SOCKETS only controls the POSIX socket
     layer — DHCP/DNS use raw udp_new() which bypasses it entirely.
     """
-    if not (CORE.is_bk72xx or CORE.is_rtl87xx or CORE.is_ln882x or CORE.is_rp2):
+    if not (CORE.is_bk72xx or CORE.is_rtl87xx or CORE.is_ln882x):
         return config
     from esphome.components import socket
 
@@ -474,7 +474,6 @@ CONFIG_SCHEMA = cv.All(
                 CONF_POWER_SAVE_MODE,
                 esp8266="none",
                 esp32="light",
-                rp2="light",
                 bk72xx="none",
                 rtl87xx="none",
                 ln882x="light",
@@ -678,8 +677,6 @@ async def to_code(config):
         if CONF_PHY_MODE in config:
             cg.add_define("USE_WIFI_PHY_MODE")
             cg.add(var.set_phy_mode(config[CONF_PHY_MODE]))
-    elif CORE.is_rp2:
-        cg.add_library("WiFi", None)
 
     if CORE.is_esp32:
         if config[CONF_ENABLE_BTM] or config[CONF_ENABLE_RRM]:
@@ -947,7 +944,6 @@ FILTER_SOURCE_FILES = filter_source_files_from_platform(
             PlatformFramework.RTL87XX_ARDUINO,
             PlatformFramework.LN882X_ARDUINO,
         },
-        "wifi_component_pico_w.cpp": {PlatformFramework.RP2_ARDUINO},
     }
 )
 
