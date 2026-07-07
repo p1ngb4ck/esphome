@@ -144,10 +144,10 @@ def has_native_wifi(
     """
     if platform == Platform.ESP32:
         return variant_has_wifi(variant) if variant else True
-#    if platform == Platform.RP2:
-#        from esphome.components.rp2 import board_id_has_wifi
+    if platform == Platform.RP2:
+        from esphome.components.rp2 import board_id_has_wifi
 
-#        return board_id_has_wifi(board) if board else True
+        return board_id_has_wifi(board) if board else True
     return platform in _WIFI_FIRST_PLATFORMS
 
 
@@ -302,11 +302,11 @@ def wifi_network_ap(value):
     if value is None:
         value = {}
     config = WIFI_NETWORK_AP(value)
-#    if CONF_MANUAL_IP in config and CORE.is_rp2:
-#        raise cv.Invalid(
-#            "Manual AP IP configuration is not supported on RP2040. "
-#            "The AP uses the default IP 192.168.4.1"
-#        )
+    if CONF_MANUAL_IP in config and CORE.is_rp2:
+        raise cv.Invalid(
+            "Manual AP IP configuration is not supported on RP2040. "
+            "The AP uses the default IP 192.168.4.1"
+        )
     return config
 
 
@@ -325,14 +325,14 @@ def validate_variant(_):
         variant = get_esp32_variant()
         if variant in NO_WIFI_VARIANTS and "esp32_hosted" not in fv.full_config.get():
             raise cv.Invalid(f"WiFi requires component esp32_hosted on {variant}")
-#    if CORE.is_rp2:
-#        from esphome.components.rp2 import board_has_wifi, get_board
+    if CORE.is_rp2:
+        from esphome.components.rp2 import board_has_wifi, get_board
 
-#        if not board_has_wifi():
-#            raise cv.Invalid(
-#                f"Board '{get_board()}' does not have WiFi support (no CYW43 wireless chip). "
-#                f"Use a WiFi-capable board like 'rpipicow' or 'rpipico2w'."
-#            )
+        if not board_has_wifi():
+            raise cv.Invalid(
+                f"Board '{get_board()}' does not have WiFi support (no CYW43 wireless chip). "
+                f"Use a WiFi-capable board like 'rpipicow' or 'rpipico2w'."
+            )
 
 
 def _apply_min_auth_mode_default(config):
@@ -370,7 +370,7 @@ def _consume_wifi_sockets(config: ConfigType) -> ConfigType:
     DHCP/DNS). On ESP32, CONFIG_LWIP_MAX_SOCKETS only controls the POSIX socket
     layer — DHCP/DNS use raw udp_new() which bypasses it entirely.
     """
-    if not (CORE.is_bk72xx or CORE.is_rtl87xx or CORE.is_ln882x):
+    if not (CORE.is_bk72xx or CORE.is_rtl87xx or CORE.is_ln882x or CORE.is_rp2):
         return config
     from esphome.components import socket
 
@@ -474,6 +474,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_POWER_SAVE_MODE,
                 esp8266="none",
                 esp32="light",
+                rp2="light",
                 bk72xx="none",
                 rtl87xx="none",
                 ln882x="light",
@@ -627,8 +628,7 @@ async def to_code(config):
         request_wifi(ap=CONF_AP in config)
 
     # Disable Enterprise WiFi support if no EAP is configured
-    # Skip on esp32_hosted — symbol is owned by the co-processor component
-    if CORE.is_esp32 and "esp32_hosted" not in CORE.config:
+    if CORE.is_esp32:
         add_idf_sdkconfig_option("CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT", has_eap)
 
     # Only define USE_WIFI_MANUAL_IP if any AP uses manual IP
@@ -677,6 +677,8 @@ async def to_code(config):
         if CONF_PHY_MODE in config:
             cg.add_define("USE_WIFI_PHY_MODE")
             cg.add(var.set_phy_mode(config[CONF_PHY_MODE]))
+    elif CORE.is_rp2:
+        cg.add_library("WiFi", None)
 
     if CORE.is_esp32:
         if config[CONF_ENABLE_BTM] or config[CONF_ENABLE_RRM]:
@@ -693,8 +695,7 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP", True)
 
     # Apply high performance WiFi settings if high performance networking is enabled
-    # Skip on esp32_hosted — WiFi runs on the co-processor, these symbols are disabled
-    if CORE.is_esp32 and has_high_performance_networking() and "esp32_hosted" not in CORE.config:
+    if CORE.is_esp32 and has_high_performance_networking():
         # Check if PSRAM is guaranteed (set by psram component during final validation)
         psram_guaranteed = psram_is_guaranteed()
 
@@ -944,6 +945,7 @@ FILTER_SOURCE_FILES = filter_source_files_from_platform(
             PlatformFramework.RTL87XX_ARDUINO,
             PlatformFramework.LN882X_ARDUINO,
         },
+        "wifi_component_pico_w.cpp": {PlatformFramework.RP2_ARDUINO},
     }
 )
 
