@@ -302,11 +302,11 @@ def wifi_network_ap(value):
     if value is None:
         value = {}
     config = WIFI_NETWORK_AP(value)
-    if CONF_MANUAL_IP in config and CORE.is_rp2:
-        raise cv.Invalid(
-            "Manual AP IP configuration is not supported on RP2040. "
-            "The AP uses the default IP 192.168.4.1"
-        )
+#    if CONF_MANUAL_IP in config and CORE.is_rp2:
+#        raise cv.Invalid(
+#            "Manual AP IP configuration is not supported on RP2040. "
+#            "The AP uses the default IP 192.168.4.1"
+#        )
     return config
 
 
@@ -325,14 +325,14 @@ def validate_variant(_):
         variant = get_esp32_variant()
         if variant in NO_WIFI_VARIANTS and "esp32_hosted" not in fv.full_config.get():
             raise cv.Invalid(f"WiFi requires component esp32_hosted on {variant}")
-    if CORE.is_rp2:
-        from esphome.components.rp2 import board_has_wifi, get_board
+#    if CORE.is_rp2:
+#        from esphome.components.rp2 import board_has_wifi, get_board
 
-        if not board_has_wifi():
-            raise cv.Invalid(
-                f"Board '{get_board()}' does not have WiFi support (no CYW43 wireless chip). "
-                f"Use a WiFi-capable board like 'rpipicow' or 'rpipico2w'."
-            )
+#        if not board_has_wifi():
+#            raise cv.Invalid(
+#                f"Board '{get_board()}' does not have WiFi support (no CYW43 wireless chip). "
+#                f"Use a WiFi-capable board like 'rpipicow' or 'rpipico2w'."
+#            )
 
 
 def _apply_min_auth_mode_default(config):
