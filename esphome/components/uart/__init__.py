@@ -534,7 +534,7 @@ FILTER_SOURCE_FILES = filter_source_files_from_platform(
         },
         "uart_component_esp8266.cpp": {PlatformFramework.ESP8266_ARDUINO},
         "uart_component_host.cpp": {PlatformFramework.HOST_NATIVE},
-        "uart_component_rp2.cpp": {PlatformFramework.RP2_ARDUINO},
+#        "uart_component_rp2.cpp": {PlatformFramework.RP2_ARDUINO},
         "uart_component_libretiny.cpp": {
             PlatformFramework.BK72XX_ARDUINO,
             PlatformFramework.RTL87XX_ARDUINO,
