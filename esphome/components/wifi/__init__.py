@@ -144,10 +144,10 @@ def has_native_wifi(
     """
     if platform == Platform.ESP32:
         return variant_has_wifi(variant) if variant else True
-    if platform == Platform.RP2:
-        from esphome.components.rp2 import board_id_has_wifi
+#    if platform == Platform.RP2:
+#        from esphome.components.rp2 import board_id_has_wifi
 
-        return board_id_has_wifi(board) if board else True
+#        return board_id_has_wifi(board) if board else True
     return platform in _WIFI_FIRST_PLATFORMS
 
 
