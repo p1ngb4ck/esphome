@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
@@ -13,8 +14,16 @@ CONF_MAX_BLOCKING_TRANSFER_SIZE = "max_blocking_transfer_size"
 CONF_TASK_STACK_SIZE = "task_stack_size"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_MAX_PENDING = "max_pending"
+CONF_MAX_STREAMS = "max_streams"
+
+# Not yet in esphome/const.py
+CONF_ON_REGISTERED = "on_registered"
+CONF_ON_UNREGISTERED = "on_unregistered"
 
 storage_ns = cg.esphome_ns.namespace("storage")
+Storage = storage_ns.class_("Storage", cg.Component)
+StoragePtr = Storage.operator("ptr")
+PathStorage = storage_ns.class_("PathStorage", Storage)
 StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
 StorageWorker = storage_ns.class_("StorageWorker", cg.Component)
 
@@ -57,6 +66,17 @@ CONFIG_SCHEMA = cv.Schema(
         # Fixed request pool/queue depth — sized exactly at codegen like the storage
         # registry's device count, no heap allocation per request at runtime.
         cv.Optional(CONF_MAX_PENDING, default=4): cv.int_range(min=1, max=16),
+        # Fixed stream pool depth (begin_write()/begin_read() and friends, storage_worker.h) —
+        # streams are typically much longer-lived than a single copy/move (e.g. one HTTP
+        # upload in progress), so a node doing one at a time needs very few slots.
+        cv.Optional(CONF_MAX_STREAMS, default=2): cv.int_range(min=1, max=8),
+        # Fired for every storage device, not just file-browser-style consumers — any
+        # component that cares about hotplug/availability can listen here instead of
+        # each reinventing its own notion of "storage changed". See
+        # StorageRegistry::add_on_registered_callback()/add_on_unregistered_callback()
+        # in storage.h.
+        cv.Optional(CONF_ON_REGISTERED): automation.validate_automation({}),
+        cv.Optional(CONF_ON_UNREGISTERED): automation.validate_automation({}),
     }
 )
 
@@ -121,6 +141,15 @@ async def to_code(config):
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
     cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
 
+    for conf in config.get(CONF_ON_REGISTERED, []):
+        await automation.build_callback_automation(
+            var, "add_on_registered_callback", [(StoragePtr, "x")], conf
+        )
+    for conf in config.get(CONF_ON_UNREGISTERED, []):
+        await automation.build_callback_automation(
+            var, "add_on_unregistered_callback", [(StoragePtr, "x")], conf
+        )
+
     data = _get_data()
     if data.worker_count > 0:
         cg.add_define("USE_STORAGE_WORKER")
@@ -135,5 +164,6 @@ async def to_code(config):
         cg.add(worker_var.set_task_stack_size(config[CONF_TASK_STACK_SIZE]))
         cg.add(worker_var.set_task_priority(config[CONF_TASK_PRIORITY]))
         cg.add(worker_var.set_max_pending(config[CONF_MAX_PENDING]))
+        cg.add(worker_var.set_max_streams(config[CONF_MAX_STREAMS]))
 
         cg.add(cg.RawExpression(f"{storage_ns}::global_storage_worker = {worker_var}"))
