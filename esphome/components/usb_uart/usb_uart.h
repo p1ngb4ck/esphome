@@ -255,6 +255,10 @@ class USBUartComponent : public usb_host::USBClient {
   // USBUartChannel::load_settings()).
   void apply_channel_settings(USBUartChannel *channel);
 
+  // Called from loop() when input_buffer_ has insufficient space for the incoming chunk.
+  // Default is a no-op; override in device-specific subclasses that need resync on overflow.
+  virtual void on_rx_overflow(USBUartChannel *channel) {}
+
   // Lock-free data transfer from USB task to main loop
   static constexpr int USB_DATA_QUEUE_SIZE = 32;
   LockFreeQueue<UsbDataChunk, USB_DATA_QUEUE_SIZE> usb_data_queue_;
