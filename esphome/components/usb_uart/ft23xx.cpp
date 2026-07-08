@@ -456,11 +456,6 @@ void USBUartTypeFT23XX::on_rx_overflow(USBUartChannel *channel) {
   channel->input_buffer_.clear();
 }
 
-void USBUartTypeFT23XX::on_rx_overflow(USBUartChannel *channel) {
-  ESP_LOGW(TAG, "RX buffer overflow on channel %d, clearing to resync", channel->index_);
-  channel->input_buffer_.clear();
-}
-
 void USBUartTypeFT23XX::enable_channels() {
   if (!this->channels_.empty() && this->channels_[0]->initialised_.load()) {
     this->reset_(this->channels_[0]);
