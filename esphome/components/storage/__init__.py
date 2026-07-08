@@ -1,289 +1,139 @@
-from __future__ import annotations
+from dataclasses import dataclass
 
-import logging
-
-from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TRIGGER_ID
+from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 
-_LOGGER = logging.getLogger(__name__)
+CODEOWNERS = ["@p1ngb4ck"]
 
-CODEOWNERS = ["@esphome/core"]
-DEPENDENCIES = []
-AUTO_LOAD = []
+DOMAIN = "storage"
 
-# Namespaces
+CONF_COPY_CHUNK_SIZE = "copy_chunk_size"
+CONF_MAX_BLOCKING_TRANSFER_SIZE = "max_blocking_transfer_size"
+CONF_TASK_STACK_SIZE = "task_stack_size"
+CONF_TASK_PRIORITY = "task_priority"
+CONF_MAX_PENDING = "max_pending"
+
 storage_ns = cg.esphome_ns.namespace("storage")
+StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
+StorageWorker = storage_ns.class_("StorageWorker", cg.Component)
 
-# Classes
-Storage = storage_ns.class_("Storage", cg.Component)
-StorageMount = storage_ns.class_("StorageMount")
-FileManager = storage_ns.class_("FileManager", cg.Component)
 
-# Triggers - FileManager triggers
-FileAddedTrigger = storage_ns.class_("FileAddedTrigger", automation.Trigger)
-FileModifiedTrigger = storage_ns.class_("FileModifiedTrigger", automation.Trigger)
-FileDeletedTrigger = storage_ns.class_("FileDeletedTrigger", automation.Trigger)
-DirectoryChangedTrigger = storage_ns.class_(
-    "DirectoryChangedTrigger", automation.Trigger
-)
+def validate_sector_multiple(value):
+    """Require a multiple of 512 (the common sector size).
 
-# Triggers - StorageDevice registry triggers
-DeviceAddedTrigger = storage_ns.class_("DeviceAddedTrigger", automation.Trigger)
-DeviceRemovedTrigger = storage_ns.class_("DeviceRemovedTrigger", automation.Trigger)
-DeviceChangedTrigger = storage_ns.class_("DeviceChangedTrigger", automation.Trigger)
+    Anything else loses the FATFS direct-sector-read path that motivated picking a
+    16kB chunk size in the first place — see STORAGE_COPY_CHUNK_SIZE's comment in storage.h.
+    """
+    if value % 512 != 0:
+        raise cv.Invalid(f"copy_chunk_size must be a multiple of 512, got {value}")
+    return value
 
-# StorageDevice pointer type for trigger parameters
-StorageDevice = storage_ns.class_("StorageDevice")
 
-# Info structs
-FileInfo = storage_ns.struct("FileInfo")
-DirectoryChangeInfo = storage_ns.struct("DirectoryChangeInfo")
-
-# Configuration keys
-CONF_MOUNTS = "mounts"
-CONF_MOUNT_PATH = "path"
-CONF_MOUNT_PLATFORM = "platform"
-CONF_FILE_MANAGERS = "file_managers"
-CONF_STORAGE_ID = "storage_id"
-CONF_WATCH_DIRECTORY = "watch_directory"
-CONF_WATCH_FILE = "watch_file"
-CONF_SCAN_INTERVAL = "scan_interval"
-CONF_PATTERNS = "patterns"
-CONF_MIN_SIZE = "min_size"
-CONF_MAX_SIZE = "max_size"
-CONF_ON_FILE_ADDED = "on_file_added"
-CONF_ON_FILE_MODIFIED = "on_file_modified"
-CONF_ON_FILE_DELETED = "on_file_deleted"
-CONF_ON_DIRECTORY_CHANGED = "on_directory_changed"
-CONF_ON_DEVICE_ADDED = "on_device_added"
-CONF_ON_DEVICE_REMOVED = "on_device_removed"
-CONF_ON_DEVICE_CHANGED = "on_device_changed"
-
-# Platform types
-PLATFORM_SD_DIRECT = "sd_direct"
-PLATFORM_USB_MSC = "usb_msc"
-PLATFORM_SD_MMC = "sd_mmc"
-PLATFORM_SPIFFS = "spiffs"
-PLATFORM_NFS = "nfs"
-PLATFORM_SMB = "smb"
-PLATFORM_BINARY_STORAGE = "binary_storage"
-
-# Single mount configuration
-MOUNT_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(StorageMount),
-        cv.Required(CONF_MOUNT_PATH): cv.string,
-        cv.Optional(CONF_MOUNT_PLATFORM, default=PLATFORM_SD_DIRECT): cv.one_of(
-            PLATFORM_SD_DIRECT,
-            PLATFORM_USB_MSC,
-            PLATFORM_SD_MMC,
-            PLATFORM_SPIFFS,
-            PLATFORM_NFS,
-            PLATFORM_SMB,
-            PLATFORM_BINARY_STORAGE,
-        ),
-    }
-)
-
-# File manager configuration with automation triggers
-FILE_MANAGER_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(FileManager),
-        cv.GenerateID(CONF_STORAGE_ID): cv.use_id(Storage),
-        # Watch either a directory or a single file (mutually exclusive)
-        cv.Optional(CONF_WATCH_DIRECTORY): cv.string,
-        cv.Optional(CONF_WATCH_FILE): cv.string,
-        # Scan interval
-        cv.Optional(
-            CONF_SCAN_INTERVAL, default="5s"
-        ): cv.positive_time_period_milliseconds,
-        # Pattern filters (glob patterns like "*.jpg", "*.png")
-        cv.Optional(CONF_PATTERNS, default=[]): cv.ensure_list(cv.string),
-        # Size filters
-        cv.Optional(CONF_MIN_SIZE, default=0): cv.int_range(min=0),
-        cv.Optional(CONF_MAX_SIZE): cv.int_range(min=0),
-        # Automation triggers
-        cv.Optional(CONF_ON_FILE_ADDED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(FileAddedTrigger),
-            }
-        ),
-        cv.Optional(CONF_ON_FILE_MODIFIED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(FileModifiedTrigger),
-            }
-        ),
-        cv.Optional(CONF_ON_FILE_DELETED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(FileDeletedTrigger),
-            }
-        ),
-        cv.Optional(CONF_ON_DIRECTORY_CHANGED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DirectoryChangedTrigger),
-            }
-        ),
-    }
-).extend(cv.COMPONENT_SCHEMA)
-
-# Storage configuration
+# Default kept in sync with the STORAGE_COPY_CHUNK_SIZE fallback in storage.h.
+# Lower bound matches copy()'s allocation fallback floor (4096, see storage.cpp); upper bound
+# is a sanity cap so a typo can't request an unreasonable single allocation (e.g. 16777216).
+#
+# The task_*/max_pending keys only take effect when the async worker (storage_worker.h/.cpp,
+# compiled in as USE_STORAGE_WORKER) is actually pulled in by a path-based driver, via that
+# driver's own request_storage_worker() call in its to_code() (mirrors how sd_storage already
+# calls request_storage_device()). If no such driver is configured, these keys are simply
+# unused, same as any other config key with no effect in a given configuration.
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.GenerateID(): cv.declare_id(Storage),
-        cv.Optional(CONF_MOUNTS, default=[]): cv.ensure_list(MOUNT_SCHEMA),
-        cv.Optional(CONF_FILE_MANAGERS, default=[]): cv.ensure_list(
-            FILE_MANAGER_SCHEMA
+        cv.GenerateID(): cv.declare_id(StorageRegistry),
+        cv.Optional(CONF_COPY_CHUNK_SIZE, default=16384): cv.All(
+            cv.int_range(min=4096, max=131072), validate_sector_multiple
         ),
-        # Device registry automation triggers
-        cv.Optional(CONF_ON_DEVICE_ADDED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceAddedTrigger),
-            }
+        # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
+        # preserves current behavior). See max_blocking_transfer_size's comment in storage.h.
+        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=0): cv.int_range(min=0),
+        # FATFS LFN + NFS/lwIP transfers both need headroom on the worker task's stack.
+        cv.Optional(CONF_TASK_STACK_SIZE, default=8192): cv.int_range(
+            min=4096, max=32768
         ),
-        cv.Optional(CONF_ON_DEVICE_REMOVED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceRemovedTrigger),
-            }
-        ),
-        cv.Optional(CONF_ON_DEVICE_CHANGED): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceChangedTrigger),
-            }
-        ),
+        # FreeRTOS priority: above idle (0), below networking tasks (typically higher).
+        cv.Optional(CONF_TASK_PRIORITY, default=1): cv.int_range(min=1, max=23),
+        # Fixed request pool/queue depth — sized exactly at codegen like the storage
+        # registry's device count, no heap allocation per request at runtime.
+        cv.Optional(CONF_MAX_PENDING, default=4): cv.int_range(min=1, max=16),
     }
-).extend(cv.COMPONENT_SCHEMA)
+)
 
 
+@dataclass
+class StorageData:
+    device_count: int = 0
+    worker_count: int = 0
+    worker_task_safe: bool = False
+
+
+def _get_data() -> StorageData:
+    if DOMAIN not in CORE.data:
+        CORE.data[DOMAIN] = StorageData()
+    return CORE.data[DOMAIN]
+
+
+def request_storage_device() -> None:
+    """Called by each storage driver's to_code() to count configured devices.
+
+    The accumulated count is passed to StorageRegistry.set_device_count() so the
+    internal FixedVector is sized exactly — no compile-time upper bound needed.
+    """
+    _get_data().device_count += 1
+
+
+def request_storage_worker(task_safe: bool = False) -> None:
+    """Called by path-based drivers (Filesystem/NetworkStorage) that need the async worker.
+
+    RawStorage drivers never call this, so on a raw-only node storage_worker.h/.cpp is not
+    even compiled in (see USE_STORAGE_WORKER below) — zero RAM/flash cost for the feature.
+
+    task_safe should be True only if the driver's data-plane calls are safe to run from a
+    background FreeRTOS task for every instance it registers (e.g. SdMmc, which owns its bus
+    exclusively) — not if that safety depends on how the bus is shared (e.g. SdSpi, which
+    shares its bus with other devices). This aggregates via OR across all callers: if any
+    driver requests task-safe operation, the worker creates its background task, which then
+    also depends per-request on Storage::get_capabilities() reporting STORAGE_CAP_IO_TASK_SAFE.
+    """
+    data = _get_data()
+    data.worker_count += 1
+    if task_safe:
+        data.worker_task_safe = True
+
+
+# storage is a dependency of every driver and would otherwise run BEFORE them (default
+# priority), reading device_count/worker_count as 0 — every driver's own to_code() is where
+# request_storage_device()/request_storage_worker() actually get called. LATE (-100) runs
+# after all default-priority driver to_code()s, so those counts are final by the time this
+# reads them. Consumers awaiting the registry/worker variables (e.g. via cg.get_variable())
+# are unaffected either way, since that call already suspends until the variable exists.
+@coroutine_with_priority(CoroPriority.LATE)
 async def to_code(config):
-    """Generate code for storage component"""
-    var = cg.new_Pvariable(config[CONF_ID])
+    var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
-    cg.add_define("USE_STORAGE")
+    device_count = _get_data().device_count
+    cg.add(var.set_device_count(device_count))
 
-    # Register each mount
-    for mount_config in config.get(CONF_MOUNTS, []):
-        mount_path = mount_config[CONF_MOUNT_PATH]
-        mount_platform = mount_config[CONF_MOUNT_PLATFORM]
+    cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
-        # Create StorageMount object for this mount
-        mount_var = cg.new_Pvariable(mount_config[CONF_ID])
-        cg.add(mount_var.set_path(mount_path))
-        cg.add(mount_var.set_platform(mount_platform))
-        cg.add(mount_var.set_storage(var))
+    cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
+    cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
 
-        # Register with storage
-        cg.add(var.register_mount(mount_path, mount_platform))
+    data = _get_data()
+    if data.worker_count > 0:
+        cg.add_define("USE_STORAGE_WORKER")
+        if data.worker_task_safe:
+            cg.add_define("USE_STORAGE_WORKER_TASK")
 
-    # Register file managers
-    if CONF_FILE_MANAGERS in config:
-        for fm_config in config[CONF_FILE_MANAGERS]:
-            await setup_file_manager(fm_config, var)
+        worker_id = ID(f"{var}_worker", is_declaration=True, type=StorageWorker)
+        CORE.component_ids.add(str(worker_id))
+        worker_var = cg.new_Pvariable(worker_id)
+        await cg.register_component(worker_var, {})
 
-    # Register mount callbacks for SD storage devices
-    # SD/USB devices store themselves in CORE.data during their to_code()
-    # We register callbacks so when they mount, they register with storage
-    from esphome.core import CORE
+        cg.add(worker_var.set_task_stack_size(config[CONF_TASK_STACK_SIZE]))
+        cg.add(worker_var.set_task_priority(config[CONF_TASK_PRIORITY]))
+        cg.add(worker_var.set_max_pending(config[CONF_MAX_PENDING]))
 
-    if hasattr(CORE, "data") and "sd_storage_devices" in CORE.data:
-        for sd_device in CORE.data["sd_storage_devices"]:
-            # Register callback: when SD mounts, register it with storage
-            cg.add(
-                sd_device.add_mount_ready_callback(
-                    cg.RawExpression(
-                        f"[](const std::string &mount_path) {{ "
-                        f"if (storage::global_storage != nullptr) {{ "
-                        f"storage::global_storage->register_device({sd_device}); "
-                        f"}} }}"
-                    )
-                )
-            )
-
-    if hasattr(CORE, "data") and "usb_storage_devices" in CORE.data:
-        for usb_device in CORE.data["usb_storage_devices"]:
-            # Register callback: when USB mounts, register it with storage
-            cg.add(
-                usb_device.add_mount_ready_callback(
-                    cg.RawExpression(
-                        f"[](const std::string &mount_path) {{ "
-                        f"if (storage::global_storage != nullptr) {{ "
-                        f"storage::global_storage->register_device({usb_device}); "
-                        f"}} }}"
-                    )
-                )
-            )
-
-    # Device registry automation triggers
-    for conf in config.get(CONF_ON_DEVICE_ADDED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(
-            trigger, [(StorageDevice.operator("ptr"), "device")], conf
-        )
-
-    for conf in config.get(CONF_ON_DEVICE_REMOVED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(
-            trigger, [(StorageDevice.operator("ptr"), "device")], conf
-        )
-
-    for conf in config.get(CONF_ON_DEVICE_CHANGED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(
-            trigger, [(StorageDevice.operator("ptr"), "device")], conf
-        )
-
-
-async def setup_file_manager(config, parent_storage):
-    """Configure a FileManager component with automation triggers"""
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
-    # Link to parent storage component
-    storage = await cg.get_variable(config[CONF_STORAGE_ID])
-    cg.add(var.set_storage(storage))
-
-    # Set watch directory or file
-    if CONF_WATCH_DIRECTORY in config:
-        cg.add(var.set_watch_directory(config[CONF_WATCH_DIRECTORY]))
-    elif CONF_WATCH_FILE in config:
-        cg.add(var.set_watch_file(config[CONF_WATCH_FILE]))
-    else:
-        raise cv.Invalid("Either watch_directory or watch_file must be specified")
-
-    # Scan interval
-    cg.add(var.set_scan_interval(config[CONF_SCAN_INTERVAL]))
-
-    # Pattern filters
-    for pattern in config.get(CONF_PATTERNS, []):
-        cg.add(var.add_pattern(pattern))
-
-    # Size filters
-    if CONF_MIN_SIZE in config:
-        cg.add(var.set_min_size(config[CONF_MIN_SIZE]))
-    if CONF_MAX_SIZE in config:
-        cg.add(var.set_max_size(config[CONF_MAX_SIZE]))
-
-    # Automation triggers
-    for conf in config.get(CONF_ON_FILE_ADDED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(trigger, [(FileInfo, "x")], conf)
-        cg.add(var.add_on_file_added_callback(trigger))
-
-    for conf in config.get(CONF_ON_FILE_MODIFIED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(trigger, [(FileInfo, "x")], conf)
-        cg.add(var.add_on_file_modified_callback(trigger))
-
-    for conf in config.get(CONF_ON_FILE_DELETED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(trigger, [(FileInfo, "x")], conf)
-        cg.add(var.add_on_file_deleted_callback(trigger))
-
-    for conf in config.get(CONF_ON_DIRECTORY_CHANGED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-        await automation.build_automation(trigger, [(DirectoryChangeInfo, "x")], conf)
-        cg.add(var.add_on_directory_changed_callback(trigger))
-
-    return var
+        cg.add(cg.RawExpression(f"{storage_ns}::global_storage_worker = {worker_var}"))
