@@ -412,12 +412,7 @@ class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
-
-  int reset_(USBUartChannel *channel);
-  int set_baudrate_(USBUartChannel *channel, uint32_t baudrate = 0);
-  int set_line_properties_(USBUartChannel *channel);
-  int set_dtr_rts_(USBUartChannel *channel);
+  bool config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
 
   uint8_t chip_type_{255};
 };
