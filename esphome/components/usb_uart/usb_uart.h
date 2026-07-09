@@ -386,7 +386,7 @@ class USBUartTypeCH934X : public USBUartComponent {
   std::atomic<bool> cmd_running_{false};
 };
 
-final class CH934XChannel : public USBUartChannelBase {
+class CH934XChannel final : public USBUartChannelBase {
   friend class USBUartTypeCH934X;
 
  public:
