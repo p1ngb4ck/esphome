@@ -339,19 +339,6 @@ void USBUartTypeFT23XX::on_rx_overflow(USBUartChannelBase *channel) {
   channel->input_buffer_.clear();
 }
 
-void USBUartTypeFT23XX::enable_channels() {
-  if (!this->channels_.empty() && this->channels_[0]->initialised_.load()) {
-    this->reset_(this->channels_[0]);
-  }
-
-  for (auto *channel : this->channels_) {
-    if (!channel->initialised_.load())
-      continue;
-    channel->input_started_.store(false);
-    channel->output_started_.store(false);
-  }
-}
-
 bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
                                     const uint8_t *response) {
   // On reload (settings change on an open channel) skip the SIO reset; the FTDI set_termios
