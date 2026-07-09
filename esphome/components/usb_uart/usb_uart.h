@@ -197,13 +197,8 @@ class USBUartComponent : public usb_host::USBClient {
 
   virtual void start_input(USBUartChannel *channel);
   void start_output(USBUartChannel *channel);
-
-  // Begin configuring all channels (full initialisation). Called from on_connected().
-<<<<<<< HEAD
   virtual void enable_channels();
-=======
-  void enable_channels();
->>>>>>> 9327d011fc95dbb710e46917218cce09b86f2cbe
+
   // Re-apply line settings to a single, already-open channel (used by
   // USBUartChannel::load_settings()).
   void apply_channel_settings(USBUartChannel *channel);
@@ -297,7 +292,7 @@ class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
 
   void start_input(USBUartChannel *channel) override;
   void on_rx_overflow(USBUartChannel *channel) override;
-  void enable_channels() override;
+  void enable_channels();
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;

@@ -52,12 +52,14 @@ void StorageRegistry::unregister_storage(Storage *s) {
       break;
     }
   }
-  if (found_index == this->storages_.size())
+  if (found_index == this->storages_.size()) {
     return;
+  }
 
   size_t last_index = this->storages_.size() - 1;
-  if (found_index != last_index)
+  if (found_index != last_index) {
     this->storages_[found_index] = this->storages_[last_index];
+  }
   this->storages_.pop_back();
 
   StorageInfo info{};
