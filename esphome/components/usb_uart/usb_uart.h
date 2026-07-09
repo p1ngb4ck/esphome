@@ -259,7 +259,7 @@ class USBUartComponent : public usb_host::USBClient {
 
   virtual void start_input(USBUartChannelBase *channel);
   void start_output(USBUartChannelBase *channel);
-  void start_output(USBUartChannel *channel);
+  void start_output(USBUartChannelBase *channel);
 
   // Begin configuring all channels (full initialisation). Called from on_connected().
   virtual void enable_channels();
@@ -412,7 +412,7 @@ class USBUartTypeFT23XX : public USBUartTypeCdcAcm {
 
  protected:
   std::vector<CdcEps> parse_descriptors(usb_device_handle_t dev_hdl) override;
-  bool config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
+  bool config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok, const uint8_t *response) override;
 
   uint8_t chip_type_{255};
 };
