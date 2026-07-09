@@ -726,38 +726,42 @@ async def to_code(config):
             # Higher maximum values are allowed because CONFIG_LWIP_WND_SCALE is set to true in networking component
             # Based on https://github.com/espressif/esp-adf/issues/297#issuecomment-783811702
 
-            # Large dynamic RX buffers (requires PSRAM)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM", 16)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM", 512)
+            # CONFIG OPTIONS removed with esp-idf > 6.1.0
+            if not idf_version() >= cv.Version(6, 1, 0):
+                # Large dynamic RX buffers (requires PSRAM)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM", 16)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM", 512)
 
-            # Static TX buffers for better performance
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_TX_BUFFER", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BUFFER_TYPE", 0)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM", 32)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM", 8)
+                # Static TX buffers for better performance
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_TX_BUFFER", True)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BUFFER_TYPE", 0)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM", 32)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM", 8)
 
-            # AMPDU settings optimized for PSRAM
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_TX_ENABLED", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN", 16)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_RX_ENABLED", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_RX_BA_WIN", 32)
+                # AMPDU settings optimized for PSRAM
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_TX_ENABLED", True)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN", 16)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_RX_ENABLED", True)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_RX_BA_WIN", 32)
         else:
             _LOGGER.info(
                 "Applying optimized WiFi settings: 64 RX buffers, 64 TX buffers"
             )
-            # PSRAM not guaranteed - use more conservative, but still optimized settings
-            # Based on https://github.com/espressif/esp-idf/blob/release/v5.4/examples/wifi/iperf/sdkconfig.defaults.esp32
+            
+            if not idf_version() >= cv.Version(6, 1, 0):
+                # PSRAM not guaranteed - use more conservative, but still optimized settings
+                # Based on https://github.com/espressif/esp-idf/blob/release/v5.4/examples/wifi/iperf/sdkconfig.defaults.esp32
+                
+                # Standard buffer counts
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM", 16)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM", 64)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM", 64)
 
-            # Standard buffer counts
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM", 16)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM", 64)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM", 64)
-
-            # Standard AMPDU settings
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_TX_ENABLED", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN", 32)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_RX_ENABLED", True)
-            add_idf_sdkconfig_option("CONFIG_ESP_WIFI_RX_BA_WIN", 32)
+                # Standard AMPDU settings
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_TX_ENABLED", True)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_TX_BA_WIN", 32)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_AMPDU_RX_ENABLED", True)
+                add_idf_sdkconfig_option("CONFIG_ESP_WIFI_RX_BA_WIN", 32)
 
     cg.add_define("USE_WIFI")
 
