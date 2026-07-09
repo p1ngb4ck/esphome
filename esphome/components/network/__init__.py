@@ -2,7 +2,7 @@ import ipaddress
 import logging
 
 import esphome.codegen as cg
-from esphome.components.esp32 import add_idf_sdkconfig_option
+from esphome.components.esp32 import add_idf_sdkconfig_option, idf_version
 from esphome.components.psram import is_guaranteed as psram_is_guaranteed
 from esphome.components.zephyr import zephyr_add_prj_conf
 import esphome.config_validation as cv
@@ -281,16 +281,22 @@ async def to_code(config):
             cg.add_define(
                 "USE_NETWORK_MIN_IPV6_ADDR_COUNT", config[CONF_MIN_IPV6_ADDR_COUNT]
             )
-        if CORE.is_esp32 and "esp32_hosted" not in CORE.config:
+        if CORE.is_esp32:
             if CORE.using_arduino:
                 add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
-                add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", True)
+                # CONFIG OPTIONS removed with esp-idf > 6.1.0
+                if not idf_version() >= cv.Version(6, 1, 0):
+                    add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
             else:
                 add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", enable_ipv6)
-                add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
+                
+                # CONFIG OPTIONS removed with esp-idf > 6.1.0
+                if not idf_version() >= cv.Version(6, 1, 0):
+                    add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", enable_ipv6)
         elif enable_ipv6:
             cg.add_build_flag("-DCONFIG_LWIP_IPV6")
-            cg.add_build_flag("-DCONFIG_LWIP_IPV6_AUTOCONFIG")
+            if not idf_version() >= cv.Version(6, 1, 0):
+                cg.add_build_flag("-DCONFIG_LWIP_IPV6_AUTOCONFIG")
             if CORE.is_bk72xx:
                 cg.add_build_flag("-DCONFIG_IPV6")
             if CORE.is_esp8266:
