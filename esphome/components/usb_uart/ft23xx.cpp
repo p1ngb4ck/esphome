@@ -264,7 +264,7 @@ std::vector<CdcEps> USBUartTypeFT23XX::parse_descriptors(usb_device_handle_t dev
   return cdc_devs;
 }
 
-int USBUartTypeFT23XX::reset_(USBUartChannel *channel) {
+int USBUartTypeFT23XX::reset_(USBUartChannelBase *channel) {
   usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Reset failed, status=%s", esp_err_to_name(status.error_code));
@@ -284,7 +284,7 @@ int USBUartTypeFT23XX::reset_(USBUartChannel *channel) {
   return 0;
 }
 
-int USBUartTypeFT23XX::set_baudrate_(USBUartChannel *channel, uint32_t baudrate) {
+int USBUartTypeFT23XX::set_baudrate_(USBUartChannelBase *channel, uint32_t baudrate) {
   usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set baudrate failed, status=%s", esp_err_to_name(status.error_code));
@@ -310,7 +310,7 @@ int USBUartTypeFT23XX::set_baudrate_(USBUartChannel *channel, uint32_t baudrate)
   return 0;
 }
 
-int USBUartTypeFT23XX::set_line_properties_(USBUartChannel *channel) {
+int USBUartTypeFT23XX::set_line_properties_(USBUartChannelBase *channel) {
   usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set line properties failed, status=%s", esp_err_to_name(status.error_code));
@@ -365,7 +365,7 @@ int USBUartTypeFT23XX::set_line_properties_(USBUartChannel *channel) {
   return 0;
 }
 
-int USBUartTypeFT23XX::set_dtr_rts_(USBUartChannel *channel) {
+int USBUartTypeFT23XX::set_dtr_rts_(USBUartChannelBase *channel) {
   usb_host::transfer_cb_t callback = [channel, this](const usb_host::TransferStatus &status) {
     if (!status.success) {
       ESP_LOGE(TAG, "Set modem control failed, status=%s", esp_err_to_name(status.error_code));
@@ -377,7 +377,7 @@ int USBUartTypeFT23XX::set_dtr_rts_(USBUartChannel *channel) {
     this->start_input(channel);
     uint8_t next_index = channel->index_ + 1;
     if (next_index < this->channels_.size()) {
-      USBUartChannel *next_channel = this->channels_[next_index];
+      USBUartChannelBase *next_channel = this->channels_[next_index];
       ESP_LOGD(TAG, "Configuring next channel %d", next_channel->index_);
       this->reset_(next_channel);
       return;
@@ -396,7 +396,7 @@ int USBUartTypeFT23XX::set_dtr_rts_(USBUartChannel *channel) {
   return 0;
 }
 
-void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
+void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
   if (!channel->initialised_.load())
     return;
 
@@ -469,12 +469,12 @@ void USBUartTypeFT23XX::start_input(USBUartChannel *channel) {
   }
 }
 
-void USBUartTypeFT23XX::on_rx_overflow(USBUartChannel *channel) {
+void USBUartTypeFT23XX::on_rx_overflow(USBUartChannelBase *channel) {
   ESP_LOGW(TAG, "RX buffer overflow on channel %d, clearing to resync", channel->index_);
   channel->input_buffer_.clear();
 }
 
-void USBUartTypeFT23XX::on_rx_overflow(USBUartChannel *channel) {
+void USBUartTypeFT23XX::on_rx_overflow(USBUartChannelBase *channel) {
   ESP_LOGW(TAG, "RX buffer overflow on channel %d, clearing to resync", channel->index_);
   channel->input_buffer_.clear();
 }
@@ -492,7 +492,7 @@ void USBUartTypeFT23XX::enable_channels() {
   }
 }
 
-bool USBUartTypeFT23XX::config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok,
+bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
                                     const uint8_t *response) {
   // On reload (settings change on an open channel) skip the SIO reset; the FTDI set_termios
   // path only re-applies baud + line properties and does not re-assert DTR/RTS.

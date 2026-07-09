@@ -194,7 +194,7 @@ bool USBUartTypeCH934X::config_device_step(uint8_t step, bool ok, const uint8_t 
 // Per-channel settings. On full init every channel is already configured by
 // config_device_step(); this is used by load_settings() to re-apply UART parameters
 // (baud/parity/stop/data) to an already-open channel.
-bool USBUartTypeCH934X::config_step(USBUartChannel *channel, uint8_t step, bool reload, bool ok,
+bool USBUartTypeCH934X::config_step(USBUartChannelBase *channel, uint8_t step, bool reload, bool ok,
                                     const uint8_t *response) {
   if (!reload || channel->index_ >= this->num_ports_)
     return false;
@@ -233,7 +233,7 @@ bool USBUartTypeCH934X::config_step(USBUartChannel *channel, uint8_t step, bool 
   return false;
 }
 
-bool USBUartTypeCH934X::configure_channel_(USBUartChannel *channel) {
+bool USBUartTypeCH934X::configure_channel_(USBUartChannelBase *channel) {
   if (!this->set_uart_mode_(channel)) {
     ESP_LOGE(TAG, "Failed to set UART mode for channel %d", channel->index_);
     return false;
@@ -272,7 +272,7 @@ bool USBUartTypeCH934X::configure_channel_(USBUartChannel *channel) {
   return true;
 }
 
-bool USBUartTypeCH934X::set_uart_mode_(USBUartChannel *channel) {
+bool USBUartTypeCH934X::set_uart_mode_(USBUartChannelBase *channel) {
   uint8_t portnum = channel->index_;
   uint8_t rgadd = this->get_reg_address_(portnum);
   uint8_t buffer[3];
@@ -314,7 +314,7 @@ static void cal_outdata(uint8_t *buffer, uint8_t rol, uint8_t xor_val) {
     buffer[i] ^= xor_val;
 }
 
-bool USBUartTypeCH934X::configure_uart_parameters_(USBUartChannel *channel) {
+bool USBUartTypeCH934X::configure_uart_parameters_(USBUartChannelBase *channel) {
   uint32_t baud_rate = channel->get_baud_rate();
   uint8_t data_bits = channel->get_data_bits();
   uint8_t stop_bits = channel->get_stop_bits();
@@ -504,7 +504,7 @@ void USBUartTypeCH934X::demux_rx_data_(const uint8_t *data, size_t len) {
     if (adjusted_port >= this->channels_.size())
       continue;
 
-    USBUartChannel *channel = this->channels_[adjusted_port];
+    USBUartChannelBase *channel = this->channels_[adjusted_port];
     if (!channel->initialised_.load())
       continue;
 
@@ -548,7 +548,7 @@ void USBUartTypeCH934X::handle_command_data_(const uint8_t *data, size_t len) {
   ESP_LOGV(TAG, "CMD data received: %d bytes", len);
 }
 
-void USBUartTypeCH934X::start_input(USBUartChannel * /*channel*/) {}
+void USBUartTypeCH934X::start_input(USBUartChannelBase *channel) {}
 
 void CH934XChannel::write_array(const uint8_t *data, size_t len) {
   if (!this->initialised_.load() || this->tx_shared_channel_ == nullptr)
