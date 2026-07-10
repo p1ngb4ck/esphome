@@ -316,20 +316,31 @@ async def _build_write_action(config, action_id, template_arg, args, append):
 
 
 @automation.register_action(
-    "storage.file_write", FileWriteAction, _file_write_schema(newline_default=False)
+    "storage.file_write",
+    FileWriteAction,
+    _file_write_schema(newline_default=False),
+    synchronous=True,
 )
 async def file_write_action_to_code(config, action_id, template_arg, args):
     return await _build_write_action(config, action_id, template_arg, args, False)
 
 
 @automation.register_action(
-    "storage.file_append", FileWriteAction, _file_write_schema(newline_default=True)
+    "storage.file_append",
+    FileWriteAction,
+    _file_write_schema(newline_default=True),
+    synchronous=True,
 )
 async def file_append_action_to_code(config, action_id, template_arg, args):
     return await _build_write_action(config, action_id, template_arg, args, True)
 
 
-@automation.register_action("storage.file_read", FileReadAction, _FILE_READ_SCHEMA)
+@automation.register_action(
+    "storage.file_read",
+    FileReadAction,
+    _FILE_READ_SCHEMA,
+    synchronous=True,
+)
 async def file_read_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
