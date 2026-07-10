@@ -47,6 +47,16 @@ CONF_SORTING_GROUP_ID = "sorting_group_id"
 CONF_SORTING_GROUPS = "sorting_groups"
 CONF_SORTING_WEIGHT = "sorting_weight"
 
+CONF_FILEBROWSER = "filebrowser"
+CONF_COPY_ENABLED = "enable_copy"
+CONF_CREATE_DIR_ENABLED = "enable_create_dir"
+CONF_DELETE_ENABLED = "enable_delete"
+CONF_DOWNLOAD_ENABLED = "enable_download"
+CONF_LIST_ENABLED = "enable_list"
+CONF_MOVE_ENABLED = "enable_move"
+CONF_RENAME_ENABLED = "enable_rename"
+CONF_UPLOAD_ENABLED = "enable_upload"
+
 
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
@@ -210,6 +220,18 @@ CONFIG_SCHEMA = cv.All(
                     ),
                 }
             ),
+            cv.Optional(CONF_FILEBROWSER): cv.Schema(
+                {
+                    cv.Required(CONF_DOWNLOAD_ENABLED, default=True): cv.Boolean,
+                    cv.Required(CONF_UPLOAD_ENABLED, default=False): cv.Boolean,
+                    cv.Required(CONF_DELETE_ENABLED, default=False): cv.Boolean,
+                    cv.Required(CONF_CREATE_DIR_ENABLED, default=False): cv.Boolean,
+                    cv.Required(CONF_RENAME_ENABLED, default=False): cv.Boolean,
+                    cv.Required(CONF_MOVE_ENABLED, default=False): cv.Boolean,
+                    cv.Required(CONF_COPY_ENABLED, default=True): cv.Boolean,
+                    cv.Required(CONF_LIST_ENABLED, default=True): cv.Boolean,
+                }
+            ),
             cv.GenerateID(CONF_WEB_SERVER_BASE_ID): cv.use_id(
                 web_server_base.WebServerBase
             ),
@@ -355,6 +377,17 @@ async def to_code(config):
     if (sorting_group_config := config.get(CONF_SORTING_GROUPS)) is not None:
         cg.add_define("USE_WEBSERVER_SORTING")
         add_sorting_groups(var, sorting_group_config)
+    if(filebrowser_config := config.get(CONF_FILEBROWSER)) is not None:
+        cg.add_define("USE_FILEBROWSER")
+        cg.add(var.set_filebrowser_enabled(True))
+        cg.add(var.set_filebrowser_download_enabled(filebrowser_config[CONF_DOWNLOAD_ENABLED]))
+        cg.add(var.set_filebrowser_upload_enabled(filebrowser_config[CONF_UPLOAD_ENABLED]))
+        cg.add(var.set_filebrowser_delete_enabled(filebrowser_config[CONF_DELETE_ENABLED]))
+        cg.add(var.set_filebrowser_create_dir_enabled(filebrowser_config[CONF_CREATE_DIR_ENABLED]))
+        cg.add(var.set_filebrowser_rename_enabled(filebrowser_config[CONF_RENAME_ENABLED]))
+        cg.add(var.set_filebrowser_move_enabled(filebrowser_config[CONF_MOVE_ENABLED]))
+        cg.add(var.set_filebrowser_copy_enabled(filebrowser_config[CONF_COPY_ENABLED]))
+        cg.add(var.set_filebrowser_list_enabled(filebrowser_config[CONF_LIST_ENABLED]))
 
 
 def FILTER_SOURCE_FILES() -> list[str]:
