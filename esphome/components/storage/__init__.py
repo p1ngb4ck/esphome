@@ -319,7 +319,7 @@ async def _build_write_action(config, action_id, template_arg, args, append):
     "storage.file_write",
     FileWriteAction,
     _file_write_schema(newline_default=False),
-    synchronous=True,
+    synchronous=True
 )
 async def file_write_action_to_code(config, action_id, template_arg, args):
     return await _build_write_action(config, action_id, template_arg, args, False)
