@@ -18,18 +18,18 @@ namespace esphome::storage {
 // above the highest errno in use here, so no accidental collisions creep in later either.
 enum class StorageError : uint8_t {
   OK = 0,
-  NOT_FOUND = ENOENT,           // 2
-  READ_ERROR = EIO,             // 5 — I/O error
-  PERMISSION_DENIED = EACCES,   // 13
-  ALREADY_EXISTS = EEXIST,      // 17
-  NOT_READY = ENODEV,           // 19
-  INVALID_ARGS = EINVAL,        // 22
-  TOO_MANY_OPEN_FILES = EMFILE, // 24
-  NO_SPACE = ENOSPC,            // 28
-  NOT_EMPTY = ENOTEMPTY,        // 39
-  CORRUPT = EILSEQ,             // 84 on newlib/ESP-IDF — closest POSIX equivalent (illegal byte sequence)
-  NOT_SUPPORTED = ENOTSUP,      // 95 on newlib/ESP-IDF
-  TIMEOUT = ETIMEDOUT,          // 116 on newlib/ESP-IDF
+  NOT_FOUND = ENOENT,            // 2
+  READ_ERROR = EIO,              // 5 — I/O error
+  PERMISSION_DENIED = EACCES,    // 13
+  ALREADY_EXISTS = EEXIST,       // 17
+  NOT_READY = ENODEV,            // 19
+  INVALID_ARGS = EINVAL,         // 22
+  TOO_MANY_OPEN_FILES = EMFILE,  // 24
+  NO_SPACE = ENOSPC,             // 28
+  NOT_EMPTY = ENOTEMPTY,         // 39
+  CORRUPT = EILSEQ,              // 84 on newlib/ESP-IDF — closest POSIX equivalent (illegal byte sequence)
+  NOT_SUPPORTED = ENOTSUP,       // 95 on newlib/ESP-IDF
+  TIMEOUT = ETIMEDOUT,           // 116 on newlib/ESP-IDF
   // No distinct POSIX errno for a write-direction I/O error (EIO is used by READ_ERROR
   // above) — assigned its own value past the highest errno referenced here.
   WRITE_ERROR = 120,
@@ -284,7 +284,11 @@ class StorageRegistry : public Component {
   void set_max_blocking_transfer_size(uint64_t size) { this->max_blocking_transfer_size_ = size; }
   uint64_t get_max_blocking_transfer_size() const { return this->max_blocking_transfer_size_; }
 
-  void register_storage(Storage *s);
+  // Returns OK on success (idempotent: re-registering an already-registered device is OK),
+  // INVALID_ARGS for nullptr, NO_SPACE when the registry is at its codegen-sized capacity —
+  // the latter indicates a codegen/runtime device-count mismatch; drivers should treat it as
+  // fatal (log + mark_failed()) instead of running with an invisibly missing device.
+  StorageError register_storage(Storage *s);
   void unregister_storage(Storage *s);
   bool is_registered(const Storage *s) const;
 
@@ -325,6 +329,11 @@ class StorageRegistry : public Component {
  protected:
   // Single allocation at set_device_count() — no realloc machinery
   FixedVector<Storage *> storages_;
+  // Guards storages_ against the one cross-thread access pattern: the worker task reads via
+  // is_registered() (per-chunk cancellation check) while the main loop mutates via
+  // register_storage()/unregister_storage(). All other accessors (for_each*, size()/get(),
+  // resolve_path()) are main-loop-only by contract and need no lock — the task never calls them.
+  mutable Mutex registry_lock_;
 
   // LazyCallbackManager: 4-byte nullptr until first subscriber — saves RAM
   // on devices where no component listens for hotplug events
@@ -347,7 +356,11 @@ const char *error_to_string(StorageError error);
 
 // stat()-based existence/size checks — thin wrappers, work on any PathStorage
 // (FilesystemStorage or NetworkStorage).
-bool exists(PathStorage *storage, const char *path);
+// exists(): only StorageError::NOT_FOUND maps to a clean "no". Any OTHER non-OK error
+// (NOT_READY, READ_ERROR, PERMISSION_DENIED, ...) also returns false but is surfaced via
+// err_out so callers can distinguish "file is absent" from "medium is unmounted/faulted"
+// before deciding to create/overwrite or to report 'not found'.
+bool exists(PathStorage *storage, const char *path, StorageError *err_out = nullptr);
 StorageError file_size(PathStorage *storage, const char *path, uint64_t *size);
 
 // Deleter that frees memory obtained from RAMAllocator<uint8_t> (malloc/heap_caps_malloc_prefer)
