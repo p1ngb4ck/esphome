@@ -9,6 +9,7 @@
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
 #include "mdns.h"
 #include "esp_netif.h"
+#include "esphome/components/storage/storage.h"
 #endif
 
 namespace esphome::nfs_client {
