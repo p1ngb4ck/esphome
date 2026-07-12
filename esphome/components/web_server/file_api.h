@@ -75,6 +75,20 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   void handle_mkdir_(AsyncWebServerRequest *request);
   void handle_delete_(AsyncWebServerRequest *request);
   void handle_copy_move_(AsyncWebServerRequest *request, bool is_move);
+#ifdef USE_STORAGE_WORKER
+  // Recursive directory transfer orchestrator: copies one file at a time through the async
+  // worker (main loop stays responsive), directories via mkdir + descend. Memory-bounded:
+  // no entry lists — entry #i of a directory is found by re-enumerating with a counting
+  // callback (the same RAM-free trick remove_recursive() uses, O(n²) listings), and the
+  // walker keeps one subpath buffer plus a per-level index stack instead of paths per level.
+  // For moves, each file is deleted right after its copy completed and each directory is
+  // rmdir'ed once drained. Single transfer at a time; driven purely from the main loop
+  // (worker completion callbacks defer the next advance step).
+  bool start_dir_transfer_(storage::PathStorage *src, const char *src_rel, storage::PathStorage *dst,
+                           const char *dst_rel, bool is_move);
+  void advance_dir_transfer_();
+  void finish_dir_transfer_(storage::StorageError result);
+#endif
   void handle_job_(AsyncWebServerRequest *request);
   void handle_mount_(AsyncWebServerRequest *request, bool mount);
   void handle_upload_response_(AsyncWebServerRequest *request);
@@ -99,6 +113,34 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   JobCacheEntry job_cache_[JOB_CACHE_SIZE]{};
   size_t job_cache_next_{0};
   void cache_job_result_(storage::TransferJob job, storage::StorageError result);
+
+  // Directory-transfer job ids live in their own space (high bit set) so /files/job can
+  // route them to the orchestrator instead of the worker pool. The final state stays
+  // queryable until the next directory transfer starts (single slot).
+  static constexpr uint32_t DIR_JOB_FLAG = 0x80000000u;
+  struct DirTransfer {
+    bool active{false};
+    bool done{false};
+    bool is_move{false};
+    storage::PathStorage *src{nullptr};
+    storage::PathStorage *dst{nullptr};
+    char src_root[256]{};
+    char dst_root[256]{};
+    char sub[256]{};  // current subpath relative to both roots ("" at the top)
+    static constexpr uint8_t MAX_DEPTH = 8;
+    uint16_t index_stack[MAX_DEPTH]{};
+    uint8_t depth{0};
+    // current file being copied (worker job in flight)
+    char cur_src[300]{};
+    char cur_dst[300]{};
+    uint64_t cur_size{0};
+    storage::TransferJob cur_job{storage::INVALID_TRANSFER_JOB};
+    uint64_t bytes_done{0};
+    uint32_t files_done{0};
+    storage::StorageError result{storage::StorageError::OK};
+    uint32_t id{0};
+  } dir_{};
+  uint32_t dir_job_counter_{0};
 #endif
 
   // Per-request upload state. httpd serves uploads sequentially per handler instance; a

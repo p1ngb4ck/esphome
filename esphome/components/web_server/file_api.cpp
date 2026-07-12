@@ -432,10 +432,15 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   }
   std::string from_s = from->value();
   std::string to_s = to->value();
+  // Copying/moving a directory into itself would recurse forever — reject early on the
+  // full VFS strings ('/a' -> '/a/b' style; exact-prefix with a path boundary).
+  if (to_s.size() > from_s.size() && to_s.compare(0, from_s.size(), from_s) == 0 && to_s[from_s.size()] == '/') {
+    request->send(400, "application/json", "{\"error\":\"destination is inside the source\"}");
+    return;
+  }
   storage::StorageError err = storage::StorageError::OK;
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
-  bool dir_unsupported = false;
-  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, &err, &job, &dir_unsupported]() {
+  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, &err, &job]() {
     const char *src_rel = nullptr;
     const char *dst_rel = nullptr;
     storage::PathStorage *src = this->resolve_(from_s.c_str(), &src_rel);
@@ -445,12 +450,16 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
       return;
     }
     // Directories: a same-storage MOVE is a pure rename (the worker takes that fast path
-    // before opening any handles, so it works for directories as-is). Directory COPY and
-    // cross-storage directory moves need per-file recursion — follow-up orchestrator.
+    // before opening any handles). Everything else — directory COPY and cross-storage
+    // directory moves — goes through the per-file orchestrator.
     storage::FileStat src_stat{};
     if (src->stat(src_rel, &src_stat) == storage::StorageError::OK && src_stat.is_dir) {
       if (!is_move || src != dst) {
-        dir_unsupported = true;
+        if (!this->start_dir_transfer_(src, src_rel, dst, dst_rel, is_move)) {
+          err = this->dir_.active ? storage::StorageError::NOT_READY : storage::StorageError::INVALID_ARGS;
+          return;
+        }
+        job = this->dir_.id;
         return;
       }
     }
@@ -481,11 +490,6 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     request->send(504);
     return;
   }
-  if (dir_unsupported) {
-    request->send(501, "application/json",
-                  "{\"error\":\"recursive directory copy/cross-storage move not yet supported\"}");
-    return;
-  }
   if (err != storage::StorageError::OK) {
     send_error_(request, err);
     return;
@@ -514,6 +518,185 @@ void WebServerFileApi::cache_job_result_(storage::TransferJob job, storage::Stor
 }
 #endif
 
+#ifdef USE_STORAGE_WORKER
+// ---------------------------------------------------------------------------
+// Recursive directory transfer orchestrator (see the header for the design notes)
+// ---------------------------------------------------------------------------
+
+namespace {
+// Finds entry #target in a directory by re-enumeration (RAM-free, remove_recursive's trick).
+struct FindEntryCtx {
+  uint16_t target;
+  uint16_t seen{0};
+  bool found{false};
+  storage::FileStat entry{};
+};
+bool find_entry_cb(const storage::FileStat *entry, void *ctx_raw) {
+  auto *ctx = static_cast<FindEntryCtx *>(ctx_raw);
+  if (ctx->seen == ctx->target) {
+    ctx->entry = *entry;
+    ctx->found = true;
+    return false;  // stop enumeration — not an error per the list_dir contract
+  }
+  ctx->seen++;
+  return true;
+}
+// Bounded "<root>[/<sub>][/<name>]" join; false on truncation.
+bool join_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
+  int n;
+  if (name != nullptr) {
+    n = (sub[0] != '\0') ? snprintf(out, out_size, "%s/%s/%s", root, sub, name)
+                         : snprintf(out, out_size, "%s/%s", root, name);
+  } else {
+    n = (sub[0] != '\0') ? snprintf(out, out_size, "%s/%s", root, sub) : snprintf(out, out_size, "%s", root);
+  }
+  return n > 0 && static_cast<size_t>(n) < out_size;
+}
+}  // namespace
+
+bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char *src_rel, storage::PathStorage *dst,
+                                           const char *dst_rel, bool is_move) {
+  if (this->dir_.active)
+    return false;
+  if (strlen(src_rel) >= sizeof(this->dir_.src_root) || strlen(dst_rel) >= sizeof(this->dir_.dst_root))
+    return false;
+  this->dir_ = DirTransfer{};
+  this->dir_.active = true;
+  this->dir_.is_move = is_move;
+  this->dir_.src = src;
+  this->dir_.dst = dst;
+  strncpy(this->dir_.src_root, src_rel, sizeof(this->dir_.src_root) - 1);
+  strncpy(this->dir_.dst_root, dst_rel, sizeof(this->dir_.dst_root) - 1);
+  this->dir_.id = DIR_JOB_FLAG | (++this->dir_job_counter_ & 0x7FFFFFFFu);
+
+  storage::StorageError err = this->dir_.dst->mkdir(this->dir_.dst_root);
+  if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
+    this->finish_dir_transfer_(err);
+    return true;  // started (and already finished with an error) — id is queryable
+  }
+  // Kick the walker from a fresh main-loop slice.
+  this->defer([this]() { this->advance_dir_transfer_(); });
+  return true;
+}
+
+void WebServerFileApi::finish_dir_transfer_(storage::StorageError result) {
+  this->dir_.result = result;
+  this->dir_.done = true;
+  this->dir_.active = false;
+  if (result != storage::StorageError::OK) {
+    ESP_LOGW(TAG, "directory %s failed (%s)", this->dir_.is_move ? "move" : "copy", storage::error_to_string(result));
+  }
+}
+
+void WebServerFileApi::advance_dir_transfer_() {
+  if (!this->dir_.active)
+    return;
+  DirTransfer &d = this->dir_;
+  // Bound the inline control steps per main-loop slice (empty-directory chains would
+  // otherwise walk arbitrarily long in one go); continue via defer.
+  for (int steps = 0; steps < 8; steps++) {
+    char src_dir[300];
+    if (!join_path(src_dir, sizeof(src_dir), d.src_root, d.sub, nullptr)) {
+      this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
+      return;
+    }
+    FindEntryCtx ctx{d.index_stack[d.depth]};
+    storage::StorageError err = d.src->list_dir(src_dir, find_entry_cb, &ctx);
+    if (err != storage::StorageError::OK) {
+      this->finish_dir_transfer_(err);
+      return;
+    }
+    if (!ctx.found) {
+      // Directory drained. For moves the emptied source directory goes away now.
+      if (d.is_move) {
+        err = d.src->rmdir(src_dir);
+        if (err != storage::StorageError::OK) {
+          this->finish_dir_transfer_(err);
+          return;
+        }
+      }
+      if (d.depth == 0) {
+        this->finish_dir_transfer_(storage::StorageError::OK);
+        return;
+      }
+      // Ascend: strip the last component; the parent's index was already advanced on descend.
+      char *slash = strrchr(d.sub, '/');
+      if (slash != nullptr) {
+        *slash = '\0';
+      } else {
+        d.sub[0] = '\0';
+      }
+      d.depth--;
+      continue;
+    }
+    d.index_stack[d.depth]++;  // this entry position is consumed either way
+    if (ctx.entry.is_dir) {
+      if (d.depth + 1 >= DirTransfer::MAX_DEPTH) {
+        this->finish_dir_transfer_(storage::StorageError::NOT_SUPPORTED);
+        return;
+      }
+      char dst_dir[300];
+      if (!join_path(dst_dir, sizeof(dst_dir), d.dst_root, d.sub, ctx.entry.name)) {
+        this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
+        return;
+      }
+      err = d.dst->mkdir(dst_dir);
+      if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
+        this->finish_dir_transfer_(err);
+        return;
+      }
+      // Descend
+      size_t sub_len = strlen(d.sub);
+      size_t name_len = strlen(ctx.entry.name);
+      if (sub_len + name_len + 2 >= sizeof(d.sub)) {
+        this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
+        return;
+      }
+      if (sub_len != 0)
+        d.sub[sub_len++] = '/';
+      memcpy(d.sub + sub_len, ctx.entry.name, name_len + 1);
+      d.depth++;
+      d.index_stack[d.depth] = 0;
+      continue;
+    }
+    // Regular file: hand it to the async worker and wait for its completion callback.
+    if (!join_path(d.cur_src, sizeof(d.cur_src), d.src_root, d.sub, ctx.entry.name) ||
+        !join_path(d.cur_dst, sizeof(d.cur_dst), d.dst_root, d.sub, ctx.entry.name)) {
+      this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
+      return;
+    }
+    d.cur_size = ctx.entry.size;
+    auto on_done = [this](storage::StorageError result) {
+      DirTransfer &dt = this->dir_;
+      if (!dt.active)
+        return;  // finished/aborted meanwhile
+      if (result != storage::StorageError::OK) {
+        this->finish_dir_transfer_(result);
+        return;
+      }
+      dt.bytes_done += dt.cur_size;
+      dt.files_done++;
+      if (dt.is_move) {
+        storage::StorageError del_err = dt.src->remove(dt.cur_src);
+        if (del_err != storage::StorageError::OK) {
+          this->finish_dir_transfer_(del_err);
+          return;
+        }
+      }
+      dt.cur_job = storage::INVALID_TRANSFER_JOB;
+      // Fresh main-loop slice for the next walker step (avoids callback recursion).
+      this->defer([this]() { this->advance_dir_transfer_(); });
+    };
+    err = storage::global_storage_worker->async_copy(d.src, d.cur_src, d.dst, d.cur_dst, on_done, &d.cur_job);
+    if (err != storage::StorageError::OK) {
+      this->finish_dir_transfer_(err);
+    }
+    return;  // wait for the completion callback
+  }
+  this->defer([this]() { this->advance_dir_transfer_(); });
+}
+#endif  // USE_STORAGE_WORKER
+
 void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
 #ifdef USE_STORAGE_WORKER
   auto *param = request->getParam("id");
@@ -525,6 +708,24 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
   storage::TransferStatus st{};
   bool found = false;
   bool ok = this->run_on_loop_([this, job, &st, &found]() {
+    if ((job & DIR_JOB_FLAG) != 0) {
+      // Directory transfer: single slot, final state queryable until the next one starts.
+      DirTransfer &d = this->dir_;
+      if (job != d.id || (!d.active && !d.done))
+        return;
+      found = true;
+      st.state = d.done ? storage::RequestState::DONE : storage::RequestState::RUNNING;
+      st.result = d.result;
+      st.bytes_total = 0;  // unknown without a pre-scan — UI treats it as indeterminate
+      st.bytes_done = d.bytes_done;
+      // add live progress of the file currently in flight
+      storage::TransferStatus cur{};
+      if (d.cur_job != storage::INVALID_TRANSFER_JOB && storage::global_storage_worker != nullptr &&
+          storage::global_storage_worker->get_transfer_status(d.cur_job, &cur)) {
+        st.bytes_done += cur.bytes_done;
+      }
+      return;
+    }
     // Cache first: a DONE job usually had its slot recycled already.
     for (const auto &e : this->job_cache_) {
       if (e.job == job) {
