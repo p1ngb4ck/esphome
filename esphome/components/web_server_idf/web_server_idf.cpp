@@ -190,7 +190,8 @@ esp_err_t AsyncWebServer::request_post_handler(httpd_req_t *r) {
     size_t content_type_len = strlen(content_type_char);
     if (strcasestr_n(content_type_char, content_type_len, "application/x-www-form-urlencoded") != nullptr) {
       // Normal form data - proceed with regular handling
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
+      // Multipart is needed by OTA uploads and by the file API's /files/upload alike.
     } else if (strcasestr_n(content_type_char, content_type_len, "multipart/form-data") != nullptr) {
       auto *server = static_cast<AsyncWebServer *>(r->user_ctx);
       return server->handle_multipart_upload_(r, content_type_char);
@@ -961,7 +962,7 @@ void AsyncEventSourceResponse::deferrable_send_state(void *source, const char *e
 }
 #endif
 
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
 esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *content_type) {
   // Parse boundary and create reader
   const char *boundary_start;

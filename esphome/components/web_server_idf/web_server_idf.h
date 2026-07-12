@@ -234,7 +234,7 @@ class AsyncWebServer {
   esp_err_t request_handler_(AsyncWebServerRequest *request) const;
   static void safe_close_with_shutdown(httpd_handle_t hd, int sockfd);
   esp_err_t handle_raw_body_(httpd_req_t *r, const char *content_type);
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
   esp_err_t handle_multipart_upload_(httpd_req_t *r, const char *content_type);
 #endif
   std::vector<AsyncWebHandler *> handlers_;
