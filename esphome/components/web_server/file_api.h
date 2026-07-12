@@ -54,6 +54,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   void handleRequest(AsyncWebServerRequest *request) override;
   void handleUpload(AsyncWebServerRequest *request, const std::string &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
+  void handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) override;
 
  protected:
   // Runs `op` on the main loop and blocks the calling (httpd) task until it completed.

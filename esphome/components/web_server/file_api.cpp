@@ -434,7 +434,8 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   std::string to_s = to->value();
   storage::StorageError err = storage::StorageError::OK;
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
-  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, &err, &job]() {
+  bool dir_unsupported = false;
+  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, &err, &job, &dir_unsupported]() {
     const char *src_rel = nullptr;
     const char *dst_rel = nullptr;
     storage::PathStorage *src = this->resolve_(from_s.c_str(), &src_rel);
@@ -442,6 +443,16 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     if (src == nullptr || dst == nullptr) {
       err = storage::StorageError::NOT_FOUND;
       return;
+    }
+    // Directories: a same-storage MOVE is a pure rename (the worker takes that fast path
+    // before opening any handles, so it works for directories as-is). Directory COPY and
+    // cross-storage directory moves need per-file recursion — follow-up orchestrator.
+    storage::FileStat src_stat{};
+    if (src->stat(src_rel, &src_stat) == storage::StorageError::OK && src_stat.is_dir) {
+      if (!is_move || src != dst) {
+        dir_unsupported = true;
+        return;
+      }
     }
     if (storage::global_storage_worker == nullptr) {
       err = storage::StorageError::NOT_SUPPORTED;
@@ -468,6 +479,11 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   });
   if (!ok) {
     request->send(504);
+    return;
+  }
+  if (dir_unsupported) {
+    request->send(501, "application/json",
+                  "{\"error\":\"recursive directory copy/cross-storage move not yet supported\"}");
     return;
   }
   if (err != storage::StorageError::OK) {
@@ -745,6 +761,15 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     }
     if (this->upload_.error == storage::StorageError::OK)
       this->upload_.error = close_err;
+  }
+}
+
+void WebServerFileApi::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index,
+                                  size_t total) {
+  // Diagnostic: if this fires for /files/upload, the POST went down the RAW body path —
+  // i.e. the backend's content-type check never classified the request as multipart.
+  if (index == 0) {
+    ESP_LOGW(TAG, "upload: request took the raw-body path (not classified as multipart)");
   }
 }
 
