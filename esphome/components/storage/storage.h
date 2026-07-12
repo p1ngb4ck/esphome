@@ -182,6 +182,12 @@ class RawStorage : public Storage {
 // on any storage that exposes a path namespace, regardless of local vs. network backing.
 class PathStorage : public Storage {
  public:
+  // No-RTTI downcast hook: consumers holding a PathStorage* (e.g. from resolve_path() or
+  // for_each_path_based()) use this to reach the optional MountableStorage interface —
+  // dynamic_cast is unavailable (ESPHome builds with -fno-rtti). Drivers that inherit
+  // MountableStorage override this with `return this;`.
+  virtual MountableStorage *as_mountable() { return nullptr; }
+
   // The VFS mount point this storage is reachable under (e.g. "/sdcard", "/usb"). Set once by
   // the driver (typically from YAML) and treated as invariant for the lifetime of the instance —
   // it does not change across mount()/unmount() cycles. Contract, enforced by the driver at set

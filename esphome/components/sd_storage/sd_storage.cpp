@@ -23,6 +23,8 @@
 
 namespace esphome::sd_storage {
 
+static const char *const TAG = "sd_storage";
+
 void SdMmc::setup() {
   ESP_LOGI(TAG, "Initializing SD/MMC card");
   ESP_LOGI(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
@@ -44,7 +46,12 @@ void SdMmc::setup() {
   // card happens to be present. No mark_failed() here: a failed mount is not a broken
   // component, and this lets sd_storage.mount retry later without a reboot.
   if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->register_storage(this);
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
 
   if (this->cd_pin_ != nullptr) {
     this->cd_pin_->setup();
@@ -165,7 +172,12 @@ storage::StorageError SdMmc::mount() {
   ESP_LOGI(TAG, "SD/MMC card mounted at %s", this->mount_path_);
 
   if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->register_storage(this);
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
 
   this->on_mounted_.call(this->mount_path_);
 
@@ -198,7 +210,12 @@ storage::StorageError SdMmc::unmount() {
   // for this device (see setup()'s comment) — unregistering here was only ever about the
   // teardown window itself, not about removing the device from the registry permanently.
   if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->register_storage(this);
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
 
   return storage::StorageError::OK;
 }
