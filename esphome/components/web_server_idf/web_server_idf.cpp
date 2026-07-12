@@ -199,6 +199,7 @@ esp_err_t AsyncWebServer::request_post_handler(httpd_req_t *r) {
     } else {
       // Other content types (e.g. application/json) are delivered raw to a matching
       // custom handler via handleBody(), like the Arduino AsyncWebServer does
+      ESP_LOGD(TAG, "POST %s: raw body path, content-type: '%s'", r->uri, content_type_char);
       auto *server = static_cast<AsyncWebServer *>(r->user_ctx);
       return server->handle_raw_body_(r, content_type_char);
     }
