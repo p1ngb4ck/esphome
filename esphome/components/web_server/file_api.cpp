@@ -635,7 +635,13 @@ void WebServerFileApi::advance_dir_transfer_() {
       d.depth--;
       continue;
     }
-    d.index_stack[d.depth]++;  // this entry position is consumed either way
+    // Entry-position bookkeeping differs by mode: a COPY leaves the source untouched, so the
+    // walker counts upward through stable positions. A MOVE removes every processed entry
+    // from the source (files right after their copy, directories via rmdir once drained), so
+    // remaining entries slide down and the next unprocessed entry is always #0 — advancing
+    // the index here would skip entries and derail the counting re-enumeration.
+    if (!d.is_move)
+      d.index_stack[d.depth]++;
     if (ctx.entry.is_dir) {
       if (d.depth + 1 >= DirTransfer::MAX_DEPTH) {
         this->finish_dir_transfer_(storage::StorageError::NOT_SUPPORTED);
