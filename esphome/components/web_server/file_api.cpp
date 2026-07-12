@@ -574,12 +574,16 @@ bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char
     this->finish_dir_transfer_(err);
     return true;  // started (and already finished with an error) — id is queryable
   }
+  ESP_LOGD(TAG, "dir %s started: '%s' -> '%s' (job %" PRIu32 ")", is_move ? "move" : "copy", src_rel, dst_rel,
+           this->dir_.id);
   // Kick the walker from a fresh main-loop slice.
   this->defer([this]() { this->advance_dir_transfer_(); });
   return true;
 }
 
 void WebServerFileApi::finish_dir_transfer_(storage::StorageError result) {
+  ESP_LOGD(TAG, "dir %s finished: %s (%" PRIu32 " files, %" PRIu64 " bytes)", this->dir_.is_move ? "move" : "copy",
+           storage::error_to_string(result), this->dir_.files_done, this->dir_.bytes_done);
   this->dir_.result = result;
   this->dir_.done = true;
   this->dir_.active = false;
@@ -600,6 +604,7 @@ void WebServerFileApi::advance_dir_transfer_() {
       this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
       return;
     }
+    ESP_LOGD(TAG, "dir walk: depth=%u idx=%u in '%s'", d.depth, d.index_stack[d.depth], src_dir);
     FindEntryCtx ctx{d.index_stack[d.depth]};
     storage::StorageError err = d.src->list_dir(src_dir, find_entry_cb, &ctx);
     if (err != storage::StorageError::OK) {
@@ -607,6 +612,7 @@ void WebServerFileApi::advance_dir_transfer_() {
       return;
     }
     if (!ctx.found) {
+      ESP_LOGD(TAG, "dir walk: '%s' drained", src_dir);
       // Directory drained. For moves the emptied source directory goes away now.
       if (d.is_move) {
         err = d.src->rmdir(src_dir);
@@ -640,6 +646,7 @@ void WebServerFileApi::advance_dir_transfer_() {
         this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
         return;
       }
+      ESP_LOGD(TAG, "dir walk: descend into '%s'", ctx.entry.name);
       err = d.dst->mkdir(dst_dir);
       if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
         this->finish_dir_transfer_(err);
@@ -668,6 +675,7 @@ void WebServerFileApi::advance_dir_transfer_() {
     d.cur_size = ctx.entry.size;
     auto on_done = [this](storage::StorageError result) {
       DirTransfer &dt = this->dir_;
+      ESP_LOGD(TAG, "dir walk: file done (%s), active=%d", storage::error_to_string(result), dt.active);
       if (!dt.active)
         return;  // finished/aborted meanwhile
       if (result != storage::StorageError::OK) {
@@ -688,6 +696,7 @@ void WebServerFileApi::advance_dir_transfer_() {
       this->defer([this]() { this->advance_dir_transfer_(); });
     };
     err = storage::global_storage_worker->async_copy(d.src, d.cur_src, d.dst, d.cur_dst, on_done, &d.cur_job);
+    ESP_LOGD(TAG, "dir walk: file '%s' -> '%s' submitted (%s)", d.cur_src, d.cur_dst, storage::error_to_string(err));
     if (err != storage::StorageError::OK) {
       this->finish_dir_transfer_(err);
     }
