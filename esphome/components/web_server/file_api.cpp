@@ -749,6 +749,11 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
 }
 
 void WebServerFileApi::handle_upload_response_(AsyncWebServerRequest *request) {
+  if (!this->upload_.active) {
+    // handleRequest fired for POST /files/upload but handleUpload never received a start
+    // marker — the multipart body produced no file part for this handler.
+    ESP_LOGW(TAG, "upload: no multipart file part reached the handler");
+  }
   storage::StorageError err = this->upload_.error;
   this->upload_.active = false;
   if (err != storage::StorageError::OK) {

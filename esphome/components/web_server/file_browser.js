@@ -86,9 +86,13 @@
           cwd = i > 0 ? cwd.slice(0, i) : null;
         })));
         const up = $("input", { type: "file" });
-        up.onchange = () => {
+        const startBtn = $("button", { textContent: "start upload", disabled: true });
+        startBtn.style.cssText = "font-size:.8em";
+        up.onchange = () => { startBtn.disabled = !up.files.length; };
+        startBtn.onclick = () => {
           if (!up.files.length) return;
           const f = up.files[0];
+          startBtn.disabled = true;
           const fd = new FormData();
           fd.append("file", f);
           // XHR instead of fetch: fetch has no upload progress events
@@ -113,7 +117,7 @@
           setStatus(`uploading ${f.name}…0%`);
           xhr.send(fd);
         };
-        listing.append(row("upload:", up, btn("mkdir", async () => {
+        listing.append(row("upload:", up, startBtn, btn("mkdir", async () => {
           const n = prompt("New directory name");
           if (n) await api(`/files/mkdir?path=${encodeURIComponent(cwd + "/" + n)}`, { method: "POST" });
         })));
