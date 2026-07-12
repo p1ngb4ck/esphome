@@ -86,15 +86,32 @@
           cwd = i > 0 ? cwd.slice(0, i) : null;
         })));
         const up = $("input", { type: "file" });
-        up.onchange = async () => {
+        up.onchange = () => {
           if (!up.files.length) return;
           const f = up.files[0];
           const fd = new FormData();
           fd.append("file", f);
-          setStatus(`uploading ${f.name}…`);
-          await api(`/files/upload?path=${encodeURIComponent(cwd + "/" + f.name)}`, { method: "POST", body: fd })
-            .then(() => setStatus("upload done"), (e) => setStatus("Error: " + e.message));
-          refresh();
+          // XHR instead of fetch: fetch has no upload progress events
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", `/files/upload?path=${encodeURIComponent(cwd + "/" + f.name)}`);
+          xhr.upload.onprogress = (e) => setStatus(e.lengthComputable
+            ? `uploading ${f.name}: ${Math.round(100 * e.loaded / e.total)}% (${fmtSize(e.loaded)}/${fmtSize(e.total)})`
+            : `uploading ${f.name}: ${fmtSize(e.loaded)}…`);
+          xhr.onload = () => {
+            if (xhr.status === 200) {
+              let bytes = 0;
+              try { bytes = JSON.parse(xhr.responseText).bytes; } catch (e) {}
+              setStatus(`upload done: ${f.name} (${fmtSize(bytes)})`);
+            } else {
+              let msg = xhr.status;
+              try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
+              setStatus("Upload error: " + msg);
+            }
+            refresh();
+          };
+          xhr.onerror = () => { setStatus("Upload error: connection failed"); refresh(); };
+          setStatus(`uploading ${f.name}…0%`);
+          xhr.send(fd);
         };
         listing.append(row("upload:", up, btn("mkdir", async () => {
           const n = prompt("New directory name");
@@ -112,6 +129,10 @@
             const dl = $("a", { textContent: "download", href: `/files/download?path=${encodeURIComponent(p)}` });
             dl.style.fontSize = ".8em";
             listing.append(row(`${e.name} (${fmtSize(e.size)})`, dl,
+              btn("info", async () => {
+                const st = await api(`/files/stat?path=${encodeURIComponent(p)}`);
+                alert(`${st.name}\nSize: ${st.size} bytes (${fmtSize(st.size)})\nModified: ${st.mtime ? new Date(st.mtime * 1000).toLocaleString() : "unknown"}`);
+              }),
               btn("copy", async () => {
                 const to = prompt("Copy to (full path)", p);
                 if (!to) return;

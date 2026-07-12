@@ -599,7 +599,20 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   // chunk API directly is fine and avoids buffering the file.
   httpd_req_t *req = *request;
   httpd_resp_set_type(req, "application/octet-stream");
-  httpd_resp_set_hdr(req, "Content-Disposition", "attachment");
+  // Pass the real file name to the browser's save dialog. httpd_resp_set_hdr() stores the
+  // pointer (no copy), so the buffer must outlive every send below — function scope does.
+  char disposition[300];
+  {
+    const char *base = strrchr(path.c_str(), '/');
+    base = (base != nullptr && base[1] != '\0') ? base + 1 : path.c_str();
+    std::string safe_name;
+    for (const char *p = base; *p != '\0'; p++) {
+      if (*p != '"' && *p != '\\' && static_cast<uint8_t>(*p) >= 0x20)
+        safe_name += *p;
+    }
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", safe_name.c_str());
+  }
+  httpd_resp_set_hdr(req, "Content-Disposition", disposition);
 
   auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
   uint64_t offset = 0;
@@ -647,6 +660,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::string &filename, size_t index,
                                     uint8_t *data, size_t len, bool final) {
   if (index == 0 && data == nullptr) {
+    ESP_LOGD(TAG, "upload start: '%s'", filename.c_str());
     // Start marker. Target path comes from the query (?path=/sdcard/dir/file.bin); the
     // multipart filename is only a fallback appended to ?dir=.
     if (this->upload_.active) {
@@ -719,6 +733,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
   }
 
   if (final) {
+    ESP_LOGD(TAG, "upload end: %" PRIu64 " bytes (%s)", this->upload_.offset,
+             storage::error_to_string(this->upload_.error));
     storage::StorageError close_err = storage::StorageError::OK;
     if (this->upload_.handle_open) {
       this->run_on_loop_([this, &close_err]() {
