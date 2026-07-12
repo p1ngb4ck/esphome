@@ -6,6 +6,7 @@ from pathlib import Path
 
 import esphome.codegen as cg
 from esphome.components import storage, web_server_base
+from esphome.components.esp32 import add_idf_component
 from esphome.components.logger import request_log_listener
 from esphome.components.web_server_base import CONF_WEB_SERVER_BASE_ID
 import esphome.config_validation as cv
@@ -194,7 +195,9 @@ sorting_group = {
 
 WEBSERVER_SORTING_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_WEB_SERVER): cv.Schema(
+        # The per-entity web_server block is cosmetic dashboard ordering —
+        # mark the whole block advanced; the children inherit via the cascade.
+        cv.Optional(CONF_WEB_SERVER, visibility=cv.Visibility.ADVANCED): cv.Schema(
             {
                 cv.OnlyWith(CONF_WEB_SERVER_ID, "web_server"): cv.use_id(WebServer),
                 cv.Optional(CONF_SORTING_WEIGHT): cv.All(
@@ -418,6 +421,10 @@ async def to_code(config):
         file_api_config = FILE_API_DEFAULTS
     if file_api_config is not None:
         cg.add_define("USE_WEBSERVER_FILE_API")
+        # /files/upload uses the same multipart machinery as web_server OTA; without OTA
+        # configured nothing else pulls the parser library in. file_api is validated as
+        # esp-idf-only, so no framework check is needed here.
+        add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
         # No YAML-visible id — this instance exists purely to back this web_server's
         # file_api sub-block. It is a real Component (setup() registers the handler).
         api_id = ID(f"{var}_file_api", is_declaration=True, type=WebServerFileApi)
