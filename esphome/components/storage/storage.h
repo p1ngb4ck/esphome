@@ -180,6 +180,21 @@ class RawStorage : public Storage {
 // Common path-based operations shared by FilesystemStorage and NetworkStorage.
 // Lets path-oriented consumers (e.g. a file browser/server) enumerate and operate
 // on any storage that exposes a path namespace, regardless of local vs. network backing.
+// Optional interface for drivers whose medium can be mounted/unmounted at runtime (removable
+// media: SD cards, USB sticks, network shares). Drivers inherit this IN ADDITION to their
+// storage base class. Consumers reach it via PathStorage::as_mountable() below — the no-RTTI
+// downcast hook (ESPHome builds with -fno-rtti, so dynamic_cast is unavailable).
+// NOTE: FilesystemStorage declares mount()/unmount() with identical signatures as part of its
+// own contract; a driver inheriting both provides ONE override that satisfies both bases (the
+// standard sibling-interface pattern). This interface exists as an explicit opt-in marker:
+// non-removable filesystems simply don't inherit it.
+class MountableStorage {
+ public:
+  virtual ~MountableStorage() = default;
+  virtual StorageError mount() = 0;
+  virtual StorageError unmount() = 0;
+};
+
 class PathStorage : public Storage {
  public:
   // No-RTTI downcast hook: consumers holding a PathStorage* (e.g. from resolve_path() or
