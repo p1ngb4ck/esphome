@@ -35,7 +35,7 @@ template<typename... Ts> class ListFilesAction;
 
 // Base class for both SDMMC and SPI implementations.
 // Extends FilesystemStorage so both SdMmc and SdSpi satisfy the storage interface.
-class SdStorageBase : public storage::FilesystemStorage {
+class SdStorageBase : public storage::FilesystemStorage, public storage::MountableStorage {
  public:
   void set_mount_path(const char *path) { this->set_mount_path_(path); }
   void set_id(const char *id) { this->storage_id_ = id; }
