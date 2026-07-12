@@ -18,12 +18,6 @@ void StorageWorker::setup() {
   if (global_storage_registry != nullptr) {
     global_storage_registry->add_on_unregistered_callback([this](Storage *s) { this->on_storage_unregistered_(s); });
   }
-
-  // loop() has nothing to do until the first async transfer is submitted (see
-  // ensure_started_()/submit_() below, which re-enables it) — an idle empty-pool scan every
-  // main loop iteration is pure overhead for a driver that links in the worker but never
-  // actually calls async_copy()/async_move().
-  this->disable_loop();
 }
 
 void StorageWorker::ensure_started_() {
@@ -313,6 +307,18 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
 }
 
 void StorageWorker::loop() {
+  // Self-disable on the first pass instead of in setup(): enable_loop() re-activates a
+  // component by finding it in the inactive partition of the app's looping list, and a
+  // disable_loop() issued during setup() runs before that partitioning is consistent for
+  // this component — the later enable_loop() from ensure_started_() then silently fails and
+  // loop() never runs again (async jobs stall PENDING forever). Disabling from inside our
+  // own loop() is the documented pattern and guarantees a consistent partition. The idle
+  // empty-pool scan this avoids costs one loop pass after boot.
+  if (!this->started_) {
+    this->disable_loop();
+    return;
+  }
+
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
   // loop, per the public API's contract.
