@@ -62,6 +62,19 @@ enum class RequestState : uint8_t {
   DONE,
 };
 
+// Opaque transfer-job handle: (generation << 8) | slot_index. max_pending is capped at 16 so
+// 8 bits of slot index are plenty; 0 is the invalid handle (generations start at 1).
+using TransferJob = uint32_t;
+static constexpr TransferJob INVALID_TRANSFER_JOB = 0;
+
+// Snapshot of a transfer's externally observable state — see get_transfer_status().
+struct TransferStatus {
+  RequestState state{RequestState::FREE};
+  storage::StorageError result{storage::StorageError::OK};
+  uint64_t bytes_done{0};
+  uint64_t bytes_total{0};  // 0 = unknown (indeterminate progress)
+};
+
 // One pooled transfer request. Fixed-size, no heap allocation — the pool is a FixedVector of
 // these, sized exactly to max_pending at codegen. Path buffers and the callback are only valid
 // while state != FREE.
@@ -93,6 +106,16 @@ struct TransferRequest {
   // on_storage_unregistered_()'s timeout comment) — avoids re-logging every loop() iteration
   // for as long as the stuck slot remains. Reset when the request is freed.
   bool stuck_warned{false};
+
+  // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
+  // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
+  // main loop may query concurrently — hence atomics. bytes_total is stat()ed once at
+  // transfer start; 0 means unknown (e.g. rename fast path, stat failure).
+  std::atomic<uint64_t> bytes_done{0};
+  std::atomic<uint64_t> bytes_total{0};
+  // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale
+  // TransferJob handles (never 0 — 0 is reserved for the invalid job). Main-loop-only.
+  uint32_t generation{0};
 };
 
 // ===========================================================================================
@@ -220,9 +243,17 @@ class StorageWorker : public Component {
   // not a frozen-enum addition, see the PR notes) or StorageError::INVALID_ARGS (a path
   // exceeds STORAGE_WORKER_MAX_PATH).
   storage::StorageError async_copy(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
-                                   const char *dst_path, CompletionCallback &&on_done);
+                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr);
   storage::StorageError async_move(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
-                                   const char *dst_path, CompletionCallback &&on_done);
+                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr);
+
+  // Snapshot of a transfer's externally observable state, for progress bars / job-status
+  // endpoints. Main-loop-only (like all control-plane calls). Returns false when the job
+  // handle is unknown or expired: a slot is recycled by the pool after its completion
+  // callback ran, so the DONE snapshot is only observable until then — consumers that need
+  // the final result reliably must capture it in the completion callback (an HTTP job
+  // endpoint caches it web-side) and use polling only for progress.
+  bool get_transfer_status(TransferJob job, TransferStatus *out) const;
 
   // Opens `path` for writing (create/truncate, like OpenMode::WRITE) and returns a handle
   // immediately if a slot was available — StorageError::NOT_READY (pool full) or
@@ -254,7 +285,8 @@ class StorageWorker : public Component {
 
  protected:
   storage::StorageError submit_(RequestOp op, storage::PathStorage *src, const char *src_path,
-                                storage::PathStorage *dst, const char *dst_path, CompletionCallback &&on_done);
+                                storage::PathStorage *dst, const char *dst_path, CompletionCallback &&on_done,
+                                TransferJob *job_out = nullptr);
 
   // Lazily creates both pools (and, where applicable, the shared background task) on the first
   // submit_()/begin_write()/begin_read() call. A path-based driver that links in the worker but
