@@ -127,6 +127,18 @@
           if (e.is_dir) {
             listing.append(row("📁 " + e.name,
               btn("open", async () => { cwd = p; }),
+              btn("copy", async () => {
+                const to = prompt("Copy directory to (full path)", p);
+                if (!to) return;
+                const j = await api(`/files/copy?from=${encodeURIComponent(p)}&to=${encodeURIComponent(to)}`, { method: "POST" });
+                await pollJob(j.job, "copy");
+              }),
+              btn("move", async () => {
+                const to = prompt("Move/rename directory to (full path)", p);
+                if (!to) return;
+                const j = await api(`/files/move?from=${encodeURIComponent(p)}&to=${encodeURIComponent(to)}`, { method: "POST" });
+                await pollJob(j.job, "move");
+              }),
               btn("del", () => confirm(`Delete ${e.name} recursively?`)
                 ? api(`/files/delete?path=${encodeURIComponent(p)}&recursive=1`, { method: "POST" }) : Promise.resolve())));
           } else {
