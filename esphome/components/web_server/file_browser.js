@@ -137,7 +137,22 @@
 
   const attach = () => {
     const app = document.querySelector("esp-app");
-    (app ? app.parentNode : document.body).appendChild(card);
+    // Place the card right below the entity table, ABOVE the (growing) log. The v3 app
+    // renders inside an open shadow root; fall back to appending after <esp-app> (and retry
+    // once shortly after, in case the app hasn't rendered its shadow content yet).
+    const mount = () => {
+      const table = app && app.shadowRoot && app.shadowRoot.querySelector("esp-entity-table");
+      if (table && table.parentNode) {
+        table.parentNode.insertBefore(card, table.nextSibling);
+        return true;
+      }
+      return false;
+    };
+    if (!mount()) {
+      setTimeout(() => {
+        if (!mount()) (app ? app.parentNode : document.body).appendChild(card);
+      }, 300);
+    }
   };
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", attach) : attach();
 })();
