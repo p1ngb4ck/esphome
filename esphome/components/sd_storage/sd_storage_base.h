@@ -44,6 +44,13 @@ class SdStorageBase : public storage::FilesystemStorage {
   // No-RTTI downcast hook — see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
 
+  // Both FilesystemStorage and MountableStorage declare mount()/unmount(); redeclaring them
+  // here merges the two inherited slots into one final declaration point, so lookup through a
+  // SdStorageBase* (e.g. the driver's own mount/unmount actions) is unambiguous. SdMmc/SdSpi
+  // overrides are unchanged and satisfy both bases.
+  storage::StorageError mount() override = 0;
+  storage::StorageError unmount() override = 0;
+
   template<typename F> void add_on_mounted_callback(F &&cb) { this->on_mounted_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_removed_callback(F &&cb) { this->on_removed_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_inserted_callback(F &&cb) { this->on_inserted_.add(std::forward<F>(cb)); }
