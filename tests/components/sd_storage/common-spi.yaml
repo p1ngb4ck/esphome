@@ -18,6 +18,10 @@ script:
   - id: sd_card_exercise
     then:
       - sd_storage.unmount: sd_card
+      # generic storage-level mount actions (MountableStorage opt-in)
+      - storage.unmount: sd_card
+      - storage.mount:
+          id: sd_card
       - sd_storage.mount: sd_card
       - if:
           condition:
