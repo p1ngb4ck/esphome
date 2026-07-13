@@ -707,7 +707,7 @@ bool USBUartComponent::run_config_machine_() {
   return true;
 }
 
-void USBUartChannel::load_settings(bool /*dump_config*/) {
+void USBUartChannelBase::load_settings(bool /*dump_config*/) {
   // The per-channel control transfers already log their values at debug level.
   this->parent_->apply_channel_settings(this);
 }
