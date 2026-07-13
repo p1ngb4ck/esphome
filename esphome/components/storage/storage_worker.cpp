@@ -93,6 +93,21 @@ bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
   return false;
 }
 
+bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
+  if (storage == nullptr)
+    return false;
+  // PENDING counts too: a submitted-but-not-yet-started job already "owns" the device from
+  // the caller's point of view, so unmounting out from under it must wait.
+  for (const auto &req : this->pool_) {
+    RequestState state = req.state.load();
+    if (state == RequestState::FREE || state == RequestState::DONE)
+      continue;
+    if (req.src_storage == storage || req.dst_storage == storage)
+      return true;
+  }
+  return false;
+}
+
 StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *src_path, PathStorage *dst,
                                     const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out) {
   this->ensure_started_();

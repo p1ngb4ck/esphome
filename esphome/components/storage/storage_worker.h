@@ -255,6 +255,11 @@ class StorageWorker : public Component {
   // endpoint caches it web-side) and use polling only for progress.
   bool get_transfer_status(TransferJob job, TransferStatus *out) const;
 
+  // True if any active (PENDING/RUNNING/CANCELLED) transfer references `storage` as source or
+  // destination. Main-loop-only, like all control-plane queries. Used e.g. by a removable
+  // device to defer its unmount until no in-flight job still touches it.
+  bool is_busy_with(const storage::Storage *storage) const;
+
   // Opens `path` for writing (create/truncate, like OpenMode::WRITE) and returns a handle
   // immediately if a slot was available — StorageError::NOT_READY (pool full) or
   // StorageError::INVALID_ARGS (path too long) otherwise, in which case on_open is NOT

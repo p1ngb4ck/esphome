@@ -15,7 +15,11 @@ from esphome.components.esp32 import (
     require_vfs_dir,
     require_vfs_select,
 )
-from esphome.components.storage import request_storage_device, request_storage_worker
+from esphome.components.storage import (
+    MountableStorage,
+    request_storage_device,
+    request_storage_worker,
+)
 from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
@@ -39,6 +43,7 @@ USBStorageClient = usb_storage_ns.class_(
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
     cg.Component,
+    MountableStorage,
 )
 
 # Automation classes
