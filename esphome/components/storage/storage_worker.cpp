@@ -24,8 +24,6 @@ void StorageWorker::ensure_started_() {
   if (this->started_)
     return;
   this->started_ = true;
-  this->enable_loop();
-  ESP_LOGD(TAG, "ensure_started_: enable_loop() called, state=0x%02x", this->component_state_ & 0x03);
 
   this->pool_.init(this->max_pending_);
   for (size_t i = 0; i < this->max_pending_; i++) {
@@ -308,27 +306,18 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
 }
 
 void StorageWorker::loop() {
-  // Self-disable on the first pass instead of in setup(): enable_loop() re-activates a
-  // component by finding it in the inactive partition of the app's looping list, and a
-  // disable_loop() issued during setup() runs before that partitioning is consistent for
-  // this component — the later enable_loop() from ensure_started_() then silently fails and
-  // loop() never runs again (async jobs stall PENDING forever). Disabling from inside our
-  // own loop() is the documented pattern and guarantees a consistent partition. The idle
-  // empty-pool scan this avoids costs one loop pass after boot.
-  if (!this->started_) {
-    this->disable_loop();
+  // Nothing to do until the first async transfer is submitted. Cheap early-out every main
+  // loop pass — far simpler and race-free compared to disable_loop()/enable_loop() gymnastics
+  // around lazy start (an enable_loop() issued while the component is still in LOOP state is a
+  // no-op, so a pre-start disable could never be undone — that was the stall).
+  if (!this->started_)
     return;
-  }
-  static uint32_t s_loop_dbg = 0;
-  if ((s_loop_dbg++ & 0xFF) == 0)
-    ESP_LOGD(TAG, "worker loop() alive (#%" PRIu32 ")", s_loop_dbg);
 
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
   // loop, per the public API's contract.
   for (auto &req : this->pool_) {
     if (req.state.load() == RequestState::DONE) {
-      ESP_LOGD(TAG, "loop: delivering completion for slot, has_cb=%d", (bool) req.callback);
       CompletionCallback cb = std::move(req.callback);
       StorageError result = req.result;
       req.callback = nullptr;

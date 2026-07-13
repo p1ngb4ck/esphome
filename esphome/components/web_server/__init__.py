@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import re
 from pathlib import Path
 
 import esphome.codegen as cg
@@ -59,7 +60,6 @@ CONF_ENABLE_UPLOAD = "enable_upload"
 CONF_ENABLE_DOWNLOAD = "enable_download"
 CONF_ENABLE_DELETION = "enable_deletion"
 
-
 def AUTO_LOAD(config: ConfigType) -> list[str]:
     """web_server always needs json/web_server_base; storage is pulled in only when the
     optional file_api:/file_browser: sub-blocks are actually present in this instance's
@@ -68,7 +68,6 @@ def AUTO_LOAD(config: ConfigType) -> list[str]:
     if config and (CONF_FILE_API in config or CONF_FILE_BROWSER in config):
         return base + ["storage"]
     return base
-
 
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
