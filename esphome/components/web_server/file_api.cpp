@@ -208,12 +208,13 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           append_json_escaped(*ctx->out, s->get_mount_path());
           *ctx->out += "\",\"type\":\"";
           *ctx->out += type == storage::StorageType::NETWORK ? "network" : "filesystem";
-          // Per-direction capabilities: a plain "mountable" bool cannot express drivers whose
-          // medium mounts itself (USB hotplug) and only supports safe-eject — the UI must gate
-          // each button separately (see MountableStorage::get_mount_caps()).
+          // Close the type string value, then per-direction capabilities: a plain "mountable"
+          // bool cannot express drivers whose medium mounts itself (USB hotplug) and only
+          // supports safe-eject — the UI must gate each button separately (see
+          // MountableStorage::get_mount_caps()).
           storage::MountableStorage *m = s->as_mountable();
           uint8_t caps = m != nullptr ? m->get_mount_caps() : 0;
-          *ctx->out += ",\"can_mount\":";
+          *ctx->out += "\",\"can_mount\":";
           *ctx->out += (caps & storage::MountableStorage::MOUNT_CAP_MOUNT) != 0 ? "true" : "false";
           *ctx->out += ",\"can_unmount\":";
           *ctx->out += (caps & storage::MountableStorage::MOUNT_CAP_UNMOUNT) != 0 ? "true" : "false";
