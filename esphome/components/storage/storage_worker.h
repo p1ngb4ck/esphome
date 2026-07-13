@@ -67,6 +67,30 @@ enum class RequestState : uint8_t {
 using TransferJob = uint32_t;
 static constexpr TransferJob INVALID_TRANSFER_JOB = 0;
 
+// 64-bit progress counter for TransferRequest, atomic only when it has to be. With the
+// background worker task the counters are written from the task while the main loop reads
+// them concurrently — that build uses std::atomic<uint64_t>. Every other build runs the
+// loop-sliced engine exclusively, so all access is main-loop-only and a plain field is
+// sufficient; this matters because 64-bit atomics are not lock-free on several supported
+// cores and GCC lowers them to __atomic_*_8 libcalls that toolchains without libatomic
+// (e.g. arm-none-eabi as used for LibreTiny/bk72xx) fail to link. The plain variant mirrors
+// the tiny slice of the std::atomic interface the worker actually uses (load/store/assign)
+// so every call site compiles unchanged against either type.
+#if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
+using ProgressCounter = std::atomic<uint64_t>;
+#else
+struct ProgressCounter {
+  uint64_t value{0};
+  uint64_t load() const { return this->value; }
+  void store(uint64_t v) { this->value = v; }
+  ProgressCounter &operator=(uint64_t v) {
+    this->value = v;
+    return *this;
+  }
+};
+#endif
+
+// Snapshot of a transfer's externally observable state — see get_transfer_status().
 struct TransferStatus {
   RequestState state{RequestState::FREE};
   storage::StorageError result{storage::StorageError::OK};
@@ -100,21 +124,22 @@ struct TransferRequest {
   bool dst_is_fs{false};
   bool handles_open{false};
 
-  // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
-  // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
-  // main loop may query concurrently — hence atomics. bytes_total is stat()ed once at
-  // transfer start; 0 means unknown (progress is indeterminate, e.g. rename fast path).
-  std::atomic<uint64_t> bytes_done{0};
-  std::atomic<uint64_t> bytes_total{0};
-  // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale
-  // TransferJob handles (never 0 — 0 is reserved for the invalid job). Main-loop-only.
-  uint32_t generation{0};
-
   // Set once loop()'s dispatch has already logged that this request cannot proceed because it
   // overlaps a slot stuck RUNNING/CANCELLED past the drain timeout (see
   // on_storage_unregistered_()'s timeout comment) — avoids re-logging every loop() iteration
   // for as long as the stuck slot remains. Reset when the request is freed.
   bool stuck_warned{false};
+
+  // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
+  // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
+  // main loop may query concurrently — atomic in task builds only, see ProgressCounter above.
+  // bytes_total is stat()ed once at
+  // transfer start; 0 means unknown (e.g. rename fast path, stat failure).
+  ProgressCounter bytes_done{};
+  ProgressCounter bytes_total{};
+  // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale
+  // TransferJob handles (never 0 — 0 is reserved for the invalid job). Main-loop-only.
+  uint32_t generation{0};
 };
 
 // ===========================================================================================
@@ -251,8 +276,13 @@ class StorageWorker : public Component {
   // handle is unknown or expired: a slot is recycled by the pool after its completion
   // callback ran, so the DONE snapshot is only observable until then — consumers that need
   // the final result reliably must capture it in the completion callback (an HTTP job
-  // endpoint caches the final status on its side) and use polling only for progress.
+  // endpoint caches it web-side) and use polling only for progress.
   bool get_transfer_status(TransferJob job, TransferStatus *out) const;
+
+  // True if any active (PENDING/RUNNING/CANCELLED) transfer references `storage` as source or
+  // destination. Main-loop-only, like all control-plane queries. Used e.g. by a removable
+  // device to defer its unmount until no in-flight job still touches it.
+  bool is_busy_with(const storage::Storage *storage) const;
 
   // Opens `path` for writing (create/truncate, like OpenMode::WRITE) and returns a handle
   // immediately if a slot was available — StorageError::NOT_READY (pool full) or
