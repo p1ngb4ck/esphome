@@ -1,7 +1,6 @@
 from collections.abc import Callable, Iterable
 import contextlib
 from dataclasses import dataclass
-import glob
 import itertools
 import logging
 import os
@@ -1480,9 +1479,6 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
-KEY_FATFS_VOLUME_COUNT = "fatfs_volume_count"
-KEY_FATFS_LFN_MAX = "fatfs_lfn_max"
-KEY_FATFS_LFN_HEAP = "fatfs_lfn_heap"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1581,36 +1577,6 @@ def require_fatfs() -> None:
     This prevents FATFS from being disabled when disable_fatfs is set.
     """
     CORE.data[KEY_ESP32][KEY_FATFS_REQUIRED] = True
-
-
-def require_fatfs_volume_count(count: int) -> None:
-    """Request a minimum CONFIG_FATFS_VOLUME_COUNT value.
-
-    Multiple components may call this; the maximum requested value is used.
-    Call require_fatfs() as well — this only adjusts the count, not the enable flag.
-    """
-    data = CORE.data[KEY_ESP32]
-    data[KEY_FATFS_VOLUME_COUNT] = max(data.get(KEY_FATFS_VOLUME_COUNT, 2), count)
-
-
-def require_fatfs_lfn_max(length: int = 255) -> None:
-    """Request a minimum CONFIG_FATFS_MAX_LFN value.
-
-    Multiple components may call this; the maximum requested value is used.
-    Call require_fatfs() as well — this only adjusts the LFN length, not the enable flag.
-    """
-    data = CORE.data[KEY_ESP32]
-    data[KEY_FATFS_LFN_MAX] = max(data.get(KEY_FATFS_LFN_MAX, 0), length)
-
-
-def require_fatfs_lfn_heap() -> None:
-    """Request that the FATFS LFN buffer is allocated on the heap (CONFIG_FATFS_LFN_HEAP).
-
-    Use this when LFN filenames must be supported with dynamic-length buffers.
-    If not called, LFN placement defaults to stack (CONFIG_FATFS_LFN_STACK).
-    Call require_fatfs() and require_fatfs_lfn_max() as well.
-    """
-    CORE.data[KEY_ESP32][KEY_FATFS_LFN_HEAP] = True
 
 
 def require_adc_oneshot_iram() -> None:
@@ -2115,35 +2081,6 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
-async def _write_vfs_dir_sdkconfig(disable_vfs_dir: bool) -> None:
-    """Write VFS_SUPPORT_DIR sdkconfig at FINAL priority so require_vfs_dir() calls from all
-    components are visible before we decide to enable or disable VFS directory support."""
-    if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
-    else:
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", not disable_vfs_dir)
-
-
-@coroutine_with_priority(CoroPriority.FINAL)
-async def _write_fatfs_sdkconfig(disable_fatfs: bool):
-    """Write FATFS sdkconfig at FINAL priority so require_fatfs() calls from all
-    components are visible before we decide to enable or disable FATFS."""
-    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
-        lfn_max = CORE.data[KEY_ESP32].get(KEY_FATFS_LFN_MAX, 0)
-        if lfn_max > 0:
-            add_idf_sdkconfig_option("CONFIG_FATFS_MAX_LFN", lfn_max)
-        if CORE.data[KEY_ESP32].get(KEY_FATFS_LFN_HEAP, False):
-            add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
-        else:
-            add_idf_sdkconfig_option("CONFIG_FATFS_LFN_STACK", True)
-        volume_count = CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUME_COUNT, 2)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volume_count)
-    elif disable_fatfs:
-        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
-
-
-@coroutine_with_priority(CoroPriority.FINAL)
 async def _patch_idf_kconfig_files():
     """Patch IDF 6.1.0 Kconfig files that use 'default 0' for bool symbols.
 
@@ -2165,18 +2102,17 @@ async def _patch_idf_kconfig_files():
         ),
         (
             "components/fatfs/Kconfig",
-            "        bool \"Make fatfs f_printf() support long long argument\"\n        default 0\n",
-            "        bool \"Make fatfs f_printf() support long long argument\"\n        default n\n",
+            '        bool "Make fatfs f_printf() support long long argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support long long argument"\n        default n\n',
         ),
         (
             "components/fatfs/Kconfig",
-            "        bool \"Make fatfs f_printf() support floating point argument\"\n        default 0\n",
-            "        bool \"Make fatfs f_printf() support floating point argument\"\n        default n\n",
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default 0\n',
+            '        bool "Make fatfs f_printf() support floating point argument"\n        default n\n',
         ),
     ]
     for pattern, old, new in fixes:
-        for kconfig_path_str in glob.glob(str(idf_base / pattern), recursive=True):
-            kconfig_path = Path(kconfig_path_str)
+        for kconfig_path in idf_base.glob(pattern):
             if not kconfig_path.is_file():
                 continue
             original = kconfig_path.read_text()
@@ -2570,6 +2506,19 @@ async def to_code(config):
             "CONFIG_VFS_SUPPORT_SELECT", not advanced[CONF_DISABLE_VFS_SUPPORT_SELECT]
         )
 
+    # Disable VFS support for directory functions (opendir, readdir, mkdir, etc.)
+    # ESPHome doesn't use directory functions on ESP32.
+    # Components that need it (e.g., storage components) call require_vfs_dir().
+    # Saves approximately 0.5KB+ of flash when disabled (default).
+    if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
+        # Component requires VFS directory support - force enable regardless of user setting
+        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
+    else:
+        # No component needs it - allow user to control (default: disabled)
+        add_idf_sdkconfig_option(
+            "CONFIG_VFS_SUPPORT_DIR", not advanced[CONF_DISABLE_VFS_SUPPORT_DIR]
+        )
+
     if use_platformio:
         cg.add_platformio_option("board_build.partitions", "partitions.csv")
     if CONF_PARTITIONS in config:
@@ -2733,12 +2682,14 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", False)
         add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", False)
 
-
     # FINAL priority: runs after every require_libc_picolibc_newlib_compat() call
     CORE.add_job(_set_libc_picolibc_newlib_compat)
 
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
+
+    # FINAL priority: patch IDF 6.1.0 Kconfig 'default 0' bool symbols before cmake runs
+    CORE.add_job(_patch_idf_kconfig_files)
 
     # Disable regi2c control functions in IRAM
     # Only needed if using analog peripherals (ADC, DAC, etc.) from ISRs while cache is disabled
@@ -2755,11 +2706,16 @@ async def to_code(config):
     ):
         add_idf_sdkconfig_option("CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM", True)
 
-    # FATFS sdkconfig is written at FINAL priority so all components have had a
-    # chance to call require_fatfs() before we decide whether to enable or disable it.
-    CORE.add_job(_write_fatfs_sdkconfig, advanced[CONF_DISABLE_FATFS])
-    CORE.add_job(_write_vfs_dir_sdkconfig, advanced[CONF_DISABLE_VFS_SUPPORT_DIR])
-    CORE.add_job(_patch_idf_kconfig_files)
+    # Disable FATFS support
+    # Components that need FATFS (SD card, etc.) can call require_fatfs()
+    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
+        # Component called require_fatfs() - enable regardless of user setting
+        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", False)
+        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 2)
+    elif advanced[CONF_DISABLE_FATFS]:
+        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
+        # Kconfig range is [1,10]; 0 gets clamped to the default.
+        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
 
     for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
         add_idf_sdkconfig_option(name, RawSdkconfigValue(value))
@@ -3087,11 +3043,11 @@ def _write_idf_component_yml():
         components: dict = CORE.data[KEY_ESP32][KEY_COMPONENTS]
         for name, component in components.items():
             dependency: dict[str, str] = {}
-            if component.get(KEY_REF):
+            if component[KEY_REF]:
                 dependency["version"] = component[KEY_REF]
-            if component.get(KEY_REPO):
+            if component[KEY_REPO]:
                 dependency["git"] = component[KEY_REPO]
-            if component.get(KEY_PATH):
+            if component[KEY_PATH]:
                 dependency["path"] = component[KEY_PATH]
             if component.get(KEY_OVERRIDE_PATH):
                 dependency["override_path"] = component[KEY_OVERRIDE_PATH]
