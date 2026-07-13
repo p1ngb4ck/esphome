@@ -25,6 +25,7 @@ void StorageWorker::ensure_started_() {
     return;
   this->started_ = true;
   this->enable_loop();
+  ESP_LOGD(TAG, "ensure_started_: enable_loop() called, state=0x%02x", this->component_state_ & 0x03);
 
   this->pool_.init(this->max_pending_);
   for (size_t i = 0; i < this->max_pending_; i++) {
@@ -318,12 +319,16 @@ void StorageWorker::loop() {
     this->disable_loop();
     return;
   }
+  static uint32_t s_loop_dbg = 0;
+  if ((s_loop_dbg++ & 0xFF) == 0)
+    ESP_LOGD(TAG, "worker loop() alive (#%" PRIu32 ")", s_loop_dbg);
 
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
   // loop, per the public API's contract.
   for (auto &req : this->pool_) {
     if (req.state.load() == RequestState::DONE) {
+      ESP_LOGD(TAG, "loop: delivering completion for slot, has_cb=%d", (bool) req.callback);
       CompletionCallback cb = std::move(req.callback);
       StorageError result = req.result;
       req.callback = nullptr;
