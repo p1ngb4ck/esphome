@@ -41,6 +41,7 @@ namespace esphome::web_server {
 class WebServerFileApi : public Component, public AsyncWebHandler {
  public:
   void setup() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::WIFI - 1.0f; }
 
@@ -135,6 +136,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     char cur_dst[300]{};
     uint64_t cur_size{0};
     storage::TransferJob cur_job{storage::INVALID_TRANSFER_JOB};
+    bool awaiting_file{false};        // a per-file worker job is in flight; loop() drives the walk
+    volatile bool file_done_{false};  // set by the completion callback
+    storage::StorageError file_result_{storage::StorageError::OK};  // valid once file_done_
     uint64_t bytes_done{0};
     uint32_t files_done{0};
     storage::StorageError result{storage::StorageError::OK};

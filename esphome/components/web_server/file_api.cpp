@@ -574,10 +574,9 @@ bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char
     this->finish_dir_transfer_(err);
     return true;  // started (and already finished with an error) — id is queryable
   }
-  ESP_LOGD(TAG, "dir %s started: '%s' -> '%s' (job %" PRIu32 ")", is_move ? "move" : "copy", src_rel, dst_rel,
-           this->dir_.id);
-  // Kick the walker from a fresh main-loop slice.
-  this->defer([this]() { this->advance_dir_transfer_(); });
+  // Run the first walker step directly (already on the main loop here, inside the
+  // run_on_loop_ marshalling). All subsequent steps are driven by loop().
+  this->advance_dir_transfer_();
   return true;
 }
 
@@ -596,15 +595,15 @@ void WebServerFileApi::advance_dir_transfer_() {
   if (!this->dir_.active)
     return;
   DirTransfer &d = this->dir_;
-  // Bound the inline control steps per main-loop slice (empty-directory chains would
-  // otherwise walk arbitrarily long in one go); continue via defer.
-  for (int steps = 0; steps < 8; steps++) {
+  // Directory-only control steps (mkdir/descend/ascend/drain) run inline; every regular file
+  // yields by returning with awaiting_file set, so this cannot monopolise the main loop for
+  // long. Each iteration either returns or changes depth, and depth is bounded by MAX_DEPTH.
+  while (true) {
     char src_dir[300];
     if (!join_path(src_dir, sizeof(src_dir), d.src_root, d.sub, nullptr)) {
       this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
       return;
     }
-    ESP_LOGD(TAG, "dir walk: depth=%u idx=%u in '%s'", d.depth, d.index_stack[d.depth], src_dir);
     FindEntryCtx ctx{d.index_stack[d.depth]};
     storage::StorageError err = d.src->list_dir(src_dir, find_entry_cb, &ctx);
     if (err != storage::StorageError::OK) {
@@ -612,7 +611,6 @@ void WebServerFileApi::advance_dir_transfer_() {
       return;
     }
     if (!ctx.found) {
-      ESP_LOGD(TAG, "dir walk: '%s' drained", src_dir);
       // Directory drained. For moves the emptied source directory goes away now.
       if (d.is_move) {
         err = d.src->rmdir(src_dir);
@@ -652,7 +650,6 @@ void WebServerFileApi::advance_dir_transfer_() {
         this->finish_dir_transfer_(storage::StorageError::INVALID_ARGS);
         return;
       }
-      ESP_LOGD(TAG, "dir walk: descend into '%s'", ctx.entry.name);
       err = d.dst->mkdir(dst_dir);
       if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
         this->finish_dir_transfer_(err);
@@ -679,36 +676,47 @@ void WebServerFileApi::advance_dir_transfer_() {
       return;
     }
     d.cur_size = ctx.entry.size;
+    // Minimal callback: record the outcome into dir_ only (no continuation, no nested defer —
+    // that cross-component callback->defer chain was what failed to resume after file 1).
+    // Capturing the result here also means we never race the worker recycling its slot.
+    d.file_done_ = false;
+    d.file_result_ = storage::StorageError::OK;
     auto on_done = [this](storage::StorageError result) {
-      DirTransfer &dt = this->dir_;
-      ESP_LOGD(TAG, "dir walk: file done (%s), active=%d", storage::error_to_string(result), dt.active);
-      if (!dt.active)
-        return;  // finished/aborted meanwhile
-      if (result != storage::StorageError::OK) {
-        this->finish_dir_transfer_(result);
-        return;
-      }
-      dt.bytes_done += dt.cur_size;
-      dt.files_done++;
-      if (dt.is_move) {
-        storage::StorageError del_err = dt.src->remove(dt.cur_src);
-        if (del_err != storage::StorageError::OK) {
-          this->finish_dir_transfer_(del_err);
-          return;
-        }
-      }
-      dt.cur_job = storage::INVALID_TRANSFER_JOB;
-      // Fresh main-loop slice for the next walker step (avoids callback recursion).
-      this->defer([this]() { this->advance_dir_transfer_(); });
+      this->dir_.file_result_ = result;
+      this->dir_.file_done_ = true;  // single writer (worker loop), single reader (our loop)
     };
     err = storage::global_storage_worker->async_copy(d.src, d.cur_src, d.dst, d.cur_dst, on_done, &d.cur_job);
-    ESP_LOGD(TAG, "dir walk: file '%s' -> '%s' submitted (%s)", d.cur_src, d.cur_dst, storage::error_to_string(err));
     if (err != storage::StorageError::OK) {
       this->finish_dir_transfer_(err);
+      return;
     }
-    return;  // wait for the completion callback
+    d.awaiting_file = true;
+    return;  // loop() advances once file_done_ is set
   }
-  this->defer([this]() { this->advance_dir_transfer_(); });
+}
+
+void WebServerFileApi::loop() {
+#ifdef USE_STORAGE_WORKER
+  DirTransfer &d = this->dir_;
+  if (!d.active || !d.awaiting_file || !d.file_done_)
+    return;  // no directory transfer waiting on a file, or the file is still in flight
+  d.awaiting_file = false;
+  if (d.file_result_ != storage::StorageError::OK) {
+    this->finish_dir_transfer_(d.file_result_);
+    return;
+  }
+  d.bytes_done += d.cur_size;
+  d.files_done++;
+  if (d.is_move) {
+    storage::StorageError del_err = d.src->remove(d.cur_src);
+    if (del_err != storage::StorageError::OK) {
+      this->finish_dir_transfer_(del_err);
+      return;
+    }
+  }
+  d.cur_job = storage::INVALID_TRANSFER_JOB;
+  this->advance_dir_transfer_();
+#endif
 }
 #endif  // USE_STORAGE_WORKER
 
