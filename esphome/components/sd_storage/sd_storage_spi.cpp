@@ -3,26 +3,21 @@
 #ifdef USE_SD_STORAGE_SPI
 
 #include "esphome/core/log.h"
-#include <cerrno>
 #include <cinttypes>
 #include <cstdio>
-#include <cstring>
-#include <sys/stat.h>
-#include <dirent.h>
 
 extern "C" {
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
 }
 #include "ff.h"
+#include "diskio_sdmmc.h"
 #include "esphome/components/storage/storage.h"
 
 #ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
 #define VFS_FAT_MOUNT_DEFAULT_CONFIG() \
   { .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 0, .disk_status_check_enable = false, }
 #endif
-
-static constexpr int SD_OCR_SDHC_CAP = (1 << 30);
 
 namespace esphome::sd_storage {
 
@@ -43,16 +38,58 @@ void SdSpi::setup() {
     setup_input_pullup(this->data1_pin_);
   if (this->data2_pin_ != nullptr)
     setup_input_pullup(this->data2_pin_);
+  if (this->cd_pin_ != nullptr)
+    setup_input_pullup(this->cd_pin_);
 
   this->spi_setup();
 
-  if (this->mount() != StorageError::OK) {
+  // Register before attempting to mount, not only on success — get_info() reports is_mounted
+  // correctly either way, and this lets the device (and its mount/unmount/list_files actions)
+  // show up in the registry even if the initial mount fails, instead of only existing once a
+  // card happens to be present. No mark_failed() here: a failed mount is not a broken
+  // component, and this lets sd_storage.mount retry later without a reboot.
+  if (storage::global_storage_registry != nullptr)
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG_SPI, "Storage registration failed");
+      this->mark_failed();
+    }
+
+  if (this->cd_pin_ != nullptr) {
+    // With a CD pin configured, only mount if a card is actually seen at boot — otherwise wait
+    // for loop()'s polling to pick up an insertion later, rather than logging a spurious "Failed
+    // to mount" for a socket that's simply empty right now. No mark_failed() either way, same
+    // rationale as above.
+    if (this->card_present_()) {
+      if (this->mount() != StorageError::OK) {
+        ESP_LOGE(TAG_SPI, "Failed to mount SD card");
+      }
+    } else {
+      ESP_LOGI(TAG_SPI, "Waiting for card (CD)");
+    }
+  } else if (this->mount() != StorageError::OK) {
     ESP_LOGE(TAG_SPI, "Failed to mount SD card");
-    this->mark_failed();
   }
 }
 
-void SdSpi::loop() {}
+void SdSpi::loop() {
+  bool present = this->card_present_();
+  if (!this->should_poll_cd_())
+    return;
+
+  if (this->is_mounted_ && !present) {
+    ESP_LOGI(TAG_SPI, "Card removed (CD)");
+    this->unmount();
+    this->on_removed_.call();
+  } else if (!this->is_mounted_ && present) {
+    ESP_LOGI(TAG_SPI, "Card inserted (CD)");
+    bool ok = this->mount() == StorageError::OK;
+    this->log_mount_result_(ok);
+    if (ok)
+      this->on_inserted_.call();
+  }
+}
 
 void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "SD Storage (SPI):");
@@ -60,8 +97,9 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_);
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
   ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", spi::Utility::get_pin_no(this->cs_));
+  log_pin(TAG_SPI, "  CD Pin: ", this->cd_pin_);
   if (this->is_mounted_) {
-    ESP_LOGCONFIG(TAG_SPI, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
+    ESP_LOGCONFIG(TAG_SPI, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG_SPI, "  Total bytes: %" PRIu64, this->total_bytes_);
     ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
   }
@@ -127,13 +165,19 @@ StorageError SdSpi::mount() {
   }
 
   this->is_mounted_ = true;
+  this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
   this->update_card_info();
 
   ESP_LOGI(TAG_SPI, "SD card mounted at %s (max %" PRIu32 " kHz, real %" PRIu32 " kHz)", this->mount_path_,
-           this->card_->max_freq_khz, this->card_->real_freq_khz);
+           static_cast<uint32_t>(this->card_->max_freq_khz), static_cast<uint32_t>(this->card_->real_freq_khz));
 
   if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->register_storage(this);
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG_SPI, "Storage registration failed");
+      this->mark_failed();
+    }
 
   this->on_mounted_.call(this->mount_path_);
 
@@ -144,14 +188,36 @@ StorageError SdSpi::unmount() {
   if (!this->is_mounted_ || this->card_ == nullptr)
     return StorageError::OK;
 
+  // Unregister before the VFS unmount below — the registry contract guarantees
+  // unregister_storage() doesn't return until any in-flight storage_worker data-plane calls
+  // against this device have drained (closing any handles the worker itself opened), so it's
+  // safe to tear the filesystem down immediately afterward.
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->unregister_storage(this);
+
+  ESP_LOGI(TAG_SPI, "Syncing filesystem before unmount");
+  // Closes any handles still open from user/lambda code, while the VFS is still mounted to
+  // receive the flush/close calls.
+  this->flush_open_handles_();
+  ESP_LOGI(TAG_SPI, "All data flushed");
 
   esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
   this->card_ = nullptr;
   this->is_mounted_ = false;
   sdspi_host_deinit();
-  ESP_LOGI(TAG_SPI, "SD card unmounted");
+  ESP_LOGI(TAG_SPI, "SD card unmounted safely");
+
+  // Re-register now that the drain above is done: registered-but-unmounted is the normal state
+  // for this device (see setup()'s comment) — unregistering here was only ever about the
+  // teardown window itself, not about removing the device from the registry permanently.
+  if (storage::global_storage_registry != nullptr)
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG_SPI, "Storage registration failed");
+      this->mark_failed();
+    }
+
   return StorageError::OK;
 }
 

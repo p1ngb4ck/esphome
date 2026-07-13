@@ -9,6 +9,7 @@
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
+#include "diskio_sdmmc.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "freertos/FreeRTOS.h"
@@ -22,7 +23,7 @@
 
 namespace esphome::sd_storage {
 
-static sdmmc_card_t *s_card = nullptr;
+static const char *const TAG = "sd_storage";
 
 void SdMmc::setup() {
   ESP_LOGI(TAG, "Initializing SD/MMC card");
@@ -39,20 +40,62 @@ void SdMmc::setup() {
     this->cs_pin_->setup();
   }
 
-  if (this->mount() != storage::StorageError::OK) {
+  // Register before attempting to mount, not only on success — get_info() reports is_mounted
+  // correctly either way, and this lets the device (and its mount/unmount/list_files actions)
+  // show up in the registry even if the initial mount fails, instead of only existing once a
+  // card happens to be present. No mark_failed() here: a failed mount is not a broken
+  // component, and this lets sd_storage.mount retry later without a reboot.
+  if (storage::global_storage_registry != nullptr)
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
+
+  if (this->cd_pin_ != nullptr) {
+    this->cd_pin_->setup();
+    // With a CD pin configured, only mount if a card is actually seen at boot — otherwise wait
+    // for loop()'s polling to pick up an insertion later, rather than logging a spurious "Failed
+    // to mount" for a socket that's simply empty right now. No mark_failed() either way, same
+    // rationale as above.
+    if (this->card_present_()) {
+      if (this->mount() != storage::StorageError::OK) {
+        ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+      }
+    } else {
+      ESP_LOGI(TAG, "Waiting for card (CD)");
+    }
+  } else if (this->mount() != storage::StorageError::OK) {
     ESP_LOGE(TAG, "Failed to mount SD/MMC card");
-    this->mark_failed();
   }
 }
 
-void SdMmc::loop() {}
+void SdMmc::loop() {
+  bool present = this->card_present_();
+  if (!this->should_poll_cd_())
+    return;
+
+  if (this->is_mounted_ && !present) {
+    ESP_LOGI(TAG, "Card removed (CD)");
+    this->unmount();
+    this->on_removed_.call();
+  } else if (!this->is_mounted_ && present) {
+    ESP_LOGI(TAG, "Card inserted (CD)");
+    bool ok = this->mount() == storage::StorageError::OK;
+    this->log_mount_result_(ok);
+    if (ok)
+      this->on_inserted_.call();
+  }
+}
 
 void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "SD/MMC Card:");
   ESP_LOGCONFIG(TAG, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
+  LOG_PIN("  CD Pin: ", this->cd_pin_);
   if (this->is_mounted_) {
-    ESP_LOGCONFIG(TAG, "  Card Type: %d", static_cast<uint8_t>(this->card_type_));
+    ESP_LOGCONFIG(TAG, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG, "  Total bytes: %" PRIu64, this->total_bytes_);
     ESP_LOGCONFIG(TAG, "  Used bytes: %" PRIu64, this->used_bytes_);
   }
@@ -102,7 +145,7 @@ storage::StorageError SdMmc::mount() {
   esp_err_t ret = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
     ESP_LOGI(TAG, "Mounting SD card slot %d to '%s' (attempt %d/3)", this->slot_, this->mount_path_, attempt);
-    ret = esp_vfs_fat_sdmmc_mount(this->mount_path_, &host, &slot_config, &mount_config, &s_card);
+    ret = esp_vfs_fat_sdmmc_mount(this->mount_path_, &host, &slot_config, &mount_config, &this->card_);
     if (ret == ESP_OK)
       break;
     ESP_LOGW(TAG, "Mount attempt %d failed: %s", attempt, esp_err_to_name(ret));
@@ -114,21 +157,27 @@ storage::StorageError SdMmc::mount() {
     return storage::StorageError::NOT_READY;
   }
 
-  if (s_card->is_mmc) {
+  if (this->card_->is_mmc) {
     this->card_type_ = CardType::MMC;
-  } else if (s_card->is_sdio) {
+  } else if (this->card_->is_sdio) {
     this->card_type_ = CardType::SDIO;
   } else {
-    this->card_type_ = (s_card->ocr & (1 << 30)) ? CardType::SDHC : CardType::SDSC;
+    this->card_type_ = (this->card_->ocr & (1 << 30)) ? CardType::SDHC : CardType::SDSC;
   }
-  this->block_size_ = s_card->csd.sector_size;
+  this->block_size_ = this->card_->csd.sector_size;
   this->is_mounted_ = true;
+  this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
   this->update_card_info();
 
   ESP_LOGI(TAG, "SD/MMC card mounted at %s", this->mount_path_);
 
   if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->register_storage(this);
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
 
   this->on_mounted_.call(this->mount_path_);
 
@@ -136,24 +185,46 @@ storage::StorageError SdMmc::mount() {
 }
 
 storage::StorageError SdMmc::unmount() {
-  if (!this->is_mounted_ || s_card == nullptr)
+  if (!this->is_mounted_ || this->card_ == nullptr)
     return storage::StorageError::OK;
 
+  // Unregister before the VFS unmount below — the registry contract guarantees
+  // unregister_storage() doesn't return until any in-flight storage_worker data-plane calls
+  // against this device have drained (closing any handles the worker itself opened), so it's
+  // safe to tear the filesystem down immediately afterward.
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->unregister_storage(this);
 
-  esp_vfs_fat_sdcard_unmount(this->mount_path_, s_card);
-  s_card = nullptr;
+  ESP_LOGI(TAG, "Syncing filesystem before unmount");
+  // Closes any handles still open from user/lambda code, while the VFS is still mounted to
+  // receive the flush/close calls.
+  this->flush_open_handles_();
+  ESP_LOGI(TAG, "All data flushed");
+
+  esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
+  this->card_ = nullptr;
   this->is_mounted_ = false;
-  ESP_LOGI(TAG, "SD/MMC card unmounted");
+  ESP_LOGI(TAG, "SD/MMC card unmounted safely");
+
+  // Re-register now that the drain above is done: registered-but-unmounted is the normal state
+  // for this device (see setup()'s comment) — unregistering here was only ever about the
+  // teardown window itself, not about removing the device from the registry permanently.
+  if (storage::global_storage_registry != nullptr)
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
+
   return storage::StorageError::OK;
 }
 
 bool SdMmc::update_card_info() {
-  if (!this->is_mounted_ || s_card == nullptr)
+  if (!this->is_mounted_ || this->card_ == nullptr)
     return false;
 
-  this->total_bytes_ = (uint64_t) s_card->csd.capacity * s_card->csd.sector_size;
+  this->total_bytes_ = (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size;
 
   FATFS *fs;
   DWORD fre_clust;

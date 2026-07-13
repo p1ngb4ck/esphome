@@ -16,7 +16,7 @@
 
 namespace esphome::sd_storage {
 
-// Trigger — works with both SdMmc and SdSpi via SdStorageBase
+// Triggers — work with both SdMmc and SdSpi via SdStorageBase
 class CardMountedTrigger : public Trigger<const char *> {
  public:
   explicit CardMountedTrigger(SdStorageBase *parent) {
@@ -24,10 +24,24 @@ class CardMountedTrigger : public Trigger<const char *> {
   }
 };
 
-// Actions
-template<typename T, typename... Ts> class MountCardAction : public Action<Ts...> {
+class CardRemovedTrigger : public Trigger<> {
  public:
-  explicit MountCardAction(T *parent) : parent_(parent) {}
+  explicit CardRemovedTrigger(SdStorageBase *parent) {
+    parent->add_on_removed_callback([this]() { this->trigger(); });
+  }
+};
+
+class CardInsertedTrigger : public Trigger<> {
+ public:
+  explicit CardInsertedTrigger(SdStorageBase *parent) {
+    parent->add_on_inserted_callback([this]() { this->trigger(); });
+  }
+};
+
+// Actions
+template<typename... Ts> class MountCardAction : public Action<Ts...> {
+ public:
+  explicit MountCardAction(SdStorageBase *parent) : parent_(parent) {}
 
   void play(Ts... x) override {
     bool ok = this->parent_->mount() == storage::StorageError::OK;
@@ -35,12 +49,12 @@ template<typename T, typename... Ts> class MountCardAction : public Action<Ts...
   }
 
  protected:
-  T *parent_;
+  SdStorageBase *parent_;
 };
 
-template<typename T, typename... Ts> class UnmountCardAction : public Action<Ts...> {
+template<typename... Ts> class UnmountCardAction : public Action<Ts...> {
  public:
-  explicit UnmountCardAction(T *parent) : parent_(parent) {}
+  explicit UnmountCardAction(SdStorageBase *parent) : parent_(parent) {}
 
   void play(Ts... x) override {
     this->parent_->unmount();
@@ -48,12 +62,12 @@ template<typename T, typename... Ts> class UnmountCardAction : public Action<Ts.
   }
 
  protected:
-  T *parent_;
+  SdStorageBase *parent_;
 };
 
-template<typename T, typename... Ts> class ListFilesAction : public Action<Ts...> {
+template<typename... Ts> class ListFilesAction : public Action<Ts...> {
  public:
-  explicit ListFilesAction(T *parent) : parent_(parent) {}
+  explicit ListFilesAction(SdStorageBase *parent) : parent_(parent) {}
 
   TEMPLATABLE_VALUE(const char *, path)
 
@@ -63,23 +77,22 @@ template<typename T, typename... Ts> class ListFilesAction : public Action<Ts...
       path = this->parent_->get_mount_path();
 
     this->parent_->log_list_dir_start_(path);
-    this->parent_->list_dir(
-        path, [](const storage::FileStat *entry, void *ctx) { SdStorageBase::log_list_dir_entry(entry); }, nullptr);
+    this->parent_->list_dir(path, &SdStorageBase::log_list_dir_entry, nullptr);
   }
 
  protected:
-  T *parent_;
+  SdStorageBase *parent_;
 };
 
 // Condition
-template<typename T, typename... Ts> class CardMountedCondition : public Condition<Ts...> {
+template<typename... Ts> class CardMountedCondition : public Condition<Ts...> {
  public:
-  explicit CardMountedCondition(T *parent) : parent_(parent) {}
+  explicit CardMountedCondition(SdStorageBase *parent) : parent_(parent) {}
 
   bool check(Ts... x) override { return this->parent_->is_mounted(); }
 
  protected:
-  T *parent_;
+  SdStorageBase *parent_;
 };
 
 }  // namespace esphome::sd_storage
