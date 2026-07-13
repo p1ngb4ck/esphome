@@ -1,5 +1,4 @@
 #include "storage_worker.h"
-#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #ifdef USE_STORAGE_WORKER
@@ -329,6 +328,14 @@ void StorageWorker::loop() {
   if (!this->started_)
     return;
 
+  // TEMP PROBE 1: proves this loop() actually executes on this build once the first async
+  // transfer has been submitted. One-shot — remove together with the other probes.
+  static bool probe_worker_loop_alive = false;
+  if (!probe_worker_loop_alive) {
+    probe_worker_loop_alive = true;
+    ESP_LOGI(TAG, "PROBE1: StorageWorker::loop() alive (first pass after start)");
+  }
+
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
   // loop, per the public API's contract.
@@ -336,6 +343,10 @@ void StorageWorker::loop() {
     if (req.state.load() == RequestState::DONE) {
       CompletionCallback cb = std::move(req.callback);
       StorageError result = req.result;
+      // TEMP PROBE 2: proves completion delivery reaches the callback invocation, and whether
+      // a callback was actually stored for this slot.
+      ESP_LOGI(TAG, "PROBE2: delivering DONE slot=%d result=%d has_cb=%d", (int) (&req - this->pool_.begin()),
+               (int) result, (int) static_cast<bool>(cb));
       req.callback = nullptr;
       req.src_storage = nullptr;
       req.dst_storage = nullptr;
@@ -469,10 +480,6 @@ void finish_request(TransferRequest &req, StorageError result) {
   req.chunk_buf.reset();
   req.result = result;
   req.state = RequestState::DONE;
-  // May run on the worker task: nudge the main loop so it delivers this completion promptly
-  // instead of waiting for loop_interval_ to elapse on its own (harmless extra wake when
-  // called from the main loop itself, e.g. the loop-sliced engine).
-  App.wake_loop_threadsafe();
 }
 
 }  // namespace
@@ -634,9 +641,6 @@ void run_stream_step(StreamRequest &req) {
       static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
     req.result = StorageError::NOT_READY;
     req.state = StreamState::DONE;
-    // May run on the worker task: nudge the main loop so it delivers this step promptly
-    // instead of waiting for loop_interval_ to elapse on its own.
-    App.wake_loop_threadsafe();
     return;
   }
 
@@ -726,12 +730,8 @@ void run_stream_step(StreamRequest &req) {
 
     default:
       // IDLE/FREE/DONE: nothing to do — shouldn't be dispatched in these states.
-      return;
+      break;
   }
-  // May run on the worker task: nudge the main loop so it delivers this step promptly instead
-  // of waiting for loop_interval_ to elapse on its own (harmless extra wake when this ran on
-  // the main loop already, e.g. the loop-sliced engine).
-  App.wake_loop_threadsafe();
 }
 
 }  // namespace

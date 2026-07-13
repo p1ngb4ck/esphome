@@ -698,8 +698,18 @@ void WebServerFileApi::advance_dir_transfer_() {
 void WebServerFileApi::loop() {
 #ifdef USE_STORAGE_WORKER
   DirTransfer &d = this->dir_;
+  // TEMP PROBE 3: proves this loop() actually executes on this build while a directory
+  // transfer is active. One-shot — remove together with the other probes.
+  static bool probe_file_api_loop_alive = false;
+  if (d.active && !probe_file_api_loop_alive) {
+    probe_file_api_loop_alive = true;
+    ESP_LOGI(TAG, "PROBE3: WebServerFileApi::loop() alive (dir transfer active)");
+  }
   if (!d.active || !d.awaiting_file || !d.file_done_)
     return;  // no directory transfer waiting on a file, or the file is still in flight
+  // TEMP PROBE 4: proves the per-file completion flag set by the worker callback is observed
+  // here, i.e. the full chain task->worker loop->callback->this loop is intact.
+  ESP_LOGI(TAG, "PROBE4: file_done_ observed result=%d file=%s", (int) d.file_result_, d.cur_src);
   d.awaiting_file = false;
   if (d.file_result_ != storage::StorageError::OK) {
     this->finish_dir_transfer_(d.file_result_);
