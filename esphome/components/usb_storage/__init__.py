@@ -1,19 +1,22 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components.esp32 import (
+    VARIANT_ESP32H4,
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
+    VARIANT_ESP32S31,
     include_builtin_idf_component,
     only_on_variant,
     require_fatfs,
-    require_fatfs_lfn_heap,
-    require_fatfs_lfn_max,
-    require_fatfs_volume_count,
     require_vfs_dir,
     require_vfs_select,
 )
-from esphome.components.storage import request_storage_device
+from esphome.components.storage import (
+    MountableStorage,
+    request_storage_device,
+    request_storage_worker,
+)
 from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
@@ -37,7 +40,7 @@ USBStorageClient = usb_storage_ns.class_(
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
     cg.Component,
-    cg.Parented.template(USBStorageClient),
+    MountableStorage,
 )
 
 # Automation classes
@@ -55,7 +58,7 @@ DeviceMountedCondition = usb_storage_ns.class_(
 async def register_usb_storage_device(device_config, storage_client):
     var = cg.new_Pvariable(device_config[CONF_ID])
     await cg.register_component(var, device_config)
-    cg.add(var.set_parent(storage_client))
+    cg.add(var.set_client(storage_client))
     cg.add(var.set_mount_path(device_config[CONF_MOUNT_PATH]))
     cg.add(var.set_storage_id(str(device_config[CONF_ID])))
     cg.add(var.set_vid(device_config[CONF_VID]))
@@ -63,6 +66,9 @@ async def register_usb_storage_device(device_config, storage_client):
     cg.add(storage_client.add_device(var))
 
     request_storage_device()
+    # USB MSC transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore, no
+    # shared bus with other main-loop-driven components) — task-safe, unlike e.g. SdSpi.
+    request_storage_worker(task_safe=True)
 
     for conf in device_config.get(CONF_ON_MOUNTED, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
@@ -94,22 +100,29 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DEVICES): cv.ensure_list(DEVICE_SCHEMA),
         }
     ),
-    only_on_variant(supported=[VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32P4]),
+    only_on_variant(
+        supported=[
+            VARIANT_ESP32H4,
+            VARIANT_ESP32P4,
+            VARIANT_ESP32S2,
+            VARIANT_ESP32S3,
+            VARIANT_ESP32S31,
+        ]
+    ),
 )
 
 
-FATFS_LFN_MAX = 255
 
 
 async def to_code(config):
     require_vfs_dir()
     require_vfs_select()
+    # LFN mode/length and volume count are set as user-overridable defaults by the esp32
+    # platform once any component calls require_fatfs() — see
+    # _reconcile_vfs_fatfs_sdkconfig(). Override via esp32 framework sdkconfig_options.
     require_fatfs()
-    require_fatfs_volume_count(4)
-    require_fatfs_lfn_max(FATFS_LFN_MAX)
-    require_fatfs_lfn_heap()
     include_builtin_idf_component("fatfs")
-    cg.add_define("CONFIG_FATFS_MAX_LFN", FATFS_LFN_MAX)
+    include_builtin_idf_component("esp_vfs_fat")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -151,15 +164,27 @@ async def usb_storage_unmount_to_code(config, action_id, template_arg, args):
     return cg.new_Pvariable(action_id, template_arg, paren)
 
 
+LIST_FILES_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_ID): cv.use_id(USBStorageDevice),
+        cv.Optional("path", default=""): cv.templatable(cv.string),
+    }
+)
+
+
 @automation.register_action(
     "usb_storage.list_files",
     ListFilesAction,
-    USB_STORAGE_ACTION_SCHEMA,
+    LIST_FILES_SCHEMA,
     synchronous=True,
 )
 async def usb_storage_list_files_to_code(config, action_id, template_arg, args):
-    paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, paren)
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    if "path" in config:
+        template_ = await cg.templatable(config["path"], args, cg.const_char_ptr)
+        cg.add(var.set_path(template_))
+    return var
 
 
 # Conditions

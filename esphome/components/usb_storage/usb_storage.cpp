@@ -1,20 +1,53 @@
-#if defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+#include "esphome/components/storage/storage.h"
+#ifdef USE_STORAGE_WORKER
+#include "esphome/components/storage/storage_worker.h"
+#endif
+
+#if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
+    defined(USE_ESP32_VARIANT_ESP32S31) || defined(USE_ESP32_VARIANT_ESP32H4)
 
 #include "usb_storage.h"
 #include "usb_storage_diskio.h"
-#include "esphome/core/defines.h"
 #include "esphome/core/log.h"
+#include "esphome/core/string_ref.h"
 #include "usb/usb_helpers.h"
 #include "usb/usb_types_ch9.h"
 
 #include <cstring>
 #include <cinttypes>
-#include <sys/stat.h>
-#include <dirent.h>
 #include <cerrno>
-#include <unistd.h>
 
 namespace esphome::usb_storage {
+
+namespace {
+
+// Maps a FATFS FRESULT to the closest StorageError. `for_rmdir` selects FR_DENIED's mapping:
+// f_unlink() (used for rmdir — see rmdir() below, FATFS has no dedicated f_rmdir) returns
+// FR_DENIED both for "directory not empty" and for genuine permission/read-only failures, so the
+// caller must tell us which context applies.
+storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write) {
+  switch (res) {
+    case FR_OK:
+      return storage::StorageError::OK;
+    case FR_NO_FILE:
+    case FR_NO_PATH:
+      return storage::StorageError::NOT_FOUND;
+    case FR_EXIST:
+      return storage::StorageError::ALREADY_EXISTS;
+    case FR_DENIED:
+      return for_rmdir ? storage::StorageError::NOT_EMPTY : storage::StorageError::PERMISSION_DENIED;
+    case FR_INVALID_NAME:
+      return storage::StorageError::INVALID_ARGS;
+    case FR_NOT_READY:
+      return storage::StorageError::NOT_READY;
+    case FR_WRITE_PROTECTED:
+      return storage::StorageError::PERMISSION_DENIED;
+    default:
+      return is_write ? storage::StorageError::WRITE_ERROR : storage::StorageError::READ_ERROR;
+  }
+}
+
+}  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Transfer semaphore helpers
@@ -346,7 +379,7 @@ void USBStorageClient::on_connected() {
   this->mount_path_ = "/usb";
   for (auto *device : this->devices_) {
     if ((device->vid_ == 0 && device->pid_ == 0) || (device->vid_ == vid && device->pid_ == pid)) {
-      this->mount_path_ = device->mount_path_;
+      this->mount_path_ = device->get_mount_path();
       break;
     }
   }
@@ -387,18 +420,22 @@ void USBStorageClient::on_connected() {
   this->notify_connected_(vid, pid);
 }
 
+void USBStorageClient::unmount_filesystem() {
+  if (!this->mounted_)
+    return;
+  char drive_path[8];
+  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
+  f_mount(nullptr, drive_path, 0);
+  esp_vfs_fat_unregister_path(this->mount_path_);
+  this->mounted_ = false;
+  ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_);
+}
+
 void USBStorageClient::on_disconnected() {
   this->notify_disconnected_();
   this->disk_ready_ = false;
 
-  if (this->mounted_) {
-    char drive_path[8];
-    snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
-    f_mount(nullptr, drive_path, 0);
-    esp_vfs_fat_unregister_path(this->mount_path_);
-    this->mounted_ = false;
-    ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_);
-  }
+  this->unmount_filesystem();
 
   if (this->msc_interface_ != 0xFF) {
     this->release_interface(this->msc_interface_);
@@ -428,6 +465,7 @@ void USBStorageDevice::on_device_connected(const char *mount_path) {
   ESP_LOGI(TAG, "USB Storage Device connected (mount_path='%s')", mount_path);
   this->mount_path_ = mount_path;
   this->fs_mounted_ = true;
+  snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%d:", this->client_->get_fatfs_drive());
 
   this->on_mounted_.call(mount_path);
 
@@ -456,21 +494,26 @@ bool USBStorageDevice::remount_device() {
 void USBStorageDevice::unmount_device() {
   if (!this->fs_mounted_)
     return;
+  // Safe-eject semantics: unregister from the storage registry first (drains worker jobs,
+  // see the registry contract), then tear the FAT mount + VFS registration down completely.
+  // The device intentionally "disappears" — get_mount_caps() is UNMOUNT-only, so there is no
+  // mount button; the next mount happens when the stick is physically (re)inserted, which
+  // re-runs the client's connect flow.
   ESP_LOGI(TAG, "Device unmounted");
   this->on_device_disconnected();
+  if (this->client_ != nullptr)
+    this->client_->unmount_filesystem();
 }
 
-void USBStorageDevice::list_files() {
-  ESP_LOGI(TAG, "Listing contents of '%s'", this->mount_path_);
-  DIR *dh = opendir(this->mount_path_);
-  if (!dh) {
-    ESP_LOGE(TAG, "Failed to open directory: %s", this->mount_path_);
-    return;
+void USBStorageDevice::log_list_dir_start_(const char *path) const { ESP_LOGI(TAG, "Listing files in: %s", path); }
+
+bool USBStorageDevice::log_list_dir_entry(const storage::FileStat *entry, void *ctx) {
+  if (entry->is_dir) {
+    ESP_LOGI(TAG, "  [DIR]  %s", entry->name);
+  } else {
+    ESP_LOGI(TAG, "  [FILE] %s (%llu bytes)", entry->name, static_cast<unsigned long long>(entry->size));
   }
-  struct dirent *d;
-  while ((d = readdir(dh)) != nullptr)
-    ESP_LOGI(TAG, "  %s/%s", this->mount_path_, d->d_name);
-  closedir(dh);
+  return true;  // keep enumerating — this is a "list everything" action
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -503,6 +546,16 @@ void USBStorageDevice::build_path_(char *out, size_t out_size, const char *path)
   }
 }
 
+bool USBStorageDevice::build_fatfs_path_(const char *rel_path, char *out, size_t out_size) const {
+  int written;
+  if (rel_path[0] == '/') {
+    written = snprintf(out, out_size, "%s%s", this->fatfs_drive_, rel_path);
+  } else {
+    written = snprintf(out, out_size, "%s/%s", this->fatfs_drive_, rel_path);
+  }
+  return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FilesystemStorage interface
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +566,7 @@ storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
   info->is_mounted = this->fs_mounted_;
   info->is_removable = true;
   info->is_read_only = false;
-  info->block_size = this->parent_->get_sector_size();
+  info->block_size = this->client_->get_sector_size();
   info->total_bytes = 0;
   info->free_bytes = 0;
 
@@ -538,17 +591,67 @@ storage::StorageError USBStorageDevice::mount() {
   return this->fs_mounted_ ? storage::StorageError::OK : storage::StorageError::NOT_READY;
 }
 
+bool USBStorageDevice::has_open_handles_() const {
+  for (const auto &h : this->handle_pool_) {
+    if (h.in_use)
+      return true;
+  }
+  return false;
+}
+
 storage::StorageError USBStorageDevice::unmount() {
-  this->unmount_device();
+  // Already unmounted -> target state reached, no error (see design notes).
+  if (!this->fs_mounted_)
+    return storage::StorageError::OK;
+  // An unmount is already being carried out asynchronously.
+  if (this->unmount_pending_)
+    return storage::StorageError::NOT_READY;
+  // Request the unmount; loop() completes it once the device is quiescent (no open handle,
+  // no worker job referencing this device). Typical USB "safe eject" behaviour: in-flight
+  // transfers finish, then we sync and unmount. Returns OK = unmount accepted/initiated.
+  this->unmount_pending_ = true;
+  ESP_LOGI(TAG, "Unmount requested; will complete once active transfers finish");
   return storage::StorageError::OK;
+}
+
+void USBStorageDevice::loop() {
+  if (!this->unmount_pending_)
+    return;
+  // Wait until nothing references the device: no open file handle, and no worker job whose
+  // src/dst is this device. The worker keeps a handle open for a transfer's whole duration,
+  // so has_open_handles_() already covers active copies; the extra registry check guards the
+  // brief open()/close() edges where a job exists but its handle is momentarily not counted.
+  if (this->has_open_handles_())
+    return;
+#ifdef USE_STORAGE_WORKER
+  if (storage::global_storage_worker != nullptr && storage::global_storage_worker->is_busy_with(this))
+    return;
+#endif
+  // Quiescent — sync then physically unmount.
+  this->sync();
+  this->unmount_pending_ = false;
+  this->unmount_device();
 }
 
 storage::StorageError USBStorageDevice::format() {
   ESP_LOGW(TAG, "Format not implemented for USB storage");
-  return storage::StorageError::NOT_READY;
+  return storage::StorageError::NOT_SUPPORTED;
 }
 
-storage::StorageError USBStorageDevice::sync() { return storage::StorageError::OK; }
+storage::StorageError USBStorageDevice::sync() {
+  // Flush any open handle's buffered data to the medium (same as SdStorageBase::sync()).
+  // handle->file is a POSIX FILE* on the FAT VFS mount. In the deferred-unmount path there
+  // are usually no open handles left (unmount waits for that), but sync() is also callable
+  // on its own, and flushing here still commits FATFS-internal buffers on the next write.
+  storage::StorageError err = storage::StorageError::OK;
+  for (auto &h : this->handle_pool_) {
+    if (!h.in_use || h.file == nullptr)
+      continue;
+    if (fflush(h.file) != 0 || fsync(fileno(h.file)) != 0)
+      err = storage::StorageError::WRITE_ERROR;
+  }
+  return err;
+}
 
 storage::StorageError USBStorageDevice::open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) {
   if (!this->fs_mounted_)
@@ -556,7 +659,7 @@ storage::StorageError USBStorageDevice::open(const char *path, storage::FileHand
 
   USBFileHandle *h = this->alloc_handle_();
   if (h == nullptr)
-    return storage::StorageError::NO_SPACE;
+    return storage::StorageError::TOO_MANY_OPEN_FILES;
 
   this->build_path_(h->path_buf, sizeof(h->path_buf), path);
   h->path = h->path_buf;
@@ -579,7 +682,20 @@ storage::StorageError USBStorageDevice::open(const char *path, storage::FileHand
   h->file = fopen(h->path_buf, fmode);
   if (h->file == nullptr) {
     this->free_handle_(h);
-    return storage::StorageError::NOT_FOUND;
+    switch (errno) {
+      case ENOENT:
+        return storage::StorageError::NOT_FOUND;
+      case ENOSPC:
+        return storage::StorageError::NO_SPACE;
+      case EACCES:
+      case EROFS:
+        return storage::StorageError::PERMISSION_DENIED;
+      case EMFILE:
+      case ENFILE:
+        return storage::StorageError::TOO_MANY_OPEN_FILES;
+      default:
+        return mode == storage::OpenMode::READ ? storage::StorageError::READ_ERROR : storage::StorageError::WRITE_ERROR;
+    }
   }
 
   handle = h;
@@ -587,24 +703,39 @@ storage::StorageError USBStorageDevice::open(const char *path, storage::FileHand
 }
 
 storage::StorageError USBStorageDevice::close(storage::FileHandle *handle) {
+  if (handle == nullptr || !handle->in_use)
+    return storage::StorageError::INVALID_ARGS;
   auto *h = static_cast<USBFileHandle *>(handle);
-  if (h->file != nullptr)
-    fclose(h->file);
+  storage::StorageError err = storage::StorageError::OK;
+  if (h->file != nullptr) {
+    if (fclose(h->file) != 0)
+      err = storage::StorageError::WRITE_ERROR;
+  }
   this->free_handle_(h);
-  return storage::StorageError::OK;
+  return err;
 }
 
 storage::StorageError USBStorageDevice::read(storage::FileHandle *handle, uint8_t *buf, size_t len,
                                              size_t *bytes_transferred) {
+  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+    return storage::StorageError::INVALID_ARGS;
   auto *h = static_cast<USBFileHandle *>(handle);
   size_t n = fread(buf, 1, len, h->file);
   if (bytes_transferred != nullptr)
     *bytes_transferred = n;
+  // fread() returning less than requested means either EOF (not an error, per the
+  // partial-read contract in storage.h) or a real I/O error — ferror() disambiguates.
+  if (n < len && ferror(h->file)) {
+    clearerr(h->file);
+    return storage::StorageError::READ_ERROR;
+  }
   return storage::StorageError::OK;
 }
 
 storage::StorageError USBStorageDevice::write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
                                               size_t *bytes_transferred) {
+  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+    return storage::StorageError::INVALID_ARGS;
   auto *h = static_cast<USBFileHandle *>(handle);
   size_t n = fwrite(buf, 1, len, h->file);
   if (bytes_transferred != nullptr)
@@ -612,66 +743,123 @@ storage::StorageError USBStorageDevice::write(storage::FileHandle *handle, const
   return n == len ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
 }
 
-storage::StorageError USBStorageDevice::seek(storage::FileHandle *handle, size_t offset) {
+storage::StorageError USBStorageDevice::seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) {
+  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+    return storage::StorageError::INVALID_ARGS;
+  // ESP-IDF's newlib fseek() takes a 32-bit `long` offset — FATFS/POSIX on this platform can't
+  // address beyond that anyway (files >4GB aren't representable here), so reject rather than
+  // silently truncating a caller-supplied 64-bit offset (the interface allows >4GB elsewhere,
+  // e.g. NetworkStorage).
+  if (offset > INT32_MAX || offset < INT32_MIN)
+    return storage::StorageError::INVALID_ARGS;
+  int whence;
+  switch (mode) {
+    case storage::SeekMode::SET:
+      whence = SEEK_SET;
+      break;
+    case storage::SeekMode::CUR:
+      whence = SEEK_CUR;
+      break;
+    case storage::SeekMode::END:
+      whence = SEEK_END;
+      break;
+    default:
+      return storage::StorageError::INVALID_ARGS;
+  }
   auto *h = static_cast<USBFileHandle *>(handle);
-  return fseek(h->file, static_cast<int32_t>(offset), SEEK_SET) == 0 ? storage::StorageError::OK
-                                                                  : storage::StorageError::READ_ERROR;
+  return fseek(h->file, static_cast<int32_t>(offset), whence) == 0 ? storage::StorageError::OK
+                                                                   : storage::StorageError::READ_ERROR;
 }
 
-storage::StorageError USBStorageDevice::tell(storage::FileHandle *handle, size_t *position) {
+storage::StorageError USBStorageDevice::tell(storage::FileHandle *handle, uint64_t *position) {
+  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+    return storage::StorageError::INVALID_ARGS;
   auto *h = static_cast<USBFileHandle *>(handle);
   int32_t pos = static_cast<int32_t>(ftell(h->file));
   if (pos < 0)
     return storage::StorageError::READ_ERROR;
-  *position = static_cast<size_t>(pos);
+  *position = static_cast<uint64_t>(pos);
   return storage::StorageError::OK;
 }
 
 storage::StorageError USBStorageDevice::stat(const char *path, storage::FileStat *st) {
   if (!this->fs_mounted_)
     return storage::StorageError::NOT_READY;
+
+  // f_stat() on the drive root ("N:/") fails by FATFS design — synthesize the result instead of
+  // calling it. path is "" or "/" exactly when the caller asked to stat the mount point itself.
+  if (path[0] == '\0' || (path[0] == '/' && path[1] == '\0')) {
+    st->name[0] = '\0';
+    st->size = 0;
+    st->is_dir = true;
+    st->mtime = 0;
+    return storage::StorageError::OK;
+  }
+
   char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  this->build_path_(full, sizeof(full), path);
-  struct stat s;
-  if (::stat(full, &s) != 0)
-    return storage::StorageError::NOT_FOUND;
-  snprintf(st->name, sizeof(st->name), "%s", path);
-  st->size = S_ISREG(s.st_mode) ? static_cast<size_t>(s.st_size) : 0;
-  st->is_dir = S_ISDIR(s.st_mode);
+  if (!this->build_fatfs_path_(path, full, sizeof(full)))
+    return storage::StorageError::INVALID_ARGS;
+
+  FILINFO fno;
+  FRESULT res = f_stat(full, &fno);
+  if (res != FR_OK)
+    return fresult_to_storage_error(res, /*for_rmdir=*/false, /*is_write=*/false);
+
+  // FileStat::name is the basename only (see the contract on the struct in storage.h) —
+  // consistent with what list_dir() puts there, regardless of how many path segments the
+  // caller passed in.
+  StringRef path_ref(path);
+  size_t base_pos = 0;
+  for (size_t i = path_ref.size(); i > 0; i--) {
+    if (path_ref[i - 1] == '/') {
+      base_pos = i;
+      break;
+    }
+  }
+  StringRef base_ref(path + base_pos, path_ref.size() - base_pos);
+  size_t name_len = base_ref.copy(st->name, sizeof(st->name) - 1);
+  st->name[name_len] = '\0';
+  st->is_dir = (fno.fattrib & AM_DIR) != 0;
+  st->size = st->is_dir ? 0 : static_cast<uint64_t>(fno.fsize);
+  st->mtime = 0;  // FatFs FILINFO exposes fdate/ftime (DOS format), not a Unix timestamp.
   return storage::StorageError::OK;
 }
 
 storage::StorageError USBStorageDevice::list_dir(const char *path,
-                                                 void (*callback)(const storage::FileStat *entry, void *ctx),
+                                                 bool (*callback)(const storage::FileStat *entry, void *ctx),
                                                  void *ctx) {
   if (!this->fs_mounted_)
     return storage::StorageError::NOT_READY;
   char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  this->build_path_(full, sizeof(full), path);
-  DIR *dir = opendir(full);
-  if (dir == nullptr)
-    return storage::StorageError::NOT_FOUND;
+  if (!this->build_fatfs_path_(path, full, sizeof(full)))
+    return storage::StorageError::INVALID_ARGS;
 
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+  FF_DIR fat_dir;
+  FRESULT res = f_opendir(&fat_dir, full);
+  if (res != FR_OK)
+    return fresult_to_storage_error(res, /*for_rmdir=*/false, /*is_write=*/false);
+
+  FILINFO fno;
+  for (;;) {
+    if (f_readdir(&fat_dir, &fno) != FR_OK || fno.fname[0] == '\0')
+      break;
+    StringRef fname_ref(fno.fname);
+    if (fname_ref == "." || fname_ref == "..")
       continue;
+
     storage::FileStat st{};
-    snprintf(st.name, sizeof(st.name), "%s", entry->d_name);
-    st.is_dir = entry->d_type == DT_DIR;
-    if (!st.is_dir) {
-      char child_rel[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-      if (snprintf(child_rel, sizeof(child_rel), "%s/%s", path, entry->d_name) < static_cast<int>(sizeof(child_rel))) {
-        char entry_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-        this->build_path_(entry_full, sizeof(entry_full), child_rel);
-        struct stat s;
-        if (::stat(entry_full, &s) == 0)
-          st.size = static_cast<size_t>(s.st_size);
-      }
-    }
-    callback(&st, ctx);
+    size_t name_len = fname_ref.copy(st.name, sizeof(st.name) - 1);
+    st.name[name_len] = '\0';
+    st.is_dir = (fno.fattrib & AM_DIR) != 0;
+    st.size = st.is_dir ? 0 : static_cast<uint64_t>(fno.fsize);
+    st.mtime = 0;  // FatFs FILINFO exposes fdate/ftime (DOS format), not a Unix timestamp.
+
+    // callback returns false to stop enumeration early — that is not an error, so we still
+    // return OK below regardless of how the loop exits.
+    if (!callback(&st, ctx))
+      break;
   }
-  closedir(dir);
+  f_closedir(&fat_dir);
   return storage::StorageError::OK;
 }
 
@@ -679,36 +867,44 @@ storage::StorageError USBStorageDevice::mkdir(const char *path) {
   if (!this->fs_mounted_)
     return storage::StorageError::NOT_READY;
   char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  this->build_path_(full, sizeof(full), path);
-  return ::mkdir(full, 0755) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  if (!this->build_fatfs_path_(path, full, sizeof(full)))
+    return storage::StorageError::INVALID_ARGS;
+
+  FRESULT res = f_mkdir(full);
+  return fresult_to_storage_error(res, /*for_rmdir=*/false, /*is_write=*/true);
 }
 
-storage::StorageError USBStorageDevice::rmdir(const char *path, bool recursive) {
+storage::StorageError USBStorageDevice::rmdir(const char *path) {
   if (!this->fs_mounted_)
     return storage::StorageError::NOT_READY;
   char full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  this->build_path_(full, sizeof(full), path);
+  if (!this->build_fatfs_path_(path, full, sizeof(full)))
+    return storage::StorageError::INVALID_ARGS;
 
-  if (recursive) {
-    DIR *dir = opendir(full);
-    if (dir == nullptr)
-      return storage::StorageError::NOT_FOUND;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-        continue;
-      char child[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-      if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >= static_cast<int>(sizeof(child)))
-        continue;
-      storage::StorageError err = (entry->d_type == DT_DIR) ? this->rmdir(child, true) : this->remove(child);
-      if (err != storage::StorageError::OK) {
-        closedir(dir);
-        return err;
-      }
-    }
-    closedir(dir);
+  // Non-recursive per the storage:: contract: must fail with NOT_EMPTY if the directory has
+  // contents. Recursive delete is the free storage::remove_recursive() helper, built on top
+  // of list_dir()/remove()/this rmdir() — no need to duplicate that tree-walk here.
+  FF_DIR fat_dir;
+  FRESULT res = f_opendir(&fat_dir, full);
+  if (res != FR_OK)
+    return fresult_to_storage_error(res, /*for_rmdir=*/true, /*is_write=*/false);
+
+  bool has_entries = false;
+  FILINFO fno;
+  while (f_readdir(&fat_dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+    StringRef fname_ref(fno.fname);
+    if (fname_ref == "." || fname_ref == "..")
+      continue;
+    has_entries = true;
+    break;
   }
-  return ::unlink(full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  f_closedir(&fat_dir);
+  if (has_entries)
+    return storage::StorageError::NOT_EMPTY;
+
+  // FATFS removes empty directories via f_unlink() — there is no dedicated f_rmdir().
+  res = f_unlink(full);
+  return fresult_to_storage_error(res, /*for_rmdir=*/true, /*is_write=*/true);
 }
 
 storage::StorageError USBStorageDevice::remove(const char *path) {
@@ -727,36 +923,6 @@ storage::StorageError USBStorageDevice::rename(const char *old_path, const char 
   this->build_path_(old_full, sizeof(old_full), old_path);
   this->build_path_(new_full, sizeof(new_full), new_path);
   return ::rename(old_full, new_full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
-}
-
-storage::StorageError USBStorageDevice::copy(const char *src_path, const char *dst_path) {
-  if (!this->fs_mounted_)
-    return storage::StorageError::NOT_READY;
-  char src_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  char dst_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
-  this->build_path_(src_full, sizeof(src_full), src_path);
-  this->build_path_(dst_full, sizeof(dst_full), dst_path);
-
-  FILE *src = fopen(src_full, "rb");
-  if (src == nullptr)
-    return storage::StorageError::NOT_FOUND;
-  FILE *dst = fopen(dst_full, "wb");
-  if (dst == nullptr) {
-    fclose(src);
-    return storage::StorageError::WRITE_ERROR;
-  }
-  uint8_t buf[256];
-  size_t n;
-  storage::StorageError err = storage::StorageError::OK;
-  while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
-    if (fwrite(buf, 1, n, dst) != n) {
-      err = storage::StorageError::WRITE_ERROR;
-      break;
-    }
-  }
-  fclose(src);
-  fclose(dst);
-  return err;
 }
 
 }  // namespace esphome::usb_storage
