@@ -13,6 +13,8 @@
 
 namespace esphome::sd_storage {
 
+static constexpr size_t FATFS_DRIVE_LEN = CONFIG_FATFS_VOLUME_COUNT + 1;
+
 // Note: SDHC and SDXC cards cannot be distinguished by the OCR capacity bit alone (that only
 // separates SDSC from "high/extended capacity"); doing so would require checking the card's
 // actual reported capacity. No driver currently assigns SDXC, so it's omitted here rather than
@@ -138,7 +140,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   uint64_t used_bytes_{0};
   const char *storage_id_{nullptr};
   GPIOPin *cd_pin_{nullptr};
-  char fatfs_drive_[3]{};  // "N:" — set via set_fatfs_drive_() after a successful mount
+  char fatfs_drive_[FATFS_DRIVE_LEN]{}; // "N:" — set via set_fatfs_drive_() after a successful mount
 
   LazyCallbackManager<void(const char *)> on_mounted_;
   LazyCallbackManager<void()> on_removed_;
