@@ -166,7 +166,8 @@ struct UsbOutputChunk {
 // Concrete channel types (USBUartChannel for CDC-style devices, vendor-specific
 // multiplexed channels like CH934X) derive from this and are themselves final,
 // per the "configurable classes are final" convention.
-class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartComponent> {  friend class USBUartComponent;
+class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartComponent> {
+  friend class USBUartComponent;
   friend class USBUartTypeCdcAcm;
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
@@ -258,7 +259,6 @@ class USBUartComponent : public usb_host::USBClient {
   void add_channel(USBUartChannelBase *channel) { this->channels_.push_back(channel); }
 
   virtual void start_input(USBUartChannelBase *channel);
-  void start_output(USBUartChannelBase *channel);
   void start_output(USBUartChannelBase *channel);
 
   // Begin configuring all channels (full initialisation). Called from on_connected().

@@ -296,10 +296,6 @@ void USBUartTypeFT23XX::start_input(USBUartChannelBase *channel) {
     if (uart_data_len > 0) {
       ESP_LOGV(TAG, "RX callback: Received %zu bytes, channel=%d", uart_data_len, channel->index_);
       if (!channel->dummy_receiver_) {
-        if (channel->input_buffer_.get_free_space() < uart_data_len) {
-          this->on_rx_overflow(channel);
-        }
-        channel->input_buffer_.push(status.data + 2, uart_data_len);
         UsbDataChunk *chunk = this->chunk_pool_.allocate();
         if (chunk == nullptr) {
           this->usb_data_queue_.increment_dropped_count();
