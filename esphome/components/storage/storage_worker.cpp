@@ -1,4 +1,5 @@
 #include "storage_worker.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #ifdef USE_STORAGE_WORKER
@@ -468,6 +469,10 @@ void finish_request(TransferRequest &req, StorageError result) {
   req.chunk_buf.reset();
   req.result = result;
   req.state = RequestState::DONE;
+  // May run on the worker task: nudge the main loop so it delivers this completion promptly
+  // instead of waiting for loop_interval_ to elapse on its own (harmless extra wake when
+  // called from the main loop itself, e.g. the loop-sliced engine).
+  App.wake_loop_threadsafe();
 }
 
 }  // namespace
@@ -629,6 +634,9 @@ void run_stream_step(StreamRequest &req) {
       static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
     req.result = StorageError::NOT_READY;
     req.state = StreamState::DONE;
+    // May run on the worker task: nudge the main loop so it delivers this step promptly
+    // instead of waiting for loop_interval_ to elapse on its own.
+    App.wake_loop_threadsafe();
     return;
   }
 
@@ -718,8 +726,12 @@ void run_stream_step(StreamRequest &req) {
 
     default:
       // IDLE/FREE/DONE: nothing to do — shouldn't be dispatched in these states.
-      break;
+      return;
   }
+  // May run on the worker task: nudge the main loop so it delivers this step promptly instead
+  // of waiting for loop_interval_ to elapse on its own (harmless extra wake when this ran on
+  // the main loop already, e.g. the loop-sliced engine).
+  App.wake_loop_threadsafe();
 }
 
 }  // namespace
