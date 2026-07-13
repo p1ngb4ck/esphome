@@ -11,6 +11,7 @@ from typing import Any
 
 from esphome import yaml_util
 import esphome.codegen as cg
+from esphome.components.const import CONF_ENABLE_OTA_DOWNGRADE_PROTECTION
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADVANCED,
@@ -18,7 +19,6 @@ from esphome.const import (
     CONF_COMPONENTS,
     CONF_DISABLED,
     CONF_ENABLE_FULL_PRINTF,
-    CONF_ENABLE_OTA_DOWNGRADE_PROTECTION,
     CONF_ENABLE_OTA_ROLLBACK,
     CONF_ESPHOME,
     CONF_FRAMEWORK,
@@ -109,7 +109,9 @@ CONF_ENGINEERING_SAMPLE = "engineering_sample"
 CONF_INCLUDE_BUILTIN_IDF_COMPONENTS = "include_builtin_idf_components"
 CONF_ENABLE_LWIP_ASSERT = "enable_lwip_assert"
 CONF_EXECUTE_FROM_PSRAM = "execute_from_psram"
+CONF_KEY_ID = "key_id"
 CONF_MINIMUM_CHIP_REVISION = "minimum_chip_revision"
+CONF_NVS_ENCRYPTION = "nvs_encryption"
 CONF_RELEASE = "release"
 CONF_SIGNED_OTA_VERIFICATION = "signed_ota_verification"
 CONF_SIGNING_KEY = "signing_key"
@@ -165,6 +167,20 @@ SIGNED_OTA_V2_ECC_ONLY_VARIANTS = {
 # Based on SOC_SECURE_BOOT_V1 in soc_caps.h.
 SIGNED_OTA_V1_ECDSA_VARIANTS = {
     VARIANT_ESP32,
+}
+
+# NVS encryption (HMAC peripheral scheme) is only available on variants that
+# expose the HMAC peripheral (SOC_HMAC_SUPPORTED in soc_caps.h). The original
+# ESP32 and ESP32-C2 do not have it. New variants with an HMAC peripheral
+# should be added here.
+NVS_ENCRYPTION_HMAC_VARIANTS = {
+    VARIANT_ESP32S2,
+    VARIANT_ESP32S3,
+    VARIANT_ESP32C3,
+    VARIANT_ESP32C5,
+    VARIANT_ESP32C6,
+    VARIANT_ESP32H2,
+    VARIANT_ESP32P4,
 }
 
 COMPILER_OPTIMIZATIONS = {
@@ -1417,6 +1433,37 @@ def final_validate(config):
                 "Binaries will NOT be signed automatically during build. "
                 "You must sign them externally before flashing."
             )
+    if (nvs_enc := advanced.get(CONF_NVS_ENCRYPTION)) is not None:
+        variant = config[CONF_VARIANT]
+        if variant in NVS_ENCRYPTION_HMAC_VARIANTS:
+            _LOGGER.warning(
+                "NVS encryption will burn an HMAC key into eFuse key block %d on the "
+                "first boot of each device. This is PERMANENT and IRREVERSIBLE: "
+                "the block cannot be erased or reused afterwards. Enabling (or "
+                "later disabling) encryption also wipes any previously saved "
+                "preferences once, because the older data can no longer be read.",
+                nvs_enc[CONF_KEY_ID],
+            )
+        else:
+            supported = ", ".join(
+                sorted(VARIANT_FRIENDLY[v] for v in NVS_ENCRYPTION_HMAC_VARIANTS)
+            )
+            errs.append(
+                cv.Invalid(
+                    f"NVS encryption (HMAC scheme) is not supported on "
+                    f"{VARIANT_FRIENDLY[variant]} (it has no HMAC peripheral). "
+                    f"Supported variants: {supported}.",
+                    path=[CONF_FRAMEWORK, CONF_ADVANCED, CONF_NVS_ENCRYPTION],
+                )
+            )
+    if advanced[CONF_ENABLE_OTA_DOWNGRADE_PROTECTION]:
+        project = full_config[CONF_ESPHOME].get(CONF_PROJECT)
+        errs.extend(
+            _ota_downgrade_protection_errors(
+                project[CONF_VERSION] if project else None,
+                bool(advanced.get(CONF_SIGNED_OTA_VERIFICATION)),
+            )
+        )
     if errs:
         raise cv.MultipleInvalid(errs)
 
@@ -1459,9 +1506,6 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
-KEY_FATFS_VOLUME_COUNT = "fatfs_volume_count"
-KEY_FATFS_LFN_MAX = "fatfs_lfn_max"
-KEY_FATFS_LFN_HEAP = "fatfs_lfn_heap"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1560,36 +1604,6 @@ def require_fatfs() -> None:
     This prevents FATFS from being disabled when disable_fatfs is set.
     """
     CORE.data[KEY_ESP32][KEY_FATFS_REQUIRED] = True
-
-
-def require_fatfs_volume_count(count: int) -> None:
-    """Request a minimum CONFIG_FATFS_VOLUME_COUNT value.
-
-    Multiple components may call this; the maximum requested value is used.
-    Call require_fatfs() as well — this only adjusts the count, not the enable flag.
-    """
-    data = CORE.data[KEY_ESP32]
-    data[KEY_FATFS_VOLUME_COUNT] = max(data.get(KEY_FATFS_VOLUME_COUNT, 2), count)
-
-
-def require_fatfs_lfn_max(length: int = 255) -> None:
-    """Request a minimum CONFIG_FATFS_MAX_LFN value.
-
-    Multiple components may call this; the maximum requested value is used.
-    Call require_fatfs() as well — this only adjusts the LFN length, not the enable flag.
-    """
-    data = CORE.data[KEY_ESP32]
-    data[KEY_FATFS_LFN_MAX] = max(data.get(KEY_FATFS_LFN_MAX, 0), length)
-
-
-def require_fatfs_lfn_heap() -> None:
-    """Request that the FATFS LFN buffer is allocated on the heap (CONFIG_FATFS_LFN_HEAP).
-
-    Use this when LFN filenames must be supported with dynamic-length buffers.
-    If not called, LFN placement defaults to stack (CONFIG_FATFS_LFN_STACK).
-    Call require_fatfs() and require_fatfs_lfn_max() as well.
-    """
-    CORE.data[KEY_ESP32][KEY_FATFS_LFN_HEAP] = True
 
 
 def require_adc_oneshot_iram() -> None:
@@ -1941,35 +1955,6 @@ def _configure_lwip_max_sockets(conf: dict) -> None:
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
-async def _write_fatfs_sdkconfig(disable_fatfs: bool) -> None:
-    """Write FATFS sdkconfig at FINAL priority so require_fatfs() calls from all
-    components are visible before we decide to enable or disable FATFS."""
-    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
-        lfn_max = CORE.data[KEY_ESP32].get(KEY_FATFS_LFN_MAX, 0)
-        if lfn_max > 0:
-            add_idf_sdkconfig_option("CONFIG_FATFS_MAX_LFN", lfn_max)
-        if CORE.data[KEY_ESP32].get(KEY_FATFS_LFN_HEAP, False):
-            add_idf_sdkconfig_option("CONFIG_FATFS_LFN_HEAP", True)
-        else:
-            add_idf_sdkconfig_option("CONFIG_FATFS_LFN_STACK", True)
-        volume_count = CORE.data[KEY_ESP32].get(KEY_FATFS_VOLUME_COUNT, 2)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", volume_count)
-    elif disable_fatfs:
-        add_idf_sdkconfig_option("CONFIG_FATFS_LFN_NONE", True)
-        add_idf_sdkconfig_option("CONFIG_FATFS_VOLUME_COUNT", 1)
-
-
-@coroutine_with_priority(CoroPriority.FINAL)
-async def _write_vfs_dir_sdkconfig(disable_vfs_dir: bool) -> None:
-    """Write VFS_SUPPORT_DIR sdkconfig at FINAL priority so require_vfs_dir() calls from all
-    components are visible before we decide to enable or disable VFS directory support."""
-    if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", True)
-    else:
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_DIR", not disable_vfs_dir)
-
-
-@coroutine_with_priority(CoroPriority.FINAL)
 async def _write_exclude_components() -> None:
     """Write EXCLUDE_COMPONENTS cmake arg after all components have registered exclusions."""
     if KEY_ESP32 not in CORE.data:
@@ -2102,6 +2087,72 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
             ref=component.get(CONF_REF),
             path=component.get(CONF_PATH),
         )
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _reconcile_vfs_fatfs_sdkconfig(
+    disable_vfs_termios: bool,
+    disable_vfs_select: bool,
+    disable_vfs_dir: bool,
+    disable_fatfs: bool,
+) -> None:
+    """Reconcile VFS/FATFS sdkconfig flags.
+
+    Runs at FINAL priority so every require_vfs_termios()/require_vfs_select()/
+    require_vfs_dir()/require_fatfs() call (made from the various components' to_code at
+    their own priorities) is seen first. A user-supplied sdkconfig_options value always
+    takes precedence.
+    """
+    opts = CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]
+
+    def set_opt(name: str, value: SdkconfigValueType) -> None:
+        # User sdkconfig_options (applied during to_code) win.
+        if name not in opts:
+            add_idf_sdkconfig_option(name, value)
+
+    # VFS support for termios (terminal I/O functions)
+    # USB Serial JTAG VFS functions require termios support.
+    # Components that need it (e.g., logger when USB_SERIAL_JTAG is supported but not selected
+    # as the logger output) call require_vfs_termios().
+    # Saves approximately 1.8KB of flash when disabled (default).
+    if CORE.data.get(KEY_VFS_TERMIOS_REQUIRED, False):
+        set_opt("CONFIG_VFS_SUPPORT_TERMIOS", True)
+    else:
+        set_opt("CONFIG_VFS_SUPPORT_TERMIOS", not disable_vfs_termios)
+
+    # VFS support for select() with file descriptors
+    # ESPHome only uses select() with sockets via lwip_select(), which still works.
+    # VFS select is only needed for UART/eventfd file descriptors.
+    # Components that need it (e.g., openthread) call require_vfs_select().
+    # Saves approximately 2.7KB of flash when disabled (default).
+    if CORE.data.get(KEY_VFS_SELECT_REQUIRED, False):
+        set_opt("CONFIG_VFS_SUPPORT_SELECT", True)
+    else:
+        set_opt("CONFIG_VFS_SUPPORT_SELECT", not disable_vfs_select)
+
+    # VFS support for directory functions (opendir, readdir, mkdir, etc.)
+    # Components that need it (e.g., storage drivers) call require_vfs_dir().
+    # Saves approximately 0.5KB+ of flash when disabled (default).
+    if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
+        set_opt("CONFIG_VFS_SUPPORT_DIR", True)
+    else:
+        set_opt("CONFIG_VFS_SUPPORT_DIR", not disable_vfs_dir)
+
+    # FATFS support
+    # Components that need FATFS (SD card, USB storage, ...) call require_fatfs().
+    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
+        # Storage drivers need long filenames (heap-allocated, full 255-char length) and
+        # enough FATFS volumes for several drivers at once (SD + USB + wear levelling —
+        # every esp_vfs_fat mount consumes one). All of these are only defaults: override
+        # any of them via esp32 -> framework -> advanced -> sdkconfig_options.
+        set_opt("CONFIG_FATFS_LFN_NONE", False)
+        set_opt("CONFIG_FATFS_LFN_HEAP", True)
+        set_opt("CONFIG_FATFS_MAX_LFN", 255)
+        set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
+    elif disable_fatfs:
+        set_opt("CONFIG_FATFS_LFN_NONE", True)
+        # Kconfig range is [1,10]; 0 gets clamped to the default.
+        set_opt("CONFIG_FATFS_VOLUME_COUNT", 1)
 
 
 @coroutine_with_priority(CoroPriority.FINAL - 1)
@@ -2457,34 +2508,6 @@ async def to_code(config):
     if advanced[CONF_DISABLE_LIBC_LOCKS_IN_IRAM]:
         add_idf_sdkconfig_option("CONFIG_LIBC_LOCKS_PLACE_IN_IRAM", False)
 
-    # Disable VFS support for termios (terminal I/O functions)
-    # USB Serial JTAG VFS functions require termios support.
-    # Components that need it (e.g., logger when USB_SERIAL_JTAG is supported but not selected
-    # as the logger output) call require_vfs_termios().
-    # Saves approximately 1.8KB of flash when disabled (default).
-    if CORE.data.get(KEY_VFS_TERMIOS_REQUIRED, False):
-        # Component requires VFS termios - force enable regardless of user setting
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_TERMIOS", True)
-    else:
-        # No component needs it - allow user to control (default: disabled)
-        add_idf_sdkconfig_option(
-            "CONFIG_VFS_SUPPORT_TERMIOS", not advanced[CONF_DISABLE_VFS_SUPPORT_TERMIOS]
-        )
-
-    # Disable VFS support for select() with file descriptors
-    # ESPHome only uses select() with sockets via lwip_select(), which still works.
-    # VFS select is only needed for UART/eventfd file descriptors.
-    # Components that need it (e.g., openthread) call require_vfs_select().
-    # Saves approximately 2.7KB of flash when disabled (default).
-    if CORE.data.get(KEY_VFS_SELECT_REQUIRED, False):
-        # Component requires VFS select - force enable regardless of user setting
-        add_idf_sdkconfig_option("CONFIG_VFS_SUPPORT_SELECT", True)
-    else:
-        # No component needs it - allow user to control (default: disabled)
-        add_idf_sdkconfig_option(
-            "CONFIG_VFS_SUPPORT_SELECT", not advanced[CONF_DISABLE_VFS_SUPPORT_SELECT]
-        )
-
     if use_platformio:
         cg.add_platformio_option("board_build.partitions", "partitions.csv")
     if CONF_PARTITIONS in config:
@@ -2532,6 +2555,16 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE", True)
         cg.add_define("USE_OTA_ROLLBACK")
 
+    # Enable software OTA downgrade protection. Embed the project version into
+    # the image's esp_app_desc_t so the OTA backend can compare it against the
+    # running version (final_validate guarantees a dotted-numeric project
+    # version and that signed OTA is enabled).
+    if advanced[CONF_ENABLE_OTA_DOWNGRADE_PROTECTION]:
+        project_version = CORE.config[CONF_ESPHOME][CONF_PROJECT][CONF_VERSION]
+        add_idf_sdkconfig_option("CONFIG_APP_PROJECT_VER_FROM_CONFIG", True)
+        add_idf_sdkconfig_option("CONFIG_APP_PROJECT_VER", project_version)
+        cg.add_define("USE_OTA_DOWNGRADE_PROTECTION")
+
     # Enable signed app verification without hardware secure boot
     if signed_ota := advanced.get(CONF_SIGNED_OTA_VERIFICATION):
         add_idf_sdkconfig_option("CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT", True)
@@ -2561,6 +2594,20 @@ async def to_code(config):
                 )
 
         cg.add_define("USE_OTA_SIGNED_VERIFICATION")
+
+    # Encrypt NVS using the HMAC peripheral scheme. The NVS encryption keys are
+    # derived at runtime from an HMAC key stored in the configured eFuse block
+    # (no flash encryption required). The HMAC key is generated and burned into
+    # the eFuse block on first boot if it is empty. With the scheme selected,
+    # nvs_sec_provider registers it at startup and the default nvs_flash_init()
+    # (used in esp32/preferences.cpp) transparently performs the secure init, so
+    # no C++ changes are needed.
+    if (nvs_enc := advanced.get(CONF_NVS_ENCRYPTION)) is not None:
+        add_idf_sdkconfig_option("CONFIG_NVS_ENCRYPTION", True)
+        add_idf_sdkconfig_option("CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC", True)
+        add_idf_sdkconfig_option(
+            "CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID", nvs_enc[CONF_KEY_ID]
+        )
 
     cg.add_define("ESPHOME_LOOP_TASK_STACK_SIZE", advanced[CONF_LOOP_TASK_STACK_SIZE])
 
@@ -2634,6 +2681,17 @@ async def to_code(config):
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
 
+    # FINAL priority: runs after every require_vfs_*() / require_fatfs() call — components
+    # make those calls from their own to_code, which runs after this platform to_code, so
+    # reading the flags inline here would never see them (VFS/FATFS would stay disabled).
+    CORE.add_job(
+        _reconcile_vfs_fatfs_sdkconfig,
+        advanced[CONF_DISABLE_VFS_SUPPORT_TERMIOS],
+        advanced[CONF_DISABLE_VFS_SUPPORT_SELECT],
+        advanced[CONF_DISABLE_VFS_SUPPORT_DIR],
+        advanced[CONF_DISABLE_FATFS],
+    )
+
     # Disable regi2c control functions in IRAM
     # Only needed if using analog peripherals (ADC, DAC, etc.) from ISRs while cache is disabled
     if advanced[CONF_DISABLE_REGI2C_IN_IRAM]:
@@ -2648,10 +2706,6 @@ async def to_code(config):
         or advanced[CONF_ADC_ONESHOT_IN_IRAM]
     ):
         add_idf_sdkconfig_option("CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM", True)
-
-    # FINAL priority: runs after every require_fatfs() / require_fatfs_lfn_*() call
-    CORE.add_job(_write_fatfs_sdkconfig, advanced[CONF_DISABLE_FATFS])
-    CORE.add_job(_write_vfs_dir_sdkconfig, advanced[CONF_DISABLE_VFS_SUPPORT_DIR])
 
     for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
         add_idf_sdkconfig_option(name, RawSdkconfigValue(value))

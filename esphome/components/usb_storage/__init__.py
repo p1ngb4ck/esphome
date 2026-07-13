@@ -9,9 +9,6 @@ from esphome.components.esp32 import (
     include_builtin_idf_component,
     only_on_variant,
     require_fatfs,
-    require_fatfs_lfn_heap,
-    require_fatfs_lfn_max,
-    require_fatfs_volume_count,
     require_vfs_dir,
     require_vfs_select,
 )
@@ -115,19 +112,17 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-FATFS_LFN_MAX = 255
 
 
 async def to_code(config):
     require_vfs_dir()
     require_vfs_select()
+    # LFN mode/length and volume count are set as user-overridable defaults by the esp32
+    # platform once any component calls require_fatfs() — see
+    # _reconcile_vfs_fatfs_sdkconfig(). Override via esp32 framework sdkconfig_options.
     require_fatfs()
-    require_fatfs_volume_count(4)
-    require_fatfs_lfn_max(FATFS_LFN_MAX)
-    require_fatfs_lfn_heap()
     include_builtin_idf_component("fatfs")
     include_builtin_idf_component("esp_vfs_fat")
-    cg.add_define("CONFIG_FATFS_MAX_LFN", FATFS_LFN_MAX)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
