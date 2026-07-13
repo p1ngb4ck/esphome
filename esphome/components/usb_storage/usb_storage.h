@@ -148,6 +148,9 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
 
   // No-RTTI downcast hook — see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
+  // The FAT mount lifecycle is owned by the USB hotplug client — insertion auto-mounts, so
+  // only the safe-eject direction may be invoked externally (mount() below is a status no-op).
+  uint8_t get_mount_caps() const override { return storage::MountableStorage::MOUNT_CAP_UNMOUNT; }
   storage::StorageError format() override;
   storage::StorageError sync() override;
   storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;

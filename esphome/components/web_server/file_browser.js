@@ -74,11 +74,15 @@
         for (const s of storages) {
           const open = btn("open", async () => { cwd = s.mount_path; });
           const acts = [open];
-          if (s.mountable) {
+          // Per-direction capabilities: e.g. USB auto-mounts on insertion and only offers
+          // safe-eject; each button also only makes sense in the opposite mounted state.
+          if (s.can_mount && !s.mounted) {
             acts.push(btn("mount", () => api(`/files/mount?path=${encodeURIComponent(s.mount_path)}`, { method: "POST" })));
+          }
+          if (s.can_unmount && s.mounted) {
             acts.push(btn("unmount", () => api(`/files/unmount?path=${encodeURIComponent(s.mount_path)}`, { method: "POST" })));
           }
-          listing.append(row(`${s.mount_path} (${s.type})`, ...acts));
+          listing.append(row(`${s.mount_path} (${s.type}${s.mounted ? "" : ", not mounted"})`, ...acts));
         }
       } else {
         listing.append(row(cwd, btn("up", async () => {

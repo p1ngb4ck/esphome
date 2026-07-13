@@ -7,7 +7,11 @@ from esphome.components.esp32.const import (
     VARIANT_ESP32S3,
     VARIANT_ESP32S31,
 )
-from esphome.components.storage import request_storage_device, request_storage_worker
+from esphome.components.storage import (
+    MountableStorage,
+    request_storage_device,
+    request_storage_worker,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CLK_PIN,
@@ -28,7 +32,9 @@ DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["storage"]
 
 sd_storage_ns = cg.esphome_ns.namespace("sd_storage")
-SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component)
+# MountableStorage parent makes SD ids valid targets for the generic storage.mount /
+# storage.unmount actions (cv.use_id(MountableStorage) checks declared Python parents).
+SdStorageBase = sd_storage_ns.class_("SdStorageBase", cg.Component, MountableStorage)
 SdMmc = sd_storage_ns.class_("SdMmc", SdStorageBase)
 SdSpi = sd_storage_ns.class_("SdSpi", spi.SPIDevice, SdStorageBase)
 

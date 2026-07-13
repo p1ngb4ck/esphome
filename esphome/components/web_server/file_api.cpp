@@ -208,10 +208,22 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           append_json_escaped(*ctx->out, s->get_mount_path());
           *ctx->out += "\",\"type\":\"";
           *ctx->out += type == storage::StorageType::NETWORK ? "network" : "filesystem";
-          *ctx->out += "\",\"mountable\":";
-          *ctx->out += s->as_mountable() != nullptr ? "true" : "false";
+          // Per-direction capabilities: a plain "mountable" bool cannot express drivers whose
+          // medium mounts itself (USB hotplug) and only supports safe-eject — the UI must gate
+          // each button separately (see MountableStorage::get_mount_caps()).
+          storage::MountableStorage *m = s->as_mountable();
+          uint8_t caps = m != nullptr ? m->get_mount_caps() : 0;
+          *ctx->out += ",\"can_mount\":";
+          *ctx->out += (caps & storage::MountableStorage::MOUNT_CAP_MOUNT) != 0 ? "true" : "false";
+          *ctx->out += ",\"can_unmount\":";
+          *ctx->out += (caps & storage::MountableStorage::MOUNT_CAP_UNMOUNT) != 0 ? "true" : "false";
           storage::StorageInfo info{};
-          if (s->get_info(&info) == storage::StorageError::OK) {
+          storage::StorageError info_err = s->get_info(&info);
+          // is_mounted is filled by drivers even on NOT_READY (unmounted); the zero-initialized
+          // struct covers any other failure, so the flag is always safe to emit.
+          *ctx->out += ",\"mounted\":";
+          *ctx->out += info.is_mounted ? "true" : "false";
+          if (info_err == storage::StorageError::OK) {
             *ctx->out += ",\"name\":\"";
             append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
             *ctx->out += "\"";
@@ -397,7 +409,10 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
       return;
     }
     storage::MountableStorage *m = ps->as_mountable();
-    if (m == nullptr) {
+    // Gate on the per-direction capability, not just interface presence: e.g. USB storage
+    // auto-mounts on insertion and only supports the safe-eject direction.
+    uint8_t need = mount ? storage::MountableStorage::MOUNT_CAP_MOUNT : storage::MountableStorage::MOUNT_CAP_UNMOUNT;
+    if (m == nullptr || (m->get_mount_caps() & need) == 0) {
       found_not_mountable = true;
       return;
     }
@@ -408,7 +423,7 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
     return;
   }
   if (found_not_mountable) {
-    request->send(400, "application/json", "{\"error\":\"not a mountable storage\"}");
+    request->send(400, "application/json", "{\"error\":\"operation not supported by this storage\"}");
     return;
   }
   if (err != storage::StorageError::OK) {

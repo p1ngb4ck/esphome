@@ -190,7 +190,16 @@ class RawStorage : public Storage {
 // non-removable filesystems simply don't inherit it.
 class MountableStorage {
  public:
+  // Which of the two operations may be invoked externally (YAML actions, web UI). A driver
+  // whose medium controls its own mount lifecycle (e.g. USB: hotplug auto-mounts on insertion)
+  // supports only UNMOUNT ("safe eject"); manually managed media (SD card, NFS export) support
+  // both. Consumers building UI must gate each button on its bit — as_mountable() != nullptr
+  // alone only says "at least one of the two works".
+  static constexpr uint8_t MOUNT_CAP_MOUNT = 1 << 0;
+  static constexpr uint8_t MOUNT_CAP_UNMOUNT = 1 << 1;
+
   virtual ~MountableStorage() = default;
+  virtual uint8_t get_mount_caps() const { return MOUNT_CAP_MOUNT | MOUNT_CAP_UNMOUNT; }
   virtual StorageError mount() = 0;
   virtual StorageError unmount() = 0;
 };
