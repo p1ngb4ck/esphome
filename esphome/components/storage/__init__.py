@@ -16,8 +16,8 @@ from esphome.const import (
     CONF_KEY,
     CONF_ON_VALUE,
     CONF_PATH,
-    CONF_TYPE,
     CONF_TO,
+    CONF_TYPE,
 )
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 
@@ -260,10 +260,6 @@ def _exactly_one_step_kind(config):
         raise cv.Invalid(
             f"Each extract step needs exactly one of line/split/key/regex/trim/json, got {kinds}"
         )
-    if CONF_JSON in config:
-        fv_note = None  # validated for emptiness only; component presence is checked below
-        if not config[CONF_JSON]:
-            raise cv.Invalid("'json' pointer must not be empty")
     if CONF_INDEX in config and CONF_SPLIT not in config:
         raise cv.Invalid("'index' is only valid with 'split'")
     if CONF_SEPARATOR in config and CONF_KEY not in config:
@@ -577,8 +573,13 @@ def _pref_type_for_global(global_id: str) -> tuple[str, int]:
         return "HEX", 0
     return "HEX", 0
 
-ExportPreferencesAction = storage_ns.class_("ExportPreferencesAction", automation.Action)
-ImportPreferencesAction = storage_ns.class_("ImportPreferencesAction", automation.Action)
+
+ExportPreferencesAction = storage_ns.class_(
+    "ExportPreferencesAction", automation.Action
+)
+ImportPreferencesAction = storage_ns.class_(
+    "ImportPreferencesAction", automation.Action
+)
 
 
 def _global_nvs_key(global_id: str) -> int:
@@ -621,24 +622,10 @@ async def _build_preferences_action(config, action_id, template_arg, args):
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
     cg.add(var.set_format(config[CONF_FORMAT]))
-    # The name/type table is ALWAYS baked: from the explicit list when given
-    # (restrict=True — only those entries round-trip), otherwise from every
-    # restore_value global in the config (restrict=False — the whole
-    # namespace round-trips, but everything codegen can name renders
-    # readable; only truly unknown keys like entity states stay hex).
     if selection := config.get(CONF_PREFERENCES):
-        names = [str(gid) for gid in selection]
-        restrict = True
-    else:
-        names = [
-            str(entry[CONF_ID])
-            for entry in CORE.config.get("globals", [])
-            if entry.get("restore_value", False)
-        ]
-        restrict = False
-    if names:
         entries = []
-        for name in names:
+        for gid in selection:
+            name = str(gid)
             tag, count = _pref_type_for_global(name)
             key = _global_nvs_key(name)
             entries.append(
@@ -652,11 +639,7 @@ async def _build_preferences_action(config, action_id, template_arg, args):
                 + "}"
             )
         )
-        cg.add(
-            var.set_selection(
-                cg.RawExpression(arr), len(entries), restrict
-            )
-        )
+        cg.add(var.set_selection(cg.RawExpression(arr), len(entries)))
     return var
 
 

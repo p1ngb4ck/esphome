@@ -195,7 +195,6 @@ template<typename... Ts> class MountAction : public Action<Ts...> {
   bool mount_;
 };
 
-
 #if defined(USE_STORAGE_PREFERENCES) && defined(USE_ESP32)
 // storage.export_preferences / storage.import_preferences — see
 // preferences_backup.h. The selection table (name/key/type/count) is
@@ -205,22 +204,20 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
  public:
   TEMPLATABLE_VALUE(std::string, path)
   void set_format(const char *format) { this->format_ = format; }
-  void set_selection(const PrefSelection *selection, size_t count, bool restrict_to_selection) {
+  void set_selection(const PrefSelection *selection, size_t count) {
     this->selection_ = selection;
     this->count_ = count;
-    this->restrict_ = restrict_to_selection;
   }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
-    preferences_export_to_storage(path.c_str(), this->format_, this->selection_, this->count_, this->restrict_);
+    preferences_export_to_storage(path.c_str(), this->format_, this->selection_, this->count_);
   }
 
  protected:
   const char *format_{"kv"};
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
-  bool restrict_{false};
 };
 
 template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
@@ -228,16 +225,14 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(std::string, path)
   void set_format(const char *format) { this->format_ = format; }
   void set_reboot(bool reboot) { this->reboot_ = reboot; }
-  void set_selection(const PrefSelection *selection, size_t count, bool restrict_to_selection) {
+  void set_selection(const PrefSelection *selection, size_t count) {
     this->selection_ = selection;
     this->count_ = count;
-    this->restrict_ = restrict_to_selection;
   }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
-    preferences_import_from_storage(path.c_str(), this->format_, this->reboot_, this->selection_, this->count_,
-                                    this->restrict_);
+    preferences_import_from_storage(path.c_str(), this->format_, this->reboot_, this->selection_, this->count_);
   }
 
  protected:
@@ -245,7 +240,6 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   bool reboot_{false};
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
-  bool restrict_{false};
 };
 #endif  // USE_STORAGE_PREFERENCES && USE_ESP32
 
