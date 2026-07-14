@@ -620,9 +620,17 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
 # Per-type version constants of EntityBase::make_entity_preference_() callers.
 # Keep in sync: fan/fan.cpp, climate/climate.cpp; every other core entity uses
 # the default version 0. template text is special-cased (trait-salted key).
-_ENTITY_VERSIONS = (
-    ("fan", "Fan", 0x71700ABB),
-    ("climate", "Climate", 0x848EA6AD),
+# (module, class, version, EntityKind) — kinds map to real-struct codecs in
+# preferences_backup.cpp; anything not matched below registers as RAW (named,
+# hex value). datetime template platforms carry their own versions.
+_ENTITY_KINDS = (
+    ("fan", "Fan", 0x71700ABB, "FAN"),
+    ("climate", "Climate", 0x848EA6AD, "CLIMATE"),
+    ("light", "LightState", 0, "LIGHT"),
+    ("cover", "Cover", 0, "COVER"),
+    ("valve", "Valve", 0, "VALVE"),
+    ("switch", "Switch", 0, "BOOL"),
+    ("number", "Number", 0, "FLOAT"),
 )
 
 
@@ -645,13 +653,16 @@ def _entity_registration(reg_id) -> str | None:
             f"{reg_id.id}->traits.get_min_length(), {reg_id.id}->traits.get_max_length(), "
             f"{reg_id.id}->traits.get_pattern_c_str())"
         )
-    version = 0
-    for mod_name, cls_name, ver in _ENTITY_VERSIONS:
+    version, kind = 0, "RAW"
+    for mod_name, cls_name, ver, k in _ENTITY_KINDS:
         mod = __import__(f"esphome.components.{mod_name}", fromlist=[cls_name])
-        if type_.inherits_from(getattr(mod, cls_name)):
-            version = ver
+        if hasattr(mod, cls_name) and type_.inherits_from(getattr(mod, cls_name)):
+            version, kind = ver, k
             break
-    return f'esphome::storage::register_entity_pref({reg_id.id}, "{reg_id.id}", {version}UL)'
+    return (
+        f'esphome::storage::register_entity_pref({reg_id.id}, "{reg_id.id}", '
+        f"{version}UL, esphome::storage::EntityKind::{kind})"
+    )
 
 
 async def _build_preferences_action(config, action_id, template_arg, args):

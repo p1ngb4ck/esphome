@@ -54,7 +54,24 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
 // private restore structs); this registry provides the NAMES.
 class EntityBase;  // fwd (esphome::EntityBase pulled in by the .cpp)
 
-void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version);
+// What the entity's restore blob IS — codegen picks this from the declared
+// class; the codecs in preferences_backup.cpp are compiled against the REAL
+// component structs (sizeof-gated, hex fallback on mismatch), so no layout
+// knowledge is duplicated here.
+enum class EntityKind : uint8_t {
+  RAW = 0,  // unknown restore layout: named, hex value
+  BOOL,     // switch & friends
+  FLOAT,    // number, integration, sprinkler, ...
+  STRING,   // text (length-prefixed; aux = SZ incl. length byte)
+  FAN,
+  COVER,
+  VALVE,
+  LIGHT,
+  CLIMATE,
+};
+
+void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version, EntityKind kind,
+                          uint16_t aux = 0);
 #ifdef USE_TEXT
 namespace detail {
 void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
