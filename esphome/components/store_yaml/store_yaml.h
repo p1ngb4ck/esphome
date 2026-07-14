@@ -6,6 +6,12 @@
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
 
+#ifdef USE_STORE_YAML_EXPORT
+namespace esphome::storage {
+class PathStorage;
+}  // namespace esphome::storage
+#endif  // USE_STORE_YAML_EXPORT
+
 namespace esphome::store_yaml {
 
 // "zstd" — published in GetYamlResponse.encoding so clients know how to decompress.
@@ -28,6 +34,9 @@ class StoreYamlComponent : public Component {
 #ifdef USE_STORE_YAML_EXPORT
   /// Export the embedded YAML to a storage path (fork extension, not part of
   /// upstream PR #16445 — its native-API channel has no storage to write to).
+  /// The path is resolved through the storage registry (mount-point prefix ->
+  /// PathStorage + relative path), so every registered path-based storage
+  /// works as a target — including non-VFS ones like nfs_client.
   /// raw=true writes the zstd-compressed EHY1 envelope as a single file at
   /// `path`; raw=false decompresses on-device and recreates the original file
   /// tree (entry yaml + includes/packages) below the directory `path`.
@@ -36,8 +45,8 @@ class StoreYamlComponent : public Component {
   bool export_to_storage(const char *path, bool raw);
 
  protected:
-  bool write_file_(const char *path, const uint8_t *data, size_t len);
-  bool ensure_parent_dirs_(const char *file_path);
+  bool write_file_(storage::PathStorage *ps, const char *rel_path, const uint8_t *data, size_t len);
+  bool ensure_parent_dirs_(storage::PathStorage *ps, const char *rel_file_path);
 
  public:
 #endif  // USE_STORE_YAML_EXPORT

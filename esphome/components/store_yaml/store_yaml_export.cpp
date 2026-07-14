@@ -2,12 +2,10 @@
 
 #if defined(USE_STORE_YAML) && defined(USE_STORE_YAML_EXPORT)
 
-#include <sys/stat.h>
-#include <cerrno>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+#include "esphome/components/storage/storage.h"
 #include "esphome/core/log.h"
 
 #ifdef USE_ESP32
@@ -35,20 +33,24 @@ static uint32_t read_u32_le(const uint8_t *p) {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
-bool StoreYamlComponent::ensure_parent_dirs_(const char *file_path) {
-  // mkdir -p for everything above the final path component. Segment-wise
-  // mkdir with EEXIST tolerated; other errors abort.
+bool StoreYamlComponent::ensure_parent_dirs_(storage::PathStorage *ps, const char *rel_file_path) {
+  // mkdir -p (storage-relative) for everything above the final path
+  // component. Segment-wise PathStorage::mkdir with ALREADY_EXISTS tolerated;
+  // other errors abort.
   char buf[MAX_EXPORT_PATH];
-  size_t len = strlen(file_path);
+  size_t len = strlen(rel_file_path);
   if (len >= sizeof(buf))
     return false;
-  memcpy(buf, file_path, len + 1);
+  memcpy(buf, rel_file_path, len + 1);
   for (size_t i = 1; i < len; i++) {
     if (buf[i] != '/')
       continue;
+    if (buf[i - 1] == '/')
+      continue;  // empty segment (consecutive slashes) — nothing to create
     buf[i] = '\0';
-    if (mkdir(buf, 0775) != 0 && errno != EEXIST) {
-      ESP_LOGE(TAG, "mkdir '%s' failed: %d", buf, errno);
+    storage::StorageError err = ps->mkdir(buf);
+    if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
+      ESP_LOGE(TAG, "mkdir '%s' failed (%s)", buf, storage::error_to_string(err));
       return false;
     }
     buf[i] = '/';
@@ -56,20 +58,17 @@ bool StoreYamlComponent::ensure_parent_dirs_(const char *file_path) {
   return true;
 }
 
-bool StoreYamlComponent::write_file_(const char *path, const uint8_t *data, size_t len) {
-  if (!this->ensure_parent_dirs_(path))
+bool StoreYamlComponent::write_file_(storage::PathStorage *ps, const char *rel_path, const uint8_t *data,
+                                     size_t len) {
+  if (!this->ensure_parent_dirs_(ps, rel_path))
     return false;
-  FILE *f = fopen(path, "wb");
-  if (f == nullptr) {
-    ESP_LOGE(TAG, "fopen '%s' failed: %d", path, errno);
+  // PathStorage-level helper — works on FILESYSTEM and NETWORK storages alike.
+  storage::StorageError err = storage::write_file(ps, rel_path, data, len);
+  if (err != storage::StorageError::OK) {
+    ESP_LOGE(TAG, "Writing '%s' failed (%s)", rel_path, storage::error_to_string(err));
     return false;
   }
-  bool ok = len == 0 || fwrite(data, 1, len, f) == len;
-  if (fclose(f) != 0)
-    ok = false;
-  if (!ok)
-    ESP_LOGE(TAG, "Writing '%s' failed", path);
-  return ok;
+  return true;
 }
 
 bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
@@ -81,15 +80,43 @@ bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
     ESP_LOGE(TAG, "Export path must be absolute and shorter than %u chars", (unsigned) MAX_EXPORT_PATH);
     return false;
   }
+  if (storage::global_storage_registry == nullptr) {
+    ESP_LOGE(TAG, "Storage registry not available (is the storage component configured?)");
+    return false;
+  }
 
-  // PROGMEM is a no-op on every platform this branch's storage stack supports
-  // (ESP32 / host) — the blob is directly addressable.
+  // Normalize: strip trailing slashes ("/nfs/" == "/nfs", "/nfs/config/" ==
+  // "/nfs/config") so the base/relative join below never produces empty path
+  // segments — a trailing slash otherwise turns into a bogus mkdir of an
+  // empty-named directory.
+  char norm[MAX_EXPORT_PATH];
+  size_t norm_len = strlen(path);
+  memcpy(norm, path, norm_len + 1);
+  while (norm_len > 1 && norm[norm_len - 1] == '/') {
+    norm[--norm_len] = '\0';
+  }
+
+  // Resolve the mount-point prefix once: every file of one export lands on
+  // the same storage device, addressed by its storage-relative path.
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(norm, &rel);
+  if (ps == nullptr) {
+    ESP_LOGE(TAG, "No storage mounted for '%s'", norm);
+    return false;
+  }
+
+  // PROGMEM is a no-op on every platform this action supports (ESP32 / host)
+  // — the blob is directly addressable.
   if (raw) {
     // The compressed EHY1 envelope as-is; decompress off-device
     // (zstd CLI / Python `compression.zstd`).
-    if (!this->write_file_(path, this->data_, this->size_))
+    if (rel == nullptr || rel[0] == '\0' || strcmp(rel, "/") == 0) {
+      ESP_LOGE(TAG, "raw export needs a file path, '%s' is a mount root", norm);
       return false;
-    ESP_LOGI(TAG, "Exported compressed YAML envelope (%zu bytes) to '%s'", this->size_, path);
+    }
+    if (!this->write_file_(ps, rel, this->data_, this->size_))
+      return false;
+    ESP_LOGI(TAG, "Exported compressed YAML envelope (%zu bytes) to '%s'", this->size_, norm);
     return true;
   }
 
@@ -107,6 +134,11 @@ bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
     ESP_LOGE(TAG, "Cannot allocate %zu bytes for decompression (no PSRAM?) — use raw: true instead", out_size);
     return false;
   }
+
+  // Storage-relative base directory of the export; may be empty when the
+  // target is the mount root itself (e.g. path == "/data").
+  const char *base = (rel != nullptr && strcmp(rel, "/") != 0) ? rel : "";
+  const size_t base_len = strlen(base);
 
   bool ok = false;
   size_t written_files = 0;
@@ -131,13 +163,13 @@ bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
         ok = false;
         break;
       }
-      char rel[MAX_EXPORT_PATH];
-      if (path_len == 0 || path_len >= sizeof(rel)) {
+      char env_rel[MAX_EXPORT_PATH];
+      if (path_len == 0 || path_len >= sizeof(env_rel)) {
         ok = false;
         break;
       }
-      memcpy(rel, out + off, path_len);
-      rel[path_len] = '\0';
+      memcpy(env_rel, out + off, path_len);
+      env_rel[path_len] = '\0';
       off += path_len;
       const uint32_t content_len = read_u32_le(out + off);
       off += 4;
@@ -147,19 +179,20 @@ bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
       }
       // Path sanitizing: envelope paths are relative by construction; reject
       // anything that could escape the target directory.
-      if (rel[0] == '/' || strstr(rel, "..") != nullptr) {
-        ESP_LOGE(TAG, "Refusing unsafe envelope path '%s'", rel);
+      if (env_rel[0] == '/' || strstr(env_rel, "..") != nullptr) {
+        ESP_LOGE(TAG, "Refusing unsafe envelope path '%s'", env_rel);
         ok = false;
         break;
       }
-      char full[MAX_EXPORT_PATH];
-      const int n = snprintf(full, sizeof(full), "%s/%s", path, rel);
-      if (n < 0 || static_cast<size_t>(n) >= sizeof(full)) {
-        ESP_LOGE(TAG, "Target path too long for '%s'", rel);
+      char full_rel[MAX_EXPORT_PATH];
+      const int n = base_len > 0 ? snprintf(full_rel, sizeof(full_rel), "%s/%s", base, env_rel)
+                                 : snprintf(full_rel, sizeof(full_rel), "%s", env_rel);
+      if (n < 0 || static_cast<size_t>(n) >= sizeof(full_rel)) {
+        ESP_LOGE(TAG, "Target path too long for '%s'", env_rel);
         ok = false;
         break;
       }
-      if (!this->write_file_(full, out + off, content_len)) {
+      if (!this->write_file_(ps, full_rel, out + off, content_len)) {
         ok = false;
         break;
       }
@@ -173,9 +206,9 @@ bool StoreYamlComponent::export_to_storage(const char *path, bool raw) {
 
   free(out);  // NOLINT — matches both allocation paths (heap_caps_free aliases free on ESP-IDF)
   if (ok) {
-    ESP_LOGI(TAG, "Exported %zu YAML file(s) below '%s'", written_files, path);
+    ESP_LOGI(TAG, "Exported %zu YAML file(s) below '%s'", written_files, norm);
   } else {
-    ESP_LOGE(TAG, "YAML export to '%s' failed after %zu file(s)", path, written_files);
+    ESP_LOGE(TAG, "YAML export to '%s' failed after %zu file(s)", norm, written_files);
   }
   return ok;
 }

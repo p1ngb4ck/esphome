@@ -8,6 +8,8 @@ from pathlib import Path
 import struct
 
 from esphome import automation, yaml_util
+
+from . import yaml_discovery
 import esphome.codegen as cg
 from esphome.components.api import CONF_ENCRYPTION
 import esphome.config_validation as cv
@@ -87,7 +89,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 def _gather_files(
-    discovered: yaml_util.DiscoveredYamlFiles,
+    discovered: yaml_discovery.DiscoveredYamlFiles,
 ) -> tuple[list[tuple[str, Path]], set[str]]:
     """Map each discovered YAML file to its envelope path.
 
@@ -182,7 +184,7 @@ def _collect_sensitive_values() -> dict[str, _SensitiveValue]:
     values get a name generated from their config path, avoiding names already
     taken by real secrets.
     """
-    used = yaml_util.registered_secret_names()
+    used = yaml_discovery.registered_secret_names()
     result: dict[str, _SensitiveValue] = {}
     for path, value in _iter_sensitive_values(CORE.config):
         if not value or value in result:
@@ -239,7 +241,7 @@ def _generate_redacted_files(
 
     texts: dict[str, str] = {}
     registered = {value: info.secret_name for value, info in sensitive.items()}
-    with yaml_util.secret_values_registered(registered):
+    with yaml_discovery.secret_values_registered(registered):
         for rel, path in entries:
             if rel in secret_rels:
                 continue
@@ -248,7 +250,7 @@ def _generate_redacted_files(
 
     skeleton_keys: set[str] = set()
     for text in texts.values():
-        skeleton_keys |= yaml_util.find_secret_references(text)
+        skeleton_keys |= yaml_discovery.find_secret_references(text)
 
     # After the context manager exits, only values loaded through a real
     # `!secret` are still registered — those legitimately never appear
@@ -338,7 +340,7 @@ async def to_code(config: ConfigType) -> None:
     # listener installed across validation) avoids capturing framework YAML
     # that components load internally (e.g. LVGL's `hello_world.yaml`), and
     # costs nothing on validate-only runs or configs without this component.
-    discovered = yaml_util.discover_user_yaml_files(CORE.config_path)
+    discovered = yaml_discovery.discover_user_yaml_files(CORE.config_path)
     entries, secret_rels = _gather_files(discovered)
     if config[CONF_INCLUDE_SECRETS]:
         files = _read_files_verbatim(entries)
@@ -373,6 +375,8 @@ ExportToStorageAction = store_yaml_ns.class_("ExportToStorageAction", automation
 
 EXPORT_ACTION_SCHEMA = cv.All(
     cv.only_on(["esp32", "host"]),
+    # Targets are resolved through the storage registry, not raw VFS.
+    cv.requires_component("storage"),
     cv.Schema(
     {
         cv.GenerateID(): cv.use_id(StoreYamlComponent),
