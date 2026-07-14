@@ -72,6 +72,10 @@ enum class EntityKind : uint8_t {
   VALVE,
   LIGHT,
   CLIMATE,
+  SELECT_INDEX,  // template select restores a size_t option index
+  DATE,
+  TIME,
+  DATETIME,
 };
 
 void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version, EntityKind kind,

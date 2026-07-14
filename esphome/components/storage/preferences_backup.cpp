@@ -33,6 +33,15 @@
 #ifdef USE_CLIMATE
 #include "esphome/components/climate/climate.h"
 #endif
+#ifdef USE_DATETIME_DATE
+#include "esphome/components/datetime/date_entity.h"
+#endif
+#ifdef USE_DATETIME_TIME
+#include "esphome/components/datetime/time_entity.h"
+#endif
+#ifdef USE_DATETIME_DATETIME
+#include "esphome/components/datetime/datetime_entity.h"
+#endif
 
 #include "esphome/components/json/json_util.h"
 #include "esphome/core/application.h"
@@ -562,6 +571,65 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       return true;
     }
 #endif
+    case EntityKind::SELECT_INDEX: {
+      // template select restores its option index as size_t
+      if (len != sizeof(size_t))
+        return false;
+      size_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%zu", v);
+      out += b;
+      return true;
+    }
+#ifdef USE_DATETIME_DATE
+    case EntityKind::DATE: {
+      if (len != sizeof(datetime::DateEntityRestoreState))
+        return false;
+      datetime::DateEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "year", st.year, first);
+      kv_field_i(out, "month", st.month, first);
+      kv_field_i(out, "day", st.day, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_TIME
+    case EntityKind::TIME: {
+      if (len != sizeof(datetime::TimeEntityRestoreState))
+        return false;
+      datetime::TimeEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "hour", st.hour, first);
+      kv_field_i(out, "minute", st.minute, first);
+      kv_field_i(out, "second", st.second, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_DATETIME
+    case EntityKind::DATETIME: {
+      if (len != sizeof(datetime::DateTimeEntityRestoreState))
+        return false;
+      datetime::DateTimeEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "year", st.year, first);
+      kv_field_i(out, "month", st.month, first);
+      kv_field_i(out, "day", st.day, first);
+      kv_field_i(out, "hour", st.hour, first);
+      kv_field_i(out, "minute", st.minute, first);
+      kv_field_i(out, "second", st.second, first);
+      out += '}';
+      return true;
+    }
+#endif
     default:
       return false;
   }
@@ -597,6 +665,20 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
         return false;
       memcpy(blob, &v, sizeof(v));
       *blob_len = sizeof(float);
+      return true;
+    }
+    case EntityKind::SELECT_INDEX: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      size_t v = static_cast<size_t>(strtoul(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(size_t);
       return true;
     }
     case EntityKind::STRING: {
@@ -698,6 +780,66 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
           !r.f("target_temperature_high", st.target_temperature_high) ||
           !r.f("target_humidity", st.target_humidity))
         return false;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_DATE
+    case EntityKind::DATE: {
+      datetime::DateEntityRestoreState st{};
+      if (!r.i("year", li))
+        return false;
+      st.year = static_cast<uint16_t>(li);
+      if (!r.i("month", li))
+        return false;
+      st.month = static_cast<uint8_t>(li);
+      if (!r.i("day", li))
+        return false;
+      st.day = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_TIME
+    case EntityKind::TIME: {
+      datetime::TimeEntityRestoreState st{};
+      if (!r.i("hour", li))
+        return false;
+      st.hour = static_cast<uint8_t>(li);
+      if (!r.i("minute", li))
+        return false;
+      st.minute = static_cast<uint8_t>(li);
+      if (!r.i("second", li))
+        return false;
+      st.second = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_DATETIME
+    case EntityKind::DATETIME: {
+      datetime::DateTimeEntityRestoreState st{};
+      if (!r.i("year", li))
+        return false;
+      st.year = static_cast<uint16_t>(li);
+      if (!r.i("month", li))
+        return false;
+      st.month = static_cast<uint8_t>(li);
+      if (!r.i("day", li))
+        return false;
+      st.day = static_cast<uint8_t>(li);
+      if (!r.i("hour", li))
+        return false;
+      st.hour = static_cast<uint8_t>(li);
+      if (!r.i("minute", li))
+        return false;
+      st.minute = static_cast<uint8_t>(li);
+      if (!r.i("second", li))
+        return false;
+      st.second = static_cast<uint8_t>(li);
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
       return true;

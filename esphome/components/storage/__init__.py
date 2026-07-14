@@ -631,6 +631,13 @@ _ENTITY_KINDS = (
     ("valve", "Valve", 0, "VALVE"),
     ("switch", "Switch", 0, "BOOL"),
     ("number", "Number", 0, "FLOAT"),
+    # datetime template platforms carry their OWN versions
+    # (template_date/time/datetime.cpp) — concrete classes, no shared base
+    # listed, so ordering vs each other does not matter
+    ("datetime", "DateEntity", 194434030, "DATE"),
+    ("datetime", "TimeEntity", 194434060, "TIME"),
+    ("datetime", "DateTimeEntity", 194434090, "DATETIME"),
+    ("select", "Select", 0, "SELECT_INDEX"),
 )
 
 
