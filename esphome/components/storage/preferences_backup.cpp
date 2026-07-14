@@ -582,6 +582,26 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       out += b;
       return true;
     }
+    case EntityKind::MEDIA_VOLUME: {
+      // {float volume; bool is_muted} — defined identically (and trivially)
+      // in speaker/media_player/speaker_media_player.h and
+      // speaker_source/speaker_source_media_player.h; both are platform
+      // headers we cannot include generically, so this mirrors the layout
+      // with the usual sizeof gate (mismatch -> hex fallback).
+      struct MediaVolumeState {
+        float volume;
+        bool is_muted;
+      } st;
+      if (len != sizeof(st))
+        return false;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_f(out, "volume", st.volume, first);
+      kv_field_b(out, "is_muted", st.is_muted, first);
+      out += '}';
+      return true;
+    }
 #ifdef USE_DATETIME_DATE
     case EntityKind::DATE: {
       if (len != sizeof(datetime::DateEntityRestoreState))
@@ -785,6 +805,17 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
       return true;
     }
 #endif
+    case EntityKind::MEDIA_VOLUME: {
+      struct MediaVolumeState {
+        float volume;
+        bool is_muted;
+      } st{};
+      if (!r.f("volume", st.volume) || !r.b("is_muted", st.is_muted))
+        return false;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
 #ifdef USE_DATETIME_DATE
     case EntityKind::DATE: {
       datetime::DateEntityRestoreState st{};

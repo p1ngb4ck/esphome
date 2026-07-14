@@ -638,6 +638,7 @@ _ENTITY_KINDS = (
     ("datetime", "TimeEntity", 194434060, "TIME"),
     ("datetime", "DateTimeEntity", 194434090, "DATETIME"),
     ("select", "Select", 0, "SELECT_INDEX"),
+    ("media_player", "MediaPlayer", 0, "MEDIA_VOLUME"),
 )
 
 

@@ -73,6 +73,7 @@ enum class EntityKind : uint8_t {
   LIGHT,
   CLIMATE,
   SELECT_INDEX,  // template select restores a size_t option index
+  MEDIA_VOLUME,  // media players restore {float volume; bool is_muted}
   DATE,
   TIME,
   DATETIME,
