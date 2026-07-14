@@ -617,6 +617,43 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
 )
 
 
+# Per-type version constants of EntityBase::make_entity_preference_() callers.
+# Keep in sync: fan/fan.cpp, climate/climate.cpp; every other core entity uses
+# the default version 0. template text is special-cased (trait-salted key).
+_ENTITY_VERSIONS = (
+    ("fan", "Fan", 0x71700ABB),
+    ("climate", "Climate", 0x848EA6AD),
+)
+
+
+def _entity_registration(reg_id) -> str | None:
+    """Generated registration call for a restoring entity ID, or None if the
+    ID is not an entity. The KEY is computed at runtime by the entity object
+    itself — codegen only supplies name and per-type version."""
+    type_ = reg_id.type
+    if type_ is None or not hasattr(type_, "inherits_from"):
+        return None
+    if not type_.inherits_from(cg.EntityBase):
+        return None
+    from esphome.components import text as text_
+
+    if type_.inherits_from(text_.Text):
+        # trait-salted key (template_text.cpp) — traits read from the live
+        # object inside the helper; nothing recipe-shaped is baked here
+        return (
+            f"esphome::storage::detail::register_text_pref_impl({reg_id.id}, \"{reg_id.id}\", "
+            f"{reg_id.id}->traits.get_min_length(), {reg_id.id}->traits.get_max_length(), "
+            f"{reg_id.id}->traits.get_pattern_c_str())"
+        )
+    version = 0
+    for mod_name, cls_name, ver in _ENTITY_VERSIONS:
+        mod = __import__(f"esphome.components.{mod_name}", fromlist=[cls_name])
+        if type_.inherits_from(getattr(mod, cls_name)):
+            version = ver
+            break
+    return f'esphome::storage::register_entity_pref({reg_id.id}, "{reg_id.id}", {version}UL)'
+
+
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
@@ -645,15 +682,33 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         # ID it returns carries the real C++ class (codegen-world data, no
         # validation-step leftovers).
         entries = []
+        entity_names = []
         for gid in selection:
             full_id, _ = await cg.get_variable_with_full_id(gid)
             parsed = _pref_type_from_class(str(full_id.type))
-            if parsed is None:
-                raise cv.Invalid(
-                    f"'{gid.id}' is not a restoring global (restore_value: true required)"
-                )
-            entries.append(_entry(gid.id, *parsed))
+            if parsed is not None:
+                entries.append(_entry(gid.id, *parsed))
+                continue
+            if reg := _entity_registration(full_id):
+                # entity preference: named round-trip, value stays hex
+                cg.add(cg.RawExpression(reg))
+                entity_names.append(gid.id)
+                continue
+            raise cv.Invalid(
+                f"'{gid.id}' stores no known preference (restoring global or "
+                f"restorable entity required)"
+            )
         _bake(entries, True)
+        if entity_names:
+            arr = f"{action_id}_pent"
+            cg.add_global(
+                cg.RawExpression(
+                    f"static const char *const {arr}[] = {{"
+                    + ", ".join(f'"{n}"' for n in entity_names)
+                    + "}"
+                )
+            )
+            cg.add(var.set_entity_selection(cg.RawExpression(arr), len(entity_names)))
     else:
         # All mode: enumerate the codegen variable registry once every
         # pending to_code has run. Scheduled as its own coroutine job — it is
@@ -661,10 +716,15 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         # are registered by the time it executes.
         async def _bake_all():
             entries = []
+            seen_regs = set()
             for reg_id in CORE.variables:
                 parsed = _pref_type_from_class(str(reg_id.type))
                 if parsed is not None:
                     entries.append(_entry(reg_id.id, *parsed))
+                    continue
+                if (reg := _entity_registration(reg_id)) and reg_id.id not in seen_regs:
+                    seen_regs.add(reg_id.id)
+                    cg.add(cg.RawExpression(reg))
             if entries:
                 _bake(entries, False)
 

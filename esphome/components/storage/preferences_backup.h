@@ -46,6 +46,22 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
 bool preferences_import_from_storage(const char *path, const char *format, bool reboot,
                                      const PrefSelection *selection, size_t count, bool restrict_to_selection);
 
+// ---- runtime entity name registry (baked registration calls) ----
+// Codegen enumerates entity IDs in its coroutine and emits one registration
+// call per restoring entity into setup(); the KEY comes from the entity
+// object itself at runtime (get_preference_hash() ^ per-type version), so no
+// hash recipe is replicated at codegen time. Values stay hex (component-
+// private restore structs); this registry provides the NAMES.
+class EntityBase;  // fwd (esphome::EntityBase pulled in by the .cpp)
+
+void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version);
+#ifdef USE_TEXT
+namespace detail {
+void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
+                             const char *pattern);
+}  // namespace detail
+#endif  // USE_TEXT
+
 }  // namespace esphome::storage
 
 #endif  // USE_STORAGE_PREFERENCES && USE_ESP32
