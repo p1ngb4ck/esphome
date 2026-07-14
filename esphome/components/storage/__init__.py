@@ -621,10 +621,24 @@ async def _build_preferences_action(config, action_id, template_arg, args):
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
     cg.add(var.set_format(config[CONF_FORMAT]))
+    # The name/type table is ALWAYS baked: from the explicit list when given
+    # (restrict=True — only those entries round-trip), otherwise from every
+    # restore_value global in the config (restrict=False — the whole
+    # namespace round-trips, but everything codegen can name renders
+    # readable; only truly unknown keys like entity states stay hex).
     if selection := config.get(CONF_PREFERENCES):
+        names = [str(gid) for gid in selection]
+        restrict = True
+    else:
+        names = [
+            str(entry[CONF_ID])
+            for entry in CORE.config.get("globals", [])
+            if entry.get("restore_value", False)
+        ]
+        restrict = False
+    if names:
         entries = []
-        for gid in selection:
-            name = str(gid)
+        for name in names:
             tag, count = _pref_type_for_global(name)
             key = _global_nvs_key(name)
             entries.append(
@@ -638,7 +652,11 @@ async def _build_preferences_action(config, action_id, template_arg, args):
                 + "}"
             )
         )
-        cg.add(var.set_selection(cg.RawExpression(arr), len(entries)))
+        cg.add(
+            var.set_selection(
+                cg.RawExpression(arr), len(entries), restrict
+            )
+        )
     return var
 
 
