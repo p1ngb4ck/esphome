@@ -1,0 +1,5 @@
+api:
+
+store_yaml:
+  allow_unencrypted: true
+

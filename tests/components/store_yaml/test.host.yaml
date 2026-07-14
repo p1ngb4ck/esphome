@@ -1,0 +1,15 @@
+<<: !include common.yaml
+
+network:
+
+button:
+  - platform: template
+    name: "Export config to storage"
+    on_press:
+      # Decompressed file tree below the directory
+      - store_yaml.export_to_storage:
+          path: /sdcard/config
+      # Raw compressed envelope as a single file
+      - store_yaml.export_to_storage:
+          path: !lambda 'return "/sdcard/backup.ehy1.zst";'
+          raw: true
