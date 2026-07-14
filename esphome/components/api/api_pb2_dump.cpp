@@ -445,8 +445,7 @@ template<> const char *proto_enum_to_string<enums::WaterHeaterMode>(enums::Water
   }
 }
 #endif
-template<>
-const char *proto_enum_to_string<enums::WaterHeaterCommandHasField>(enums::WaterHeaterCommandHasField value) {
+template<> const char *proto_enum_to_string<enums::WaterHeaterCommandHasField>(enums::WaterHeaterCommandHasField value) {
   switch (value) {
     case enums::WATER_HEATER_COMMAND_HAS_NONE:
       return ESPHOME_PSTR("WATER_HEATER_COMMAND_HAS_NONE");
@@ -585,8 +584,7 @@ template<> const char *proto_enum_to_string<enums::MediaPlayerFormatPurpose>(enu
 }
 #endif
 #ifdef USE_BLUETOOTH_PROXY
-template<>
-const char *proto_enum_to_string<enums::BluetoothDeviceRequestType>(enums::BluetoothDeviceRequestType value) {
+template<> const char *proto_enum_to_string<enums::BluetoothDeviceRequestType>(enums::BluetoothDeviceRequestType value) {
   switch (value) {
     case enums::BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT:
       return ESPHOME_PSTR("BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT");
@@ -635,8 +633,7 @@ template<> const char *proto_enum_to_string<enums::BluetoothScannerMode>(enums::
   }
 }
 #endif
-template<>
-const char *proto_enum_to_string<enums::VoiceAssistantSubscribeFlag>(enums::VoiceAssistantSubscribeFlag value) {
+template<> const char *proto_enum_to_string<enums::VoiceAssistantSubscribeFlag>(enums::VoiceAssistantSubscribeFlag value) {
   switch (value) {
     case enums::VOICE_ASSISTANT_SUBSCRIBE_NONE:
       return ESPHOME_PSTR("VOICE_ASSISTANT_SUBSCRIBE_NONE");
@@ -739,8 +736,7 @@ template<> const char *proto_enum_to_string<enums::AlarmControlPanelState>(enums
       return ESPHOME_PSTR("UNKNOWN");
   }
 }
-template<>
-const char *proto_enum_to_string<enums::AlarmControlPanelStateCommand>(enums::AlarmControlPanelStateCommand value) {
+template<> const char *proto_enum_to_string<enums::AlarmControlPanelStateCommand>(enums::AlarmControlPanelStateCommand value) {
   switch (value) {
     case enums::ALARM_CONTROL_PANEL_DISARM:
       return ESPHOME_PSTR("ALARM_CONTROL_PANEL_DISARM");
@@ -857,6 +853,7 @@ template<> const char *proto_enum_to_string<enums::SerialProxyStatus>(enums::Ser
   }
 }
 #endif
+
 
 const char *HelloRequest::dump_to(DumpBuffer &out) const {
   MessageDumpHelper helper(out, ESPHOME_PSTR("HelloRequest"));
@@ -985,6 +982,9 @@ const char *DeviceInfoResponse::dump_to(DumpBuffer &out) const {
 #endif
 #ifdef USE_API_NOISE
   dump_field(out, ESPHOME_PSTR("api_encryption_provisionable"), this->api_encryption_provisionable);
+#endif
+#ifdef USE_STORE_YAML
+  dump_field(out, ESPHOME_PSTR("has_store_yaml"), this->has_store_yaml);
 #endif
   return out.c_str();
 }
@@ -2729,6 +2729,16 @@ const char *BluetoothSetConnectionParamsResponse::dump_to(DumpBuffer &out) const
   MessageDumpHelper helper(out, ESPHOME_PSTR("BluetoothSetConnectionParamsResponse"));
   dump_field(out, ESPHOME_PSTR("address"), this->address);
   dump_field(out, ESPHOME_PSTR("error"), this->error);
+  return out.c_str();
+}
+#endif
+#ifdef USE_STORE_YAML
+const char *GetYamlResponse::dump_to(DumpBuffer &out) const {
+  MessageDumpHelper helper(out, ESPHOME_PSTR("GetYamlResponse"));
+  dump_bytes_field(out, ESPHOME_PSTR("data"), this->data_ptr_, this->data_len_);
+  dump_field(out, ESPHOME_PSTR("done"), this->done);
+  dump_field(out, ESPHOME_PSTR("total_size"), this->total_size);
+  dump_field(out, ESPHOME_PSTR("encoding"), this->encoding);
   return out.c_str();
 }
 #endif

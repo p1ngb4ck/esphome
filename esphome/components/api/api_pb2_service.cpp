@@ -25,9 +25,9 @@ void APIServerConnectionBase::log_receive_message_(const LogString *name) {
 void APIConnection::read_message_(uint32_t msg_size, uint32_t msg_type, const uint8_t *msg_data) {
   // Check authentication/connection requirements
   switch (msg_type) {
-    case HelloRequest::MESSAGE_TYPE:       // No setup required
+    case HelloRequest::MESSAGE_TYPE:  // No setup required
     case DisconnectRequest::MESSAGE_TYPE:  // No setup required
-    case PingRequest::MESSAGE_TYPE:        // No setup required
+    case PingRequest::MESSAGE_TYPE:  // No setup required
       break;
     case 9 /* DeviceInfoRequest is empty */:  // Connection setup only
       if (!this->check_connection_setup_()) {
@@ -702,6 +702,15 @@ void APIConnection::read_message_(uint32_t msg_size, uint32_t msg_type, const ui
       this->log_receive_message_(LOG_STR("on_bluetooth_set_connection_params_request"), msg);
 #endif
       this->on_bluetooth_set_connection_params_request(msg);
+      break;
+    }
+#endif
+#ifdef USE_STORE_YAML
+    case 151 /* GetYamlRequest is empty */: {
+#ifdef HAS_PROTO_MESSAGE_DUMP
+      this->log_receive_message_(LOG_STR("on_get_yaml_request"));
+#endif
+      this->on_get_yaml_request();
       break;
     }
 #endif

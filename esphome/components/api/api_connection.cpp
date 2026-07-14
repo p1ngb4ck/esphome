@@ -56,6 +56,9 @@
 #ifdef USE_RADIO_FREQUENCY
 #include "esphome/components/radio_frequency/radio_frequency.h"
 #endif
+#ifdef USE_STORE_YAML
+#include "esphome/components/store_yaml/store_yaml.h"
+#endif
 
 namespace esphome::api {
 
@@ -345,6 +348,13 @@ void APIConnection::loop() {
   // Process camera last - state updates are higher priority
   // (missing a frame is fine, missing a state update is not)
   this->try_send_camera_image_();
+#endif
+
+#ifdef USE_STORE_YAML
+  // Guard inline so the idle hot path pays a compare, not a function call.
+  if (this->store_yaml_pos_ != std::numeric_limits<size_t>::max()) {
+    this->try_send_store_yaml_();
+  }
 #endif
 }
 
@@ -1190,6 +1200,76 @@ void APIConnection::on_camera_image_request(const CameraImageRequest &msg) {
 }
 #endif
 
+#ifdef USE_STORE_YAML
+// Chunk size per GetYamlResponse. Small enough to leave room for the protobuf frame
+// inside the 65535-byte API limit and friendly to TCP MSS.
+static constexpr size_t STORE_YAML_CHUNK_SIZE = 512;
+#ifdef USE_ESP8266
+// On ESP8266 the blob lives in instruction flash and can't be read directly, so
+// each chunk is bounced through this static buffer via progmem_memcpy. Shared
+// across connections is safe because the API loop is single-threaded and each
+// chunk is filled and consumed atomically inside one `try_send_store_yaml_`
+// iteration. Every other platform sends straight from the blob, zero-copy.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+static uint8_t store_yaml_chunk_buf[STORE_YAML_CHUNK_SIZE];
+#endif
+
+void APIConnection::on_get_yaml_request() {
+  // All responses — including the single data-less done=true frame for a
+  // missing/empty blob — go through the loop-driven retry below, so a full
+  // TX buffer at request time can't strand the client without a terminal frame.
+  this->store_yaml_pos_ = 0;
+  this->try_send_store_yaml_();
+}
+
+// Caller guarantees: store_yaml_pos_ != SIZE_MAX (a request is in flight).
+void APIConnection::try_send_store_yaml_() {
+  auto *comp = store_yaml::global_store_yaml;
+  // comp is only null if the request arrived before the component's setup();
+  // treat that like an empty blob and send just the terminal frame.
+  const size_t total = comp == nullptr ? 0 : comp->get_size();
+
+  // Camera-style streaming: advance the position only after a successful send,
+  // so a WOULD_BLOCK simply retries the same chunk on the next loop iteration.
+  while (true) {
+    if (!this->helper_->can_write_without_blocking())
+      return;
+
+    const size_t remaining = total - this->store_yaml_pos_;
+    const size_t to_send = std::min(remaining, STORE_YAML_CHUNK_SIZE);
+
+    GetYamlResponse resp;
+    if (to_send != 0) {
+#ifdef USE_ESP8266
+      progmem_memcpy(store_yaml_chunk_buf, comp->get_data() + this->store_yaml_pos_, to_send);
+      resp.set_data(store_yaml_chunk_buf, to_send);
+#else
+      resp.set_data(comp->get_data() + this->store_yaml_pos_, to_send);
+#endif
+    } else {
+      // Terminal frame for an empty blob: a valid empty pointer keeps the
+      // forced `data` field's memcpy well-defined.
+      resp.set_data(reinterpret_cast<const uint8_t *>(""), 0);
+    }
+    if (this->store_yaml_pos_ == 0 && total != 0) {
+      resp.total_size = static_cast<uint32_t>(total);
+      resp.encoding = StringRef(store_yaml::ENCODING);
+    }
+    resp.done = (this->store_yaml_pos_ + to_send) >= total;
+
+    if (!this->send_message(resp))
+      return;  // retry on next loop, pos unchanged
+
+    this->store_yaml_pos_ += to_send;
+    if (resp.done)
+      break;
+  }
+
+  // Final response (with done=true) sent successfully.
+  this->store_yaml_pos_ = std::numeric_limits<size_t>::max();
+}
+#endif
+
 #ifdef USE_HOMEASSISTANT_TIME
 void APIConnection::on_get_time_response(const GetTimeResponse &value) {
   if (homeassistant::global_homeassistant_time != nullptr) {
@@ -1846,6 +1926,10 @@ bool APIConnection::send_device_info_response_() {
 #ifdef USE_DEEP_SLEEP
   resp.has_deep_sleep = deep_sleep::global_has_deep_sleep;
 #endif
+#ifdef USE_STORE_YAML
+  // Codegen always embeds a non-empty blob, so presence of the component implies data.
+  resp.has_store_yaml = store_yaml::global_store_yaml != nullptr;
+#endif
 #ifdef ESPHOME_PROJECT_NAME
 #ifdef USE_ESP8266
   static const char PROJECT_NAME_PROGMEM[] PROGMEM = ESPHOME_PROJECT_NAME;
@@ -2120,10 +2204,15 @@ bool APIConnection::try_to_clear_buffer_slow_(bool log_out_of_space) {
 bool APIConnection::send_message_(uint32_t payload_size, uint8_t message_type, MessageEncodeFn encode_fn,
                                   const void *msg) {
 #ifdef HAS_PROTO_MESSAGE_DUMP
-  // Skip dump for log messages (recursive logging risk) and camera frames (high-frequency noise)
+  // Skip dump for log messages (recursive logging risk), camera frames (high-frequency noise),
+  // and YAML recovery payloads (every chunk would log the embedded config, including any
+  // secrets the user opted into).
   if (message_type != SubscribeLogsResponse::MESSAGE_TYPE
 #ifdef USE_CAMERA
       && message_type != CameraImageResponse::MESSAGE_TYPE
+#endif
+#ifdef USE_STORE_YAML
+      && message_type != GetYamlResponse::MESSAGE_TYPE
 #endif
   ) {
     auto *proto_msg = static_cast<const ProtoMessage *>(msg);
