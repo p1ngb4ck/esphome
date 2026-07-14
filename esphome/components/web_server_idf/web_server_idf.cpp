@@ -16,13 +16,12 @@
 #include "utils.h"
 #include "web_server_idf.h"
 
-#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
 #ifdef USE_WEBSERVER_AUTH_DIGEST
 #include <esp_random.h>
 #include <esp_rom_md5.h>
 #endif
 
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
 #include <multipart_parser.h>
 #include "multipart.h"  // For parse_multipart_boundary and other utils
 #endif
@@ -1213,4 +1212,4 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
 
 }  // namespace esphome::web_server_idf
 
-#endif  // !defined(USE_ESP32)
+#endif  // USE_ESP32
