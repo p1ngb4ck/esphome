@@ -361,7 +361,7 @@ static bool decode_value(const char *s, size_t len, const PrefSelection &sel, ui
 
 // ---- entity value codecs (real component structs) ----
 
-static void kv_field(std::string &out, const char *k, const char *v, bool &first) {
+[[maybe_unused]] static void kv_field(std::string &out, const char *k, const char *v, bool &first) {
   if (!first)
     out += ',';
   first = false;
@@ -369,17 +369,17 @@ static void kv_field(std::string &out, const char *k, const char *v, bool &first
   out += ':';
   out += v;
 }
-static void kv_field_f(std::string &out, const char *k, float v, bool &first) {
+[[maybe_unused]] static void kv_field_f(std::string &out, const char *k, float v, bool &first) {
   char b[24];
   snprintf(b, sizeof(b), "%.9g", (double) v);
   kv_field(out, k, b, first);
 }
-static void kv_field_i(std::string &out, const char *k, long v, bool &first) {
+[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, long v, bool &first) {
   char b[16];
   snprintf(b, sizeof(b), "%ld", v);
   kv_field(out, k, b, first);
 }
-static void kv_field_b(std::string &out, const char *k, bool v, bool &first) {
+[[maybe_unused]] static void kv_field_b(std::string &out, const char *k, bool v, bool &first) {
   kv_field(out, k, v ? "true" : "false", first);
 }
 

@@ -639,7 +639,10 @@ def _entity_registration(reg_id) -> str | None:
     ID is not an entity. The KEY is computed at runtime by the entity object
     itself — codegen only supplies name and per-type version."""
     type_ = reg_id.type
-    if type_ is None or not hasattr(type_, "inherits_from"):
+    # MockObj fabricates ANY attribute via __getattr__ (a bare uint8_t ID
+    # would happily "inherit" from Text and return a truthy MockObj) — only a
+    # real MockObjClass carries an actual inheritance chain.
+    if not isinstance(type_, cg.MockObjClass):
         return None
     if not type_.inherits_from(cg.EntityBase):
         return None
