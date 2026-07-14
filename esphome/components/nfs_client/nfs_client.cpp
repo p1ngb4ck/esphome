@@ -2,6 +2,7 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/components/network/util.h"
 
 #include <cstring>
 #include <algorithm>
@@ -377,17 +378,46 @@ void NFSClient::setup() {
   }
 
   this->mount_state_ = MountState::IDLE;
-  ESP_LOGI(TAG, "NFS mount will be attempted asynchronously in loop()");
+
+  // Register before any mount attempt, not only on success — get_info() reports is_mounted
+  // correctly either way, and this lets the device (and storage.mount/unmount actions, the
+  // web file browser, path routing) see the share even while it is unmounted. Same pattern
+  // as sd_storage: registered-but-unmounted is the normal state for a mountable device.
+  if (storage::global_storage_registry != nullptr) {
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal — do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
+  }
 }
 
 void NFSClient::loop() {
-  uint32_t now = millis();
+  // Auto-connect: fire ONE mount attempt on each rising edge of network connectivity.
+  // network::is_connected() covers wifi, ethernet, modem and openthread alike, so no
+  // per-stack wiring is needed; the check costs a flag read per pass and the attempt starts
+  // within one main-loop pass of the network coming up (event-edge, never periodic). The
+  // first pass after boot counts as an edge when the network is already up by then, and a
+  // network drop re-arms the edge so a reconnect remounts an unmounted share automatically.
+  const bool net_connected = network::is_connected();
+  if (this->auto_connect_ && net_connected && !this->network_was_connected_ && !this->mounted_) {
+    ESP_LOGD(TAG, "Network up — auto-connect requests NFS mount");
+    this->mount_requested_ = true;
+  }
+  this->network_was_connected_ = net_connected;
+
+  // A pending request only starts a new attempt from a resting state; FAILED is terminal
+  // otherwise (no periodic retry — retries are the user's decision via interval:/automations
+  // calling storage.mount, or the next network-up edge above).
+  if (this->mount_requested_ && (this->mount_state_ == MountState::IDLE || this->mount_state_ == MountState::FAILED)) {
+    this->mount_requested_ = false;
+    ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
+    this->mount_state_ = MountState::CONNECTING_PMAP;
+  }
 
   switch (this->mount_state_) {
     case MountState::IDLE:
-      ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
-      this->mount_state_ = MountState::CONNECTING_PMAP;
-      this->last_mount_attempt_ = now;
       break;
 
     case MountState::CONNECTING_PMAP:
@@ -395,10 +425,8 @@ void NFSClient::loop() {
         ESP_LOGD(TAG, "Connected to portmapper, querying for MOUNT service...");
         this->mount_state_ = MountState::QUERYING_PMAP_MOUNT;
       } else {
-        ESP_LOGW(TAG, "Failed to connect to portmapper, will retry in %" PRIu32 " seconds",
-                 this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to connect to portmapper");
         this->mount_state_ = MountState::FAILED;
-        this->last_mount_attempt_ = now;
       }
       break;
 
@@ -409,11 +437,9 @@ void NFSClient::loop() {
         this->close_connection_();
         this->mount_state_ = MountState::CONNECTING_MOUNT;
       } else {
-        ESP_LOGW(TAG, "Failed to query portmapper for MOUNT, will retry in %" PRIu32 " seconds",
-                 this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to query portmapper for MOUNT");
         this->close_connection_();
         this->mount_state_ = MountState::FAILED;
-        this->last_mount_attempt_ = now;
       }
       break;
 
@@ -422,10 +448,8 @@ void NFSClient::loop() {
         ESP_LOGD(TAG, "Connected to MOUNT service, attempting mount...");
         this->mount_state_ = MountState::MOUNTING;
       } else {
-        ESP_LOGW(TAG, "Failed to connect to MOUNT service, will retry in %" PRIu32 " seconds",
-                 this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to connect to MOUNT service");
         this->mount_state_ = MountState::FAILED;
-        this->last_mount_attempt_ = now;
       }
       break;
 
@@ -435,11 +459,9 @@ void NFSClient::loop() {
         this->close_connection_();
         this->mount_state_ = MountState::QUERYING_PMAP_NFS;
       } else {
-        ESP_LOGW(TAG, "Failed to mount NFS export, will retry in %" PRIu32 " seconds",
-                 this->mount_retry_interval_ / 1000);
+        ESP_LOGW(TAG, "Failed to mount NFS export");
         this->unmount_();
         this->mount_state_ = MountState::FAILED;
-        this->last_mount_attempt_ = now;
       }
       break;
 
@@ -451,9 +473,6 @@ void NFSClient::loop() {
           this->nfs_port_discovered_ = false;
           this->mounted_ = true;
           this->mount_state_ = MountState::MOUNTED;
-          if (storage::global_storage_registry != nullptr) {
-            storage::global_storage_registry->register_storage(this);
-          }
           break;
         }
       }
@@ -469,20 +488,15 @@ void NFSClient::loop() {
       this->close_connection_();
       this->mounted_ = true;
       this->mount_state_ = MountState::MOUNTED;
-
-      if (storage::global_storage_registry != nullptr) {
-        storage::global_storage_registry->register_storage(this);
-      }
       break;
 
     case MountState::MOUNTED:
+      // A request that arrived mid-attempt has reached its target state — drop it so it
+      // cannot restart the pipeline after a later manual unmount.
+      this->mount_requested_ = false;
       break;
 
     case MountState::FAILED:
-      if (now - this->last_mount_attempt_ >= this->mount_retry_interval_) {
-        ESP_LOGI(TAG, "Retrying NFS mount...");
-        this->mount_state_ = MountState::IDLE;
-      }
       break;
   }
 }
@@ -492,6 +506,7 @@ void NFSClient::dump_config() {
   ESP_LOGCONFIG(TAG, "  Server: %s:%u", this->server_.c_str(), this->port_);
   ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
   ESP_LOGCONFIG(TAG, "  Status: %s", this->mounted_ ? "Mounted" : "Not mounted");
+  ESP_LOGCONFIG(TAG, "  Auto connect on network up: %s", YESNO(this->auto_connect_));
   if (this->mount_path_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
   }
@@ -505,49 +520,68 @@ storage::StorageError NFSClient::get_info(storage::StorageInfo *info) {
   if (info == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    info->is_mounted = false;
-    return storage::StorageError::NOT_READY;
-  }
-
-  uint64_t total = 0, free_b = 0;
-  this->get_space_info(total, free_b);
-
+  // Storage contract: get_info() must succeed even when registered-but-unmounted and
+  // report that via is_mounted — never via a non-OK error, and never with a server
+  // round-trip while unmounted.
   info->id = (this->mount_path_ != nullptr) ? this->mount_path_ : "nfs";
   info->name = "NFS";
-  info->total_bytes = total;
-  info->free_bytes = free_b;
   info->block_size = 4096;
-  info->is_mounted = true;
   info->is_removable = false;
   info->is_read_only = false;
+  info->is_mounted = this->mounted_;
+  info->total_bytes = 0;
+  info->free_bytes = 0;
+
+  if (this->mounted_) {
+    uint64_t total = 0, free_b = 0;
+    this->get_space_info(total, free_b);
+    info->total_bytes = total;
+    info->free_bytes = free_b;
+  }
+  return storage::StorageError::OK;
+}
+
+storage::StorageError NFSClient::mount() {
+  // Already mounted -> target state reached, no error.
+  if (this->mounted_)
+    return storage::StorageError::OK;
+  // Request one asynchronous attempt; loop() runs the pipeline one step per pass. A request
+  // arriving while an attempt is already in flight simply coalesces with it.
+  this->mount_requested_ = true;
+  return storage::StorageError::OK;
+}
+
+storage::StorageError NFSClient::unmount() {
+  if (!this->mounted_)
+    return storage::StorageError::OK;
+  // Quiesce first — same drain guarantee as unregister_storage() (no in-flight
+  // storage_worker data-plane call against this device remains), but the device stays
+  // registered: registered-but-unmounted is its normal state (see setup()), so there is
+  // nothing to re-register afterwards and consumers never see it vanish.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->quiesce_storage(this);
+
+  this->unmount_export_(this->export_path_);
+  this->close_connection_();
+  this->root_fh_.data.clear();
+  this->mounted_ = false;
+  this->mount_state_ = MountState::IDLE;
+  ESP_LOGI(TAG, "NFS unmounted");
+
   return storage::StorageError::OK;
 }
 
 storage::StorageError NFSClient::connect() {
-  // Trigger async mount — actual connection happens in loop()
-  if (this->mount_state_ == MountState::IDLE || this->mount_state_ == MountState::FAILED) {
-    this->mount_state_ = MountState::IDLE;
-  }
-  return storage::StorageError::OK;
+  // NetworkStorage name for the same operation — see the header.
+  return this->mount();
 }
 
 storage::StorageError NFSClient::disconnect() {
-  if (!this->mounted_) {
-    return storage::StorageError::OK;
-  }
-  if (storage::global_storage_registry != nullptr) {
-    storage::global_storage_registry->unregister_storage(this);
-  }
-  this->unmount_export_(this->export_path_);
-  this->root_fh_.data.clear();
-  this->mounted_ = false;
-  this->mount_state_ = MountState::FAILED;
-  ESP_LOGI(TAG, "NFS disconnected");
-  return storage::StorageError::OK;
+  // NetworkStorage name for the same operation — see the header.
+  return this->unmount();
 }
 
-storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, size_t offset, size_t len,
+storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint64_t offset, size_t len,
                                             size_t *bytes_transferred) {
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::INVALID_ARGS;
@@ -638,7 +672,7 @@ storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, size
   return storage::StorageError::OK;
 }
 
-storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *buf, size_t offset, size_t len,
+storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *buf, uint64_t offset, size_t len,
                                              size_t *bytes_transferred) {
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::INVALID_ARGS;
@@ -694,10 +728,11 @@ storage::StorageError NFSClient::stat(const char *path, storage::FileStat *stat)
 
   stat->size = attr.size;
   stat->is_dir = (attr.type == NF3DIR);
+  stat->mtime = static_cast<uint32_t>(attr.mtime_sec);
   return storage::StorageError::OK;
 }
 
-storage::StorageError NFSClient::list_dir(const char *path, void (*callback)(const storage::FileStat *entry, void *ctx),
+storage::StorageError NFSClient::list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
                                           void *ctx) {
   if (path == nullptr || callback == nullptr) {
     return storage::StorageError::INVALID_ARGS;
@@ -728,7 +763,9 @@ storage::StorageError NFSClient::list_dir(const char *path, void (*callback)(con
     entry_stat.name[storage::STORAGE_NAME_MAX] = '\0';
     entry_stat.size = e.has_attr ? e.attr.size : 0;
     entry_stat.is_dir = e.has_attr && (e.attr.type == NF3DIR);
-    callback(&entry_stat, ctx);
+    entry_stat.mtime = e.has_attr ? static_cast<uint32_t>(e.attr.mtime_sec) : 0;
+    if (!callback(&entry_stat, ctx))
+      break;
   }
 
   return storage::StorageError::OK;
@@ -754,7 +791,7 @@ storage::StorageError NFSClient::mkdir(const char *path) {
                                                         : storage::StorageError::WRITE_ERROR;
 }
 
-storage::StorageError NFSClient::rmdir(const char *path, bool recursive) {
+storage::StorageError NFSClient::rmdir(const char *path) {
   if (path == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
@@ -764,35 +801,24 @@ storage::StorageError NFSClient::rmdir(const char *path, bool recursive) {
 
   const std::string path_str(path);
 
-  if (recursive) {
-    // List and remove contents first
-    NFSFileHandle fh;
-    NFSFileAttr attr;
-    if (!this->resolve_path_(path_str, fh, attr)) {
-      return storage::StorageError::NOT_FOUND;
-    }
-    if (attr.type != NF3DIR) {
-      return storage::StorageError::INVALID_ARGS;
-    }
+  // Non-recursive per the storage:: contract: must fail with NOT_EMPTY if the directory has
+  // contents. Recursive delete is the free storage::remove_recursive() helper, built on top
+  // of list_dir()/remove()/this rmdir() — no need to duplicate that tree-walk here.
+  NFSFileHandle fh;
+  NFSFileAttr attr;
+  if (!this->resolve_path_(path_str, fh, attr)) {
+    return storage::StorageError::NOT_FOUND;
+  }
+  if (attr.type != NF3DIR) {
+    return storage::StorageError::INVALID_ARGS;
+  }
 
-    std::vector<NFSDirEntry> entries;
-    if (!this->nfs_readdir_(fh, entries)) {
-      return storage::StorageError::READ_ERROR;
-    }
-
-    for (const auto &e : entries) {
-      std::string child_path = path_str + "/" + e.name;
-      if (e.has_attr && e.attr.type == NF3DIR) {
-        storage::StorageError err = this->rmdir(child_path.c_str(), true);
-        if (err != storage::StorageError::OK) {
-          return err;
-        }
-      } else {
-        if (!this->nfs_remove_(fh, e.name)) {
-          return storage::StorageError::WRITE_ERROR;
-        }
-      }
-    }
+  std::vector<NFSDirEntry> entries;
+  if (!this->nfs_readdir_(fh, entries)) {
+    return storage::StorageError::READ_ERROR;
+  }
+  if (!entries.empty()) {
+    return storage::StorageError::NOT_EMPTY;
   }
 
   NFSFileHandle parent_fh;
@@ -847,63 +873,6 @@ storage::StorageError NFSClient::rename(const char *old_path, const char *new_pa
 
   return this->nfs_rename_(old_parent_fh, old_name, new_parent_fh, new_name) ? storage::StorageError::OK
                                                                              : storage::StorageError::WRITE_ERROR;
-}
-
-storage::StorageError NFSClient::copy(const char *src_path, const char *dst_path) {
-  if (src_path == nullptr || dst_path == nullptr) {
-    return storage::StorageError::INVALID_ARGS;
-  }
-  if (!this->mounted_) {
-    return storage::StorageError::NOT_READY;
-  }
-
-  const std::string src_str(src_path);
-  const std::string dst_str(dst_path);
-
-  // Resolve source
-  NFSFileHandle src_fh;
-  NFSFileAttr src_attr;
-  if (!this->resolve_path_(src_str, src_fh, src_attr)) {
-    return storage::StorageError::NOT_FOUND;
-  }
-  if (src_attr.type != NF3REG) {
-    return storage::StorageError::INVALID_ARGS;
-  }
-
-  // Create destination
-  NFSFileHandle dst_parent_fh;
-  std::string dst_name;
-  if (!this->resolve_parent_path_(dst_str, dst_parent_fh, dst_name)) {
-    return storage::StorageError::NOT_FOUND;
-  }
-  NFSFileHandle dst_fh;
-  if (!this->nfs_create_(dst_parent_fh, dst_name, 0644, dst_fh)) {
-    return storage::StorageError::WRITE_ERROR;
-  }
-
-  // Copy in 8KB chunks
-  static constexpr uint32_t COPY_CHUNK = 8192;
-  uint64_t offset = 0;
-  while (offset < src_attr.size) {
-    uint32_t to_read = COPY_CHUNK;
-    if (offset + to_read > src_attr.size) {
-      to_read = static_cast<uint32_t>(src_attr.size - offset);
-    }
-
-    std::vector<uint8_t> chunk;
-    if (!this->nfs_read_(src_fh, offset, to_read, chunk)) {
-      return storage::StorageError::READ_ERROR;
-    }
-    if (chunk.empty()) {
-      break;
-    }
-    if (!this->nfs_write_(dst_fh, offset, chunk.data(), chunk.size())) {
-      return storage::StorageError::WRITE_ERROR;
-    }
-    offset += chunk.size();
-  }
-
-  return storage::StorageError::OK;
 }
 
 //========================================================================
@@ -1416,6 +1385,26 @@ bool NFSClient::mount_export_(const std::string &export_path, NFSFileHandle &fh)
 
 bool NFSClient::unmount_export_(const std::string &export_path) {
   ESP_LOGD(TAG, "Unmounting export: %s", export_path.c_str());
+
+  // MOUNTPROC3_UMNT belongs to the MOUNT program: it must be sent to the MOUNT service
+  // port, not down the established NFS-port connection (the server would answer with
+  // RPC accept status PROG_UNAVAIL there). Reconnect to the MOUNT port for this one
+  // call; the caller closes the connection right afterwards anyway. Best effort: UMNT
+  // is advisory server-side bookkeeping (RFC 1813), so a failure here must not block
+  // the local unmount.
+  if (!this->mount_port_discovered_) {
+    ESP_LOGD(TAG, "MOUNT port unknown — skipping advisory UMNT");
+    return false;
+  }
+  this->close_connection_();
+  MountState prev_state = this->mount_state_;
+  this->mount_state_ = MountState::CONNECTING_MOUNT;  // connect_tcp_() port selector
+  bool connected = this->connect_tcp_();
+  this->mount_state_ = prev_state;
+  if (!connected) {
+    ESP_LOGD(TAG, "Could not reach MOUNT service for advisory UMNT — skipping");
+    return false;
+  }
 
   uint32_t xid = RPCClient::generate_xid();
   XDRBuffer request;

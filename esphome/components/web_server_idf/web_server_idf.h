@@ -7,7 +7,6 @@
 #include <esp_http_server.h>
 
 #include <atomic>
-#include <cstring>
 #include <functional>
 #include <list>
 #include <map>
@@ -114,19 +113,15 @@ class AsyncWebServerRequest {
   ~AsyncWebServerRequest();
 
   http_method method() const { return static_cast<http_method>(this->req_->method); }
-  /// Return URL (without query string, URL-decoded) as a StringRef into the request's own uri buffer.
-  /// Zero stack cost — decodes in-place into req_->uri on first call, then returns a view of it.
-  StringRef url() const;
-  /// @deprecated Use url() instead.
-  static constexpr size_t URL_BUF_SIZE = CONFIG_HTTPD_MAX_URI_LEN + 1;  ///< kept for external ABI compat
+  static constexpr size_t URL_BUF_SIZE = CONFIG_HTTPD_MAX_URI_LEN + 1;  ///< Buffer size for url_to()
+  /// Write URL (without query string) to buffer, returns StringRef pointing to buffer.
+  /// URL is decoded (e.g., %20 -> space).
+  StringRef url_to(std::span<char, URL_BUF_SIZE> buffer) const;
   // Remove before 2026.9.0
-  ESPDEPRECATED("Use url() instead. Removed in 2026.9.0", "2026.3.0")
-  StringRef url_to(std::span<char, URL_BUF_SIZE> buffer) const {
-    StringRef u = this->url();
-    size_t copy_len = std::min(u.size(), URL_BUF_SIZE - 1);
-    memcpy(buffer.data(), u.data(), copy_len);
-    buffer[copy_len] = '\0';
-    return StringRef(buffer.data(), copy_len);
+  ESPDEPRECATED("Use url_to() instead. Removed in 2026.9.0", "2026.3.0")
+  std::string url() const {
+    char buffer[URL_BUF_SIZE];
+    return std::string(this->url_to(buffer));
   }
   // NOLINTNEXTLINE(readability-identifier-naming)
   size_t contentLength() const { return this->req_->content_len; }
@@ -134,7 +129,7 @@ class AsyncWebServerRequest {
 #ifdef USE_WEBSERVER_AUTH
   bool authenticate(const char *username, const char *password) const;
   // NOLINTNEXTLINE(readability-identifier-naming)
-  void requestAuthentication(const char *realm = nullptr) const;
+  void requestAuthentication() const;
 #endif
 
   void redirect(const std::string &url);
@@ -205,7 +200,6 @@ class AsyncWebServerRequest {
   optional<std::string> find_query_value_(const char *name) const;
   std::vector<AsyncWebParameter *> params_;
   std::string post_query_;
-  mutable uint16_t url_decoded_len_{0};  // 0 = not yet decoded; set on first url() call
   AsyncWebServerRequest(httpd_req_t *req) : req_(req) {}
   AsyncWebServerRequest(httpd_req_t *req, std::string post_query) : req_(req), post_query_(std::move(post_query)) {}
   void init_response_(AsyncWebServerResponse *rsp, int code, const char *content_type);
@@ -240,7 +234,7 @@ class AsyncWebServer {
   esp_err_t request_handler_(AsyncWebServerRequest *request) const;
   static void safe_close_with_shutdown(httpd_handle_t hd, int sockfd);
   esp_err_t handle_raw_body_(httpd_req_t *r, const char *content_type);
-#ifdef USE_WEBSERVER_OTA
+#if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
   esp_err_t handle_multipart_upload_(httpd_req_t *r, const char *content_type);
 #endif
   std::vector<AsyncWebHandler *> handlers_;
@@ -341,7 +335,8 @@ class AsyncEventSource : public AsyncWebHandler {
   bool canHandle(AsyncWebServerRequest *request) const override {
     if (request->method() != HTTP_GET)
       return false;
-    return request->url() == this->url_;
+    char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+    return request->url_to(url_buf) == this->url_;
   }
   // NOLINTNEXTLINE(readability-identifier-naming)
   void handleRequest(AsyncWebServerRequest *request) override;

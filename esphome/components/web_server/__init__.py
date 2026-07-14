@@ -3,9 +3,11 @@ from __future__ import annotations
 import gzip
 import logging
 import re
+from pathlib import Path
 
 import esphome.codegen as cg
-from esphome.components import web_server_base
+from esphome.components import storage, web_server_base
+from esphome.components.esp32 import add_idf_component
 from esphome.components.logger import request_log_listener
 from esphome.components.web_server_base import CONF_WEB_SERVER_BASE_ID
 import esphome.config_validation as cv
@@ -25,6 +27,7 @@ from esphome.const import (
     CONF_OTA,
     CONF_PASSWORD,
     CONF_PORT,
+    CONF_TYPE,
     CONF_USERNAME,
     CONF_VERSION,
     CONF_WEB_SERVER,
@@ -36,7 +39,7 @@ from esphome.const import (
     PLATFORM_RP2,
     PLATFORM_RTL87XX,
 )
-from esphome.core import CORE, CoroPriority, coroutine_with_priority
+from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -44,24 +47,38 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["json", "web_server_base"]
 
+AUTH_TYPE_BASIC = "basic"
+AUTH_TYPE_DIGEST = "digest"
+
 CONF_SORTING_GROUP_ID = "sorting_group_id"
 CONF_SORTING_GROUPS = "sorting_groups"
 CONF_SORTING_WEIGHT = "sorting_weight"
 CONF_ALLOWED_ORIGINS = "allowed_origins"
 
-CONF_FILEBROWSER = "filebrowser"
-CONF_COPY_ENABLED = "enable_copy"
-CONF_CREATE_DIR_ENABLED = "enable_create_dir"
-CONF_DELETE_ENABLED = "enable_delete"
-CONF_DOWNLOAD_ENABLED = "enable_download"
-CONF_LIST_ENABLED = "enable_list"
-CONF_MOVE_ENABLED = "enable_move"
-CONF_RENAME_ENABLED = "enable_rename"
-CONF_UPLOAD_ENABLED = "enable_upload"
+# Not yet in esphome/const.py
+CONF_FILE_API = "file_api"
 
+FILE_API_DEFAULTS = {"max_dir_entries": 64}
+CONF_FILE_BROWSER = "file_browser"
+CONF_MAX_DIR_ENTRIES = "max_dir_entries"
+CONF_STORAGE_ID = "storage_id"
+CONF_ENABLE_UPLOAD = "enable_upload"
+CONF_ENABLE_DOWNLOAD = "enable_download"
+CONF_ENABLE_DELETION = "enable_deletion"
+
+def AUTO_LOAD(config: ConfigType) -> list[str]:
+    """web_server always needs json/web_server_base; storage is pulled in only when the
+    optional file_api:/file_browser: sub-blocks are actually present in this instance's
+    config — a web_server without them pays nothing for the feature."""
+    base = ["json", "web_server_base"]
+    if config and (CONF_FILE_API in config or CONF_FILE_BROWSER in config):
+        return base + ["storage"]
+    return base
 
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
+
+WebServerFileApi = web_server_ns.class_("WebServerFileApi", cg.Component)
 
 sorting_groups = {}
 
@@ -93,6 +110,19 @@ def validate_version_deprecated(config: ConfigType) -> ConfigType:
             "2027.1.0. Please migrate to version 2 (the default) or version 3."
         )
     return config
+
+
+def validate_auth_type_deprecated(auth: ConfigType) -> ConfigType:
+    # Remove before 2027.1.0: the default auth scheme changes from basic to digest.
+    if CONF_TYPE not in auth:
+        _LOGGER.warning(
+            "The 'web_server' 'auth' scheme currently defaults to 'basic', which sends the "
+            "password over the network in an easily reversible form. The default will change "
+            "to 'digest' in ESPHome 2027.1.0. To keep using basic authentication, set "
+            "'type: basic' under 'auth:' explicitly; otherwise set 'type: digest' now to "
+            "adopt the more secure scheme."
+        )
+    return auth
 
 
 def validate_local(config: ConfigType) -> ConfigType:
@@ -238,6 +268,19 @@ WEBSERVER_SORTING_SCHEMA = cv.Schema(
 )
 
 
+def _validate_file_api(config):
+    """file_api/file_browser are ESP-IDF + web_server version 3 only: the REST handlers use
+    the IDF httpd backend directly (chunked responses, multipart upload), and the browser
+    module hooks into the v3 page."""
+    if CONF_FILE_API not in config and CONF_FILE_BROWSER not in config:
+        return config
+    if CORE.target_framework != "esp-idf":
+        raise cv.Invalid("file_api/file_browser require the esp-idf framework")
+    if config[CONF_VERSION] != 3:
+        raise cv.Invalid("file_api/file_browser require web_server version: 3")
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -252,27 +295,21 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ALLOWED_ORIGINS): cv.All(
                 cv.ensure_list(validate_origin), cv.Length(min=1)
             ),
-            cv.Optional(CONF_AUTH): cv.Schema(
-                {
-                    cv.Required(CONF_USERNAME): cv.All(
-                        cv.string_strict, cv.Length(min=1)
-                    ),
-                    cv.Required(CONF_PASSWORD): cv.sensitive(
-                        cv.All(cv.string_strict, cv.Length(min=1))
-                    ),
-                }
-            ),
-            cv.Optional(CONF_FILEBROWSER): cv.Schema(
-                {
-                    cv.Required(CONF_DOWNLOAD_ENABLED, default=True): cv.Boolean,
-                    cv.Required(CONF_UPLOAD_ENABLED, default=False): cv.Boolean,
-                    cv.Required(CONF_DELETE_ENABLED, default=False): cv.Boolean,
-                    cv.Required(CONF_CREATE_DIR_ENABLED, default=False): cv.Boolean,
-                    cv.Required(CONF_RENAME_ENABLED, default=False): cv.Boolean,
-                    cv.Required(CONF_MOVE_ENABLED, default=False): cv.Boolean,
-                    cv.Required(CONF_COPY_ENABLED, default=True): cv.Boolean,
-                    cv.Required(CONF_LIST_ENABLED, default=True): cv.Boolean,
-                }
+            cv.Optional(CONF_AUTH): cv.All(
+                cv.Schema(
+                    {
+                        cv.Required(CONF_USERNAME): cv.All(
+                            cv.string_strict, cv.Length(min=1)
+                        ),
+                        cv.Required(CONF_PASSWORD): cv.sensitive(
+                            cv.All(cv.string_strict, cv.Length(min=1))
+                        ),
+                        cv.Optional(CONF_TYPE): cv.one_of(
+                            AUTH_TYPE_BASIC, AUTH_TYPE_DIGEST, lower=True
+                        ),
+                    }
+                ),
+                validate_auth_type_deprecated,
             ),
             cv.GenerateID(CONF_WEB_SERVER_BASE_ID): cv.use_id(
                 web_server_base.WebServerBase
@@ -283,6 +320,22 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_LOCAL): cv.boolean,
             cv.Optional(CONF_COMPRESSION, default="gzip"): cv.one_of("gzip", "br"),
             cv.Optional(CONF_SORTING_GROUPS): cv.ensure_list(sorting_group),
+            # Optional compile-time opt-in blocks. Presence alone drives AUTO_LOAD() above
+            # to pull in storage; absence costs nothing (zero-cost gating via defines).
+            # ESP-IDF + web_server version 3 only — enforced in _validate_file_api below.
+            cv.Optional(CONF_FILE_API): cv.Schema(
+                {
+                    cv.Optional(CONF_STORAGE_ID): cv.use_id(storage.PathStorage),
+                    cv.Optional(CONF_MAX_DIR_ENTRIES, default=64): cv.int_range(
+                        min=1, max=1024
+                    ),
+                }
+            ),
+            # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
+            # not a separate page; it implies file_api (defaults applied when absent).
+            cv.Optional(CONF_FILE_BROWSER): cv.All(
+                lambda value: {} if value is None else value, cv.Schema({})
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on(
@@ -302,6 +355,7 @@ CONFIG_SCHEMA = cv.All(
     validate_ota,
     validate_private_network_access,
     _consume_web_server_sockets,
+    _validate_file_api,
 )
 
 
@@ -343,6 +397,9 @@ def build_index_html(config) -> str:
     if js_include:
         html += "<script type=module src=/0.js></script>"
     html += "<esp-app></esp-app>"
+    if config.get(CONF_FILE_BROWSER) is not None:
+        # Injected module renders a "Files" card inside this same page (next to <esp-app>).
+        html += "<script src=/file_browser.js></script>"
     if config[CONF_JS_URL]:
         html += f'<script src="{config[CONF_JS_URL]}"></script>'
     html += "</body></html>"
@@ -400,10 +457,15 @@ async def to_code(config):
     if (allowed_origins := config.get(CONF_ALLOWED_ORIGINS)) is not None:
         cg.add_define("USE_WEBSERVER_ALLOWED_ORIGINS")
         cg.add(var.set_allowed_origins(allowed_origins))
-    if CONF_AUTH in config:
+    if (auth := config.get(CONF_AUTH)) is not None:
         cg.add_define("USE_WEBSERVER_AUTH")
-        cg.add(paren.set_auth_username(config[CONF_AUTH][CONF_USERNAME]))
-        cg.add(paren.set_auth_password(config[CONF_AUTH][CONF_PASSWORD]))
+        # The scheme is fixed at build time so the unused Basic/Digest code path is compiled
+        # out. Basic is the current default (the absence of this define); an explicit
+        # 'type: digest' opts in early. Default changes to digest in 2027.1.0.
+        if auth.get(CONF_TYPE) == AUTH_TYPE_DIGEST:
+            cg.add_define("USE_WEBSERVER_AUTH_DIGEST")
+        cg.add(paren.set_auth_username(auth[CONF_USERNAME]))
+        cg.add(paren.set_auth_password(auth[CONF_PASSWORD]))
     if CONF_CSS_INCLUDE in config:
         cg.add_define("USE_WEBSERVER_CSS_INCLUDE")
         path = CORE.relative_config_path(config[CONF_CSS_INCLUDE])
@@ -423,17 +485,36 @@ async def to_code(config):
     if (sorting_group_config := config.get(CONF_SORTING_GROUPS)) is not None:
         cg.add_define("USE_WEBSERVER_SORTING")
         add_sorting_groups(var, sorting_group_config)
-    if(filebrowser_config := config.get(CONF_FILEBROWSER)) is not None:
-        cg.add_define("USE_FILEBROWSER")
-        cg.add(var.set_filebrowser_enabled(True))
-        cg.add(var.set_filebrowser_download_enabled(filebrowser_config[CONF_DOWNLOAD_ENABLED]))
-        cg.add(var.set_filebrowser_upload_enabled(filebrowser_config[CONF_UPLOAD_ENABLED]))
-        cg.add(var.set_filebrowser_delete_enabled(filebrowser_config[CONF_DELETE_ENABLED]))
-        cg.add(var.set_filebrowser_create_dir_enabled(filebrowser_config[CONF_CREATE_DIR_ENABLED]))
-        cg.add(var.set_filebrowser_rename_enabled(filebrowser_config[CONF_RENAME_ENABLED]))
-        cg.add(var.set_filebrowser_move_enabled(filebrowser_config[CONF_MOVE_ENABLED]))
-        cg.add(var.set_filebrowser_copy_enabled(filebrowser_config[CONF_COPY_ENABLED]))
-        cg.add(var.set_filebrowser_list_enabled(filebrowser_config[CONF_LIST_ENABLED]))
+
+    file_api_config = config.get(CONF_FILE_API)
+    file_browser = config.get(CONF_FILE_BROWSER) is not None
+    if file_browser and file_api_config is None:
+        # file_browser implies file_api with defaults
+        file_api_config = FILE_API_DEFAULTS
+    if file_api_config is not None:
+        cg.add_define("USE_WEBSERVER_FILE_API")
+        # /files/upload uses the same multipart machinery as web_server OTA; without OTA
+        # configured nothing else pulls the parser library in. file_api is validated as
+        # esp-idf-only, so no framework check is needed here.
+        add_idf_component(name="zorxx/multipart-parser", ref="1.0.1")
+        # No YAML-visible id — this instance exists purely to back this web_server's
+        # file_api sub-block. It is a real Component (setup() registers the handler).
+        api_id = ID(f"{var}_file_api", is_declaration=True, type=WebServerFileApi)
+        # register_component() consumes the id from CORE.component_ids — manually created
+        # IDs (no cv.declare_id) must be added there first (same pattern as the storage
+        # worker instantiation).
+        CORE.component_ids.add(str(api_id))
+        api_var = cg.new_Pvariable(api_id)
+        await cg.register_component(api_var, {})
+        cg.add(api_var.set_web_server_base(paren))
+        cg.add(api_var.set_max_dir_entries(file_api_config[CONF_MAX_DIR_ENTRIES]))
+        if storage_id := file_api_config.get(CONF_STORAGE_ID):
+            cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
+        if file_browser:
+            cg.add_define("USE_WEBSERVER_FILE_BROWSER")
+            js_path = Path(__file__).parent / "file_browser.js"
+            with js_path.open(encoding="utf-8") as js_file:
+                add_resource_as_progmem("FILE_BROWSER_JS", js_file.read())
 
 
 def FILTER_SOURCE_FILES() -> list[str]:

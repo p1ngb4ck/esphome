@@ -34,6 +34,13 @@ extern const uint8_t ESPHOME_WEBSERVER_JS_INCLUDE[] PROGMEM;
 extern const size_t ESPHOME_WEBSERVER_JS_INCLUDE_SIZE;
 #endif
 
+#ifdef USE_WEBSERVER_FILE_BROWSER
+// See file_api.h — declared here as well so main.cpp (which always includes this header)
+// gives the codegen-emitted constexpr definition external linkage.
+extern const uint8_t ESPHOME_WEBSERVER_FILE_BROWSER_JS[] PROGMEM;
+extern const size_t ESPHOME_WEBSERVER_FILE_BROWSER_JS_SIZE;
+#endif
+
 namespace esphome::web_server {
 
 // Type for parameter names that can be stored in flash on ESP8266

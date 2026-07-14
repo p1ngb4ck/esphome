@@ -35,12 +35,21 @@ template<typename... Ts> class ListFilesAction;
 
 // Base class for both SDMMC and SPI implementations.
 // Extends FilesystemStorage so both SdMmc and SdSpi satisfy the storage interface.
-class SdStorageBase : public storage::FilesystemStorage {
+class SdStorageBase : public storage::FilesystemStorage, public storage::MountableStorage {
  public:
   void set_mount_path(const char *path) { this->set_mount_path_(path); }
   void set_id(const char *id) { this->storage_id_ = id; }
   void set_cd_pin(GPIOPin *pin) { this->cd_pin_ = pin; }
   bool is_mounted() const { return this->is_mounted_; }
+  // No-RTTI downcast hook — see PathStorage::as_mountable().
+  storage::MountableStorage *as_mountable() override { return this; }
+
+  // Both FilesystemStorage and MountableStorage declare mount()/unmount(); redeclaring them
+  // here merges the two inherited slots into one final declaration point, so lookup through a
+  // SdStorageBase* (e.g. the driver's own mount/unmount actions) is unambiguous. SdMmc/SdSpi
+  // overrides are unchanged and satisfy both bases.
+  storage::StorageError mount() override = 0;
+  storage::StorageError unmount() override = 0;
 
   template<typename F> void add_on_mounted_callback(F &&cb) { this->on_mounted_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_removed_callback(F &&cb) { this->on_removed_.add(std::forward<F>(cb)); }
@@ -105,6 +114,14 @@ class SdStorageBase : public storage::FilesystemStorage {
   // observed change is accurate regardless of when the caller last polled.
   bool card_present_();
 
+  // Card-detect handling shared by SdMmc::loop()/SdSpi::loop(). Strictly EDGE-triggered:
+  // (re)mount only when the debounced CD state CHANGES to present, unmount only when it
+  // changes to absent — never on levels. A manual unmount with the card still seated
+  // therefore stays unmounted until the card is physically re-inserted (or mounted
+  // manually). Without a configured CD pin this is a no-op: mount happens once at boot
+  // (setup()), afterwards strictly manually via the mount/unmount actions.
+  void loop_cd_();
+
   // True at most once every CD_POLL_MS — gates how often a driver's loop() acts on
   // card_present_()'s result (auto-mount/unmount), independent of how often loop() itself
   // runs. card_present_() itself must still be called every iteration regardless (see above).
@@ -141,6 +158,11 @@ class SdStorageBase : public storage::FilesystemStorage {
   // first differed from last_confirmed_ so the debounce window is wall-clock based rather than
   // counted in loop() iterations (whose frequency varies with the rest of the node's config).
   bool cd_debounce_started_{false};
+  // Edge detection for loop_cd_(): last debounced state that was acted upon, and whether
+  // it has been seeded yet (the first sample after boot must not count as an edge —
+  // setup() already handled the boot-time mount decision).
+  bool cd_last_present_{false};
+  bool cd_state_seeded_{false};
   bool last_confirmed_present_{true};
   bool candidate_present_{true};
   uint32_t candidate_since_ms_{0};
