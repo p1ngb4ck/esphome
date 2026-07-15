@@ -29,8 +29,13 @@ bool OnlineImage::validate_url_(const std::string &url) {
     ESP_LOGE(TAG, "URL is too long");
     return false;
   }
+#ifdef USE_STORAGE
+  if (url.starts_with("file://")) {
+    return true;  // mounted-storage source, resolved at read time
+  }
+#endif
   if (!url.starts_with("http://") && !url.starts_with("https://")) {
-    ESP_LOGE(TAG, "URL must start with http:// or https://");
+    ESP_LOGE(TAG, "URL must start with http:// or https:// (or file:// with the storage component)");
     return false;
   }
   return true;
@@ -49,6 +54,30 @@ void OnlineImage::update() {
   }
 
   ESP_LOGD(TAG, "Updating image from %s", this->url_.c_str());
+
+#ifdef USE_STORAGE
+  if (this->url_.starts_with("file://")) {
+    if (!this->start_storage_read_()) {
+      this->end_connection_();
+      this->download_error_callback_.call();
+      return;
+    }
+    if (!this->begin_decode(this->storage_size_)) {
+      ESP_LOGE(TAG, "Failed to initialize decoder for format %d", this->get_format());
+      this->end_connection_();
+      this->download_error_callback_.call();
+      return;
+    }
+    // JPEG requires the complete image in the buffer before decoding — same rule as http
+    if (this->get_format() == runtime_image::JPEG && this->storage_size_ > this->download_buffer_.size()) {
+      this->download_buffer_.resize(this->storage_size_);
+    }
+    ESP_LOGI(TAG, "Reading image from storage (Size: %llu)", (unsigned long long) this->storage_size_);
+    this->start_time_ = millis();
+    this->enable_loop();
+    return;
+  }
+#endif
 
   std::vector<http_request::Header> headers;
 
@@ -141,6 +170,13 @@ void OnlineImage::loop() {
     return;
   }
 
+#ifdef USE_STORAGE
+  if (this->storage_ != nullptr) {
+    this->storage_loop_();
+    return;
+  }
+#endif
+
   if (!this->downloader_) {
     ESP_LOGE(TAG, "Downloader not instantiated; cannot download");
     this->end_connection_();
@@ -221,6 +257,18 @@ void OnlineImage::end_connection_() {
   if (this->is_decoding()) {
     RuntimeImage::release();
   }
+#ifdef USE_STORAGE
+  if (this->storage_ != nullptr) {
+    if (this->storage_handle_ != nullptr) {
+      static_cast<storage::FilesystemStorage *>(this->storage_)->close(this->storage_handle_);
+      this->storage_handle_ = nullptr;
+    }
+    this->storage_ = nullptr;
+    this->storage_path_.clear();
+    this->storage_offset_ = 0;
+    this->storage_size_ = 0;
+  }
+#endif
   if (this->downloader_) {
     this->downloader_->end();
     this->downloader_ = nullptr;
@@ -240,5 +288,96 @@ void OnlineImage::release() {
   // Call parent's release to free the image buffer
   RuntimeImage::release();
 }
+
+#ifdef USE_STORAGE
+bool OnlineImage::start_storage_read_() {
+  const char *path = this->url_.c_str() + strlen("file://");
+  const char *rel = nullptr;
+  if (storage::global_storage_registry == nullptr ||
+      (this->storage_ = storage::global_storage_registry->resolve_path(path, &rel)) == nullptr || rel == nullptr) {
+    ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", path);
+    this->storage_ = nullptr;
+    return false;
+  }
+  storage::FileStat st;
+  storage::StorageError serr = this->storage_->stat(rel, &st);
+  if (serr != storage::StorageError::OK || st.is_directory) {
+    ESP_LOGE(TAG, "'%s' not found on storage (%s)", path, storage::error_to_string(serr));
+    this->storage_ = nullptr;
+    return false;
+  }
+  this->storage_size_ = st.size;
+  this->storage_offset_ = 0;
+  if (this->storage_->get_storage_type() == storage::StorageType::FILESYSTEM) {
+    auto *fs = static_cast<storage::FilesystemStorage *>(this->storage_);
+    serr = fs->open(rel, this->storage_handle_, storage::OpenMode::READ);
+    if (serr != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
+      this->storage_ = nullptr;
+      this->storage_handle_ = nullptr;
+      return false;
+    }
+  } else if (this->storage_->get_storage_type() == storage::StorageType::NETWORK) {
+    this->storage_path_ = rel;  // owned copy — rel points into resolver scratch
+  } else {
+    ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", path);
+    this->storage_ = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void OnlineImage::storage_loop_() {
+  // Completion: everything read AND the decoder consumed the buffer.
+  if (this->is_decode_finished() ||
+      (this->storage_offset_ >= this->storage_size_ && this->download_buffer_.unread() == 0)) {
+    this->end_decode();
+    ESP_LOGD(TAG, "Image fully read from storage, %llu bytes in %" PRIu32 " ms",
+             (unsigned long long) this->storage_offset_, millis() - this->start_time_);
+    this->download_finished_callback_.call(false);
+    this->end_connection_();
+    return;
+  }
+
+  size_t available = this->download_buffer_.free_capacity();
+  if (available > 0 && this->storage_offset_ < this->storage_size_) {
+    available = std::min(available, this->download_buffer_initial_size_);
+    size_t received = 0;
+    storage::StorageError serr;
+    if (this->storage_handle_ != nullptr) {
+      serr = static_cast<storage::FilesystemStorage *>(this->storage_)
+                 ->read(this->storage_handle_, this->download_buffer_.append(), available, &received);
+    } else {
+      serr = static_cast<storage::NetworkStorage *>(this->storage_)
+                 ->read_chunk(this->storage_path_.c_str(), this->download_buffer_.append(), this->storage_offset_,
+                              available, &received);
+    }
+    if (serr != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
+      this->end_connection_();
+      this->download_error_callback_.call();
+      return;
+    }
+    this->storage_offset_ += received;
+    if (received > 0) {
+      this->download_buffer_.write(received);
+    }
+  }
+
+  // Feed whatever is buffered to the decoder (mirrors the http path)
+  if (this->download_buffer_.unread() > 0) {
+    auto consumed = this->feed_data(this->download_buffer_.data(), this->download_buffer_.unread());
+    if (consumed < 0) {
+      ESP_LOGE(TAG, "Error decoding image: %s", esphome::runtime_image::decode_error_to_string(consumed));
+      this->end_connection_();
+      this->download_error_callback_.call();
+      return;
+    }
+    if (consumed > 0) {
+      this->download_buffer_.read(consumed);
+    }
+  }
+}
+#endif  // USE_STORAGE
 
 }  // namespace esphome::online_image

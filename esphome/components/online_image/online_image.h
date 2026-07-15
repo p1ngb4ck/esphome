@@ -8,6 +8,10 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage.h"
+#endif
+
 namespace esphome::online_image {
 
 using t_http_codes = enum {
@@ -80,6 +84,17 @@ class OnlineImage final : public PollingComponent,
   CallbackManager<void()> download_error_callback_{};
 
   std::shared_ptr<http_request::HttpContainer> downloader_{nullptr};
+#ifdef USE_STORAGE
+  /// file:// source — FILESYSTEM storages stream via handle, NETWORK (NFS) via
+  /// stateless read_chunk with a self-tracked offset (same pattern as audio).
+  bool start_storage_read_();
+  void storage_loop_();
+  storage::PathStorage *storage_{nullptr};
+  storage::FileHandle *storage_handle_{nullptr};  // FILESYSTEM only
+  std::string storage_path_;                      // NETWORK only (owned copy)
+  uint64_t storage_offset_{0};
+  uint64_t storage_size_{0};
+#endif
   DownloadBuffer download_buffer_;
   /**
    * This is the *initial* size of the download buffer, not the current size.
