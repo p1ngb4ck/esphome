@@ -11,7 +11,10 @@
 
 #include "storage.h"
 
+#include <span>
 #include <vector>
+
+#include "esphome/core/string_ref.h"
 
 #include "esphome/core/entity_base.h"
 #include "esphome/core/helpers.h"
@@ -61,7 +64,7 @@ static constexpr const char *HEX_PREFIX = "hex:";
 
 struct RuntimeEntry {
   uint32_t key;
-  const char *name;
+  std::string name;  // owned: sweep names come from stack buffers
   EntityKind kind;
   uint16_t aux;  // STRING: SZ incl. length byte
 };
@@ -97,10 +100,103 @@ void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint
   key += min_len << 2;
   key += max_len << 4;
   key += fnv1_hash(pattern) << 6;
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key)
+      return;
+  }
   runtime_registry().push_back({key, name, EntityKind::STRING, static_cast<uint16_t>(max_len + 1)});
 }
 }  // namespace detail
 #endif  // USE_TEXT
+
+// Runtime safety net: codegen registration depends on the Python-side
+// declaration parents of each entity class, which are not reliable across
+// esphome versions (media_player_ns.class_("MediaPlayer") has none at all in
+// some trees). This sweep walks the App entity lists ONCE, lazily, and
+// registers anything the baked calls missed — naming then only depends on
+// the running firmware itself.
+static void register_if_missing(esphome::EntityBase *e, uint32_t version, EntityKind kind, uint16_t aux = 0) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  const uint32_t key = e->get_preference_hash() ^ version;
+#pragma GCC diagnostic pop
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key)
+      return;
+  }
+  char buf[OBJECT_ID_MAX_LEN];
+  const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
+  runtime_registry().emplace_back(RuntimeEntry{key, std::string(oid.c_str(), oid.size()), kind, aux});
+}
+
+static void sweep_app_entities() {
+  static bool done = false;
+  if (done)
+    return;
+  done = true;
+#ifdef USE_SWITCH
+  for (auto *e : App.get_switches())
+    register_if_missing(e, 0, EntityKind::BOOL);
+#endif
+#ifdef USE_NUMBER
+  for (auto *e : App.get_numbers())
+    register_if_missing(e, 0, EntityKind::FLOAT);
+#endif
+#ifdef USE_SELECT
+  for (auto *e : App.get_selects())
+    register_if_missing(e, 0, EntityKind::SELECT_INDEX);
+#endif
+#ifdef USE_MEDIA_PLAYER
+  for (auto *e : App.get_media_players())
+    register_if_missing(e, 0, EntityKind::MEDIA_VOLUME);
+#endif
+#ifdef USE_FAN
+  for (auto *e : App.get_fans())
+    register_if_missing(e, 0x71700ABB, EntityKind::FAN);
+#endif
+#ifdef USE_CLIMATE
+  for (auto *e : App.get_climates())
+    register_if_missing(e, 0x848EA6AD, EntityKind::CLIMATE);
+#endif
+#ifdef USE_LIGHT
+  for (auto *e : App.get_lights())
+    register_if_missing(e, 0, EntityKind::LIGHT);
+#endif
+#ifdef USE_COVER
+  for (auto *e : App.get_covers())
+    register_if_missing(e, 0, EntityKind::COVER);
+#endif
+#ifdef USE_VALVE
+  for (auto *e : App.get_valves())
+    register_if_missing(e, 0, EntityKind::VALVE);
+#endif
+#ifdef USE_LOCK
+  for (auto *e : App.get_locks())
+    register_if_missing(e, 0, EntityKind::RAW);
+#endif
+#ifdef USE_DATETIME_DATE
+  for (auto *e : App.get_dates())
+    register_if_missing(e, 194434030, EntityKind::DATE);
+#endif
+#ifdef USE_DATETIME_TIME
+  for (auto *e : App.get_times())
+    register_if_missing(e, 194434060, EntityKind::TIME);
+#endif
+#ifdef USE_DATETIME_DATETIME
+  for (auto *e : App.get_datetimes())
+    register_if_missing(e, 194434090, EntityKind::DATETIME);
+#endif
+#ifdef USE_TEXT
+  for (auto *e : App.get_texts()) {
+    // trait-salted key — same recipe as the baked text registration; the
+    // impl copies the name into its owned entry
+    char buf[OBJECT_ID_MAX_LEN];
+    const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
+    detail::register_text_pref_impl(e, oid.c_str(), e->traits.get_min_length(), e->traits.get_max_length(),
+                                    e->traits.get_pattern_c_str());
+  }
+#endif
+}
 
 static const RuntimeEntry *runtime_by_key(uint32_t key, const char *const *allowed, size_t allowed_count) {
   for (const auto &e : runtime_registry()) {
@@ -109,7 +205,7 @@ static const RuntimeEntry *runtime_by_key(uint32_t key, const char *const *allow
     if (allowed == nullptr)
       return &e;
     for (size_t i = 0; i < allowed_count; i++) {
-      if (strcmp(allowed[i], e.name) == 0)
+      if (e.name == allowed[i])
         return &e;
     }
     return nullptr;  // known, but filtered out by the action's selection
@@ -120,12 +216,12 @@ static const RuntimeEntry *runtime_by_key(uint32_t key, const char *const *allow
 static const RuntimeEntry *runtime_by_name(const char *token, size_t len, const char *const *allowed,
                                            size_t allowed_count) {
   for (const auto &e : runtime_registry()) {
-    if (strlen(e.name) != len || memcmp(e.name, token, len) != 0)
+    if (e.name.size() != len || memcmp(e.name.data(), token, len) != 0)
       continue;
     if (allowed == nullptr)
       return &e;
     for (size_t i = 0; i < allowed_count; i++) {
-      if (strcmp(allowed[i], e.name) == 0)
+      if (e.name == allowed[i])
         return &e;
     }
     return nullptr;
@@ -986,6 +1082,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
   if (ps == nullptr)
     return false;
 
+  sweep_app_entities();
   // Flush pending preference writes so NVS reflects the current state.
   global_preferences->sync();
 
@@ -1016,7 +1113,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
           value = HEX_PREFIX;
           append_hex(value, e.blob, e.len);
         }
-        prefs[s != nullptr ? s->name : (re != nullptr ? re->name : key_str)] = value;
+        prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
       });
     });
     out.assign(buf.data(), buf.size());
@@ -1152,6 +1249,8 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
   PathStorage *ps = resolve_file_target(path, &rel);
   if (ps == nullptr)
     return false;
+
+  sweep_app_entities();
 
   RamBuffer buf;
   size_t size = 0;
