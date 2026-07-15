@@ -670,6 +670,11 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         # pending to_code has run. Scheduled as its own coroutine job — it is
         # enqueued behind all already-queued component jobs, so the globals
         # are registered by the time it executes.
+        # globals' own to_code runs at CoroPriority.LATE (-100) — an
+        # unprioritized job would enumerate CORE.variables BEFORE any global
+        # is registered (verified empirically: 14 vars, zero globals).
+        # FINAL (-1000) queues the bake after every component job.
+        @coroutine_with_priority(CoroPriority.FINAL)
         async def _bake_all():
             # globals only — entity naming is entirely the runtime sweep's job
             entries = []
