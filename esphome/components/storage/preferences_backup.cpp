@@ -543,7 +543,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       kv_field_f(out, "cold_white", st.cold_white, first);
       kv_field_f(out, "warm_white", st.warm_white, first);
       kv_field_i(out, "effect", st.effect, first);
-      kv_field_i(out, "color_mode", static_cast<long>(st.color_mode.raw), first);
+      kv_field_i(out, "color_mode", static_cast<long>(st.color_mode), first);
       out += '}';
       return true;
     }
@@ -739,8 +739,12 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
 #ifdef USE_COVER
     case EntityKind::COVER: {
       cover::CoverRestoreState st{};
-      if (!r.f("position", st.position) || !r.f("tilt", st.tilt))
+      // packed struct: fields cannot bind to float& — go through locals
+      float pos, tilt;
+      if (!r.f("position", pos) || !r.f("tilt", tilt))
         return false;
+      st.position = pos;
+      st.tilt = tilt;
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
       return true;
@@ -749,8 +753,10 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
 #ifdef USE_VALVE
     case EntityKind::VALVE: {
       valve::ValveRestoreState st{};
-      if (!r.f("position", st.position))
+      float pos;  // packed struct — see cover above
+      if (!r.f("position", pos))
         return false;
+      st.position = pos;
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
       return true;
@@ -767,7 +773,7 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
       st.effect = static_cast<uint32_t>(li);
       if (!r.i("color_mode", li))
         return false;
-      st.color_mode = light::ColorMode(static_cast<light::ColorModeRaw>(li));
+      st.color_mode = static_cast<light::ColorMode>(li);
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
       return true;

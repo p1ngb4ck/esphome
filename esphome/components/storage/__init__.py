@@ -652,8 +652,6 @@ def _entity_registration(reg_id) -> str | None:
     # real MockObjClass carries an actual inheritance chain.
     if not isinstance(type_, cg.MockObjClass):
         return None
-    if not type_.inherits_from(cg.EntityBase):
-        return None
     from esphome.components import text as text_
 
     if type_.inherits_from(text_.Text):
@@ -664,12 +662,21 @@ def _entity_registration(reg_id) -> str | None:
             f"{reg_id.id}->traits.get_min_length(), {reg_id.id}->traits.get_max_length(), "
             f"{reg_id.id}->traits.get_pattern_c_str())"
         )
+    # The concrete kind classes are checked FIRST and independently of
+    # EntityBase: some core declarations lack their Python-side parents
+    # entirely (media_player_ns.class_("MediaPlayer") — no cg.EntityBase!),
+    # so inherits_from(EntityBase) is False for them even though the C++
+    # class is an entity. EntityBase is only the RAW fallback gate.
     version, kind = 0, "RAW"
+    matched = False
     for mod_name, cls_name, ver, k in _ENTITY_KINDS:
         mod = __import__(f"esphome.components.{mod_name}", fromlist=[cls_name])
         if hasattr(mod, cls_name) and type_.inherits_from(getattr(mod, cls_name)):
             version, kind = ver, k
+            matched = True
             break
+    if not matched and not type_.inherits_from(cg.EntityBase):
+        return None
     return (
         f'esphome::storage::register_entity_pref({reg_id.id}, "{reg_id.id}", '
         f"{version}UL, esphome::storage::EntityKind::{kind})"
