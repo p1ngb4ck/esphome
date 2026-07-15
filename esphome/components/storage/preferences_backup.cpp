@@ -75,17 +75,6 @@ static std::vector<RuntimeEntry> &runtime_registry() {
   return reg;
 }
 
-static void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version, EntityKind kind,
-                                 uint16_t aux) {
-  // Central recipe from EntityBase::make_entity_preference_() — the entity
-  // supplies its own hash; only the per-type version constant is baked.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  const uint32_t key = entity->get_preference_hash() ^ version;
-#pragma GCC diagnostic pop
-  runtime_registry().push_back({key, name, kind, aux, entity});
-}
-
 #ifdef USE_TEXT
 namespace detail {
 static void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
