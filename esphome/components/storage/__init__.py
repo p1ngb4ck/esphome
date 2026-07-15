@@ -635,6 +635,13 @@ async def _build_preferences_action(config, action_id, template_arg, args):
     cg.add(var.set_format(config[CONF_FORMAT]))
 
     def _bake(entries, restrict):
+        # entity-only selections produce zero table entries: emitting
+        # "static const T x[] = {}" would be a zero-size array (GNU
+        # extension, not ISO C++) — pass a null table instead
+        if not entries:
+            cg.add(var.set_selection(cg.nullptr, 0, restrict))
+            return
+
         arr = f"{action_id}_psel"
         cg.add_global(
             cg.RawExpression(
