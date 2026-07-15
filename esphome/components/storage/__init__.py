@@ -160,6 +160,7 @@ async def to_code(config):
 
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
+    cg.add_define("USE_STORAGE")
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
     cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
 

@@ -89,6 +89,45 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     return ESP_ERR_INVALID_ARG;
   }
 
+  if (uri.rfind("file://", 0) == 0) {
+#ifdef USE_STORAGE
+    // Storage-backed local file: resolve the mount, open a DATA-PLANE handle
+    // (task-agnostic by contract) and stream through the transfer buffer —
+    // same downstream path as http, so the decoder pipeline is untouched.
+    const char *path = uri.c_str() + strlen("file://");
+    const char *rel = nullptr;
+    if (storage::global_storage_registry == nullptr ||
+        (this->storage_ = storage::global_storage_registry->resolve_path(path, &rel)) == nullptr || rel == nullptr) {
+      ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", path);
+      return ESP_ERR_NOT_FOUND;
+    }
+    file_type = detect_audio_file_type(nullptr, path);  // by extension
+    if (file_type == AudioFileType::NONE) {
+      ESP_LOGE(TAG, "Unsupported audio file type: %s", path);
+      this->storage_ = nullptr;
+      return ESP_ERR_NOT_SUPPORTED;
+    }
+    storage::StorageError serr = this->storage_->open(rel, this->storage_handle_, storage::OpenMode::READ);
+    if (serr != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
+      this->storage_ = nullptr;
+      this->storage_handle_ = nullptr;
+      return ESP_ERR_NOT_FOUND;
+    }
+    this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(this->buffer_size_);
+    if (this->output_transfer_buffer_ == nullptr) {
+      this->cleanup_connection_();
+      return ESP_ERR_NO_MEM;
+    }
+    this->audio_file_type_ = file_type;
+    this->last_data_read_ms_ = millis();
+    return ESP_OK;
+#else
+    ESP_LOGE(TAG, "file:// URIs require the storage component in the build");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+  }
+
   esp_http_client_config_t client_config = {};
 
   client_config.url = uri.c_str();
@@ -208,6 +247,10 @@ AudioReaderState AudioReader::read() {
     return this->http_read_();
   } else if (this->current_audio_file_ != nullptr) {
     return this->file_read_();
+#ifdef USE_STORAGE
+  } else if (this->storage_handle_ != nullptr) {
+    return this->storage_read_();
+#endif
   }
 
   return AudioReaderState::FAILED;
@@ -280,12 +323,50 @@ AudioReaderState AudioReader::http_read_() {
   return AudioReaderState::READING;
 }
 
+#ifdef USE_STORAGE
+AudioReaderState AudioReader::storage_read_() {
+  this->output_transfer_buffer_->transfer_data_to_sink(pdMS_TO_TICKS(READ_WRITE_TIMEOUT_MS), false);
+
+  if (this->output_transfer_buffer_->free() > 0) {
+    size_t received = 0;
+    storage::StorageError serr = this->storage_->read(this->storage_handle_,
+                                                      this->output_transfer_buffer_->get_buffer_end(),
+                                                      this->output_transfer_buffer_->free(), &received);
+    if (serr != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
+      this->cleanup_connection_();
+      return AudioReaderState::FAILED;
+    }
+    if (received > 0) {
+      this->output_transfer_buffer_->increase_buffer_length(received);
+      this->last_data_read_ms_ = millis();
+      return AudioReaderState::READING;
+    }
+    // Partial-read contract: OK with 0 bytes means EOF. Finish once the
+    // transfer buffer has fully drained into the sink.
+    if (this->output_transfer_buffer_->available() == 0) {
+      this->cleanup_connection_();
+      return AudioReaderState::FINISHED;
+    }
+  }
+
+  return AudioReaderState::READING;
+}
+#endif  // USE_STORAGE
+
 void AudioReader::cleanup_connection_() {
   if (this->client_ != nullptr) {
     esp_http_client_close(this->client_);
     esp_http_client_cleanup(this->client_);
     this->client_ = nullptr;
   }
+#ifdef USE_STORAGE
+  if (this->storage_handle_ != nullptr) {
+    this->storage_->close(this->storage_handle_);
+    this->storage_handle_ = nullptr;
+    this->storage_ = nullptr;
+  }
+#endif
 }
 
 }  // namespace esphome::audio
