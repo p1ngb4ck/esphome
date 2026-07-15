@@ -62,6 +62,20 @@ static constexpr const char *NVS_NAMESPACE = "esphome";
 static constexpr size_t MAX_BLOB_LEN = 4096;  // NVS blob hard limit is well below this
 static constexpr const char *HEX_PREFIX = "hex:";
 
+// SINGLE coupling point to the core's preference-key recipe.
+// get_preference_hash() is deprecated in favor of make_entity_preference<T>()
+// because upstream plans a v2 key migration (esphome/backlog#85) and carries a
+// known collision problem (different names sanitizing to the same object_id).
+// We need the raw key for NVS<->name mapping, so we keep exactly ONE silenced
+// call here: when the core migrates, this one function follows the new recipe
+// and every codec/sweep path inherits it.
+static uint32_t entity_pref_key(esphome::EntityBase *e, uint32_t version) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  return e->get_preference_hash() ^ version;
+#pragma GCC diagnostic pop
+}
+
 struct RuntimeEntry {
   uint32_t key;
   std::string name;  // owned: sweep names come from stack buffers
@@ -78,21 +92,23 @@ static std::vector<RuntimeEntry> &runtime_registry() {
 #ifdef USE_TEXT
 namespace detail {
 static void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
-                             const char *pattern) {
+                                    const char *pattern) {
   // template_text does NOT use make_entity_preference: its key adds trait
   // salts on top of the base hash — replicated 1:1 from
   // template/text/template_text.cpp (traits come from the live object via
   // codegen, so the salt inputs are always the real ones).
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  uint32_t key = entity->get_preference_hash();
-#pragma GCC diagnostic pop
+  uint32_t key = entity_pref_key(entity, 0);
   key += min_len << 2;
   key += max_len << 4;
   key += fnv1_hash(pattern) << 6;
   for (const auto &r : runtime_registry()) {
-    if (r.key == key)
+    if (r.key == key) {
+      if (r.entity != entity) {
+        ESP_LOGW(TAG, "Preference key collision: '%s' and '%s' share key %" PRIu32 " — only the first is exported",
+                 r.name.c_str(), name, key);
+      }
       return;
+    }
   }
   runtime_registry().push_back({key, name, EntityKind::STRING, static_cast<uint16_t>(max_len + 1), entity});
 }
@@ -106,13 +122,17 @@ static void register_text_pref_impl(esphome::EntityBase *entity, const char *nam
 // registers anything the baked calls missed — naming then only depends on
 // the running firmware itself.
 static void register_if_missing(esphome::EntityBase *e, uint32_t version, EntityKind kind, uint16_t aux = 0) {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  const uint32_t key = e->get_preference_hash() ^ version;
-#pragma GCC diagnostic pop
+  const uint32_t key = entity_pref_key(e, version);
   for (const auto &r : runtime_registry()) {
-    if (r.key == key)
+    if (r.key == key) {
+      if (r.entity != e) {
+        char nbuf[OBJECT_ID_MAX_LEN];
+        const StringRef nid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(nbuf));
+        ESP_LOGW(TAG, "Preference key collision: '%s' and '%s' share key %" PRIu32 " — only the first is exported",
+                 r.name.c_str(), nid.c_str(), key);
+      }
       return;
+    }
   }
   char buf[OBJECT_ID_MAX_LEN];
   const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
@@ -644,8 +664,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       out += '{';
       kv_field_i(out, "mode", static_cast<long>(st.mode), first);
       kv_field_b(out, "uses_custom_fan_mode", st.uses_custom_fan_mode, first);
-      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<long>(st.fan_mode),
-                 first);
+      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<long>(st.fan_mode), first);
       kv_field_b(out, "uses_custom_preset", st.uses_custom_preset, first);
       kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<long>(st.preset), first);
       kv_field_i(out, "swing_mode", static_cast<long>(st.swing_mode), first);
@@ -889,8 +908,7 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
         return false;
       st.swing_mode = static_cast<climate::ClimateSwingMode>(li);
       if (!r.f("target_temperature_low", st.target_temperature_low) ||
-          !r.f("target_temperature_high", st.target_temperature_high) ||
-          !r.f("target_humidity", st.target_humidity))
+          !r.f("target_temperature_high", st.target_temperature_high) || !r.f("target_humidity", st.target_humidity))
         return false;
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
@@ -997,7 +1015,8 @@ static bool nvs_read_entry(nvs_handle_t handle, uint32_t key, NvsEntry &e) {
 
 template<typename EmitFn>
 static size_t collect_entries(nvs_handle_t handle, const PrefSelection *sel, size_t count, bool restrict_to_selection,
-                              esphome::EntityBase *const *selected_entities, size_t selected_entity_count, EmitFn &&emit) {
+                              esphome::EntityBase *const *selected_entities, size_t selected_entity_count,
+                              EmitFn &&emit) {
   size_t n = 0;
   NvsEntry e;
   if (restrict_to_selection) {
@@ -1096,50 +1115,53 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
       root["version"] = 1;
       JsonObject prefs = root["preferences"].to<JsonObject>();
       exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
-                                [&](const NvsEntry &e, const PrefSelection *s) {
-        char key_str[16];
-        snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-        std::string value;
-        const RuntimeEntry *re = s == nullptr ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
-                                                               selected_entity_count)
-                                              : nullptr;
-        if (s != nullptr) {
-          encode_value(value, *s, e.blob, e.len);
-        } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
-          value = HEX_PREFIX;
-          append_hex(value, e.blob, e.len);
-        }
-        prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
-      });
+                                 [&](const NvsEntry &e, const PrefSelection *s) {
+                                   char key_str[16];
+                                   snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+                                   std::string value;
+                                   const RuntimeEntry *re =
+                                       s == nullptr
+                                           ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
+                                                            selected_entity_count)
+                                           : nullptr;
+                                   if (s != nullptr) {
+                                     encode_value(value, *s, e.blob, e.len);
+                                   } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
+                                     value = HEX_PREFIX;
+                                     append_hex(value, e.blob, e.len);
+                                   }
+                                   prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
+                                 });
     });
     out.assign(buf.data(), buf.size());
   } else {
     out += "# ESPHome preferences export (kv v1)\n";
     out += "# <global id or numeric NVS key>=<typed value or hex:...>\n";
     exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
-                                [&](const NvsEntry &e, const PrefSelection *s) {
-      if (s != nullptr) {
-        out += s->name;
-        out += '=';
-        encode_value(out, *s, e.blob, e.len);
-      } else {
-        const RuntimeEntry *re =
-            runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr, selected_entity_count);
-        if (re != nullptr) {
-          out += re->name;
-        } else {
-          char key_str[16];
-          snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-          out += key_str;
-        }
-        out += '=';
-        if (re == nullptr || !encode_entity_value(out, *re, e.blob, e.len)) {
-          out += HEX_PREFIX;
-          append_hex(out, e.blob, e.len);
-        }
-      }
-      out += '\n';
-    });
+                               [&](const NvsEntry &e, const PrefSelection *s) {
+                                 if (s != nullptr) {
+                                   out += s->name;
+                                   out += '=';
+                                   encode_value(out, *s, e.blob, e.len);
+                                 } else {
+                                   const RuntimeEntry *re =
+                                       runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
+                                                      selected_entity_count);
+                                   if (re != nullptr) {
+                                     out += re->name;
+                                   } else {
+                                     char key_str[16];
+                                     snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+                                     out += key_str;
+                                   }
+                                   out += '=';
+                                   if (re == nullptr || !encode_entity_value(out, *re, e.blob, e.len)) {
+                                     out += HEX_PREFIX;
+                                     append_hex(out, e.blob, e.len);
+                                   }
+                                 }
+                                 out += '\n';
+                               });
   }
   nvs_close(handle);
 
@@ -1192,8 +1214,7 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
     buf[name_len] = '\0';
     char *end = nullptr;
     unsigned long v = strtoul(buf, &end, 10);
-    if (end == nullptr || *end != '\0' ||
-        (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
+    if (end == nullptr || *end != '\0' || (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
       skipped++;  // unknown name, or filtered out by the configured selection
       return true;
     }
@@ -1234,8 +1255,8 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
 }
 
 bool preferences_import_from_storage(const char *path, const char *format, bool reboot, const PrefSelection *sel,
-                                     size_t count, bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
-                                     size_t selected_entity_count) {
+                                     size_t count, bool restrict_to_selection,
+                                     esphome::EntityBase *const *selected_entities, size_t selected_entity_count) {
   const bool as_json = strcmp(format, "json") == 0;
   if (!as_json && strcmp(format, "kv") != 0) {
     ESP_LOGE(TAG, "Unsupported format '%s'", format);
@@ -1305,8 +1326,8 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
         skipped++;
         continue;
       }
-      ok = import_one(handle, line, eq - line, eq + 1, line_len - (eq + 1 - line), sel, count,
-                      restrict_to_selection, selected_entities, selected_entity_count, imported, skipped);
+      ok = import_one(handle, line, eq - line, eq + 1, line_len - (eq + 1 - line), sel, count, restrict_to_selection,
+                      selected_entities, selected_entity_count, imported, skipped);
     }
   }
   if (ok && (err = nvs_commit(handle)) != ESP_OK) {
