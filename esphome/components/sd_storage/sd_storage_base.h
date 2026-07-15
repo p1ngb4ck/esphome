@@ -146,7 +146,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   uint64_t used_bytes_{0};
   const char *storage_id_{nullptr};
   GPIOPin *cd_pin_{nullptr};
-  char fatfs_drive_[3]{};  // "N:" — set via set_fatfs_drive_() after a successful mount
+  char fatfs_drive_[5]{};  // "N:" — set via set_fatfs_drive_() after a successful mount
 
   LazyCallbackManager<void(const char *)> on_mounted_;
   LazyCallbackManager<void()> on_removed_;
