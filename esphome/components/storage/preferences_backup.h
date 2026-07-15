@@ -46,11 +46,11 @@ struct PrefSelection {
 // config (restrict == false: the whole namespace round-trips, table entries
 // render readable, unknown keys — entity states etc. — fall back to hex).
 bool preferences_export_to_storage(const char *path, const char *format, const PrefSelection *selection,
-                                   size_t count, bool restrict_to_selection, const char *const *entity_names,
-                                   size_t entity_name_count);
+                                   size_t count, bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
+                                   size_t selected_entity_count);
 bool preferences_import_from_storage(const char *path, const char *format, bool reboot,
                                      const PrefSelection *selection, size_t count, bool restrict_to_selection,
-                                     const char *const *entity_names, size_t entity_name_count);
+                                     esphome::EntityBase *const *selected_entities, size_t selected_entity_count);
 
 // ---- runtime entity name registry (baked registration calls) ----
 // Codegen enumerates entity IDs in its coroutine and emits one registration
@@ -79,14 +79,10 @@ enum class EntityKind : uint8_t {
   DATETIME,
 };
 
-void register_entity_pref(esphome::EntityBase *entity, const char *name, uint32_t version, EntityKind kind,
-                          uint16_t aux = 0);
-#ifdef USE_TEXT
-namespace detail {
-void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
-                             const char *pattern);
-}  // namespace detail
-#endif  // USE_TEXT
+// Entity naming/typing is resolved ENTIRELY at runtime by the sweep in
+// preferences_backup.cpp (App entity lists + per-type version constants);
+// codegen contributes only the globals table and, for listed entity IDs,
+// the object pointers handed to the actions.
 
 }  // namespace esphome::storage
 

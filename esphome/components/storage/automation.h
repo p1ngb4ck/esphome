@@ -209,15 +209,12 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
     this->count_ = count;
     this->restrict_ = restrict_to_selection;
   }
-  void set_entity_selection(const char *const *names, size_t count) {
-    this->entity_names_ = names;
-    this->entity_name_count_ = count;
-  }
+  void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
     preferences_export_to_storage(path.c_str(), this->format_, this->selection_, this->count_, this->restrict_,
-                                  this->entity_names_, this->entity_name_count_);
+                                  this->selected_entities_.data(), this->selected_entities_.size());
   }
 
  protected:
@@ -225,8 +222,7 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
   bool restrict_{false};
-  const char *const *entity_names_{nullptr};
-  size_t entity_name_count_{0};
+  std::vector<esphome::EntityBase *> selected_entities_;
 };
 
 template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
@@ -239,15 +235,12 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
     this->count_ = count;
     this->restrict_ = restrict_to_selection;
   }
-  void set_entity_selection(const char *const *names, size_t count) {
-    this->entity_names_ = names;
-    this->entity_name_count_ = count;
-  }
+  void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
     preferences_import_from_storage(path.c_str(), this->format_, this->reboot_, this->selection_, this->count_,
-                                    this->restrict_, this->entity_names_, this->entity_name_count_);
+                                    this->restrict_, this->selected_entities_.data(), this->selected_entities_.size());
   }
 
  protected:
@@ -256,8 +249,7 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
   bool restrict_{false};
-  const char *const *entity_names_{nullptr};
-  size_t entity_name_count_{0};
+  std::vector<esphome::EntityBase *> selected_entities_;
 };
 #endif  // USE_STORAGE_PREFERENCES && USE_ESP32
 

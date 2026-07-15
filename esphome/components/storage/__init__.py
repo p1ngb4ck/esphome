@@ -623,66 +623,6 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
 # (module, class, version, EntityKind) — kinds map to real-struct codecs in
 # preferences_backup.cpp; anything not matched below registers as RAW (named,
 # hex value). datetime template platforms carry their own versions.
-_ENTITY_KINDS = (
-    ("fan", "Fan", 0x71700ABB, "FAN"),
-    ("climate", "Climate", 0x848EA6AD, "CLIMATE"),
-    ("light", "LightState", 0, "LIGHT"),
-    ("cover", "Cover", 0, "COVER"),
-    ("valve", "Valve", 0, "VALVE"),
-    ("switch", "Switch", 0, "BOOL"),
-    ("number", "Number", 0, "FLOAT"),
-    # datetime template platforms carry their OWN versions
-    # (template_date/time/datetime.cpp) — concrete classes, no shared base
-    # listed, so ordering vs each other does not matter
-    ("datetime", "DateEntity", 194434030, "DATE"),
-    ("datetime", "TimeEntity", 194434060, "TIME"),
-    ("datetime", "DateTimeEntity", 194434090, "DATETIME"),
-    ("select", "Select", 0, "SELECT_INDEX"),
-    ("media_player", "MediaPlayer", 0, "MEDIA_VOLUME"),
-)
-
-
-def _entity_registration(reg_id) -> str | None:
-    """Generated registration call for a restoring entity ID, or None if the
-    ID is not an entity. The KEY is computed at runtime by the entity object
-    itself — codegen only supplies name and per-type version."""
-    type_ = reg_id.type
-    # MockObj fabricates ANY attribute via __getattr__ (a bare uint8_t ID
-    # would happily "inherit" from Text and return a truthy MockObj) — only a
-    # real MockObjClass carries an actual inheritance chain.
-    if not isinstance(type_, cg.MockObjClass):
-        return None
-    from esphome.components import text as text_
-
-    if type_.inherits_from(text_.Text):
-        # trait-salted key (template_text.cpp) — traits read from the live
-        # object inside the helper; nothing recipe-shaped is baked here
-        return (
-            f"esphome::storage::detail::register_text_pref_impl({reg_id.id}, \"{reg_id.id}\", "
-            f"{reg_id.id}->traits.get_min_length(), {reg_id.id}->traits.get_max_length(), "
-            f"{reg_id.id}->traits.get_pattern_c_str())"
-        )
-    # The concrete kind classes are checked FIRST and independently of
-    # EntityBase: some core declarations lack their Python-side parents
-    # entirely (media_player_ns.class_("MediaPlayer") — no cg.EntityBase!),
-    # so inherits_from(EntityBase) is False for them even though the C++
-    # class is an entity. EntityBase is only the RAW fallback gate.
-    version, kind = 0, "RAW"
-    matched = False
-    for mod_name, cls_name, ver, k in _ENTITY_KINDS:
-        mod = __import__(f"esphome.components.{mod_name}", fromlist=[cls_name])
-        if hasattr(mod, cls_name) and type_.inherits_from(getattr(mod, cls_name)):
-            version, kind = ver, k
-            matched = True
-            break
-    if not matched and not type_.inherits_from(cg.EntityBase):
-        return None
-    return (
-        f'esphome::storage::register_entity_pref({reg_id.id}, "{reg_id.id}", '
-        f"{version}UL, esphome::storage::EntityKind::{kind})"
-    )
-
-
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
@@ -711,49 +651,32 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         # ID it returns carries the real C++ class (codegen-world data, no
         # validation-step leftovers).
         entries = []
-        entity_names = []
+        has_entities = False
         for gid in selection:
-            full_id, _ = await cg.get_variable_with_full_id(gid)
+            full_id, obj = await cg.get_variable_with_full_id(gid)
             parsed = _pref_type_from_class(str(full_id.type))
             if parsed is not None:
                 entries.append(_entry(gid.id, *parsed))
                 continue
-            if reg := _entity_registration(full_id):
-                # entity preference: named round-trip, value stays hex
-                cg.add(cg.RawExpression(reg))
-                entity_names.append(gid.id)
-                continue
-            raise cv.Invalid(
-                f"'{gid.id}' stores no known preference (restoring global or "
-                f"restorable entity required)"
-            )
-        _bake(entries, True)
-        if entity_names:
-            arr = f"{action_id}_pent"
-            cg.add_global(
-                cg.RawExpression(
-                    f"static const char *const {arr}[] = {{"
-                    + ", ".join(f'"{n}"' for n in entity_names)
-                    + "}"
-                )
-            )
-            cg.add(var.set_entity_selection(cg.RawExpression(arr), len(entity_names)))
+            # anything else is treated as an entity: the runtime sweep
+            # resolves name/kind/key from the live object; unresolvable
+            # selections log a loud skip at play time
+            cg.add(var.add_selected_entity(obj))
+            has_entities = True
+        if entries or has_entities:
+            _bake(entries, True)
     else:
         # All mode: enumerate the codegen variable registry once every
         # pending to_code has run. Scheduled as its own coroutine job — it is
         # enqueued behind all already-queued component jobs, so the globals
         # are registered by the time it executes.
         async def _bake_all():
+            # globals only — entity naming is entirely the runtime sweep's job
             entries = []
-            seen_regs = set()
             for reg_id in CORE.variables:
                 parsed = _pref_type_from_class(str(reg_id.type))
                 if parsed is not None:
                     entries.append(_entry(reg_id.id, *parsed))
-                    continue
-                if (reg := _entity_registration(reg_id)) and reg_id.id not in seen_regs:
-                    seen_regs.add(reg_id.id)
-                    cg.add(cg.RawExpression(reg))
             if entries:
                 _bake(entries, False)
 
