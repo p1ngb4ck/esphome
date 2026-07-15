@@ -107,12 +107,32 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
       this->storage_ = nullptr;
       return ESP_ERR_NOT_SUPPORTED;
     }
-    storage::StorageError serr = this->storage_->open(rel, this->storage_handle_, storage::OpenMode::READ);
-    if (serr != storage::StorageError::OK) {
-      ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
+    // The handle API lives on FilesystemStorage; NetworkStorage (NFS) is
+    // stateless by design and reads chunks by path+offset. get_storage_type()
+    // is the no-RTTI discrimination hook the storage API provides for this.
+    if (this->storage_->get_storage_type() == storage::StorageType::FILESYSTEM) {
+      auto *fs = static_cast<storage::FilesystemStorage *>(this->storage_);
+      storage::StorageError serr = fs->open(rel, this->storage_handle_, storage::OpenMode::READ);
+      if (serr != storage::StorageError::OK) {
+        ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
+        this->storage_ = nullptr;
+        this->storage_handle_ = nullptr;
+        return ESP_ERR_NOT_FOUND;
+      }
+    } else if (this->storage_->get_storage_type() == storage::StorageType::NETWORK) {
+      storage::FileStat st;
+      storage::StorageError serr = this->storage_->stat(rel, &st);  // early existence check
+      if (serr != storage::StorageError::OK) {
+        ESP_LOGE(TAG, "'%s' not found on network storage (%s)", path, storage::error_to_string(serr));
+        this->storage_ = nullptr;
+        return ESP_ERR_NOT_FOUND;
+      }
+      this->storage_path_ = rel;  // owned copy — rel points into resolver scratch
+      this->storage_offset_ = 0;
+    } else {
+      ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", path);
       this->storage_ = nullptr;
-      this->storage_handle_ = nullptr;
-      return ESP_ERR_NOT_FOUND;
+      return ESP_ERR_NOT_SUPPORTED;
     }
     this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(this->buffer_size_);
     if (this->output_transfer_buffer_ == nullptr) {
@@ -248,7 +268,7 @@ AudioReaderState AudioReader::read() {
   } else if (this->current_audio_file_ != nullptr) {
     return this->file_read_();
 #ifdef USE_STORAGE
-  } else if (this->storage_handle_ != nullptr) {
+  } else if (this->storage_ != nullptr) {
     return this->storage_read_();
 #endif
   }
@@ -329,9 +349,17 @@ AudioReaderState AudioReader::storage_read_() {
 
   if (this->output_transfer_buffer_->free() > 0) {
     size_t received = 0;
-    storage::StorageError serr = this->storage_->read(this->storage_handle_,
-                                                      this->output_transfer_buffer_->get_buffer_end(),
-                                                      this->output_transfer_buffer_->free(), &received);
+    storage::StorageError serr;
+    if (this->storage_handle_ != nullptr) {
+      serr = static_cast<storage::FilesystemStorage *>(this->storage_)
+                 ->read(this->storage_handle_, this->output_transfer_buffer_->get_buffer_end(),
+                        this->output_transfer_buffer_->free(), &received);
+    } else {
+      serr = static_cast<storage::NetworkStorage *>(this->storage_)
+                 ->read_chunk(this->storage_path_.c_str(), this->output_transfer_buffer_->get_buffer_end(),
+                              this->storage_offset_, this->output_transfer_buffer_->free(), &received);
+      this->storage_offset_ += received;
+    }
     if (serr != storage::StorageError::OK) {
       ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
       this->cleanup_connection_();
@@ -362,10 +390,12 @@ void AudioReader::cleanup_connection_() {
   }
 #ifdef USE_STORAGE
   if (this->storage_handle_ != nullptr) {
-    this->storage_->close(this->storage_handle_);
+    static_cast<storage::FilesystemStorage *>(this->storage_)->close(this->storage_handle_);
     this->storage_handle_ = nullptr;
-    this->storage_ = nullptr;
   }
+  this->storage_ = nullptr;
+  this->storage_path_.clear();
+  this->storage_offset_ = 0;
 #endif
 }
 

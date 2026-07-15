@@ -85,8 +85,12 @@ class AudioReader {
   AudioFileType audio_file_type_{AudioFileType::NONE};
   const uint8_t *file_current_{nullptr};
 #ifdef USE_STORAGE
+  // FILESYSTEM storages stream through a handle; NETWORK storages (NFS) are
+  // stateless by design — chunked reads by path + self-tracked offset.
   storage::PathStorage *storage_{nullptr};
-  storage::FileHandle *storage_handle_{nullptr};
+  storage::FileHandle *storage_handle_{nullptr};  // FILESYSTEM only
+  std::string storage_path_;                      // NETWORK only (owned copy)
+  uint64_t storage_offset_{0};                    // NETWORK only
 #endif
 };
 }  // namespace esphome::audio
