@@ -1,5 +1,11 @@
 #pragma once
 
+// defines.h MUST be seen before the guard below is evaluated: the preferences
+// action classes are define-gated, and main.cpp placement-news them into
+// sizeof()-sized static buffers — any TU seeing this header with a different
+// define state gets a different class size (ODR violation, boot crash).
+#include "esphome/core/defines.h"
+
 #include "storage.h"
 #if defined(USE_STORAGE_PREFERENCES) && defined(USE_ESP32)
 #include "preferences_backup.h"  // PrefSelection — file scope, NOT inside the namespace below
