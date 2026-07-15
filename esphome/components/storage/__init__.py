@@ -319,7 +319,11 @@ async def _build_write_action(config, action_id, template_arg, args, append):
         # Render printf-style format + args into the content string, logger.log-style:
         # the validated arg lambdas are embedded verbatim as C++ expressions.
         format_literal = str(cg.safe_exp(config[CONF_FORMAT]))
-        arg_exprs = "".join(f", {x}" for x in config[CONF_ARGS])
+        # each arg is normalized through printf_arg(): std::string -> c_str(),
+        # everything else passes through (see automation.h for the UB rationale)
+        arg_exprs = "".join(
+            f", esphome::storage::printf_arg({x})" for x in config[CONF_ARGS]
+        )
         lambda_ = await cg.process_lambda(
             core.Lambda(f"return str_sprintf({format_literal}{arg_exprs});"),
             args,
@@ -573,7 +577,6 @@ def _pref_type_from_class(type_str: str) -> tuple[str, int] | None:
                 return _PREF_SCALAR_TYPES[base], count
         return "HEX", 0  # restoring, but a type we cannot render — hex round-trip
     return None
-
 
 
 ExportPreferencesAction = storage_ns.class_(
