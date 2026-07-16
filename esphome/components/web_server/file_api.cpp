@@ -1096,7 +1096,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
 #ifdef USE_STORAGE_TRANSFER_BUFFER
       if (this->upload_.staged != nullptr) {
         if (this->upload_.offset + len > this->upload_.staged_cap) {
-          this->upload_.error = storage::StorageError::IO_ERROR;  // cannot happen: cap = content_len
+          this->upload_.error = storage::StorageError::WRITE_ERROR;  // cannot happen: cap = content_len
           return;
         }
         memcpy(this->upload_.staged + this->upload_.offset, data, len);
