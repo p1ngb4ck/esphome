@@ -66,6 +66,12 @@ enum class StorageType : uint8_t {
 struct StorageInfo {
   const char *id;
   const char *name;
+  // Stable machine-readable medium kind ("sd", "usb", "nfs", "flash", ...) for consumers
+  // that must distinguish media, e.g. to pick an icon. Unlike `name` this is not a display
+  // string and never user-configured. Optional: drivers that don't report one leave it at
+  // nullptr (every caller zero-initializes StorageInfo), consumers then fall back to
+  // get_storage_type().
+  const char *kind;
   uint64_t total_bytes;
   uint64_t free_bytes;
   uint32_t block_size;

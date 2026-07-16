@@ -563,6 +563,7 @@ bool USBStorageDevice::build_fatfs_path_(const char *rel_path, char *out, size_t
 storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
   info->id = this->mount_path_;
   info->name = "USB Storage";
+  info->kind = "usb";
   info->is_mounted = this->fs_mounted_;
   info->is_removable = true;
   info->is_read_only = false;

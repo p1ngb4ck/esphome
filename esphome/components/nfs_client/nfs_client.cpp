@@ -525,6 +525,7 @@ storage::StorageError NFSClient::get_info(storage::StorageInfo *info) {
   // round-trip while unmounted.
   info->id = (this->mount_path_ != nullptr) ? this->mount_path_ : "nfs";
   info->name = "NFS";
+  info->kind = "nfs";
   info->block_size = 4096;
   info->is_removable = false;
   info->is_read_only = false;
@@ -971,8 +972,7 @@ bool NFSClient::resolve_hostname_() {
     }
   }
 
-  struct addrinfo hints {
-  }, *result = nullptr;
+  struct addrinfo hints{}, *result = nullptr;
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
