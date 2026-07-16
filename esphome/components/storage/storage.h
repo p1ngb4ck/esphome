@@ -168,6 +168,29 @@ class Storage : public Component {
   virtual uint8_t get_capabilities() const { return 0; }
 };
 
+// What a raw medium's erase() accepts — NOT how it does it: which opcode (chip/block/sector)
+// runs is the driver's business. Consumers use these bits only to decide what to offer, e.g.
+// whether to show an erase control at all, and whether a write has to be preceded by one.
+enum RawEraseCaps : uint8_t {
+  // Writes only turn bits one way and must be preceded by erasing the covering unit (NOR
+  // flash). Media without this bit overwrite in place (FRAM, EEPROM) and have no erase at all.
+  RAW_WRITE_NEEDS_ERASE = 1 << 0,
+  RAW_ERASE_SECTOR = 1 << 1,  // smallest erasable unit, see RawGeometry::erase_sector
+  RAW_ERASE_BLOCK = 1 << 2,   // larger erase unit, see RawGeometry::erase_block
+  RAW_ERASE_CHIP = 1 << 3,    // whole device in one command
+};
+
+// Geometry of a raw medium. Raw media differ fundamentally — a FRAM is byte-addressable with
+// no erase whatsoever, a NOR flash erases in sectors and needs it before every write — so
+// consumers (actions, HTTP API, browser) must ask instead of assuming flash semantics.
+struct RawGeometry {
+  uint64_t capacity{0};
+  uint32_t write_page{1};    // write granularity/alignment in bytes; 1 = byte addressable
+  uint32_t erase_sector{0};  // smallest erasable unit; 0 = medium has no erase
+  uint32_t erase_block{0};   // larger erase unit; 0 = none
+  uint8_t caps{0};           // RawEraseCaps bitmask
+};
+
 // Offset-based byte access (raw flash, FRAM, EEPROM, NVS blobs)
 class RawStorage : public Storage {
  public:
@@ -179,8 +202,22 @@ class RawStorage : public Storage {
   // unspecified in that case. Callers loop until *bytes_transferred == 0 or an error.
   virtual StorageError read(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) = 0;
   virtual StorageError write(uint64_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) = 0;
+
+  // Erases [offset, offset+len).
+  //
+  // Contract:
+  //  - Media that advertise no RAW_ERASE_* capability return NOT_SUPPORTED. They overwrite in
+  //    place, so there is nothing to erase — and answering OK would tell a caller its range is
+  //    blank when it is not.
+  //  - The range must be aligned to erase_sector at both ends. Erasing is destructive at that
+  //    granularity, so an unaligned request would take the neighbouring data sharing the first
+  //    or last unit with it: that returns INVALID_ARGS instead.
+  //  - Within a valid range the driver picks the coarsest opcode that fits.
   virtual StorageError erase(uint64_t offset, size_t len) = 0;
   virtual StorageError format() = 0;
+
+  // Every driver answers for its own medium — consumers must not infer geometry from the type.
+  virtual void get_raw_geometry(RawGeometry *out) const = 0;
 };
 
 // Common path-based operations shared by FilesystemStorage and NetworkStorage.

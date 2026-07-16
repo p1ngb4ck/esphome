@@ -47,6 +47,10 @@ class BinaryStorage : public storage::RawStorage {
   virtual const char *get_device_type() const = 0;
   virtual uint32_t get_page_size() const { return 1; }
   virtual uint32_t get_erase_size() const { return 0; }
+  // Larger erase unit, 0 when the device has none (see RawEraseCaps::RAW_ERASE_BLOCK).
+  virtual uint32_t get_erase_block_size() const { return 0; }
+  // Default: media that overwrite in place (FRAM, EEPROM) — no erase, none needed.
+  virtual uint8_t get_erase_caps() const { return 0; }
   virtual bool is_ready() { return true; }
 
   // Deliberately explicit (not just the inherited default): every binary_storage device is an
@@ -64,6 +68,8 @@ class BinaryStorage : public storage::RawStorage {
   storage::StorageError write(uint64_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) override = 0;
   storage::StorageError erase(uint64_t offset, size_t len) override = 0;
   storage::StorageError format() override;
+  // Implemented once here from the device getters above — drivers only report their numbers.
+  void get_raw_geometry(storage::RawGeometry *out) const override;
 
   //========================================================================
   // Utility
