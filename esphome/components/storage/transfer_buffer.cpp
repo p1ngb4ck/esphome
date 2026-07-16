@@ -25,7 +25,7 @@ void TransferBuffer::setup() {
   }
   if (this->size_ == 0) {
     this->size_ = total / 4;
-  } else if (this->size_ > (total / 5) * 4) {
+  } else if (!this->override_limit_ && this->size_ > (total / 5) * 4) {
     ESP_LOGE(TAG, "configured size %u exceeds 80%% of PSRAM (%u of %u) — transfer buffer disabled",
              (unsigned) this->size_, (unsigned) ((total / 5) * 4), (unsigned) total);
     this->mark_failed();
@@ -36,6 +36,10 @@ void TransferBuffer::setup() {
   // Config validation already requires the psram component; allocation can still fail
   // (fragmentation, other consumers) — then the buffer stays disabled and every consumer
   // keeps streaming, which is the documented fallback.
+  if (this->override_limit_ && this->size_ > (total / 5) * 4) {
+    ESP_LOGW(TAG, "size %u exceeds 80%% of PSRAM (%u) — safety limit overridden by config", (unsigned) this->size_,
+             (unsigned) ((total / 5) * 4));
+  }
   RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
   this->buf_ = allocator.allocate(this->size_);
   if (this->buf_ == nullptr) {

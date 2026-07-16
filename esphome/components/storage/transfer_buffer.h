@@ -20,6 +20,9 @@ class TransferBuffer : public Component {
   void dump_config() override;
 
   void set_size(size_t size) { this->size_ = size; }
+  // Removes the 80%-of-PSRAM safety line for explicit sizes; a failing allocation then
+  // remains the only (graceful) guard.
+  void set_override_limit(bool v) { this->override_limit_ = v; }
 
   // Single-owner borrow, callable from any task (atomic claim). Returns the buffer base
   // when `need` fits and the buffer is free, nullptr otherwise — callers must treat a
@@ -30,6 +33,7 @@ class TransferBuffer : public Component {
 
  protected:
   size_t size_{0};
+  bool override_limit_{false};
   uint8_t *buf_{nullptr};
   std::atomic<bool> busy_{false};
 };

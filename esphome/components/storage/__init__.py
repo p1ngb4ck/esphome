@@ -78,6 +78,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional("psram_transfer_buffer_size"): cv.All(
             cv.validate_bytes, cv.Range(min=64 * 1024)
         ),
+        cv.Optional("psram_transfer_buffer_override_limit", default=False): cv.boolean,
         cv.GenerateID(): cv.declare_id(StorageRegistry),
         cv.Optional(CONF_COPY_CHUNK_SIZE, default=16384): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
@@ -166,6 +167,12 @@ def _transfer_buffer_final_validate(config):
             raise cv.Invalid(
                 "'psram_transfer_buffer_size' requires 'enable_psram_transfer_buffer' to be true"
             )
+    if config.get("psram_transfer_buffer_override_limit") and (
+        not has_psram or not enabled
+    ):
+        raise cv.Invalid(
+            "'psram_transfer_buffer_override_limit' requires an enabled psram transfer buffer"
+        )
     # The 25% default and the 80% ceiling are enforced in setup(): the actual PSRAM
     # size is detected at boot and unknowable at config time.
     return config
@@ -191,6 +198,7 @@ async def to_code(config):
         await cg.register_component(tb, {})
         # 0 = auto: setup() sizes the arena to 25% of the detected PSRAM
         cg.add(tb.set_size(config.get("psram_transfer_buffer_size", 0)))
+        cg.add(tb.set_override_limit(config["psram_transfer_buffer_override_limit"]))
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
