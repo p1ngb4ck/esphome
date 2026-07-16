@@ -16,7 +16,12 @@ extern "C" {
 
 #ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
 #define VFS_FAT_MOUNT_DEFAULT_CONFIG() \
-  { .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 0, .disk_status_check_enable = false, }
+  { \
+      .format_if_mount_failed = false, \
+      .max_files = 5, \
+      .allocation_unit_size = 0, \
+      .disk_status_check_enable = false, \
+  }
 #endif
 
 namespace esphome::sd_storage {
@@ -81,6 +86,7 @@ void SdSpi::dump_config() {
   ESP_LOGCONFIG(TAG_SPI, "  Mount path: %s", this->mount_path_);
   ESP_LOGCONFIG(TAG_SPI, "  Mode 1 bit: %s", YESNO(this->mode_1bit_));
   ESP_LOGCONFIG(TAG_SPI, "  CS Pin: %d", spi::Utility::get_pin_no(this->cs_));
+  ESP_LOGCONFIG(TAG_SPI, "  Data rate: %" PRIu32 " kHz", this->data_rate_ / 1000);
   log_pin(TAG_SPI, "  CD Pin: ", this->cd_pin_);
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
@@ -125,12 +131,28 @@ StorageError SdSpi::mount() {
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
   host.slot = this->spi_interface_;
 
+  // The IDF sdspi driver runs the actual transfers, not our SPIDevice delegate, so the
+  // configured bus speed has to be handed over here — otherwise 'data_rate:' is accepted by
+  // the schema and silently ignored. Default comes from the SPIDevice declaration (10 MHz).
+  uint32_t max_freq_khz = this->data_rate_ / 1000;
+  if (max_freq_khz < SDMMC_FREQ_PROBING)
+    max_freq_khz = SDMMC_FREQ_PROBING;
+
   esp_err_t mount_error = ESP_OK;
-  for (const auto freq_khz : {SDMMC_FREQ_DEFAULT, SDMMC_FREQ_PROBING}) {
-    host.max_freq_khz = freq_khz;
+  for (const uint32_t freq_khz : {max_freq_khz, static_cast<uint32_t>(SDMMC_FREQ_PROBING)}) {
+    host.max_freq_khz = static_cast<int>(freq_khz);
+    ESP_LOGD(TAG_SPI, "Mounting at %" PRIu32 " kHz", freq_khz);
     mount_error = esp_vfs_fat_sdspi_mount(this->mount_path_, &host, &slot_config, &mount_config, &this->card_);
-    if (mount_error != ESP_ERR_INVALID_RESPONSE)
+    if (mount_error == ESP_OK || freq_khz == static_cast<uint32_t>(SDMMC_FREQ_PROBING))
       break;
+    // Only bus signalling failures are worth a slower retry: a card that times out, answers
+    // garbage or fails CRC at speed frequently enumerates fine at the 400 kHz probing clock
+    // (long traces, a bus shared with other devices, weak pull-ups). Anything else (no card,
+    // no memory, bad arguments) will not improve by clocking slower.
+    if (mount_error != ESP_ERR_TIMEOUT && mount_error != ESP_ERR_INVALID_RESPONSE && mount_error != ESP_ERR_INVALID_CRC)
+      break;
+    ESP_LOGW(TAG_SPI, "Mount at %" PRIu32 " kHz failed (%s), retrying at %d kHz", freq_khz,
+             esp_err_to_name(mount_error), SDMMC_FREQ_PROBING);
   }
 
   if (mount_error != ESP_OK) {
@@ -190,7 +212,6 @@ StorageError SdSpi::unmount() {
   this->is_mounted_ = false;
   sdspi_host_deinit();
   ESP_LOGI(TAG_SPI, "SD card unmounted safely");
-
 
   return StorageError::OK;
 }
