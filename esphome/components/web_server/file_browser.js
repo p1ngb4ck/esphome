@@ -2,6 +2,9 @@
 // Injected into the EXISTING web_server v3 page (served as /0.js via the js_include hook) —
 // it appends a collapsible "Files" card below <esp-app>; it is NOT a separate page.
 // Talks exclusively to the /files/* REST API.
+// Styling mirrors the v3 entity table (system font, hairline row separators, #03a9f4
+// accent, automatic dark mode); all rules are scoped to #esp-file-browser so nothing
+// leaks into the host page, whether we land inside the shadow root or in the body.
 (() => {
   const $ = (t, a = {}, ...c) => {
     const e = document.createElement(t);
@@ -20,17 +23,50 @@
   };
   const fmtSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " kB" : (n / 1048576).toFixed(1) + " MB";
 
+  const style = $("style", { textContent: `
+    #esp-file-browser { max-width: 600px; margin: 0 auto; font-family: -apple-system, system-ui, sans-serif; color: #222; }
+    #esp-file-browser .efb-title { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+      font-size: 1.17em; font-weight: bold; padding: 10px 8px; border-top: 1px solid #e0e0e0; }
+    #esp-file-browser .efb-chevron { color: #03a9f4; font-size: .8em; transition: transform .15s; }
+    #esp-file-browser.efb-open .efb-chevron { transform: rotate(90deg); }
+    #esp-file-browser .efb-row { display: flex; gap: 8px; align-items: center; padding: 6px 8px;
+      border-top: 1px solid #e0e0e0; min-height: 28px; }
+    #esp-file-browser .efb-row:hover { background: rgba(3, 169, 244, .06); }
+    #esp-file-browser .efb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #esp-file-browser .efb-dir { color: #03a9f4; margin-right: 6px; }
+    #esp-file-browser .efb-size, #esp-file-browser .efb-muted { font-size: .85em; opacity: .6; }
+    #esp-file-browser .efb-status { font-size: .85em; opacity: .8; min-height: 1.2em; padding: 4px 8px; }
+    #esp-file-browser button, #esp-file-browser a.efb-act { font: inherit; font-size: .8em; color: #03a9f4;
+      background: none; border: 1px solid #03a9f4; border-radius: 4px; padding: 2px 8px; cursor: pointer;
+      text-decoration: none; line-height: 1.4; }
+    #esp-file-browser button:hover, #esp-file-browser a.efb-act:hover { background: #03a9f4; color: #fff; }
+    #esp-file-browser button:disabled { opacity: .4; pointer-events: none; }
+    #esp-file-browser button.efb-primary { background: #03a9f4; color: #fff; }
+    #esp-file-browser button.efb-danger { color: #d32f2f; border-color: #d32f2f; }
+    #esp-file-browser button.efb-danger:hover { background: #d32f2f; color: #fff; }
+    #esp-file-browser input[type=file] { font-size: .8em; max-width: 45%; }
+    @media (prefers-color-scheme: dark) {
+      #esp-file-browser { color: #e1e1e1; }
+      #esp-file-browser .efb-title, #esp-file-browser .efb-row { border-top-color: #333; }
+      #esp-file-browser .efb-row:hover { background: rgba(3, 169, 244, .12); }
+    }
+  ` });
+
   const card = $("div", { id: "esp-file-browser" });
-  card.style.cssText = "max-width:600px;margin:8px auto;padding:12px;border:1px solid #8884;border-radius:12px;font-family:sans-serif";
-  const title = $("h2", { textContent: "Files" });
-  title.style.cssText = "cursor:pointer;margin:0;font-size:1.1em";
+  const title = $("div", { className: "efb-title" },
+    $("span", { className: "efb-chevron", textContent: "\u25B6" }),
+    $("span", { textContent: "Files" }));
   const body = $("div");
   body.style.display = "none";
-  title.onclick = () => { body.style.display = body.style.display === "none" ? "" : "none"; if (body.style.display === "") refresh(); };
-  const status = $("div");
-  status.style.cssText = "font-size:.85em;opacity:.8;min-height:1.2em";
+  title.onclick = () => {
+    const open = body.style.display === "none";
+    body.style.display = open ? "" : "none";
+    card.classList.toggle("efb-open", open);
+    if (open) refresh();
+  };
+  const status = $("div", { className: "efb-status" });
   const listing = $("div");
-  card.append(title, body);
+  card.append(style, title, body);
   body.append(status, listing);
 
   let cwd = null; // null = storage overview
@@ -51,17 +87,19 @@
     }
   };
 
+  // label may be a string or a prebuilt .efb-name element; extras (e.g. size) render
+  // as muted text between the name and the action buttons, exactly like v3 states.
   const row = (label, ...actions) => {
-    const r = $("div");
-    r.style.cssText = "display:flex;gap:8px;align-items:center;padding:2px 0";
-    const l = $("span", { textContent: label });
-    l.style.flex = "1";
+    const r = $("div", { className: "efb-row" });
+    const l = typeof label === "string" ? $("span", { className: "efb-name", textContent: label }) : label;
     r.append(l, ...actions);
     return r;
   };
-  const btn = (label, fn) => {
+  const dirName = (name) => $("span", { className: "efb-name" },
+    $("span", { className: "efb-dir", textContent: "\u25B8" }), $("span", { textContent: name }));
+  const btn = (label, fn, cls) => {
     const b = $("button", { textContent: label });
-    b.style.cssText = "font-size:.8em";
+    if (cls) b.className = cls;
     b.onclick = () => fn().then(refresh).catch((e) => setStatus("Error: " + e.message));
     return b;
   };
@@ -73,7 +111,7 @@
         const storages = await api("/files/storages");
         for (const s of storages) {
           const open = btn("open", async () => { cwd = s.mount_path; });
-          const acts = [open];
+          const acts = [$("span", { className: "efb-muted", textContent: s.type + (s.mounted ? "" : " · not mounted") }), open];
           // Per-direction capabilities: e.g. USB auto-mounts on insertion and only offers
           // safe-eject; each button also only makes sense in the opposite mounted state.
           if (s.can_mount && !s.mounted) {
@@ -82,16 +120,15 @@
           if (s.can_unmount && s.mounted) {
             acts.push(btn("unmount", () => api(`/files/unmount?path=${encodeURIComponent(s.mount_path)}`, { method: "POST" })));
           }
-          listing.append(row(`${s.mount_path} (${s.type}${s.mounted ? "" : ", not mounted"})`, ...acts));
+          listing.append(row(dirName(s.mount_path), ...acts));
         }
       } else {
-        listing.append(row(cwd, btn("up", async () => {
+        listing.append(row(dirName(cwd), btn("up", async () => {
           const i = cwd.lastIndexOf("/");
           cwd = i > 0 ? cwd.slice(0, i) : null;
         })));
         const up = $("input", { type: "file" });
-        const startBtn = $("button", { textContent: "start upload", disabled: true });
-        startBtn.style.cssText = "font-size:.8em";
+        const startBtn = $("button", { textContent: "start upload", disabled: true, className: "efb-primary" });
         up.onchange = () => { startBtn.disabled = !up.files.length; };
         startBtn.onclick = () => {
           if (!up.files.length) return;
@@ -129,7 +166,7 @@
         for (const e of d.entries) {
           const p = cwd + "/" + e.name;
           if (e.is_dir) {
-            listing.append(row("📁 " + e.name,
+            listing.append(row(dirName(e.name),
               btn("open", async () => { cwd = p; }),
               btn("copy", async () => {
                 const to = prompt("Copy directory to (full path)", p);
@@ -144,11 +181,10 @@
                 await pollJob(j.job, "move");
               }),
               btn("del", () => confirm(`Delete ${e.name} recursively?`)
-                ? api(`/files/delete?path=${encodeURIComponent(p)}&recursive=1`, { method: "POST" }) : Promise.resolve())));
+                ? api(`/files/delete?path=${encodeURIComponent(p)}&recursive=1`, { method: "POST" }) : Promise.resolve(), "efb-danger")));
           } else {
-            const dl = $("a", { textContent: "download", href: `/files/download?path=${encodeURIComponent(p)}` });
-            dl.style.fontSize = ".8em";
-            listing.append(row(`${e.name} (${fmtSize(e.size)})`, dl,
+            const dl = $("a", { textContent: "download", className: "efb-act", href: `/files/download?path=${encodeURIComponent(p)}` });
+            listing.append(row(e.name, $("span", { className: "efb-size", textContent: fmtSize(e.size) }), dl,
               btn("info", async () => {
                 const st = await api(`/files/stat?path=${encodeURIComponent(p)}`);
                 alert(`${st.name}\nSize: ${st.size} bytes (${fmtSize(st.size)})\nModified: ${st.mtime ? new Date(st.mtime * 1000).toLocaleString() : "unknown"}`);
@@ -166,10 +202,10 @@
                 await pollJob(j.job, "move");
               }),
               btn("del", () => confirm(`Delete ${e.name}?`)
-                ? api(`/files/delete?path=${encodeURIComponent(p)}`, { method: "POST" }) : Promise.resolve())));
+                ? api(`/files/delete?path=${encodeURIComponent(p)}`, { method: "POST" }) : Promise.resolve(), "efb-danger")));
           }
         }
-        if (d.truncated) listing.append(row("… (listing truncated)"));
+        if (d.truncated) listing.append(row($("span", { className: "efb-muted efb-name", textContent: "… (listing truncated)" })));
       }
     } catch (e) {
       setStatus("Error: " + e.message);
