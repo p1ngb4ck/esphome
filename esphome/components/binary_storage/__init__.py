@@ -107,7 +107,6 @@ CONF_ERASE_SIZE = "erase_size"
 CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
 CONF_MOUNT_ID = "mount_id"
-CONF_STORAGE_ID = "storage_id"
 CONF_STORAGE_NAME = "storage_name"
 CONF_DEVICE_NODE = "device_node"
 CONF_DEVICE_NODE_NAME = "device_node_name"
@@ -168,7 +167,6 @@ EEPROM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-            cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
             # browser is configured at all.
@@ -198,7 +196,6 @@ FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-            cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
             # browser is configured at all.
@@ -231,7 +228,6 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-            cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
             # browser is configured at all.
@@ -261,7 +257,6 @@ SPI_FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-            cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
             # browser is configured at all.
@@ -291,7 +286,6 @@ SPI_MRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-            cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
             # Whether this device gets its own node in the file browser. Defaults to on when a
             # browser is configured at all.
@@ -322,7 +316,6 @@ ONEWIRE_EEPROM_SCHEMA = cv.Schema(
         cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
         cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
-        cv.Optional(CONF_STORAGE_ID): cv.string,
         cv.Optional(CONF_STORAGE_NAME): cv.string,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -342,7 +335,6 @@ FLASH_PARTITION_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_MOUNT_PATH, default="/littlefs"): _validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
-        cv.Optional(CONF_STORAGE_ID): cv.string,
         cv.Optional(CONF_STORAGE_NAME): cv.string,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -537,7 +529,8 @@ async def to_code(config):
         cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
         cg.add(var.set_auto_format(config[CONF_AUTO_FORMAT]))
 
-        storage_id = config.get(CONF_STORAGE_ID, str(config[CONF_ID]))
+        # The device's identity in the registry is its YAML id — nothing else to choose.
+        storage_id = str(config[CONF_ID])
         storage_name = config.get(CONF_STORAGE_NAME, config[CONF_PARTITION_LABEL])
         cg.add(var.set_storage_id(storage_id))
         cg.add(var.set_storage_name(storage_name))
@@ -603,7 +596,8 @@ async def to_code(config):
     if (addr_bits := config.get(CONF_ADDRESSING_BITS)) is not None:
         cg.add(var.set_addressing_bits(addr_bits))
 
-    storage_id = config.get(CONF_STORAGE_ID, str(config[CONF_ID]))
+    # The device's identity in the registry is its YAML id — nothing else to choose.
+    storage_id = str(config[CONF_ID])
     storage_name = config.get(CONF_STORAGE_NAME, config.get(CONF_MODEL, device_type))
     cg.add(var.set_storage_id(storage_id))
     cg.add(var.set_storage_name(storage_name))
