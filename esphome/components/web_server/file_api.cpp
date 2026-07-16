@@ -25,6 +25,11 @@ static constexpr size_t FILE_API_CHUNK = 4096;
 // ---------------------------------------------------------------------------
 
 void WebServerFileApi::setup() {
+  // Async downloads (tier 1): bounded pipeline of one transfer task + small pointer queue.
+  this->dl_queue_ = xQueueCreate(DL_QUEUE_DEPTH, sizeof(DownloadJob *));
+  if (this->dl_queue_ != nullptr) {
+    xTaskCreate(WebServerFileApi::download_task_trampoline_, "fileapi_dl", 6144, this, 3, &this->dl_task_);
+  }
   this->op_done_ = xSemaphoreCreateBinary();
   this->base_->add_handler(this);
 }
@@ -714,18 +719,8 @@ void WebServerFileApi::advance_dir_transfer_() {
 void WebServerFileApi::loop() {
 #ifdef USE_STORAGE_WORKER
   DirTransfer &d = this->dir_;
-  // TEMP PROBE 3: proves this loop() actually executes on this build while a directory
-  // transfer is active. One-shot — remove together with the other probes.
-  static bool probe_file_api_loop_alive = false;
-  if (d.active && !probe_file_api_loop_alive) {
-    probe_file_api_loop_alive = true;
-    ESP_LOGI(TAG, "PROBE3: WebServerFileApi::loop() alive (dir transfer active)");
-  }
   if (!d.active || !d.awaiting_file || !d.file_done_)
     return;  // no directory transfer waiting on a file, or the file is still in flight
-  // TEMP PROBE 4: proves the per-file completion flag set by the worker callback is observed
-  // here, i.e. the full chain task->worker loop->callback->this loop is intact.
-  ESP_LOGI(TAG, "PROBE4: file_done_ observed result=%d file=%s", (int) d.file_result_, d.cur_src);
   d.awaiting_file = false;
   if (d.file_result_ != storage::StorageError::OK) {
     this->finish_dir_transfer_(d.file_result_);
@@ -861,13 +856,14 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     return;
   }
 
-  // Raw chunked httpd response: this handler is IDF-only by construction, so using the native
-  // chunk API directly is fine and avoids buffering the file.
-  httpd_req_t *req = *request;
-  httpd_resp_set_type(req, "application/octet-stream");
-  // Pass the real file name to the browser's save dialog. httpd_resp_set_hdr() stores the
-  // pointer (no copy), so the buffer must outlive every send below — function scope does.
-  char disposition[300];
+  // Build the transfer job up front; the disposition buffer must live inside the job
+  // because httpd_resp_set_hdr() keeps the pointer until the response is finished.
+  auto *job = new DownloadJob{};  // NOLINT(cppcoreguidelines-owning-memory)
+  job->ps = ps;
+  job->handle = handle;
+  job->is_fs = is_fs;
+  job->size = size;
+  strncpy(job->rel, rel_buf, sizeof(job->rel) - 1);
   {
     const char *base = strrchr(path.c_str(), '/');
     base = (base != nullptr && base[1] != '\0') ? base + 1 : path.c_str();
@@ -876,20 +872,55 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
       if (*p != '"' && *p != '\\' && static_cast<uint8_t>(*p) >= 0x20)
         safe_name += *p;
     }
-    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", safe_name.c_str());
+    snprintf(job->disposition, sizeof(job->disposition), "attachment; filename=\"%s\"", safe_name.c_str());
   }
-  httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+
+  httpd_req_t *req = *request;
+  httpd_req_t *async_req = nullptr;
+  if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
+    // No async slot (or no pipeline) — degrade gracefully to the old synchronous pump.
+    // The server blocks for this one transfer, but the download still succeeds.
+    job->req = req;
+    this->pump_download_(job);
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+    return;
+  }
+  job->req = async_req;
+  if (xQueueSend(this->dl_queue_, &job, 0) != pdTRUE) {
+    // Pipeline full: report on the async copy, then release socket and handle.
+    httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "transfer queue full");
+    if (job->is_fs && job->handle != nullptr) {
+      auto *ps_c = job->ps;
+      auto *handle_c = job->handle;
+      this->run_on_loop_([ps_c, handle_c]() { static_cast<storage::FilesystemStorage *>(ps_c)->close(handle_c); });
+    }
+    httpd_req_async_handler_complete(async_req);
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+    return;
+  }
+  // Handler returns immediately; the transfer task finishes the response and calls
+  // httpd_req_async_handler_complete().
+}
+
+// Streams one download job to its request: headers, chunk loop (one main-loop hop per
+// chunk), storage-handle close and the terminating zero chunk. Does NOT call
+// httpd_req_async_handler_complete() — only the task path owns an async copy.
+void WebServerFileApi::pump_download_(DownloadJob *job) {
+  httpd_req_t *req = job->req;
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Content-Disposition", job->disposition);
 
   auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
   uint64_t offset = 0;
   bool failed = false;
+  storage::StorageError err = storage::StorageError::OK;
   while (true) {
     size_t got = 0;
-    bool loop_ok = this->run_on_loop_([this, ps, handle, is_fs, &rel_buf, &offset, buf, &got, &err]() {
-      if (is_fs) {
-        err = static_cast<storage::FilesystemStorage *>(ps)->read(handle, buf, FILE_API_CHUNK, &got);
+    bool loop_ok = this->run_on_loop_([this, job, &offset, buf, &got, &err]() {
+      if (job->is_fs) {
+        err = static_cast<storage::FilesystemStorage *>(job->ps)->read(job->handle, buf, FILE_API_CHUNK, &got);
       } else {
-        err = static_cast<storage::NetworkStorage *>(ps)->read_chunk(rel_buf, buf, offset, FILE_API_CHUNK, &got);
+        err = static_cast<storage::NetworkStorage *>(job->ps)->read_chunk(job->rel, buf, offset, FILE_API_CHUNK, &got);
       }
     });
     if (!loop_ok || err != storage::StorageError::OK) {
@@ -903,20 +934,33 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
       failed = true;  // client went away — still close the handle below
       break;
     }
-    if (offset >= size && size != 0)
+    if (offset >= job->size && job->size != 0)
       break;
   }
   delete[] buf;  // NOLINT(cppcoreguidelines-owning-memory)
 
-  if (is_fs && handle != nullptr) {
-    this->run_on_loop_([ps, handle]() { static_cast<storage::FilesystemStorage *>(ps)->close(handle); });
+  if (job->is_fs && job->handle != nullptr) {
+    auto *ps_c = job->ps;
+    auto *handle_c = job->handle;
+    this->run_on_loop_([ps_c, handle_c]() { static_cast<storage::FilesystemStorage *>(ps_c)->close(handle_c); });
   }
   if (failed) {
-    ESP_LOGW(TAG, "download '%s' aborted (%s)", path.c_str(), storage::error_to_string(err));
-    httpd_resp_send_chunk(req, nullptr, 0);
-    return;
+    ESP_LOGW(TAG, "download '%s' aborted (%s)", job->rel, storage::error_to_string(err));
   }
-  httpd_resp_send_chunk(req, nullptr, 0);  // finish chunked response
+  httpd_resp_send_chunk(req, nullptr, 0);  // finish chunked response (also on abort)
+}
+
+void WebServerFileApi::download_task_trampoline_(void *arg) { static_cast<WebServerFileApi *>(arg)->download_task_(); }
+
+void WebServerFileApi::download_task_() {
+  for (;;) {
+    DownloadJob *job = nullptr;
+    if (xQueueReceive(this->dl_queue_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
+      continue;
+    this->pump_download_(job);
+    httpd_req_async_handler_complete(job->req);
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+  }
 }
 
 // ---------------------------------------------------------------------------

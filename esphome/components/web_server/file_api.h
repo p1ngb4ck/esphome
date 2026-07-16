@@ -18,6 +18,11 @@
 #include <functional>
 #include <string>
 
+#include <esp_http_server.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
 #ifdef USE_WEBSERVER_FILE_BROWSER
 // Gzipped browser module, embedded by codegen from file_browser.js. Global namespace on
 // purpose: add_resource_as_progmem() defines the constexpr symbol at global scope in
@@ -150,6 +155,27 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // Per-request upload state. httpd serves uploads sequentially per handler instance; a
   // concurrent second upload is rejected with NOT_READY (active_ guard) instead of
   // interleaving handles.
+  // --- Async download pipeline. The one-and-only httpd server task hands finished-
+  // validated downloads to a single bounded transfer task via httpd_req_async_handler_begin(),
+  // so the server task (and with it the v3 event stream) stays responsive during transfers.
+  // Storage access keeps marshalling through run_on_loop_() — storage is main-loop-only.
+  struct DownloadJob {
+    httpd_req_t *req{nullptr};  // async request copy; owns the socket until complete()
+    storage::PathStorage *ps{nullptr};
+    storage::FileHandle *handle{nullptr};  // FILESYSTEM only
+    bool is_fs{false};
+    uint64_t size{0};
+    char rel[256]{};
+    // httpd_resp_set_hdr() stores the pointer (no copy) — must outlive every send.
+    char disposition[300]{};
+  };
+  static constexpr size_t DL_QUEUE_DEPTH = 4;
+  void pump_download_(DownloadJob *job);
+  static void download_task_trampoline_(void *arg);
+  void download_task_();
+  QueueHandle_t dl_queue_{nullptr};
+  TaskHandle_t dl_task_{nullptr};
+
   struct UploadState {
     bool active{false};
     storage::PathStorage *storage{nullptr};
