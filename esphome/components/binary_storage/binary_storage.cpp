@@ -53,6 +53,14 @@ storage::StorageError BinaryStorage::format() {
   return (written == this->get_capacity()) ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
 }
 
+void BinaryStorage::get_raw_geometry(storage::RawGeometry *out) const {
+  out->capacity = this->get_capacity();
+  out->write_page = this->get_page_size();
+  out->erase_sector = this->get_erase_size();
+  out->erase_block = this->get_erase_block_size();
+  out->caps = this->get_erase_caps();
+}
+
 uint32_t BinaryStorage::fill(uint8_t value) {
   const size_t buffer_size = std::min(static_cast<uint32_t>(256u), this->get_page_size() * 4);
   uint8_t buffer[buffer_size];
@@ -134,6 +142,12 @@ int BinaryStorage::block_prog(uint32_t block, uint32_t offset, const void *buffe
 int BinaryStorage::block_erase(uint32_t block) {
   BlockDeviceConfig cfg = this->get_block_config();
   uint32_t address = block * cfg.block_size;
+
+  // littlefs calls this before programming a block. On media that overwrite in place there is
+  // nothing to do, and "nothing to do" is success for a block device — a different question
+  // from erase() below, which must not claim a range was blanked when the medium cannot.
+  if (this->get_erase_caps() == 0)
+    return 0;
 
   return (this->erase(address, cfg.block_size) == storage::StorageError::OK) ? 0 : -1;
 }

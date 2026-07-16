@@ -395,12 +395,50 @@ storage::StorageError SPIFlash::write(uint64_t offset, const uint8_t *buf, size_
 }
 
 storage::StorageError SPIFlash::erase(uint64_t offset, size_t len) {
+  if (len == 0)
+    return storage::StorageError::OK;
+
+  const uint32_t sector = this->sector_size_;
+  const uint64_t capacity = this->get_capacity();
+  if (offset + len > capacity) {
+    ESP_LOGE(TAG, "Erase out of bounds: 0x%08" PRIX32 " + %" PRIu32 " > capacity %" PRIu32, (uint32_t) offset,
+             (uint32_t) len, (uint32_t) capacity);
+    return storage::StorageError::INVALID_ARGS;
+  }
+  // Erasing is destructive at sector granularity: an unaligned range would take the
+  // neighbouring data sharing the first or last sector with it. Refuse rather than surprise.
+  if ((offset % sector) != 0 || (len % sector) != 0) {
+    ESP_LOGE(TAG, "Erase range 0x%08" PRIX32 " + %" PRIu32 " is not aligned to the %" PRIu32 " byte sector size",
+             (uint32_t) offset, (uint32_t) len, sector);
+    return storage::StorageError::INVALID_ARGS;
+  }
+
+  // Whole device: one chip erase instead of thousands of sector commands.
+  if (offset == 0 && len == capacity)
+    return this->erase_chip() ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+
+  // The block opcodes are only usable when the configured sector size tiles them evenly —
+  // with an exotic sector_size_ the sector opcode stays the only safe choice.
+  const bool blocks_usable = (BLOCK_SIZE_64K % sector) == 0;
+
   uint32_t addr = static_cast<uint32_t>(offset);
-  uint32_t end = addr + static_cast<uint32_t>(len);
+  const uint32_t end = addr + static_cast<uint32_t>(len);
   while (addr < end) {
-    if (!this->erase_block(addr))
+    const uint32_t remaining = end - addr;
+    bool ok;
+    // Coarsest opcode that fits: a 1 MB range costs 16 block erases instead of 256 sector ones.
+    if (blocks_usable && (addr % BLOCK_SIZE_64K) == 0 && remaining >= BLOCK_SIZE_64K) {
+      ok = this->erase_block_64k(addr);
+      addr += BLOCK_SIZE_64K;
+    } else if (blocks_usable && (addr % BLOCK_SIZE_32K) == 0 && remaining >= BLOCK_SIZE_32K) {
+      ok = this->erase_block_32k(addr);
+      addr += BLOCK_SIZE_32K;
+    } else {
+      ok = this->erase_sector(addr);
+      addr += sector;
+    }
+    if (!ok)
       return storage::StorageError::WRITE_ERROR;
-    addr += this->sector_size_;
   }
   return storage::StorageError::OK;
 }
