@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import re
 
@@ -119,6 +119,11 @@ class StorageData:
     device_count: int = 0
     worker_count: int = 0
     worker_task_safe: bool = False
+    # Raw preference regions per device id: every export/import action's address, plus the
+    # container size when it can be computed. Filled while the actions are built and resolved
+    # once at the end — see _resolve_raw_pref_regions().
+    raw_pref_regions: dict = field(default_factory=dict)
+    raw_pref_job_queued: bool = False
 
 
 def _get_data() -> StorageData:
@@ -750,6 +755,7 @@ async def raw_erase_action_to_code(config, action_id, template_arg, args):
 # with it, only those entries round-trip and export under their YAML id;
 # without it, the whole namespace round-trips under numeric NVS keys.
 
+CONF_DEVICE = "device"
 CONF_PREFERENCES = "preferences"
 CONF_REBOOT = "reboot"
 
@@ -821,8 +827,14 @@ def _global_nvs_key(global_id: str) -> int:
 
 
 _PREFERENCES_ACTION_BASE = {
-    cv.Required(CONF_PATH): cv.templatable(cv.string_strict),
-    cv.Optional(CONF_FORMAT, default="kv"): cv.one_of("kv", "json", lower=True),
+    cv.Optional(CONF_PATH): cv.templatable(cv.string_strict),
+    # No default: the presence of the key is what distinguishes a file target from a raw one
+    # (a default would fill it in and make that check meaningless).
+    cv.Optional(CONF_FORMAT): cv.one_of("kv", "json", lower=True),
+    cv.Optional(CONF_DEVICE): cv.use_id(RawStorage),
+    # Not templatable on purpose: codegen computes each region's room from these addresses,
+    # which a runtime lambda would hide.
+    cv.Optional(CONF_ADDRESS): cv.hex_uint32_t,
     # Globals with restore_value. cv.use_id(cg.Component) because the globals
     # component declares several unrelated classes (GlobalsComponent,
     # RestoringGlobalsComponent, RestoringGlobalStringComponent) — only the
@@ -831,9 +843,29 @@ _PREFERENCES_ACTION_BASE = {
     cv.Optional(CONF_PREFERENCES): cv.ensure_list(cv.use_id(cg.Component)),
 }
 
+
+def _validate_preferences_target(config):
+    has_path = CONF_PATH in config
+    has_device = CONF_DEVICE in config
+    if has_path == has_device:
+        raise cv.Invalid("Exactly one of 'path' or 'device' is required")
+    if has_device:
+        if CONF_FORMAT in config:
+            raise cv.Invalid(
+                "'format' does not apply to a raw device: the blob is written as stored, "
+                "there is nothing to render"
+            )
+        if CONF_ADDRESS not in config:
+            raise cv.Invalid("'address' is required when the target is a raw device")
+    elif CONF_ADDRESS in config:
+        raise cv.Invalid("'address' only applies to a raw device target ('device:')")
+    return config
+
+
 _EXPORT_PREFERENCES_SCHEMA = cv.All(
     cv.only_on(["esp32"]),
     cv.Schema(_PREFERENCES_ACTION_BASE),
+    _validate_preferences_target,
 )
 
 _IMPORT_PREFERENCES_SCHEMA = cv.All(
@@ -846,6 +878,7 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
             cv.Optional(CONF_REBOOT, default=False): cv.boolean,
         }
     ),
+    _validate_preferences_target,
 )
 
 
@@ -855,12 +888,95 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
 # (module, class, version, EntityKind) — kinds map to real-struct codecs in
 # preferences_backup.cpp; anything not matched below registers as RAW (named,
 # hex value). datetime template platforms carry their own versions.
+# Container arithmetic, used to catch overlapping regions at config time. Layout is fixed by
+# preferences_backup.cpp: a 16-byte header plus {key u32, len u16, blob} per entry.
+_RAW_PREF_HEADER = 16
+_RAW_PREF_ENTRY_OVERHEAD = 6
+_PREF_TYPE_SIZES = {
+    "BOOL": 1,
+    "I8": 1,
+    "U8": 1,
+    "I16": 2,
+    "U16": 2,
+    "I32": 4,
+    "U32": 4,
+    "F32": 4,
+    "F64": 8,
+}
+
+
+def _raw_pref_size(entries: list[tuple[str, int]]) -> int:
+    """Exact container size for an explicit selection: (PrefType tag, count) per entry."""
+    total = _RAW_PREF_HEADER
+    for tag, count in entries:
+        # STRING blobs are length-prefixed char[SZ], with SZ already carried in count.
+        elem = 1 if tag == "STRING" else _PREF_TYPE_SIZES[tag]
+        total += _RAW_PREF_ENTRY_OVERHEAD + elem * count
+    return total
+
+
+async def _resolve_raw_pref_regions():
+    """Hands every raw preferences action the room it actually has, and rejects regions that
+    would run into each other.
+
+    Codegen knows every action's address, so nobody has to repeat "and it may use N bytes":
+    a region reaches up to the next address on the same device, and the last one to the end of
+    the device — which only the device knows, hence window 0 for it. An export and its import
+    share one address by design (that is the pair), so actions are grouped by address, not
+    counted individually.
+
+    Where a selection is explicit the container size is exact and a collision is a config
+    error. An unrestricted selection grows with the app, so that case cannot be sized here and
+    is caught at runtime by the window instead — the export refuses rather than writing into
+    the neighbouring region."""
+    for device, actions in _get_data().raw_pref_regions.items():
+        by_address: dict[int, dict] = {}
+        for action in actions:
+            region = by_address.setdefault(
+                action["address"], {"size": None, "actions": []}
+            )
+            region["actions"].append(action)
+            if action["size"] is not None:
+                region["size"] = max(region["size"] or 0, action["size"])
+
+        addresses = sorted(by_address)
+        for i, address in enumerate(addresses):
+            region = by_address[address]
+            if i + 1 < len(addresses):
+                window = addresses[i + 1] - address
+                size = region["size"]
+                if size is not None and size > window:
+                    raise cv.Invalid(
+                        f"The preferences region at 0x{address:X} on '{device}' needs {size} "
+                        f"bytes and would run into the region at 0x{addresses[i + 1]:X} "
+                        f"({window} bytes apart)"
+                    )
+            else:
+                window = 0  # to the end of the device
+            for action in region["actions"]:
+                cg.add(action["var"].set_raw_target(action["device"], address, window))
+
+
+def _register_raw_pref_region(device_id, device_var, address, size, var):
+    data = _get_data()
+    data.raw_pref_regions.setdefault(str(device_id), []).append(
+        {"address": address, "size": size, "var": var, "device": device_var}
+    )
+    if not data.raw_pref_job_queued:
+        data.raw_pref_job_queued = True
+        # FINAL: every action must be built before the regions can be laid out.
+        CORE.add_job(
+            coroutine_with_priority(CoroPriority.FINAL)(_resolve_raw_pref_regions)
+        )
+
+
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
-    template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
-    cg.add(var.set_path(template_))
-    cg.add(var.set_format(config[CONF_FORMAT]))
+    if CONF_PATH in config:
+        template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
+        cg.add(var.set_path(template_))
+        cg.add(var.set_format(config.get(CONF_FORMAT, "kv")))
 
     def _bake(entries, restrict):
         # entity-only selections produce zero table entries: emitting
@@ -890,12 +1006,14 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         # ID it returns carries the real C++ class (codegen-world data, no
         # validation-step leftovers).
         entries = []
+        sizes = []
         has_entities = False
         for gid in selection:
             full_id, obj = await cg.get_variable_with_full_id(gid)
             parsed = _pref_type_from_class(str(full_id.type))
             if parsed is not None:
                 entries.append(_entry(gid.id, *parsed))
+                sizes.append(parsed)
                 continue
             # anything else is treated as an entity: the runtime sweep
             # resolves name/kind/key from the live object; unresolvable
@@ -904,6 +1022,10 @@ async def _build_preferences_action(config, action_id, template_arg, args):
             has_entities = True
         if entries or has_entities:
             _bake(entries, True)
+        # Entity selections carry no codegen-known blob size (their layout is a component
+        # private, resolved by the runtime sweep) — the size stays unknown then, and only the
+        # window guards that case.
+        raw_size = None if has_entities else _raw_pref_size(sizes)
     else:
         # All mode: enumerate the codegen variable registry once every
         # pending to_code has run. Scheduled as its own coroutine job — it is
@@ -925,6 +1047,15 @@ async def _build_preferences_action(config, action_id, template_arg, args):
                 _bake(entries, False)
 
         CORE.add_job(_bake_all)
+        raw_size = (
+            None  # the namespace grows with the app — only the window can guard this
+        )
+
+    if CONF_DEVICE in config:
+        device_var = await cg.get_variable(config[CONF_DEVICE])
+        _register_raw_pref_region(
+            config[CONF_DEVICE], device_var, config[CONF_ADDRESS], raw_size, var
+        )
     return var
 
 
