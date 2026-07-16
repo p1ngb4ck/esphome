@@ -41,6 +41,9 @@ namespace esphome::web_server {
 class WebServerFileApi : public Component, public AsyncWebHandler {
  public:
   void setup() override;
+  // Upload callbacks marshal all storage work through run_on_loop_(), so the multipart
+  // body may be received on the web server's async upload task instead of the httpd task.
+  bool supportsAsyncUpload() const override { return true; }
   void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::WIFI - 1.0f; }

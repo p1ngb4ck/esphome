@@ -34,6 +34,7 @@
 // Include socket headers after Arduino headers to avoid IPADDR_NONE/INADDR_NONE macro conflicts
 #include <cerrno>
 #include <sys/socket.h>
+#include <freertos/queue.h>
 
 namespace esphome::web_server_idf {
 
@@ -1133,7 +1134,59 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
     httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, nullptr);
     return ESP_FAIL;
   }
+  // Copy now: the pointer targets the original request's header buffer, which is invalid
+  // after an async handoff returns this handler.
+  std::string boundary(boundary_start, boundary_len);
 
+  // Async opt-in: handlers with task-agnostic upload callbacks receive their body on the
+  // dedicated upload task so this (one and only) httpd server task stays responsive.
+  {
+    AsyncWebServerRequest probe(r);
+    AsyncWebHandler *handler = nullptr;
+    for (auto *h : this->handlers_) {
+      if (h->canHandle(&probe)) {
+        handler = h;
+        break;
+      }
+    }
+    if (handler != nullptr && handler->supportsAsyncUpload()) {
+      if (this->upload_queue_ == nullptr) {
+        this->upload_queue_ = xQueueCreate(2, sizeof(AsyncUploadJob *));
+        if (this->upload_queue_ != nullptr) {
+          xTaskCreate(AsyncWebServer::upload_task_trampoline_, "ws_upload", 6144, this, 3, &this->upload_task_handle_);
+        }
+      }
+      httpd_req_t *async_req = nullptr;
+      if (this->upload_task_handle_ != nullptr && httpd_req_async_handler_begin(r, &async_req) == ESP_OK) {
+        auto *job = new AsyncUploadJob{async_req, boundary};  // NOLINT(cppcoreguidelines-owning-memory)
+        if (xQueueSend(this->upload_queue_, &job, 0) == pdTRUE) {
+          return ESP_OK;  // upload task finishes the response and completes the async request
+        }
+        // Pipeline full — release the copy and fall through to the inline path below.
+        httpd_req_async_handler_complete(async_req);
+        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+      }
+      // begin() failing (no async slot) also falls through: blocking upload beats a failed one.
+    }
+  }
+
+  return this->multipart_pump_(r, boundary);
+}
+
+void AsyncWebServer::upload_task_trampoline_(void *arg) { static_cast<AsyncWebServer *>(arg)->upload_task_(); }
+
+void AsyncWebServer::upload_task_() {
+  for (;;) {
+    AsyncUploadJob *job = nullptr;
+    if (xQueueReceive(this->upload_queue_, &job, portMAX_DELAY) != pdTRUE || job == nullptr)
+      continue;
+    this->multipart_pump_(job->req, job->boundary);
+    httpd_req_async_handler_complete(job->req);
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+  }
+}
+
+esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &boundary) {
   AsyncWebServerRequest req(r);
   AsyncWebHandler *handler = nullptr;
   for (auto *h : this->handlers_) {
@@ -1153,7 +1206,7 @@ esp_err_t AsyncWebServer::handle_multipart_upload_(httpd_req_t *r, const char *c
   std::string filename;
   size_t index = 0;
   // Create reader on heap to reduce stack usage
-  auto reader = std::make_unique<MultipartReader>("--" + std::string(boundary_start, boundary_len));
+  auto reader = std::make_unique<MultipartReader>("--" + boundary);
 
   // Configure callbacks
   reader->set_data_callback([&](const uint8_t *data, size_t len) {

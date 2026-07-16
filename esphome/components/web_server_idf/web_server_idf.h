@@ -209,7 +209,7 @@ class AsyncWebHandler;
 
 class AsyncWebServer {
  public:
-  AsyncWebServer(uint16_t port) : port_(port){};
+  AsyncWebServer(uint16_t port) : port_(port) {};
   ~AsyncWebServer() { this->end(); }
 
   // NOLINTNEXTLINE(readability-identifier-naming)
@@ -236,6 +236,17 @@ class AsyncWebServer {
   esp_err_t handle_raw_body_(httpd_req_t *r, const char *content_type);
 #if defined(USE_WEBSERVER_OTA) || defined(USE_WEBSERVER_FILE_API)
   esp_err_t handle_multipart_upload_(httpd_req_t *r, const char *content_type);
+  // Receives one multipart body on `r` (blocking the calling task) and dispatches the
+  // handler callbacks; shared by the inline path and the async upload task.
+  esp_err_t multipart_pump_(httpd_req_t *r, const std::string &boundary);
+  struct AsyncUploadJob {
+    httpd_req_t *req;      // async request copy; owns the socket until complete()
+    std::string boundary;  // copied before handoff — points into the original request otherwise
+  };
+  static void upload_task_trampoline_(void *arg);
+  void upload_task_();
+  QueueHandle_t upload_queue_{nullptr};
+  TaskHandle_t upload_task_handle_{nullptr};
 #endif
   std::vector<AsyncWebHandler *> handlers_;
   std::function<void(AsyncWebServerRequest *request)> on_not_found_{};
@@ -246,6 +257,10 @@ class AsyncWebHandler {
   virtual ~AsyncWebHandler() {}
   // NOLINTNEXTLINE(readability-identifier-naming)
   virtual bool canHandle(AsyncWebServerRequest *request) const { return false; }
+  // Handlers whose upload callbacks are task-agnostic (e.g. they marshal storage work to
+  // the main loop themselves) may opt in: their multipart body is then received on a
+  // dedicated task via an async request copy, keeping the single httpd task responsive.
+  virtual bool supportsAsyncUpload() const { return false; }
   // NOLINTNEXTLINE(readability-identifier-naming)
   virtual void handleRequest(AsyncWebServerRequest *request) {}
   // NOLINTNEXTLINE(readability-identifier-naming)
