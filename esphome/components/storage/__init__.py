@@ -14,7 +14,10 @@ from esphome.const import (
     CONF_ID,
     CONF_INDEX,
     CONF_KEY,
+    CONF_ADDRESS,
+    CONF_DATA,
     CONF_ON_VALUE,
+    CONF_SIZE,
     CONF_PATH,
     CONF_TO,
     CONF_TYPE,
@@ -47,6 +50,7 @@ Storage = storage_ns.class_("Storage", cg.Component)
 TransferBuffer = storage_ns.class_("TransferBuffer", cg.Component)
 StoragePtr = Storage.operator("ptr")
 PathStorage = storage_ns.class_("PathStorage", Storage)
+RawStorage = storage_ns.class_("RawStorage", Storage)
 MountableStorage = storage_ns.class_("MountableStorage")
 StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
 StorageWorker = storage_ns.class_("StorageWorker", cg.Component)
@@ -258,6 +262,9 @@ CONF_TRIM = "trim"
 
 FileWriteAction = storage_ns.class_("FileWriteAction", automation.Action)
 FileReadAction = storage_ns.class_("FileReadAction", automation.Action)
+RawReadAction = storage_ns.class_("RawReadAction", automation.Action)
+RawWriteAction = storage_ns.class_("RawWriteAction", automation.Action)
+RawEraseAction = storage_ns.class_("RawEraseAction", automation.Action)
 ExtractStepType = storage_ns.enum("ExtractStepType", is_class=True)
 
 
@@ -559,6 +566,180 @@ async def unmount_action_to_code(config, action_id, template_arg, args):
 
 
 # ==================== PREFERENCES BACKUP/RESTORE ====================
+# ---------------------------------------------------------------------------
+# storage.raw_read / storage.raw_write / storage.raw_erase
+# ---------------------------------------------------------------------------
+# Address-based access to a RawStorage device. Ranges and capabilities are the device's own
+# answer at runtime (RawGeometry/RawEraseCaps) — codegen only wires the parameters through.
+
+CONF_TO_FILE = "to_file"
+CONF_FROM_FILE = "from_file"
+CONF_ERASE_FIRST = "erase_first"
+CONF_ALL = "all"
+
+
+def _validate_raw_data(value):
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, list):
+        return cv.Schema([cv.hex_uint8_t])(value)
+    raise cv.Invalid(
+        "data must either be a string wrapped in quotes or a list of bytes"
+    )
+
+
+def _validate_raw_read(config):
+    if CONF_TO_FILE not in config and CONF_ON_VALUE not in config:
+        raise cv.Invalid("At least one of 'to_file' or 'on_value' is required")
+    if CONF_SIZE not in config and CONF_TO_FILE not in config:
+        raise cv.Invalid("'size' is required unless reading into a file with 'to_file'")
+    return config
+
+
+def _validate_raw_write(config):
+    if (CONF_DATA in config) == (CONF_FROM_FILE in config):
+        raise cv.Invalid("Exactly one of 'data' or 'from_file' is required")
+    return config
+
+
+def _validate_raw_erase(config):
+    if config[CONF_ALL]:
+        if CONF_ADDRESS in config or CONF_SIZE in config:
+            raise cv.Invalid("'all' erases the whole device — remove 'address'/'size'")
+    elif CONF_SIZE not in config:
+        raise cv.Invalid(
+            "'size' is required unless erasing the whole device with 'all'"
+        )
+    return config
+
+
+_RAW_READ_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(RawStorage),
+            cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
+            # Omitted with to_file: read to the end of the device (0 = rest, see the action).
+            cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
+            cv.Optional(CONF_TO_FILE): cv.templatable(cv.string),
+            cv.Optional(CONF_ON_VALUE): automation.validate_automation(single=True),
+        }
+    ),
+    _validate_raw_read,
+)
+
+_RAW_WRITE_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(RawStorage),
+            cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
+            cv.Optional(CONF_DATA): cv.templatable(_validate_raw_data),
+            cv.Optional(CONF_FROM_FILE): cv.templatable(cv.string),
+            # Media reporting RAW_WRITE_NEEDS_ERASE (NOR flash) need the covering sectors erased
+            # first — which also wipes whatever else shares them, hence opt-in.
+            cv.Optional(CONF_ERASE_FIRST, default=False): cv.boolean,
+        }
+    ),
+    _validate_raw_write,
+)
+
+_RAW_ERASE_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(RawStorage),
+            cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
+            cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
+            cv.Optional(CONF_ALL, default=False): cv.boolean,
+        }
+    ),
+    _validate_raw_erase,
+)
+
+
+@automation.register_action(
+    "storage.raw_read", RawReadAction, _RAW_READ_SCHEMA, synchronous=True
+)
+async def raw_read_action_to_code(config, action_id, template_arg, args):
+    cg.add_define("USE_STORAGE_RAW_ACTIONS")
+    device = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, device)
+    cg.add(
+        var.set_address(
+            await cg.templatable(config.get(CONF_ADDRESS, 0), args, cg.uint32)
+        )
+    )
+    cg.add(
+        var.set_size(await cg.templatable(config.get(CONF_SIZE, 0), args, cg.uint32))
+    )
+    if CONF_TO_FILE in config:
+        cg.add(
+            var.set_to_file(
+                await cg.templatable(config[CONF_TO_FILE], args, cg.std_string)
+            )
+        )
+        cg.add(var.set_has_to_file(True))
+    if CONF_ON_VALUE in config:
+        await automation.build_automation(
+            var.get_value_trigger(),
+            [(cg.std_vector.template(cg.uint8), "x")],
+            config[CONF_ON_VALUE],
+        )
+    return var
+
+
+@automation.register_action(
+    "storage.raw_write", RawWriteAction, _RAW_WRITE_SCHEMA, synchronous=True
+)
+async def raw_write_action_to_code(config, action_id, template_arg, args):
+    cg.add_define("USE_STORAGE_RAW_ACTIONS")
+    device = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, device)
+    cg.add(
+        var.set_address(
+            await cg.templatable(config.get(CONF_ADDRESS, 0), args, cg.uint32)
+        )
+    )
+    cg.add(var.set_erase_first(config[CONF_ERASE_FIRST]))
+    if CONF_FROM_FILE in config:
+        cg.add(
+            var.set_from_file(
+                await cg.templatable(config[CONF_FROM_FILE], args, cg.std_string)
+            )
+        )
+        cg.add(var.set_has_from_file(True))
+        return var
+    data = config[CONF_DATA]
+    if isinstance(data, bytes):
+        data = list(data)
+    if cg.is_template(data):
+        templ = await cg.templatable(data, args, cg.std_vector.template(cg.uint8))
+        cg.add(var.set_data_template(templ))
+    else:
+        # Static payload stays in flash — no RAM copy (same as uart.write).
+        arr_id = ID(f"{action_id}_data", is_declaration=True, type=cg.uint8)
+        arr = cg.static_const_array(arr_id, cg.ArrayInitializer(*data))
+        cg.add(var.set_data_static(arr, len(data)))
+    return var
+
+
+@automation.register_action(
+    "storage.raw_erase", RawEraseAction, _RAW_ERASE_SCHEMA, synchronous=True
+)
+async def raw_erase_action_to_code(config, action_id, template_arg, args):
+    cg.add_define("USE_STORAGE_RAW_ACTIONS")
+    device = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, device)
+    cg.add(
+        var.set_address(
+            await cg.templatable(config.get(CONF_ADDRESS, 0), args, cg.uint32)
+        )
+    )
+    cg.add(
+        var.set_size(await cg.templatable(config.get(CONF_SIZE, 0), args, cg.uint32))
+    )
+    cg.add(var.set_all(config[CONF_ALL]))
+    return var
+
+
 # storage.export_preferences / storage.import_preferences: back up ESPHome
 # preferences (the "esphome" NVS namespace) to a storage target and restore
 # them. Provided by storage itself, guard-protected: the C++ only compiles

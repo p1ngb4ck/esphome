@@ -167,6 +167,124 @@ template<typename... Ts> class FileCopyAction : public Action<Ts...> {
   bool is_move_;
 };
 
+#ifdef USE_STORAGE_RAW_ACTIONS
+// ---------------------------------------------------------------------------
+// storage.raw_read / storage.raw_write / storage.raw_erase
+// ---------------------------------------------------------------------------
+// Address-based access to a RawStorage device (NOR flash, FRAM, EEPROM). What a medium
+// accepts is its own business — these helpers ask get_raw_geometry() instead of assuming
+// flash semantics, and pass erase()'s verdict (NOT_SUPPORTED on erase-less media, INVALID_ARGS
+// on an unaligned range) straight through to the log rather than papering over it.
+//
+// Like the file_* actions above these are BLOCKING and honor max_blocking_transfer_size.
+
+// Reads [address, address+size) into `out`. Returns false (already logged) on any failure;
+// `out` is left empty then, so a trigger never fires with half a result.
+bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::vector<uint8_t> &out);
+// Same, but streams into a file on a mounted storage. size == 0 means "to the end of the device".
+bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t size, const std::string &path);
+// Writes `data` at `address`. erase_first erases the covering sectors beforehand — required on
+// media reporting RAW_WRITE_NEEDS_ERASE, and destructive to anything else sharing those sectors.
+bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data, size_t len, bool erase_first);
+bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first);
+// Erases [address, address+size), or the whole device when `all` is set.
+void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all);
+
+template<typename... Ts> class RawReadAction : public Action<Ts...> {
+ public:
+  explicit RawReadAction(RawStorage *device) : device_(device) {}
+
+  TEMPLATABLE_VALUE(uint32_t, address)
+  TEMPLATABLE_VALUE(uint32_t, size)
+  TEMPLATABLE_VALUE(std::string, to_file)
+
+  void set_has_to_file(bool has_to_file) { this->has_to_file_ = has_to_file; }
+  Trigger<std::vector<uint8_t>> *get_value_trigger() { return &this->value_trigger_; }
+
+  void play(const Ts &...x) override {
+    const uint32_t address = this->address_.value(x...);
+    const uint32_t size = this->size_.value(x...);
+    if (this->has_to_file_) {
+      perform_raw_read_to_file(this->device_, address, size, this->to_file_.value(x...));
+      return;
+    }
+    std::vector<uint8_t> data;
+    if (!perform_raw_read(this->device_, address, size, data))
+      return;  // already logged; no trigger on a failed read
+    this->value_trigger_.trigger(data);
+  }
+
+ protected:
+  RawStorage *device_;
+  bool has_to_file_{false};
+  Trigger<std::vector<uint8_t>> value_trigger_;
+};
+
+template<typename... Ts> class RawWriteAction : public Action<Ts...> {
+ public:
+  explicit RawWriteAction(RawStorage *device) : device_(device) {}
+
+  TEMPLATABLE_VALUE(uint32_t, address)
+  TEMPLATABLE_VALUE(std::string, from_file)
+
+  // Data sources, mirroring uart.write: a static array stays in flash, a lambda is called per
+  // play(). from_file reads the file into RAM first (guard-railed by the transfer limit).
+  void set_data_template(std::vector<uint8_t> (*func)(Ts...)) {
+    this->code_.func = func;
+    this->len_ = -1;  // sentinel: template mode
+  }
+  void set_data_static(const uint8_t *data, size_t len) {
+    this->code_.data = data;
+    this->len_ = static_cast<int>(len);
+  }
+  void set_has_from_file(bool has_from_file) { this->has_from_file_ = has_from_file; }
+  void set_erase_first(bool erase_first) { this->erase_first_ = erase_first; }
+
+  void play(const Ts &...x) override {
+    const uint32_t address = this->address_.value(x...);
+    if (this->has_from_file_) {
+      perform_raw_write_from_file(this->device_, address, this->from_file_.value(x...), this->erase_first_);
+      return;
+    }
+    if (this->len_ >= 0) {
+      perform_raw_write(this->device_, address, this->code_.data, static_cast<size_t>(this->len_), this->erase_first_);
+      return;
+    }
+    std::vector<uint8_t> data = (*this->code_.func)(x...);
+    perform_raw_write(this->device_, address, data.data(), data.size(), this->erase_first_);
+  }
+
+ protected:
+  RawStorage *device_;
+  union {
+    const uint8_t *data;
+    std::vector<uint8_t> (*func)(Ts...);
+  } code_{nullptr};
+  int len_{-1};
+  bool has_from_file_{false};
+  bool erase_first_{false};
+};
+
+template<typename... Ts> class RawEraseAction : public Action<Ts...> {
+ public:
+  explicit RawEraseAction(RawStorage *device) : device_(device) {}
+
+  TEMPLATABLE_VALUE(uint32_t, address)
+  TEMPLATABLE_VALUE(uint32_t, size)
+
+  void set_all(bool all) { this->all_ = all; }
+
+  void play(const Ts &...x) override {
+    perform_raw_erase(this->device_, this->address_.value(x...), this->size_.value(x...), this->all_);
+  }
+
+ protected:
+  RawStorage *device_;
+  bool all_{false};
+};
+
+#endif  // USE_STORAGE_RAW_ACTIONS
+
 // ---------------------------------------------------------------------------
 // storage.file_delete
 // ---------------------------------------------------------------------------

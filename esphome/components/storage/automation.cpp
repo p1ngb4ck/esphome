@@ -5,6 +5,8 @@
 #endif
 
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
+#include <cinttypes>
 
 #ifdef USE_STORAGE_REGEX_EXTRACT
 // <regex> costs significant flash (~50-100 kB) and stack; it is only compiled in when a
@@ -260,6 +262,198 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
   }
   return true;
 }
+
+#ifdef USE_STORAGE_RAW_ACTIONS
+namespace {
+
+// Every raw action asks the device what it is before touching it — capacity and geometry come
+// from the driver (see RawGeometry), never from an assumption about the medium.
+bool raw_preflight(RawStorage *device, const char *op, uint64_t address, uint64_t size, RawGeometry *geo) {
+  device->get_raw_geometry(geo);
+  if (geo->capacity == 0) {
+    ESP_LOGW(TAG, "raw_%s: device reports no capacity", op);
+    return false;
+  }
+  if (address >= geo->capacity || size > geo->capacity - address) {
+    ESP_LOGW(TAG, "raw_%s: 0x%08" PRIX32 " + %" PRIu32 " exceeds the device capacity %" PRIu32, op, (uint32_t) address,
+             (uint32_t) size, (uint32_t) geo->capacity);
+    return false;
+  }
+  return true;
+}
+
+// Same guard rail the blocking file helpers use: these actions run on the main loop.
+bool raw_size_allowed(const char *op, uint64_t size) {
+  uint64_t limit = global_storage_registry != nullptr ? global_storage_registry->get_max_blocking_transfer_size() : 0;
+  if (limit != 0 && size > limit) {
+    ESP_LOGW(TAG, "raw_%s: %" PRIu32 " bytes exceeds max_blocking_transfer_size (%" PRIu32 ")", op, (uint32_t) size,
+             (uint32_t) limit);
+    return false;
+  }
+  return true;
+}
+
+// Erases the sector range covering [address, address+len) — expanding to sector bounds, which
+// is what makes this destructive to neighbours and therefore opt-in.
+bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint64_t address, size_t len) {
+  if (geo.erase_sector == 0) {
+    ESP_LOGW(TAG, "raw_write: erase_first requested but this device has no erase");
+    return false;
+  }
+  uint64_t start = address - (address % geo.erase_sector);
+  uint64_t end = address + len;
+  if ((end % geo.erase_sector) != 0)
+    end += geo.erase_sector - (end % geo.erase_sector);
+  ESP_LOGD(TAG, "raw_write: erasing 0x%08" PRIX32 " + %" PRIu32 " before writing", (uint32_t) start,
+           (uint32_t) (end - start));
+  StorageError err = device->erase(start, static_cast<size_t>(end - start));
+  if (err != StorageError::OK) {
+    ESP_LOGW(TAG, "raw_write: erase failed (%s)", error_to_string(err));
+    return false;
+  }
+  return true;
+}
+
+// Reads the range into an already-sized buffer, honoring the partial-read contract.
+bool raw_read_into(RawStorage *device, uint64_t address, uint8_t *buf, size_t size, size_t *done_out) {
+  size_t done = 0;
+  while (done < size) {
+    size_t got = 0;
+    StorageError err = device->read(address + done, buf + done, size - done, &got);
+    if (err != StorageError::OK) {
+      ESP_LOGW(TAG, "raw_read: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
+      return false;
+    }
+    if (got == 0)
+      break;  // end of medium (partial-read contract)
+    done += got;
+  }
+  *done_out = done;
+  return true;
+}
+
+}  // namespace
+
+bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::vector<uint8_t> &out) {
+  RawGeometry geo;
+  if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
+    return false;
+  out.resize(size);
+  size_t done = 0;
+  if (!raw_read_into(device, address, out.data(), size, &done)) {
+    out.clear();
+    return false;
+  }
+  out.resize(done);
+  return true;
+}
+
+bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t size, const std::string &path) {
+  RawGeometry geo;
+  device->get_raw_geometry(&geo);
+  if (size == 0)  // "to the end of the device"
+    size = geo.capacity > address ? geo.capacity - address : 0;
+  if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
+    return false;
+  if (global_storage_registry == nullptr) {
+    ESP_LOGW(TAG, "raw_read: no storage registry");
+    return false;
+  }
+  const char *rel = nullptr;
+  PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
+  if (ps == nullptr) {
+    ESP_LOGW(TAG, "raw_read: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+
+  auto buf_size = static_cast<size_t>(size);
+  uint8_t *raw = RAMAllocator<uint8_t>().allocate(buf_size);
+  if (raw == nullptr) {
+    ESP_LOGW(TAG, "raw_read: cannot allocate %" PRIu32 " bytes", (uint32_t) buf_size);
+    return false;
+  }
+  RamBuffer buf(raw, RamBufferDeleter{buf_size});
+  size_t done = 0;
+  if (!raw_read_into(device, address, buf.get(), buf_size, &done))
+    return false;
+
+  StorageError err = write_file(ps, rel, buf.get(), done);
+  if (err != StorageError::OK) {
+    ESP_LOGW(TAG, "raw_read: writing '%s' failed (%s)", path.c_str(), error_to_string(err));
+    return false;
+  }
+  ESP_LOGD(TAG, "raw_read: 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) done, path.c_str());
+  return true;
+}
+
+bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data, size_t len, bool erase_first) {
+  if (len == 0)
+    return true;
+  RawGeometry geo;
+  if (!raw_preflight(device, "write", address, len, &geo) || !raw_size_allowed("write", len))
+    return false;
+  if (erase_first && !raw_erase_for_write(device, geo, address, len))
+    return false;
+
+  size_t done = 0;
+  while (done < len) {
+    size_t written = 0;
+    StorageError err = device->write(address + done, data + done, len - done, &written);
+    if (err != StorageError::OK) {
+      ESP_LOGW(TAG, "raw_write: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
+      return false;
+    }
+    if (written == 0) {
+      ESP_LOGW(TAG, "raw_write: device stopped accepting data at 0x%08" PRIX32, (uint32_t) (address + done));
+      return false;
+    }
+    done += written;
+  }
+  ESP_LOGD(TAG, "raw_write: %" PRIu32 " bytes at 0x%08" PRIX32, (uint32_t) len, (uint32_t) address);
+  return true;
+}
+
+bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first) {
+  if (global_storage_registry == nullptr) {
+    ESP_LOGW(TAG, "raw_write: no storage registry");
+    return false;
+  }
+  const char *rel = nullptr;
+  PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
+  if (ps == nullptr) {
+    ESP_LOGW(TAG, "raw_write: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  RamBuffer buf;
+  size_t size = 0;
+  StorageError err = read_file(ps, rel, buf, &size);
+  if (err != StorageError::OK) {
+    ESP_LOGW(TAG, "raw_write: reading '%s' failed (%s)", path.c_str(), error_to_string(err));
+    return false;
+  }
+  return perform_raw_write(device, address, buf.get(), size, erase_first);
+}
+
+void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all) {
+  RawGeometry geo;
+  device->get_raw_geometry(&geo);
+  if (all) {
+    address = 0;
+    size = geo.capacity;
+  }
+  if (!raw_preflight(device, "erase", address, size, &geo))
+    return;
+  // No alignment massaging here: erase() rejects an unaligned range on purpose (it would take
+  // the neighbouring data with it), and silently rounding would defeat that.
+  StorageError err = device->erase(address, static_cast<size_t>(size));
+  if (err != StorageError::OK) {
+    ESP_LOGW(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " failed (%s)", (uint32_t) address, (uint32_t) size,
+             error_to_string(err));
+    return;
+  }
+  ESP_LOGD(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " done", (uint32_t) address, (uint32_t) size);
+}
+#endif  // USE_STORAGE_RAW_ACTIONS
 
 void perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
   const char *op = is_move ? "move" : "copy";
