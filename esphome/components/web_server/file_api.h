@@ -22,6 +22,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include "esphome/components/storage/transfer_buffer.h"
 
 #ifdef USE_WEBSERVER_FILE_BROWSER
 // Gzipped browser module, embedded by codegen from file_browser.js. Global namespace on
@@ -188,7 +189,34 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     char rel_path[256]{};
     uint64_t offset{0};
     storage::StorageError error{storage::StorageError::OK};
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+    // Borrowed PSRAM arena: data callbacks memcpy at network speed instead of one
+    // main-loop hop per chunk; nullptr keeps the plain streaming path.
+    uint8_t *staged{nullptr};
+    size_t staged_cap{0};
+#endif
   } upload_{};
+
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  // Post-response flush of a staged upload: loop() drains the arena to storage chunk-wise
+  // (storage is main-loop-only by contract), queryable through /files/job. Flush ids carry
+  // the high bit so they can never collide with the worker's TransferJob counters.
+  static constexpr uint32_t FLUSH_JOB_FLAG = 0x80000000u;
+  struct StagedFlush {
+    bool active{false};
+    bool finished{false};
+    uint32_t job{0};
+    storage::PathStorage *storage{nullptr};
+    storage::FileHandle *handle{nullptr};
+    bool dst_is_fs{false};
+    char rel_path[256]{};
+    const uint8_t *data{nullptr};
+    size_t total{0};
+    size_t done{0};
+    storage::StorageError result{storage::StorageError::OK};
+  } flush_{};
+  uint32_t flush_job_counter_{0};
+#endif
 };
 
 }  // namespace esphome::web_server
