@@ -116,9 +116,15 @@
         : `uploading ${f.name}: ${fmtSize(e.loaded)}…`);
       xhr.onload = () => {
         if (xhr.status === 200) {
-          let bytes = 0;
-          try { bytes = JSON.parse(xhr.responseText).bytes; } catch (e) {}
-          setStatus(`upload done: ${f.name} (${fmtSize(bytes)})`);
+          let j = {};
+          try { j = JSON.parse(xhr.responseText); } catch (e) {}
+          if (j.job) {
+            // staged upload: the device flushes the PSRAM buffer to storage in background
+            setStatus(`upload received: ${f.name} (${fmtSize(j.bytes || 0)}) — flushing…`);
+            pollJob(j.job, "flush").catch((e) => setStatus("Flush error: " + e.message)).then(reload);
+            return;
+          }
+          setStatus(`upload done: ${f.name} (${fmtSize(j.bytes || 0)})`);
         } else {
           let msg = xhr.status;
           try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}

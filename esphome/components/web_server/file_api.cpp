@@ -717,6 +717,40 @@ void WebServerFileApi::advance_dir_transfer_() {
 }
 
 void WebServerFileApi::loop() {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  if (this->flush_.active && !this->flush_.finished) {
+    size_t chunk = this->flush_.total - this->flush_.done;
+    if (chunk > 4 * FILE_API_CHUNK)
+      chunk = 4 * FILE_API_CHUNK;
+    size_t written = 0;
+    storage::StorageError err = storage::StorageError::OK;
+    if (chunk > 0) {
+      if (this->flush_.dst_is_fs) {
+        err = static_cast<storage::FilesystemStorage *>(this->flush_.storage)
+                  ->write(this->flush_.handle, this->flush_.data + this->flush_.done, chunk, &written);
+      } else {
+        err = static_cast<storage::NetworkStorage *>(this->flush_.storage)
+                  ->write_chunk(this->flush_.rel_path, this->flush_.data + this->flush_.done, this->flush_.done, chunk,
+                                &written);
+      }
+      this->flush_.done += written;
+    }
+    if (err != storage::StorageError::OK || this->flush_.done >= this->flush_.total) {
+      if (this->flush_.dst_is_fs && this->flush_.handle != nullptr) {
+        storage::StorageError cerr =
+            static_cast<storage::FilesystemStorage *>(this->flush_.storage)->close(this->flush_.handle);
+        if (err == storage::StorageError::OK)
+          err = cerr;
+        this->flush_.handle = nullptr;
+      }
+      storage::global_transfer_buffer->release();
+      this->flush_.result = err;
+      this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
+      ESP_LOGD(TAG, "staged upload flushed: %u/%u bytes (%s)", (unsigned) this->flush_.done,
+               (unsigned) this->flush_.total, storage::error_to_string(err));
+    }
+  }
+#endif
 #ifdef USE_STORAGE_WORKER
   DirTransfer &d = this->dir_;
   if (!d.active || !d.awaiting_file || !d.file_done_)
@@ -742,6 +776,29 @@ void WebServerFileApi::loop() {
 #endif  // USE_STORAGE_WORKER
 
 void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  {
+    auto *p = request->getParam("id");
+    uint32_t fid = p != nullptr ? (uint32_t) strtoul(p->value().c_str(), nullptr, 10) : 0;
+    if ((fid & FLUSH_JOB_FLAG) != 0) {
+      if (!this->flush_.active || this->flush_.job != fid) {
+        request->send(404);
+        return;
+      }
+      char jbuf[128];
+      if (this->flush_.finished) {
+        snprintf(jbuf, sizeof(jbuf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":%u,\"bytes_total\":%u}",
+                 storage::error_to_string(this->flush_.result), (unsigned) this->flush_.done,
+                 (unsigned) this->flush_.total);
+      } else {
+        snprintf(jbuf, sizeof(jbuf), "{\"state\":\"running\",\"bytes_done\":%u,\"bytes_total\":%u}",
+                 (unsigned) this->flush_.done, (unsigned) this->flush_.total);
+      }
+      request->send(200, "application/json", jbuf);
+      return;
+    }
+  }
+#endif
 #ifdef USE_STORAGE_WORKER
   auto *param = request->getParam("id");
   if (param == nullptr) {
@@ -1015,6 +1072,16 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     if (!ok)
       err = storage::StorageError::NOT_READY;
     this->upload_.error = err;
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+    // Stage into the PSRAM arena when the whole request body fits (content_len is a safe
+    // upper bound for the file part). Strictly additive: nullptr keeps streaming.
+    if (this->upload_.error == storage::StorageError::OK && storage::global_transfer_buffer != nullptr &&
+        (!this->flush_.active || this->flush_.finished)) {
+      httpd_req_t *raw = *request;
+      this->upload_.staged = storage::global_transfer_buffer->try_acquire(raw->content_len);
+      this->upload_.staged_cap = this->upload_.staged != nullptr ? raw->content_len : 0;
+    }
+#endif
     return;
   }
 
@@ -1026,6 +1093,17 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     storage::StorageError err = storage::StorageError::OK;
     bool ok = this->run_on_loop_([this, data, len, &err]() {
       size_t written = 0;
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+      if (this->upload_.staged != nullptr) {
+        if (this->upload_.offset + len > this->upload_.staged_cap) {
+          this->upload_.error = storage::StorageError::IO_ERROR;  // cannot happen: cap = content_len
+          return;
+        }
+        memcpy(this->upload_.staged + this->upload_.offset, data, len);
+        this->upload_.offset += len;
+        return;
+      }
+#endif
       if (this->upload_.dst_is_fs) {
         err = static_cast<storage::FilesystemStorage *>(this->upload_.storage)
                   ->write(this->upload_.handle, data, len, &written);
@@ -1043,6 +1121,25 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
   }
 
   if (final) {
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+    if (this->upload_.staged != nullptr) {
+      if (this->upload_.error == storage::StorageError::OK) {
+        this->flush_ = StagedFlush{};
+        this->flush_.active = true;
+        this->flush_.job = FLUSH_JOB_FLAG | (++this->flush_job_counter_ & 0x7FFFFFFFu);
+        this->flush_.storage = this->upload_.storage;
+        this->flush_.handle = this->upload_.handle;
+        this->flush_.dst_is_fs = this->upload_.dst_is_fs;
+        memcpy(this->flush_.rel_path, this->upload_.rel_path, sizeof(this->flush_.rel_path));
+        this->flush_.data = this->upload_.staged;
+        this->flush_.total = this->upload_.offset;
+        this->upload_.handle_open = false;  // the flush owns and closes the handle now
+      } else {
+        storage::global_transfer_buffer->release();  // receive failed — nothing to flush
+      }
+      this->upload_.staged = nullptr;
+    }
+#endif
     ESP_LOGD(TAG, "upload end: %" PRIu64 " bytes (%s)", this->upload_.offset,
              storage::error_to_string(this->upload_.error));
     storage::StorageError close_err = storage::StorageError::OK;
@@ -1080,6 +1177,14 @@ void WebServerFileApi::handle_upload_response_(AsyncWebServerRequest *request) {
     send_error_(request, err);
     return;
   }
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+  if (this->flush_.active && !this->flush_.finished) {
+    char jbuf[80];
+    snprintf(jbuf, sizeof(jbuf), "{\"bytes\":%" PRIu64 ",\"job\":%" PRIu32 "}", this->upload_.offset, this->flush_.job);
+    request->send(200, "application/json", jbuf);
+    return;
+  }
+#endif
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"bytes\":%" PRIu64 "}", this->upload_.offset);
   request->send(200, "application/json", buf);
