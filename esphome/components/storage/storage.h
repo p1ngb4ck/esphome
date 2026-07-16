@@ -218,6 +218,18 @@ class RawStorage : public Storage {
 
   // Every driver answers for its own medium — consumers must not infer geometry from the type.
   virtual void get_raw_geometry(RawGeometry *out) const = 0;
+
+#ifdef USE_STORAGE_DEVICE_NODES
+  // Whether this medium should appear as its own node in a file browser. Presentation, not
+  // storage: a raw device has no path namespace to browse, so the node is just a place to hang
+  // its address-based operations. Off unless codegen was told otherwise, and the whole notion
+  // only exists when a browser is configured (see USE_STORAGE_DEVICE_NODES).
+  virtual bool has_device_node() const { return false; }
+  // Label of that node. Deliberately neither the YAML id (a reference for lambdas/actions) nor
+  // the entity name (Home Assistant / web server) — it names one thing only: this device's node
+  // in the browser. nullptr when the driver has no node.
+  virtual const char *get_device_node_name() const { return nullptr; }
+#endif
 };
 
 // Common path-based operations shared by FilesystemStorage and NetworkStorage.

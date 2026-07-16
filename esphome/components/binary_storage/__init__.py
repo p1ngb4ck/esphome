@@ -12,6 +12,7 @@ from esphome.components.esp32 import (
 )
 from esphome.components.storage import request_storage_device, request_storage_worker
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.const import (
     CONF_ADDRESS,
     CONF_CAPACITY,
@@ -29,6 +30,7 @@ from esphome.core import CORE
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = []
 AUTO_LOAD = ["storage"]
+DOMAIN = "binary_storage"
 MULTI_CONF = True
 
 # Namespaces
@@ -107,6 +109,8 @@ CONF_QUAD_MODE = "quad_mode"
 CONF_MOUNT_ID = "mount_id"
 CONF_STORAGE_ID = "storage_id"
 CONF_STORAGE_NAME = "storage_name"
+CONF_DEVICE_NODE = "device_node"
+CONF_DEVICE_NODE_NAME = "device_node_name"
 
 # Storage modes (for external devices)
 MODE_RAW = "raw"
@@ -166,6 +170,14 @@ EEPROM_SCHEMA = (
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
             cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
+            # Whether this device gets its own node in the file browser. Defaults to on when a
+            # browser is configured at all.
+            cv.Optional(CONF_DEVICE_NODE): cv.boolean,
+            # What that node is called. Neither the YAML id (references in lambdas/actions) nor
+            # the entity name (Home Assistant / web server): this names the node and nothing
+            # else. Defaults to the device type, which is unambiguous until a second device of
+            # that type shows up — then it is required.
+            cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -188,6 +200,14 @@ FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
             cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
+            # Whether this device gets its own node in the file browser. Defaults to on when a
+            # browser is configured at all.
+            cv.Optional(CONF_DEVICE_NODE): cv.boolean,
+            # What that node is called. Neither the YAML id (references in lambdas/actions) nor
+            # the entity name (Home Assistant / web server): this names the node and nothing
+            # else. Defaults to the device type, which is unambiguous until a second device of
+            # that type shows up — then it is required.
+            cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -213,6 +233,14 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
             cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
+            # Whether this device gets its own node in the file browser. Defaults to on when a
+            # browser is configured at all.
+            cv.Optional(CONF_DEVICE_NODE): cv.boolean,
+            # What that node is called. Neither the YAML id (references in lambdas/actions) nor
+            # the entity name (Home Assistant / web server): this names the node and nothing
+            # else. Defaults to the device type, which is unambiguous until a second device of
+            # that type shows up — then it is required.
+            cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -235,6 +263,14 @@ SPI_FRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
             cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
+            # Whether this device gets its own node in the file browser. Defaults to on when a
+            # browser is configured at all.
+            cv.Optional(CONF_DEVICE_NODE): cv.boolean,
+            # What that node is called. Neither the YAML id (references in lambdas/actions) nor
+            # the entity name (Home Assistant / web server): this names the node and nothing
+            # else. Defaults to the device type, which is unambiguous until a second device of
+            # that type shows up — then it is required.
+            cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -257,6 +293,14 @@ SPI_MRAM_SCHEMA = (
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
             cv.Optional(CONF_STORAGE_ID): cv.string,
             cv.Optional(CONF_STORAGE_NAME): cv.string,
+            # Whether this device gets its own node in the file browser. Defaults to on when a
+            # browser is configured at all.
+            cv.Optional(CONF_DEVICE_NODE): cv.boolean,
+            # What that node is called. Neither the YAML id (references in lambdas/actions) nor
+            # the entity name (Home Assistant / web server): this names the node and nothing
+            # else. Defaults to the device type, which is unambiguous until a second device of
+            # that type shows up — then it is required.
+            cv.Optional(CONF_DEVICE_NODE_NAME): cv.string_strict,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -335,6 +379,16 @@ DEVICE_SOURCE_FILES = {
     "flash_partition": ["flash_partition.cpp"],
 }
 
+# Raw media only: flash_partition is a filesystem and shows up as a mount point, not a node.
+RAW_DEVICE_TYPES = {
+    "i2c_eeprom",
+    "i2c_fram",
+    "spi_flash",
+    "spi_fram",
+    "spi_mram",
+    "onewire_eeprom",
+}
+
 TYPE_TO_DEVICE = {
     "EEPROM": "i2c_eeprom",
     "I2C_EEPROM": "i2c_eeprom",
@@ -352,7 +406,59 @@ TYPE_TO_DEVICE = {
 }
 
 
+def _browser_configured() -> bool:
+    """True when a web_server in this config has the file browser turned on."""
+    web_server = fv.full_config.get().get("web_server")
+    if isinstance(web_server, list):
+        return any("file_browser" in ws for ws in web_server)
+    return isinstance(web_server, dict) and "file_browser" in web_server
+
+
+def _node_name_of(device: dict) -> str | None:
+    """Effective node name of a raw device, or None when it has no node."""
+    internal = TYPE_TO_DEVICE.get(device[CONF_TYPE].upper())
+    if internal not in RAW_DEVICE_TYPES:
+        return None
+    if not device.get(CONF_DEVICE_NODE, _browser_configured()):
+        return None
+    return device.get(CONF_DEVICE_NODE_NAME) or internal
+
+
+def _validate_device_node(config):
+    """The node name defaults to the device type — fine for one FRAM, ambiguous for two.
+
+    Two nodes called 'spi_flash' would be indistinguishable in the browser and would address
+    each other's device, so the second one has to say who it is."""
+    if config.get(CONF_DEVICE_NODE_NAME) and not _browser_configured():
+        raise cv.Invalid(
+            f"'{CONF_DEVICE_NODE_NAME}' needs a web_server with 'file_browser:' — there is "
+            f"nowhere to show the node otherwise"
+        )
+    if config.get(CONF_DEVICE_NODE) and not _browser_configured():
+        raise cv.Invalid(
+            f"'{CONF_DEVICE_NODE}' needs a web_server with 'file_browser:' — there is nowhere "
+            f"to show the node otherwise"
+        )
+
+    seen: dict[str, int] = {}
+    for device in fv.full_config.get().get(DOMAIN, []):
+        name = _node_name_of(device)
+        if name is not None:
+            seen[name] = seen.get(name, 0) + 1
+    duplicates = sorted(name for name, count in seen.items() if count > 1)
+    if duplicates:
+        raise cv.Invalid(
+            f"More than one device node is called {duplicates}. Give each one a "
+            f"'{CONF_DEVICE_NODE_NAME}' — it is what the file browser shows and addresses them by."
+        )
+    return config
+
+
 def _final_validate(config):
+    _validate_device_node(config)
+    # Resolved here because it depends on another component's config; stored back for to_code().
+    if (node_name := _node_name_of(config)) is not None:
+        config[CONF_DEVICE_NODE_NAME] = node_name
     device_type = config[CONF_TYPE].upper()
     if (internal_type := TYPE_TO_DEVICE.get(device_type)) is not None:
         CORE.data.setdefault("binary_storage_device_types", set()).add(internal_type)
@@ -501,6 +607,10 @@ async def to_code(config):
     storage_name = config.get(CONF_STORAGE_NAME, config.get(CONF_MODEL, device_type))
     cg.add(var.set_storage_id(storage_id))
     cg.add(var.set_storage_name(storage_name))
+    if (node_name := config.get(CONF_DEVICE_NODE_NAME)) is not None:
+        # The whole device-node notion only exists when something shows it (see storage.h).
+        cg.add_define("USE_STORAGE_DEVICE_NODES")
+        cg.add(var.set_device_node_name(node_name))
 
     # Raw device always registers itself
     request_storage_device()
