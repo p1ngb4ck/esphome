@@ -126,8 +126,10 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
     struct Ctx {
       std::string *out;
       storage::RawStorage *scope;
+      bool enable_write;
+      bool enable_erase;
       bool first{true};
-    } ctx{&json, this->scoped_device_};
+    } ctx{&json, this->scoped_device_, this->enable_write_, this->enable_erase_};
     if (storage::global_storage_registry == nullptr)
       return;
     storage::global_storage_registry->for_each_raw(
@@ -161,12 +163,19 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
               buf, sizeof(buf),
               "\",\"capacity\":%" PRIu64 ",\"write_page\":%" PRIu32 ",\"erase_sector\":%" PRIu32
               ",\"erase_block\":%" PRIu32 ",\"write_needs_erase\":%s,\"can_erase_sector\":%s,\"can_erase_block\":%s"
-              ",\"can_erase_chip\":%s,\"node\":%s}",
+              ",\"can_erase_chip\":%s,\"writable\":%s,\"erasable\":%s,\"node\":%s}",
               geo.capacity, geo.write_page, geo.erase_sector, geo.erase_block,
               (geo.caps & storage::RAW_WRITE_NEEDS_ERASE) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_SECTOR) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_BLOCK) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_CHIP) != 0 ? "true" : "false",
+              // What this build allows, so the browser never offers a button that can only 403.
+              ctx->enable_write ? "true" : "false",
+              // Erasable means both: allowed here and the medium actually has an erase.
+              ctx->enable_erase &&
+                      (geo.caps & (storage::RAW_ERASE_SECTOR | storage::RAW_ERASE_BLOCK | storage::RAW_ERASE_CHIP)) != 0
+                  ? "true"
+                  : "false",
 #ifdef USE_STORAGE_DEVICE_NODES
               // Presentation hint for the browser — the API itself serves every device.
               s->has_device_node() ? "true" : "false"

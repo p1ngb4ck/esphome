@@ -41,6 +41,8 @@
     usb: "M15,7V11H16V13H13V5H15L12,1L9,5H11V13H8V10.93C8.7,10.56 9.2,9.85 9.2,9C9.2,7.78 8.21,6.8 7,6.8C5.78,6.8 4.8,7.78 4.8,9C4.8,9.85 5.3,10.56 6,10.93V13A2,2 0 0,0 8,15H11V18.05C10.29,18.41 9.8,19.15 9.8,20C9.8,21.22 10.78,22.2 12,22.2C13.22,22.2 14.2,21.22 14.2,20C14.2,19.15 13.71,18.41 13,18.05V15H16A2,2 0 0,0 18,13V11H19V7H15Z",
     net: "M10,2C8.89,2 8,2.89 8,4V7C8,8.11 8.89,9 10,9H11V11H2V13H6V15H5C3.89,15 3,15.89 3,17V20C3,21.11 3.89,22 5,22H9C10.11,22 11,21.11 11,20V17C11,15.89 10.11,15 9,15H8V13H16V15H15C13.89,15 13,15.89 13,17V20C13,21.11 13.89,22 15,22H19C20.11,22 21,21.11 21,20V17C21,15.89 20.11,15 19,15H18V13H22V11H13V9H14C15.11,9 16,8.11 16,7V4C16,2.89 15.11,2 14,2H10Z",
     mem: "M6,4H18V5H21V7H18V9H21V11H18V13H21V15H18V17H21V19H18V20H6V19H3V17H6V15H3V13H6V11H3V9H6V7H3V5H6V4M8,6V18H16V6H8M10,8H14V16H10V8Z",
+    erase: "M15.14,3C14.63,3 14.12,3.2 13.73,3.59L2.59,14.73C1.81,15.5 1.81,16.77 2.59,17.56L5,20H12.5L20.41,12.09C21.2,11.3 21.2,10.03 20.41,9.24L16.76,5.59L15.14,3M17,18A2,2 0 0,0 19,20A2,2 0 0,0 21,18C21,16.67 19,14.5 19,14.5C19,14.5 17,16.67 17,18Z",
+    all: "M9,3V4H4V6H5V19A2,2 0 0,0 7,21H17A2,2 0 0,0 19,19V6H20V4H15V3H9M7,6H17V19H7V6M9,8V17H11V8H9M13,8V17H15V8H13Z",
     disk: "M12,3C7.58,3 4,4.79 4,7C4,9.21 7.58,11 12,11C16.42,11 20,9.21 20,7C20,4.79 16.42,3 12,3M4,9V12C4,14.21 7.58,16 12,16C16.42,16 20,14.21 20,12V9C20,11.21 16.42,13 12,13C7.58,13 4,11.21 4,9M4,14V17C4,19.21 7.58,21 12,21C16.42,21 20,19.21 20,17V14C20,16.21 16.42,18 12,18C7.58,18 4,16.21 4,14Z",
   };
   const icon = (name) => {
@@ -98,6 +100,19 @@
     #esp-file-browser button svg, #esp-file-browser a.efb-act svg { display: block; }
     #esp-file-browser button, #esp-file-browser a.efb-act { padding: 6px; }
     #esp-file-browser .efb-type { flex: none; display: flex; opacity: .75; }
+    #esp-file-browser .efb-modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      display: flex; align-items: center; justify-content: center; z-index: 10; }
+    #esp-file-browser .efb-modal { background: var(--bg-color, #fff); color: inherit;
+      border: 2px solid rgba(127,127,127,.3); border-radius: 12px; padding: 1em 1.25em;
+      min-width: 18em; max-width: 90%; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
+    #esp-file-browser .efb-modal-title { font-weight: 500; margin-bottom: .75em; }
+    #esp-file-browser .efb-field { display: flex; align-items: center; gap: .75em;
+      justify-content: space-between; margin: .4em 0; }
+    #esp-file-browser .efb-field-label { font-size: .9em; opacity: .8; }
+    #esp-file-browser .efb-field input[type=text] { flex: 1; min-width: 0; max-width: 60%;
+      background: transparent; color: inherit; border: none;
+      border-bottom: 1px solid rgba(127,127,127,.4); padding: 2px 0; font-family: ui-monospace, monospace; }
+    #esp-file-browser .efb-modal-bar { display: flex; justify-content: flex-end; margin-top: 1em; }
     #esp-file-browser button.efb-danger { color: #d32f2f; }
     #esp-file-browser button.efb-danger:hover { background: rgba(211,47,47,.12); }
     #esp-file-browser input[type=file] { font-size: .8em; flex: 1; min-width: 0; }
@@ -289,6 +304,127 @@
     return wrap;
   };
 
+  // --- modal --------------------------------------------------------------
+  // Raw operations need parameters (address, size, a path) that a single icon cannot carry —
+  // and each of them is destructive or long-running enough to deserve a deliberate confirm.
+  const modal = (title, fields, onSubmit) => {
+    const back = $("div", { className: "efb-modal-back" });
+    const box = $("div", { className: "efb-modal" });
+    box.append($("div", { className: "efb-modal-title", textContent: title }));
+    const inputs = {};
+    for (const f of fields) {
+      const row = $("label", { className: "efb-field" });
+      row.append($("span", { className: "efb-field-label", textContent: f.label }));
+      const el = f.type === "check"
+        ? $("input", { type: "checkbox", checked: !!f.value })
+        : $("input", { type: "text", value: f.value == null ? "" : String(f.value) });
+      if (f.hint) el.placeholder = f.hint;
+      inputs[f.key] = el;
+      row.append(el);
+      box.append(row);
+    }
+    const close = () => back.remove();
+    const bar = $("div", { className: "efb-modal-bar" });
+    const cancel = $("button", { textContent: "cancel" });
+    cancel.onclick = close;
+    const ok = $("button", { textContent: "ok" });
+    ok.onclick = () => {
+      const values = {};
+      for (const f of fields)
+        values[f.key] = f.type === "check" ? inputs[f.key].checked : inputs[f.key].value.trim();
+      close();
+      Promise.resolve(onSubmit(values)).catch((e) => setStatus("Error: " + e.message));
+    };
+    bar.append(cancel, ok);
+    box.append(bar);
+    back.append(box);
+    back.onclick = (e) => { if (e.target === back) close(); };
+    card.append(back);
+    const first = box.querySelector("input");
+    if (first) first.focus();
+  };
+
+  // --- device nodes (raw media) -------------------------------------------
+  // A raw device has no directories, so its node is a leaf: no twisty, just its operations.
+  // What those are comes from /raw/devices — the driver's own geometry plus what this build
+  // allows — so the UI never offers what the medium or the config rules out.
+  const fmtHex = (n) => "0x" + Number(n).toString(16).toUpperCase();
+
+  const deviceNode = (dev) => {
+    const wrap = $("div");
+    const row = $("div", { className: "efb-row" });
+    row.style.paddingLeft = "8px";
+    row.append(
+      $("span", { className: "efb-twist efb-none", textContent: "\u25B8" }),
+      $("span", { className: "efb-type", title: dev.kind }, icon(typeIcon(dev.kind, ""))),
+      $("span", { className: "efb-name", textContent: dev.node_name || dev.id }),
+      $("span", { className: "efb-size", textContent: fmtSize(dev.capacity) }));
+
+    const readModal = (whole) => modal(whole ? `Read all of ${dev.node_name}` : `Read from ${dev.node_name}`, [
+      { key: "address", label: "Address", value: whole ? "0x0" : "0x0" },
+      { key: "size", label: "Size (bytes)", value: whole ? dev.capacity : 256 },
+      { key: "to_path", label: "To file on device", hint: "empty = download" },
+    ], async (v) => {
+      const q = `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
+      if (!v.to_path) {
+        window.location.href = `/raw/read?${q}`;
+        return;
+      }
+      setStatus(`reading ${dev.node_name} \u2192 ${v.to_path}\u2026`);
+      const r = await api(`/raw/read?${q}&to_path=${enc(v.to_path)}`);
+      setStatus(`read ${fmtSize(r.read)} from ${dev.node_name} into ${v.to_path}`);
+    });
+
+    {
+      const acts = [
+        btn("download", "Read a range", async () => readModal(false), () => {}),
+        btn("all", "Read the whole device", async () => readModal(true), () => {}),
+      ];
+      if (dev.writable) {
+        acts.push(btn("upload", "Write a file to this device", async () => modal(`Write to ${dev.node_name}`, [
+          { key: "address", label: "Address", value: "0x0" },
+          { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
+          ...(dev.write_needs_erase
+            ? [{ key: "erase", label: `Erase first (${fmtSize(dev.erase_sector)} sectors)`, type: "check", value: true }]
+            : []),
+        ], async (v) => {
+          if (!v.from_path) throw new Error("no file given");
+          setStatus(`writing ${v.from_path} \u2192 ${dev.node_name}\u2026`);
+          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}`;
+          const r = await api(`/raw/write?${q}${v.erase ? "&erase=1" : ""}`, { method: "POST" });
+          setStatus(`wrote ${fmtSize(r.written)} to ${dev.node_name}`);
+        }), () => {}));
+      }
+      if (dev.erasable) {
+        acts.push(btn("erase", "Erase a range", async () => modal(`Erase ${dev.node_name}`, [
+          { key: "address", label: `Address (multiple of ${fmtHex(dev.erase_sector)})`, value: "0x0" },
+          { key: "size", label: `Size (multiple of ${fmtHex(dev.erase_sector)})`, value: dev.erase_sector },
+          { key: "all", label: "Erase the whole device", type: "check", value: false },
+        ], async (v) => {
+          if (v.all && !confirm(`Erase all of ${dev.node_name}? Everything on it is gone.`)) return;
+          const q = v.all
+            ? `device=${enc(dev.id)}&all=1`
+            : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
+          setStatus(`erasing ${dev.node_name}\u2026`);
+          const r = await api(`/raw/erase?${q}`, { method: "POST" });
+          setStatus(`erased ${fmtSize(r.erased)} on ${dev.node_name}`);
+        }), () => {}, "efb-danger"));
+      }
+      acts.push(btn("info", "Details", async () => {
+        alert(`${dev.node_name} (${dev.kind})\n` +
+          `Capacity: ${fmtSize(dev.capacity)}\n` +
+          `Write page: ${dev.write_page} B\n` +
+          (dev.erase_sector ? `Erase sector: ${fmtSize(dev.erase_sector)}\n` : "Erase: not supported\n") +
+          (dev.erase_block ? `Erase block: ${fmtSize(dev.erase_block)}\n` : "") +
+          (dev.write_needs_erase ? "Writes need an erase first\n" : "Writes overwrite in place\n"));
+      }, () => {}));
+      row.append(...acts);
+    }
+
+    wrap.append(row);
+    return wrap;
+  };
+
   // --- roots: always visible ----------------------------------------------
   async function renderRoots() {
     tree.textContent = "";
@@ -310,6 +446,16 @@
       }
     } catch (e) {
       setStatus("Error: " + e.message);
+    }
+    // Raw devices, if this build has the raw API and any device asked for a node. A 404 simply
+    // means no raw API — not an error worth showing.
+    try {
+      for (const dev of await api("/raw/devices")) {
+        if (dev.node)
+          tree.append(deviceNode(dev));
+      }
+    } catch (e) {
+      /* no raw api configured */
     }
   }
   renderRoots();
