@@ -534,7 +534,19 @@ async def to_code(config):
             with js_path.open(encoding="utf-8") as js_file:
                 add_resource_as_progmem("FILE_BROWSER_JS", js_file.read())
 
-    if (raw_api_config := config.get(CONF_RAW_API)) is not None:
+    raw_api_config = config.get(CONF_RAW_API)
+    if raw_api_config is None and file_browser:
+        # A configured device node needs an API to talk to, exactly like file_browser implies
+        # file_api above. Read-only: showing a node is not consent to write or erase.
+        # binary_storage's final validation resolves the node name into its config, so the
+        # presence of that key is the reliable signal here — and needs no import of a component
+        # that may not even be vendored.
+        if any(
+            "device_node_name" in device
+            for device in CORE.config.get("binary_storage", [])
+        ):
+            raw_api_config = {CONF_ENABLE_WRITE: False, CONF_ENABLE_ERASE: False}
+    if raw_api_config is not None:
         cg.add_define("USE_WEBSERVER_RAW_API")
         # Same pattern as the file api above: no YAML-visible id, a real Component whose
         # setup() registers the handler.

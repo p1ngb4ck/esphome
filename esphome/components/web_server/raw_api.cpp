@@ -4,8 +4,10 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -143,6 +145,11 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           ctx->first = false;
           *ctx->out += "{\"id\":\"";
           append_json_escaped(*ctx->out, info.id != nullptr ? info.id : "");
+#ifdef USE_STORAGE_DEVICE_NODES
+          // The browser labels the node with this; it addresses the device by "id" above.
+          *ctx->out += "\",\"node_name\":\"";
+          append_json_escaped(*ctx->out, s->get_device_node_name() != nullptr ? s->get_device_node_name() : "");
+#endif
           *ctx->out += "\",\"name\":\"";
           append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
           *ctx->out += "\",\"kind\":\"";
@@ -150,16 +157,23 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           char buf[192];
           // The geometry is what a client needs to offer only what this medium can do — the
           // capability bits, not a guess from the kind string.
-          snprintf(buf, sizeof(buf),
-                   "\",\"capacity\":%" PRIu64 ",\"write_page\":%" PRIu32 ",\"erase_sector\":%" PRIu32
-                   ",\"erase_block\":%" PRIu32
-                   ",\"write_needs_erase\":%s,\"can_erase_sector\":%s,\"can_erase_block\":%s"
-                   ",\"can_erase_chip\":%s}",
-                   geo.capacity, geo.write_page, geo.erase_sector, geo.erase_block,
-                   (geo.caps & storage::RAW_WRITE_NEEDS_ERASE) != 0 ? "true" : "false",
-                   (geo.caps & storage::RAW_ERASE_SECTOR) != 0 ? "true" : "false",
-                   (geo.caps & storage::RAW_ERASE_BLOCK) != 0 ? "true" : "false",
-                   (geo.caps & storage::RAW_ERASE_CHIP) != 0 ? "true" : "false");
+          snprintf(
+              buf, sizeof(buf),
+              "\",\"capacity\":%" PRIu64 ",\"write_page\":%" PRIu32 ",\"erase_sector\":%" PRIu32
+              ",\"erase_block\":%" PRIu32 ",\"write_needs_erase\":%s,\"can_erase_sector\":%s,\"can_erase_block\":%s"
+              ",\"can_erase_chip\":%s,\"node\":%s}",
+              geo.capacity, geo.write_page, geo.erase_sector, geo.erase_block,
+              (geo.caps & storage::RAW_WRITE_NEEDS_ERASE) != 0 ? "true" : "false",
+              (geo.caps & storage::RAW_ERASE_SECTOR) != 0 ? "true" : "false",
+              (geo.caps & storage::RAW_ERASE_BLOCK) != 0 ? "true" : "false",
+              (geo.caps & storage::RAW_ERASE_CHIP) != 0 ? "true" : "false",
+#ifdef USE_STORAGE_DEVICE_NODES
+              // Presentation hint for the browser — the API itself serves every device.
+              s->has_device_node() ? "true" : "false"
+#else
+              "false"
+#endif
+          );
           *ctx->out += buf;
         },
         &ctx);
@@ -172,6 +186,109 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
+bool WebServerRawApi::read_to_path_(storage::RawStorage *device, uint64_t address, uint64_t size, const char *path,
+                                    const char **error) {
+  auto buf_size = static_cast<size_t>(size);
+  uint8_t *raw = RAMAllocator<uint8_t>().allocate(buf_size);
+  if (raw == nullptr) {
+    *error = "out of memory";
+    return false;
+  }
+  storage::RamBuffer buf(raw, storage::RamBufferDeleter{buf_size});
+
+  uint64_t offset = 0;
+  while (offset < size) {
+    size_t want = static_cast<size_t>(std::min<uint64_t>(RAW_API_CHUNK, size - offset));
+    size_t got = 0;
+    storage::StorageError err = storage::StorageError::OK;
+    uint8_t *dst = buf.get() + offset;
+    bool ok = this->run_on_loop_(
+        [device, address, offset, dst, want, &got, &err]() { err = device->read(address + offset, dst, want, &got); });
+    if (!ok || err != storage::StorageError::OK || got == 0) {
+      *error = ok ? storage::error_to_string(err) : "device busy";
+      return false;
+    }
+    offset += got;
+  }
+
+  storage::StorageError werr = storage::StorageError::OK;
+  const uint8_t *data = buf.get();
+  bool ok = this->run_on_loop_(
+      [path, data, buf_size, &werr]() {
+        const char *rel = nullptr;
+        storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                       ? storage::global_storage_registry->resolve_path(path, &rel)
+                                       : nullptr;
+        werr = ps == nullptr ? storage::StorageError::NOT_FOUND : storage::write_file(ps, rel, data, buf_size);
+      },
+      60000);
+  if (!ok || werr != storage::StorageError::OK) {
+    *error = ok ? storage::error_to_string(werr) : "storage busy";
+    return false;
+  }
+  return true;
+}
+
+bool WebServerRawApi::write_from_path_(storage::RawStorage *device, uint64_t address, const char *path,
+                                       bool erase_first, uint64_t *written, const char **error) {
+  storage::RamBuffer buf;
+  size_t size = 0;
+  storage::StorageError rerr = storage::StorageError::OK;
+  bool ok = this->run_on_loop_(
+      [path, &buf, &size, &rerr]() {
+        const char *rel = nullptr;
+        storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                       ? storage::global_storage_registry->resolve_path(path, &rel)
+                                       : nullptr;
+        rerr = ps == nullptr ? storage::StorageError::NOT_FOUND : storage::read_file(ps, rel, buf, &size);
+      },
+      60000);
+  if (!ok || rerr != storage::StorageError::OK) {
+    *error = ok ? storage::error_to_string(rerr) : "storage busy";
+    return false;
+  }
+
+  storage::RawGeometry geo;
+  this->run_on_loop_([device, &geo]() { device->get_raw_geometry(&geo); });
+  if (address >= geo.capacity || size > geo.capacity - address) {
+    *error = "file does not fit at this address";
+    return false;
+  }
+  if (erase_first) {
+    if (geo.erase_sector == 0 || (address % geo.erase_sector) != 0) {
+      *error = "address not sector aligned";
+      return false;
+    }
+    uint64_t erase_len = size;
+    if ((erase_len % geo.erase_sector) != 0)
+      erase_len += geo.erase_sector - (erase_len % geo.erase_sector);
+    storage::StorageError eerr = storage::StorageError::OK;
+    bool eok =
+        this->run_on_loop_([device, address, erase_len, &eerr]() { eerr = device->erase(address, erase_len); }, 120000);
+    if (!eok || eerr != storage::StorageError::OK) {
+      *error = eok ? storage::error_to_string(eerr) : "device busy";
+      return false;
+    }
+  }
+
+  uint64_t done = 0;
+  while (done < size) {
+    size_t want = static_cast<size_t>(std::min<uint64_t>(RAW_API_CHUNK, size - done));
+    size_t n = 0;
+    storage::StorageError werr = storage::StorageError::OK;
+    const uint8_t *src = buf.get() + done;
+    bool wok = this->run_on_loop_(
+        [device, address, done, src, want, &n, &werr]() { werr = device->write(address + done, src, want, &n); });
+    if (!wok || werr != storage::StorageError::OK || n == 0) {
+      *error = wok ? storage::error_to_string(werr) : "device busy";
+      return false;
+    }
+    done += n;
+  }
+  *written = done;
+  return true;
+}
+
 void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
   storage::RawStorage *device = this->find_device_(request);
   if (device == nullptr) {
@@ -181,6 +298,21 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
   uint64_t address = 0, size = 0;
   if (!this->parse_range_(request, device, &address, &size)) {
     request->send(400, "application/json", "{\"error\":\"bad or out-of-bounds range\"}");
+    return;
+  }
+
+  // to_path: the node reads into a file itself; nothing streams to the client.
+  if (auto *to_path = request->getParam("to_path")) {
+    const char *error = nullptr;
+    if (!this->read_to_path_(device, address, size, to_path->value().c_str(), &error)) {
+      char ebuf[128];
+      snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", error != nullptr ? error : "failed");
+      request->send(400, "application/json", ebuf);
+      return;
+    }
+    char okbuf[64];
+    snprintf(okbuf, sizeof(okbuf), "{\"read\":%" PRIu64 "}", size);
+    request->send(200, "application/json", okbuf);
     return;
   }
 
@@ -271,11 +403,35 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
       return;
     }
     if (strcmp(tail, "write") == 0) {
-      // The body handler did the work; report its outcome.
       if (!this->enable_write_) {
         request->send(403, "application/json", "{\"error\":\"write disabled\"}");
         return;
       }
+      // from_path: the payload is a file on the node, not the request body.
+      if (auto *from_path = request->getParam("from_path")) {
+        storage::RawStorage *device = this->find_device_(request);
+        if (device == nullptr) {
+          request->send(404, "application/json", "{\"error\":\"no such device\"}");
+          return;
+        }
+        auto *addr_param = request->getParam("address");
+        uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
+        auto *erase = request->getParam("erase");
+        uint64_t written = 0;
+        const char *error = nullptr;
+        if (!this->write_from_path_(device, address, from_path->value().c_str(),
+                                    erase != nullptr && erase->value() == "1", &written, &error)) {
+          char ebuf[128];
+          snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", error != nullptr ? error : "failed");
+          request->send(400, "application/json", ebuf);
+          return;
+        }
+        char okbuf[64];
+        snprintf(okbuf, sizeof(okbuf), "{\"written\":%" PRIu64 "}", written);
+        request->send(200, "application/json", okbuf);
+        return;
+      }
+      // Otherwise the body handler did the work; report its outcome.
       if (this->write_.failed) {
         char buf[96];
         snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", this->write_.error != nullptr ? this->write_.error : "failed");

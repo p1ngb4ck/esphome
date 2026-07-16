@@ -96,6 +96,11 @@ class BinaryStorage : public storage::RawStorage {
 
   void set_storage_id(const char *id) { this->storage_id_ = id; }
   void set_storage_name(const char *name) { this->storage_name_ = name; }
+#ifdef USE_STORAGE_DEVICE_NODES
+  void set_device_node_name(const char *name) { this->device_node_name_ = name; }
+  bool has_device_node() const override { return this->device_node_name_ != nullptr; }
+  const char *get_device_node_name() const override { return this->device_node_name_; }
+#endif
 
  protected:
   // Overflow-proof: valid iff [address, address+length) fits within capacity.
@@ -106,6 +111,10 @@ class BinaryStorage : public storage::RawStorage {
 
   const char *storage_id_{nullptr};
   const char *storage_name_{nullptr};
+#ifdef USE_STORAGE_DEVICE_NODES
+  // nullptr = no node for this device (device_node: false, or no browser configured at all).
+  const char *device_node_name_{nullptr};
+#endif
 };
 
 }  // namespace esphome::binary_storage
