@@ -1,6 +1,8 @@
 #include "transfer_buffer.h"
 #ifdef USE_STORAGE_TRANSFER_BUFFER
 
+#include <esp_heap_caps.h>
+
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
@@ -11,10 +13,33 @@ static const char *const TAG = "storage.transfer_buffer";
 TransferBuffer *global_transfer_buffer = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 void TransferBuffer::setup() {
+  // size 0 = auto (25% of the detected PSRAM); an explicit size must leave at least 20%
+  // of PSRAM to the rest of the system. Both checks live here because the real PSRAM
+  // size is only known after boot detection — config time cannot compute percentages.
+  size_t total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  if (total == 0) {
+    ESP_LOGE(TAG, "no PSRAM detected — transfer buffer disabled");
+    this->mark_failed();
+    global_transfer_buffer = this;
+    return;
+  }
+  if (this->size_ == 0) {
+    this->size_ = total / 4;
+  } else if (!this->override_limit_ && this->size_ > (total / 5) * 4) {
+    ESP_LOGE(TAG, "configured size %u exceeds 80%% of PSRAM (%u of %u) — transfer buffer disabled",
+             (unsigned) this->size_, (unsigned) ((total / 5) * 4), (unsigned) total);
+    this->mark_failed();
+    global_transfer_buffer = this;
+    return;
+  }
   // External-only on purpose: a multi-MB arena must never silently land in internal RAM.
   // Config validation already requires the psram component; allocation can still fail
   // (fragmentation, other consumers) — then the buffer stays disabled and every consumer
   // keeps streaming, which is the documented fallback.
+  if (this->override_limit_ && this->size_ > (total / 5) * 4) {
+    ESP_LOGW(TAG, "size %u exceeds 80%% of PSRAM (%u) — safety limit overridden by config", (unsigned) this->size_,
+             (unsigned) ((total / 5) * 4));
+  }
   RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
   this->buf_ = allocator.allocate(this->size_);
   if (this->buf_ == nullptr) {
