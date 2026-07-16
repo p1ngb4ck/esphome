@@ -233,6 +233,12 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
             *ctx->out += ",\"name\":\"";
             append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
             *ctx->out += "\"";
+            // Optional: only drivers that report a medium kind emit it (see StorageInfo).
+            if (info.kind != nullptr) {
+              *ctx->out += ",\"kind\":\"";
+              append_json_escaped(*ctx->out, info.kind);
+              *ctx->out += "\"";
+            }
           }
           *ctx->out += '}';
         },

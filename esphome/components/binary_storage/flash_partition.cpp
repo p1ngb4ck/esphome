@@ -96,6 +96,7 @@ storage::StorageError FlashPartition::get_info(storage::StorageInfo *info) {
 
   info->id = this->storage_id_ != nullptr ? this->storage_id_ : this->partition_label_;
   info->name = this->storage_name_ != nullptr ? this->storage_name_ : this->mount_path_;
+  info->kind = "flash";
   info->is_mounted = this->mounted_;
   info->is_removable = false;
   info->is_read_only = false;

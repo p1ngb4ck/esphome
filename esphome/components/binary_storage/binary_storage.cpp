@@ -37,6 +37,7 @@ storage::StorageError BinaryStorage::get_info(storage::StorageInfo *info) {
 
   info->id = this->storage_id_ != nullptr ? this->storage_id_ : this->get_device_type();
   info->name = this->storage_name_ != nullptr ? this->storage_name_ : this->get_device_name();
+  info->kind = this->get_device_type();  // "eeprom", "fram", ... — already the driver's own kind string
   info->total_bytes = this->get_capacity();
   info->free_bytes = 0;
   info->block_size = this->get_page_size();

@@ -552,6 +552,7 @@ storage::StorageError LittleFSMount::get_info(storage::StorageInfo *info) {
 
   info->id = this->storage_ != nullptr ? this->storage_->get_device_type() : "littlefs";
   info->name = this->mount_path_;
+  info->kind = "littlefs";
   info->is_mounted = this->mounted_;
   info->is_removable = false;
   info->is_read_only = false;

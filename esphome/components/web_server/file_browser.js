@@ -55,11 +55,17 @@
     s.append(path);
     return s;
   };
-  const typeIcon = (t) => {
-    const k = (t || "").toLowerCase();
-    return k.includes("sd") ? "sd" : k.includes("usb") ? "usb"
-      : (k.includes("nfs") || k.includes("net")) ? "net"
-      : (k.includes("flash") || k.includes("part") || k.includes("data")) ? "mem" : "disk";
+  // Icon per medium: 'kind' from /files/storages when the driver reports one (sd, usb,
+  // nfs, flash, littlefs, eeprom, ...), otherwise the coarse type (filesystem/network).
+  const typeIcon = (kind, type) => {
+    const k = (kind || type || "").toLowerCase();
+    if (k.includes("sd")) return "sd";
+    if (k.includes("usb")) return "usb";
+    if (k.includes("nfs") || k.includes("net")) return "net";
+    if (k.includes("flash") || k.includes("eeprom") || k.includes("fram") ||
+        k.includes("littlefs") || k.includes("part"))
+      return "mem";
+    return "disk";
   };
 
   const style = $("style", { textContent: `
@@ -298,7 +304,7 @@
         }
         const node = dirNode(s.mount_path, s.mount_path, 0, { extras, canExpand: !!s.mounted });
         const row = node.firstChild;
-        const ti = $("span", { className: "efb-type", title: s.type }, icon(typeIcon(s.type)));
+        const ti = $("span", { className: "efb-type", title: s.kind || s.type }, icon(typeIcon(s.kind, s.type)));
         row.insertBefore(ti, row.children[1]);
         tree.append(node);
       }

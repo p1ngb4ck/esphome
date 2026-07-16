@@ -81,6 +81,7 @@ bool SdStorageBase::build_fatfs_path_(const char *rel_path, char *buf, size_t bu
 storage::StorageError SdStorageBase::get_info(storage::StorageInfo *info) {
   info->id = this->storage_id_ != nullptr ? this->storage_id_ : this->mount_path_;
   info->name = "SD Card";
+  info->kind = "sd";
   info->total_bytes = this->total_bytes_;
   info->free_bytes = this->get_free_bytes_impl();
   info->block_size = this->get_block_size_impl();
