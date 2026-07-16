@@ -11,6 +11,41 @@
 
 #include "storage.h"
 
+#include <span>
+#include <vector>
+
+#include "esphome/core/string_ref.h"
+
+#include "esphome/core/entity_base.h"
+#include "esphome/core/helpers.h"
+
+// Codecs compile against the REAL component restore structs — field access by
+// name, layouts stay the compiler's problem, sizeof gates every decode.
+#ifdef USE_FAN
+#include "esphome/components/fan/fan.h"
+#endif
+#ifdef USE_COVER
+#include "esphome/components/cover/cover.h"
+#endif
+#ifdef USE_VALVE
+#include "esphome/components/valve/valve.h"
+#endif
+#ifdef USE_LIGHT
+#include "esphome/components/light/light_state.h"
+#endif
+#ifdef USE_CLIMATE
+#include "esphome/components/climate/climate.h"
+#endif
+#ifdef USE_DATETIME_DATE
+#include "esphome/components/datetime/date_entity.h"
+#endif
+#ifdef USE_DATETIME_TIME
+#include "esphome/components/datetime/time_entity.h"
+#endif
+#ifdef USE_DATETIME_DATETIME
+#include "esphome/components/datetime/datetime_entity.h"
+#endif
+
 #include "esphome/components/json/json_util.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -26,6 +61,183 @@ static const char *const TAG = "storage.preferences";
 static constexpr const char *NVS_NAMESPACE = "esphome";
 static constexpr size_t MAX_BLOB_LEN = 4096;  // NVS blob hard limit is well below this
 static constexpr const char *HEX_PREFIX = "hex:";
+
+// SINGLE coupling point to the core's preference-key recipe.
+// get_preference_hash() is deprecated in favor of make_entity_preference<T>()
+// because upstream plans a v2 key migration (esphome/backlog#85) and carries a
+// known collision problem (different names sanitizing to the same object_id).
+// We need the raw key for NVS<->name mapping, so we keep exactly ONE silenced
+// call here: when the core migrates, this one function follows the new recipe
+// and every codec/sweep path inherits it.
+static uint32_t entity_pref_key(esphome::EntityBase *e, uint32_t version) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  return e->get_preference_hash() ^ version;
+#pragma GCC diagnostic pop
+}
+
+struct RuntimeEntry {
+  uint32_t key;
+  std::string name;  // owned: sweep names come from stack buffers
+  EntityKind kind;
+  uint16_t aux;                          // STRING: SZ incl. length byte
+  esphome::EntityBase *entity{nullptr};  // for pointer-based selection
+};
+
+static std::vector<RuntimeEntry> &runtime_registry() {
+  static std::vector<RuntimeEntry> reg;  // function-local: safe init order
+  return reg;
+}
+
+#ifdef USE_TEXT
+namespace detail {
+static void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
+                                    const char *pattern) {
+  // template_text does NOT use make_entity_preference: its key adds trait
+  // salts on top of the base hash — replicated 1:1 from
+  // template/text/template_text.cpp (traits come from the live object via
+  // codegen, so the salt inputs are always the real ones).
+  uint32_t key = entity_pref_key(entity, 0);
+  key += min_len << 2;
+  key += max_len << 4;
+  key += fnv1_hash(pattern) << 6;
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key) {
+      if (r.entity != entity) {
+        ESP_LOGW(TAG, "Preference key collision: '%s' and '%s' share key %" PRIu32 " — only the first is exported",
+                 r.name.c_str(), name, key);
+      }
+      return;
+    }
+  }
+  runtime_registry().push_back({key, name, EntityKind::STRING, static_cast<uint16_t>(max_len + 1), entity});
+}
+}  // namespace detail
+#endif  // USE_TEXT
+
+// Runtime safety net: codegen registration depends on the Python-side
+// declaration parents of each entity class, which are not reliable across
+// esphome versions (media_player_ns.class_("MediaPlayer") has none at all in
+// some trees). This sweep walks the App entity lists ONCE, lazily, and
+// registers anything the baked calls missed — naming then only depends on
+// the running firmware itself.
+static void register_if_missing(esphome::EntityBase *e, uint32_t version, EntityKind kind, uint16_t aux = 0) {
+  const uint32_t key = entity_pref_key(e, version);
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key) {
+      if (r.entity != e) {
+        char nbuf[OBJECT_ID_MAX_LEN];
+        const StringRef nid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(nbuf));
+        ESP_LOGW(TAG, "Preference key collision: '%s' and '%s' share key %" PRIu32 " — only the first is exported",
+                 r.name.c_str(), nid.c_str(), key);
+      }
+      return;
+    }
+  }
+  char buf[OBJECT_ID_MAX_LEN];
+  const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
+  runtime_registry().emplace_back(RuntimeEntry{key, std::string(oid.c_str(), oid.size()), kind, aux, e});
+}
+
+static void sweep_app_entities() {
+  static bool done = false;
+  if (done)
+    return;
+  done = true;
+#ifdef USE_SWITCH
+  for (auto *e : App.get_switches())
+    register_if_missing(e, 0, EntityKind::BOOL);
+#endif
+#ifdef USE_NUMBER
+  for (auto *e : App.get_numbers())
+    register_if_missing(e, 0, EntityKind::FLOAT);
+#endif
+#ifdef USE_SELECT
+  for (auto *e : App.get_selects())
+    register_if_missing(e, 0, EntityKind::SELECT_INDEX);
+#endif
+#ifdef USE_MEDIA_PLAYER
+  for (auto *e : App.get_media_players())
+    register_if_missing(e, 0, EntityKind::MEDIA_VOLUME);
+#endif
+#ifdef USE_FAN
+  for (auto *e : App.get_fans())
+    register_if_missing(e, 0x71700ABB, EntityKind::FAN);
+#endif
+#ifdef USE_CLIMATE
+  for (auto *e : App.get_climates())
+    register_if_missing(e, 0x848EA6AD, EntityKind::CLIMATE);
+#endif
+#ifdef USE_LIGHT
+  for (auto *e : App.get_lights())
+    register_if_missing(e, 0, EntityKind::LIGHT);
+#endif
+#ifdef USE_COVER
+  for (auto *e : App.get_covers())
+    register_if_missing(e, 0, EntityKind::COVER);
+#endif
+#ifdef USE_VALVE
+  for (auto *e : App.get_valves())
+    register_if_missing(e, 0, EntityKind::VALVE);
+#endif
+#ifdef USE_LOCK
+  for (auto *e : App.get_locks())
+    register_if_missing(e, 0, EntityKind::RAW);
+#endif
+#ifdef USE_DATETIME_DATE
+  for (auto *e : App.get_dates())
+    register_if_missing(e, 194434030, EntityKind::DATE);
+#endif
+#ifdef USE_DATETIME_TIME
+  for (auto *e : App.get_times())
+    register_if_missing(e, 194434060, EntityKind::TIME);
+#endif
+#ifdef USE_DATETIME_DATETIME
+  for (auto *e : App.get_datetimes())
+    register_if_missing(e, 194434090, EntityKind::DATETIME);
+#endif
+#ifdef USE_TEXT
+  for (auto *e : App.get_texts()) {
+    // trait-salted key — same recipe as the baked text registration; the
+    // impl copies the name into its owned entry
+    char buf[OBJECT_ID_MAX_LEN];
+    const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
+    detail::register_text_pref_impl(e, oid.c_str(), e->traits.get_min_length(), e->traits.get_max_length(),
+                                    e->traits.get_pattern_c_str());
+  }
+#endif
+}
+
+static const RuntimeEntry *runtime_by_key(uint32_t key, esphome::EntityBase *const *allowed, size_t allowed_count) {
+  for (const auto &e : runtime_registry()) {
+    if (e.key != key)
+      continue;
+    if (allowed == nullptr)
+      return &e;
+    for (size_t i = 0; i < allowed_count; i++) {
+      if (e.entity == allowed[i])
+        return &e;
+    }
+    return nullptr;  // known, but filtered out by the action's selection
+  }
+  return nullptr;
+}
+
+static const RuntimeEntry *runtime_by_name(const char *token, size_t len, esphome::EntityBase *const *allowed,
+                                           size_t allowed_count) {
+  for (const auto &e : runtime_registry()) {
+    if (e.name.size() != len || memcmp(e.name.data(), token, len) != 0)
+      continue;
+    if (allowed == nullptr)
+      return &e;
+    for (size_t i = 0; i < allowed_count; i++) {
+      if (e.entity == allowed[i])
+        return &e;
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
 
 static const PrefSelection *find_by_key(uint32_t key, const PrefSelection *sel, size_t count) {
   for (size_t i = 0; i < count; i++) {
@@ -262,6 +474,523 @@ static bool decode_value(const char *s, size_t len, const PrefSelection &sel, ui
   return true;
 }
 
+// ---- entity value codecs (real component structs) ----
+
+[[maybe_unused]] static void kv_field(std::string &out, const char *k, const char *v, bool &first) {
+  if (!first)
+    out += ',';
+  first = false;
+  out += k;
+  out += ':';
+  out += v;
+}
+[[maybe_unused]] static void kv_field_f(std::string &out, const char *k, float v, bool &first) {
+  char b[24];
+  snprintf(b, sizeof(b), "%.9g", (double) v);
+  kv_field(out, k, b, first);
+}
+[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, long v, bool &first) {
+  char b[16];
+  snprintf(b, sizeof(b), "%ld", v);
+  kv_field(out, k, b, first);
+}
+[[maybe_unused]] static void kv_field_b(std::string &out, const char *k, bool v, bool &first) {
+  kv_field(out, k, v ? "true" : "false", first);
+}
+
+// Tiny "{k:v,k:v}" reader shared by all struct decoders.
+struct FieldReader {
+  const char *p;
+  const char *end;
+  bool ok{true};
+  bool get(const char *key, char *val, size_t val_size) {
+    // fields may arrive in any order; scan from the start each time
+    const char *s = this->p;
+    size_t klen = strlen(key);
+    while (s < this->end) {
+      const char *colon = static_cast<const char *>(memchr(s, ':', this->end - s));
+      if (colon == nullptr)
+        break;
+      const char *comma = static_cast<const char *>(memchr(colon, ',', this->end - colon));
+      const char *vend = comma != nullptr ? comma : this->end;
+      if (static_cast<size_t>(colon - s) == klen && memcmp(s, key, klen) == 0) {
+        size_t vlen = vend - (colon + 1);
+        if (vlen >= val_size)
+          return false;
+        memcpy(val, colon + 1, vlen);
+        val[vlen] = '\0';
+        return true;
+      }
+      s = comma != nullptr ? comma + 1 : this->end;
+    }
+    return false;
+  }
+  bool f(const char *key, float &out) {
+    char b[32];
+    if (!this->get(key, b, sizeof(b)))
+      return false;
+    char *e = nullptr;
+    out = strtof(b, &e);
+    return e != nullptr && *e == '\0';
+  }
+  bool i(const char *key, long &out) {
+    char b[24];
+    if (!this->get(key, b, sizeof(b)))
+      return false;
+    char *e = nullptr;
+    out = strtol(b, &e, 10);
+    return e != nullptr && *e == '\0';
+  }
+  bool b(const char *key, bool &out) {
+    char v[8];
+    if (!this->get(key, v, sizeof(v)))
+      return false;
+    if (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) {
+      out = true;
+      return true;
+    }
+    if (strcmp(v, "false") == 0 || strcmp(v, "0") == 0) {
+      out = false;
+      return true;
+    }
+    return false;
+  }
+};
+
+// Renders a runtime entry's blob readable; returns false to hex-fall back
+// (unknown kind, or blob size does not match the compiled struct — stale).
+static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const uint8_t *blob, size_t len) {
+  switch (re.kind) {
+    case EntityKind::BOOL:
+      if (len != sizeof(bool))
+        return false;
+      out += (*blob != 0) ? "true" : "false";
+      return true;
+    case EntityKind::FLOAT: {
+      if (len != sizeof(float))
+        return false;
+      float v;
+      memcpy(&v, blob, sizeof(v));
+      char b[24];
+      snprintf(b, sizeof(b), "%.9g", (double) v);
+      out += b;
+      return true;
+    }
+    case EntityKind::STRING: {
+      // length-prefixed char[SZ]; same layout as string globals
+      if (len < 1 || blob[0] >= len)
+        return false;
+      const char *s = reinterpret_cast<const char *>(blob + 1);
+      if (memchr(s, '\n', blob[0]) != nullptr || memchr(s, '\r', blob[0]) != nullptr)
+        return false;
+      out.append(s, blob[0]);
+      return true;
+    }
+#ifdef USE_FAN
+    case EntityKind::FAN: {
+      if (len != sizeof(fan::FanRestoreState))
+        return false;
+      fan::FanRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_b(out, "state", st.state, first);
+      kv_field_i(out, "speed", st.speed, first);
+      kv_field_b(out, "oscillating", st.oscillating, first);
+      kv_field_i(out, "direction", static_cast<long>(st.direction), first);
+      kv_field_i(out, "preset_mode", st.preset_mode, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_COVER
+    case EntityKind::COVER: {
+      if (len != sizeof(cover::CoverRestoreState))
+        return false;
+      cover::CoverRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_f(out, "position", st.position, first);
+      kv_field_f(out, "tilt", st.tilt, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_VALVE
+    case EntityKind::VALVE: {
+      if (len != sizeof(valve::ValveRestoreState))
+        return false;
+      valve::ValveRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_f(out, "position", st.position, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_LIGHT
+    case EntityKind::LIGHT: {
+      if (len != sizeof(light::LightStateRTCState))
+        return false;
+      light::LightStateRTCState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_b(out, "state", st.state, first);
+      kv_field_f(out, "brightness", st.brightness, first);
+      kv_field_f(out, "color_brightness", st.color_brightness, first);
+      kv_field_f(out, "red", st.red, first);
+      kv_field_f(out, "green", st.green, first);
+      kv_field_f(out, "blue", st.blue, first);
+      kv_field_f(out, "white", st.white, first);
+      kv_field_f(out, "color_temp", st.color_temp, first);
+      kv_field_f(out, "cold_white", st.cold_white, first);
+      kv_field_f(out, "warm_white", st.warm_white, first);
+      kv_field_i(out, "effect", st.effect, first);
+      kv_field_i(out, "color_mode", static_cast<long>(st.color_mode), first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_CLIMATE
+    case EntityKind::CLIMATE: {
+      if (len != sizeof(climate::ClimateDeviceRestoreState))
+        return false;
+      climate::ClimateDeviceRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "mode", static_cast<long>(st.mode), first);
+      kv_field_b(out, "uses_custom_fan_mode", st.uses_custom_fan_mode, first);
+      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<long>(st.fan_mode), first);
+      kv_field_b(out, "uses_custom_preset", st.uses_custom_preset, first);
+      kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<long>(st.preset), first);
+      kv_field_i(out, "swing_mode", static_cast<long>(st.swing_mode), first);
+      // two-point control shares the union — export both words, they alias
+      kv_field_f(out, "target_temperature_low", st.target_temperature_low, first);
+      kv_field_f(out, "target_temperature_high", st.target_temperature_high, first);
+      kv_field_f(out, "target_humidity", st.target_humidity, first);
+      out += '}';
+      return true;
+    }
+#endif
+    case EntityKind::SELECT_INDEX: {
+      // template select restores its option index as size_t
+      if (len != sizeof(size_t))
+        return false;
+      size_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%zu", v);
+      out += b;
+      return true;
+    }
+    case EntityKind::MEDIA_VOLUME: {
+      // {float volume; bool is_muted} — defined identically (and trivially)
+      // in speaker/media_player/speaker_media_player.h and
+      // speaker_source/speaker_source_media_player.h; both are platform
+      // headers we cannot include generically, so this mirrors the layout
+      // with the usual sizeof gate (mismatch -> hex fallback).
+      struct MediaVolumeState {
+        float volume;
+        bool is_muted;
+      } st;
+      if (len != sizeof(st))
+        return false;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_f(out, "volume", st.volume, first);
+      kv_field_b(out, "is_muted", st.is_muted, first);
+      out += '}';
+      return true;
+    }
+#ifdef USE_DATETIME_DATE
+    case EntityKind::DATE: {
+      if (len != sizeof(datetime::DateEntityRestoreState))
+        return false;
+      datetime::DateEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "year", st.year, first);
+      kv_field_i(out, "month", st.month, first);
+      kv_field_i(out, "day", st.day, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_TIME
+    case EntityKind::TIME: {
+      if (len != sizeof(datetime::TimeEntityRestoreState))
+        return false;
+      datetime::TimeEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "hour", st.hour, first);
+      kv_field_i(out, "minute", st.minute, first);
+      kv_field_i(out, "second", st.second, first);
+      out += '}';
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_DATETIME
+    case EntityKind::DATETIME: {
+      if (len != sizeof(datetime::DateTimeEntityRestoreState))
+        return false;
+      datetime::DateTimeEntityRestoreState st;
+      memcpy(&st, blob, sizeof(st));
+      bool first = true;
+      out += '{';
+      kv_field_i(out, "year", st.year, first);
+      kv_field_i(out, "month", st.month, first);
+      kv_field_i(out, "day", st.day, first);
+      kv_field_i(out, "hour", st.hour, first);
+      kv_field_i(out, "minute", st.minute, first);
+      kv_field_i(out, "second", st.second, first);
+      out += '}';
+      return true;
+    }
+#endif
+    default:
+      return false;
+  }
+}
+
+// Parses a readable entity value back into a blob; false = not parseable.
+static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &re, uint8_t *blob, size_t *blob_len) {
+  switch (re.kind) {
+    case EntityKind::BOOL: {
+      bool v;
+      if (len == 4 && memcmp(s, "true", 4) == 0) {
+        v = true;
+      } else if (len == 5 && memcmp(s, "false", 5) == 0) {
+        v = false;
+      } else if (len == 1 && (s[0] == '0' || s[0] == '1')) {
+        v = s[0] == '1';
+      } else {
+        return false;
+      }
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(bool);
+      return true;
+    }
+    case EntityKind::FLOAT: {
+      char b[32];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      float v = strtof(b, &e);
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(float);
+      return true;
+    }
+    case EntityKind::SELECT_INDEX: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      size_t v = static_cast<size_t>(strtoul(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(size_t);
+      return true;
+    }
+    case EntityKind::STRING: {
+      if (re.aux == 0 || len >= re.aux)
+        return false;
+      blob[0] = static_cast<uint8_t>(len);
+      memcpy(blob + 1, s, len);
+      memset(blob + 1 + len, 0, re.aux - 1 - len);
+      *blob_len = re.aux;
+      return true;
+    }
+    default:
+      break;
+  }
+  // struct kinds: expect "{...}"
+  if (len < 2 || s[0] != '{' || s[len - 1] != '}')
+    return false;
+  FieldReader r{s + 1, s + len - 1};
+  long li;
+  switch (re.kind) {
+#ifdef USE_FAN
+    case EntityKind::FAN: {
+      fan::FanRestoreState st{};
+      if (!r.b("state", st.state) || !r.i("speed", li))
+        return false;
+      st.speed = static_cast<int>(li);
+      if (!r.b("oscillating", st.oscillating) || !r.i("direction", li))
+        return false;
+      st.direction = static_cast<fan::FanDirection>(li);
+      if (!r.i("preset_mode", li))
+        return false;
+      st.preset_mode = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_COVER
+    case EntityKind::COVER: {
+      cover::CoverRestoreState st{};
+      // packed struct: fields cannot bind to float& — go through locals
+      float pos, tilt;
+      if (!r.f("position", pos) || !r.f("tilt", tilt))
+        return false;
+      st.position = pos;
+      st.tilt = tilt;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_VALVE
+    case EntityKind::VALVE: {
+      valve::ValveRestoreState st{};
+      float pos;  // packed struct — see cover above
+      if (!r.f("position", pos))
+        return false;
+      st.position = pos;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_LIGHT
+    case EntityKind::LIGHT: {
+      light::LightStateRTCState st{};
+      if (!r.b("state", st.state) || !r.f("brightness", st.brightness) ||
+          !r.f("color_brightness", st.color_brightness) || !r.f("red", st.red) || !r.f("green", st.green) ||
+          !r.f("blue", st.blue) || !r.f("white", st.white) || !r.f("color_temp", st.color_temp) ||
+          !r.f("cold_white", st.cold_white) || !r.f("warm_white", st.warm_white) || !r.i("effect", li))
+        return false;
+      st.effect = static_cast<uint32_t>(li);
+      if (!r.i("color_mode", li))
+        return false;
+      st.color_mode = static_cast<light::ColorMode>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_CLIMATE
+    case EntityKind::CLIMATE: {
+      climate::ClimateDeviceRestoreState st{};
+      if (!r.i("mode", li))
+        return false;
+      st.mode = static_cast<climate::ClimateMode>(li);
+      if (!r.b("uses_custom_fan_mode", st.uses_custom_fan_mode) || !r.i("fan_mode", li))
+        return false;
+      if (st.uses_custom_fan_mode) {
+        st.custom_fan_mode = static_cast<uint8_t>(li);
+      } else {
+        st.fan_mode = static_cast<climate::ClimateFanMode>(li);
+      }
+      if (!r.b("uses_custom_preset", st.uses_custom_preset) || !r.i("preset", li))
+        return false;
+      if (st.uses_custom_preset) {
+        st.custom_preset = static_cast<uint8_t>(li);
+      } else {
+        st.preset = static_cast<climate::ClimatePreset>(li);
+      }
+      if (!r.i("swing_mode", li))
+        return false;
+      st.swing_mode = static_cast<climate::ClimateSwingMode>(li);
+      if (!r.f("target_temperature_low", st.target_temperature_low) ||
+          !r.f("target_temperature_high", st.target_temperature_high) || !r.f("target_humidity", st.target_humidity))
+        return false;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+    case EntityKind::MEDIA_VOLUME: {
+      struct MediaVolumeState {
+        float volume;
+        bool is_muted;
+      } st{};
+      if (!r.f("volume", st.volume) || !r.b("is_muted", st.is_muted))
+        return false;
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#ifdef USE_DATETIME_DATE
+    case EntityKind::DATE: {
+      datetime::DateEntityRestoreState st{};
+      if (!r.i("year", li))
+        return false;
+      st.year = static_cast<uint16_t>(li);
+      if (!r.i("month", li))
+        return false;
+      st.month = static_cast<uint8_t>(li);
+      if (!r.i("day", li))
+        return false;
+      st.day = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_TIME
+    case EntityKind::TIME: {
+      datetime::TimeEntityRestoreState st{};
+      if (!r.i("hour", li))
+        return false;
+      st.hour = static_cast<uint8_t>(li);
+      if (!r.i("minute", li))
+        return false;
+      st.minute = static_cast<uint8_t>(li);
+      if (!r.i("second", li))
+        return false;
+      st.second = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+#ifdef USE_DATETIME_DATETIME
+    case EntityKind::DATETIME: {
+      datetime::DateTimeEntityRestoreState st{};
+      if (!r.i("year", li))
+        return false;
+      st.year = static_cast<uint16_t>(li);
+      if (!r.i("month", li))
+        return false;
+      st.month = static_cast<uint8_t>(li);
+      if (!r.i("day", li))
+        return false;
+      st.day = static_cast<uint8_t>(li);
+      if (!r.i("hour", li))
+        return false;
+      st.hour = static_cast<uint8_t>(li);
+      if (!r.i("minute", li))
+        return false;
+      st.minute = static_cast<uint8_t>(li);
+      if (!r.i("second", li))
+        return false;
+      st.second = static_cast<uint8_t>(li);
+      memcpy(blob, &st, sizeof(st));
+      *blob_len = sizeof(st);
+      return true;
+    }
+#endif
+    default:
+      return false;
+  }
+}
+
 // ---- shared NVS plumbing ----
 
 struct NvsEntry {
@@ -286,6 +1015,7 @@ static bool nvs_read_entry(nvs_handle_t handle, uint32_t key, NvsEntry &e) {
 
 template<typename EmitFn>
 static size_t collect_entries(nvs_handle_t handle, const PrefSelection *sel, size_t count, bool restrict_to_selection,
+                              esphome::EntityBase *const *selected_entities, size_t selected_entity_count,
                               EmitFn &&emit) {
   size_t n = 0;
   NvsEntry e;
@@ -296,6 +1026,26 @@ static size_t collect_entries(nvs_handle_t handle, const PrefSelection *sel, siz
         n++;
       } else {
         ESP_LOGW(TAG, "Preference '%s' has no stored value yet — skipped", sel[i].name);
+      }
+    }
+    // Selected ENTITY preferences: resolve by object pointer via the sweep.
+    for (size_t i = 0; i < selected_entity_count; i++) {
+      const RuntimeEntry *re = nullptr;
+      for (const auto &entry : runtime_registry()) {
+        if (entry.entity == selected_entities[i]) {
+          re = &entry;
+          break;
+        }
+      }
+      if (re == nullptr) {
+        ESP_LOGW(TAG, "Selected entity #%zu stores no known preference — skipped", i);
+        continue;
+      }
+      if (nvs_read_entry(handle, re->key, e)) {
+        emit(e, nullptr);  // emit resolves the name via runtime_by_key
+        n++;
+      } else {
+        ESP_LOGW(TAG, "Entity preference '%s' has no stored value yet — skipped", re->name.c_str());
       }
     }
     return n;
@@ -335,7 +1085,8 @@ static PathStorage *resolve_file_target(const char *path, const char **rel) {
 // ---- export ----
 
 bool preferences_export_to_storage(const char *path, const char *format, const PrefSelection *sel, size_t count,
-                                   bool restrict_to_selection) {
+                                   bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
+                                   size_t selected_entity_count) {
   const bool as_json = strcmp(format, "json") == 0;
   if (!as_json && strcmp(format, "kv") != 0) {
     ESP_LOGE(TAG, "Unsupported format '%s'", format);
@@ -346,6 +1097,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
   if (ps == nullptr)
     return false;
 
+  sweep_app_entities();
   // Flush pending preference writes so NVS reflects the current state.
   global_preferences->sync();
 
@@ -362,40 +1114,54 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     auto buf = json::build_json([&](JsonObject root) {
       root["version"] = 1;
       JsonObject prefs = root["preferences"].to<JsonObject>();
-      exported = collect_entries(handle, sel, count, restrict_to_selection, [&](const NvsEntry &e, const PrefSelection *s) {
-        char key_str[16];
-        snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-        std::string value;
-        if (s != nullptr) {
-          encode_value(value, *s, e.blob, e.len);
-        } else {
-          value = HEX_PREFIX;
-          append_hex(value, e.blob, e.len);
-        }
-        // Values as strings uniformly (incl. "hex:..."): keeps import
-        // parsing symmetric and avoids float round-trip surprises.
-        prefs[s != nullptr ? s->name : key_str] = value;
-      });
+      exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
+                                 [&](const NvsEntry &e, const PrefSelection *s) {
+                                   char key_str[16];
+                                   snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+                                   std::string value;
+                                   const RuntimeEntry *re =
+                                       s == nullptr
+                                           ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
+                                                            selected_entity_count)
+                                           : nullptr;
+                                   if (s != nullptr) {
+                                     encode_value(value, *s, e.blob, e.len);
+                                   } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
+                                     value = HEX_PREFIX;
+                                     append_hex(value, e.blob, e.len);
+                                   }
+                                   prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
+                                 });
     });
     out.assign(buf.data(), buf.size());
   } else {
     out += "# ESPHome preferences export (kv v1)\n";
     out += "# <global id or numeric NVS key>=<typed value or hex:...>\n";
-    exported = collect_entries(handle, sel, count, restrict_to_selection, [&](const NvsEntry &e, const PrefSelection *s) {
-      if (s != nullptr) {
-        out += s->name;
-        out += '=';
-        encode_value(out, *s, e.blob, e.len);
-      } else {
-        char key_str[16];
-        snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-        out += key_str;
-        out += '=';
-        out += HEX_PREFIX;
-        append_hex(out, e.blob, e.len);
-      }
-      out += '\n';
-    });
+    exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
+                               [&](const NvsEntry &e, const PrefSelection *s) {
+                                 if (s != nullptr) {
+                                   out += s->name;
+                                   out += '=';
+                                   encode_value(out, *s, e.blob, e.len);
+                                 } else {
+                                   const RuntimeEntry *re =
+                                       runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
+                                                      selected_entity_count);
+                                   if (re != nullptr) {
+                                     out += re->name;
+                                   } else {
+                                     char key_str[16];
+                                     snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+                                     out += key_str;
+                                   }
+                                   out += '=';
+                                   if (re == nullptr || !encode_entity_value(out, *re, e.blob, e.len)) {
+                                     out += HEX_PREFIX;
+                                     append_hex(out, e.blob, e.len);
+                                   }
+                                 }
+                                 out += '\n';
+                               });
   }
   nvs_close(handle);
 
@@ -412,12 +1178,32 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
 
 // Writes one parsed name/value pair to NVS; shared by both formats.
 static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, const char *value, size_t value_len,
-                       const PrefSelection *sel, size_t count, bool restrict_to_selection, size_t &imported,
+                       const PrefSelection *sel, size_t count, bool restrict_to_selection,
+                       esphome::EntityBase *const *selected_entities, size_t selected_entity_count, size_t &imported,
                        size_t &skipped) {
   const PrefSelection *s = find_by_name(name, name_len, sel, count);
   uint32_t key;
   if (s != nullptr) {
     key = s->key;
+  } else if (const RuntimeEntry *re = runtime_by_name(
+                 name, name_len, restrict_to_selection ? selected_entities : nullptr, selected_entity_count)) {
+    key = re->key;
+    // typed parse first; hex: prefix (and stale-format hex) still accepted below
+    if (value_len < strlen(HEX_PREFIX) || memcmp(value, HEX_PREFIX, strlen(HEX_PREFIX)) != 0) {
+      uint8_t blob[MAX_BLOB_LEN];
+      size_t blob_len = 0;
+      if (decode_entity_value(value, value_len, *re, blob, &blob_len)) {
+        char key_str[16];
+        snprintf(key_str, sizeof(key_str), "%" PRIu32, key);
+        esp_err_t err = nvs_set_blob(handle, key_str, blob, blob_len);
+        if (err != ESP_OK) {
+          ESP_LOGE(TAG, "nvs_set_blob('%s') failed: %s", key_str, esp_err_to_name(err));
+          return false;
+        }
+        imported++;
+        return true;
+      }
+    }
   } else {
     char buf[16];
     if (name_len == 0 || name_len >= sizeof(buf)) {
@@ -428,8 +1214,7 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
     buf[name_len] = '\0';
     char *end = nullptr;
     unsigned long v = strtoul(buf, &end, 10);
-    if (end == nullptr || *end != '\0' ||
-        (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
+    if (end == nullptr || *end != '\0' || (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
       skipped++;  // unknown name, or filtered out by the configured selection
       return true;
     }
@@ -470,7 +1255,8 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
 }
 
 bool preferences_import_from_storage(const char *path, const char *format, bool reboot, const PrefSelection *sel,
-                                     size_t count, bool restrict_to_selection) {
+                                     size_t count, bool restrict_to_selection,
+                                     esphome::EntityBase *const *selected_entities, size_t selected_entity_count) {
   const bool as_json = strcmp(format, "json") == 0;
   if (!as_json && strcmp(format, "kv") != 0) {
     ESP_LOGE(TAG, "Unsupported format '%s'", format);
@@ -480,6 +1266,8 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
   PathStorage *ps = resolve_file_target(path, &rel);
   if (ps == nullptr)
     return false;
+
+  sweep_app_entities();
 
   RamBuffer buf;
   size_t size = 0;
@@ -513,7 +1301,7 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
           continue;
         }
         if (!import_one(handle, kv.key().c_str(), strlen(kv.key().c_str()), value, strlen(value), sel, count,
-                        restrict_to_selection, imported, skipped))
+                        restrict_to_selection, selected_entities, selected_entity_count, imported, skipped))
           return false;
       }
       return true;
@@ -538,8 +1326,8 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
         skipped++;
         continue;
       }
-      ok = import_one(handle, line, eq - line, eq + 1, line_len - (eq + 1 - line), sel, count,
-                      restrict_to_selection, imported, skipped);
+      ok = import_one(handle, line, eq - line, eq + 1, line_len - (eq + 1 - line), sel, count, restrict_to_selection,
+                      selected_entities, selected_entity_count, imported, skipped);
     }
   }
   if (ok && (err = nvs_commit(handle)) != ESP_OK) {

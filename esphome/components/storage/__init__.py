@@ -160,6 +160,7 @@ async def to_code(config):
 
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
+    cg.add_define("USE_STORAGE")
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
     cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
 
@@ -318,7 +319,11 @@ async def _build_write_action(config, action_id, template_arg, args, append):
         # Render printf-style format + args into the content string, logger.log-style:
         # the validated arg lambdas are embedded verbatim as C++ expressions.
         format_literal = str(cg.safe_exp(config[CONF_FORMAT]))
-        arg_exprs = "".join(f", {x}" for x in config[CONF_ARGS])
+        # each arg is normalized through printf_arg(): std::string -> c_str(),
+        # everything else passes through (see automation.h for the UB rationale)
+        arg_exprs = "".join(
+            f", esphome::storage::printf_arg({x})" for x in config[CONF_ARGS]
+        )
         lambda_ = await cg.process_lambda(
             core.Lambda(f"return str_sprintf({format_literal}{arg_exprs});"),
             args,
@@ -550,28 +555,28 @@ _PREF_SCALAR_TYPES = {
 }
 _ARRAY_TYPE_RE = re.compile(r"^\s*(.+?)\s*\[\s*(\d+)\s*\]\s*$")
 
+_RESTORING_RE = re.compile(r"RestoringGlobalsComponent<\s*(.+?)\s*>\s*$")
+_RESTORING_STRING_RE = re.compile(
+    r"RestoringGlobalStringComponent<\s*.+?,\s*(\d+)\s*>\s*$"
+)
 
-def _pref_type_for_global(global_id: str) -> tuple[str, int]:
-    """(PrefType tag, count) for a global's YAML entry — HEX,0 if unknown."""
-    for entry in CORE.config.get("globals", []):
-        if entry[CONF_ID].id != global_id:
-            continue
-        if not entry.get("restore_value", False):
-            raise cv.Invalid(
-                f"Global '{global_id}' has no restore_value — it stores no preference"
-            )
-        type_str = entry[CONF_TYPE].strip()
-        if type_str == "std::string":
-            return "STRING", entry.get("max_restore_data_length", 63) + 1
-        if type_str in _PREF_SCALAR_TYPES:
-            return _PREF_SCALAR_TYPES[type_str], 1
-        if m := _ARRAY_TYPE_RE.match(type_str):
-            base, count = m.group(1), int(m.group(2))
+
+def _pref_type_from_class(type_str: str) -> tuple[str, int] | None:
+    """(PrefType tag, count) from a declared global's C++ class string —
+    codegen-world data only (ID.type of the registered variable). None when
+    the class is not a restoring global at all."""
+    if m := _RESTORING_STRING_RE.search(type_str):
+        return "STRING", int(m.group(1))  # SZ straight from the template arg
+    if m := _RESTORING_RE.search(type_str):
+        inner = m.group(1)
+        if inner in _PREF_SCALAR_TYPES:
+            return _PREF_SCALAR_TYPES[inner], 1
+        if am := _ARRAY_TYPE_RE.match(inner):
+            base, count = am.group(1), int(am.group(2))
             if base in _PREF_SCALAR_TYPES:
                 return _PREF_SCALAR_TYPES[base], count
-        # Unknown C++ type: still round-trips, just as hex.
-        return "HEX", 0
-    return "HEX", 0
+        return "HEX", 0  # restoring, but a type we cannot render — hex round-trip
+    return None
 
 
 ExportPreferencesAction = storage_ns.class_(
@@ -616,37 +621,27 @@ _IMPORT_PREFERENCES_SCHEMA = cv.All(
 )
 
 
+# Per-type version constants of EntityBase::make_entity_preference_() callers.
+# Keep in sync: fan/fan.cpp, climate/climate.cpp; every other core entity uses
+# the default version 0. template text is special-cased (trait-salted key).
+# (module, class, version, EntityKind) — kinds map to real-struct codecs in
+# preferences_backup.cpp; anything not matched below registers as RAW (named,
+# hex value). datetime template platforms carry their own versions.
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
     cg.add(var.set_format(config[CONF_FORMAT]))
-    # The name/type table is ALWAYS baked: from the explicit list when given
-    # (restrict=True — only those entries round-trip), otherwise from every
-    # restore_value global in the config (restrict=False — the whole
-    # namespace round-trips, but everything codegen can name renders
-    # readable; only truly unknown keys like entity states stay hex).
-    if selection := config.get(CONF_PREFERENCES):
-        # ID has no __str__ (str() falls back to the ID<...> repr) — use .id,
-        # exactly what globals/__init__.py feeds into its md5 name hash.
-        names = [gid.id for gid in selection]
-        restrict = True
-    else:
-        names = [
-            entry[CONF_ID].id
-            for entry in CORE.config.get("globals", [])
-            if entry.get("restore_value", False)
-        ]
-        restrict = False
-    if names:
-        entries = []
-        for name in names:
-            tag, count = _pref_type_for_global(name)
-            key = _global_nvs_key(name)
-            entries.append(
-                f'{{"{name}", {key}UL, esphome::storage::PrefType::{tag}, {count}}}'
-            )
+
+    def _bake(entries, restrict):
+        # entity-only selections produce zero table entries: emitting
+        # "static const T x[] = {}" would be a zero-size array (GNU
+        # extension, not ISO C++) — pass a null table instead
+        if not entries:
+            cg.add(var.set_selection(cg.nullptr, 0, restrict))
+            return
+
         arr = f"{action_id}_psel"
         cg.add_global(
             cg.RawExpression(
@@ -655,11 +650,53 @@ async def _build_preferences_action(config, action_id, template_arg, args):
                 + "}"
             )
         )
-        cg.add(
-            var.set_selection(
-                cg.RawExpression(arr), len(entries), restrict
-            )
-        )
+        cg.add(var.set_selection(cg.RawExpression(arr), len(entries), restrict))
+
+    def _entry(name, tag, count):
+        key = _global_nvs_key(name)
+        return f'{{"{name}", {key}UL, esphome::storage::PrefType::{tag}, {count}}}'
+
+    if selection := config.get(CONF_PREFERENCES):
+        # get_variable_with_full_id is a coroutine: it suspends until the
+        # global's own to_code has registered the variable — the declaration
+        # ID it returns carries the real C++ class (codegen-world data, no
+        # validation-step leftovers).
+        entries = []
+        has_entities = False
+        for gid in selection:
+            full_id, obj = await cg.get_variable_with_full_id(gid)
+            parsed = _pref_type_from_class(str(full_id.type))
+            if parsed is not None:
+                entries.append(_entry(gid.id, *parsed))
+                continue
+            # anything else is treated as an entity: the runtime sweep
+            # resolves name/kind/key from the live object; unresolvable
+            # selections log a loud skip at play time
+            cg.add(var.add_selected_entity(obj))
+            has_entities = True
+        if entries or has_entities:
+            _bake(entries, True)
+    else:
+        # All mode: enumerate the codegen variable registry once every
+        # pending to_code has run. Scheduled as its own coroutine job — it is
+        # enqueued behind all already-queued component jobs, so the globals
+        # are registered by the time it executes.
+        # globals' own to_code runs at CoroPriority.LATE (-100) — an
+        # unprioritized job would enumerate CORE.variables BEFORE any global
+        # is registered (verified empirically: 14 vars, zero globals).
+        # FINAL (-1000) queues the bake after every component job.
+        @coroutine_with_priority(CoroPriority.FINAL)
+        async def _bake_all():
+            # globals only — entity naming is entirely the runtime sweep's job
+            entries = []
+            for reg_id in CORE.variables:
+                parsed = _pref_type_from_class(str(reg_id.type))
+                if parsed is not None:
+                    entries.append(_entry(reg_id.id, *parsed))
+            if entries:
+                _bake(entries, False)
+
+        CORE.add_job(_bake_all)
     return var
 
 

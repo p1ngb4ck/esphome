@@ -1,5 +1,11 @@
 #pragma once
 
+// defines.h MUST be seen before the guard below is evaluated: the preferences
+// action classes are define-gated, and main.cpp placement-news them into
+// sizeof()-sized static buffers — any TU seeing this header with a different
+// define state gets a different class size (ODR violation, boot crash).
+#include "esphome/core/defines.h"
+
 #include "storage.h"
 #if defined(USE_STORAGE_PREFERENCES) && defined(USE_ESP32)
 #include "preferences_backup.h"  // PrefSelection — file scope, NOT inside the namespace below
@@ -19,6 +25,14 @@ namespace esphome::storage {
 // paths; routing to the right device happens via StorageRegistry::resolve_path().
 
 // Logging helpers implemented in automation.cpp (log macros must stay out of headers).
+// printf-style args from YAML flow verbatim through C varargs in the generated
+// str_sprintf() call; a std::string there is undefined behavior (non-POD through
+// "..." renders garbage or corrupts memory, and only warns via -Wformat).
+// Normalizing every arg through this overload set means no config ever needs a
+// manual .c_str() — and args that already have one pass through unchanged.
+inline const char *printf_arg(const std::string &s) { return s.c_str(); }
+template<typename T> inline T printf_arg(T v) { return v; }
+
 void warn_invalid_bool(const std::string &s);
 void warn_invalid_number(const std::string &s);
 
@@ -209,10 +223,12 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
     this->count_ = count;
     this->restrict_ = restrict_to_selection;
   }
+  void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
-    preferences_export_to_storage(path.c_str(), this->format_, this->selection_, this->count_, this->restrict_);
+    preferences_export_to_storage(path.c_str(), this->format_, this->selection_, this->count_, this->restrict_,
+                                  this->selected_entities_.data(), this->selected_entities_.size());
   }
 
  protected:
@@ -220,6 +236,7 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
   bool restrict_{false};
+  std::vector<esphome::EntityBase *> selected_entities_;
 };
 
 template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
@@ -232,11 +249,12 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
     this->count_ = count;
     this->restrict_ = restrict_to_selection;
   }
+  void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
   void play(Ts... x) override {
     const std::string path = this->path_.value(x...);
     preferences_import_from_storage(path.c_str(), this->format_, this->reboot_, this->selection_, this->count_,
-                                    this->restrict_);
+                                    this->restrict_, this->selected_entities_.data(), this->selected_entities_.size());
   }
 
  protected:
@@ -245,6 +263,7 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   const PrefSelection *selection_{nullptr};
   size_t count_{0};
   bool restrict_{false};
+  std::vector<esphome::EntityBase *> selected_entities_;
 };
 #endif  // USE_STORAGE_PREFERENCES && USE_ESP32
 
