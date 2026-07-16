@@ -17,10 +17,6 @@
 #include "esp_idf_version.h"
 #include "esphome/components/storage/storage.h"
 
-#if defined(USE_ESP32_VARIANT_ESP32P4)
-#define SD_MMC_USE_HIGHSPEED
-#endif
-
 namespace esphome::sd_storage {
 
 static const char *const TAG = "sd_storage";
@@ -78,6 +74,7 @@ void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "  Mounted: %s", this->is_mounted_ ? "YES" : "NO");
   ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
   LOG_PIN("  CD Pin: ", this->cd_pin_);
+  ESP_LOGCONFIG(TAG, "  Data rate: %" PRIu32 " kHz", this->data_rate_khz_);
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG, "  Total bytes: %" PRIu64, this->total_bytes_);
@@ -87,11 +84,7 @@ void SdMmc::dump_config() {
 
 storage::StorageError SdMmc::mount() {
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-#if defined(SD_MMC_USE_HIGHSPEED)
-  host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-#else
-  host.max_freq_khz = SDMMC_FREQ_DEFAULT;
-#endif
+  host.max_freq_khz = static_cast<int>(this->data_rate_khz_);
   host.flags = this->mode_1bit_ ? SDMMC_HOST_FLAG_1BIT : SDMMC_HOST_FLAG_4BIT;
   host.slot = this->slot_;
 
@@ -189,7 +182,6 @@ storage::StorageError SdMmc::unmount() {
   this->card_ = nullptr;
   this->is_mounted_ = false;
   ESP_LOGI(TAG, "SD/MMC card unmounted safely");
-
 
   return storage::StorageError::OK;
 }

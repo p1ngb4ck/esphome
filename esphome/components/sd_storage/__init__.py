@@ -16,6 +16,7 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_CLK_PIN,
     CONF_CS_PIN,
+    CONF_DATA_RATE,
     CONF_ID,
     CONF_PATH,
     CONF_SPI,
@@ -132,6 +133,11 @@ SD_MMC_SCHEMA = cv.Schema(
         cv.Optional(CONF_DATA3_PIN): pins.internal_gpio_pin_number,
         cv.Optional(CONF_MODE_1BIT, default=False): cv.boolean,
         cv.Optional(CONF_SLOT, default=0): cv.int_range(min=0, max=1),
+        # Default is platform dependent and applied in to_code(): SDMMC_FREQ_HIGHSPEED
+        # (40 MHz) on ESP32-P4, SDMMC_FREQ_DEFAULT (20 MHz) elsewhere.
+        cv.Optional(CONF_DATA_RATE): cv.All(
+            cv.frequency, cv.Range(min=400e3, max=40e6)
+        ),
         cv.Optional(CONF_PATH, default="/sdcard"): cv.string,
         cv.Optional(CONF_CD_PIN): pins.gpio_input_pullup_pin_schema,
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
@@ -263,6 +269,16 @@ async def to_code(config):
 
         mode_1bit = config.get(CONF_MODE_1BIT, False)
         cg.add(var.set_mode_1bit(mode_1bit))
+
+        # The P4 host runs the bus at high speed; every other variant stays at the
+        # SD default speed. An explicit data_rate wins over both.
+        if (data_rate := config.get(CONF_DATA_RATE)) is not None:
+            data_rate_khz = int(data_rate / 1000)
+        elif esp32.get_esp32_variant() == VARIANT_ESP32P4:
+            data_rate_khz = 40000
+        else:
+            data_rate_khz = 20000
+        cg.add(var.set_data_rate_khz(data_rate_khz))
 
         if CONF_SLOT in config:
             cg.add(var.set_slot(config[CONF_SLOT]))
