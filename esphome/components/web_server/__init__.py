@@ -65,20 +65,29 @@ CONF_STORAGE_ID = "storage_id"
 CONF_ENABLE_UPLOAD = "enable_upload"
 CONF_ENABLE_DOWNLOAD = "enable_download"
 CONF_ENABLE_DELETION = "enable_deletion"
+CONF_RAW_API = "raw_api"
+CONF_DEVICE_ID = "device_id"
+CONF_ENABLE_WRITE = "enable_write"
+CONF_ENABLE_ERASE = "enable_erase"
+
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
     """web_server always needs json/web_server_base; storage is pulled in only when the
     optional file_api:/file_browser: sub-blocks are actually present in this instance's
     config — a web_server without them pays nothing for the feature."""
     base = ["json", "web_server_base"]
-    if config and (CONF_FILE_API in config or CONF_FILE_BROWSER in config):
+    if config and (
+        CONF_FILE_API in config or CONF_FILE_BROWSER in config or CONF_RAW_API in config
+    ):
         return base + ["storage"]
     return base
+
 
 web_server_ns = cg.esphome_ns.namespace("web_server")
 WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
 
 WebServerFileApi = web_server_ns.class_("WebServerFileApi", cg.Component)
+WebServerRawApi = web_server_ns.class_("WebServerRawApi", cg.Component)
 
 sorting_groups = {}
 
@@ -323,6 +332,15 @@ CONFIG_SCHEMA = cv.All(
             # Optional compile-time opt-in blocks. Presence alone drives AUTO_LOAD() above
             # to pull in storage; absence costs nothing (zero-cost gating via defines).
             # ESP-IDF + web_server version 3 only — enforced in _validate_file_api below.
+            # Address-based counterpart to file_api for raw media. Reading is what a
+            # browser needs; writing and erasing are opt-in because neither is undoable.
+            cv.Optional(CONF_RAW_API): cv.Schema(
+                {
+                    cv.Optional(CONF_DEVICE_ID): cv.use_id(storage.RawStorage),
+                    cv.Optional(CONF_ENABLE_WRITE, default=False): cv.boolean,
+                    cv.Optional(CONF_ENABLE_ERASE, default=False): cv.boolean,
+                }
+            ),
             cv.Optional(CONF_FILE_API): cv.Schema(
                 {
                     cv.Optional(CONF_STORAGE_ID): cv.use_id(storage.PathStorage),
@@ -515,6 +533,20 @@ async def to_code(config):
             js_path = Path(__file__).parent / "file_browser.js"
             with js_path.open(encoding="utf-8") as js_file:
                 add_resource_as_progmem("FILE_BROWSER_JS", js_file.read())
+
+    if (raw_api_config := config.get(CONF_RAW_API)) is not None:
+        cg.add_define("USE_WEBSERVER_RAW_API")
+        # Same pattern as the file api above: no YAML-visible id, a real Component whose
+        # setup() registers the handler.
+        raw_id = ID(f"{var}_raw_api", is_declaration=True, type=WebServerRawApi)
+        CORE.component_ids.add(str(raw_id))
+        raw_var = cg.new_Pvariable(raw_id)
+        await cg.register_component(raw_var, {})
+        cg.add(raw_var.set_web_server_base(paren))
+        cg.add(raw_var.set_enable_write(raw_api_config[CONF_ENABLE_WRITE]))
+        cg.add(raw_var.set_enable_erase(raw_api_config[CONF_ENABLE_ERASE]))
+        if device_id := raw_api_config.get(CONF_DEVICE_ID):
+            cg.add(raw_var.set_scoped_device(await cg.get_variable(device_id)))
 
 
 def FILTER_SOURCE_FILES() -> list[str]:
