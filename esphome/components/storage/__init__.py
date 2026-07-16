@@ -20,6 +20,7 @@ from esphome.const import (
     CONF_TYPE,
 )
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
+import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 
@@ -43,6 +44,7 @@ AUTO_LOAD = ["json"]
 
 storage_ns = cg.esphome_ns.namespace("storage")
 Storage = storage_ns.class_("Storage", cg.Component)
+TransferBuffer = storage_ns.class_("TransferBuffer", cg.Component)
 StoragePtr = Storage.operator("ptr")
 PathStorage = storage_ns.class_("PathStorage", Storage)
 MountableStorage = storage_ns.class_("MountableStorage")
@@ -72,6 +74,11 @@ def validate_sector_multiple(value):
 # unused, same as any other config key with no effect in a given configuration.
 CONFIG_SCHEMA = cv.Schema(
     {
+        cv.Optional("transfer_buffer"): cv.Schema(
+            {
+                cv.Required("size"): cv.All(cv.validate_bytes, cv.Range(min=64 * 1024)),
+            }
+        ),
         cv.GenerateID(): cv.declare_id(StorageRegistry),
         cv.Optional(CONF_COPY_CHUNK_SIZE, default=16384): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
@@ -144,6 +151,15 @@ def request_storage_worker(task_safe: bool = False) -> None:
         data.worker_task_safe = True
 
 
+def _transfer_buffer_final_validate(config):
+    if "transfer_buffer" in config and "psram" not in fv.full_config.get():
+        raise cv.Invalid("storage 'transfer_buffer' requires the psram component")
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
+
+
 # storage is a dependency of every driver and would otherwise run BEFORE them (default
 # priority), reading device_count/worker_count as 0 — every driver's own to_code() is where
 # request_storage_device()/request_storage_worker() actually get called. LATE (-100) runs
@@ -152,6 +168,13 @@ def request_storage_worker(task_safe: bool = False) -> None:
 # are unaffected either way, since that call already suspends until the variable exists.
 @coroutine_with_priority(CoroPriority.LATE)
 async def to_code(config):
+    if (tb_conf := config.get("transfer_buffer")) is not None:
+        cg.add_define("USE_STORAGE_TRANSFER_BUFFER")
+        tb_id = ID("storage_transfer_buffer", is_declaration=True, type=TransferBuffer)
+        CORE.component_ids.add(str(tb_id))
+        tb = cg.new_Pvariable(tb_id)
+        await cg.register_component(tb, {})
+        cg.add(tb.set_size(tb_conf["size"]))
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
