@@ -74,10 +74,9 @@ def validate_sector_multiple(value):
 # unused, same as any other config key with no effect in a given configuration.
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.Optional("transfer_buffer"): cv.Schema(
-            {
-                cv.Required("size"): cv.All(cv.validate_bytes, cv.Range(min=64 * 1024)),
-            }
+        cv.Optional("enable_psram_transfer_buffer"): cv.boolean,
+        cv.Optional("psram_transfer_buffer_size"): cv.All(
+            cv.validate_bytes, cv.Range(min=64 * 1024)
         ),
         cv.GenerateID(): cv.declare_id(StorageRegistry),
         cv.Optional(CONF_COPY_CHUNK_SIZE, default=16384): cv.All(
@@ -152,8 +151,23 @@ def request_storage_worker(task_safe: bool = False) -> None:
 
 
 def _transfer_buffer_final_validate(config):
-    if "transfer_buffer" in config and "psram" not in fv.full_config.get():
-        raise cv.Invalid("storage 'transfer_buffer' requires the psram component")
+    has_psram = "psram" in fv.full_config.get()
+    if "enable_psram_transfer_buffer" in config and not has_psram:
+        raise cv.Invalid(
+            "'enable_psram_transfer_buffer' is only available with the psram component"
+        )
+    enabled = config.get("enable_psram_transfer_buffer", has_psram)
+    if "psram_transfer_buffer_size" in config:
+        if not has_psram:
+            raise cv.Invalid(
+                "'psram_transfer_buffer_size' is only available with the psram component"
+            )
+        if not enabled:
+            raise cv.Invalid(
+                "'psram_transfer_buffer_size' requires 'enable_psram_transfer_buffer' to be true"
+            )
+    # The 25% default and the 80% ceiling are enforced in setup(): the actual PSRAM
+    # size is detected at boot and unknowable at config time.
     return config
 
 
@@ -168,13 +182,15 @@ FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
 # are unaffected either way, since that call already suspends until the variable exists.
 @coroutine_with_priority(CoroPriority.LATE)
 async def to_code(config):
-    if (tb_conf := config.get("transfer_buffer")) is not None:
+    tb_enabled = config.get("enable_psram_transfer_buffer", "psram" in CORE.config)
+    if tb_enabled:
         cg.add_define("USE_STORAGE_TRANSFER_BUFFER")
         tb_id = ID("storage_transfer_buffer", is_declaration=True, type=TransferBuffer)
         CORE.component_ids.add(str(tb_id))
         tb = cg.new_Pvariable(tb_id)
         await cg.register_component(tb, {})
-        cg.add(tb.set_size(tb_conf["size"]))
+        # 0 = auto: setup() sizes the arena to 25% of the detected PSRAM
+        cg.add(tb.set_size(config.get("psram_transfer_buffer_size", 0)))
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
