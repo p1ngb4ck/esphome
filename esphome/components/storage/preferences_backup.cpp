@@ -11,6 +11,8 @@
 
 #include "storage.h"
 
+#include <esp_rom_crc.h>
+
 #include <span>
 #include <vector>
 
@@ -1083,6 +1085,256 @@ static PathStorage *resolve_file_target(const char *path, const char **rel) {
 }
 
 // ---- export ----
+
+// ---------------------------------------------------------------------------
+// Raw-device container
+// ---------------------------------------------------------------------------
+// Layout: header + entries, each entry {key u32, len u16, blob}. The blobs go in exactly as
+// NVS holds them — component-private structs, no decoding, no rendering. The header is what
+// lets import distinguish "an export starts here" from "whatever was here before".
+namespace {
+
+constexpr uint32_t RAW_MAGIC = 0x57525045;  // 'EPRW'
+constexpr uint8_t RAW_VERSION = 1;
+
+struct RawHeader {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t reserved;
+  uint16_t entries;
+  uint32_t payload_len;
+  uint32_t crc32;  // over the payload only
+} __attribute__((packed));
+
+static_assert(sizeof(RawHeader) == 16, "raw preferences header must stay 16 bytes");
+
+void append_u16(std::string &out, uint16_t v) {
+  out.push_back(static_cast<char>(v & 0xFF));
+  out.push_back(static_cast<char>(v >> 8));
+}
+void append_u32(std::string &out, uint32_t v) {
+  for (int i = 0; i < 4; i++)
+    out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+}
+
+// Blocking chunked helpers — the RawStorage contract is "caller chunks and yields".
+bool raw_read_exact(RawStorage *device, uint64_t address, uint8_t *buf, size_t len) {
+  size_t done = 0;
+  while (done < len) {
+    size_t got = 0;
+    if (device->read(address + done, buf + done, len - done, &got) != StorageError::OK || got == 0)
+      return false;
+    done += got;
+  }
+  return true;
+}
+
+bool raw_write_exact(RawStorage *device, uint64_t address, const uint8_t *buf, size_t len) {
+  size_t done = 0;
+  while (done < len) {
+    size_t written = 0;
+    if (device->write(address + done, buf + done, len - done, &written) != StorageError::OK || written == 0)
+      return false;
+    done += written;
+    App.feed_wdt();
+  }
+  return true;
+}
+
+}  // namespace
+
+bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t window, const PrefSelection *sel,
+                               size_t count, bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
+                               size_t selected_entity_count) {
+  if (device == nullptr)
+    return false;
+  RawGeometry geo;
+  device->get_raw_geometry(&geo);
+  if (address >= geo.capacity) {
+    ESP_LOGE(TAG, "Export address 0x%08" PRIX32 " is beyond the device (%" PRIu32 " bytes)", (uint32_t) address,
+             (uint32_t) geo.capacity);
+    return false;
+  }
+
+  sweep_app_entities();
+  // Flush pending preference writes so NVS reflects the current state.
+  global_preferences->sync();
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  std::string payload;
+  size_t exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
+                                    [&](const NvsEntry &e, const PrefSelection *s) {
+                                      append_u32(payload, e.key);
+                                      append_u16(payload, static_cast<uint16_t>(e.len));
+                                      payload.append(reinterpret_cast<const char *>(e.blob), e.len);
+                                    });
+  nvs_close(handle);
+
+  RawHeader hdr{};
+  hdr.magic = RAW_MAGIC;
+  hdr.version = RAW_VERSION;
+  hdr.entries = static_cast<uint16_t>(exported);
+  hdr.payload_len = static_cast<uint32_t>(payload.size());
+  hdr.crc32 = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
+
+  const uint64_t total = sizeof(RawHeader) + payload.size();
+  if (total > window) {
+    ESP_LOGE(TAG,
+             "Export needs %" PRIu32 " bytes but only %" PRIu32 " are reserved at 0x%08" PRIX32 " — nothing written",
+             (uint32_t) total, (uint32_t) window, (uint32_t) address);
+    return false;
+  }
+
+  // Media that only clear bits on write need the covering sectors erased first. Rounding the
+  // erase outward would take the region in front of us with it, so demand alignment instead of
+  // guessing — and never erase past the window into the neighbouring region.
+  if ((geo.caps & RAW_WRITE_NEEDS_ERASE) != 0) {
+    if (geo.erase_sector == 0 || (address % geo.erase_sector) != 0) {
+      ESP_LOGE(TAG, "Export address 0x%08" PRIX32 " must be aligned to this device's %" PRIu32 " byte sector size",
+               (uint32_t) address, (uint32_t) geo.erase_sector);
+      return false;
+    }
+    uint64_t erase_len = total;
+    if ((erase_len % geo.erase_sector) != 0)
+      erase_len += geo.erase_sector - (erase_len % geo.erase_sector);
+    if (erase_len > window) {
+      ESP_LOGE(TAG, "Erasing %" PRIu32 " bytes would reach past the %" PRIu32 " reserved here — nothing written",
+               (uint32_t) erase_len, (uint32_t) window);
+      return false;
+    }
+    StorageError eerr = device->erase(address, static_cast<size_t>(erase_len));
+    if (eerr != StorageError::OK) {
+      ESP_LOGE(TAG, "Erase before export failed (%s)", error_to_string(eerr));
+      return false;
+    }
+  }
+
+  if (!raw_write_exact(device, address, reinterpret_cast<const uint8_t *>(&hdr), sizeof(hdr)) ||
+      !raw_write_exact(device, address + sizeof(hdr), reinterpret_cast<const uint8_t *>(payload.data()),
+                       payload.size())) {
+    ESP_LOGE(TAG, "Writing export to the device failed");
+    return false;
+  }
+  ESP_LOGI(TAG, "Exported %zu preference(s), %" PRIu32 " bytes to 0x%08" PRIX32, exported, (uint32_t) total,
+           (uint32_t) address);
+  return true;
+}
+
+bool preferences_import_from_raw(RawStorage *device, uint64_t address, uint64_t window, bool reboot,
+                                 const PrefSelection *sel, size_t count, bool restrict_to_selection,
+                                 esphome::EntityBase *const *selected_entities, size_t selected_entity_count) {
+  if (device == nullptr)
+    return false;
+  RawGeometry geo;
+  device->get_raw_geometry(&geo);
+  if (address + sizeof(RawHeader) > geo.capacity) {
+    ESP_LOGE(TAG, "Import address 0x%08" PRIX32 " is beyond the device", (uint32_t) address);
+    return false;
+  }
+
+  RawHeader hdr{};
+  if (!raw_read_exact(device, address, reinterpret_cast<uint8_t *>(&hdr), sizeof(hdr))) {
+    ESP_LOGE(TAG, "Reading the export header failed");
+    return false;
+  }
+  if (hdr.magic != RAW_MAGIC) {
+    ESP_LOGE(TAG, "No preferences export at 0x%08" PRIX32 " (magic 0x%08" PRIX32 ")", (uint32_t) address, hdr.magic);
+    return false;
+  }
+  if (hdr.version != RAW_VERSION) {
+    ESP_LOGE(TAG, "Export at 0x%08" PRIX32 " has version %u, this build reads version %u", (uint32_t) address,
+             hdr.version, RAW_VERSION);
+    return false;
+  }
+  if (sizeof(RawHeader) + static_cast<uint64_t>(hdr.payload_len) > window) {
+    ESP_LOGE(TAG, "Export claims %" PRIu32 " bytes, more than the %" PRIu32 " reserved here — refusing",
+             hdr.payload_len, (uint32_t) window);
+    return false;
+  }
+
+  uint8_t *raw = RAMAllocator<uint8_t>().allocate(hdr.payload_len);
+  if (raw == nullptr) {
+    ESP_LOGE(TAG, "Cannot allocate %" PRIu32 " bytes for the import", hdr.payload_len);
+    return false;
+  }
+  RamBuffer payload(raw, RamBufferDeleter{hdr.payload_len});
+  if (!raw_read_exact(device, address + sizeof(RawHeader), payload.get(), hdr.payload_len)) {
+    ESP_LOGE(TAG, "Reading the export payload failed");
+    return false;
+  }
+  uint32_t crc = esp_rom_crc32_le(0, payload.get(), hdr.payload_len);
+  if (crc != hdr.crc32) {
+    ESP_LOGE(TAG, "Export at 0x%08" PRIX32 " is corrupt (CRC 0x%08" PRIX32 ", expected 0x%08" PRIX32 ")",
+             (uint32_t) address, crc, hdr.crc32);
+    return false;
+  }
+
+  sweep_app_entities();
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  size_t imported = 0, skipped = 0;
+  bool ok = true;
+  uint32_t pos = 0;
+  for (uint16_t i = 0; i < hdr.entries && ok; i++) {
+    if (pos + 6 > hdr.payload_len) {
+      ESP_LOGE(TAG, "Export is truncated after %zu entries", imported + skipped);
+      ok = false;
+      break;
+    }
+    uint32_t key = payload[pos] | (payload[pos + 1] << 8) | (payload[pos + 2] << 16) | (payload[pos + 3] << 24);
+    uint16_t len = payload[pos + 4] | (payload[pos + 5] << 8);
+    pos += 6;
+    if (pos + len > hdr.payload_len) {
+      ESP_LOGE(TAG, "Export entry for key %" PRIu32 " runs past the payload", key);
+      ok = false;
+      break;
+    }
+    const uint8_t *blob = payload.get() + pos;
+    pos += len;
+
+    // Same filter rule as the path variants: an explicit selection restricts what round-trips,
+    // an empty one lets the whole namespace through.
+    if (restrict_to_selection && find_by_key(key, sel, count) == nullptr &&
+        runtime_by_key(key, selected_entities, selected_entity_count) == nullptr) {
+      skipped++;
+      continue;
+    }
+    char key_str[16];
+    snprintf(key_str, sizeof(key_str), "%" PRIu32, key);
+    err = nvs_set_blob(handle, key_str, blob, len);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "nvs_set_blob('%s') failed: %s", key_str, esp_err_to_name(err));
+      ok = false;
+      break;
+    }
+    imported++;
+  }
+  if (ok && (err = nvs_commit(handle)) != ESP_OK) {
+    ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+    ok = false;
+  }
+  nvs_close(handle);
+  if (!ok)
+    return false;
+
+  ESP_LOGI(TAG, "Imported %zu preference(s), skipped %zu — values take effect after reboot", imported, skipped);
+  if (reboot) {
+    ESP_LOGI(TAG, "Rebooting to apply imported preferences");
+    App.safe_reboot();
+  }
+  return true;
+}
 
 bool preferences_export_to_storage(const char *path, const char *format, const PrefSelection *sel, size_t count,
                                    bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
