@@ -124,9 +124,16 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   size_t job_cache_next_{0};
   void cache_job_result_(storage::TransferJob job, storage::StorageError result);
 
-  // Directory-transfer job ids live in their own space (high bit set) so /files/job can
-  // route them to the orchestrator instead of the worker pool. The final state stays
-  // queryable until the next directory transfer starts (single slot).
+  // /files/job serves three kinds of id, told apart by their top two bits. The worker's own
+  // TransferJob handles are small counters and leave both clear, so anything tagged here is
+  // ours. Keep every id space in this one place: two of them silently shared a single flag
+  // bit once, and every directory job answered 404 because the wrong branch claimed it.
+  static constexpr uint32_t JOB_SPACE_MASK = 0xC0000000u;
+  static constexpr uint32_t JOB_COUNTER_MASK = 0x3FFFFFFFu;
+
+  // Directory-transfer job ids live in their own space so /files/job can route them to the
+  // orchestrator instead of the worker pool. The final state stays queryable until the next
+  // directory transfer starts (single slot).
   static constexpr uint32_t DIR_JOB_FLAG = 0x80000000u;
   struct DirTransfer {
     bool active{false};
@@ -199,9 +206,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 
 #ifdef USE_STORAGE_TRANSFER_BUFFER
   // Post-response flush of a staged upload: loop() drains the arena to storage chunk-wise
-  // (storage is main-loop-only by contract), queryable through /files/job. Flush ids carry
-  // the high bit so they can never collide with the worker's TransferJob counters.
-  static constexpr uint32_t FLUSH_JOB_FLAG = 0x80000000u;
+  // (storage is main-loop-only by contract), queryable through /files/job. Its own id space
+  // (see JOB_SPACE_MASK) — distinct from the directory transfers' as well as the worker's.
+  static constexpr uint32_t FLUSH_JOB_FLAG = 0xC0000000u;
   struct StagedFlush {
     bool active{false};
     bool finished{false};
