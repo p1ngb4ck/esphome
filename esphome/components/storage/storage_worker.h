@@ -36,6 +36,14 @@ static constexpr size_t STORAGE_WORKER_MAX_PATH = 256;
 enum class RequestOp : uint8_t {
   COPY,
   MOVE,
+  // Whole directory tree, walked by the engine itself: list, mkdir, copy each file, and for a
+  // move remove each source entry as it is drained. Deliberately here and not in the caller:
+  // on task-safe media the worker task then owns the entire operation start to finish, exactly
+  // like a single file does. A caller that walks the tree itself can only step forward when
+  // its own loop() runs, which makes the transfer depend on the main loop being scheduled —
+  // it is not the caller's business, and nothing asks the main loop to run on their behalf.
+  COPY_TREE,
+  MOVE_TREE,
 };
 
 // Where a request currently stands. Transitions:
@@ -101,6 +109,26 @@ struct TransferStatus {
 // One pooled transfer request. Fixed-size, no heap allocation — the pool is a FixedVector of
 // these, sized exactly to max_pending at codegen. Path buffers and the callback are only valid
 // while state != FREE.
+// Position inside a directory tree, allocated only for COPY_TREE/MOVE_TREE. Kept out of
+// TransferRequest so a pool sized for plain file transfers does not carry it per slot.
+struct TreeWalk {
+  static constexpr size_t MAX_DEPTH = 8;
+
+  char src_root[STORAGE_WORKER_MAX_PATH]{};
+  char dst_root[STORAGE_WORKER_MAX_PATH]{};
+  // Current position below the roots, "" at the top. src_path/dst_path always hold the file
+  // being copied right now, so the chunk loop below needs no special-casing for trees.
+  char sub[STORAGE_WORKER_MAX_PATH]{};
+  uint16_t index_stack[MAX_DEPTH]{};
+  uint8_t depth{0};
+  bool file_in_flight{false};
+  bool root_created{false};
+  uint32_t files_done{0};
+  // Bytes of the files already finished; the one in flight adds its own offset on top, so
+  // progress counts the whole tree rather than restarting with every file.
+  uint64_t bytes_base{0};
+};
+
 struct TransferRequest {
   std::atomic<RequestState> state{RequestState::FREE};
 
@@ -140,6 +168,9 @@ struct TransferRequest {
   // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale
   // TransferJob handles (never 0 — 0 is reserved for the invalid job). Main-loop-only.
   uint32_t generation{0};
+
+  // Set for COPY_TREE/MOVE_TREE only; owns the walk position for the duration of the request.
+  std::unique_ptr<TreeWalk> tree;
 };
 
 // ===========================================================================================
@@ -271,6 +302,15 @@ class StorageWorker : public Component {
   storage::StorageError async_move(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
                                    const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr);
 
+  // Same, for a whole directory tree. The engine walks it — see RequestOp::COPY_TREE. The
+  // destination root is created if missing; existing entries below it are overwritten.
+  storage::StorageError async_copy_tree(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
+                                        const char *dst_path, CompletionCallback &&on_done,
+                                        TransferJob *job_out = nullptr);
+  storage::StorageError async_move_tree(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
+                                        const char *dst_path, CompletionCallback &&on_done,
+                                        TransferJob *job_out = nullptr);
+
   // Snapshot of a transfer's externally observable state, for progress bars / job-status
   // endpoints. Main-loop-only (like all control-plane calls). Returns false when the job
   // handle is unknown or expired: a slot is recycled by the pool after its completion
@@ -350,6 +390,9 @@ class StorageWorker : public Component {
   // or cancellation) sets req.result and req.state = RequestState::DONE; the caller (loop()
   // or the task) must not touch req again until the main loop has delivered the callback.
   void run_chunk_(TransferRequest &req);
+  // One step of a directory walk: pick the next entry, create a directory, or set up the next
+  // file for the chunk loop. Returns false when the walk is over (request already finished).
+  bool tree_step_(TransferRequest &req);
 
   // Advances one stream by exactly the operation implied by its current state (open, one
   // write/read chunk, or close), then transitions to IDLE (more chunks expected) or DONE.
