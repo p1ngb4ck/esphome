@@ -471,7 +471,8 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   }
   // move() internally takes the same-storage rename() fast path and only falls back to
   // copy+delete across devices — so this action doubles as a rename action. Both helpers are
-  // PathStorage-level (filesystem and network alike) and honor max_blocking_transfer_size.
+  // PathStorage-level (filesystem and network alike), take a directory as readily as a file
+  // (recursively, source decides), and honor max_blocking_transfer_size per file.
   StorageError err = is_move ? move(src, src_rel, dst, dst_rel) : copy(src, src_rel, dst, dst_rel);
   if (err != StorageError::OK) {
     ESP_LOGW(TAG, "file_%s: '%s' -> '%s' failed (%s)", op, from.c_str(), to.c_str(), error_to_string(err));

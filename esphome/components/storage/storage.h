@@ -506,19 +506,23 @@ StorageError write_file(NetworkStorage *storage, const char *path, const uint8_t
 // PathStorage overload — see read_file(PathStorage *, ...) above.
 StorageError write_file(PathStorage *storage, const char *path, const uint8_t *data, size_t size);
 
-// Copies a file, within the same storage or across two different storages (e.g. SD -> USB,
-// USB -> NFS). Dispatches on get_storage_type() and streams the file through a fixed
-// STORAGE_COPY_CHUNK_SIZE buffer (unlike read_file()/write_file(), it never holds the whole
-// file in RAM), feeding the task watchdog between chunks. It still BLOCKS the main loop for
-// the duration of the copy, though — large copies freeze sensor updates/API responsiveness
-// unless the caller uses the async worker's copy (StorageWorker::async_copy(), storage_worker.h)
-// instead.
+// Copies a file OR a whole directory tree, within the same storage or across two different
+// storages (e.g. SD -> USB, USB -> NFS). What the source is decides which: a caller passes a
+// path and gets the obvious thing, recursion included (bounded by STORAGE_MAX_RECURSION_DEPTH,
+// missing destination directories created on the way). Dispatches on get_storage_type() and
+// streams every file through one fixed STORAGE_COPY_CHUNK_SIZE buffer — reused across a tree's
+// files rather than allocated per entry — never holding a whole file in RAM, feeding the task
+// watchdog between chunks and between entries. It still BLOCKS the main loop for the duration,
+// though, and max_blocking_transfer_size is checked per file, not per tree: a tree of many
+// small files passes it and can still take a while. Callers that must not block use the async
+// worker instead (StorageWorker::async_copy()/async_copy_tree(), storage_worker.h).
 StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path);
 
-// Moves a file, within the same storage or across two different storages. Same-storage moves
-// go through rename() directly — no chunk buffer, no size limit, near-O(1); if the driver
-// refuses it with NOT_SUPPORTED, this falls back to copy + remove unless the registry's
-// move_fallback_copy is off. Cross-storage moves
+// Moves a file or a whole directory tree, within the same storage or across two different
+// storages. Same-storage moves go through rename() directly — no chunk buffer, no size limit,
+// near-O(1), and a tree costs exactly the same as a file there; if the driver refuses it with
+// NOT_SUPPORTED, this falls back to copy + remove unless the registry's move_fallback_copy is
+// off. Cross-storage moves
 // go through copy() (inheriting its chunking, watchdog feeding, and max_blocking_transfer_size
 // enforcement) followed by remove() on the source, but ONLY if the copy succeeded. If the
 // source remove() fails, its error is returned and the destination copy is kept — the caller
