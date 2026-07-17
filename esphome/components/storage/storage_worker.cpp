@@ -377,6 +377,27 @@ void StorageWorker::loop() {
   // loop, per the public API's contract.
   for (auto &req : this->pool_) {
     if (req.state.load() == RequestState::DONE) {
+#ifdef USE_STORAGE_CHANGE_FEED
+      // Every transfer completes here, whoever submitted it — YAML automations included —
+      // so this is where the change feed learns about it, while the request's fields are
+      // still intact. Whatever the result: a partially landed tree is still a change.
+      // (Streaming requests are not fed: reads change nothing, and the write stream's
+      // consumers note their own completion — they know the path, this loop does not.)
+      if (global_storage_registry != nullptr && req.dst_storage != nullptr && req.src_storage != nullptr) {
+        const bool is_tree = req.tree != nullptr;
+        const char *dst_rel = is_tree ? req.tree->dst_root : req.dst_path;
+        std::string dst = std::string(req.dst_storage->get_mount_path()) + "/" + dst_rel;
+        global_storage_registry->note_parent_changed(dst);
+        if (is_tree) {
+          // Merging into an existing (possibly open) directory changes its listing too.
+          global_storage_registry->note_dir_changed(dst);
+        }
+        if (req.op == RequestOp::MOVE || req.op == RequestOp::MOVE_TREE) {
+          const char *src_rel = is_tree ? req.tree->src_root : req.src_path;
+          global_storage_registry->note_parent_changed(std::string(req.src_storage->get_mount_path()) + "/" + src_rel);
+        }
+      }
+#endif
       CompletionCallback cb = std::move(req.callback);
       StorageError result = req.result;
       req.callback = nullptr;

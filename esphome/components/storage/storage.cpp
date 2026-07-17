@@ -11,6 +11,28 @@ static const char *const TAG = "storage";
 
 StorageRegistry *global_storage_registry = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
+#ifdef USE_STORAGE_CHANGE_FEED
+void StorageRegistry::note_dir_changed(const std::string &dir) {
+  // Coalesce bursts into the same directory: bumping the newest entry's seq is enough — a
+  // client behind it is handed the dir exactly once either way.
+  size_t newest = (this->dir_changes_next_ + DIR_CHANGES_SIZE - 1) % DIR_CHANGES_SIZE;
+  if (this->dir_changes_[newest].seq != 0 && this->dir_changes_[newest].dir == dir) {
+    this->dir_changes_[newest].seq = ++this->change_seq_;
+    return;
+  }
+  auto &e = this->dir_changes_[this->dir_changes_next_];
+  this->dir_changes_next_ = (this->dir_changes_next_ + 1) % DIR_CHANGES_SIZE;
+  e.seq = ++this->change_seq_;
+  e.dir = dir;
+}
+
+void StorageRegistry::note_parent_changed(const std::string &path) {
+  size_t slash = path.rfind('/');
+  // A top-level path's parent is the roots level itself — the feed's "" marker.
+  this->note_dir_changed(slash == std::string::npos || slash == 0 ? std::string() : path.substr(0, slash));
+}
+#endif
+
 StorageError StorageRegistry::register_storage(Storage *s) {
   if (s == nullptr)
     return StorageError::INVALID_ARGS;
