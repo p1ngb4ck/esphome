@@ -32,7 +32,10 @@
     upload: "M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z",
     info: "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z",
     copy: "M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z",
-    move: "M4,11V13H16L10.5,18.5L11.92,19.92L19.84,12L11.92,4.08L10.5,5.5L16,11H4Z",
+    // mdi file-move / folder-move — the specific "this thing moves" glyphs; a plain arrow
+    // next to the copy + trash icons read like a legend ("put the copy in the bin").
+    move: "M14,17H18V14L23,18.5L18,23V20H14V17M13,9H18.5L13,3.5V9M6,2H14L20,8V12.34C19.37,12.12 18.7,12 18,12A6,6 0 0,0 12,18C12,19.54 12.58,20.94 13.53,22H6C4.89,22 4,21.1 4,20V4A2,2 0 0,1 6,2Z",
+    movedir: "M14,18V15H10V11H14V8L19,13M20,6H12L10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6Z",
     del: "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z",
     mkdir: "M10,4L12,6H20A2,2 0 0,1 22,8V18A2,2 0 0,1 20,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10M15,9V12H12V14H15V17H17V14H20V12H17V9H15Z",
     mount: "M16,7V3H14V7H10V3H8V7C7.45,7 7,7.45 7,8V13.5L10.5,17V21H13.5V17L17,13.5V8C17,7.45 16.55,7 16,7Z",
@@ -258,7 +261,7 @@
       const to = prompt(`Copy ${isDir ? "directory " : ""}to (full path)`, path);
       if (to) await transfer("copy", path, to);
     }, reload),
-    btn("move", "Move / rename", async () => {
+    btn(isDir ? "movedir" : "move", "Move / rename", async () => {
       const to = prompt(`Move/rename ${isDir ? "directory " : ""}to (full path)`, path);
       if (to) await transfer("move", path, to);
     }, reload),
