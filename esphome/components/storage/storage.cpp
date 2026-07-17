@@ -513,33 +513,12 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
   }
 }
 
-StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path) {
-  // Only pay for the extra stat() when a limit is actually configured — the guard-rail is
-  // opt-in and copy() itself doesn't need the file size to stream.
-  if (global_storage_registry != nullptr && global_storage_registry->get_max_blocking_transfer_size() != 0) {
-    FileStat src_stat{};
-    StorageError stat_err = src_storage->stat(src_path, &src_stat);
-    if (stat_err != StorageError::OK)
-      return stat_err;
-    stat_err = check_blocking_transfer_size(src_stat.size);
-    if (stat_err != StorageError::OK)
-      return stat_err;
-  }
+namespace {
 
-  // PREFER_INTERNAL: PSRAM isn't DMA-capable on classic ESP32 (restricted on S3 too), so
-  // SD/SPI drivers would bounce-buffer anyway. Fall back to smaller sizes under memory pressure.
-  size_t chunk_size = STORAGE_COPY_CHUNK_SIZE;
-  uint8_t *raw = nullptr;
-  while (chunk_size >= 4096) {
-    raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
-    if (raw != nullptr)
-      break;
-    chunk_size /= 2;
-  }
-  if (raw == nullptr)
-    return StorageError::NO_SPACE;
-  RamBuffer chunk_buf(raw, RamBufferDeleter{chunk_size});
-
+// The bytes of one file, given a chunk buffer to borrow. Split out of copy() so a directory
+// walk can reuse the same buffer for every file instead of allocating one per entry.
+StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                           const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size) {
   bool src_is_fs = src_storage->get_storage_type() == StorageType::FILESYSTEM;
   bool dst_is_fs = dst_storage->get_storage_type() == StorageType::FILESYSTEM;
   auto *src_fs = src_is_fs ? static_cast<FilesystemStorage *>(src_storage) : nullptr;
@@ -614,6 +593,118 @@ StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *d
   return err;
 }
 
+// Bound for one "<dir>/<name>" step of the walk. Two of these live on the stack per recursion
+// level, so this is deliberately not generous: STORAGE_MAX_RECURSION_DEPTH levels deep it is
+// what the main loop's stack has to carry, and a path that does not fit is reported as
+// INVALID_ARGS rather than silently truncated.
+static constexpr size_t COPY_TREE_PATH_MAX = 256;
+
+struct CopyTreeCtx;
+StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                                const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size, size_t depth);
+
+struct CopyTreeCtx {
+  PathStorage *src_storage;
+  const char *src_base;
+  PathStorage *dst_storage;
+  const char *dst_base;
+  const RamBuffer &chunk_buf;
+  size_t chunk_size;
+  size_t depth;
+  StorageError err{StorageError::OK};
+};
+
+bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
+  auto *ctx = static_cast<CopyTreeCtx *>(ctx_ptr);
+
+  // Fixed stack buffers instead of std::string — no heap allocation per entry, same as
+  // remove_recursive's walk right below.
+  char src_child[COPY_TREE_PATH_MAX];
+  char dst_child[COPY_TREE_PATH_MAX];
+  int n1 = snprintf(src_child, sizeof(src_child), "%s/%s", ctx->src_base, entry->name);
+  int n2 = snprintf(dst_child, sizeof(dst_child), "%s/%s", ctx->dst_base, entry->name);
+  if (n1 < 0 || static_cast<size_t>(n1) >= sizeof(src_child) || n2 < 0 ||
+      static_cast<size_t>(n2) >= sizeof(dst_child)) {
+    ctx->err = StorageError::INVALID_ARGS;
+    return false;
+  }
+
+  StorageError err;
+  if (entry->is_dir) {
+    err = copy_tree_at_depth(ctx->src_storage, src_child, ctx->dst_storage, dst_child, ctx->chunk_buf, ctx->chunk_size,
+                             ctx->depth + 1);
+  } else {
+    err = check_blocking_transfer_size(entry->size);
+    if (err == StorageError::OK)
+      err = copy_one_file(ctx->src_storage, src_child, ctx->dst_storage, dst_child, ctx->chunk_buf, ctx->chunk_size);
+  }
+  App.feed_wdt();
+
+  if (err != StorageError::OK) {
+    ctx->err = err;
+    return false;  // stop enumeration — an entry failed
+  }
+  return true;
+}
+
+StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                                const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size, size_t depth) {
+  if (depth > STORAGE_MAX_RECURSION_DEPTH)
+    return StorageError::INVALID_ARGS;
+
+  StorageError err = dst_storage->mkdir(dst_path);
+  if (err != StorageError::OK && err != StorageError::ALREADY_EXISTS)
+    return err;
+
+  CopyTreeCtx ctx{src_storage, src_path, dst_storage, dst_path, chunk_buf, chunk_size, depth};
+  err = src_storage->list_dir(src_path, copy_tree_cb, &ctx);
+  if (err != StorageError::OK)
+    return err;
+  return ctx.err;
+}
+
+// The chunk buffer both paths borrow. PREFER_INTERNAL: PSRAM isn't DMA-capable on classic
+// ESP32 (restricted on S3 too), so SD/SPI drivers would bounce-buffer anyway. Falls back to
+// smaller sizes under memory pressure.
+RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
+  size_t chunk_size = STORAGE_COPY_CHUNK_SIZE;
+  uint8_t *raw = nullptr;
+  while (chunk_size >= 4096) {
+    raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
+    if (raw != nullptr)
+      break;
+    chunk_size /= 2;
+  }
+  *chunk_size_out = chunk_size;
+  if (raw == nullptr)
+    return RamBuffer(nullptr, RamBufferDeleter{0});
+  return RamBuffer(raw, RamBufferDeleter{chunk_size});
+}
+
+}  // namespace
+
+StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path) {
+  // A directory is copied whole — the API owns that, not its callers. Only pay for the stat()
+  // when it decides something: a limit is configured, or we need to know what this path is.
+  FileStat src_stat{};
+  StorageError stat_err = src_storage->stat(src_path, &src_stat);
+  if (stat_err != StorageError::OK)
+    return stat_err;
+
+  size_t chunk_size = 0;
+  RamBuffer chunk_buf = alloc_copy_chunk(&chunk_size);
+  if (chunk_buf == nullptr)
+    return StorageError::NO_SPACE;
+
+  if (src_stat.is_dir)
+    return copy_tree_at_depth(src_storage, src_path, dst_storage, dst_path, chunk_buf, chunk_size, 0);
+
+  StorageError err = check_blocking_transfer_size(src_stat.size);
+  if (err != StorageError::OK)
+    return err;
+  return copy_one_file(src_storage, src_path, dst_storage, dst_path, chunk_buf, chunk_size);
+}
+
 StorageError move(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path) {
   if (src_storage == dst_storage) {
     StorageError err = src_storage->rename(src_path, dst_path);  // same-storage: O(1), no size limit
@@ -624,10 +715,16 @@ StorageError move(PathStorage *src_storage, const char *src_path, PathStorage *d
     ESP_LOGD(TAG, "rename refused for '%s' — moving it as copy + remove instead", src_path);
   }
 
+  // What the source is decides how it goes away afterwards; copy() already handles either.
+  FileStat src_stat{};
+  StorageError stat_err = src_storage->stat(src_path, &src_stat);
+  if (stat_err != StorageError::OK)
+    return stat_err;
+
   StorageError err = copy(src_storage, src_path, dst_storage, dst_path);
   if (err != StorageError::OK)
     return err;
-  return src_storage->remove(src_path);
+  return src_stat.is_dir ? remove_recursive(src_storage, src_path) : src_storage->remove(src_path);
 }
 
 namespace {
