@@ -156,7 +156,10 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
           *ctx->out += "\",\"kind\":\"";
           append_json_escaped(*ctx->out, info.kind != nullptr ? info.kind : "");
-          char buf[192];
+          // Worst case is 250 bytes: 169 of template, a 20-digit capacity, three 10-digit
+          // geometry fields and six "false" — snprintf would silently truncate a shorter one
+          // and hand the browser JSON it cannot parse.
+          char buf[256];
           // The geometry is what a client needs to offer only what this medium can do — the
           // capability bits, not a guess from the kind string.
           snprintf(
