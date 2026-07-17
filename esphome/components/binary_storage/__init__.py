@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from esphome import automation, pins
 import esphome.codegen as cg
@@ -116,6 +117,54 @@ MODE_RAW = "raw"
 MODE_LITTLEFS = "littlefs"
 MODE_BOTH = "both"
 CONF_FS_SIZE = "fs_size"
+CONF_PRE_FILL = "pre_fill"
+CONF_PRE_FILL_SOURCE = "source"
+CONF_PRE_FILL_TARGET = "target"
+
+# LittleFS geometry the compile-time image is built with (see the esp_littlefs fork's
+# littlefs_create_partition_image) — used for the config-time fit estimate below.
+_LFS_BLOCK = 0x1000
+# Superblock pair + a little breathing room for metadata blocks; deliberately conservative
+# so a config that passes here does not surprise-fail at image build time.
+_LFS_OVERHEAD_BLOCKS = 4
+
+
+def _validate_prefill_target(value):
+    value = cv.string_strict(value)
+    if not value.startswith("/"):
+        raise cv.Invalid(
+            "pre_fill target must be an absolute path inside the filesystem"
+        )
+    if value.endswith("/") or ".." in value.split("/") or "//" in value:
+        raise cv.Invalid(f"invalid pre_fill target path: {value}")
+    return value
+
+
+def _validate_prefill_fits(config):
+    """Config-time fit estimate: every file rounds up to whole blocks, plus a conservative
+    metadata allowance. The image build enforces the real limit; this catches the obvious
+    mistakes before a compile is wasted."""
+    prefill = config.get(CONF_PRE_FILL)
+    if not prefill:
+        return config
+    targets = set()
+    blocks = _LFS_OVERHEAD_BLOCKS
+    for entry in prefill:
+        target = entry[CONF_PRE_FILL_TARGET]
+        if target in targets:
+            raise cv.Invalid(f"duplicate pre_fill target: {target}")
+        targets.add(target)
+        size = entry[CONF_PRE_FILL_SOURCE].stat().st_size
+        blocks += max(1, -(-size // _LFS_BLOCK))
+        # every directory level costs metadata too — folded into the flat allowance above
+    needed = blocks * _LFS_BLOCK
+    if needed > config[CONF_PARTITION_SIZE]:
+        raise cv.Invalid(
+            f"pre_fill needs about {needed} bytes (files rounded to {_LFS_BLOCK}-byte "
+            f"blocks plus filesystem overhead) but partition_size is only "
+            f"{config[CONF_PARTITION_SIZE]}"
+        )
+    return config
 
 
 def validate_bytes(value):
@@ -359,6 +408,18 @@ FLASH_PARTITION_SCHEMA = cv.Schema(
         cv.Optional(CONF_MOUNT_PATH, default="/littlefs"): _validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
         cv.Optional(CONF_STORAGE_NAME): cv.string,
+        # Compile-time pre-fill: the listed files are baked into a LittleFS image during the
+        # build (littlefs_create_partition_image) and flashed with the partition — in the
+        # factory image automatically, over OTA via the image appended to firmware.ota.bin
+        # (see espidf/toolchain.py). Nothing is ever embedded into the app binary.
+        cv.Optional(CONF_PRE_FILL): cv.ensure_list(
+            cv.Schema(
+                {
+                    cv.Required(CONF_PRE_FILL_SOURCE): cv.file_,
+                    cv.Required(CONF_PRE_FILL_TARGET): _validate_prefill_target,
+                }
+            )
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -508,6 +569,7 @@ def _validate_device_node(config):
 def _final_validate(config):
     _validate_fs_split(config)
     _validate_device_node(config)
+    _validate_prefill_fits(config)
     # Resolved here because it depends on another component's config; stored back for to_code().
     if (node_name := _node_name_of(config)) is not None:
         config[CONF_DEVICE_NODE_NAME] = node_name
@@ -543,6 +605,31 @@ def FILTER_SOURCE_FILES():
         if device_type not in configured:
             exclude.extend(files)
     return exclude
+
+
+def _stage_prefill(label: str, prefill: list) -> None:
+    """Copy the pre-fill sources into a per-partition staging tree under the build dir and
+    wire the compile-time image build: littlefs_create_partition_image() turns the tree into
+    build/<label>.bin, FLASH_IN_PROJECT registers it in flasher_args.json — which is exactly
+    what create_factory_bin() merges, so the factory/serial path needs nothing further. The
+    label registration lets create_ota_bin() append the image to the OTA artifact."""
+    import shutil
+
+    from esphome.components.esp32 import add_project_cmake, register_littlefs_prefill
+
+    staging = Path(CORE.build_path) / "littlefs_prefill" / label
+    # Rebuilt from scratch every codegen run: stale files from removed entries must not
+    # linger in the image.
+    if staging.exists():
+        shutil.rmtree(staging)
+    for entry in prefill:
+        dest = staging / entry[CONF_PRE_FILL_TARGET].lstrip("/")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(entry[CONF_PRE_FILL_SOURCE], dest)
+    add_project_cmake(
+        f'littlefs_create_partition_image({label} "{staging.as_posix()}" FLASH_IN_PROJECT)'
+    )
+    register_littlefs_prefill(label)
 
 
 async def to_code(config):
@@ -588,6 +675,9 @@ async def to_code(config):
         cg.add(var.set_partition_label(config[CONF_PARTITION_LABEL]))
         cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
         cg.add(var.set_auto_format(config[CONF_AUTO_FORMAT]))
+
+        if prefill := config.get(CONF_PRE_FILL):
+            _stage_prefill(config[CONF_PARTITION_LABEL], prefill)
 
         # The device's identity in the registry is its YAML id — nothing else to choose.
         storage_id = str(config[CONF_ID])
