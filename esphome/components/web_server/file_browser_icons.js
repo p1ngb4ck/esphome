@@ -32,6 +32,22 @@
   const enc = encodeURIComponent;
 
   // Material Design icon paths (24x24), rendered inline so they follow currentColor.
+  const ACTION_ICONS = {
+    download: "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z",
+    upload: "M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z",
+    info: "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z",
+    copy: "M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z",
+    // mdi file-move / folder-move — the specific "this thing moves" glyphs; a plain arrow
+    // next to the copy + trash icons read like a legend ("put the copy in the bin").
+    move: "M14,17H18V14L23,18.5L18,23V20H14V17M13,9H18.5L13,3.5V9M6,2H14L20,8V12.34C19.37,12.12 18.7,12 18,12A6,6 0 0,0 12,18C12,19.54 12.58,20.94 13.53,22H6C4.89,22 4,21.1 4,20V4A2,2 0 0,1 6,2Z",
+    movedir: "M14,18V15H10V11H14V8L19,13M20,6H12L10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6Z",
+    del: "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z",
+    mkdir: "M10,4L12,6H20A2,2 0 0,1 22,8V18A2,2 0 0,1 20,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10M15,9V12H12V14H15V17H17V14H20V12H17V9H15Z",
+    mount: "M16,7V3H14V7H10V3H8V7C7.45,7 7,7.45 7,8V13.5L10.5,17V21H13.5V17L17,13.5V8C17,7.45 16.55,7 16,7Z",
+    unmount: "M12,5L5.33,15H18.67L12,5M5,17H19V19H5V17Z",
+    erase: "M15.14,3C14.63,3 14.12,3.2 13.73,3.59L2.59,14.73C1.81,15.5 1.81,16.77 2.59,17.56L5,20H12.5L20.41,12.09C21.2,11.3 21.2,10.03 20.41,9.24L16.76,5.59L15.14,3M17,18A2,2 0 0,0 19,20A2,2 0 0,0 21,18C21,16.67 19,14.5 19,14.5C19,14.5 17,16.67 17,18Z",
+    all: "M9,3V4H4V6H5V19A2,2 0 0,0 7,21H17A2,2 0 0,0 19,19V6H20V4H15V3H9M7,6H17V19H7V6M9,8V17H11V8H9M13,8V17H15V8H13Z",
+  };
   const TYPE_ICONS = {
     sd: "M18,8H16V4H18M15,8H13V4H15M12,8H10V4H12M18,2H10L4,8V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V4A2,2 0 0,0 18,2Z",
     usb: "M15,7V11H16V13H13V5H15L12,1L9,5H11V13H8V10.93C8.7,10.56 9.2,9.85 9.2,9C9.2,7.78 8.21,6.8 7,6.8C5.78,6.8 4.8,7.78 4.8,9C4.8,9.85 5.3,10.56 6,10.93V13A2,2 0 0,0 8,15H11V18.05C10.29,18.41 9.8,19.15 9.8,20C9.8,21.22 10.78,22.2 12,22.2C13.22,22.2 14.2,21.22 14.2,20C14.2,19.15 13.71,18.41 13,18.05V15H16A2,2 0 0,0 18,13V11H19V7H15Z",
@@ -39,7 +55,7 @@
     mem: "M6,4H18V5H21V7H18V9H21V11H18V13H21V15H18V17H21V19H18V20H6V19H3V17H6V15H3V13H6V11H3V9H6V7H3V5H6V4M8,6V18H16V6H8M10,8H14V16H10V8Z",
     disk: "M12,3C7.58,3 4,4.79 4,7C4,9.21 7.58,11 12,11C16.42,11 20,9.21 20,7C20,4.79 16.42,3 12,3M4,9V12C4,14.21 7.58,16 12,16C16.42,16 20,14.21 20,12V9C20,11.21 16.42,13 12,13C7.58,13 4,11.21 4,9M4,14V17C4,19.21 7.58,21 12,21C16.42,21 20,19.21 20,17V14C20,16.21 16.42,18 12,18C7.58,18 4,16.21 4,14Z",
   };
-  const ICONS = TYPE_ICONS;
+  const ICONS = { ...TYPE_ICONS, ...ACTION_ICONS };
   const icon = (name) => {
     const NS = "http://www.w3.org/2000/svg";
     const s = document.createElementNS(NS, "svg");
@@ -54,9 +70,7 @@
   };
   // Type/medium icons do not go through act() — they are identification, not actions,
   // and render as icons in both variants.
-  const ACT_TEXT = { movedir: "move", all: "read all" };
-  // Labels are the shared action names, except where those would mislead as words.
-  const act = (name) => ACT_TEXT[name] || name;
+  const act = icon;
   // Icon per medium: 'kind' from /files/storages when the driver reports one (sd, usb,
   // nfs, flash, littlefs, eeprom, ...), otherwise the coarse type (filesystem/network).
   const typeIcon = (kind, type) => {

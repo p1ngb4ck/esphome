@@ -60,6 +60,7 @@ CONF_FILE_API = "file_api"
 
 FILE_API_DEFAULTS = {"max_dir_entries": 64}
 CONF_FILE_BROWSER = "file_browser"
+CONF_ACTIONS_AS_ICONS = "actions_as_icons"
 CONF_MAX_DIR_ENTRIES = "max_dir_entries"
 CONF_STORAGE_ID = "storage_id"
 CONF_ENABLE_UPLOAD = "enable_upload"
@@ -352,7 +353,16 @@ CONFIG_SCHEMA = cv.All(
             # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
             # not a separate page; it implies file_api (defaults applied when absent).
             cv.Optional(CONF_FILE_BROWSER): cv.All(
-                lambda value: {} if value is None else value, cv.Schema({})
+                lambda value: {} if value is None else value,
+                cv.Schema(
+                    {
+                        # Compile-time choice: the embedded browser JS contains exactly one
+                        # action-button variant — flat uppercase v3 text buttons (default)
+                        # or icons. Type/medium icons are identification, not actions, and
+                        # ship in both variants.
+                        cv.Optional(CONF_ACTIONS_AS_ICONS, default=False): cv.boolean,
+                    }
+                ),
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -530,7 +540,15 @@ async def to_code(config):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
         if file_browser:
             cg.add_define("USE_WEBSERVER_FILE_BROWSER")
-            js_path = Path(__file__).parent / "file_browser.js"
+            # Two prebuilt variants differing only in action-button rendering; the option
+            # decides at codegen which one is embedded — the other never reaches the build.
+            fb_conf = config[CONF_FILE_BROWSER]
+            js_name = (
+                "file_browser_icons.js"
+                if fb_conf[CONF_ACTIONS_AS_ICONS]
+                else "file_browser.js"
+            )
+            js_path = Path(__file__).parent / js_name
             with js_path.open(encoding="utf-8") as js_file:
                 add_resource_as_progmem("FILE_BROWSER_JS", js_file.read())
 
