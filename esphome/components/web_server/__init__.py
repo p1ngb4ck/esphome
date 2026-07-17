@@ -61,6 +61,7 @@ CONF_FILE_API = "file_api"
 FILE_API_DEFAULTS = {"max_dir_entries": 64}
 CONF_FILE_BROWSER = "file_browser"
 CONF_ACTIONS_AS_ICONS = "actions_as_icons"
+CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
 CONF_MAX_DIR_ENTRIES = "max_dir_entries"
 CONF_STORAGE_ID = "storage_id"
 CONF_ENABLE_UPLOAD = "enable_upload"
@@ -361,6 +362,12 @@ CONFIG_SCHEMA = cv.All(
                         # or icons. Type/medium icons are identification, not actions, and
                         # ship in both variants.
                         cv.Optional(CONF_ACTIONS_AS_ICONS, default=False): cv.boolean,
+                        # How often the browser polls /files/changes to auto-refresh
+                        # directories that changed behind its back (other clients, plain
+                        # API calls). 0s disables the poll.
+                        cv.Optional(
+                            CONF_CHANGE_POLL_INTERVAL, default="5s"
+                        ): cv.positive_time_period_milliseconds,
                     }
                 ),
             ),
@@ -550,7 +557,16 @@ async def to_code(config):
             )
             js_path = Path(__file__).parent / js_name
             with js_path.open(encoding="utf-8") as js_file:
-                add_resource_as_progmem("FILE_BROWSER_JS", js_file.read())
+                js = js_file.read()
+            # Both variants carry the schema default; only a deviation needs the rewrite.
+            poll_ms = int(fb_conf[CONF_CHANGE_POLL_INTERVAL].total_milliseconds)
+            if poll_ms != 5000:
+                js = js.replace(
+                    "const CHANGE_POLL_MS = 5000;",
+                    f"const CHANGE_POLL_MS = {poll_ms};",
+                    1,
+                )
+            add_resource_as_progmem("FILE_BROWSER_JS", js)
 
     raw_api_config = config.get(CONF_RAW_API)
     if raw_api_config is None and file_browser:

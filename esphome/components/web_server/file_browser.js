@@ -28,6 +28,10 @@
     }
     return r.json();
   };
+  // Rewritten by codegen from the file_browser: change_poll_interval option; 0 disables the
+  // auto-refresh poll entirely.
+  const CHANGE_POLL_MS = 5000;
+
   const fmtSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " kB" : (n / 1048576).toFixed(1) + " MB";
   const enc = encodeURIComponent;
 
@@ -186,6 +190,10 @@
     return b;
   };
 
+  // Directories currently expanded, path -> their reload; the change poll below relists
+  // exactly these when the server reports them dirty.
+  const openDirs = new Map();
+
   // The upload/mkdir form exists exactly once, attached to the most recently expanded
   // (= marked) directory or root; expanding elsewhere moves it there.
   let currentUpload = null;
@@ -338,8 +346,13 @@
       expanded = !expanded;
       twist.classList.toggle("efb-open", expanded);
       children.style.display = expanded ? "" : "none";
-      if (expanded) reloadChildren().catch((e) => setStatus("Error: " + e.message));
-      else children.textContent = "";
+      if (expanded) {
+        openDirs.set(path, reloadChildren);
+        reloadChildren().catch((e) => setStatus("Error: " + e.message));
+      } else {
+        openDirs.delete(path);
+        children.textContent = "";
+      }
     };
     twist.onclick = toggle;
     label.onclick = toggle;
@@ -474,6 +487,7 @@
   // --- roots: always visible ----------------------------------------------
   async function renderRoots() {
     tree.textContent = "";
+    openDirs.clear();  // every node below is rebuilt collapsed
     try {
       const storages = await api("/files/storages");
       for (const s of storages) {
@@ -505,6 +519,29 @@
     }
   }
   renderRoots();
+
+
+  // Auto-refresh. /files/changes hands back the directories whose listings changed since this
+  // client's cursor — including changes made by API calls no browser initiated. Only what is
+  // actually expanded gets relisted; "" marks the roots level (a mount came or went). A
+  // cursor that fell behind the server's small ring comes back as reset — then everything
+  // open is considered dirty. Errors stay quiet: the next tick simply tries again.
+  let changeCursor = 0;
+  const pollChanges = async () => {
+    const c = await api(`/files/changes?since=${changeCursor}`);
+    changeCursor = c.seq;
+    if (c.reset) {
+      for (const r of openDirs.values()) r().catch(() => {});
+      return;
+    }
+    for (const d of c.dirs || []) {
+      if (d === "") { renderRoots(); return; }  // rebuilds every node — nothing further to do
+      const r = openDirs.get(d);
+      if (r) r().catch(() => {});
+    }
+  };
+  if (CHANGE_POLL_MS > 0)
+    setInterval(() => { if (!document.hidden) pollChanges().catch(() => {}); }, CHANGE_POLL_MS);
 
   const attach = () => {
     const app = document.querySelector("esp-app");
