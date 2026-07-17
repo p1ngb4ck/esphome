@@ -31,6 +31,7 @@ DOMAIN = "storage"
 
 CONF_COPY_CHUNK_SIZE = "copy_chunk_size"
 CONF_MAX_BLOCKING_TRANSFER_SIZE = "max_blocking_transfer_size"
+CONF_MOVE_FALLBACK_COPY = "move_fallback_copy"
 CONF_TASK_STACK_SIZE = "task_stack_size"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_MAX_PENDING = "max_pending"
@@ -90,6 +91,11 @@ CONFIG_SCHEMA = cv.Schema(
         # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
         # preserves current behavior). See max_blocking_transfer_size's comment in storage.h.
         cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=0): cv.int_range(min=0),
+        # A same-storage move is a rename, which some backends refuse across their own
+        # internals (an NFS export can span file systems, and RENAME never crosses one).
+        # On, such a refusal is redone as copy + remove so the move still happens; off, it is
+        # reported instead of quietly turning a directory-entry update into a full copy.
+        cv.Optional(CONF_MOVE_FALLBACK_COPY, default=True): cv.boolean,
         # FATFS LFN + NFS/lwIP transfers both need headroom on the worker task's stack.
         cv.Optional(CONF_TASK_STACK_SIZE, default=8192): cv.int_range(
             min=4096, max=32768
@@ -219,6 +225,7 @@ async def to_code(config):
     cg.add_define("USE_STORAGE")
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
     cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
+    cg.add(var.set_move_fallback_copy(config[CONF_MOVE_FALLBACK_COPY]))
 
     for conf in config.get(CONF_ON_REGISTERED, []):
         await automation.build_callback_automation(
