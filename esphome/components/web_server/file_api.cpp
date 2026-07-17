@@ -672,7 +672,7 @@ bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char
   this->dir_.dst = dst;
   strncpy(this->dir_.src_root, src_rel, sizeof(this->dir_.src_root) - 1);
   strncpy(this->dir_.dst_root, dst_rel, sizeof(this->dir_.dst_root) - 1);
-  this->dir_.id = DIR_JOB_FLAG | (++this->dir_job_counter_ & 0x7FFFFFFFu);
+  this->dir_.id = DIR_JOB_FLAG | (++this->dir_job_counter_ & JOB_COUNTER_MASK);
 
   storage::StorageError err = this->dir_.dst->mkdir(this->dir_.dst_root);
   if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
@@ -864,7 +864,7 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
   {
     auto *p = request->getParam("id");
     uint32_t fid = p != nullptr ? (uint32_t) strtoul(p->value().c_str(), nullptr, 10) : 0;
-    if ((fid & FLUSH_JOB_FLAG) != 0) {
+    if ((fid & JOB_SPACE_MASK) == FLUSH_JOB_FLAG) {
       if (!this->flush_.active || this->flush_.job != fid) {
         request->send(404);
         return;
@@ -893,7 +893,7 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
   storage::TransferStatus st{};
   bool found = false;
   bool ok = this->run_on_loop_([this, job, &st, &found]() {
-    if ((job & DIR_JOB_FLAG) != 0) {
+    if ((job & JOB_SPACE_MASK) == DIR_JOB_FLAG) {
       // Directory transfer: single slot, final state queryable until the next one starts.
       DirTransfer &d = this->dir_;
       if (job != d.id || (!d.active && !d.done))
@@ -1211,7 +1211,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       if (this->upload_.error == storage::StorageError::OK) {
         this->flush_ = StagedFlush{};
         this->flush_.active = true;
-        this->flush_.job = FLUSH_JOB_FLAG | (++this->flush_job_counter_ & 0x7FFFFFFFu);
+        this->flush_.job = FLUSH_JOB_FLAG | (++this->flush_job_counter_ & JOB_COUNTER_MASK);
         this->flush_.storage = this->upload_.storage;
         this->flush_.handle = this->upload_.handle;
         this->flush_.dst_is_fs = this->upload_.dst_is_fs;
