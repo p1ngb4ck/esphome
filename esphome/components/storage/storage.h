@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <string>
 
 namespace esphome::storage {
 
@@ -431,6 +432,28 @@ class StorageRegistry : public Component {
   template<typename F> void add_on_registered_callback(F &&cb) { this->on_registered_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_unregistered_callback(F &&cb) { this->on_unregistered_.add(std::forward<F>(cb)); }
 
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Directory-change feed (main loop only). Whoever alters a directory's *listing* notes it
+  // here: the storage worker for every completed transfer regardless of who submitted it
+  // (YAML automations included), the web file/raw APIs for their direct operations. "" marks
+  // the roots level (a mount came or went). Consumers poll against change_seq() with their
+  // own cursor and read entries newer than it — nothing is cleared, so any number of
+  // consumers coexist. Small ring: a cursor older than the oldest retained entry has missed
+  // evictions and must treat everything it shows as dirty (see the web_server file_api's
+  // /files/changes endpoint, the feed's one consumer today).
+  // Bursts into the same directory (a tree landing file after file) coalesce into one entry.
+  static constexpr size_t DIR_CHANGES_SIZE = 8;
+  struct DirChange {
+    uint32_t seq{0};  // 0 = slot never used
+    std::string dir;
+  };
+  void note_dir_changed(const std::string &dir);
+  // Notes the parent directory of `path` ("" — the roots level — for a top-level path).
+  void note_parent_changed(const std::string &path);
+  uint32_t change_seq() const { return this->change_seq_; }
+  const DirChange &dir_change(size_t index) const { return this->dir_changes_[index]; }
+#endif
+
  protected:
   // Single allocation at set_device_count() — no realloc machinery
   FixedVector<Storage *> storages_;
@@ -447,6 +470,12 @@ class StorageRegistry : public Component {
 
   uint64_t max_blocking_transfer_size_{0};  // 0 = unlimited
   bool move_fallback_copy_{true};
+
+#ifdef USE_STORAGE_CHANGE_FEED
+  DirChange dir_changes_[DIR_CHANGES_SIZE]{};
+  size_t dir_changes_next_{0};
+  uint32_t change_seq_{0};
+#endif
 };
 
 extern StorageRegistry *global_storage_registry;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)

@@ -232,6 +232,12 @@ bool WebServerRawApi::read_to_path_(storage::RawStorage *device, uint64_t addres
                                        ? storage::global_storage_registry->resolve_path(path, &rel)
                                        : nullptr;
         werr = ps == nullptr ? storage::StorageError::NOT_FOUND : storage::write_file(ps, rel, data, buf_size);
+#ifdef USE_STORAGE_CHANGE_FEED
+        // A device read landing in a file changes that file's directory — feed it, so a
+        // browser showing the directory picks the new file up on its next change poll.
+        if (werr == storage::StorageError::OK)
+          storage::global_storage_registry->note_parent_changed(path);
+#endif
       },
       60000);
   if (!ok || werr != storage::StorageError::OK) {

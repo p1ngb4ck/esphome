@@ -528,6 +528,10 @@ async def to_code(config):
         file_api_config = FILE_API_DEFAULTS
     if file_api_config is not None:
         cg.add_define("USE_WEBSERVER_FILE_API")
+        # The registry-level directory-change feed behind /files/changes: fed by the
+        # storage worker and the raw API too, but only worth its RAM when something
+        # serves it — and that something is the file_api.
+        cg.add_define("USE_STORAGE_CHANGE_FEED")
         # /files/upload uses the same multipart machinery as web_server OTA; without OTA
         # configured nothing else pulls the parser library in. file_api is validated as
         # esp-idf-only, so no framework check is needed here.

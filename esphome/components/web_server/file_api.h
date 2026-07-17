@@ -113,23 +113,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // once a transfer is under way. Held while there is work, released when there is none.
   HighFrequencyLoopRequester loop_requester_;
 
-  // Directory-change feed behind /files/changes (browser auto-refresh): every mutating
-  // operation notes the directory whose *listing* it altered ("" = the roots level, i.e.
-  // mounts came or went) into a small ring with a running sequence. Clients poll with their
-  // own cursor (?since=) and relist what comes back — nothing is flushed server-side, so
-  // several browsers coexist and changes made by API calls no browser initiated are seen
-  // too. A cursor that falls behind the ring gets reset:true instead of a wrong answer.
-  // Main loop only.
-  static constexpr size_t DIR_CHANGES_SIZE = 8;
-  struct DirChange {
-    uint32_t seq{0};  // 0 = slot never used
-    std::string dir;
-  };
-  DirChange dir_changes_[DIR_CHANGES_SIZE]{};
-  size_t dir_changes_next_{0};
-  uint32_t change_seq_{0};
-  void note_dir_changed_(const std::string &dir);
-  void note_parent_changed_(const std::string &path);
+  // /files/changes — serves the storage registry's directory-change feed (see storage.h:
+  // note_dir_changed()): the ring itself lives there so the worker and the raw API feed it
+  // too; this endpoint only reads it against the client's cursor.
   void handle_changes_(AsyncWebServerRequest *request);
 
 #ifdef USE_STORAGE_WORKER
