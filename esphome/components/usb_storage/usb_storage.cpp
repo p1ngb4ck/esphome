@@ -427,6 +427,13 @@ void USBStorageClient::on_connected() {
   }
 
   this->mounted_ = true;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   ESP_LOGI(TAG, "FAT filesystem mounted at '%s'", this->mount_path_);
 
   this->notify_connected_(vid, pid);
@@ -440,6 +447,13 @@ void USBStorageClient::unmount_filesystem() {
   f_mount(nullptr, drive_path, 0);
   esp_vfs_fat_unregister_path(this->mount_path_);
   this->mounted_ = false;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   ESP_LOGI(TAG, "FAT filesystem unmounted from '%s'", this->mount_path_);
 }
 

@@ -243,6 +243,13 @@ storage::StorageError SdMmc::mount() {
   }
   this->block_size_ = this->card_->csd.sector_size;
   this->is_mounted_ = true;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
   this->update_card_info();
 
@@ -285,6 +292,13 @@ storage::StorageError SdMmc::unmount() {
 #endif
   this->card_ = nullptr;
   this->is_mounted_ = false;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   ESP_LOGI(TAG, "SD/MMC card unmounted safely");
 
   return storage::StorageError::OK;

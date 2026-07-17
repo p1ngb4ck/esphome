@@ -16,12 +16,7 @@ extern "C" {
 
 #ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
 #define VFS_FAT_MOUNT_DEFAULT_CONFIG() \
-  { \
-      .format_if_mount_failed = false, \
-      .max_files = 5, \
-      .allocation_unit_size = 0, \
-      .disk_status_check_enable = false, \
-  }
+  { .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 0, .disk_status_check_enable = false, }
 #endif
 
 namespace esphome::sd_storage {
@@ -171,6 +166,13 @@ StorageError SdSpi::mount() {
   }
 
   this->is_mounted_ = true;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
   this->update_card_info();
 
@@ -210,6 +212,13 @@ StorageError SdSpi::unmount() {
   esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
   this->card_ = nullptr;
   this->is_mounted_ = false;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
+  // automation), the browser's change poll must see it — including recovery after an error.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+
   sdspi_host_deinit();
   ESP_LOGI(TAG_SPI, "SD card unmounted safely");
 

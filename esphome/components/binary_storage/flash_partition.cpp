@@ -50,6 +50,10 @@ void FlashPartition::setup() {
 
   this->mounted_ = true;
   ESP_LOGI(TAG, "LittleFS mounted at '%s'", this->mount_path_);
+#ifdef USE_STORAGE_CHANGE_FEED
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");  // mount state is roots-listing state
+#endif
 
 #if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
   // So an incoming pre-fill image (OTA_TYPE_UPDATE_APP_WITH_DATA) can have this mount step
@@ -136,6 +140,10 @@ storage::StorageError FlashPartition::mount() {
     return storage::StorageError::READ_ERROR;
 
   this->mounted_ = true;
+#ifdef USE_STORAGE_CHANGE_FEED
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");  // mount state is roots-listing state
+#endif
 
   return storage::StorageError::OK;
 }
@@ -458,6 +466,10 @@ bool FlashPartition::unmount_lfs_() {
   }
 
   this->mounted_ = false;
+#ifdef USE_STORAGE_CHANGE_FEED
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");  // mount state is roots-listing state
+#endif
   ESP_LOGI(TAG, "Unmounted '%s'", this->mount_path_);
   return true;
 }
