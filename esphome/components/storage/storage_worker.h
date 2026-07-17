@@ -378,7 +378,6 @@ class StorageWorker : public Component {
 
   // Set by ensure_started_() the first time it runs; guards pool/task creation so it only ever
   // happens once, on the first submit_()/begin_write()/begin_read() call.
-  HighFrequencyLoopRequester loop_requester_;
   bool started_{false};
 
   // Index of the request currently owned by the loop-sliced engine (SIZE_MAX = none in
