@@ -115,6 +115,7 @@ CONF_DEVICE_NODE_NAME = "device_node_name"
 MODE_RAW = "raw"
 MODE_LITTLEFS = "littlefs"
 MODE_BOTH = "both"
+CONF_FS_SIZE = "fs_size"
 
 
 def validate_bytes(value):
@@ -164,6 +165,10 @@ EEPROM_SCHEMA = (
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
             ),
+            # mode: both only — the split contract: LittleFS owns [0, fs_size), raw the rest
+            # (rebased, so raw address 0 sits right above the filesystem). Required there,
+            # meaningless elsewhere: littlefs and raw each use the whole device.
+            cv.Optional(CONF_FS_SIZE): validate_bytes,
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -193,6 +198,10 @@ FRAM_SCHEMA = (
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
             ),
+            # mode: both only — the split contract: LittleFS owns [0, fs_size), raw the rest
+            # (rebased, so raw address 0 sits right above the filesystem). Required there,
+            # meaningless elsewhere: littlefs and raw each use the whole device.
+            cv.Optional(CONF_FS_SIZE): validate_bytes,
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -225,6 +234,10 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
             ),
+            # mode: both only — the split contract: LittleFS owns [0, fs_size), raw the rest
+            # (rebased, so raw address 0 sits right above the filesystem). Required there,
+            # meaningless elsewhere: littlefs and raw each use the whole device.
+            cv.Optional(CONF_FS_SIZE): validate_bytes,
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -254,6 +267,10 @@ SPI_FRAM_SCHEMA = (
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
             ),
+            # mode: both only — the split contract: LittleFS owns [0, fs_size), raw the rest
+            # (rebased, so raw address 0 sits right above the filesystem). Required there,
+            # meaningless elsewhere: littlefs and raw each use the whole device.
+            cv.Optional(CONF_FS_SIZE): validate_bytes,
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -283,6 +300,10 @@ SPI_MRAM_SCHEMA = (
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
                 MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
             ),
+            # mode: both only — the split contract: LittleFS owns [0, fs_size), raw the rest
+            # (rebased, so raw address 0 sits right above the filesystem). Required there,
+            # meaningless elsewhere: littlefs and raw each use the whole device.
+            cv.Optional(CONF_FS_SIZE): validate_bytes,
             cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
             cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
             cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -313,6 +334,8 @@ ONEWIRE_EEPROM_SCHEMA = cv.Schema(
         cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
             MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
         ),
+        # mode: both only — see the sibling schemas above.
+        cv.Optional(CONF_FS_SIZE): validate_bytes,
         cv.Optional(CONF_MOUNT_PATH): _validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
         cv.Optional(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
@@ -411,9 +434,40 @@ def _node_name_of(device: dict) -> str | None:
     internal = TYPE_TO_DEVICE.get(device[CONF_TYPE].upper())
     if internal not in RAW_DEVICE_TYPES:
         return None
+    if device.get(CONF_MODE) == MODE_LITTLEFS:
+        return None  # no raw side — nothing a node could address
     if not device.get(CONF_DEVICE_NODE, _browser_configured()):
         return None
     return device.get(CONF_DEVICE_NODE_NAME) or internal
+
+
+def _validate_fs_split(config):
+    """mode: both splits the device by contract — fs first, rest raw — and fs_size says
+    where. Config-time checks cover what the config knows; capacity from model autodetect
+    and default erase sizes are re-checked at runtime in BinaryStorage::setup()."""
+    mode = config.get(CONF_MODE, MODE_RAW)
+    fs_size = config.get(CONF_FS_SIZE)
+    if mode == MODE_BOTH and fs_size is None:
+        raise cv.Invalid(
+            f"mode: both splits the device (LittleFS first, rest raw) — '{CONF_FS_SIZE}' "
+            f"is required to say where"
+        )
+    if fs_size is not None and mode != MODE_BOTH:
+        raise cv.Invalid(
+            f"'{CONF_FS_SIZE}' only applies to mode: both — '{mode}' uses the whole device"
+        )
+    if fs_size is None:
+        return config
+    if (capacity := config.get(CONF_CAPACITY)) is not None and fs_size >= capacity:
+        raise cv.Invalid(
+            f"'{CONF_FS_SIZE}' ({fs_size}) must leave room for raw below the capacity "
+            f"({capacity})"
+        )
+    if (erase := config.get(CONF_ERASE_SIZE)) is not None and fs_size % erase != 0:
+        raise cv.Invalid(
+            f"'{CONF_FS_SIZE}' ({fs_size}) must be a multiple of the erase sector ({erase})"
+        )
+    return config
 
 
 def _validate_device_node(config):
@@ -431,6 +485,11 @@ def _validate_device_node(config):
             f"'{CONF_DEVICE_NODE}' needs a web_server with 'file_browser:' — there is nowhere "
             f"to show the node otherwise"
         )
+    if config.get(CONF_DEVICE_NODE) and config.get(CONF_MODE) == MODE_LITTLEFS:
+        raise cv.Invalid(
+            f"'{CONF_DEVICE_NODE}' contradicts mode: littlefs — that device is a filesystem "
+            f"backing only and has no raw side to hang a node on (use mode: both)"
+        )
 
     seen: dict[str, int] = {}
     for device in fv.full_config.get().get(DOMAIN, []):
@@ -447,6 +506,7 @@ def _validate_device_node(config):
 
 
 def _final_validate(config):
+    _validate_fs_split(config)
     _validate_device_node(config)
     # Resolved here because it depends on another component's config; stored back for to_code().
     if (node_name := _node_name_of(config)) is not None:
@@ -608,6 +668,14 @@ async def to_code(config):
 
     # Raw device always registers itself
     request_storage_device()
+
+    if mode == MODE_BOTH:
+        # The split contract: filesystem first, raw rebased above it.
+        cg.add(var.set_fs_reserved(config[CONF_FS_SIZE]))
+    elif mode == MODE_LITTLEFS:
+        # Filesystem backing only: never registers as raw storage — no raw API presence,
+        # no device node, and raw automations against it answer INVALID_ARGS.
+        cg.add(var.set_raw_enabled(False))
 
     # Create LittleFSMount if mode requires filesystem access
     if mode in [MODE_LITTLEFS, MODE_BOTH]:

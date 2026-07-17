@@ -93,9 +93,10 @@ class SPIFlash : public BinaryStorage,
   }
 
   // RawStorage interface
-  storage::StorageError read(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
-  storage::StorageError write(uint64_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) override;
-  storage::StorageError erase(uint64_t offset, size_t len) override;
+  storage::StorageError read_physical_(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError write_physical_(uint64_t offset, const uint8_t *buf, size_t len,
+                                        size_t *bytes_transferred) override;
+  storage::StorageError erase_physical_(uint64_t offset, size_t len) override;
   storage::StorageError format() override;
 
   // Hardware-level byte access
