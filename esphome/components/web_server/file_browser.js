@@ -80,6 +80,9 @@
     #esp-file-browser .efb-frame { border: 2px solid rgba(127,127,127,.3); border-radius: 0 12px 12px 12px;
       padding: 4px 0; }
     #esp-file-browser .efb-row { display: flex; gap: 4px; align-items: center; padding: 2px 8px; min-height: 32px; }
+    /* zebra stripes, same neutral grey family as the v3 tables; declared before :hover so
+       hovering still reads as the stronger highlight (equal specificity, later rule wins) */
+    #esp-file-browser .efb-row.efb-odd { background: rgba(127,127,127,.07); }
     #esp-file-browser .efb-row:hover { background: rgba(127,127,127,.12); }
     #esp-file-browser .efb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #esp-file-browser .efb-twist { width: 1.1em; text-align: center; color: #03a9f4; cursor: pointer;
@@ -131,6 +134,29 @@
   frame.append(status, tree);
 
   const setStatus = (t) => { status.textContent = t || ""; };
+
+  // Zebra striping. The listing is a lazy tree of nested containers, so CSS nth-child cannot
+  // alternate across expansion levels — instead a tiny pass walks the *visible* rows in DOM
+  // order and marks every second one. Driven by a MutationObserver (rows appear/disappear,
+  // subtrees collapse via display:none) and debounced to one run per frame.
+  let stripePending = false;
+  const restripe = () => {
+    if (stripePending) return;
+    stripePending = true;
+    requestAnimationFrame(() => {
+      stripePending = false;
+      let i = 0;
+      for (const r of tree.querySelectorAll(".efb-row")) {
+        if (r.offsetParent === null) continue;  // inside a collapsed (display:none) subtree
+        r.classList.toggle("efb-odd", (i++ & 1) === 1);
+      }
+    });
+  };
+  // attributeFilter: collapsing toggles children.style.display; class flips above do not
+  // match "style", so the observer cannot feed itself.
+  new MutationObserver(restripe).observe(tree, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ["style"],
+  });
 
   const pollJob = async (job, label) => {
     for (;;) {
