@@ -2863,6 +2863,22 @@ async def to_code(config):
 
 
 KEY_CUSTOM_PARTITIONS = "custom_partitions"
+KEY_PROJECT_CMAKE = "project_cmake"
+KEY_LITTLEFS_PREFILL = "littlefs_prefill"
+
+
+def add_project_cmake(snippet: str) -> None:
+    """Append a CMake snippet to the generated top-level project CMakeLists, after
+    project() — i.e. with the full IDF build context (partition table, esptool_py)
+    available. For component-level build logic use add_idf_component() instead; this is
+    for the rare project-scope calls like littlefs_create_partition_image()."""
+    CORE.data[KEY_ESP32].setdefault(KEY_PROJECT_CMAKE, []).append(snippet)
+
+
+def register_littlefs_prefill(label: str) -> None:
+    """Note a partition whose LittleFS image is built at compile time, so the toolchain
+    can fold it into the OTA artifact (see espidf/toolchain.py create_ota_bin())."""
+    CORE.data[KEY_ESP32].setdefault(KEY_LITTLEFS_PREFILL, []).append(label)
 
 
 @dataclass
