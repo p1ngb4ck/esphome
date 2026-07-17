@@ -64,9 +64,12 @@ class BinaryStorage : public storage::RawStorage {
   //========================================================================
 
   storage::StorageError get_info(storage::StorageInfo *info) override;
-  storage::StorageError read(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) override = 0;
-  storage::StorageError write(uint64_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) override = 0;
-  storage::StorageError erase(uint64_t offset, size_t len) override = 0;
+  // The raw window (mode: both contract — see set_fs_reserved()): these final wrappers
+  // translate raw addresses into physical ones and refuse anything outside the window, then
+  // delegate to the drivers' *_physical_() below. Drivers cannot bypass the contract.
+  storage::StorageError read(uint64_t offset, uint8_t *buf, size_t len, size_t *bytes_transferred) final;
+  storage::StorageError write(uint64_t offset, const uint8_t *buf, size_t len, size_t *bytes_transferred) final;
+  storage::StorageError erase(uint64_t offset, size_t len) final;
   storage::StorageError format() override;
   // Implemented once here from the device getters above — drivers only report their numbers.
   void get_raw_geometry(storage::RawGeometry *out) const override;
@@ -96,6 +99,21 @@ class BinaryStorage : public storage::RawStorage {
 
   void set_storage_id(const char *id) { this->storage_id_ = id; }
   void set_storage_name(const char *name) { this->storage_name_ = name; }
+  // mode: both — the split contract: LittleFS owns [0, fs_size), raw the rest. Raw addresses
+  // are rebased (raw 0 = fs_size physically) so the two are genuinely separate memories: the
+  // raw side reports capacity - fs_size and no raw operation can reach the filesystem.
+  void set_fs_reserved(uint32_t bytes) { this->fs_reserved_ = bytes; }
+  // mode: littlefs — the device is a filesystem backing only: it never registers as a raw
+  // storage, so it has no raw API presence, no device node, no automations target.
+  void set_raw_enabled(bool enabled) { this->raw_enabled_ = enabled; }
+  // What the raw side may use. 0 when raw is disabled or the FS reservation swallows
+  // everything (the latter is a config error caught in setup()).
+  uint64_t get_raw_capacity() const {
+    if (!this->raw_enabled_)
+      return 0;
+    const uint64_t cap = this->get_capacity();
+    return this->fs_reserved_ < cap ? cap - this->fs_reserved_ : 0;
+  }
 #ifdef USE_STORAGE_DEVICE_NODES
   void set_device_node_name(const char *name) { this->device_node_name_ = name; }
   bool has_device_node() const override { return this->device_node_name_ != nullptr; }
@@ -103,6 +121,15 @@ class BinaryStorage : public storage::RawStorage {
 #endif
 
  protected:
+  // The physical device operations — implemented by each driver, addresses are device
+  // addresses over the full capacity. Only the window wrappers above and the LittleFS block
+  // callbacks (which must reach [0, fs_reserved_)) call these.
+  virtual storage::StorageError read_physical_(uint64_t offset, uint8_t *buf, size_t len,
+                                               size_t *bytes_transferred) = 0;
+  virtual storage::StorageError write_physical_(uint64_t offset, const uint8_t *buf, size_t len,
+                                                size_t *bytes_transferred) = 0;
+  virtual storage::StorageError erase_physical_(uint64_t offset, size_t len) = 0;
+
   // Overflow-proof: valid iff [address, address+length) fits within capacity.
   bool is_valid_address_(uint64_t address, size_t length) const {
     const uint64_t cap = this->get_capacity();
@@ -111,6 +138,8 @@ class BinaryStorage : public storage::RawStorage {
 
   const char *storage_id_{nullptr};
   const char *storage_name_{nullptr};
+  uint32_t fs_reserved_{0};  // bytes at the bottom owned by LittleFS (mode: both), 0 = none
+  bool raw_enabled_{true};   // false for mode: littlefs — no raw registration or window
 #ifdef USE_STORAGE_DEVICE_NODES
   // nullptr = no node for this device (device_node: false, or no browser configured at all).
   const char *device_node_name_{nullptr};
