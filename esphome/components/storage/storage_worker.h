@@ -324,6 +324,14 @@ class StorageWorker : public Component {
   // started_ is set.
   void ensure_started_();
 
+  // The loop-sliced engine advances exactly one chunk per component phase, and that phase is
+  // gated: Application::loop() only runs it on loop_interval_, on a high-frequency request, or
+  // on an explicit wake. Depending on the phase without ever asking for it is what stalled
+  // transfers — in particular the very last call, the one that reads EOF and marks the request
+  // DONE, so the completion was never delivered and anything chained on it waited forever.
+  // Held while any slot is busy; the gate then always lets us through.
+  HighFrequencyLoopRequester loop_requester_;
+
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;
   bool is_task_safe_(const StreamRequest &req) const;
@@ -370,6 +378,7 @@ class StorageWorker : public Component {
 
   // Set by ensure_started_() the first time it runs; guards pool/task creation so it only ever
   // happens once, on the first submit_()/begin_write()/begin_read() call.
+  HighFrequencyLoopRequester loop_requester_;
   bool started_{false};
 
   // Index of the request currently owned by the loop-sliced engine (SIZE_MAX = none in

@@ -111,6 +111,13 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   uint16_t max_dir_entries_{64};
   SemaphoreHandle_t op_done_{nullptr};
 
+  // Everything this component does in loop() — walking a directory transfer, draining a staged
+  // upload — only happens when Application's component phase runs, and that phase is gated
+  // (loop_interval_, a high-frequency request, or an explicit wake). Nothing else asks for it:
+  // an HTTP request drives nothing, it only reads status, and the browser sends nothing more
+  // once a transfer is under way. Held while there is work, released when there is none.
+  HighFrequencyLoopRequester loop_requester_;
+
 #ifdef USE_STORAGE_WORKER
   // Completed async transfers stay queryable after the worker recycles its pool slot: the
   // completion callback (main loop) parks the final status here; /files/job checks this cache

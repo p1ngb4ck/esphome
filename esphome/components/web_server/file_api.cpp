@@ -667,6 +667,8 @@ bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char
     return false;
   this->dir_ = DirTransfer{};
   this->dir_.active = true;
+  // The walk lives in loop(); make sure loop() actually runs (see loop_requester_).
+  this->loop_requester_.start();
   this->dir_.is_move = is_move;
   this->dir_.src = src;
   this->dir_.dst = dst;
@@ -686,6 +688,7 @@ bool WebServerFileApi::start_dir_transfer_(storage::PathStorage *src, const char
 }
 
 void WebServerFileApi::finish_dir_transfer_(storage::StorageError result) {
+  this->loop_requester_.stop();
   ESP_LOGD(TAG, "dir %s finished: %s (%" PRIu32 " files, %" PRIu64 " bytes)", this->dir_.is_move ? "move" : "copy",
            storage::error_to_string(result), this->dir_.files_done, this->dir_.bytes_done);
   this->dir_.result = result;
@@ -830,6 +833,7 @@ void WebServerFileApi::loop() {
       storage::global_transfer_buffer->release();
       this->flush_.result = err;
       this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
+      this->loop_requester_.stop();
       ESP_LOGD(TAG, "staged upload flushed: %u/%u bytes (%s)", (unsigned) this->flush_.done,
                (unsigned) this->flush_.total, storage::error_to_string(err));
     }
@@ -1211,6 +1215,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       if (this->upload_.error == storage::StorageError::OK) {
         this->flush_ = StagedFlush{};
         this->flush_.active = true;
+        // Drained in loop(), so the same applies here as to the walker: ask for the phase.
+        this->loop_requester_.start();
         this->flush_.job = FLUSH_JOB_FLAG | (++this->flush_job_counter_ & JOB_COUNTER_MASK);
         this->flush_.storage = this->upload_.storage;
         this->flush_.handle = this->upload_.handle;
