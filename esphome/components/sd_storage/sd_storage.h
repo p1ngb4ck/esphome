@@ -7,6 +7,11 @@
 #include "sd_storage_base.h"
 #include "esphome/core/gpio.h"
 #include "sdmmc_cmd.h"
+#ifdef USE_STORAGE_FILE_SYSTEM_SELECT
+// mount_manual_() takes sdmmc_slot_config_t by reference; the type is an anonymous-struct
+// typedef and cannot be forward-declared.
+#include "driver/sdmmc_host.h"
+#endif
 
 namespace esphome::sd_storage {
 
