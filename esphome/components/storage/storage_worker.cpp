@@ -167,6 +167,8 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   }
   slot->bytes_done = 0;
   slot->bytes_total = 0;
+  slot->file_done = 0;
+  slot->file_total = 0;
   // Bump the generation on claim (skipping 0) so stale TransferJob handles from a previous
   // occupant of this slot stop resolving. Main loop only — submissions never race each other.
   if (++slot->generation == 0)
@@ -239,6 +241,19 @@ bool StorageWorker::get_transfer_status(TransferJob job, TransferStatus *out) co
   out->result = req.result;
   out->bytes_done = req.bytes_done.load();
   out->bytes_total = req.bytes_total.load();
+  out->file_done = req.file_done.load();
+  out->file_total = req.file_total.load();
+  // Label of the file in flight: for a tree src_path holds exactly that (tree_step_ reuses
+  // the single-file fields); basename only and truncated — this feeds a status line. The
+  // worker task may be rewriting src_path between files while we copy; the counters above
+  // are atomic, the name is not — a torn read yields at worst one garbled label for one
+  // poll frame, never out-of-bounds (copy is bounded, termination forced below).
+  out->file[0] = '\0';
+  if (state == RequestState::RUNNING && req.file_total.load() != 0) {
+    const char *slash = strrchr(req.src_path, '/');
+    strncpy(out->file, slash != nullptr ? slash + 1 : req.src_path, sizeof(out->file) - 1);
+    out->file[sizeof(out->file) - 1] = '\0';
+  }
   return true;
 }
 
@@ -720,10 +735,14 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
     // Progress total for get_transfer_status(): one cheap stat on the source. A failure here
     // is not fatal — bytes_total stays 0, which consumers must treat as "unknown/indeterminate"
     // (the transfer itself still detects a truly missing source at open()/read time).
-    if (req.tree == nullptr) {
+    {
       FileStat src_stat{};
       if (req.src_storage->stat(req.src_path, &src_stat) == StorageError::OK && !src_stat.is_dir) {
-        req.bytes_total.store(src_stat.size);
+        // bytes_total belongs to the request as a whole and stays 0 for a tree (unknown
+        // without walking it twice); the file in flight is one cheap stat either way.
+        if (req.tree == nullptr)
+          req.bytes_total.store(src_stat.size);
+        req.file_total.store(src_stat.size);
       }
     }
 
@@ -794,6 +813,8 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
       req.tree->files_done++;
       req.tree->file_in_flight = false;
       req.offset = 0;
+      req.file_done.store(0);
+      req.file_total.store(0);
       return;
     }
     if (req.op == RequestOp::MOVE) {
@@ -834,6 +855,7 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
   // point (the write loop above completed), so it doubles as bytes_done. Atomic store because
   // the main loop may snapshot progress while the worker task runs this transfer.
   req.bytes_done.store(req.tree != nullptr ? req.tree->bytes_base + req.offset : req.offset);
+  req.file_done.store(req.offset);
   // Request stays RUNNING; the next call (next loop() iteration, or the task's own loop)
   // picks up at the new offset. No watchdog feed here by design — see task_loop_()'s comment
   // for the task path; the loop-sliced path returns to the main loop's own feed_wdt() between

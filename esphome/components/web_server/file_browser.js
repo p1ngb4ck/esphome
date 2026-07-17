@@ -165,9 +165,15 @@
         setStatus(`${label}: ${s.result === "OK" ? "done" : s.result}`);
         return;
       }
-      setStatus(s.bytes_total > 0
-        ? `${label}: ${Math.round(100 * s.bytes_done / s.bytes_total)}% (${fmtSize(s.bytes_done)}/${fmtSize(s.bytes_total)})`
-        : `${label}: ${fmtSize(s.bytes_done)}…`);
+      if (s.file && !s.bytes_total) {
+        // A tree job: the whole tree's total is unknown, the file in flight has one.
+        const pct = s.file_total > 0 ? ` ${Math.round(100 * s.file_done / s.file_total)}%` : "";
+        setStatus(`${label}: ${s.file}${pct} — Total: ${fmtSize(s.bytes_done)}`);
+      } else {
+        setStatus(s.bytes_total > 0
+          ? `${label}: ${Math.round(100 * s.bytes_done / s.bytes_total)}% (${fmtSize(s.bytes_done)}/${fmtSize(s.bytes_total)})`
+          : `${label}: ${fmtSize(s.bytes_done)}…`);
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
   };
