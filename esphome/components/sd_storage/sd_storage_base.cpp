@@ -501,7 +501,12 @@ storage::StorageError SdStorageBase::rename(const char *old_path, const char *ne
   if (!this->build_full_path_(new_path, full_new, sizeof(full_new)))
     return storage::StorageError::INVALID_ARGS;
 
-  return ::rename(full_old, full_new) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  // Report why it failed: FatFs refuses an existing destination (FR_EXIST -> EEXIST), and a
+  // caller that cannot tell that apart from an I/O error cannot offer to overwrite.
+  errno = 0;
+  if (::rename(full_old, full_new) != 0)
+    return storage::error_from_errno(errno, true);
+  return storage::StorageError::OK;
 }
 
 void SdStorageBase::log_mount_result_(bool success) const {

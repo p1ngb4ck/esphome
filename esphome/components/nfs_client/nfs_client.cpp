@@ -878,8 +878,38 @@ storage::StorageError NFSClient::rename(const char *old_path, const char *new_pa
     return storage::StorageError::NOT_FOUND;
   }
 
-  return this->nfs_rename_(old_parent_fh, old_name, new_parent_fh, new_name) ? storage::StorageError::OK
-                                                                             : storage::StorageError::WRITE_ERROR;
+  // Same reasoning as mkdir above and as the VFS-backed drivers: an occupied destination is a
+  // different answer than a failed write, and only the server can tell us which it was.
+  uint32_t nfs_status = 0;
+  if (this->nfs_rename_(old_parent_fh, old_name, new_parent_fh, new_name, &nfs_status))
+    return storage::StorageError::OK;
+  switch (nfs_status) {
+    case NFS3ERR_EXIST:
+      return storage::StorageError::ALREADY_EXISTS;
+    case NFS3ERR_NOENT:
+      return storage::StorageError::NOT_FOUND;
+    case NFS3ERR_NOTEMPTY:
+      return storage::StorageError::NOT_EMPTY;
+    case NFS3ERR_ACCES:
+    case NFS3ERR_PERM:
+    case NFS3ERR_ROFS:
+      return storage::StorageError::PERMISSION_DENIED;
+    case NFS3ERR_NOSPC:
+      return storage::StorageError::NO_SPACE;
+    case NFS3ERR_ISDIR:
+    case NFS3ERR_NOTDIR:
+    case NFS3ERR_INVAL:
+      return storage::StorageError::INVALID_ARGS;
+    case NFS3ERR_XDEV:
+      // RENAME is confined to one file system on the server, and an export can span several —
+      // so a rename inside a single mount can still be refused. Same meaning the local drivers
+      // give EXDEV: not this way, copy instead.
+      return storage::StorageError::NOT_SUPPORTED;
+    case NFS3ERR_NAMETOOLONG:
+      return storage::StorageError::INVALID_ARGS;
+    default:
+      return storage::StorageError::WRITE_ERROR;
+  }
 }
 
 //========================================================================
@@ -1848,7 +1878,7 @@ bool NFSClient::nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name)
 }
 
 bool NFSClient::nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &old_name,
-                            const NFSFileHandle &new_dir_fh, const std::string &new_name) {
+                            const NFSFileHandle &new_dir_fh, const std::string &new_name, uint32_t *nfs_status_out) {
   ESP_LOGD(TAG, "NFS RENAME: %s -> %s", old_name.c_str(), new_name.c_str());
 
   uint32_t xid = RPCClient::generate_xid();
@@ -1870,7 +1900,10 @@ bool NFSClient::nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &
   }
 
   uint32_t nfs_status{0};
-  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
+  bool decoded = response.decode_uint32(nfs_status);
+  if (nfs_status_out != nullptr)
+    *nfs_status_out = decoded ? nfs_status : 0;
+  if (!decoded || nfs_status != NFS3_OK) {
     ESP_LOGW(TAG, "RENAME failed: status=%" PRIu32, nfs_status);
     return false;
   }

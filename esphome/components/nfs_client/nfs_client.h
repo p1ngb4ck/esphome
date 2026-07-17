@@ -405,7 +405,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool network_was_connected_{false};
 
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
-  struct sockaddr_in server_addr_ {};
+  struct sockaddr_in server_addr_{};
   bool server_addr_resolved_{false};
 #endif
 
@@ -457,7 +457,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name);
   bool nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries);
   bool nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &old_name, const NFSFileHandle &new_dir_fh,
-                   const std::string &new_name);
+                   const std::string &new_name, uint32_t *nfs_status_out = nullptr);
 
   bool resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFileAttr &attr);
   bool resolve_parent_path_(const std::string &path, NFSFileHandle &parent_fh, std::string &filename);

@@ -451,6 +451,12 @@ extern StorageRegistry *global_storage_registry;  // NOLINT(cppcoreguidelines-av
 // instead of hand-rolling a switch per driver.
 const char *error_to_string(StorageError error);
 
+// Maps a POSIX errno to a StorageError, for drivers that reach their medium through the VFS
+// (SD, USB). Collapsing every failure into WRITE_ERROR loses exactly what a caller needs to
+// react: "destination exists" (EEXIST) is a different answer than "source is gone" (ENOENT).
+// `writing` picks the fallback direction for errnos with no direct mapping.
+StorageError error_from_errno(int err, bool writing);
+
 // stat()-based existence/size checks — thin wrappers, work on any PathStorage
 // (FilesystemStorage or NetworkStorage).
 // exists(): only StorageError::NOT_FOUND maps to a clean "no". Any OTHER non-OK error
