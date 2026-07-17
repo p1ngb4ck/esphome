@@ -161,8 +161,9 @@ struct TransferRequest {
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
   // main loop may query concurrently — atomic in task builds only, see ProgressCounter above.
-  // bytes_total is stat()ed once at
-  // transfer start; 0 means unknown (e.g. rename fast path, stat failure).
+  // bytes_total is stat()ed once at transfer start; 0 means unknown — the rename fast path, a
+  // failed stat, and every tree op, whose total nobody knows without walking it twice. For a
+  // tree bytes_done counts the whole thing, not the file in flight.
   ProgressCounter bytes_done{};
   ProgressCounter bytes_total{};
   // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale

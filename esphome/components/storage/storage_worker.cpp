@@ -667,7 +667,10 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
       return false;
     }
     req.offset = 0;
-    req.bytes_total.store(ctx.entry.size);
+    // Deliberately no bytes_total: it belongs to the request, and bytes_done counts the whole
+    // tree, so a per-file total would have the two describe different things — progress ran
+    // past 100% for every file after the first. What a tree will weigh in total is unknown
+    // without walking it twice, and 0 already means exactly that (see TransferRequest).
     w.file_in_flight = true;
     return true;
   }
