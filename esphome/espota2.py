@@ -18,6 +18,33 @@ from esphome.helpers import ProgressBar, resolve_ip_address
 OTA_TYPE_UPDATE_APP = 0x00
 OTA_TYPE_UPDATE_PARTITION_TABLE = 0x01
 OTA_TYPE_UPDATE_BOOTLOADER = 0x02
+# One stream, two destinations: [app][data partition image], split told in a sub-header.
+# App size 0 makes it a pure data update (device skips the reboot).
+OTA_TYPE_UPDATE_APP_WITH_DATA = 0x03
+
+# firmware.ota.bin trailer written by espidf/toolchain.py when a LittleFS pre-fill is
+# configured — layout (big-endian): magic "EPF1" (4) | app_size u32 | image_size u32 |
+# label (32, NUL-padded) | image MD5 (16) | reserved (4). Constants live here so sender and
+# builder cannot drift; the toolchain imports them.
+OTA_PREFILL_FOOTER_MAGIC = b"EPF1"
+OTA_PREFILL_FOOTER_SIZE = 64
+
+
+def parse_prefill_footer(contents: bytes) -> tuple[int, int, str] | None:
+    """Return (app_size, image_size, label) when the artifact carries a pre-fill footer and
+    its sizes are consistent, else None."""
+    if len(contents) < OTA_PREFILL_FOOTER_SIZE:
+        return None
+    footer = contents[-OTA_PREFILL_FOOTER_SIZE:]
+    if footer[:4] != OTA_PREFILL_FOOTER_MAGIC:
+        return None
+    app_size = int.from_bytes(footer[4:8], "big")
+    image_size = int.from_bytes(footer[8:12], "big")
+    label = footer[12:44].rstrip(b"\x00").decode(errors="replace")
+    if app_size + image_size + OTA_PREFILL_FOOTER_SIZE != len(contents) or not label:
+        return None
+    return app_size, image_size, label
+
 
 RESPONSE_OK = 0x00
 RESPONSE_REQUEST_AUTH = 0x01
@@ -53,6 +80,7 @@ RESPONSE_ERROR_PARTITION_TABLE_UPDATE = 0x90
 RESPONSE_ERROR_BOOTLOADER_VERIFY = 0x91
 RESPONSE_ERROR_BOOTLOADER_UPDATE = 0x92
 RESPONSE_ERROR_VERSION_DOWNGRADE = 0x93
+RESPONSE_ERROR_DATA_PARTITION = 0x94
 RESPONSE_ERROR_UNKNOWN = 0xFF
 
 OTA_VERSION_1_0 = 1
@@ -70,7 +98,12 @@ SERVER_FEATURE_SUPPORTS_PARTITION_ACCESS = 0x02
 # updates extend this set. Anything outside the set is rejected up front so callers
 # of perform_ota/run_ota get a clear error instead of a post-auth 0x8E from the device.
 _SUPPORTED_OTA_TYPES: frozenset[int] = frozenset(
-    {OTA_TYPE_UPDATE_APP, OTA_TYPE_UPDATE_PARTITION_TABLE, OTA_TYPE_UPDATE_BOOTLOADER}
+    {
+        OTA_TYPE_UPDATE_APP,
+        OTA_TYPE_UPDATE_PARTITION_TABLE,
+        OTA_TYPE_UPDATE_BOOTLOADER,
+        OTA_TYPE_UPDATE_APP_WITH_DATA,
+    }
 )
 
 UPLOAD_BLOCK_SIZE = 8192
@@ -151,6 +184,11 @@ _ERROR_MESSAGES: dict[int, str] = {
     RESPONSE_ERROR_BOOTLOADER_VERIFY: (
         "The bootloader update could not be verified. No changes were "
         "made to the bootloader. Check the logs for more information and retry."
+    ),
+    RESPONSE_ERROR_DATA_PARTITION: (
+        "The device could not prepare the data partition for the pre-fill image "
+        "(missing partition, size mismatch, or a firmware without the matching "
+        "flash_partition config). Check the logs; the running app was not changed."
     ),
     RESPONSE_ERROR_BOOTLOADER_UPDATE: (
         "An error occurred while updating the bootloader. The device is now "
@@ -298,6 +336,14 @@ def perform_ota(
         )
 
     file_contents = file_handle.read()
+
+    # A pre-fill footer upgrades a plain app upload into the combined [app][image] stream —
+    # decided after the handshake, when the device's capabilities are known.
+    prefill = (
+        parse_prefill_footer(file_contents) if ota_type == OTA_TYPE_UPDATE_APP else None
+    )
+    if prefill is not None:
+        file_contents = file_contents[:-OTA_PREFILL_FOOTER_SIZE]
     file_size = len(file_contents)
     _LOGGER.info("Uploading %s (%s bytes)", filename, file_size)
 
@@ -365,10 +411,35 @@ def perform_ota(
                 f"retry {flag_name}."
             )
 
-    if features & SERVER_FEATURE_SUPPORTS_COMPRESSION:
+    if prefill is not None:
+        app_size, image_size, label = prefill
+        if extended_proto and (features & SERVER_FEATURE_SUPPORTS_PARTITION_ACCESS):
+            ota_type = OTA_TYPE_UPDATE_APP_WITH_DATA
+            _LOGGER.info(
+                "Pre-fill image for partition '%s' rides along (%d bytes)",
+                label,
+                image_size,
+            )
+        else:
+            # The device cannot take the image — deliver the app alone rather than fail.
+            # The pre-fill then only arrives via serial/factory flash (or after this app,
+            # which supports it, is running and the OTA is repeated).
+            _LOGGER.warning(
+                "Device does not support data-partition OTA (needs "
+                "'allow_partition_access: true' and current firmware); "
+                "uploading the app only — pre-fill for '%s' NOT delivered",
+                label,
+            )
+            file_contents = file_contents[:app_size]
+            prefill = None
+            file_size = len(file_contents)
+
+    if prefill is None and features & SERVER_FEATURE_SUPPORTS_COMPRESSION:
         upload_contents = gzip.compress(file_contents, compresslevel=9)
         _LOGGER.info("Compressed to %s bytes", len(upload_contents))
     else:
+        # Compression is never applied to the combined stream: the device routes it by
+        # uncompressed offsets. (Moot on ESP-IDF, whose backend never offers compression.)
         upload_contents = file_contents
 
     def perform_auth(
@@ -422,6 +493,19 @@ def perform_ota(
 
     if extended_proto:
         send_check(sock, ota_type, "ota type")
+        if ota_type == OTA_TYPE_UPDATE_APP_WITH_DATA:
+            assert prefill is not None
+            app_size, _image_size, label = prefill
+            label_bytes = label.encode()
+            subheader = [
+                (app_size >> 24) & 0xFF,
+                (app_size >> 16) & 0xFF,
+                (app_size >> 8) & 0xFF,
+                app_size & 0xFF,
+                len(label_bytes),
+            ]
+            send_check(sock, subheader, "data sub-header")
+            send_check(sock, label_bytes, "data partition label")
 
     upload_size = len(upload_contents)
     upload_size_encoded = [

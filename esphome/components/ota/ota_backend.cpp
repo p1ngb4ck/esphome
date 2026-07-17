@@ -1,6 +1,27 @@
 #include "ota_backend.h"
+#include <cstring>
+#include <vector>
 
 namespace esphome::ota {
+
+// Data-partition listeners: a handful at most (one per mounted flash partition), main loop
+// only — a plain vector is the whole story.
+static std::vector<OTADataPartitionListener *> &data_partition_listeners() {
+  static std::vector<OTADataPartitionListener *> listeners;
+  return listeners;
+}
+
+void register_data_partition_listener(OTADataPartitionListener *listener) {
+  data_partition_listeners().push_back(listener);
+}
+
+OTADataPartitionListener *find_data_partition_listener(const char *label) {
+  for (auto *l : data_partition_listeners()) {
+    if (strcmp(l->ota_data_partition_label(), label) == 0)
+      return l;
+  }
+  return nullptr;
+}
 
 bool version_is_older(const char *candidate, const char *reference) {
   if (candidate == nullptr || reference == nullptr)

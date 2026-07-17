@@ -14,6 +14,7 @@ from esphome.const import CONF_FRAMEWORK, CONF_SOURCE
 from esphome.core import CORE, EsphomeError
 from esphome.espidf.framework import check_esp_idf_install, get_framework_env
 from esphome.espidf.size_summary import print_summary
+from esphome.espota2 import OTA_PREFILL_FOOTER_MAGIC, OTA_PREFILL_FOOTER_SIZE
 from esphome.helpers import add_git_ceiling_directory
 
 _LOGGER = logging.getLogger(__name__)
@@ -559,11 +560,8 @@ def create_factory_bin() -> bool:
 # firmware.ota.bin with a pre-fill image: [app][littlefs image][64-byte footer]. The footer
 # sits at the very end so the sender can detect it by reading the file tail; devices without
 # the extended OTA type never see the extra bytes (the sender strips them for a plain app
-# upload). Layout, all integers big-endian:
-#   magic "EPF1" (4) | app_size u32 | image_size u32 | label (32, NUL-padded) |
-#   image MD5 (16) | reserved zeros (4)
-OTA_PREFILL_FOOTER_MAGIC = b"EPF1"
-OTA_PREFILL_FOOTER_SIZE = 64
+# upload). Format constants live with the sender (espota2.py, imported above) so the two
+# cannot drift.
 
 
 def create_ota_bin() -> bool:
