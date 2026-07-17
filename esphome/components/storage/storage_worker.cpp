@@ -152,6 +152,19 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->chunk_size = 0;
   slot->src_is_fs = src->get_storage_type() == StorageType::FILESYSTEM;
   slot->dst_is_fs = dst->get_storage_type() == StorageType::FILESYSTEM;
+  // Tree ops keep their roots aside: src_path/dst_path are reused for the file currently in
+  // flight, so everything below this point works on a tree exactly as it does on one file.
+  if (op == RequestOp::COPY_TREE || op == RequestOp::MOVE_TREE) {
+    slot->tree = make_unique<TreeWalk>();
+    if (slot->tree == nullptr) {
+      slot->state = RequestState::FREE;
+      return StorageError::NO_SPACE;  // same answer the chunk buffer gives when it cannot be had
+    }
+    strncpy(slot->tree->src_root, src_path, STORAGE_WORKER_MAX_PATH - 1);
+    strncpy(slot->tree->dst_root, dst_path, STORAGE_WORKER_MAX_PATH - 1);
+  } else {
+    slot->tree.reset();
+  }
   slot->bytes_done = 0;
   slot->bytes_total = 0;
   // Bump the generation on claim (skipping 0) so stale TransferJob handles from a previous
@@ -193,6 +206,16 @@ StorageError StorageWorker::async_copy(PathStorage *src, const char *src_path, P
 StorageError StorageWorker::async_move(PathStorage *src, const char *src_path, PathStorage *dst, const char *dst_path,
                                        CompletionCallback &&on_done, TransferJob *job_out) {
   return this->submit_(RequestOp::MOVE, src, src_path, dst, dst_path, std::move(on_done), job_out);
+}
+
+StorageError StorageWorker::async_copy_tree(PathStorage *src, const char *src_path, PathStorage *dst,
+                                            const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out) {
+  return this->submit_(RequestOp::COPY_TREE, src, src_path, dst, dst_path, std::move(on_done), job_out);
+}
+
+StorageError StorageWorker::async_move_tree(PathStorage *src, const char *src_path, PathStorage *dst,
+                                            const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out) {
+  return this->submit_(RequestOp::MOVE_TREE, src, src_path, dst, dst_path, std::move(on_done), job_out);
 }
 
 bool StorageWorker::get_transfer_status(TransferJob job, TransferStatus *out) const {
@@ -488,25 +511,167 @@ void StorageWorker::task_loop_() {
 
 namespace {
 
+// Picks entry #target out of a directory listing; the walk re-lists per step rather than
+// holding an open directory handle across calls, so nothing has to stay valid in between.
+struct WalkEntryCtx {
+  uint16_t target;
+  uint16_t seen{0};
+  bool found{false};
+  FileStat entry{};
+};
+
+bool walk_entry_cb(const FileStat *entry, void *ctx_raw) {
+  auto *ctx = static_cast<WalkEntryCtx *>(ctx_raw);
+  if (ctx->seen == ctx->target) {
+    ctx->entry = *entry;
+    ctx->found = true;
+    return false;  // stop enumeration — not an error per the list_dir contract
+  }
+  ctx->seen++;
+  return true;
+}
+
+// Bounded "<root>[/<sub>][/<name>]" join; false on truncation.
+bool join_walk_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
+  int n;
+  if (name != nullptr) {
+    n = (sub[0] != '\0') ? snprintf(out, out_size, "%s/%s/%s", root, sub, name)
+                         : snprintf(out, out_size, "%s/%s", root, name);
+  } else {
+    n = (sub[0] != '\0') ? snprintf(out, out_size, "%s/%s", root, sub) : snprintf(out, out_size, "%s", root);
+  }
+  return n > 0 && static_cast<size_t>(n) < out_size;
+}
+
 // Finishes a request: closes any open handles (best-effort — a close failure only overrides
 // the result if the transfer itself had otherwise succeeded, mirroring storage::copy()'s
 // close-error propagation) and marks it DONE for loop()/task_loop_() to deliver.
-void finish_request(TransferRequest &req, StorageError result) {
-  if (req.handles_open) {
-    if (req.src_is_fs && req.src_handle != nullptr)
-      static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
-    if (req.dst_is_fs && req.dst_handle != nullptr) {
-      StorageError close_err = static_cast<FilesystemStorage *>(req.dst_storage)->close(req.dst_handle);
-      if (result == StorageError::OK)
-        result = close_err;
-    }
+// Closes whatever handles the request holds. A close failure only overrides an otherwise
+// successful result, mirroring storage::copy()'s close-error propagation.
+void close_handles(TransferRequest &req, StorageError *result) {
+  if (!req.handles_open)
+    return;
+  if (req.src_is_fs && req.src_handle != nullptr)
+    static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
+  if (req.dst_is_fs && req.dst_handle != nullptr) {
+    StorageError close_err = static_cast<FilesystemStorage *>(req.dst_storage)->close(req.dst_handle);
+    if (*result == StorageError::OK)
+      *result = close_err;
   }
+  req.src_handle = nullptr;
+  req.dst_handle = nullptr;
+}
+
+void finish_request(TransferRequest &req, StorageError result) {
+  close_handles(req, &result);
   req.chunk_buf.reset();
   req.result = result;
   req.state = RequestState::DONE;
 }
 
 }  // namespace
+
+// One step of a directory walk. Everything here is control plane — list, mkdir, rmdir, remove —
+// so it costs one call each and never blocks for long; the bytes go through run_chunk_()'s
+// chunk loop exactly as they do for a single file. Returns false once the request is finished.
+bool StorageWorker::tree_step_(TransferRequest &req) {
+  TreeWalk &w = *req.tree;
+  const bool is_move = req.op == RequestOp::MOVE_TREE;
+
+  if (!w.root_created) {
+    StorageError err = req.dst_storage->mkdir(w.dst_root);
+    if (err != StorageError::OK && err != StorageError::ALREADY_EXISTS) {
+      finish_request(req, err);
+      return false;
+    }
+    w.root_created = true;
+  }
+
+  while (true) {
+    char dir[STORAGE_WORKER_MAX_PATH];
+    if (!join_walk_path(dir, sizeof(dir), w.src_root, w.sub, nullptr)) {
+      finish_request(req, StorageError::INVALID_ARGS);
+      return false;
+    }
+
+    WalkEntryCtx ctx{w.index_stack[w.depth]};
+    StorageError err = req.src_storage->list_dir(dir, walk_entry_cb, &ctx);
+    if (err != StorageError::OK) {
+      finish_request(req, err);
+      return false;
+    }
+
+    if (!ctx.found) {
+      // Drained. A move takes the emptied source directory with it.
+      if (is_move) {
+        err = req.src_storage->rmdir(dir);
+        if (err != StorageError::OK) {
+          finish_request(req, err);
+          return false;
+        }
+      }
+      if (w.depth == 0) {
+        finish_request(req, StorageError::OK);
+        return false;
+      }
+      char *slash = strrchr(w.sub, '/');
+      if (slash != nullptr) {
+        *slash = '\0';
+      } else {
+        w.sub[0] = '\0';
+      }
+      w.depth--;
+      continue;
+    }
+
+    // Entry bookkeeping differs by mode: a copy leaves the source alone, so positions are
+    // stable and the index counts up. A move removes each entry once it is done, so what is
+    // left slides down and the next unprocessed entry is always #0 — advancing would skip one.
+    if (!is_move)
+      w.index_stack[w.depth]++;
+
+    if (ctx.entry.is_dir) {
+      if (w.depth + 1 >= TreeWalk::MAX_DEPTH) {
+        finish_request(req, StorageError::NOT_SUPPORTED);
+        return false;
+      }
+      char dst_dir[STORAGE_WORKER_MAX_PATH];
+      if (!join_walk_path(dst_dir, sizeof(dst_dir), w.dst_root, w.sub, ctx.entry.name)) {
+        finish_request(req, StorageError::INVALID_ARGS);
+        return false;
+      }
+      err = req.dst_storage->mkdir(dst_dir);
+      if (err != StorageError::OK && err != StorageError::ALREADY_EXISTS) {
+        finish_request(req, err);
+        return false;
+      }
+      size_t sub_len = strlen(w.sub);
+      size_t name_len = strlen(ctx.entry.name);
+      if (sub_len + name_len + 2 >= sizeof(w.sub)) {
+        finish_request(req, StorageError::INVALID_ARGS);
+        return false;
+      }
+      if (sub_len != 0)
+        w.sub[sub_len++] = '/';
+      memcpy(w.sub + sub_len, ctx.entry.name, name_len + 1);
+      w.depth++;
+      w.index_stack[w.depth] = 0;
+      continue;
+    }
+
+    // A file: hand it to the chunk loop below by putting it where a single-file request keeps
+    // its paths. Nothing else in run_chunk_() has to know it is part of a tree.
+    if (!join_walk_path(req.src_path, sizeof(req.src_path), w.src_root, w.sub, ctx.entry.name) ||
+        !join_walk_path(req.dst_path, sizeof(req.dst_path), w.dst_root, w.sub, ctx.entry.name)) {
+      finish_request(req, StorageError::INVALID_ARGS);
+      return false;
+    }
+    req.offset = 0;
+    req.bytes_total.store(ctx.entry.size);
+    w.file_in_flight = true;
+    return true;
+  }
+}
 
 void StorageWorker::run_chunk_(TransferRequest &req) {
   // Cancellation / hotplug check, before doing any I/O this call.
@@ -518,6 +683,13 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
                                              !global_storage_registry->is_registered(req.dst_storage))) {
     finish_request(req, StorageError::NOT_READY);
     return;
+  }
+
+  // A tree between files: take the next walk step. It either sets up the next file (and falls
+  // through to the chunk loop below) or finishes the request — no caller involved either way.
+  if (req.tree != nullptr && !req.tree->file_in_flight) {
+    if (!this->tree_step_(req))
+      return;
   }
 
   // First call for this request: do the cheap same-storage rename() fast path for MOVE, or
@@ -545,7 +717,7 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
     // Progress total for get_transfer_status(): one cheap stat on the source. A failure here
     // is not fatal — bytes_total stays 0, which consumers must treat as "unknown/indeterminate"
     // (the transfer itself still detects a truly missing source at open()/read time).
-    {
+    if (req.tree == nullptr) {
       FileStat src_stat{};
       if (req.src_storage->stat(req.src_path, &src_stat) == StorageError::OK && !src_stat.is_dir) {
         req.bytes_total.store(src_stat.size);
@@ -603,7 +775,24 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
     return;
   }
   if (bytes_read == 0) {
-    // EOF.
+    // EOF of the file in flight.
+    if (req.tree != nullptr) {
+      // Close it before touching the entry itself, then let the walk pick the next one on the
+      // next call. The chunk buffer stays — the next file reuses it.
+      close_handles(req, &err);
+      req.handles_open = false;
+      if (req.op == RequestOp::MOVE_TREE && err == StorageError::OK)
+        err = req.src_storage->remove(req.src_path);
+      if (err != StorageError::OK) {
+        finish_request(req, err);
+        return;
+      }
+      req.tree->bytes_base += req.offset;
+      req.tree->files_done++;
+      req.tree->file_in_flight = false;
+      req.offset = 0;
+      return;
+    }
     if (req.op == RequestOp::MOVE) {
       // Cross-storage move: the copy succeeded, now remove the source. Per move()'s
       // documented semantics, if this remove fails the destination copy is kept rather than
@@ -641,7 +830,7 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
   // Progress for get_transfer_status(): offset equals bytes fully read AND written at this
   // point (the write loop above completed), so it doubles as bytes_done. Atomic store because
   // the main loop may snapshot progress while the worker task runs this transfer.
-  req.bytes_done.store(req.offset);
+  req.bytes_done.store(req.tree != nullptr ? req.tree->bytes_base + req.offset : req.offset);
   // Request stays RUNNING; the next call (next loop() iteration, or the task's own loop)
   // picks up at the new offset. No watchdog feed here by design — see task_loop_()'s comment
   // for the task path; the loop-sliced path returns to the main loop's own feed_wdt() between
