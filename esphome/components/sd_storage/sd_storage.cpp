@@ -11,6 +11,11 @@
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "diskio_sdmmc.h"
+#ifdef USE_STORAGE_FILE_SYSTEM_SELECT
+// FF_DRV_NOT_USED, ff_diskio_get_drive(), ff_diskio_register() — the generic diskio layer
+// the manual mount mirror drives; diskio_sdmmc.h above only covers the sdmmc binding.
+#include "diskio_impl.h"
+#endif
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "freertos/FreeRTOS.h"
