@@ -176,6 +176,33 @@ void WebServerFileApi::send_error_(AsyncWebServerRequest *request, storage::Stor
 }
 
 // Minimal JSON string escaping for file names (quotes and backslashes; control chars dropped).
+// Brings a VFS path into exactly one shape: duplicate separators collapsed, trailing ones
+// stripped (a lone "/" survives). Done once at the edge, before anything compares or splits it.
+//
+// FatFs itself tolerates "//" and "dir/" (it skips duplicate separators and ignores a
+// terminating one), which is why this looked harmless — but our own string logic does not: the
+// self-copy guard below compares prefixes, and "from=/a/" made "/a/b" look like it was NOT
+// inside the source. The registry's rel path and join_path()'s concatenation carry the same
+// slashes on to network drivers, which have no reason to be as forgiving as FatFs.
+static void normalize_vfs_path(std::string &path) {
+  std::string out;
+  out.reserve(path.size());
+  bool prev_slash = false;
+  for (char ch : path) {
+    if (ch == '/') {
+      if (prev_slash)
+        continue;
+      prev_slash = true;
+    } else {
+      prev_slash = false;
+    }
+    out += ch;
+  }
+  while (out.size() > 1 && out.back() == '/')
+    out.pop_back();
+  path = std::move(out);
+}
+
 static void append_json_escaped(std::string &out, const char *s) {
   for (; *s != '\0'; s++) {
     char c = *s;
@@ -620,33 +647,6 @@ bool find_entry_cb(const storage::FileStat *entry, void *ctx_raw) {
   return true;
 }
 // Bounded "<root>[/<sub>][/<name>]" join; false on truncation.
-// Brings a VFS path into exactly one shape: duplicate separators collapsed, trailing ones
-// stripped (a lone "/" survives). Done once at the edge, before anything compares or splits it.
-//
-// FatFs itself tolerates "//" and "dir/" (it skips duplicate separators and ignores a
-// terminating one), which is why this looked harmless — but our own string logic does not: the
-// self-copy guard below compares prefixes, and "from=/a/" made "/a/b" look like it was NOT
-// inside the source. The registry's rel path and join_path()'s concatenation carry the same
-// slashes on to network drivers, which have no reason to be as forgiving as FatFs.
-void normalize_vfs_path(std::string &path) {
-  std::string out;
-  out.reserve(path.size());
-  bool prev_slash = false;
-  for (char ch : path) {
-    if (ch == '/') {
-      if (prev_slash)
-        continue;
-      prev_slash = true;
-    } else {
-      prev_slash = false;
-    }
-    out += ch;
-  }
-  while (out.size() > 1 && out.back() == '/')
-    out.pop_back();
-  path = std::move(out);
-}
-
 bool join_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
   int n;
   if (name != nullptr) {
