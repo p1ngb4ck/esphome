@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from esphome.components.esp32 import get_esp32_variant, get_exfat_enabled, idf_version
+from esphome.components.esp32 import get_esp32_variant, idf_version
 import esphome.config_validation as cv
 from esphome.core import CORE
 from esphome.framework_helpers import (
@@ -65,32 +65,6 @@ def get_available_components() -> list[str] | None:
 def has_discovered_components() -> bool:
     """Check if we have discovered components from a previous configure."""
     return get_available_components() is not None
-
-
-# exFAT is a compile-time #define in the FatFs library (FF_FS_EXFAT in ffconf.h) with no Kconfig
-# symbol behind it, so the only way to turn it on is editing that header — ESP-IDF documents this
-# as the only path and provides none of its own.
-#
-# The header lives in the shared IDF install, which every project on this machine builds against.
-# Patching it there would hand exFAT (and its side effects) to builds that never asked. So copy
-# the component into this build directory, patch the copy, and let IDF's own override order pick
-# it up: project_extra_components beats idf_components (see IDF's tools/cmake/build.cmake).
-# Nothing outside this build directory is touched, and the copy comes from the IDF actually in
-# use, so it cannot drift out of sync with it.
-_EXFAT_OVERRIDE = """
-set(ESPHOME_FATFS_DIR ${CMAKE_BINARY_DIR}/esphome_fatfs)
-file(COPY $ENV{IDF_PATH}/components/fatfs DESTINATION ${ESPHOME_FATFS_DIR})
-file(READ ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h ESPHOME_FFCONF)
-string(REGEX REPLACE "#define[ \t]+FF_FS_EXFAT[ \t]+[0-9]+" "#define FF_FS_EXFAT 1"
-       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
-# exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE), so TRIM goes
-# with it. It is an optimisation for the medium, not a feature anything depends on.
-string(REGEX REPLACE "#define[ \t]+FF_USE_TRIM[ \t]+[0-9]+" "#define FF_USE_TRIM 0"
-       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
-file(WRITE ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h "${ESPHOME_FFCONF}")
-list(APPEND EXTRA_COMPONENT_DIRS ${ESPHOME_FATFS_DIR}/fatfs)
-message(STATUS "ESPHome: exFAT enabled - building a patched FatFs copy in ${ESPHOME_FATFS_DIR}")
-"""
 
 
 def get_project_cmakelists(minimal: bool = False) -> str:
@@ -166,14 +140,16 @@ def get_project_cmakelists(minimal: bool = False) -> str:
         )
     )
 
-    # Only builds that asked for exFAT pay for the copy; everyone else emits nothing at all.
-    exfat_override = _EXFAT_OVERRIDE if get_exfat_enabled() else ""
+
 
     # Project-scope snippets registered by components (esp32.add_project_cmake) — emitted
     # after project(), where the partition table and esptool_py functions exist.
-    from esphome.components.esp32 import KEY_PROJECT_CMAKE
+    from esphome.components.esp32 import KEY_PRE_PROJECT_CMAKE, KEY_PROJECT_CMAKE
     from esphome.components.esp32.const import KEY_ESP32
 
+    # Component-registered project CMake, two slots: before include(project.cmake) — for
+    # things that must precede it, like EXTRA_COMPONENT_DIRS — and after project().
+    pre_project_cmake = "\n".join(CORE.data.get(KEY_ESP32, {}).get(KEY_PRE_PROJECT_CMAKE, []))
     project_cmake = "\n".join(CORE.data.get(KEY_ESP32, {}).get(KEY_PROJECT_CMAKE, []))
 
     return f"""\
@@ -198,7 +174,7 @@ set(CMAKE_NINJA_FORCE_RESPONSE_FILE 1)
 
 set(IDF_TARGET {idf_target})
 set(EXTRA_COMPONENT_DIRS ${{CMAKE_SOURCE_DIR}}/src)
-{exfat_override}
+{pre_project_cmake}
 include($ENV{{IDF_PATH}}/tools/cmake/project.cmake)
 
 {cpp_standard_options}

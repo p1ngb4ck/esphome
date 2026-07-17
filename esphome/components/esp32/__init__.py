@@ -1507,7 +1507,6 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
-KEY_EXFAT_ENABLED = "exfat_enabled"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1597,15 +1596,6 @@ def idf_version() -> cv.Version:
     For Arduino builds this is the mapped IDF version from ARDUINO_IDF_VERSION_LOOKUP.
     """
     return CORE.data[KEY_ESP32][KEY_IDF_VERSION]
-
-
-def get_exfat_enabled() -> bool:
-    """Whether this build wants exFAT in its FatFs copy.
-
-    Read by the build_gen layer (build_gen.espidf.get_project_cmakelists) after codegen, since
-    only then is it settled whether anything mounts a FAT filesystem at all.
-    """
-    return CORE.data[KEY_ESP32].get(KEY_EXFAT_ENABLED, False)
 
 
 def require_fatfs() -> None:
@@ -2163,11 +2153,11 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         set_opt("CONFIG_FATFS_MAX_LFN", 255)
         set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
         # exFAT has no Kconfig symbol behind it — it is a plain #define in the FatFs library —
-        # so it is turned on in the build_gen layer, which patches a private copy of the
-        # component (see build_gen/espidf.py). Long filenames are a hard requirement of exFAT
-        # and are already set right above.
+        # so it is turned on by patching a private FatFs copy — registered here, emitted by
+        # the neutral pre-project slot in build_gen. Long filenames are a hard requirement
+        # of exFAT and are already set right above.
         if enable_exfat:
-            CORE.data[KEY_ESP32][KEY_EXFAT_ENABLED] = True
+            add_pre_project_cmake(_EXFAT_FATFS_OVERRIDE)
     elif enable_exfat:
         raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
@@ -2753,7 +2743,46 @@ async def to_code(config):
 
 KEY_CUSTOM_PARTITIONS = "custom_partitions"
 KEY_PROJECT_CMAKE = "project_cmake"
+KEY_PRE_PROJECT_CMAKE = "pre_project_cmake"
 KEY_LITTLEFS_PREFILL = "littlefs_prefill"
+
+
+# exFAT is a compile-time #define in the FatFs library (FF_FS_EXFAT in ffconf.h) with no
+# Kconfig symbol behind it, so the only way to turn it on is editing that header — ESP-IDF
+# documents this as the only path and provides none of its own. Same story for FF_LBA64,
+# which exFAT media sizes make mandatory (32-bit LBA ends at 2 TiB and predates GPT).
+#
+# The header lives in the shared IDF install, which every project on this machine builds
+# against. Patching it there would hand exFAT (and its side effects) to builds that never
+# asked. So copy the component into this build directory, patch the copy, and let IDF's own
+# override order pick it up: project_extra_components beats idf_components (see IDF's
+# tools/cmake/build.cmake). Nothing outside this build directory is touched, and the copy
+# comes from the IDF actually in use, so it cannot drift out of sync with it.
+#
+# Emitted via add_pre_project_cmake(): EXTRA_COMPONENT_DIRS must be final before
+# include(project.cmake) runs.
+_EXFAT_FATFS_OVERRIDE = """
+set(ESPHOME_FATFS_DIR ${CMAKE_BINARY_DIR}/esphome_fatfs)
+file(COPY $ENV{IDF_PATH}/components/fatfs DESTINATION ${ESPHOME_FATFS_DIR})
+file(READ ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h ESPHOME_FFCONF)
+string(REGEX REPLACE "#define[ \t]+FF_FS_EXFAT[ \t]+[0-9]+" "#define FF_FS_EXFAT 1"
+       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
+string(REGEX REPLACE "#define[ \t]+FF_LBA64[ \t]+[0-9]+" "#define FF_LBA64 1"
+       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
+# exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE), so TRIM
+# goes with it. It is an optimisation for the medium, not a feature anything depends on.
+string(REGEX REPLACE "#define[ \t]+FF_USE_TRIM[ \t]+[0-9]+" "#define FF_USE_TRIM 0"
+       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
+file(WRITE ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h "${ESPHOME_FFCONF}")
+list(APPEND EXTRA_COMPONENT_DIRS ${ESPHOME_FATFS_DIR}/fatfs)
+message(STATUS "ESPHome: exFAT enabled - building a patched FatFs copy in ${ESPHOME_FATFS_DIR}")
+"""
+
+
+def add_pre_project_cmake(snippet: str) -> None:
+    """Like add_project_cmake(), but emitted *before* include(project.cmake) — for the few
+    things IDF requires there, e.g. appending to EXTRA_COMPONENT_DIRS."""
+    CORE.data[KEY_ESP32].setdefault(KEY_PRE_PROJECT_CMAKE, []).append(snippet)
 
 
 def add_project_cmake(snippet: str) -> None:
