@@ -523,7 +523,16 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
 
     // Directories: a same-storage MOVE is a pure rename (the worker takes that fast path before
     // opening any handles) — the name is free by now, either way. Everything else, directory
-    // COPY and cross-storage directory moves, goes through the per-file orchestrator.
+    // COPY and cross-storage directory moves, goes through the per-file orchestrator, which
+    // copies each file rather than renaming it: across devices rename cannot apply, so trying
+    // is a guaranteed failure per file.
+    //
+    // One gap, deliberate: if a driver refuses the directory rename itself (NFS answers
+    // NOT_SUPPORTED when the export spans file systems), move_fallback_copy cannot rescue it
+    // the way it does for a single file — the worker's chunk loop moves bytes, not trees, and
+    // the walker below cannot take over a job the caller is already polling by id. The refusal
+    // reaches the caller as-is; copying the tree and deleting the source is then a deliberate
+    // second call.
     if (src_is_dir && !same_storage_move) {
       if (!this->start_dir_transfer_(src, src_rel, dst, dst_rel, is_move)) {
         err = this->dir_.active ? storage::StorageError::NOT_READY : storage::StorageError::INVALID_ARGS;

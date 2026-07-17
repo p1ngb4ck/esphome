@@ -369,6 +369,14 @@ class StorageRegistry : public Component {
   void set_max_blocking_transfer_size(uint64_t size) { this->max_blocking_transfer_size_ = size; }
   uint64_t get_max_blocking_transfer_size() const { return this->max_blocking_transfer_size_; }
 
+  // What to do when a same-storage rename() is refused as NOT_SUPPORTED — an NFS export can
+  // span several file systems on the server, and RENAME never crosses one, so a move inside a
+  // single mount can come back "not this way". On (default) the caller redoes it as copy +
+  // remove: slower, but the move happens. Off, the refusal is reported as-is — for setups that
+  // would rather see the error than have a directory-entry update turn into a full copy.
+  void set_move_fallback_copy(bool enable) { this->move_fallback_copy_ = enable; }
+  bool get_move_fallback_copy() const { return this->move_fallback_copy_; }
+
   // Returns OK on success (idempotent: re-registering an already-registered device is OK),
   // INVALID_ARGS for nullptr, NO_SPACE when the registry is at its codegen-sized capacity —
   // the latter indicates a codegen/runtime device-count mismatch; drivers should treat it as
@@ -438,6 +446,7 @@ class StorageRegistry : public Component {
   LazyCallbackManager<void(Storage *)> on_unregistered_;
 
   uint64_t max_blocking_transfer_size_{0};  // 0 = unlimited
+  bool move_fallback_copy_{true};
 };
 
 extern StorageRegistry *global_storage_registry;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
@@ -507,7 +516,9 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
 StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path);
 
 // Moves a file, within the same storage or across two different storages. Same-storage moves
-// go through rename() directly — no chunk buffer, no size limit, near-O(1). Cross-storage moves
+// go through rename() directly — no chunk buffer, no size limit, near-O(1); if the driver
+// refuses it with NOT_SUPPORTED, this falls back to copy + remove unless the registry's
+// move_fallback_copy is off. Cross-storage moves
 // go through copy() (inheriting its chunking, watchdog feeding, and max_blocking_transfer_size
 // enforcement) followed by remove() on the source, but ONLY if the copy succeeded. If the
 // source remove() fails, its error is returned and the destination copy is kept — the caller

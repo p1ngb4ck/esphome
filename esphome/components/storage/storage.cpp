@@ -615,8 +615,14 @@ StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *d
 }
 
 StorageError move(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path) {
-  if (src_storage == dst_storage)
-    return src_storage->rename(src_path, dst_path);  // same-storage: O(1), no size limit
+  if (src_storage == dst_storage) {
+    StorageError err = src_storage->rename(src_path, dst_path);  // same-storage: O(1), no size limit
+    // Only a refusal is worth redoing the long way; every other error would hit copy() too.
+    if (err != StorageError::NOT_SUPPORTED || global_storage_registry == nullptr ||
+        !global_storage_registry->get_move_fallback_copy())
+      return err;
+    ESP_LOGD(TAG, "rename refused for '%s' — moving it as copy + remove instead", src_path);
+  }
 
   StorageError err = copy(src_storage, src_path, dst_storage, dst_path);
   if (err != StorageError::OK)

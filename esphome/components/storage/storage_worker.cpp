@@ -501,8 +501,21 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
   if (!req.handles_open) {
     if (req.op == RequestOp::MOVE && req.src_storage == req.dst_storage) {
       StorageError err = req.src_storage->rename(req.src_path, req.dst_path);
-      finish_request(req, err);
-      return;
+      // A refusal (an NFS export spanning file systems answers NOT_SUPPORTED) is the one error
+      // worth redoing the long way: fall through to the chunk loop below, which copies and then
+      // removes the source. Directories are not ours to salvage — the loop moves file bytes, so
+      // the caller's per-file walker has to take that one.
+      bool salvageable = err == StorageError::NOT_SUPPORTED && global_storage_registry != nullptr &&
+                         global_storage_registry->get_move_fallback_copy();
+      if (salvageable) {
+        FileStat st{};
+        salvageable = req.src_storage->stat(req.src_path, &st) == StorageError::OK && !st.is_dir;
+      }
+      if (!salvageable) {
+        finish_request(req, err);
+        return;
+      }
+      ESP_LOGD(TAG, "rename refused for '%s' — moving it as copy + remove instead", req.src_path);
     }
 
     // Progress total for get_transfer_status(): one cheap stat on the source. A failure here
