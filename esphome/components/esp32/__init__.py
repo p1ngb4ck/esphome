@@ -1493,6 +1493,7 @@ CONF_DISABLE_MBEDTLS_PEER_CERT = "disable_mbedtls_peer_cert"
 CONF_DISABLE_MBEDTLS_PKCS7 = "disable_mbedtls_pkcs7"
 CONF_DISABLE_REGI2C_IN_IRAM = "disable_regi2c_in_iram"
 CONF_DISABLE_FATFS = "disable_fatfs"
+CONF_ENABLE_EXFAT = "enable_exfat"
 CONF_ADC_ONESHOT_IN_IRAM = "adc_oneshot_in_iram"
 
 # VFS requirement tracking
@@ -1697,6 +1698,7 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_TERMIOS, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_SELECT, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_DIR, default=True): cv.boolean,
+                cv.Optional(CONF_ENABLE_EXFAT, default=False): cv.boolean,
                 cv.Optional(CONF_FREERTOS_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_RINGBUF_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_HEAP_IN_IRAM, default=False): cv.boolean,
@@ -2095,6 +2097,7 @@ async def _reconcile_vfs_fatfs_sdkconfig(
     disable_vfs_select: bool,
     disable_vfs_dir: bool,
     disable_fatfs: bool,
+    enable_exfat: bool,
 ) -> None:
     """Reconcile VFS/FATFS sdkconfig flags.
 
@@ -2149,6 +2152,25 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         set_opt("CONFIG_FATFS_LFN_HEAP", True)
         set_opt("CONFIG_FATFS_MAX_LFN", 255)
         set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
+        # exFAT has no Kconfig symbol — it is a plain #define in the framework's ffconf.h, so
+        # the only way in is patching that header (ESP-IDF documents this as the only path and
+        # provides none of its own). The script writes the value both ways, so a build never
+        # inherits exFAT from another project that shares this framework install; it is
+        # registered only here, because a build that mounts no FAT filesystem does not compile
+        # fatfs at all and has nothing to inherit. Long filenames are a hard requirement of
+        # exFAT and are already set above.
+        if enable_exfat:
+            cg.add_build_flag("-DESPHOME_FATFS_EXFAT")
+        add_extra_script(
+            "pre",
+            "exfat_patch.py",
+            Path(__file__).parent / "exfat_patch.py.script",
+        )
+    elif enable_exfat:
+        raise cv.Invalid(
+            f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
+            f"mounts a FAT filesystem, so the FatFs library is not part of the build"
+        )
     elif disable_fatfs:
         set_opt("CONFIG_FATFS_LFN_NONE", True)
         # Kconfig range is [1,10]; 0 gets clamped to the default.
@@ -2690,6 +2712,7 @@ async def to_code(config):
         advanced[CONF_DISABLE_VFS_SUPPORT_SELECT],
         advanced[CONF_DISABLE_VFS_SUPPORT_DIR],
         advanced[CONF_DISABLE_FATFS],
+        advanced[CONF_ENABLE_EXFAT],
     )
 
     # Disable regi2c control functions in IRAM
