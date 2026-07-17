@@ -347,6 +347,9 @@ void ESPHomeOTAComponent::handle_data_() {
   char *sbuf = reinterpret_cast<char *>(buf);
   size_t ota_size;
   ota::OTAType ota_type = ota::OTA_TYPE_UPDATE_APP;
+#ifdef USE_OTA_PARTITIONS
+  bool data_only_update = false;
+#endif
 #if USE_OTA_VERSION == 2
   size_t size_acknowledged = 0;
 #endif
@@ -371,6 +374,36 @@ void ESPHomeOTAComponent::handle_data_() {
     ota_type = static_cast<ota::OTAType>(buf[0]);
   }
   ESP_LOGV(TAG, "OTA type is 0x%02x", ota_type);
+
+#ifdef USE_OTA_PARTITIONS
+  if (ota_type == ota::OTA_TYPE_UPDATE_APP_WITH_DATA) {
+    // Sub-header: app size (4, MSB first) + label length (1) + label. Precedes the total
+    // size below; the backend needs the split before begin() sees the stream size.
+    if (!this->readall_(buf, 5)) {
+      this->log_read_error_(LOG_STR("data sub-header"));
+      goto error;  // NOLINT(cppcoreguidelines-avoid-goto)
+    }
+    {
+      size_t data_app_size = (static_cast<size_t>(buf[0]) << 24) | (static_cast<size_t>(buf[1]) << 16) |
+                             (static_cast<size_t>(buf[2]) << 8) | buf[3];
+      uint8_t label_len = buf[4];
+      if (label_len == 0 || label_len > 32) {
+        error_code = ota::OTA_RESPONSE_ERROR_DATA_PARTITION;
+        goto error;  // NOLINT(cppcoreguidelines-avoid-goto)
+      }
+      if (!this->readall_(buf, label_len)) {
+        this->log_read_error_(LOG_STR("data partition label"));
+        goto error;  // NOLINT(cppcoreguidelines-avoid-goto)
+      }
+      sbuf[label_len] = '\0';
+      ESP_LOGV(TAG, "Data partition '%s', app portion %zu bytes", sbuf, data_app_size);
+      error_code = this->backend_->set_data_partition(sbuf, data_app_size);
+      if (error_code != ota::OTA_RESPONSE_OK)
+        goto error;  // NOLINT(cppcoreguidelines-avoid-goto)
+      data_only_update = data_app_size == 0;
+    }
+  }
+#endif
 
   // Read size, 4 bytes MSB first
   if (!this->readall_(buf, 4)) {
@@ -501,6 +534,13 @@ void ESPHomeOTAComponent::handle_data_() {
 #endif
   delay(100);  // NOLINT
 #ifdef USE_OTA_PARTITIONS
+  if (data_only_update) {
+    // The running app was never touched and the filesystem is already remounted on the new
+    // image (backend end()) — a reboot would only cost uptime.
+    ESP_LOGI(TAG, "Data partition update complete, no reboot needed");
+    this->cleanup_connection_();
+    return;
+  }
   if (ota_type == ota::OTA_TYPE_UPDATE_PARTITION_TABLE) {
     // Skip on_safe_shutdown: nvs_flash_deinit() has already invalidated open NVS handles, so
     // preferences flush would emit ESP_ERR_NVS_INVALID_HANDLE for every entry. Reboot directly.

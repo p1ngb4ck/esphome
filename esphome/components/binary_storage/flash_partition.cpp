@@ -51,6 +51,12 @@ void FlashPartition::setup() {
   this->mounted_ = true;
   ESP_LOGI(TAG, "LittleFS mounted at '%s'", this->mount_path_);
 
+#if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
+  // So an incoming pre-fill image (OTA_TYPE_UPDATE_APP_WITH_DATA) can have this mount step
+  // aside instead of forcing a reboot.
+  ota::register_data_partition_listener(this);
+#endif
+
   size_t total = 0, used = 0;
   if (esp_littlefs_info(this->partition_label_, &total, &used) == ESP_OK) {
     ESP_LOGI(TAG, "Partition size: total=%" PRIu32 ", used=%" PRIu32, (uint32_t) total, (uint32_t) used);
@@ -474,6 +480,25 @@ bool FlashPartition::format_lfs_() {
 
   return true;
 }
+
+#if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
+void FlashPartition::on_ota_data_partition_before_write() {
+  // Nothing may be mid-flight on this filesystem when the flash changes under it.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->quiesce_storage(this);
+  this->unmount_lfs_();
+}
+
+void FlashPartition::on_ota_data_partition_after_write(bool success) {
+  // Remount whatever is there now. After a verified image that is the new content; after a
+  // failure it is a half-written region — the mount fails, auto_format heals it to an empty
+  // filesystem, and a repeated OTA delivers the content.
+  if (!success)
+    ESP_LOGW(TAG, "Data partition update failed; remounting (auto_format may reset it)");
+  if (!this->remount())
+    ESP_LOGE(TAG, "Remount after data partition update failed");
+}
+#endif
 
 storage::FileHandle *FlashPartition::alloc_handle_(const char *path) {
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
