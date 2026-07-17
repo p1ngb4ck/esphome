@@ -130,6 +130,11 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   if (slot == nullptr)
     return StorageError::NOT_READY;
 
+  // Work is pending from here on: ask for the component phase, both for the loop-sliced
+  // engine's chunks and for delivering the completion afterwards. Released again in loop()
+  // once every slot is free.
+  this->loop_requester_.start();
+
   slot->op = op;
   slot->src_storage = src;
   slot->dst_storage = dst;
@@ -382,6 +387,27 @@ void StorageWorker::loop() {
     if (req.state.load() == RequestState::DONE)
       this->loop_active_index_ = SIZE_MAX;
   }
+
+  // Idle again? Then stop asking for the phase — the next submit_() asks for it anew.
+  bool busy = this->loop_active_index_ != SIZE_MAX;
+  if (!busy) {
+    for (const auto &req : this->pool_) {
+      if (req.state.load() != RequestState::FREE) {
+        busy = true;
+        break;
+      }
+    }
+  }
+  if (!busy) {
+    for (const auto &req : this->stream_pool_) {
+      if (req.state.load() != StreamState::FREE) {
+        busy = true;
+        break;
+      }
+    }
+  }
+  if (!busy)
+    this->loop_requester_.stop();
 
   // Streams: two jobs, both per-slot and independent of any other slot (no FIFO ordering
   // needed — unlike TransferRequest's loop_active_index_, every stream's step is
