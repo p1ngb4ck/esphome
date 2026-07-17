@@ -259,6 +259,7 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
   std::string json;
   storage::StorageError err = storage::StorageError::OK;
   bool ok = this->run_on_loop_([this, &path, &json, &err]() {
@@ -318,6 +319,7 @@ void WebServerFileApi::handle_stat_(AsyncWebServerRequest *request) {
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
   storage::FileStat st{};
   storage::StorageError err = storage::StorageError::OK;
   bool ok = this->run_on_loop_([this, &path, &st, &err]() {
@@ -353,6 +355,7 @@ void WebServerFileApi::handle_mkdir_(AsyncWebServerRequest *request) {
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
   storage::StorageError err = storage::StorageError::OK;
   bool ok = this->run_on_loop_([this, &path, &err]() {
     const char *rel = nullptr;
@@ -381,6 +384,7 @@ void WebServerFileApi::handle_delete_(AsyncWebServerRequest *request) {
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
   auto *rec = request->getParam("recursive");
   bool recursive = rec != nullptr && rec->value() == "1";
   storage::StorageError err = storage::StorageError::OK;
@@ -411,6 +415,7 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
   storage::StorageError err = storage::StorageError::OK;
   bool found_not_mountable = false;
   bool ok = this->run_on_loop_([this, &path, mount, &err, &found_not_mountable]() {
@@ -459,6 +464,15 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   }
   std::string from_s = from->value();
   std::string to_s = to->value();
+  normalize_vfs_path(from_s);
+  normalize_vfs_path(to_s);
+  // Existing destinations are refused, not silently replaced: same-storage moves went through
+  // rename() (which cannot overwrite at all), while copies and cross-storage moves happily
+  // truncated whatever was there — the same command meant two different things depending on
+  // which medium the destination sat on. Now both refuse with ALREADY_EXISTS (409) unless the
+  // caller says otherwise.
+  auto *ow = request->getParam("overwrite");
+  const bool overwrite = ow != nullptr && ow->value() == "1";
   // Copying/moving a directory into itself would recurse forever — reject early on the
   // full VFS strings ('/a' -> '/a/b' style; exact-prefix with a path boundary).
   if (to_s.size() > from_s.size() && to_s.compare(0, from_s.size(), from_s) == 0 && to_s[from_s.size()] == '/') {
@@ -467,7 +481,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   }
   storage::StorageError err = storage::StorageError::OK;
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
-  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, &err, &job]() {
+  bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, overwrite, &err, &job]() {
     const char *src_rel = nullptr;
     const char *dst_rel = nullptr;
     storage::PathStorage *src = this->resolve_(from_s.c_str(), &src_rel);
@@ -476,19 +490,47 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
       err = storage::StorageError::NOT_FOUND;
       return;
     }
-    // Directories: a same-storage MOVE is a pure rename (the worker takes that fast path
-    // before opening any handles). Everything else — directory COPY and cross-storage
-    // directory moves — goes through the per-file orchestrator.
     storage::FileStat src_stat{};
-    if (src->stat(src_rel, &src_stat) == storage::StorageError::OK && src_stat.is_dir) {
-      if (!is_move || src != dst) {
-        if (!this->start_dir_transfer_(src, src_rel, dst, dst_rel, is_move)) {
-          err = this->dir_.active ? storage::StorageError::NOT_READY : storage::StorageError::INVALID_ARGS;
-          return;
-        }
-        job = this->dir_.id;
+    const bool src_is_dir = src->stat(src_rel, &src_stat) == storage::StorageError::OK && src_stat.is_dir;
+    storage::FileStat dst_stat{};
+    const bool dst_exists = dst->stat(dst_rel, &dst_stat) == storage::StorageError::OK;
+    const bool same_storage_move = is_move && src == dst;
+    if (dst_exists) {
+      if (!overwrite) {
+        err = storage::StorageError::ALREADY_EXISTS;
         return;
       }
+      if (dst_stat.is_dir != src_is_dir) {
+        // Never trade a tree for a file or the other way round, no matter what was asked for.
+        err = storage::StorageError::INVALID_ARGS;
+        return;
+      }
+      // Clear the destination where the operation cannot replace it by itself. A same-storage
+      // move must have a free name because rename() refuses an occupied one — and clearing it
+      // keeps the rename, which is a directory-entry update no matter how large the object is.
+      // Falling back to a per-file merge here would push every byte through the MCU to reach a
+      // result rename gets for free. A directory copy is cleared for a different reason: the
+      // caller asked for a replacement, and merging would leave the old tree's files behind.
+      // A file that is written (copy, cross-storage move) needs nothing — the write truncates.
+      if (same_storage_move) {
+        err = src_is_dir ? storage::remove_recursive(dst, dst_rel) : dst->remove(dst_rel);
+      } else if (src_is_dir) {
+        err = storage::remove_recursive(dst, dst_rel);
+      }
+      if (err != storage::StorageError::OK)
+        return;
+    }
+
+    // Directories: a same-storage MOVE is a pure rename (the worker takes that fast path before
+    // opening any handles) — the name is free by now, either way. Everything else, directory
+    // COPY and cross-storage directory moves, goes through the per-file orchestrator.
+    if (src_is_dir && !same_storage_move) {
+      if (!this->start_dir_transfer_(src, src_rel, dst, dst_rel, is_move)) {
+        err = this->dir_.active ? storage::StorageError::NOT_READY : storage::StorageError::INVALID_ARGS;
+        return;
+      }
+      job = this->dir_.id;
+      return;
     }
     if (storage::global_storage_worker == nullptr) {
       err = storage::StorageError::NOT_SUPPORTED;
@@ -569,6 +611,33 @@ bool find_entry_cb(const storage::FileStat *entry, void *ctx_raw) {
   return true;
 }
 // Bounded "<root>[/<sub>][/<name>]" join; false on truncation.
+// Brings a VFS path into exactly one shape: duplicate separators collapsed, trailing ones
+// stripped (a lone "/" survives). Done once at the edge, before anything compares or splits it.
+//
+// FatFs itself tolerates "//" and "dir/" (it skips duplicate separators and ignores a
+// terminating one), which is why this looked harmless — but our own string logic does not: the
+// self-copy guard below compares prefixes, and "from=/a/" made "/a/b" look like it was NOT
+// inside the source. The registry's rel path and join_path()'s concatenation carry the same
+// slashes on to network drivers, which have no reason to be as forgiving as FatFs.
+void normalize_vfs_path(std::string &path) {
+  std::string out;
+  out.reserve(path.size());
+  bool prev_slash = false;
+  for (char ch : path) {
+    if (ch == '/') {
+      if (prev_slash)
+        continue;
+      prev_slash = true;
+    } else {
+      prev_slash = false;
+    }
+    out += ch;
+  }
+  while (out.size() > 1 && out.back() == '/')
+    out.pop_back();
+  path = std::move(out);
+}
+
 bool join_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
   int n;
   if (name != nullptr) {
@@ -880,6 +949,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     return;
   }
   std::string path = param->value();
+  normalize_vfs_path(path);
 
   storage::PathStorage *ps = nullptr;
   storage::FileHandle *handle = nullptr;

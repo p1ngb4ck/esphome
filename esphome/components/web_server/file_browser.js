@@ -209,18 +209,32 @@
     return r;
   };
 
+  // Copy and move share one flow. The API refuses an existing destination with 409 instead of
+  // replacing it silently, so that is exactly where the user gets asked — and only then does
+  // overwrite=1 go out.
+  const transfer = async (op, from, to) => {
+    const q = `from=${enc(from)}&to=${enc(to)}`;
+    let r = await fetch(`/files/${op}?${q}`, { method: "POST" });
+    if (r.status === 409) {
+      if (!confirm(`${to} already exists \u2014 overwrite it?`)) return;
+      r = await fetch(`/files/${op}?${q}&overwrite=1`, { method: "POST" });
+    }
+    if (!r.ok) {
+      let msg = r.status;
+      try { msg = (await r.json()).error || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    await pollJob((await r.json()).job, op);
+  };
+
   const copyMoveDel = (path, name, isDir, reload) => [
     btn("copy", "Copy", async () => {
       const to = prompt(`Copy ${isDir ? "directory " : ""}to (full path)`, path);
-      if (!to) return;
-      const j = await api(`/files/copy?from=${enc(path)}&to=${enc(to)}`, { method: "POST" });
-      await pollJob(j.job, "copy");
+      if (to) await transfer("copy", path, to);
     }, reload),
     btn("move", "Move / rename", async () => {
       const to = prompt(`Move/rename ${isDir ? "directory " : ""}to (full path)`, path);
-      if (!to) return;
-      const j = await api(`/files/move?from=${enc(path)}&to=${enc(to)}`, { method: "POST" });
-      await pollJob(j.job, "move");
+      if (to) await transfer("move", path, to);
     }, reload),
     btn("del", "Delete", () => confirm(isDir ? `Delete ${name} recursively?` : `Delete ${name}?`)
       ? api(`/files/delete?path=${enc(path)}${isDir ? "&recursive=1" : ""}`, { method: "POST" }) : Promise.resolve(),

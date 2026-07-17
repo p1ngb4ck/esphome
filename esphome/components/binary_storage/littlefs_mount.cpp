@@ -861,8 +861,12 @@ storage::StorageError LittleFSMount::rename(const char *old_path, const char *ne
   snprintf(full_old, sizeof(full_old), "%s/%s", this->mount_path_, old_path[0] == '/' ? old_path + 1 : old_path);
   snprintf(full_new, sizeof(full_new), "%s/%s", this->mount_path_, new_path[0] == '/' ? new_path + 1 : new_path);
 
+  // Report why it failed: the VFS shim above maps lfs errors onto errno (see
+  // lfs_errno_remap), so "destination exists" survives all the way to the caller instead of
+  // arriving as a generic write error.
+  errno = 0;
   if (::rename(full_old, full_new) != 0)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::error_from_errno(errno, true);
 
   return storage::StorageError::OK;
 }

@@ -923,7 +923,12 @@ storage::StorageError USBStorageDevice::rename(const char *old_path, const char 
   char new_full[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
   this->build_path_(old_full, sizeof(old_full), old_path);
   this->build_path_(new_full, sizeof(new_full), new_path);
-  return ::rename(old_full, new_full) == 0 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  // Report why it failed: FatFs refuses an existing destination (FR_EXIST -> EEXIST), and a
+  // caller that cannot tell that apart from an I/O error cannot offer to overwrite.
+  errno = 0;
+  if (::rename(old_full, new_full) != 0)
+    return storage::error_from_errno(errno, true);
+  return storage::StorageError::OK;
 }
 
 }  // namespace esphome::usb_storage

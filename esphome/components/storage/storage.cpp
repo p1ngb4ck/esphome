@@ -1,4 +1,6 @@
 #include "storage.h"
+
+#include <cerrno>
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/string_ref.h"
@@ -259,6 +261,36 @@ StorageError check_blocking_transfer_size(uint64_t size) {
 }
 
 }  // namespace
+
+StorageError error_from_errno(int err, bool writing) {
+  switch (err) {
+    case ENOENT:
+      return StorageError::NOT_FOUND;
+    case EEXIST:
+      return StorageError::ALREADY_EXISTS;
+    case ENOTEMPTY:
+      return StorageError::NOT_EMPTY;
+    case ENOSPC:
+      return StorageError::NO_SPACE;
+    case EACCES:
+    case EPERM:
+    case EROFS:
+      return StorageError::PERMISSION_DENIED;
+    case EMFILE:
+    case ENFILE:
+      return StorageError::TOO_MANY_OPEN_FILES;
+    case EINVAL:
+    case ENAMETOOLONG:
+    case EISDIR:   // asked for a file, found a directory
+    case ENOTDIR:  // ... or the other way round (littlefs reports both)
+      return StorageError::INVALID_ARGS;
+    case ENOTSUP:
+    case EXDEV:  // rename() across volumes — the caller must copy instead
+      return StorageError::NOT_SUPPORTED;
+    default:
+      return writing ? StorageError::WRITE_ERROR : StorageError::READ_ERROR;
+  }
+}
 
 const char *error_to_string(StorageError error) {
   switch (error) {

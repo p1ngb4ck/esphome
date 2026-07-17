@@ -404,8 +404,12 @@ storage::StorageError FlashPartition::rename(const char *old_path, const char *n
   this->build_path_(full_old, sizeof(full_old), old_path);
   this->build_path_(full_new, sizeof(full_new), new_path);
 
+  // Report why it failed — same reasoning as the other VFS-backed drivers: FatFs refuses an
+  // existing destination (FR_EXIST -> EEXIST), which a caller must be able to tell apart from
+  // an I/O error to offer overwriting.
+  errno = 0;
   if (::rename(full_old, full_new) != 0)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::error_from_errno(errno, true);
 
   return storage::StorageError::OK;
 }
