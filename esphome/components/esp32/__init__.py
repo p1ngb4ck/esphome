@@ -1534,6 +1534,7 @@ CONF_DISABLE_MBEDTLS_PEER_CERT = "disable_mbedtls_peer_cert"
 CONF_DISABLE_MBEDTLS_PKCS7 = "disable_mbedtls_pkcs7"
 CONF_DISABLE_REGI2C_IN_IRAM = "disable_regi2c_in_iram"
 CONF_DISABLE_FATFS = "disable_fatfs"
+CONF_ENABLE_EXFAT = "enable_exfat"
 CONF_ADC_ONESHOT_IN_IRAM = "adc_oneshot_in_iram"
 
 # VFS requirement tracking
@@ -1547,6 +1548,7 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
+KEY_EXFAT_ENABLED = "exfat_enabled"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1636,6 +1638,15 @@ def idf_version() -> cv.Version:
     For Arduino builds this is the mapped IDF version from ARDUINO_IDF_VERSION_LOOKUP.
     """
     return CORE.data[KEY_ESP32][KEY_IDF_VERSION]
+
+
+def get_exfat_enabled() -> bool:
+    """Whether this build wants exFAT in its FatFs copy.
+
+    Read by the build_gen layer (build_gen.espidf.get_project_cmakelists) after codegen, since
+    only then is it settled whether anything mounts a FAT filesystem at all.
+    """
+    return CORE.data[KEY_ESP32].get(KEY_EXFAT_ENABLED, False)
 
 
 def require_fatfs() -> None:
@@ -1738,6 +1749,7 @@ FRAMEWORK_SCHEMA = cv.Schema(
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_TERMIOS, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_SELECT, default=True): cv.boolean,
                 cv.Optional(CONF_DISABLE_VFS_SUPPORT_DIR, default=True): cv.boolean,
+                cv.Optional(CONF_ENABLE_EXFAT, default=False): cv.boolean,
                 cv.Optional(CONF_FREERTOS_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_RINGBUF_IN_IRAM, default=False): cv.boolean,
                 cv.Optional(CONF_HEAP_IN_IRAM, default=False): cv.boolean,
@@ -2186,6 +2198,7 @@ async def _reconcile_vfs_fatfs_sdkconfig(
     disable_vfs_select: bool,
     disable_vfs_dir: bool,
     disable_fatfs: bool,
+    enable_exfat: bool,
 ) -> None:
     """Reconcile VFS/FATFS sdkconfig flags.
 
@@ -2247,6 +2260,17 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         if not opts.get("CONFIG_FATFS_LFN_NONE", False):
             set_opt("CONFIG_FATFS_MAX_LFN", 255)
         set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
+        # exFAT has no Kconfig symbol behind it — it is a plain #define in the FatFs library —
+        # so it is turned on in the build_gen layer, which patches a private copy of the
+        # component (see build_gen/espidf.py). Long filenames are a hard requirement of exFAT
+        # and are already set right above.
+        if enable_exfat:
+            CORE.data[KEY_ESP32][KEY_EXFAT_ENABLED] = True
+    elif enable_exfat:
+        raise cv.Invalid(
+            f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
+            f"mounts a FAT filesystem, so the FatFs library is not part of the build"
+        )
     elif disable_fatfs:
         lfn_choice_keys = (
             "CONFIG_FATFS_LFN_NONE",
@@ -2801,6 +2825,7 @@ async def to_code(config):
         advanced[CONF_DISABLE_VFS_SUPPORT_SELECT],
         advanced[CONF_DISABLE_VFS_SUPPORT_DIR],
         advanced[CONF_DISABLE_FATFS],
+        advanced[CONF_ENABLE_EXFAT],
     )
 
     # Disable regi2c control functions in IRAM
