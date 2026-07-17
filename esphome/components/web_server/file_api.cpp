@@ -711,10 +711,19 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
     state = "done";
   }
   char buf[160];
-  snprintf(buf, sizeof(buf),
-           "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64 "}", state,
-           storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
-  request->send(200, "application/json", buf);
+  snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64,
+           state, storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
+  std::string json = buf;
+  if (st.file[0] != '\0') {
+    // The file currently in flight — for a tree job the only place a percentage can honestly
+    // come from, since the tree's bytes_total is unknown (see TransferStatus).
+    json += ",\"file\":\"";
+    append_json_escaped(json, st.file);
+    snprintf(buf, sizeof(buf), "\",\"file_done\":%" PRIu64 ",\"file_total\":%" PRIu64, st.file_done, st.file_total);
+    json += buf;
+  }
+  json += "}";
+  request->send(200, "application/json", json.c_str());
 #else
   request->send(501);
 #endif

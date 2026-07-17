@@ -100,10 +100,21 @@ struct ProgressCounter {
 
 // Snapshot of a transfer's externally observable state — see get_transfer_status().
 struct TransferStatus {
+  // A short label for the file currently in flight (basename, truncated — this feeds a
+  // status line, not a path column). Empty when nothing is in flight: rename fast path,
+  // a finished job, the gaps between a tree's files.
+  static constexpr size_t FILE_LABEL_LEN = 40;
+
   RequestState state{RequestState::FREE};
   storage::StorageError result{storage::StorageError::OK};
   uint64_t bytes_done{0};
   uint64_t bytes_total{0};  // 0 = unknown (indeterminate progress)
+  // Per-file progress of the file in flight. For a single-file transfer these mirror
+  // bytes_done/bytes_total; for a tree they are what bytes_total cannot be — the tree's
+  // total is unknown without walking it twice, but the current file's is one cheap stat.
+  uint64_t file_done{0};
+  uint64_t file_total{0};
+  char file[FILE_LABEL_LEN]{};
 };
 
 // One pooled transfer request. Fixed-size, no heap allocation — the pool is a FixedVector of
@@ -166,6 +177,12 @@ struct TransferRequest {
   // tree bytes_done counts the whole thing, not the file in flight.
   ProgressCounter bytes_done{};
   ProgressCounter bytes_total{};
+  // Progress of the file currently in flight, same concurrency rules as the pair above.
+  // Equal to bytes_done/bytes_total for a single-file transfer; for a tree this is the part
+  // bytes_total cannot provide (see the comment there) — file_total is stat()ed when the
+  // walk opens each file, file_done tracks its offset and both drop to 0 between files.
+  ProgressCounter file_done{};
+  ProgressCounter file_total{};
   // Job-handle generation: bumped on every slot claim so a recycled slot invalidates stale
   // TransferJob handles (never 0 — 0 is reserved for the invalid job). Main-loop-only.
   uint32_t generation{0};
