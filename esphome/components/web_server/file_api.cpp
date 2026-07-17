@@ -612,11 +612,6 @@ void WebServerFileApi::cache_job_result_(storage::TransferJob job, storage::Stor
 }
 #endif
 
-#ifdef USE_STORAGE_WORKER
-// ---------------------------------------------------------------------------
-// Recursive directory transfer orchestrator (see the header for the design notes)
-// ---------------------------------------------------------------------------
-
 void WebServerFileApi::loop() {
 #ifdef USE_STORAGE_TRANSFER_BUFFER
   if (this->flush_.active && !this->flush_.finished) {
