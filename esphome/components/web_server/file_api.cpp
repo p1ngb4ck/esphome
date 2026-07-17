@@ -84,6 +84,8 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
       return this->handle_download_(request);
     if (url == "/files/job")
       return this->handle_job_(request);
+    if (url == "/files/changes")
+      return this->handle_changes_(request);
   } else {
     if (url == "/files/mkdir")
       return this->handle_mkdir_(request);
@@ -375,6 +377,85 @@ void WebServerFileApi::handle_stat_(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
+// "" for a top-level path means the roots level itself — exactly the marker
+// note_dir_changed_() uses for it.
+static std::string parent_dir_of(const std::string &path) {
+  size_t slash = path.rfind('/');
+  if (slash == std::string::npos || slash == 0)
+    return "";
+  return path.substr(0, slash);
+}
+
+void WebServerFileApi::note_dir_changed_(const std::string &dir) {
+  // Coalesce bursts into the same directory (a tree landing file after file): bumping the
+  // newest entry's seq is enough — a client behind it is handed the dir exactly once.
+  size_t newest = (this->dir_changes_next_ + DIR_CHANGES_SIZE - 1) % DIR_CHANGES_SIZE;
+  if (this->dir_changes_[newest].seq != 0 && this->dir_changes_[newest].dir == dir) {
+    this->dir_changes_[newest].seq = ++this->change_seq_;
+    return;
+  }
+  auto &e = this->dir_changes_[this->dir_changes_next_];
+  this->dir_changes_next_ = (this->dir_changes_next_ + 1) % DIR_CHANGES_SIZE;
+  e.seq = ++this->change_seq_;
+  e.dir = dir;
+}
+
+void WebServerFileApi::note_parent_changed_(const std::string &path) { this->note_dir_changed_(parent_dir_of(path)); }
+
+void WebServerFileApi::handle_changes_(AsyncWebServerRequest *request) {
+  uint32_t since = 0;
+  auto *param = request->getParam("since");
+  if (param != nullptr)
+    since = strtoul(param->value().c_str(), nullptr, 10);
+  std::string json;
+  bool ok = this->run_on_loop_([this, since, &json]() {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"seq\":%" PRIu32, this->change_seq_);
+    json = buf;
+    if (since == 0) {
+      // First contact: the client renders fresh anyway — it only needs a cursor.
+      json += ",\"dirs\":[]}";
+      return;
+    }
+    uint32_t oldest = 0;
+    for (auto &e : this->dir_changes_) {
+      if (e.seq != 0 && (oldest == 0 || e.seq < oldest))
+        oldest = e.seq;
+    }
+    if (oldest != 0 && oldest > since + 1) {
+      // Entries between the cursor and the ring's oldest were evicted — what exactly changed
+      // is unknowable, so the client is told to consider everything it shows dirty.
+      json += ",\"reset\":true,\"dirs\":[]}";
+      return;
+    }
+    json += ",\"dirs\":[";
+    bool first = true;
+    for (size_t i = 0; i < DIR_CHANGES_SIZE; i++) {
+      auto &e = this->dir_changes_[i];
+      if (e.seq == 0 || e.seq <= since)
+        continue;
+      // The coalescing above only merges adjacent repeats; dedupe the rest while emitting.
+      bool dup = false;
+      for (size_t j = 0; j < i && !dup; j++)
+        dup = this->dir_changes_[j].seq > since && this->dir_changes_[j].dir == e.dir;
+      if (dup)
+        continue;
+      if (!first)
+        json += ",";
+      first = false;
+      json += "\"";
+      append_json_escaped(json, e.dir.c_str());
+      json += "\"";
+    }
+    json += "]}";
+  });
+  if (!ok) {
+    request->send(504);
+    return;
+  }
+  request->send(200, "application/json", json.c_str());
+}
+
 void WebServerFileApi::handle_mkdir_(AsyncWebServerRequest *request) {
   auto *param = request->getParam("path");
   if (param == nullptr) {
@@ -392,6 +473,8 @@ void WebServerFileApi::handle_mkdir_(AsyncWebServerRequest *request) {
       return;
     }
     err = ps->mkdir(rel);
+    if (err == storage::StorageError::OK)
+      this->note_parent_changed_(path);
   });
   if (!ok) {
     request->send(504);
@@ -423,6 +506,8 @@ void WebServerFileApi::handle_delete_(AsyncWebServerRequest *request) {
       return;
     }
     err = recursive ? storage::remove_recursive(ps, rel) : ps->remove(rel);
+    if (err == storage::StorageError::OK)
+      this->note_parent_changed_(path);
   });
   if (!ok) {
     request->send(504);
@@ -461,6 +546,8 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
       return;
     }
     err = mount ? m->mount() : m->unmount();
+    if (err == storage::StorageError::OK)
+      this->note_dir_changed_("");  // the roots level: a mount came or went
   });
   if (!ok) {
     request->send(504);
@@ -562,8 +649,16 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     // heap slot filled right below; safe because both submission and completion run on the
     // main loop, strictly in that order. Freed by the callback (fires exactly once).
     auto *job_slot = new storage::TransferJob(storage::INVALID_TRANSFER_JOB);  // NOLINT
-    auto on_done = [this, job_slot](storage::StorageError result) {
+    // Whatever the outcome, the destination's parent may have gained entries (a partial tree
+    // is still a change), and a move drains the source's parent. Noted at completion, not
+    // submission — before that nothing has changed yet.
+    std::string dst_parent = parent_dir_of(to_s);
+    std::string src_parent = is_move ? parent_dir_of(from_s) : std::string();
+    auto on_done = [this, job_slot, dst_parent, src_parent](storage::StorageError result) {
       this->cache_job_result_(*job_slot, result);
+      this->note_dir_changed_(dst_parent);
+      if (!src_parent.empty())
+        this->note_dir_changed_(src_parent);
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
     };
     storage::StorageWorker *w = storage::global_storage_worker;
@@ -642,6 +737,9 @@ void WebServerFileApi::loop() {
       storage::global_transfer_buffer->release();
       this->flush_.result = err;
       this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
+      if (err == storage::StorageError::OK && this->flush_.storage != nullptr) {
+        this->note_parent_changed_(std::string(this->flush_.storage->get_mount_path()) + "/" + this->flush_.rel_path);
+      }
       this->loop_requester_.stop();
       ESP_LOGD(TAG, "staged upload flushed: %u/%u bytes (%s)", (unsigned) this->flush_.done,
                (unsigned) this->flush_.total, storage::error_to_string(err));
@@ -903,6 +1001,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     }
     this->upload_ = UploadState{};
     this->upload_.active = true;
+    this->upload_.staged_handoff = false;
 
     auto *param = request->getParam("path");
     std::string path;
@@ -1002,7 +1101,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         memcpy(this->flush_.rel_path, this->upload_.rel_path, sizeof(this->flush_.rel_path));
         this->flush_.data = this->upload_.staged;
         this->flush_.total = this->upload_.offset;
-        this->upload_.handle_open = false;  // the flush owns and closes the handle now
+        this->upload_.handle_open = false;    // the flush owns and closes the handle now
+        this->upload_.staged_handoff = true;  // the change note fires at flush completion
       } else {
         storage::global_transfer_buffer->release();  // receive failed — nothing to flush
       }
@@ -1021,6 +1121,13 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     }
     if (this->upload_.error == storage::StorageError::OK)
       this->upload_.error = close_err;
+    if (this->upload_.error == storage::StorageError::OK && this->upload_.storage != nullptr &&
+        !this->upload_.staged_handoff) {
+      // The file is fully on storage: its directory gained an entry. Rebuild the absolute
+      // path the client used (resolve_() split it) — the note itself is main-loop-only.
+      std::string abs = std::string(this->upload_.storage->get_mount_path()) + "/" + this->upload_.rel_path;
+      this->run_on_loop_([this, &abs]() { this->note_parent_changed_(abs); });
+    }
   }
 }
 
