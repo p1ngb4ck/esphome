@@ -1,5 +1,6 @@
 #include "storage_worker.h"
 #include "esphome/core/log.h"
+#include "esphome/core/wake.h"
 
 #ifdef USE_STORAGE_WORKER
 
@@ -328,14 +329,6 @@ void StorageWorker::loop() {
   if (!this->started_)
     return;
 
-  // TEMP PROBE 1: proves this loop() actually executes on this build once the first async
-  // transfer has been submitted. One-shot — remove together with the other probes.
-  static bool probe_worker_loop_alive = false;
-  if (!probe_worker_loop_alive) {
-    probe_worker_loop_alive = true;
-    ESP_LOGI(TAG, "PROBE1: StorageWorker::loop() alive (first pass after start)");
-  }
-
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
   // loop, per the public API's contract.
@@ -343,10 +336,6 @@ void StorageWorker::loop() {
     if (req.state.load() == RequestState::DONE) {
       CompletionCallback cb = std::move(req.callback);
       StorageError result = req.result;
-      // TEMP PROBE 2: proves completion delivery reaches the callback invocation, and whether
-      // a callback was actually stored for this slot.
-      ESP_LOGI(TAG, "PROBE2: delivering DONE slot=%d result=%d has_cb=%d", (int) (&req - this->pool_.begin()),
-               (int) result, (int) static_cast<bool>(cb));
       req.callback = nullptr;
       req.src_storage = nullptr;
       req.dst_storage = nullptr;
@@ -456,8 +445,17 @@ void StorageWorker::task_loop_() {
       // is no "loop until DONE" here; DONE only happens on end_write()/end_read()'s step.
       this->run_stream_step_(this->stream_pool_[entry.index]);
     }
-    // DONE (or IDLE, for streams) reached; loop() on the main loop delivers the completion
-    // callback and frees the slot.
+    // DONE (or IDLE, for streams) reached, and this task is the producer: loop() delivers the
+    // completion, but the component phase it runs in is gated (loop_interval_, high-frequency
+    // request, or an explicit wake). Nothing else asks for it — an HTTP request does not drive
+    // it, it only reads. So wake it here, which is exactly what wake_loop_threadsafe() is for:
+    // a background producer queued work for its component's loop() to drain.
+    //
+    // Without this the completion sits in the slot until the phase happens to come around.
+    // A caller that polls for a result eventually sees it; a caller that *chains* on it — the
+    // file browser's directory walker submits file N+1 only once file N's completion has been
+    // delivered — stops dead after the first file.
+    wake_loop_threadsafe();
   }
 }
 #endif
