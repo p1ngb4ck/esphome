@@ -2882,7 +2882,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
 
     dest = Path(CORE.build_path) / "components" / "fatfs"
     marker = dest / _EXFAT_MARKER
-    stamp = f"{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    stamp = f"v3:{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
     if not enabled:
         # Only remove what is provably ours.
         if marker.is_file():
@@ -2914,6 +2914,33 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
                 f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
                 f"unexpected FatFs layout in IDF {idf_version}"
             )
+    # Kconfig bool symbols that are disabled produce no #define, yet ff.c uses several of
+    # them in plain C expressions (e.g. `if (FF_USE_LABEL && vol)`) — inside the original
+    # IDF component that resolves, in a project-component copy it surfaced as 'undeclared
+    # identifier'. Default every CONFIG_ symbol the header references to 0 when undefined:
+    # a no-op for anything sdkconfig.h defines, and exactly the value a disabled bool means
+    # otherwise. Scanned generically so new symbols in future IDF versions are covered.
+    # Only symbols used in *value* contexts: defining one that ffconf.h probes with
+    # #ifdef/defined() would make the probe true and silently flip choice groups
+    # (LFN_STACK/HEAP, STRFUNC_*, API_ENCODING_*).
+    probed = set()
+    for line in text.splitlines():
+        if re.search(r"#\s*if(n?def)?\b", line) or "defined" in line:
+            probed.update(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", line))
+    symbols = sorted(set(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", text)) - probed)
+    guards = "".join(f"#ifndef {sym}\n#define {sym} 0\n#endif\n" for sym in symbols)
+    include_line = '#include "sdkconfig.h"\n'
+    if include_line not in text:
+        raise cv.Invalid(
+            "enable_exfat: unexpected ffconf.h layout — no sdkconfig.h include to anchor on"
+        )
+    text = text.replace(
+        include_line,
+        include_line
+        + "\n/* ESPHome exFAT override: undefined-symbol guards, see codegen */\n"
+        + guards,
+        1,
+    )
     ffconf.write_text(text)
     marker.write_text(stamp)
 
