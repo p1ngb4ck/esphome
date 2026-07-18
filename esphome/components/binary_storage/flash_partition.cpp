@@ -56,7 +56,7 @@ void FlashPartition::setup() {
 #endif
 
 #if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
-  // So an incoming pre-fill image (OTA_TYPE_UPDATE_APP_WITH_DATA) can have this mount step
+  // So an incoming pre-fill image (an in-band pre-fill OTA) can have this mount step
   // aside instead of forcing a reboot.
   ota::register_data_partition_listener(this);
 #endif

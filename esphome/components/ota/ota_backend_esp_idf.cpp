@@ -23,41 +23,101 @@ static const char *const TAG = "ota.idf";
 std::unique_ptr<IDFOTABackend> make_ota_backend() { return make_unique<IDFOTABackend>(); }
 
 #ifdef USE_OTA_PARTITIONS
-OTAResponseTypes IDFOTABackend::set_data_partition(const char *label, size_t app_size) {
-  this->data_partition_ = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, label);
-  if (this->data_partition_ == nullptr) {
-    ESP_LOGE(TAG, "Data partition '%s' not found", label);
-    return OTA_RESPONSE_ERROR_DATA_PARTITION;
+// The in-band pre-fill header a stock sender streams unchanged (layout documented in
+// esphome_esp_littlefs tools/make_prefill_ota.py): magic "EPF2" | app_size u32 BE |
+// image_size u32 BE | label (32, NUL-padded) | image MD5 (16) | reserved (4).
+static constexpr uint8_t PREFILL_MAGIC[4] = {'E', 'P', 'F', '2'};
+
+OTAResponseTypes IDFOTABackend::write_app_(const uint8_t *data, size_t len) {
+  // No md5 here: every caller has already hashed these bytes when they arrived.
+  esp_err_t err = esp_ota_write(this->update_handle_, data, len);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_ota_write failed (err=0x%X)", err);
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED)
+      return OTA_RESPONSE_ERROR_MAGIC;
+    if (err == ESP_ERR_FLASH_OP_TIMEOUT || err == ESP_ERR_FLASH_OP_FAIL)
+      return OTA_RESPONSE_ERROR_WRITING_FLASH;
+    return OTA_RESPONSE_ERROR_UNKNOWN;
   }
-  this->data_app_size_ = app_size;
-  this->data_listener_ = find_data_partition_listener(label);
   return OTA_RESPONSE_OK;
 }
 
-OTAResponseTypes IDFOTABackend::prepare_data_partition_(size_t total_size) {
-  // set_data_partition() must have run (the sub-header precedes the size on the wire).
-  if (this->data_partition_ == nullptr || this->data_app_size_ > total_size)
+OTAResponseTypes IDFOTABackend::decide_stream_head_() {
+  this->head_decided_ = true;
+  if (memcmp(this->head_buf_, PREFILL_MAGIC, sizeof(PREFILL_MAGIC)) != 0) {
+    // A plain app image: begin the slot for the announced total and replay the buffered
+    // head — from here everything behaves exactly like the immediate-begin path.
+    OTAResponseTypes result = this->app_slot_begin_(this->pending_total_);
+    if (result != OTA_RESPONSE_OK)
+      return result;
+    return this->write_app_(this->head_buf_, this->head_have_);
+  }
+  const uint8_t *h = this->head_buf_;
+  size_t app_size =
+      (static_cast<size_t>(h[4]) << 24) | (static_cast<size_t>(h[5]) << 16) | (static_cast<size_t>(h[6]) << 8) | h[7];
+  size_t image_size =
+      (static_cast<size_t>(h[8]) << 24) | (static_cast<size_t>(h[9]) << 16) | (static_cast<size_t>(h[10]) << 8) | h[11];
+  char label[33];
+  memcpy(label, h + 12, 32);
+  label[32] = '\0';
+  if (app_size == 0 || image_size == 0 || sizeof(this->head_buf_) + app_size + image_size != this->pending_total_) {
+    ESP_LOGE(TAG, "Pre-fill header sizes inconsistent with the stream");
     return OTA_RESPONSE_ERROR_DATA_PARTITION;
-  this->data_image_size_ = total_size - this->data_app_size_;
-  if (this->data_image_size_ == 0 || this->data_image_size_ > this->data_partition_->size)
+  }
+  this->data_partition_ = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, label);
+  if (this->data_partition_ == nullptr) {
+    ESP_LOGE(TAG, "Pre-fill data partition '%s' not found", label);
     return OTA_RESPONSE_ERROR_DATA_PARTITION;
+  }
+  if (image_size > this->data_partition_->size)
+    return OTA_RESPONSE_ERROR_DATA_PARTITION;
+  this->data_app_size_ = app_size;
+  this->data_image_size_ = image_size;
+  this->data_stream_pos_ = 0;
+  this->data_listener_ = find_data_partition_listener(label);
+  ESP_LOGI(TAG, "OTA carries a pre-fill image for '%s' (app %zu + image %zu bytes)", label, app_size, image_size);
   // The mounted filesystem lets go of the flash before anything changes under it.
   if (this->data_listener_ != nullptr)
     this->data_listener_->on_ota_data_partition_before_write();
   this->data_active_ = true;
-  // Same erase-budget arithmetic as the app slot below: ~10ms/KiB over a 15s floor.
-  size_t erase_size = (this->data_image_size_ + SPI_FLASH_SEC_SIZE - 1) & ~(SPI_FLASH_SEC_SIZE - 1);
-  if (erase_size > this->data_partition_->size)
-    erase_size = this->data_partition_->size;
-  const uint32_t erase_budget_ms = 15000 + (erase_size >> 10) * 10;
-  watchdog::WatchdogManager watchdog(erase_budget_ms);
-  esp_err_t err = esp_partition_erase_range(this->data_partition_, 0, erase_size);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Erasing data partition failed (err=0x%X)", err);
-    this->finish_data_partition_(false);
-    return OTA_RESPONSE_ERROR_WRITING_FLASH;
+  {
+    // Same erase-budget arithmetic as the app slot: ~10ms/KiB over a 15s floor.
+    size_t erase_size = (image_size + SPI_FLASH_SEC_SIZE - 1) & ~(SPI_FLASH_SEC_SIZE - 1);
+    if (erase_size > this->data_partition_->size)
+      erase_size = this->data_partition_->size;
+    const uint32_t erase_budget_ms = 15000 + (erase_size >> 10) * 10;
+    watchdog::WatchdogManager watchdog(erase_budget_ms);
+    esp_err_t err = esp_partition_erase_range(this->data_partition_, 0, erase_size);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Erasing data partition failed (err=0x%X)", err);
+      this->finish_data_partition_(false);
+      return OTA_RESPONSE_ERROR_WRITING_FLASH;
+    }
   }
-  this->data_stream_pos_ = 0;
+  return this->app_slot_begin_(app_size);
+}
+
+OTAResponseTypes IDFOTABackend::route_stream_(const uint8_t *data, size_t len) {
+  // One pass, split at the [app][image] seam; a chunk may straddle it.
+  size_t pos = this->data_stream_pos_;
+  this->data_stream_pos_ += len;
+  size_t app_part = 0;
+  if (pos < this->data_app_size_) {
+    app_part = std::min(len, this->data_app_size_ - pos);
+    OTAResponseTypes result = this->write_app_(data, app_part);
+    if (result != OTA_RESPONSE_OK)
+      return result;
+  }
+  if (app_part < len) {
+    size_t data_off = pos + app_part - this->data_app_size_;
+    if (data_off + (len - app_part) > this->data_image_size_)
+      return OTA_RESPONSE_ERROR_DATA_PARTITION;
+    esp_err_t err = esp_partition_write(this->data_partition_, data_off, data + app_part, len - app_part);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "esp_partition_write failed (err=0x%X)", err);
+      return OTA_RESPONSE_ERROR_WRITING_FLASH;
+    }
+  }
   return OTA_RESPONSE_OK;
 }
 
@@ -93,19 +153,6 @@ OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) 
       return result;
     }
   }
-  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP_WITH_DATA) {
-    // image_size is the whole stream here; the data part is prepared now, the app part (if
-    // any) falls through to the regular esp_ota path below, sized to the app bytes alone.
-    OTAResponseTypes result = this->prepare_data_partition_(image_size);
-    if (result != OTA_RESPONSE_OK)
-      return result;
-    if (this->data_app_size_ == 0) {
-      // Pure data update: no app slot involved, nothing else to prepare.
-      this->md5_.init();
-      return OTA_RESPONSE_OK;
-    }
-    image_size = this->data_app_size_;
-  }
   if (!this->is_app_or_bootloader_update_()) {
     return OTA_RESPONSE_ERROR_UNSUPPORTED_OTA_TYPE;
   }
@@ -126,6 +173,29 @@ OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) 
     return OTA_RESPONSE_ERROR_NO_UPDATE_PARTITION;
   }
 
+#ifdef USE_OTA_PARTITIONS
+  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP) {
+    // A completely stock sender may be streaming a pre-fill artifact
+    // ([64-byte header][app][littlefs image], built by our esp_littlefs component) — that
+    // is only knowable from the first bytes. Defer esp_ota_begin() until write() has seen
+    // them: with a header the slot is sized/erased for the app alone and the image bytes
+    // route straight into the named data partition; without one this behaves exactly as
+    // the immediate begin below.
+    this->pending_total_ = image_size;
+    this->head_have_ = 0;
+    this->head_decided_ = false;
+    this->md5_.init();
+    return OTA_RESPONSE_OK;
+  }
+#endif
+
+  OTAResponseTypes result = this->app_slot_begin_(image_size);
+  if (result == OTA_RESPONSE_OK)
+    this->md5_.init();
+  return result;
+}
+
+OTAResponseTypes IDFOTABackend::app_slot_begin_(size_t image_size) {
   // esp_ota_begin() erases the destination region, which blocks loopTask and
   // scales with the erase size -- a fixed watchdog overruns on large OTA slots.
   // An unknown size (0, e.g. web_server uploads) erases the whole partition, so
@@ -162,7 +232,6 @@ OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) 
     }
   }
 #endif
-  this->md5_.init();
   return OTA_RESPONSE_OK;
 }
 
@@ -183,32 +252,29 @@ OTAResponseTypes IDFOTABackend::write(uint8_t *data, size_t len) {
     this->md5_.add(data, len);
     return OTA_RESPONSE_OK;
   }
-  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP_WITH_DATA) {
-    // One MD5 over the whole stream — end() verifies before anything boot-relevant happens.
+  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && !this->head_decided_) {
+    // Undecided stream head: gather 64 bytes, then decide once.
     this->md5_.add(data, len);
-    size_t pos = this->data_stream_pos_;
-    this->data_stream_pos_ += len;
-    size_t app_part = 0;
-    if (pos < this->data_app_size_) {
-      // The chunk may straddle the [app][image] seam.
-      app_part = std::min(len, this->data_app_size_ - pos);
-      esp_err_t app_err = esp_ota_write(this->update_handle_, data, app_part);
-      if (app_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_write failed (err=0x%X)", app_err);
-        return OTA_RESPONSE_ERROR_WRITING_FLASH;
-      }
+    while (len > 0 && this->head_have_ < sizeof(this->head_buf_)) {
+      this->head_buf_[this->head_have_++] = *data++;
+      len--;
     }
-    if (app_part < len) {
-      size_t data_off = pos + app_part - this->data_app_size_;
-      if (data_off + (len - app_part) > this->data_image_size_)
-        return OTA_RESPONSE_ERROR_DATA_PARTITION;
-      esp_err_t data_err = esp_partition_write(this->data_partition_, data_off, data + app_part, len - app_part);
-      if (data_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_partition_write failed (err=0x%X)", data_err);
-        return OTA_RESPONSE_ERROR_WRITING_FLASH;
-      }
-    }
-    return OTA_RESPONSE_OK;
+    if (this->head_have_ < sizeof(this->head_buf_))
+      return OTA_RESPONSE_OK;  // decision pending; end() flushes streams shorter than a header
+    OTAResponseTypes result = this->decide_stream_head_();
+    if (result != OTA_RESPONSE_OK)
+      return result;
+    if (len == 0)
+      return OTA_RESPONSE_OK;
+    // Remainder of the deciding chunk: seam-routed for a pre-fill stream, straight to the
+    // slot for a plain app (its bytes are already hashed above).
+    if (this->data_active_)
+      return this->route_stream_(data, len);
+    return this->write_app_(data, len);
+  }
+  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && this->data_active_) {
+    this->md5_.add(data, len);
+    return this->route_stream_(data, len);
   }
   if (!this->is_app_or_bootloader_update_()) {
     return OTA_RESPONSE_ERROR_UNSUPPORTED_OTA_TYPE;
@@ -240,11 +306,15 @@ OTAResponseTypes IDFOTABackend::end() {
   if (this->ota_type_ == ota::OTA_TYPE_UPDATE_PARTITION_TABLE) {
     return this->update_partition_table();
   }
-  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP_WITH_DATA && this->data_app_size_ == 0) {
-    // Data-only: every byte is on flash and the MD5 above covered them all. Hand the
-    // filesystem back; the caller skips the reboot.
-    this->finish_data_partition_(true);
-    return OTA_RESPONSE_OK;
+  if (this->ota_type_ == ota::OTA_TYPE_UPDATE_APP && !this->head_decided_ && this->head_have_ > 0) {
+    // A stream shorter than a pre-fill header cannot be one: begin the slot for the real
+    // total and flush the buffered head as plain app bytes (already hashed on receive).
+    OTAResponseTypes result = this->app_slot_begin_(this->pending_total_);
+    if (result == OTA_RESPONSE_OK)
+      result = this->write_app_(this->head_buf_, this->head_have_);
+    this->head_decided_ = true;
+    if (result != OTA_RESPONSE_OK)
+      return result;
   }
   if (!this->is_app_or_bootloader_update_()) {
     return OTA_RESPONSE_ERROR_UNSUPPORTED_OTA_TYPE;

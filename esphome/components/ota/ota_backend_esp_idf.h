@@ -19,11 +19,7 @@ void get_running_app_position(uint32_t &offset, size_t &size);
 class IDFOTABackend final {
  public:
   OTAResponseTypes begin(size_t image_size, ota::OTAType ota_type = ota::OTA_TYPE_UPDATE_APP);
-#ifdef USE_OTA_PARTITIONS
-  // OTA_TYPE_UPDATE_APP_WITH_DATA: called from the sub-header before begin(). Locates the
-  // target data partition by label and records where the stream splits.
-  OTAResponseTypes set_data_partition(const char *label, size_t app_size);
-#endif
+
   void set_update_md5(const char *md5);
   OTAResponseTypes write(uint8_t *data, size_t len);
   OTAResponseTypes end();
@@ -54,15 +50,20 @@ class IDFOTABackend final {
   // The OTA types that flow through esp_ota_begin/write/end. Partition-table updates take a
   // separate code path that buffers the table in RAM and never touches the OTA handle.
   bool is_app_or_bootloader_update_() const {
-    return this->ota_type_ == ota::OTA_TYPE_UPDATE_APP || this->ota_type_ == ota::OTA_TYPE_UPDATE_BOOTLOADER ||
-           this->ota_type_ == ota::OTA_TYPE_UPDATE_APP_WITH_DATA;
+    return this->ota_type_ == ota::OTA_TYPE_UPDATE_APP || this->ota_type_ == ota::OTA_TYPE_UPDATE_BOOTLOADER;
   }
 
-  // OTA_TYPE_UPDATE_APP_WITH_DATA plumbing. The stream is [app][image]; write() splits it at
-  // data_app_size_, the image lands in data_partition_ via esp_partition_write. The listener
-  // (a mounted filesystem, typically) lets go of the flash before the erase and gets it back
-  // in finish_data_partition_() — success only after the whole stream verified.
-  OTAResponseTypes prepare_data_partition_(size_t total_size);
+  // In-band pre-fill support ([64-byte header][app][littlefs image], streamed by a
+  // completely stock sender — see esphome_esp_littlefs tools/make_prefill_ota.py). begin()
+  // defers the slot for plain app updates until the first 64 bytes reveal whether a header
+  // leads them; decide_stream_head_() then sizes the slot for the app alone, prepares the
+  // named data partition (listener unmounts first) and route_stream_() splits every chunk
+  // at the seam in a single pass. finish_data_partition_() hands the filesystem back —
+  // success only after the boot switch, so old app never meets new data.
+  OTAResponseTypes app_slot_begin_(size_t image_size);
+  OTAResponseTypes write_app_(const uint8_t *data, size_t len);
+  OTAResponseTypes decide_stream_head_();
+  OTAResponseTypes route_stream_(const uint8_t *data, size_t len);
   void finish_data_partition_(bool success);
 #endif
 
@@ -83,6 +84,10 @@ class IDFOTABackend final {
   const esp_partition_t *partition_table_part_{nullptr};
   const esp_partition_t *bootloader_part_{nullptr};
   ota::OTAType ota_type_{ota::OTA_TYPE_UPDATE_APP};
+  uint8_t head_buf_[64]{};
+  size_t head_have_{0};
+  bool head_decided_{false};
+  size_t pending_total_{0};
   const esp_partition_t *data_partition_{nullptr};
   OTADataPartitionListener *data_listener_{nullptr};
   size_t data_app_size_{0};

@@ -82,7 +82,7 @@ class FlashPartition : public storage::FilesystemStorage
   bool remount();
 
 #if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
-  // OTA data-partition listener (OTA_TYPE_UPDATE_APP_WITH_DATA): the mount releases the
+  // OTA data-partition listener (an in-band pre-fill OTA): the mount releases the
   // flash before the OTA rewrites the partition and comes back on the new image afterwards
   // — no reboot involved. In-flight worker traffic is drained first via the registry.
   const char *ota_data_partition_label() override { return this->partition_label_; }

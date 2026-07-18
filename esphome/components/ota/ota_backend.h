@@ -77,13 +77,10 @@ enum OTAType : uint8_t {
   OTA_TYPE_UPDATE_APP = 0x00,
   OTA_TYPE_UPDATE_PARTITION_TABLE = 0x01,
   OTA_TYPE_UPDATE_BOOTLOADER = 0x02,
-  // One stream, two destinations: [app bytes][data partition image]. The sub-header names
-  // the split and the target partition; app size 0 makes it a pure data update (no reboot).
-  OTA_TYPE_UPDATE_APP_WITH_DATA = 0x03,
 };
 
 /** Whoever keeps a filesystem mounted on a data partition registers one of these, so an OTA
- * that rewrites the partition (OTA_TYPE_UPDATE_APP_WITH_DATA) can have the mount let go of
+ * that rewrites the partition (an in-band pre-fill OTA) can have the mount let go of
  * the flash before bytes fly and pick it back up afterwards — no reboot required. */
 class OTADataPartitionListener {
  public:
