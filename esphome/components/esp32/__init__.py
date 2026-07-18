@@ -2771,7 +2771,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
 
     dest = Path(CORE.build_path) / "components" / "fatfs"
     marker = dest / _EXFAT_MARKER
-    stamp = f"v3:{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    stamp = f"v4:{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
     if not enabled:
         # Only remove what is provably ours.
         if marker.is_file():
@@ -2809,13 +2809,23 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
     # identifier'. Default every CONFIG_ symbol the header references to 0 when undefined:
     # a no-op for anything sdkconfig.h defines, and exactly the value a disabled bool means
     # otherwise. Scanned generically so new symbols in future IDF versions are covered.
-    # Only symbols used in *value* contexts: defining one that ffconf.h probes with
-    # #ifdef/defined() would make the probe true and silently flip choice groups
-    # (LFN_STACK/HEAP, STRFUNC_*, API_ENCODING_*).
+    # Only symbols used in *value* contexts and probed nowhere: defining a symbol that any
+    # compiled source probes with #ifdef/defined() makes the probe true and silently
+    # enables the guarded code — vfs_fat.c does exactly that with USE_FASTSEEK (its
+    # fastseek block then references FIL::cltbl, which the ffconf side correctly compiled
+    # out). So the probe scan covers the whole copied component, not just ffconf.h;
+    # test_apps/host_test/fatfs_utils are excluded because they are never built and their
+    # probes must not suppress legitimate guards.
     probed = set()
-    for line in text.splitlines():
-        if re.search(r"#\s*if(n?def)?\b", line) or "defined" in line:
-            probed.update(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", line))
+    skip_dirs = {"test_apps", "host_test", "fatfs_utils"}
+    for f in dest.rglob("*"):
+        if f.suffix not in (".c", ".h") or skip_dirs & set(
+            part.name for part in f.parents
+        ):
+            continue
+        for line in f.read_text(errors="replace").splitlines():
+            if re.search(r"#\s*if(n?def)?\b", line) or "defined" in line:
+                probed.update(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", line))
     symbols = sorted(set(re.findall(r"\bCONFIG_[A-Z0-9_]+\b", text)) - probed)
     guards = "".join(f"#ifndef {sym}\n#define {sym} 0\n#endif\n" for sym in symbols)
     include_line = '#include "sdkconfig.h"\n'
