@@ -14,7 +14,6 @@ from esphome.const import CONF_FRAMEWORK, CONF_SOURCE
 from esphome.core import CORE, EsphomeError
 from esphome.espidf.framework import check_esp_idf_install, get_framework_env
 from esphome.espidf.size_summary import print_summary
-from esphome.espota2 import OTA_PREFILL_FOOTER_MAGIC, OTA_PREFILL_FOOTER_SIZE
 from esphome.helpers import add_git_ceiling_directory
 
 _LOGGER = logging.getLogger(__name__)
@@ -557,16 +556,8 @@ def create_factory_bin() -> bool:
     return True
 
 
-# firmware.ota.bin with a pre-fill image: [app][littlefs image][64-byte footer]. The footer
-# sits at the very end so the sender can detect it by reading the file tail; devices without
-# the extended OTA type never see the extra bytes (the sender strips them for a plain app
-# upload). Format constants live with the sender (espota2.py, imported above) so the two
-# cannot drift.
-
-
 def create_ota_bin() -> bool:
-    """Create firmware.ota.bin: the app image, plus — when a compile-time LittleFS pre-fill
-    is configured — the partition image and a trailing footer describing the split."""
+    """Copy the firmware to firmware.ota.bin for ESPHome OTA compatibility."""
     firmware_path = get_firmware_path()
     ota_path = get_ota_firmware_path()
 
@@ -574,43 +565,8 @@ def create_ota_bin() -> bool:
         _LOGGER.warning("Firmware not found: %s", firmware_path)
         return False
 
-    from esphome.components.esp32 import KEY_LITTLEFS_PREFILL
-
-    labels = CORE.data.get(KEY_ESP32, {}).get(KEY_LITTLEFS_PREFILL, [])
-    if not labels:
-        shutil.copy(firmware_path, ota_path)
-        _LOGGER.info("Created: %s", ota_path)
-        return True
-    if len(labels) > 1:
-        # The footer describes exactly one image; more would need a multi-image format.
-        _LOGGER.error("OTA pre-fill supports one partition per build, got: %s", labels)
-        return False
-    label = labels[0]
-    if len(label.encode()) > 32:
-        _LOGGER.error("Pre-fill partition label too long for the OTA footer: %s", label)
-        return False
-    image_path = CORE.relative_build_path("build") / f"{label}.bin"
-    if not image_path.is_file():
-        _LOGGER.error("Pre-fill image not found (build incomplete?): %s", image_path)
-        return False
-
-    import hashlib
-
-    app = firmware_path.read_bytes()
-    image = image_path.read_bytes()
-    footer = (
-        OTA_PREFILL_FOOTER_MAGIC
-        + len(app).to_bytes(4, "big")
-        + len(image).to_bytes(4, "big")
-        + label.encode().ljust(32, b"\x00")
-        + hashlib.md5(image).digest()
-        + b"\x00" * 4
-    )
-    assert len(footer) == OTA_PREFILL_FOOTER_SIZE
-    ota_path.write_bytes(app + image + footer)
-    _LOGGER.info(
-        "Created: %s (app %d + pre-fill image %d bytes)", ota_path, len(app), len(image)
-    )
+    shutil.copy(firmware_path, ota_path)
+    _LOGGER.info("Created: %s", ota_path)
     return True
 
 

@@ -609,13 +609,12 @@ def FILTER_SOURCE_FILES():
 
 def _stage_prefill(label: str, prefill: list) -> None:
     """Copy the pre-fill sources into a per-partition staging tree under the build dir and
-    wire the compile-time image build: littlefs_create_partition_image() turns the tree into
-    build/<label>.bin, FLASH_IN_PROJECT registers it in flasher_args.json — which is exactly
-    what create_factory_bin() merges, so the factory/serial path needs nothing further. The
-    label registration lets create_ota_bin() append the image to the OTA artifact."""
+    hand partition + tree to our own esp_littlefs component via sdkconfig — its
+    project_include.cmake builds the image (littlefs_create_partition_image) and
+    FLASH_IN_PROJECT registers it in flasher_args.json, which the stock factory merge picks
+    up as-is. No esphome core involved anywhere: component codegen, component cmake,
+    stock toolchain."""
     import shutil
-
-    from esphome.components.esp32 import add_project_cmake, register_littlefs_prefill
 
     staging = Path(CORE.build_path) / "littlefs_prefill" / label
     # Rebuilt from scratch every codegen run: stale files from removed entries must not
@@ -626,10 +625,10 @@ def _stage_prefill(label: str, prefill: list) -> None:
         dest = staging / entry[CONF_PRE_FILL_TARGET].lstrip("/")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(entry[CONF_PRE_FILL_SOURCE], dest)
-    add_project_cmake(
-        f'littlefs_create_partition_image({label} "{staging.as_posix()}" FLASH_IN_PROJECT)'
+    add_idf_sdkconfig_option("CONFIG_ESPHOME_LITTLEFS_PREFILL_PARTITION", label)
+    add_idf_sdkconfig_option(
+        "CONFIG_ESPHOME_LITTLEFS_PREFILL_DIR", staging.as_posix()
     )
-    register_littlefs_prefill(label)
 
 
 async def to_code(config):
