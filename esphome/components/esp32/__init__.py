@@ -2152,12 +2152,13 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         set_opt("CONFIG_FATFS_LFN_HEAP", True)
         set_opt("CONFIG_FATFS_MAX_LFN", 255)
         set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
-        # exFAT has no Kconfig symbol behind it — it is a plain #define in the FatFs library —
-        # so it is turned on by patching a private FatFs copy — registered here, emitted by
-        # the neutral pre-project slot in build_gen. Long filenames are a hard requirement
-        # of exFAT and are already set right above.
-        if enable_exfat:
-            add_pre_project_cmake(_EXFAT_FATFS_OVERRIDE)
+        # Long filenames are a hard requirement of exFAT and are already set right above;
+        # the FatFs #defines themselves come via a patched project-local component copy.
+        _sync_exfat_fatfs_override(
+            enable_exfat,
+            str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
+            get_esp32_variant(),
+        )
     elif enable_exfat:
         raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
@@ -2742,61 +2743,68 @@ async def to_code(config):
 
 
 KEY_CUSTOM_PARTITIONS = "custom_partitions"
-KEY_PROJECT_CMAKE = "project_cmake"
-KEY_PRE_PROJECT_CMAKE = "pre_project_cmake"
-KEY_LITTLEFS_PREFILL = "littlefs_prefill"
 
 
-# exFAT is a compile-time #define in the FatFs library (FF_FS_EXFAT in ffconf.h) with no
-# Kconfig symbol behind it, so the only way to turn it on is editing that header — ESP-IDF
-# documents this as the only path and provides none of its own. Same story for FF_LBA64,
-# which exFAT media sizes make mandatory (32-bit LBA ends at 2 TiB and predates GPT).
-#
-# The header lives in the shared IDF install, which every project on this machine builds
-# against. Patching it there would hand exFAT (and its side effects) to builds that never
-# asked. So copy the component into this build directory, patch the copy, and let IDF's own
-# override order pick it up: project_extra_components beats idf_components (see IDF's
-# tools/cmake/build.cmake). Nothing outside this build directory is touched, and the copy
-# comes from the IDF actually in use, so it cannot drift out of sync with it.
-#
-# Emitted via add_pre_project_cmake(): EXTRA_COMPONENT_DIRS must be final before
-# include(project.cmake) runs.
-_EXFAT_FATFS_OVERRIDE = """
-set(ESPHOME_FATFS_DIR ${CMAKE_BINARY_DIR}/esphome_fatfs)
-file(COPY $ENV{IDF_PATH}/components/fatfs DESTINATION ${ESPHOME_FATFS_DIR})
-file(READ ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h ESPHOME_FFCONF)
-string(REGEX REPLACE "#define[ \t]+FF_FS_EXFAT[ \t]+[0-9]+" "#define FF_FS_EXFAT 1"
-       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
-string(REGEX REPLACE "#define[ \t]+FF_LBA64[ \t]+[0-9]+" "#define FF_LBA64 1"
-       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
-# exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE), so TRIM
-# goes with it. It is an optimisation for the medium, not a feature anything depends on.
-string(REGEX REPLACE "#define[ \t]+FF_USE_TRIM[ \t]+[0-9]+" "#define FF_USE_TRIM 0"
-       ESPHOME_FFCONF "${ESPHOME_FFCONF}")
-file(WRITE ${ESPHOME_FATFS_DIR}/fatfs/src/ffconf.h "${ESPHOME_FFCONF}")
-list(APPEND EXTRA_COMPONENT_DIRS ${ESPHOME_FATFS_DIR}/fatfs)
-message(STATUS "ESPHome: exFAT enabled - building a patched FatFs copy in ${ESPHOME_FATFS_DIR}")
-"""
+_EXFAT_PATCHES = (
+    ("FF_FS_EXFAT", "1"),
+    # exFAT's media sizes make 32-bit LBA pointless (ends at 2 TiB, predates GPT).
+    ("FF_LBA64", "1"),
+    # exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE);
+    # TRIM is an optimisation for the medium, not a feature anything depends on.
+    ("FF_USE_TRIM", "0"),
+)
+_EXFAT_MARKER = ".esphome_exfat_override"
 
 
-def add_pre_project_cmake(snippet: str) -> None:
-    """Like add_project_cmake(), but emitted *before* include(project.cmake) — for the few
-    things IDF requires there, e.g. appending to EXTRA_COMPONENT_DIRS."""
-    CORE.data[KEY_ESP32].setdefault(KEY_PRE_PROJECT_CMAKE, []).append(snippet)
+def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) -> None:
+    """exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on
+    is a patched copy of the component. ESP-IDF auto-discovers <project>/components with the
+    highest precedence (project components override same-named IDF components), and the
+    generated project root is the build dir — so a patched copy at
+    <build>/components/fatfs/ wins, with zero cmake anywhere and nothing outside this build
+    directory touched. Synced every codegen: created/refreshed when enabled (stamped with
+    the IDF version so an IDF switch re-copies), removed when disabled — a stale copy would
+    keep exFAT on silently."""
+    import shutil
 
+    from esphome.espidf.framework import _get_framework_path, check_esp_idf_install
 
-def add_project_cmake(snippet: str) -> None:
-    """Append a CMake snippet to the generated top-level project CMakeLists, after
-    project() — i.e. with the full IDF build context (partition table, esptool_py)
-    available. For component-level build logic use add_idf_component() instead; this is
-    for the rare project-scope calls like littlefs_create_partition_image()."""
-    CORE.data[KEY_ESP32].setdefault(KEY_PROJECT_CMAKE, []).append(snippet)
-
-
-def register_littlefs_prefill(label: str) -> None:
-    """Note a partition whose LittleFS image is built at compile time, so the toolchain
-    can fold it into the OTA artifact (see espidf/toolchain.py create_ota_bin())."""
-    CORE.data[KEY_ESP32].setdefault(KEY_LITTLEFS_PREFILL, []).append(label)
+    dest = Path(CORE.build_path) / "components" / "fatfs"
+    marker = dest / _EXFAT_MARKER
+    stamp = f"{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    if not enabled:
+        # Only remove what is provably ours.
+        if marker.is_file():
+            shutil.rmtree(dest)
+        return
+    if marker.is_file() and marker.read_text() == stamp:
+        return  # current copy is up to date
+    src = _get_framework_path(idf_version) / "components" / "fatfs"
+    if not src.is_dir():
+        # First-ever build: the toolchain would install the IDF minutes from now anyway —
+        # front-load it so the copy source exists.
+        check_esp_idf_install(idf_version, targets=[variant])
+    if not src.is_dir():
+        raise cv.Invalid(
+            "enable_exfat: cannot locate the ESP-IDF fatfs component to patch "
+            f"(looked in {src})"
+        )
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    ffconf = dest / "src" / "ffconf.h"
+    text = ffconf.read_text()
+    for key, value in _EXFAT_PATCHES:
+        text, n = re.subn(
+            rf"#define[ \t]+{key}[ \t]+\S+", f"#define {key} {value}", text
+        )
+        if n != 1:
+            raise cv.Invalid(
+                f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
+                f"unexpected FatFs layout in IDF {idf_version}"
+            )
+    ffconf.write_text(text)
+    marker.write_text(stamp)
 
 
 @dataclass
