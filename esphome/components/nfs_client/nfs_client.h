@@ -395,6 +395,8 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   };
 
   MountState mount_state_{MountState::IDLE};
+  uint32_t last_wake_log_ms_{0};
+  void wake_if_unmounted_();
   // Set by mount()/connect() or the auto-connect edge below; consumed by loop() to start one
   // mount attempt. No periodic retry exists anymore — FAILED is terminal until the next
   // request (users schedule retries themselves via interval:/automations + storage.mount).
@@ -405,7 +407,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool network_was_connected_{false};
 
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
-  struct sockaddr_in server_addr_{};
+  struct sockaddr_in server_addr_ {};
   bool server_addr_resolved_{false};
 #endif
 

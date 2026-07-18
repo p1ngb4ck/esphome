@@ -393,6 +393,21 @@ void NFSClient::setup() {
   }
 }
 
+void NFSClient::wake_if_unmounted_() {
+  // The stateless client's data plane has no connection to keep it alive — when a consumer
+  // (worker copy, automation, file API) knocks while unmounted, the knock itself must
+  // request the mount: FAILED is otherwise terminal and every call would answer NOT_READY
+  // forever. loop() picks the request up from IDLE or FAILED on the next pass.
+  if (this->mounted_ || this->mount_requested_)
+    return;
+  uint32_t now = millis();
+  if (now - this->last_wake_log_ms_ > 5000) {
+    this->last_wake_log_ms_ = now;
+    ESP_LOGD(TAG, "Data-plane call while unmounted — requesting NFS mount");
+  }
+  this->mount_requested_ = true;
+}
+
 void NFSClient::loop() {
   // Auto-connect: fire ONE mount attempt on each rising edge of network connectivity.
   // network::is_connected() covers wifi, ethernet, modem and openthread alike, so no
@@ -588,6 +603,7 @@ storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -679,6 +695,7 @@ storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *bu
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -713,6 +730,7 @@ storage::StorageError NFSClient::stat(const char *path, storage::FileStat *stat)
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -739,6 +757,7 @@ storage::StorageError NFSClient::list_dir(const char *path, bool (*callback)(con
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -777,6 +796,7 @@ storage::StorageError NFSClient::mkdir(const char *path) {
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -797,6 +817,7 @@ storage::StorageError NFSClient::rmdir(const char *path) {
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -836,6 +857,7 @@ storage::StorageError NFSClient::remove(const char *path) {
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -854,6 +876,7 @@ storage::StorageError NFSClient::rename(const char *old_path, const char *new_pa
     return storage::StorageError::INVALID_ARGS;
   }
   if (!this->mounted_) {
+    this->wake_if_unmounted_();
     return storage::StorageError::NOT_READY;
   }
 
@@ -1002,7 +1025,8 @@ bool NFSClient::resolve_hostname_() {
     }
   }
 
-  struct addrinfo hints{}, *result = nullptr;
+  struct addrinfo hints {
+  }, *result = nullptr;
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
