@@ -151,7 +151,11 @@
   card.append(style, tab, frame);
   frame.append(status, tree);
 
-  const setStatus = (t) => { status.textContent = t || ""; };
+  // The status line remembers whether it currently shows an error, so background state
+  // changes (change poll) can retire errors that no longer describe reality — e.g. a mount
+  // failure whose card has since been swapped and auto-mounted.
+  let statusIsError = false;
+  const setStatus = (t) => { status.textContent = t || ""; statusIsError = /^Error/i.test(t || ""); };
 
   // Zebra striping. The listing is a lazy tree of nested containers, so CSS nth-child cannot
   // alternate across expansion levels — instead a tiny pass walks the *visible* rows in DOM
@@ -544,6 +548,10 @@
   const pollChanges = async () => {
     const c = await api(`/files/changes?since=${changeCursor}`);
     changeCursor = c.seq;
+    // The server reports actual state changes: whatever error the line still shows is
+    // about a world that no longer exists. Only then — an unchanged world keeps its error.
+    if (statusIsError && (c.reset || (c.dirs || []).length))
+      setStatus("");
     if (c.reset) {
       for (const r of openDirs.values()) r().catch(() => {});
       return;

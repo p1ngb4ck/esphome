@@ -1548,7 +1548,6 @@ KEY_USB_SERIAL_JTAG_SECONDARY_REQUIRED = "usb_serial_jtag_secondary_required"
 KEY_MBEDTLS_PEER_CERT_REQUIRED = "mbedtls_peer_cert_required"
 KEY_MBEDTLS_PKCS7_REQUIRED = "mbedtls_pkcs7_required"
 KEY_FATFS_REQUIRED = "fatfs_required"
-KEY_EXFAT_ENABLED = "exfat_enabled"
 KEY_MBEDTLS_SHA512_REQUIRED = "mbedtls_sha512_required"
 KEY_ADC_ONESHOT_IRAM_REQUIRED = "adc_oneshot_iram_required"
 KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED = "libc_picolibc_newlib_compat_required"
@@ -1638,15 +1637,6 @@ def idf_version() -> cv.Version:
     For Arduino builds this is the mapped IDF version from ARDUINO_IDF_VERSION_LOOKUP.
     """
     return CORE.data[KEY_ESP32][KEY_IDF_VERSION]
-
-
-def get_exfat_enabled() -> bool:
-    """Whether this build wants exFAT in its FatFs copy.
-
-    Read by the build_gen layer (build_gen.espidf.get_project_cmakelists) after codegen, since
-    only then is it settled whether anything mounts a FAT filesystem at all.
-    """
-    return CORE.data[KEY_ESP32].get(KEY_EXFAT_ENABLED, False)
 
 
 def require_fatfs() -> None:
@@ -2260,12 +2250,13 @@ async def _reconcile_vfs_fatfs_sdkconfig(
         if not opts.get("CONFIG_FATFS_LFN_NONE", False):
             set_opt("CONFIG_FATFS_MAX_LFN", 255)
         set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
-        # exFAT has no Kconfig symbol behind it — it is a plain #define in the FatFs library —
-        # so it is turned on in the build_gen layer, which patches a private copy of the
-        # component (see build_gen/espidf.py). Long filenames are a hard requirement of exFAT
-        # and are already set right above.
-        if enable_exfat:
-            CORE.data[KEY_ESP32][KEY_EXFAT_ENABLED] = True
+        # Long filenames are a hard requirement of exFAT and are already set right above;
+        # the FatFs #defines themselves come via a patched project-local component copy.
+        _sync_exfat_fatfs_override(
+            enable_exfat,
+            str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
+            get_esp32_variant(),
+        )
     elif enable_exfat:
         raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
@@ -2863,22 +2854,68 @@ async def to_code(config):
 
 
 KEY_CUSTOM_PARTITIONS = "custom_partitions"
-KEY_PROJECT_CMAKE = "project_cmake"
-KEY_LITTLEFS_PREFILL = "littlefs_prefill"
 
 
-def add_project_cmake(snippet: str) -> None:
-    """Append a CMake snippet to the generated top-level project CMakeLists, after
-    project() — i.e. with the full IDF build context (partition table, esptool_py)
-    available. For component-level build logic use add_idf_component() instead; this is
-    for the rare project-scope calls like littlefs_create_partition_image()."""
-    CORE.data[KEY_ESP32].setdefault(KEY_PROJECT_CMAKE, []).append(snippet)
+_EXFAT_PATCHES = (
+    ("FF_FS_EXFAT", "1"),
+    # exFAT's media sizes make 32-bit LBA pointless (ends at 2 TiB, predates GPT).
+    ("FF_LBA64", "1"),
+    # exFAT on a card driven over SPI trips the TRIM path (ESP_ERR_INVALID_RESPONSE);
+    # TRIM is an optimisation for the medium, not a feature anything depends on.
+    ("FF_USE_TRIM", "0"),
+)
+_EXFAT_MARKER = ".esphome_exfat_override"
 
 
-def register_littlefs_prefill(label: str) -> None:
-    """Note a partition whose LittleFS image is built at compile time, so the toolchain
-    can fold it into the OTA artifact (see espidf/toolchain.py create_ota_bin())."""
-    CORE.data[KEY_ESP32].setdefault(KEY_LITTLEFS_PREFILL, []).append(label)
+def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) -> None:
+    """exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on
+    is a patched copy of the component. ESP-IDF auto-discovers <project>/components with the
+    highest precedence (project components override same-named IDF components), and the
+    generated project root is the build dir — so a patched copy at
+    <build>/components/fatfs/ wins, with zero cmake anywhere and nothing outside this build
+    directory touched. Synced every codegen: created/refreshed when enabled (stamped with
+    the IDF version so an IDF switch re-copies), removed when disabled — a stale copy would
+    keep exFAT on silently."""
+    import shutil
+
+    from esphome.espidf.framework import _get_framework_path, check_esp_idf_install
+
+    dest = Path(CORE.build_path) / "components" / "fatfs"
+    marker = dest / _EXFAT_MARKER
+    stamp = f"{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    if not enabled:
+        # Only remove what is provably ours.
+        if marker.is_file():
+            shutil.rmtree(dest)
+        return
+    if marker.is_file() and marker.read_text() == stamp:
+        return  # current copy is up to date
+    src = _get_framework_path(idf_version) / "components" / "fatfs"
+    if not src.is_dir():
+        # First-ever build: the toolchain would install the IDF minutes from now anyway —
+        # front-load it so the copy source exists.
+        check_esp_idf_install(idf_version, targets=[variant])
+    if not src.is_dir():
+        raise cv.Invalid(
+            "enable_exfat: cannot locate the ESP-IDF fatfs component to patch "
+            f"(looked in {src})"
+        )
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    ffconf = dest / "src" / "ffconf.h"
+    text = ffconf.read_text()
+    for key, value in _EXFAT_PATCHES:
+        text, n = re.subn(
+            rf"#define[ \t]+{key}[ \t]+\S+", f"#define {key} {value}", text
+        )
+        if n != 1:
+            raise cv.Invalid(
+                f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
+                f"unexpected FatFs layout in IDF {idf_version}"
+            )
+    ffconf.write_text(text)
+    marker.write_text(stamp)
 
 
 @dataclass
