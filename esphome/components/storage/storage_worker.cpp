@@ -80,6 +80,24 @@ bool StorageWorker::is_task_safe_(const TransferRequest &req) const {
 #endif
 }
 
+// A stateless network storage answers NOT_READY while it is (re)connecting — the very call
+// that got the answer has just woken it (see NFSClient::wake_if_unmounted_()). Within this
+// window the request simply tries again next pass instead of dying; after it, NOT_READY is
+// the honest final answer (server truly gone).
+static constexpr uint32_t NETWORK_READY_WINDOW_MS = 20000;
+
+bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError err, const Storage *side) {
+  if (err != StorageError::NOT_READY || side == nullptr || side->get_storage_type() != StorageType::NETWORK)
+    return false;
+  if (millis() - req.submitted_ms > NETWORK_READY_WINDOW_MS)
+    return false;
+  if (!req.waiting_logged) {
+    req.waiting_logged = true;
+    ESP_LOGD(TAG, "Network storage not ready yet — waiting for it to come up");
+  }
+  return true;  // stay RUNNING; the loop retries this request on the next pass
+}
+
 bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
   for (const auto &req : this->pool_) {
     if (&req == &candidate)
@@ -150,6 +168,8 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->handles_open = false;
   slot->chunk_buf.reset();
   slot->chunk_size = 0;
+  slot->submitted_ms = millis();
+  slot->waiting_logged = false;
   slot->src_is_fs = src->get_storage_type() == StorageType::FILESYSTEM;
   slot->dst_is_fs = dst->get_storage_type() == StorageType::FILESYSTEM;
   // Tree ops keep their roots aside: src_path/dst_path are reused for the file currently in
@@ -617,6 +637,8 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
   if (!w.root_created) {
     StorageError err = req.dst_storage->mkdir(w.dst_root);
     if (err != StorageError::OK && err != StorageError::ALREADY_EXISTS) {
+      if (this->wait_for_network_ready_(req, err, req.dst_storage))
+        return false;  // not finished — retried next pass, the knock has woken the mount
       finish_request(req, err);
       return false;
     }
@@ -632,6 +654,8 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
 
     WalkEntryCtx ctx{w.index_stack[w.depth]};
     StorageError err = req.src_storage->list_dir(dir, walk_entry_cb, &ctx);
+    if (err == StorageError::NOT_READY && this->wait_for_network_ready_(req, err, req.src_storage))
+      return false;
     if (err != StorageError::OK) {
       finish_request(req, err);
       return false;
@@ -740,6 +764,8 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
       // worth redoing the long way: fall through to the chunk loop below, which copies and then
       // removes the source. Directories are not ours to salvage — the loop moves file bytes, so
       // the caller's per-file walker has to take that one.
+      if (this->wait_for_network_ready_(req, err, req.src_storage))
+        return;
       bool salvageable = err == StorageError::NOT_SUPPORTED && global_storage_registry != nullptr &&
                          global_storage_registry->get_move_fallback_copy();
       if (salvageable) {
@@ -814,6 +840,8 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
               ->read_chunk(req.src_path, req.chunk_buf.get(), req.offset, req.chunk_size, &bytes_read);
   }
   if (err != StorageError::OK) {
+    if (this->wait_for_network_ready_(req, err, req.src_storage))
+      return;
     finish_request(req, err);
     return;
   }
@@ -861,6 +889,8 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
                               bytes_read - total_written, &bytes_written);
     }
     if (err != StorageError::OK) {
+      if (this->wait_for_network_ready_(req, err, req.dst_storage))
+        return;
       finish_request(req, err);
       return;
     }

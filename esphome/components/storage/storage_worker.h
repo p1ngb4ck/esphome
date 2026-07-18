@@ -168,6 +168,10 @@ struct TransferRequest {
   // on_storage_unregistered_()'s timeout comment) — avoids re-logging every loop() iteration
   // for as long as the stuck slot remains. Reset when the request is freed.
   bool stuck_warned{false};
+  // Submission timestamp: bounds how long NOT_READY from a network storage is treated as
+  // "still connecting" (see run_chunk_) before it becomes the honest final answer.
+  uint32_t submitted_ms{0};
+  bool waiting_logged{false};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -392,6 +396,7 @@ class StorageWorker : public Component {
 
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;
+  bool wait_for_network_ready_(TransferRequest &req, storage::StorageError err, const storage::Storage *side);
   bool is_task_safe_(const StreamRequest &req) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
