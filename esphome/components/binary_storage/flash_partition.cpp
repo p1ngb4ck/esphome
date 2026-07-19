@@ -524,6 +524,12 @@ storage::FileHandle *FlashPartition::alloc_handle_(const char *path) {
       return &this->handle_pool_[i];
     }
   }
+  // Every slot taken is a leak until proven otherwise — name the holders, so the next
+  // 'no space although plenty is free' report indicts the exact non-closing caller.
+  ESP_LOGW(TAG, "File handle pool exhausted (%d slots) while opening '%s' — handles still open:", MAX_OPEN_FILES, path);
+  for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    ESP_LOGW(TAG, "  [%d] '%s'", i, this->handle_paths_[i]);
+  }
   return nullptr;
 }
 
