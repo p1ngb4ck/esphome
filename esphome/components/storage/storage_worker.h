@@ -342,6 +342,11 @@ class StorageWorker : public Component {
   void set_max_streams(size_t count) { this->max_streams_ = count; }
 
   void setup() override;
+  // loop() only forwards to process_(). The actual engine service is SCHEDULER-driven (see
+  // process_()/set_pump_(); Application services the scheduler unconditionally on every main
+  // loop tick and bounds its sleep by the next scheduler deadline) — the component phase that
+  // calls loop() is gated (loop_interval_ / high-frequency request / wake) and therefore not
+  // a reliable driver on its own.
   void loop() override;
   // DATA, not AFTER_CONNECTION: the worker has no networking dependency of its own (NFS/SMB
   // storages are accessed through the storage:: interface, not directly), so there's no reason
@@ -447,12 +452,20 @@ class StorageWorker : public Component {
   // started_ is set.
   void ensure_started_();
 
-  // The loop-sliced engine advances exactly one chunk per component phase, and that phase is
-  // gated: Application::loop() only runs it on loop_interval_, on a high-frequency request, or
-  // on an explicit wake. Depending on the phase without ever asking for it is what stalled
-  // transfers — in particular the very last call, the one that reads EOF and marks the request
-  // DONE, so the completion was never delivered and anything chained on it waited forever.
-  // Held while any slot is busy; the gate then always lets us through.
+  // One full engine service: watchdog, completion delivery, the time-budgeted chunk batch,
+  // delivery again, then (dis)arming the pump. Called from loop() when the gated component
+  // phase happens to run, and — decisively — from the scheduler pump while any slot is busy.
+  void process_();
+  // Arms/disarms a 0 ms scheduler interval calling process_(). The scheduler is the ONE
+  // mechanism Application services on every tick regardless of the component-phase gate and
+  // regardless of loop_interval_, and an armed item keeps the main loop from sleeping past
+  // it — so a busy worker is guaranteed service at full speed with no assumption about what
+  // triggers the component phase. Idempotent via pump_armed_.
+  void set_pump_(bool armed);
+  bool pump_armed_{false};
+
+  // Kept purely as a courtesy to the rest of the system (skips the phase-gate bookkeeping
+  // while transfers run); correctness no longer depends on it in any way.
   HighFrequencyLoopRequester loop_requester_;
 
   // True if every storage involved may have its data-plane calls run off the main loop.
