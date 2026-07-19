@@ -43,6 +43,8 @@ enum class RequestOp : uint8_t {
   // freezes the main loop in one piece.
   RAW_READ_TO_FILE,
   RAW_WRITE_FROM_FILE,
+  // Device-only: the sliced erase alone, then done. Same freeze-avoidance rationale.
+  RAW_ERASE,
   // Whole directory tree, walked by the engine itself: list, mkdir, copy each file, and for a
   // move remove each source entry as it is drained. Deliberately here and not in the caller:
   // on task-safe media the worker task then owns the entire operation start to finish, exactly
@@ -370,6 +372,8 @@ class StorageWorker : public Component {
   storage::StorageError async_raw_write(storage::PathStorage *src, const char *src_path, storage::RawStorage *device,
                                         uint64_t address, bool erase_first, CompletionCallback &&on_done,
                                         TransferJob *job_out = nullptr);
+  storage::StorageError async_raw_erase(storage::RawStorage *device, uint64_t address, uint64_t size,
+                                        CompletionCallback &&on_done, TransferJob *job_out = nullptr);
 
   // Snapshot of a transfer's externally observable state, for progress bars / job-status
   // endpoints. Main-loop-only (like all control-plane calls). Returns false when the job

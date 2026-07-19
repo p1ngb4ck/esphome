@@ -440,6 +440,43 @@
       $("span", { className: "efb-name", textContent: dev.node_name || dev.id }),
       $("span", { className: "efb-size", textContent: fmtSize(dev.capacity) }));
 
+    // Raw actions are worker jobs now (the API answers {job:N}): poll like copy/move does.
+
+    // A job that vanishes between polls finished and had its slot recycled — treat as done.
+
+    const waitRawJob = async (job, label) => {
+
+      for (;;) {
+
+        await new Promise((res) => setTimeout(res, 500));
+
+        let s;
+
+        try { s = await api(`/files/job?id=${job}`); } catch (e) { break; }
+
+        if (!s || s.state === undefined) break;
+
+        if (s.state === "done") {
+
+          if (s.result && s.result !== "ok") throw new Error(`${label}: ${s.result}`);
+
+          break;
+
+        }
+
+        if (s.bytes_total > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
+
+        else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)}`);
+
+      }
+
+      setStatus(`${label} \u2014 done`);
+
+      refresh();
+
+    };
+
+
     const readModal = (whole) => modal(whole ? `Read all of ${dev.node_name}` : `Read from ${dev.node_name}`, [
       { key: "address", label: "Address", value: whole ? "0x0" : "0x0" },
       { key: "size", label: "Size (bytes)", value: whole ? dev.capacity : 256 },
@@ -452,7 +489,7 @@
       }
       setStatus(`reading ${dev.node_name} \u2192 ${v.to_path}\u2026`);
       const r = await api(`/raw/read?${q}&to_path=${enc(v.to_path)}`);
-      setStatus(`read ${fmtSize(r.read)} from ${dev.node_name} into ${v.to_path}`);
+      await waitRawJob(r.job, `reading ${dev.node_name} \u2192 ${v.to_path}`);
     });
 
     {
@@ -472,7 +509,7 @@
           setStatus(`writing ${v.from_path} \u2192 ${dev.node_name}\u2026`);
           const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}`;
           const r = await api(`/raw/write?${q}${v.erase ? "&erase=1" : ""}`, { method: "POST" });
-          setStatus(`wrote ${fmtSize(r.written)} to ${dev.node_name}`);
+          await waitRawJob(r.job, `writing ${v.from_path} \u2192 ${dev.node_name}`);
         }), () => {}));
       }
       if (dev.erasable) {
@@ -487,7 +524,7 @@
             : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
           setStatus(`erasing ${dev.node_name}\u2026`);
           const r = await api(`/raw/erase?${q}`, { method: "POST" });
-          setStatus(`erased ${fmtSize(r.erased)} on ${dev.node_name}`);
+          await waitRawJob(r.job, `erasing ${dev.node_name}`);
         }), () => {}, "efb-danger"));
       }
       acts.push(btn("info", "Details", async () => {
