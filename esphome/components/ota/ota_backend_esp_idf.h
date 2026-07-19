@@ -27,6 +27,10 @@ class IDFOTABackend final {
   bool supports_compression() { return false; }
 
  protected:
+  // Used by every app update, header-routed or plain — deliberately outside the
+  // USE_OTA_PARTITIONS guard: builds without partition access run the plain begin() path
+  // through it too (its original guarded placement broke exactly those builds).
+  OTAResponseTypes app_slot_begin_(size_t image_size);
 #ifdef USE_OTA_PARTITIONS
   // copy_dest_part non-null means the running app must be copied INTO this slot of the current
   // table before the new partition table is committed. The destination is in the current table
@@ -60,7 +64,6 @@ class IDFOTABackend final {
   // named data partition (listener unmounts first) and route_stream_() splits every chunk
   // at the seam in a single pass. finish_data_partition_() hands the filesystem back —
   // success only after the boot switch, so old app never meets new data.
-  OTAResponseTypes app_slot_begin_(size_t image_size);
   OTAResponseTypes write_app_(const uint8_t *data, size_t len);
   OTAResponseTypes decide_stream_head_();
   OTAResponseTypes route_stream_(const uint8_t *data, size_t len);
