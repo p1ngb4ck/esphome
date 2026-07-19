@@ -395,8 +395,12 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   };
 
   MountState mount_state_{MountState::IDLE};
-  uint32_t last_wake_log_ms_{0};
-  void wake_if_unmounted_();
+  uint32_t last_inline_mount_ms_{0};
+  // Runs the request-edge and one state-machine step (extracted from loop(), which still
+  // drives it every pass); ensure_mounted_() drives it to completion inline so every
+  // data-plane action is self-contained — see the definition for the reasoning.
+  void drive_mount_state_();
+  bool ensure_mounted_();
   // Set by mount()/connect() or the auto-connect edge below; consumed by loop() to start one
   // mount attempt. No periodic retry exists anymore — FAILED is terminal until the next
   // request (users schedule retries themselves via interval:/automations + storage.mount).
