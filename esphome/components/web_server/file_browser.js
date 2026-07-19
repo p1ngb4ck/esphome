@@ -451,7 +451,9 @@
         else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)}`);
       }
       setStatus(`${label} \u2014 done`);
-      refresh();
+      // Relist whatever is expanded — same as the change poll's reset path. (A raw job may
+      // have written a file into any open directory.)
+      for (const r of openDirs.values()) r().catch(() => {});
     };
 
 
