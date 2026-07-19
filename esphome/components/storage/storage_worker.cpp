@@ -299,7 +299,6 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->bytes_total = size;  // read: known now; write: pre-phase stats the file
   slot->file_done = 0;
   slot->file_total = size;
-  slot->file[0] = '\0';
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
   slot->last_progress_ms = millis();
@@ -1061,12 +1060,12 @@ void StorageWorker::check_stalled_() {
         req.last_progress_ms = now;
       } else if (now - req.last_progress_ms > REQUEST_STALL_TIMEOUT_MS) {
         ESP_LOGW(TAG, "Transfer '%s' -> '%s' made no progress for %us - timing it out", req.src_path, req.dst_path,
-                 REQUEST_STALL_TIMEOUT_MS / 1000);
+                 static_cast<unsigned>(REQUEST_STALL_TIMEOUT_MS / 1000));
         finish_request(req, StorageError::TIMEOUT);
       }
     } else if (st == RequestState::PENDING && now - req.submitted_ms > REQUEST_PENDING_CAP_MS) {
       ESP_LOGW(TAG, "Transfer '%s' -> '%s' pending for %us - timing it out", req.src_path, req.dst_path,
-               REQUEST_PENDING_CAP_MS / 1000);
+               static_cast<unsigned>(REQUEST_PENDING_CAP_MS / 1000));
       finish_request(req, StorageError::TIMEOUT);
     }
   }
@@ -1075,7 +1074,8 @@ void StorageWorker::check_stalled_() {
     if (sstate == StreamState::FREE || sreq.last_activity_ms == 0 ||
         now - sreq.last_activity_ms <= STREAM_IDLE_TIMEOUT_MS)
       continue;
-    ESP_LOGW(TAG, "Stream on '%s' idle for %us - abandoning it", sreq.path, STREAM_IDLE_TIMEOUT_MS / 1000);
+    ESP_LOGW(TAG, "Stream on '%s' idle for %us - abandoning it", sreq.path,
+             static_cast<unsigned>(STREAM_IDLE_TIMEOUT_MS / 1000));
     if (sstate == StreamState::DONE) {
       // Finished but never collected — the client is gone; reclaim the slot.
       sreq.callback = nullptr;
