@@ -2,6 +2,8 @@
 #include "esphome/core/log.h"
 #include "esphome/core/wake.h"
 
+#include <cstring>
+
 #ifdef USE_STORAGE_WORKER
 
 namespace esphome::storage {
@@ -766,15 +768,28 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
     uint64_t len = req.bytes_total.load();
-    if (geo.erase_sector == 0 || (req.raw_address % geo.erase_sector) != 0 || req.raw_address >= geo.capacity ||
-        len > geo.capacity - req.raw_address) {
-      finish_request(req, StorageError::INVALID_ARGS);
-      return;
+    const bool pseudo = (geo.caps & (RAW_ERASE_SECTOR | RAW_ERASE_BLOCK | RAW_ERASE_CHIP)) == 0;
+    if (pseudo) {
+      // Overwrite-in-place media (EEPROM, FRAM) have no erase opcode — "erasing" them is a
+      // chunked 0xFF fill via write() (see the step below). Byte-addressable, so only the
+      // bounds are checked; no sector alignment exists to demand.
+      if (len == 0 || req.raw_address >= geo.capacity || len > geo.capacity - req.raw_address) {
+        finish_request(req, StorageError::INVALID_ARGS);
+        return;
+      }
+      req.raw_erase_pos = req.raw_address;
+      req.raw_erase_end = req.raw_address + len;
+    } else {
+      if (geo.erase_sector == 0 || (req.raw_address % geo.erase_sector) != 0 || req.raw_address >= geo.capacity ||
+          len > geo.capacity - req.raw_address) {
+        finish_request(req, StorageError::INVALID_ARGS);
+        return;
+      }
+      if ((len % geo.erase_sector) != 0)
+        len += geo.erase_sector - (len % geo.erase_sector);
+      req.raw_erase_pos = req.raw_address;
+      req.raw_erase_end = req.raw_address + len;
     }
-    if ((len % geo.erase_sector) != 0)
-      len += geo.erase_sector - (len % geo.erase_sector);
-    req.raw_erase_pos = req.raw_address;
-    req.raw_erase_end = req.raw_address + len;
   }
   if (req.op == RequestOp::RAW_ERASE) {
     if (req.raw_erase_pos >= req.raw_erase_end) {
@@ -783,6 +798,39 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
     }
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
+    if ((geo.caps & (RAW_ERASE_SECTOR | RAW_ERASE_BLOCK | RAW_ERASE_CHIP)) == 0) {
+      // Pseudo erase: fill one chunk of 0xFF per pass. Same allocator discipline as the
+      // transfer chunk loop — prefer internal RAM, halve on pressure, never a whole-range
+      // buffer. The buffer is written once and reused across passes.
+      if (req.chunk_buf.get() == nullptr) {
+        size_t chunk_size = USE_STORAGE_COPY_CHUNK_SIZE;
+        uint8_t *raw = nullptr;
+        while (chunk_size >= 4096) {
+          raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
+          if (raw != nullptr)
+            break;
+          chunk_size /= 2;
+        }
+        if (raw == nullptr) {
+          finish_request(req, StorageError::NO_SPACE);
+          return;
+        }
+        memset(raw, 0xFF, chunk_size);
+        req.chunk_buf = RamBuffer(raw, RamBufferDeleter{chunk_size});
+        req.chunk_size = chunk_size;
+      }
+      size_t step = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, req.raw_erase_end - req.raw_erase_pos));
+      size_t written = 0;
+      StorageError werr = req.raw_device->write(req.raw_erase_pos, req.chunk_buf.get(), step, &written);
+      if (werr != StorageError::OK || written == 0) {
+        finish_request(req, werr != StorageError::OK ? werr : StorageError::WRITE_ERROR);
+        return;
+      }
+      // A partial write is not an error — the next pass continues from where it stopped.
+      req.raw_erase_pos += written;
+      req.bytes_done.store(req.raw_erase_pos - req.raw_address);
+      return;
+    }
     uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
     step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
     StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));

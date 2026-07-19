@@ -387,6 +387,10 @@ class StorageWorker : public Component {
   storage::StorageError async_raw_write(storage::PathStorage *src, const char *src_path, storage::RawStorage *device,
                                         uint64_t address, bool erase_first, CompletionCallback &&on_done,
                                         TransferJob *job_out = nullptr);
+  // Media without any RAW_ERASE_* capability (EEPROM, FRAM — overwrite in place, no erase
+  // opcode) get a PSEUDO erase: the worker fills [address, address+size) with 0xFF via
+  // chunked write(), sliced per pass like everything else. Byte-addressable, so no sector
+  // alignment is demanded there; media with a real erase keep the aligned driver erase().
   storage::StorageError async_raw_erase(storage::RawStorage *device, uint64_t address, uint64_t size,
                                         CompletionCallback &&on_done, TransferJob *job_out = nullptr);
 
