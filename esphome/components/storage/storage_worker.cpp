@@ -128,7 +128,8 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
 }
 
 StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *src_path, PathStorage *dst,
-                                    const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out) {
+                                    const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out,
+                                    bool overwrite) {
   this->ensure_started_();
 
   if (strlen(src_path) >= STORAGE_WORKER_MAX_PATH || strlen(dst_path) >= STORAGE_WORKER_MAX_PATH)
@@ -170,6 +171,8 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->chunk_size = 0;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
+  slot->overwrite = overwrite;
+  slot->pre_phase_done = false;
   slot->src_is_fs = src->get_storage_type() == StorageType::FILESYSTEM;
   slot->dst_is_fs = dst->get_storage_type() == StorageType::FILESYSTEM;
   // Tree ops keep their roots aside: src_path/dst_path are reused for the file currently in
@@ -221,13 +224,13 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
 }
 
 StorageError StorageWorker::async_copy(PathStorage *src, const char *src_path, PathStorage *dst, const char *dst_path,
-                                       CompletionCallback &&on_done, TransferJob *job_out) {
-  return this->submit_(RequestOp::COPY, src, src_path, dst, dst_path, std::move(on_done), job_out);
+                                       CompletionCallback &&on_done, TransferJob *job_out, bool overwrite) {
+  return this->submit_(RequestOp::COPY, src, src_path, dst, dst_path, std::move(on_done), job_out, overwrite);
 }
 
 StorageError StorageWorker::async_move(PathStorage *src, const char *src_path, PathStorage *dst, const char *dst_path,
-                                       CompletionCallback &&on_done, TransferJob *job_out) {
-  return this->submit_(RequestOp::MOVE, src, src_path, dst, dst_path, std::move(on_done), job_out);
+                                       CompletionCallback &&on_done, TransferJob *job_out, bool overwrite) {
+  return this->submit_(RequestOp::MOVE, src, src_path, dst, dst_path, std::move(on_done), job_out, overwrite);
 }
 
 StorageError StorageWorker::async_copy_tree(PathStorage *src, const char *src_path, PathStorage *dst,
@@ -746,6 +749,71 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
                                              !global_storage_registry->is_registered(req.dst_storage))) {
     finish_request(req, StorageError::NOT_READY);
     return;
+  }
+
+  // The relocated handler pre-phase, executed once inside the engine that owns the storages
+  // (the file API is a pure translator and performs no driver I/O of its own): classify the
+  // source, honor the overwrite contract, clear an occupied destination, and decide
+  // tree-vs-file HERE by materializing the walk for a directory source.
+  if (!req.pre_phase_done) {
+    req.pre_phase_done = true;
+    FileStat src_st{};
+    StorageError serr = req.src_storage->stat(req.src_path, &src_st);
+    if (this->wait_for_network_ready_(req, serr, req.src_storage)) {
+      req.pre_phase_done = false;  // not decided yet — redo the whole phase once ready
+      return;
+    }
+    if (serr != StorageError::OK) {
+      finish_request(req, StorageError::NOT_FOUND);
+      return;
+    }
+    const bool src_is_dir = src_st.is_dir;
+    const bool is_move_op = req.op == RequestOp::MOVE || req.op == RequestOp::MOVE_TREE;
+    const bool same_storage_move = is_move_op && req.src_storage == req.dst_storage;
+    // Explicit tree submissions (async_copy_tree()/async_move_tree(), e.g. automations) keep
+    // their historical contract: an existing destination root is merged into, entries below
+    // it overwritten by the walk itself. Only the self-classifying API enforces overwrite.
+    const bool explicit_tree = req.tree != nullptr;
+    FileStat dst_st{};
+    StorageError derr = req.dst_storage->stat(req.dst_path, &dst_st);
+    if (this->wait_for_network_ready_(req, derr, req.dst_storage)) {
+      req.pre_phase_done = false;
+      return;
+    }
+    if (derr == StorageError::OK && !explicit_tree) {
+      if (!req.overwrite) {
+        finish_request(req, StorageError::ALREADY_EXISTS);
+        return;
+      }
+      if (dst_st.is_dir != src_is_dir) {
+        // Never trade a tree for a file or the other way round, no matter what was asked for.
+        finish_request(req, StorageError::INVALID_ARGS);
+        return;
+      }
+      // Clear the destination where the operation cannot replace it by itself — same
+      // reasoning the handler used to apply, now in the right context: a same-storage move
+      // needs a free name for rename(); a directory copy was asked to REPLACE, and merging
+      // would leave the old tree's files behind. A plain file write truncates by itself.
+      if (same_storage_move || src_is_dir) {
+        StorageError cerr =
+            src_is_dir ? remove_recursive(req.dst_storage, req.dst_path) : req.dst_storage->remove(req.dst_path);
+        if (cerr != StorageError::OK) {
+          finish_request(req, cerr);
+          return;
+        }
+      }
+    }
+    if (src_is_dir && !same_storage_move && req.tree == nullptr) {
+      // A directory source that rename() cannot take in one step: become a tree job.
+      req.tree = make_unique<TreeWalk>();
+      if (req.tree == nullptr) {
+        finish_request(req, StorageError::NO_SPACE);
+        return;
+      }
+      strncpy(req.tree->src_root, req.src_path, STORAGE_WORKER_MAX_PATH - 1);
+      strncpy(req.tree->dst_root, req.dst_path, STORAGE_WORKER_MAX_PATH - 1);
+      req.op = req.op == RequestOp::MOVE ? RequestOp::MOVE_TREE : RequestOp::COPY_TREE;
+    }
   }
 
   // A tree between files: take the next walk step. It either sets up the next file (and falls

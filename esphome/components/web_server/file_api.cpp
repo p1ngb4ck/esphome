@@ -597,37 +597,10 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
       err = storage::StorageError::NOT_FOUND;
       return;
     }
-    storage::FileStat src_stat{};
-    const bool src_is_dir = src->stat(src_rel, &src_stat) == storage::StorageError::OK && src_stat.is_dir;
-    storage::FileStat dst_stat{};
-    const bool dst_exists = dst->stat(dst_rel, &dst_stat) == storage::StorageError::OK;
-    const bool same_storage_move = is_move && src == dst;
-    if (dst_exists) {
-      if (!overwrite) {
-        err = storage::StorageError::ALREADY_EXISTS;
-        return;
-      }
-      if (dst_stat.is_dir != src_is_dir) {
-        // Never trade a tree for a file or the other way round, no matter what was asked for.
-        err = storage::StorageError::INVALID_ARGS;
-        return;
-      }
-      // Clear the destination where the operation cannot replace it by itself. A same-storage
-      // move must have a free name because rename() refuses an occupied one — and clearing it
-      // keeps the rename, which is a directory-entry update no matter how large the object is.
-      // Falling back to a per-file merge here would push every byte through the MCU to reach a
-      // result rename gets for free. A directory copy is cleared for a different reason: the
-      // caller asked for a replacement, and merging would leave the old tree's files behind.
-      // A file that is written (copy, cross-storage move) needs nothing — the write truncates.
-      if (same_storage_move) {
-        err = src_is_dir ? storage::remove_recursive(dst, dst_rel) : dst->remove(dst_rel);
-      } else if (src_is_dir) {
-        err = storage::remove_recursive(dst, dst_rel);
-      }
-      if (err != storage::StorageError::OK)
-        return;
-    }
-
+    // Pure translator by architecture contract: no driver I/O happens here. Existence
+    // checks, the overwrite decision, destination clearing and the tree-vs-file
+    // classification all run inside the worker, in the engine context that owns the
+    // storages (see run_chunk_'s pre-phase). This handler resolves, submits, answers.
     if (storage::global_storage_worker == nullptr) {
       err = storage::StorageError::NOT_SUPPORTED;
       return;
@@ -635,7 +608,6 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     // A directory that cannot be renamed into place is a tree job — the worker walks it. This
     // endpoint's part is over once the job is submitted: it hands back the id and nothing here
     // touches the transfer again. Asking for its status is optional and drives nothing.
-    const bool tree = src_is_dir && !same_storage_move;
     // Completion parks the final status in the job cache (this callback runs on the main
     // loop) — the worker recycles its slot right after, so polling alone would miss DONE.
     // The job id only exists after submission, so the callback reads it through a small
@@ -649,13 +621,8 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
     };
     storage::StorageWorker *w = storage::global_storage_worker;
-    if (tree) {
-      err = is_move ? w->async_move_tree(src, src_rel, dst, dst_rel, on_done, &job)
-                    : w->async_copy_tree(src, src_rel, dst, dst_rel, on_done, &job);
-    } else {
-      err = is_move ? w->async_move(src, src_rel, dst, dst_rel, on_done, &job)
-                    : w->async_copy(src, src_rel, dst, dst_rel, on_done, &job);
-    }
+    err = is_move ? w->async_move(src, src_rel, dst, dst_rel, on_done, &job, overwrite)
+                  : w->async_copy(src, src_rel, dst, dst_rel, on_done, &job, overwrite);
     if (err != storage::StorageError::OK) {
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) — callback will not fire
     } else {
