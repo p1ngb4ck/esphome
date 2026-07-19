@@ -422,8 +422,6 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         }
         auto *addr_param = request->getParam("address");
         uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
-        auto *erase = request->getParam("erase");
-        uint64_t written = 0;
         std::string from = from_path->value().c_str();
         bool erase_first = request->hasParam("erase");
         this->submit_and_answer_(
@@ -438,6 +436,10 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
               return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first,
                                                                      std::move(done), job);
             });
+        // One request, one job, one answer — submit_and_answer_() already responded with
+        // {job:N}. Falling through here sent a SECOND response from the body-write reporting
+        // block below on the same request.
+        return;
       }
       // Otherwise the body handler did the work; report its outcome.
       if (this->write_.failed) {
