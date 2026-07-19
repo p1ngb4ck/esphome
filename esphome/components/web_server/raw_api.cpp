@@ -35,14 +35,19 @@ void WebServerRawApi::dump_config() {
 }
 
 bool WebServerRawApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms) {
-  // defer() is the documented thread-safe FIFO bridge into the main loop — same mechanism the
-  // file API uses from this very httpd task.
   SemaphoreHandle_t done = this->op_done_;
   this->defer([op = std::move(op), done]() {
     op();
     xSemaphoreGive(done);
   });
-  return xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+  // Wait WITHOUT a deadline — same defect and same fix as the file API's marshaller: every
+  // op captures references into this handler's stack frame, so a timed-out wait returned
+  // into a frame the still-queued op would later write through. Sliced re-take only so a
+  // long op (a whole-chip erase) is a visible wait, never an abandonment.
+  (void) timeout_ms;
+  while (xSemaphoreTake(done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+  }
+  return true;
 }
 
 static void append_json_escaped(std::string &out, const char *s) {
