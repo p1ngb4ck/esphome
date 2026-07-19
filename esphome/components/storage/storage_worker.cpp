@@ -245,6 +245,14 @@ StorageError StorageWorker::async_raw_write(PathStorage *src, const char *src_pa
                            std::move(on_done), job_out);
 }
 
+StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address, uint64_t size,
+                                            CompletionCallback &&on_done, TransferJob *job_out) {
+  if (device == nullptr || size == 0)
+    return StorageError::INVALID_ARGS;
+  return this->submit_raw_(RequestOp::RAW_ERASE, device, address, size, nullptr, "", true, false, std::move(on_done),
+                           job_out);
+}
+
 StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64_t address, uint64_t size,
                                         PathStorage *file_side, const char *file_path, bool erase_first, bool overwrite,
                                         CompletionCallback &&on_done, TransferJob *job_out) {
@@ -292,8 +300,9 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->file[0] = '\0';
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
-  slot->src_is_fs = file_side->get_storage_type() == StorageType::FILESYSTEM && file_is_src;
-  slot->dst_is_fs = file_side->get_storage_type() == StorageType::FILESYSTEM && !file_is_src;
+  const bool file_fs = file_side != nullptr && file_side->get_storage_type() == StorageType::FILESYSTEM;
+  slot->src_is_fs = file_fs && file_is_src;
+  slot->dst_is_fs = file_fs && !file_is_src;
   if (++slot->generation == 0)
     slot->generation = 1;
   if (job_out != nullptr)
@@ -719,6 +728,41 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
   const char *file_path = to_file ? req.dst_path : req.src_path;
   const bool file_is_fs = to_file ? req.dst_is_fs : req.src_is_fs;
 
+  if (req.op == RequestOp::RAW_ERASE && !req.pre_phase_done) {
+    req.pre_phase_done = true;
+    // bytes_total carries the requested erase length; align it up like the write path does.
+    RawGeometry geo{};
+    req.raw_device->get_raw_geometry(&geo);
+    uint64_t len = req.bytes_total.load();
+    if (geo.erase_sector == 0 || (req.raw_address % geo.erase_sector) != 0 || req.raw_address >= geo.capacity ||
+        len > geo.capacity - req.raw_address) {
+      finish_request(req, StorageError::INVALID_ARGS);
+      return;
+    }
+    if ((len % geo.erase_sector) != 0)
+      len += geo.erase_sector - (len % geo.erase_sector);
+    req.raw_erase_pos = req.raw_address;
+    req.raw_erase_end = req.raw_address + len;
+  }
+  if (req.op == RequestOp::RAW_ERASE) {
+    if (req.raw_erase_pos >= req.raw_erase_end) {
+      finish_request(req, StorageError::OK);
+      return;
+    }
+    RawGeometry geo{};
+    req.raw_device->get_raw_geometry(&geo);
+    uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
+    step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
+    StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
+    if (eerr != StorageError::OK) {
+      finish_request(req, eerr);
+      return;
+    }
+    req.raw_erase_pos += step;
+    req.bytes_done.store(req.raw_erase_pos - req.raw_address);
+    return;
+  }
+
   if (!req.pre_phase_done) {
     req.pre_phase_done = true;
     if (to_file) {
@@ -992,7 +1036,8 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
     finish_request(req, StorageError::NOT_READY);
     return;
   }
-  if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE) {
+  if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE ||
+      req.op == RequestOp::RAW_ERASE) {
     this->run_raw_chunk_(req);
     return;
   }

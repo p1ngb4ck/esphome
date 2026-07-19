@@ -203,113 +203,27 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
-bool WebServerRawApi::read_to_path_(storage::RawStorage *device, uint64_t address, uint64_t size, const char *path,
-                                    const char **error) {
-  auto buf_size = static_cast<size_t>(size);
-  uint8_t *raw = RAMAllocator<uint8_t>().allocate(buf_size);
-  if (raw == nullptr) {
-    *error = "out of memory";
-    return false;
+// Submits a raw worker job (translator contract: no driver I/O in HTTP context) and
+// answers {"job":N} — the browser polls /files/job like it does for copy/move. Submission
+// itself touches only the worker's pool and runs marshalled on the main loop.
+void WebServerRawApi::submit_and_answer_(AsyncWebServerRequest *request,
+                                         std::function<storage::StorageError(storage::TransferJob *)> &&submit) {
+  if (storage::global_storage_worker == nullptr) {
+    request->send(501, "application/json", "{\"error\":\"no storage worker\"}");
+    return;
   }
-  storage::RamBuffer buf(raw, storage::RamBufferDeleter{buf_size});
-
-  uint64_t offset = 0;
-  while (offset < size) {
-    size_t want = static_cast<size_t>(std::min<uint64_t>(RAW_API_CHUNK, size - offset));
-    size_t got = 0;
-    storage::StorageError err = storage::StorageError::OK;
-    uint8_t *dst = buf.get() + offset;
-    bool ok = this->run_on_loop_(
-        [device, address, offset, dst, want, &got, &err]() { err = device->read(address + offset, dst, want, &got); });
-    if (!ok || err != storage::StorageError::OK || got == 0) {
-      *error = ok ? storage::error_to_string(err) : "device busy";
-      return false;
-    }
-    offset += got;
+  storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
+  storage::StorageError err = storage::StorageError::OK;
+  this->run_on_loop_([&submit, &job, &err]() { err = submit(&job); });
+  if (err != storage::StorageError::OK) {
+    char ebuf[96];
+    snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", storage::error_to_string(err));
+    request->send(400, "application/json", ebuf);
+    return;
   }
-
-  storage::StorageError werr = storage::StorageError::OK;
-  const uint8_t *data = buf.get();
-  bool ok = this->run_on_loop_(
-      [path, data, buf_size, &werr]() {
-        const char *rel = nullptr;
-        storage::PathStorage *ps = storage::global_storage_registry != nullptr
-                                       ? storage::global_storage_registry->resolve_path(path, &rel)
-                                       : nullptr;
-        werr = ps == nullptr ? storage::StorageError::NOT_FOUND : storage::write_file(ps, rel, data, buf_size);
-#ifdef USE_STORAGE_CHANGE_FEED
-        // A device read landing in a file changes that file's directory — feed it, so a
-        // browser showing the directory picks the new file up on its next change poll.
-        if (werr == storage::StorageError::OK)
-          storage::global_storage_registry->note_parent_changed(path);
-#endif
-      },
-      60000);
-  if (!ok || werr != storage::StorageError::OK) {
-    *error = ok ? storage::error_to_string(werr) : "storage busy";
-    return false;
-  }
-  return true;
-}
-
-bool WebServerRawApi::write_from_path_(storage::RawStorage *device, uint64_t address, const char *path,
-                                       bool erase_first, uint64_t *written, const char **error) {
-  storage::RamBuffer buf;
-  size_t size = 0;
-  storage::StorageError rerr = storage::StorageError::OK;
-  bool ok = this->run_on_loop_(
-      [path, &buf, &size, &rerr]() {
-        const char *rel = nullptr;
-        storage::PathStorage *ps = storage::global_storage_registry != nullptr
-                                       ? storage::global_storage_registry->resolve_path(path, &rel)
-                                       : nullptr;
-        rerr = ps == nullptr ? storage::StorageError::NOT_FOUND : storage::read_file(ps, rel, buf, &size);
-      },
-      60000);
-  if (!ok || rerr != storage::StorageError::OK) {
-    *error = ok ? storage::error_to_string(rerr) : "storage busy";
-    return false;
-  }
-
-  storage::RawGeometry geo;
-  this->run_on_loop_([device, &geo]() { device->get_raw_geometry(&geo); });
-  if (address >= geo.capacity || size > geo.capacity - address) {
-    *error = "file does not fit at this address";
-    return false;
-  }
-  if (erase_first) {
-    if (geo.erase_sector == 0 || (address % geo.erase_sector) != 0) {
-      *error = "address not sector aligned";
-      return false;
-    }
-    uint64_t erase_len = size;
-    if ((erase_len % geo.erase_sector) != 0)
-      erase_len += geo.erase_sector - (erase_len % geo.erase_sector);
-    storage::StorageError eerr = storage::StorageError::OK;
-    bool eok =
-        this->run_on_loop_([device, address, erase_len, &eerr]() { eerr = device->erase(address, erase_len); }, 120000);
-    if (!eok || eerr != storage::StorageError::OK) {
-      *error = eok ? storage::error_to_string(eerr) : "device busy";
-      return false;
-    }
-  }
-
-  uint64_t done = 0;
-  while (done < size) {
-    size_t want = static_cast<size_t>(std::min<uint64_t>(RAW_API_CHUNK, size - done));
-    size_t n = 0;
-    storage::StorageError werr = storage::StorageError::OK;
-    const uint8_t *src = buf.get() + done;
-    bool wok = this->run_on_loop_(
-        [device, address, done, src, want, &n, &werr]() { werr = device->write(address + done, src, want, &n); });
-    if (!wok || werr != storage::StorageError::OK || n == 0) {
-      *error = wok ? storage::error_to_string(werr) : "device busy";
-      return false;
-    }
-    done += n;
-  }
-  *written = done;
-  return true;
+  char okbuf[48];
+  snprintf(okbuf, sizeof(okbuf), "{\"job\":%u}", static_cast<unsigned>(job));
+  request->send(200, "application/json", okbuf);
 }
 
 void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
@@ -326,16 +240,17 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
 
   // to_path: the node reads into a file itself; nothing streams to the client.
   if (auto *to_path = request->getParam("to_path")) {
-    const char *error = nullptr;
-    if (!this->read_to_path_(device, address, size, to_path->value().c_str(), &error)) {
-      char ebuf[128];
-      snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", error != nullptr ? error : "failed");
-      request->send(400, "application/json", ebuf);
-      return;
-    }
-    char okbuf[64];
-    snprintf(okbuf, sizeof(okbuf), "{\"read\":%" PRIu64 "}", size);
-    request->send(200, "application/json", okbuf);
+    std::string to = to_path->value().c_str();
+    bool overwrite = request->hasParam("overwrite");
+    this->submit_and_answer_(request, [device, address, size, to, overwrite](storage::TransferJob *job) {
+      const char *rel = nullptr;
+      storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                     ? storage::global_storage_registry->resolve_path(to.c_str(), &rel)
+                                     : nullptr;
+      if (ps == nullptr)
+        return storage::StorageError::NOT_FOUND;
+      return storage::global_storage_worker->async_raw_read(device, address, size, ps, rel, nullptr, job, overwrite);
+    });
     return;
   }
 
@@ -385,25 +300,9 @@ void WebServerRawApi::handle_erase_(AsyncWebServerRequest *request) {
     return;
   }
 
-  storage::StorageError err = storage::StorageError::OK;
-  // A whole-device erase can take a minute on a large flash; the timeout covers the worst case
-  // rather than reporting a failure while the chip is still busy.
-  bool ok = this->run_on_loop_([device, address, size, &err]() { err = device->erase(address, size); }, 120000);
-  if (!ok) {
-    request->send(504, "application/json", "{\"error\":\"erase timed out\"}");
-    return;
-  }
-  if (err != storage::StorageError::OK) {
-    // NOT_SUPPORTED (medium has no erase) and INVALID_ARGS (range not sector-aligned) travel
-    // verbatim: the client asked for something this device cannot do, and should say so.
-    char buf[96];
-    snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", storage::error_to_string(err));
-    request->send(err == storage::StorageError::NOT_SUPPORTED ? 501 : 400, "application/json", buf);
-    return;
-  }
-  char buf[64];
-  snprintf(buf, sizeof(buf), "{\"erased\":%" PRIu64 "}", size);
-  request->send(200, "application/json", buf);
+  this->submit_and_answer_(request, [device, address, size](storage::TransferJob *job) {
+    return storage::global_storage_worker->async_raw_erase(device, address, size, nullptr, job);
+  });
 }
 
 void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
@@ -441,18 +340,17 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
         auto *erase = request->getParam("erase");
         uint64_t written = 0;
-        const char *error = nullptr;
-        if (!this->write_from_path_(device, address, from_path->value().c_str(),
-                                    erase != nullptr && erase->value() == "1", &written, &error)) {
-          char ebuf[128];
-          snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", error != nullptr ? error : "failed");
-          request->send(400, "application/json", ebuf);
-          return;
-        }
-        char okbuf[64];
-        snprintf(okbuf, sizeof(okbuf), "{\"written\":%" PRIu64 "}", written);
-        request->send(200, "application/json", okbuf);
-        return;
+        std::string from = from_path->value().c_str();
+        bool erase_first = request->hasParam("erase");
+        this->submit_and_answer_(request, [device, address, from, erase_first](storage::TransferJob *job) {
+          const char *rel = nullptr;
+          storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                         ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
+                                         : nullptr;
+          if (ps == nullptr)
+            return storage::StorageError::NOT_FOUND;
+          return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, nullptr, job);
+        });
       }
       // Otherwise the body handler did the work; report its outcome.
       if (this->write_.failed) {

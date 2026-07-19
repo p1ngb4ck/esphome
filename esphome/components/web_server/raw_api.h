@@ -14,6 +14,7 @@
 #include <freertos/semphr.h>
 
 #include <functional>
+#include "esphome/components/storage/storage_worker.h"
 #include <string>
 
 namespace esphome::web_server {
@@ -56,6 +57,8 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   bool isRequestHandlerTrivial() const override { return false; }
 
  protected:
+  void submit_and_answer_(AsyncWebServerRequest *request,
+                          std::function<storage::StorageError(storage::TransferJob *)> &&submit);
   // Runs `op` on the main loop and blocks the calling (httpd) task until it completed. Returns
   // false on timeout — the op may still run later, so it must only touch state that stays valid.
   bool run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms = 10000);
@@ -69,10 +72,6 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   // Device <-> file on a mounted storage, entirely on the node: the browser only names the
   // path, the bytes never travel through it. Sizes are guard-railed by the storage component's
   // max_blocking_transfer_size, like every other blocking helper.
-  bool read_to_path_(storage::RawStorage *device, uint64_t address, uint64_t size, const char *path,
-                     const char **error);
-  bool write_from_path_(storage::RawStorage *device, uint64_t address, const char *path, bool erase_first,
-                        uint64_t *written, const char **error);
   void handle_read_(AsyncWebServerRequest *request);
   void handle_erase_(AsyncWebServerRequest *request);
 
