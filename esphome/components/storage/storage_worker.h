@@ -187,6 +187,11 @@ struct TransferRequest {
   // the storages — executed once on the request's first pass.
   bool overwrite{false};
   bool pre_phase_done{false};
+  // Stall watchdog (check_stalled_): refreshed whenever the request demonstrably moves; a
+  // request that stops moving is finished with TIMEOUT so its storages — and everything
+  // overlap-blocked behind them — come free again.
+  uint32_t last_progress_ms{0};
+  uint64_t progress_mark{0};
   // Raw ops only. raw_address is the device offset of the transfer window; the erase cursor
   // walks [raw_erase_pos, raw_erase_end) one geometry-sized step per pass before any bytes
   // move. The file side lives in src/dst_storage + src/dst_path as usual; the device side is
@@ -274,6 +279,10 @@ struct StreamRequest {
 
   storage::FileHandle *handle{nullptr};  // FilesystemStorage only; unused for NetworkStorage
   uint64_t offset{0};                    // NetworkStorage read_chunk()/write_chunk() position
+
+  // Stall watchdog: streams are driven by an external client (HTTP upload/download); when
+  // that client vanishes mid-flight the slot would otherwise stay claimed forever.
+  uint32_t last_activity_ms{0};
 
   // Set by write_chunk()/read_chunk() for the in-flight chunk; cleared once delivered.
   const uint8_t *pending_write_data{nullptr};
@@ -443,6 +452,8 @@ class StorageWorker : public Component {
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
                                     bool overwrite, CompletionCallback &&on_done, TransferJob *job_out);
   void run_raw_chunk_(TransferRequest &req);
+  void check_stalled_();
+  uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
