@@ -47,7 +47,6 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
 
   void set_web_server_base(web_server_base::WebServerBase *base) { this->base_ = base; }
   void set_enable_write(bool enable_write) { this->enable_write_ = enable_write; }
-  void set_enable_erase(bool enable_erase) { this->enable_erase_ = enable_erase; }
   // Optional scope: with a device set, every other raw device stays invisible to this API.
   void set_scoped_device(storage::RawStorage *device) { this->scoped_device_ = device; }
 
@@ -78,7 +77,6 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   web_server_base::WebServerBase *base_{nullptr};
   storage::RawStorage *scoped_device_{nullptr};
   bool enable_write_{false};
-  bool enable_erase_{false};
   SemaphoreHandle_t op_done_{nullptr};
 
   // In-flight /raw/write. The body arrives in chunks on the httpd task; each is written at
