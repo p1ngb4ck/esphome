@@ -172,11 +172,6 @@ struct TransferRequest {
   // "still connecting" (see run_chunk_) before it becomes the honest final answer.
   uint32_t submitted_ms{0};
   bool waiting_logged{false};
-  // Stall watchdog (see check_stalled_ in the worker loop): refreshed whenever the
-  // request demonstrably moves; a request that stops moving is finished with TIMEOUT so
-  // its storages — and everything overlap-blocked behind it — come free again.
-  uint32_t last_progress_ms{0};
-  uint64_t progress_mark{0};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -256,10 +251,6 @@ struct StreamRequest {
 
   storage::FileHandle *handle{nullptr};  // FilesystemStorage only; unused for NetworkStorage
   uint64_t offset{0};                    // NetworkStorage read_chunk()/write_chunk() position
-
-  // Stall watchdog: streams are driven by an external client (HTTP upload/download); when
-  // that client vanishes mid-flight the slot would otherwise stay claimed forever.
-  uint32_t last_activity_ms{0};
 
   // Set by write_chunk()/read_chunk() for the in-flight chunk; cleared once delivered.
   const uint8_t *pending_write_data{nullptr};
@@ -406,8 +397,6 @@ class StorageWorker : public Component {
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;
   bool wait_for_network_ready_(TransferRequest &req, storage::StorageError err, const storage::Storage *side);
-  void check_stalled_();
-  uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
