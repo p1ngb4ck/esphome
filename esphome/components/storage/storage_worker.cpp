@@ -175,6 +175,8 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->chunk_size = 0;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
+  slot->last_progress_ms = millis();
+  slot->progress_mark = 0;
   slot->overwrite = overwrite;
   slot->pre_phase_done = false;
   slot->src_is_fs = src->get_storage_type() == StorageType::FILESYSTEM;
@@ -300,6 +302,8 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->file[0] = '\0';
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
+  slot->last_progress_ms = millis();
+  slot->progress_mark = 0;
   const bool file_fs = file_side != nullptr && file_side->get_storage_type() == StorageType::FILESYSTEM;
   slot->src_is_fs = file_fs && file_is_src;
   slot->dst_is_fs = file_fs && !file_is_src;
@@ -483,6 +487,13 @@ void StorageWorker::loop() {
   // no-op, so a pre-start disable could never be undone — that was the stall).
   if (!this->started_)
     return;
+
+  // The stall watchdog (see check_stalled_ below) — once a second is plenty.
+  uint32_t now_wd = millis();
+  if (now_wd - this->last_stall_check_ms_ > 1000) {
+    this->last_stall_check_ms_ = now_wd;
+    this->check_stalled_();
+  }
 
   // Deliver completions and free slots. Runs regardless of which engine finished the
   // request, so this is the single place user callbacks are invoked — always on the main
@@ -1024,6 +1035,65 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
   }
 }
 
+// One stuck job must never wall off the queue: a RUNNING request holds its storages against
+// every overlapping newcomer (overlaps_active_) and occupies the loop slice — so a request
+// that demonstrably stops moving is finished with TIMEOUT, freeing the slot, the storages,
+// and everything blocked behind them. 'Moving' is measured, not assumed: a fingerprint over
+// offset, byte/file progress and tree position — big-but-progressing transfers never trip.
+// PENDING gets a generous absolute cap as the second belt (its usual blocker is a stuck
+// RUNNING one, which the first rule already clears). Streams are client-driven, so a
+// vanished HTTP client is handled by the same sweep, via the exact contract the quiesce
+// drain uses. Defined after finish_request() on purpose — it calls it.
+static constexpr uint32_t REQUEST_STALL_TIMEOUT_MS = 30000;
+static constexpr uint32_t REQUEST_PENDING_CAP_MS = 120000;
+static constexpr uint32_t STREAM_IDLE_TIMEOUT_MS = 30000;
+
+void StorageWorker::check_stalled_() {
+  const uint32_t now = millis();
+  for (auto &req : this->pool_) {
+    RequestState st = req.state.load(std::memory_order_acquire);
+    if (st == RequestState::RUNNING) {
+      uint64_t mark = req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2);
+      if (req.tree != nullptr)
+        mark ^= (static_cast<uint64_t>(req.tree->files_done) << 32) ^ (static_cast<uint64_t>(req.tree->depth) << 56);
+      if (mark != req.progress_mark) {
+        req.progress_mark = mark;
+        req.last_progress_ms = now;
+      } else if (now - req.last_progress_ms > REQUEST_STALL_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "Transfer '%s' -> '%s' made no progress for %us - timing it out", req.src_path, req.dst_path,
+                 REQUEST_STALL_TIMEOUT_MS / 1000);
+        finish_request(req, StorageError::TIMEOUT);
+      }
+    } else if (st == RequestState::PENDING && now - req.submitted_ms > REQUEST_PENDING_CAP_MS) {
+      ESP_LOGW(TAG, "Transfer '%s' -> '%s' pending for %us - timing it out", req.src_path, req.dst_path,
+               REQUEST_PENDING_CAP_MS / 1000);
+      finish_request(req, StorageError::TIMEOUT);
+    }
+  }
+  for (auto &sreq : this->stream_pool_) {
+    StreamState sstate = sreq.state.load(std::memory_order_acquire);
+    if (sstate == StreamState::FREE || sreq.last_activity_ms == 0 ||
+        now - sreq.last_activity_ms <= STREAM_IDLE_TIMEOUT_MS)
+      continue;
+    ESP_LOGW(TAG, "Stream on '%s' idle for %us - abandoning it", sreq.path, STREAM_IDLE_TIMEOUT_MS / 1000);
+    if (sstate == StreamState::DONE) {
+      // Finished but never collected — the client is gone; reclaim the slot.
+      sreq.callback = nullptr;
+      sreq.state = StreamState::FREE;
+    } else if (sstate == StreamState::IDLE) {
+      // Same immediate-finish contract as the quiesce drain: no I/O in flight.
+      if (sreq.is_fs && sreq.handle != nullptr)
+        static_cast<FilesystemStorage *>(sreq.storage)->close(sreq.handle);
+      sreq.handle = nullptr;
+      sreq.result = StorageError::TIMEOUT;
+      sreq.state = StreamState::DONE;
+    } else {
+      // A step is queued or running — CANCELLED makes run_stream_step_ close and finish it.
+      sreq.state = StreamState::CANCELLED;
+    }
+  }
+}
+
 void StorageWorker::run_chunk_(TransferRequest &req) {
   // Cancellation / hotplug check, before doing any I/O this call.
   if (req.state.load() == RequestState::CANCELLED) {
@@ -1397,13 +1467,17 @@ void run_stream_step(StreamRequest &req) {
 
 }  // namespace
 
-void StorageWorker::run_stream_step_(StreamRequest &req) { run_stream_step(req); }
+void StorageWorker::run_stream_step_(StreamRequest &req) {
+  req.last_activity_ms = millis();  // the client is demonstrably still driving this stream
+  run_stream_step(req);
+}
 
 namespace {
 bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_index) {
   for (size_t i = 0; i < pool.size(); i++) {
     StreamState expected = StreamState::FREE;
     if (pool[i].state.compare_exchange_strong(expected, StreamState::OPENING)) {
+      pool[i].last_activity_ms = millis();
       *out_index = i;
       return true;
     }
