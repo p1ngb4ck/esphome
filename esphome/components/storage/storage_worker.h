@@ -36,6 +36,13 @@ static constexpr size_t STORAGE_WORKER_MAX_PATH = 256;
 enum class RequestOp : uint8_t {
   COPY,
   MOVE,
+  // Raw-device transfers (image read/flash). The device side is byte-addressed RawStorage,
+  // the other side a regular file — chunked by the engine like any transfer: no whole-image
+  // RAM buffer, no blocking-size ceiling, progress and job id for free. A device write's
+  // preparatory erase is sliced per pass (see run_raw_chunk_) so a chip-scale erase never
+  // freezes the main loop in one piece.
+  RAW_READ_TO_FILE,
+  RAW_WRITE_FROM_FILE,
   // Whole directory tree, walked by the engine itself: list, mkdir, copy each file, and for a
   // move remove each source entry as it is drained. Deliberately here and not in the caller:
   // on task-safe media the worker task then owns the entire operation start to finish, exactly
@@ -178,6 +185,14 @@ struct TransferRequest {
   // the storages — executed once on the request's first pass.
   bool overwrite{false};
   bool pre_phase_done{false};
+  // Raw ops only. raw_address is the device offset of the transfer window; the erase cursor
+  // walks [raw_erase_pos, raw_erase_end) one geometry-sized step per pass before any bytes
+  // move. The file side lives in src/dst_storage + src/dst_path as usual; the device side is
+  // this pointer, deliberately part of overlaps_active_'s contention checks.
+  storage::RawStorage *raw_device{nullptr};
+  uint64_t raw_address{0};
+  uint64_t raw_erase_pos{0};
+  uint64_t raw_erase_end{0};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -344,6 +359,18 @@ class StorageWorker : public Component {
                                         const char *dst_path, CompletionCallback &&on_done,
                                         TransferJob *job_out = nullptr);
 
+  // Raw-device transfers — the storage-interface home of what the raw HTTP API used to
+  // hand-roll. async_raw_read streams device bytes [address, address+size) into a file
+  // (overwrite semantics as async_copy); async_raw_write streams a file onto the device at
+  // address, erasing the covered range first when erase_first is set (sector-aligned
+  // address required, checked against geometry in the pre-phase).
+  storage::StorageError async_raw_read(storage::RawStorage *device, uint64_t address, uint64_t size,
+                                       storage::PathStorage *dst, const char *dst_path, CompletionCallback &&on_done,
+                                       TransferJob *job_out = nullptr, bool overwrite = false);
+  storage::StorageError async_raw_write(storage::PathStorage *src, const char *src_path, storage::RawStorage *device,
+                                        uint64_t address, bool erase_first, CompletionCallback &&on_done,
+                                        TransferJob *job_out = nullptr);
+
   // Snapshot of a transfer's externally observable state, for progress bars / job-status
   // endpoints. Main-loop-only (like all control-plane calls). Returns false when the job
   // handle is unknown or expired: a slot is recycled by the pool after its completion
@@ -408,6 +435,10 @@ class StorageWorker : public Component {
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;
   bool wait_for_network_ready_(TransferRequest &req, storage::StorageError err, const storage::Storage *side);
+  storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
+                                    storage::PathStorage *file_side, const char *file_path, bool erase_first,
+                                    bool overwrite, CompletionCallback &&on_done, TransferJob *job_out);
+  void run_raw_chunk_(TransferRequest &req);
   bool is_task_safe_(const StreamRequest &req) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
