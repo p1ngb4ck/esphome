@@ -118,7 +118,19 @@ bool WebServerFileApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout
     op();
     xSemaphoreGive(done);
   });
-  return xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+  // Wait WITHOUT an arbitrary deadline. Every op captures references into this handler's
+  // stack frame (&err, &json, result buffers) — a timed-out wait returned into a frame the
+  // still-queued op would later write through: undefined behavior that surfaced as transfers
+  // frozen at 0 bytes and, after one slow storage call, a wedged file API for good. The op
+  // is bounded by the storage contract (short blocking calls; the NFS inline mount caps at
+  // 8 s), and if the main loop truly never runs it, the device is gone anyway — a stuck
+  // httpd task is then the honest symptom, not corrupted memory.
+  (void) timeout_ms;
+  while (xSemaphoreTake(done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    // Re-take in slices so a genuinely long op does not trip esp_http_server's socket
+    // supervision silently — the loop is purely a wait, never a bail-out.
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
