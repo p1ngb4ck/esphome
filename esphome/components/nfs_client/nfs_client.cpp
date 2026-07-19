@@ -393,19 +393,33 @@ void NFSClient::setup() {
   }
 }
 
-void NFSClient::wake_if_unmounted_() {
-  // The stateless client's data plane has no connection to keep it alive — when a consumer
-  // (worker copy, automation, file API) knocks while unmounted, the knock itself must
-  // request the mount: FAILED is otherwise terminal and every call would answer NOT_READY
-  // forever. loop() picks the request up from IDLE or FAILED on the next pass.
-  if (this->mounted_ || this->mount_requested_)
-    return;
+bool NFSClient::ensure_mounted_() {
+  if (this->mounted_)
+    return true;
+  // Every file-api and browser action is self-contained: none may assume that some earlier
+  // action (a listing, a poll) has already brought the share up. So the action itself
+  // mounts, inline and synchronously — the state machine's steps are all synchronous RPCs,
+  // loop() merely spreads them out; here they run back to back. Rate-limited so a dead
+  // server does not turn every knock into a fresh stack of RPC timeouts.
   uint32_t now = millis();
-  if (now - this->last_wake_log_ms_ > 5000) {
-    this->last_wake_log_ms_ = now;
-    ESP_LOGD(TAG, "Data-plane call while unmounted — requesting NFS mount");
-  }
+  if (now - this->last_inline_mount_ms_ < 3000)
+    return false;
+  this->last_inline_mount_ms_ = now;
+  ESP_LOGD(TAG, "Action against unmounted share — mounting inline");
   this->mount_requested_ = true;
+  const uint32_t deadline = now + 8000;  // hard cap; each RPC has its own shorter timeout
+  while (!this->mounted_ && millis() < deadline) {
+    MountState before = this->mount_state_;
+    this->drive_mount_state_();
+    if (this->mount_state_ == MountState::FAILED)
+      break;
+    if (this->mount_state_ == before && (before == MountState::IDLE || before == MountState::MOUNTED))
+      break;  // nothing left to drive
+    App.feed_wdt();
+  }
+  if (!this->mounted_)
+    ESP_LOGW(TAG, "Inline mount failed — action answers NOT_READY");
+  return this->mounted_;
 }
 
 void NFSClient::loop() {
@@ -422,9 +436,14 @@ void NFSClient::loop() {
   }
   this->network_was_connected_ = net_connected;
 
+  this->drive_mount_state_();
+}
+
+void NFSClient::drive_mount_state_() {
   // A pending request only starts a new attempt from a resting state; FAILED is terminal
   // otherwise (no periodic retry — retries are the user's decision via interval:/automations
-  // calling storage.mount, or the next network-up edge above).
+  // calling storage.mount, the next network-up edge above, or an action mounting inline
+  // through ensure_mounted_()).
   if (this->mount_requested_ && (this->mount_state_ == MountState::IDLE || this->mount_state_ == MountState::FAILED)) {
     this->mount_requested_ = false;
     ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
@@ -602,8 +621,7 @@ storage::StorageError NFSClient::read_chunk(const char *path, uint8_t *buf, uint
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -694,8 +712,7 @@ storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *bu
   if (path == nullptr || buf == nullptr || bytes_transferred == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -729,8 +746,7 @@ storage::StorageError NFSClient::stat(const char *path, storage::FileStat *stat)
   if (path == nullptr || stat == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -756,8 +772,7 @@ storage::StorageError NFSClient::list_dir(const char *path, bool (*callback)(con
   if (path == nullptr || callback == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -795,8 +810,7 @@ storage::StorageError NFSClient::mkdir(const char *path) {
   if (path == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -816,8 +830,7 @@ storage::StorageError NFSClient::rmdir(const char *path) {
   if (path == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -856,8 +869,7 @@ storage::StorageError NFSClient::remove(const char *path) {
   if (path == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -875,8 +887,7 @@ storage::StorageError NFSClient::rename(const char *old_path, const char *new_pa
   if (old_path == nullptr || new_path == nullptr) {
     return storage::StorageError::INVALID_ARGS;
   }
-  if (!this->mounted_) {
-    this->wake_if_unmounted_();
+  if (!this->ensure_mounted_()) {
     return storage::StorageError::NOT_READY;
   }
 
@@ -939,6 +950,9 @@ bool NFSClient::get_file_attributes(const std::string &path, NFSFileAttr &attr) 
 }
 
 bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
+  // Deliberately passive (no ensure_mounted_): this feeds the roots listing, which the
+  // browser rebuilds on polls — display metadata must never fire inline mount attempts
+  // against a dead server every few seconds. Actions mount; listings show what is.
   if (!this->mounted_ || !this->root_fh_.is_valid()) {
     return false;
   }
@@ -1507,7 +1521,7 @@ std::vector<std::string> NFSClient::split_path_(const std::string &path) {
 }
 
 bool NFSClient::resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFileAttr &attr) {
-  if (!this->mounted_) {
+  if (!this->ensure_mounted_()) {
     ESP_LOGW(TAG, "resolve_path_: not mounted");
     return false;
   }
