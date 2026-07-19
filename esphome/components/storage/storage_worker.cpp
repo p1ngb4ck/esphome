@@ -105,8 +105,12 @@ bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
     RequestState state = req.state.load();
     if (state != RequestState::RUNNING && state != RequestState::CANCELLED)
       continue;
-    if (req.src_storage == candidate.src_storage || req.src_storage == candidate.dst_storage ||
-        req.dst_storage == candidate.src_storage || req.dst_storage == candidate.dst_storage)
+    // Null sides (raw ops carry only one path-storage side) must not match other nulls.
+    if ((req.src_storage != nullptr &&
+         (req.src_storage == candidate.src_storage || req.src_storage == candidate.dst_storage)) ||
+        (req.dst_storage != nullptr &&
+         (req.dst_storage == candidate.src_storage || req.dst_storage == candidate.dst_storage)) ||
+        (req.raw_device != nullptr && req.raw_device == candidate.raw_device))
       return true;
   }
   return false;
@@ -220,6 +224,82 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
 #endif
 
   // Loop-sliced mode: leave the request PENDING; loop() picks up requests FIFO.
+  return StorageError::OK;
+}
+
+StorageError StorageWorker::async_raw_read(RawStorage *device, uint64_t address, uint64_t size, PathStorage *dst,
+                                           const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out,
+                                           bool overwrite) {
+  if (device == nullptr || dst == nullptr || dst_path == nullptr || size == 0)
+    return StorageError::INVALID_ARGS;
+  return this->submit_raw_(RequestOp::RAW_READ_TO_FILE, device, address, size, dst, dst_path, false, overwrite,
+                           std::move(on_done), job_out);
+}
+
+StorageError StorageWorker::async_raw_write(PathStorage *src, const char *src_path, RawStorage *device,
+                                            uint64_t address, bool erase_first, CompletionCallback &&on_done,
+                                            TransferJob *job_out) {
+  if (device == nullptr || src == nullptr || src_path == nullptr)
+    return StorageError::INVALID_ARGS;
+  return this->submit_raw_(RequestOp::RAW_WRITE_FROM_FILE, device, address, 0, src, src_path, erase_first, false,
+                           std::move(on_done), job_out);
+}
+
+StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64_t address, uint64_t size,
+                                        PathStorage *file_side, const char *file_path, bool erase_first, bool overwrite,
+                                        CompletionCallback &&on_done, TransferJob *job_out) {
+  this->ensure_started_();
+  if (strlen(file_path) >= STORAGE_WORKER_MAX_PATH)
+    return StorageError::INVALID_ARGS;
+  TransferRequest *slot = nullptr;
+  for (auto &req : this->pool_) {
+    RequestState expected = RequestState::FREE;
+    if (req.state.compare_exchange_strong(expected, RequestState::PENDING)) {
+      slot = &req;
+      break;
+    }
+  }
+  if (slot == nullptr)
+    return StorageError::NOT_READY;
+  slot->op = op;
+  // The file side rides in the regular storage/path fields so close_handles(), progress and
+  // the completion drain treat a raw op exactly like any transfer. The unused side is null.
+  const bool file_is_src = op == RequestOp::RAW_WRITE_FROM_FILE;
+  slot->src_storage = file_is_src ? file_side : nullptr;
+  slot->dst_storage = file_is_src ? nullptr : file_side;
+  strncpy(file_is_src ? slot->src_path : slot->dst_path, file_path, STORAGE_WORKER_MAX_PATH - 1);
+  (file_is_src ? slot->src_path : slot->dst_path)[STORAGE_WORKER_MAX_PATH - 1] = '\0';
+  (file_is_src ? slot->dst_path : slot->src_path)[0] = '\0';
+  slot->raw_device = device;
+  slot->raw_address = address;
+  slot->raw_erase_pos = 0;
+  slot->raw_erase_end = erase_first ? 1 : 0;  // pre-phase converts to a real byte range
+  slot->overwrite = overwrite;
+  slot->pre_phase_done = false;
+  slot->callback = std::move(on_done);
+  slot->result = StorageError::OK;
+  slot->offset = 0;
+  slot->src_handle = nullptr;
+  slot->dst_handle = nullptr;
+  slot->handles_open = false;
+  slot->chunk_buf.reset();
+  slot->chunk_size = 0;
+  slot->tree.reset();
+  slot->bytes_done = 0;
+  slot->bytes_total = size;  // read: known now; write: pre-phase stats the file
+  slot->file_done = 0;
+  slot->file_total = size;
+  slot->file[0] = '\0';
+  slot->submitted_ms = millis();
+  slot->waiting_logged = false;
+  slot->src_is_fs = file_side->get_storage_type() == StorageType::FILESYSTEM && file_is_src;
+  slot->dst_is_fs = file_side->get_storage_type() == StorageType::FILESYSTEM && !file_is_src;
+  if (++slot->generation == 0)
+    slot->generation = 1;
+  if (job_out != nullptr)
+    *job_out = (slot->generation << 8) | static_cast<uint32_t>(slot - this->pool_.begin());
+  // Raw devices are main-loop citizens (esp_flash & friends): always the loop engine.
+  this->loop_requester_.start();
   return StorageError::OK;
 }
 
@@ -633,6 +713,167 @@ void finish_request(TransferRequest &req, StorageError result) {
 // One step of a directory walk. Everything here is control plane — list, mkdir, rmdir, remove —
 // so it costs one call each and never blocks for long; the bytes go through run_chunk_()'s
 // chunk loop exactly as they do for a single file. Returns false once the request is finished.
+void StorageWorker::run_raw_chunk_(TransferRequest &req) {
+  const bool to_file = req.op == RequestOp::RAW_READ_TO_FILE;
+  PathStorage *file_storage = to_file ? req.dst_storage : req.src_storage;
+  const char *file_path = to_file ? req.dst_path : req.src_path;
+  const bool file_is_fs = to_file ? req.dst_is_fs : req.src_is_fs;
+
+  if (!req.pre_phase_done) {
+    req.pre_phase_done = true;
+    if (to_file) {
+      // Same overwrite contract as async_copy: an occupied destination answers
+      // ALREADY_EXISTS unless overwrite; a directory there is never replaced by an image.
+      FileStat dst_st{};
+      StorageError derr = file_storage->stat(file_path, &dst_st);
+      if (this->wait_for_network_ready_(req, derr, file_storage)) {
+        req.pre_phase_done = false;
+        return;
+      }
+      if (derr == StorageError::OK) {
+        if (!req.overwrite) {
+          finish_request(req, StorageError::ALREADY_EXISTS);
+          return;
+        }
+        if (dst_st.is_dir) {
+          finish_request(req, StorageError::INVALID_ARGS);
+          return;
+        }
+      }
+    } else {
+      FileStat src_st{};
+      StorageError serr = file_storage->stat(file_path, &src_st);
+      if (this->wait_for_network_ready_(req, serr, file_storage)) {
+        req.pre_phase_done = false;
+        return;
+      }
+      if (serr != StorageError::OK || src_st.is_dir) {
+        finish_request(req, serr != StorageError::OK ? StorageError::NOT_FOUND : StorageError::INVALID_ARGS);
+        return;
+      }
+      req.bytes_total.store(src_st.size);
+      req.file_total.store(src_st.size);
+      RawGeometry geo{};
+      req.raw_device->get_raw_geometry(&geo);
+      if (req.raw_address >= geo.capacity || src_st.size > geo.capacity - req.raw_address) {
+        finish_request(req, StorageError::NO_SPACE);  // genuinely: does not fit on the device
+        return;
+      }
+      if (req.raw_erase_end != 0) {  // erase requested — turn the flag into the real range
+        if (geo.erase_sector == 0 || (req.raw_address % geo.erase_sector) != 0) {
+          finish_request(req, StorageError::INVALID_ARGS);
+          return;
+        }
+        uint64_t len = src_st.size;
+        if ((len % geo.erase_sector) != 0)
+          len += geo.erase_sector - (len % geo.erase_sector);
+        req.raw_erase_pos = req.raw_address;
+        req.raw_erase_end = req.raw_address + len;
+      }
+    }
+  }
+
+  // Sliced erase: one geometry-sized step per pass — a chip-scale erase becomes many short
+  // main-loop visits instead of one multi-second freeze.
+  if (!to_file && req.raw_erase_pos < req.raw_erase_end) {
+    RawGeometry geo{};
+    req.raw_device->get_raw_geometry(&geo);
+    uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
+    step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
+    StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
+    if (eerr != StorageError::OK) {
+      finish_request(req, eerr);
+      return;
+    }
+    req.raw_erase_pos += step;
+    return;  // next pass continues the erase (or starts moving bytes)
+  }
+
+  if (req.chunk_buf.get() == nullptr) {
+    // Same allocator discipline as the file-to-file chunk loop: prefer internal RAM, halve
+    // on pressure down to 4 KiB before giving up.
+    size_t chunk_size = USE_STORAGE_COPY_CHUNK_SIZE;
+    uint8_t *raw = nullptr;
+    while (chunk_size >= 4096) {
+      raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
+      if (raw != nullptr)
+        break;
+      chunk_size /= 2;
+    }
+    if (raw == nullptr) {
+      finish_request(req, StorageError::NO_SPACE);
+      return;
+    }
+    req.chunk_buf = RamBuffer(raw, RamBufferDeleter{chunk_size});
+    req.chunk_size = chunk_size;
+  }
+  if (!req.handles_open) {
+    if (file_is_fs) {
+      auto *fs = static_cast<FilesystemStorage *>(file_storage);
+      FileHandle *h = nullptr;
+      StorageError oerr = fs->open(file_path, h, to_file ? OpenMode::WRITE : OpenMode::READ);
+      if (this->wait_for_network_ready_(req, oerr, file_storage))
+        return;
+      if (oerr != StorageError::OK) {
+        finish_request(req, oerr);
+        return;
+      }
+      (to_file ? req.dst_handle : req.src_handle) = h;
+    }
+    req.handles_open = true;
+  }
+
+  const uint64_t total = req.bytes_total.load();
+  if (req.offset >= total) {
+    finish_request(req, StorageError::OK);
+    return;
+  }
+  size_t want = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, total - req.offset));
+  size_t moved = 0;
+  StorageError err = StorageError::OK;
+  if (to_file) {
+    err = req.raw_device->read(req.raw_address + req.offset, req.chunk_buf.get(), want, &moved);
+    if (err == StorageError::OK && moved > 0) {
+      size_t written = 0;
+      if (file_is_fs) {
+        err =
+            static_cast<FilesystemStorage *>(file_storage)->write(req.dst_handle, req.chunk_buf.get(), moved, &written);
+      } else {
+        err = static_cast<NetworkStorage *>(file_storage)
+                  ->write_chunk(file_path, req.chunk_buf.get(), req.offset, moved, &written);
+      }
+      if (this->wait_for_network_ready_(req, err, file_storage))
+        return;
+      if (err == StorageError::OK && written != moved)
+        err = StorageError::WRITE_ERROR;
+    }
+  } else {
+    size_t got = 0;
+    if (file_is_fs) {
+      err = static_cast<FilesystemStorage *>(file_storage)->read(req.src_handle, req.chunk_buf.get(), want, &got);
+    } else {
+      err = static_cast<NetworkStorage *>(file_storage)
+                ->read_chunk(file_path, req.chunk_buf.get(), req.offset, want, &got);
+    }
+    if (this->wait_for_network_ready_(req, err, file_storage))
+      return;
+    if (err == StorageError::OK) {
+      if (got == 0) {
+        finish_request(req, StorageError::READ_ERROR);  // file shrank underneath us
+        return;
+      }
+      err = req.raw_device->write(req.raw_address + req.offset, req.chunk_buf.get(), got, &moved);
+    }
+  }
+  if (err != StorageError::OK || moved == 0) {
+    finish_request(req, err != StorageError::OK ? err : StorageError::WRITE_ERROR);
+    return;
+  }
+  req.offset += moved;
+  req.bytes_done.store(req.offset);
+  req.file_done.store(req.offset);
+}
+
 bool StorageWorker::tree_step_(TransferRequest &req) {
   TreeWalk &w = *req.tree;
   const bool is_move = req.op == RequestOp::MOVE_TREE;
@@ -745,9 +986,14 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
     finish_request(req, StorageError::NOT_READY);
     return;
   }
-  if (global_storage_registry != nullptr && (!global_storage_registry->is_registered(req.src_storage) ||
-                                             !global_storage_registry->is_registered(req.dst_storage))) {
+  if (global_storage_registry != nullptr &&
+      ((req.src_storage != nullptr && !global_storage_registry->is_registered(req.src_storage)) ||
+       (req.dst_storage != nullptr && !global_storage_registry->is_registered(req.dst_storage)))) {
     finish_request(req, StorageError::NOT_READY);
+    return;
+  }
+  if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE) {
+    this->run_raw_chunk_(req);
     return;
   }
 
