@@ -70,7 +70,6 @@ CONF_ENABLE_DELETION = "enable_deletion"
 CONF_RAW_API = "raw_api"
 CONF_DEVICE_ID = "device_id"
 CONF_ENABLE_WRITE = "enable_write"
-CONF_ENABLE_ERASE = "enable_erase"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
@@ -339,8 +338,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_RAW_API): cv.Schema(
                 {
                     cv.Optional(CONF_DEVICE_ID): cv.use_id(storage.RawStorage),
-                    cv.Optional(CONF_ENABLE_WRITE, default=False): cv.boolean,
-                    cv.Optional(CONF_ENABLE_ERASE, default=False): cv.boolean,
+                    # One flag: erase is a technical necessity of some media (NOR flash
+                    # erases before it writes), not a feature of its own — a device you may
+                    # write is a device you may erase.
+                    cv.Optional(CONF_ENABLE_WRITE, default=True): cv.boolean,
                 }
             ),
             cv.Optional(CONF_FILE_API): cv.Schema(
@@ -583,7 +584,7 @@ async def to_code(config):
             "device_node_name" in device
             for device in CORE.config.get("binary_storage", [])
         ):
-            raw_api_config = {CONF_ENABLE_WRITE: False, CONF_ENABLE_ERASE: False}
+            raw_api_config = {CONF_ENABLE_WRITE: True}
     if raw_api_config is not None:
         cg.add_define("USE_WEBSERVER_RAW_API")
         # Same pattern as the file api above: no YAML-visible id, a real Component whose
@@ -594,7 +595,6 @@ async def to_code(config):
         await cg.register_component(raw_var, {})
         cg.add(raw_var.set_web_server_base(paren))
         cg.add(raw_var.set_enable_write(raw_api_config[CONF_ENABLE_WRITE]))
-        cg.add(raw_var.set_enable_erase(raw_api_config[CONF_ENABLE_ERASE]))
         if device_id := raw_api_config.get(CONF_DEVICE_ID):
             cg.add(raw_var.set_scoped_device(await cg.get_variable(device_id)))
 

@@ -29,9 +29,8 @@ void WebServerRawApi::setup() {
 void WebServerRawApi::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Raw API:\n"
-                "  Write enabled: %s\n"
-                "  Erase enabled: %s",
-                YESNO(this->enable_write_), YESNO(this->enable_erase_));
+                "  Write enabled: %s",
+                YESNO(this->enable_write_));
 }
 
 bool WebServerRawApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms) {
@@ -134,7 +133,7 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
       bool enable_write;
       bool enable_erase;
       bool first{true};
-    } ctx{&json, this->scoped_device_, this->enable_write_, this->enable_erase_};
+    } ctx{&json, this->scoped_device_, this->enable_write_, this->enable_write_};
     if (storage::global_storage_registry == nullptr)
       return;
     storage::global_storage_registry->for_each_raw(
@@ -285,7 +284,9 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
 }
 
 void WebServerRawApi::handle_erase_(AsyncWebServerRequest *request) {
-  if (!this->enable_erase_) {
+  // Erase rides the write permission: it is a technical necessity of some media, not a
+  // capability of its own — a device you may write is a device you may erase.
+  if (!this->enable_write_) {
     request->send(403, "application/json", "{\"error\":\"erase disabled\"}");
     return;
   }
