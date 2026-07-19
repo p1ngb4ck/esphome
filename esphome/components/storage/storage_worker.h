@@ -473,8 +473,14 @@ class StorageWorker : public Component {
   // as RUNNING here, which merely delays dispatch by one loop iteration (safe/conservative).
   bool overlaps_active_(const TransferRequest &candidate) const;
 
+  // Frees DONE slots and fires their completion callbacks (always on the main loop). Called
+  // at the top of loop() and again after the chunk batch, so a completion produced inside
+  // the current pass is delivered in the same pass instead of waiting for the next one.
+  void deliver_completions_();
+
   // Advances one request by exactly one chunk. Used by both the loop-sliced engine (called
-  // from loop(), once per iteration) and the worker task (called in its own loop). Owns
+  // from loop(), once per iteration of its chunk batch) and the worker task (called in its
+  // own loop). Owns
   // opening/closing handles and the chunk buffer, offset tracking, cancellation/hotplug
   // checks, and the same-storage rename() fast path for MOVE. On completion (success, error,
   // or cancellation) sets req.result and req.state = RequestState::DONE; the caller (loop()
