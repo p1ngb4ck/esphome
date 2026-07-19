@@ -492,8 +492,10 @@
       }
       if (dev.erasable) {
         acts.push(btn("erase", "Erase a range", async () => modal(`Erase ${dev.node_name}`, [
-          { key: "address", label: `Address (multiple of ${fmtHex(dev.erase_sector)})`, value: "0x0" },
-          { key: "size", label: `Size (multiple of ${fmtHex(dev.erase_sector)})`, value: dev.erase_sector },
+          // Pseudo-erase media (EEPROM/FRAM: no erase opcode, the device fills 0xFF via
+          // writes) are byte-addressable — no sector multiple exists to demand.
+          { key: "address", label: dev.pseudo_erase ? "Address" : `Address (multiple of ${fmtHex(dev.erase_sector)})`, value: "0x0" },
+          { key: "size", label: dev.pseudo_erase ? "Size (bytes)" : `Size (multiple of ${fmtHex(dev.erase_sector)})`, value: dev.pseudo_erase ? 256 : dev.erase_sector },
           { key: "all", label: "Erase the whole device", type: "check", value: false },
         ], async (v) => {
           if (v.all && !confirm(`Erase all of ${dev.node_name}? Everything on it is gone.`)) return;
@@ -509,7 +511,8 @@
         alert(`${dev.node_name} (${dev.kind})\n` +
           `Capacity: ${fmtSize(dev.capacity)}\n` +
           `Write page: ${dev.write_page} B\n` +
-          (dev.erase_sector ? `Erase sector: ${fmtSize(dev.erase_sector)}\n` : "Erase: not supported\n") +
+          (dev.erase_sector ? `Erase sector: ${fmtSize(dev.erase_sector)}\n`
+            : dev.pseudo_erase && dev.erasable ? "Erase: pseudo (fills 0xFF)\n" : "Erase: not supported\n") +
           (dev.erase_block ? `Erase block: ${fmtSize(dev.erase_block)}\n` : "") +
           (dev.write_needs_erase ? "Writes need an erase first\n" : "Writes overwrite in place\n"));
       }, () => {}));

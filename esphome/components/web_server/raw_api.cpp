@@ -160,17 +160,17 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
           *ctx->out += "\",\"kind\":\"";
           append_json_escaped(*ctx->out, info.kind != nullptr ? info.kind : "");
-          // Worst case is 250 bytes: 169 of template, a 20-digit capacity, three 10-digit
-          // geometry fields and six "false" — snprintf would silently truncate a shorter one
-          // and hand the browser JSON it cannot parse.
-          char buf[256];
+          // Sized generously above the worst case (template + a 20-digit capacity, three
+          // 10-digit geometry fields and seven "false") — snprintf would silently truncate a
+          // shorter buffer and hand the browser JSON it cannot parse.
+          char buf[320];
           // The geometry is what a client needs to offer only what this medium can do — the
           // capability bits, not a guess from the kind string.
           snprintf(
               buf, sizeof(buf),
               "\",\"capacity\":%" PRIu64 ",\"write_page\":%" PRIu32 ",\"erase_sector\":%" PRIu32
               ",\"erase_block\":%" PRIu32 ",\"write_needs_erase\":%s,\"can_erase_sector\":%s,\"can_erase_block\":%s"
-              ",\"can_erase_chip\":%s,\"writable\":%s,\"erasable\":%s,\"node\":%s}",
+              ",\"can_erase_chip\":%s,\"writable\":%s,\"erasable\":%s,\"pseudo_erase\":%s,\"node\":%s}",
               geo.capacity, geo.write_page, geo.erase_sector, geo.erase_block,
               (geo.caps & storage::RAW_WRITE_NEEDS_ERASE) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_SECTOR) != 0 ? "true" : "false",
@@ -178,9 +178,13 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
               (geo.caps & storage::RAW_ERASE_CHIP) != 0 ? "true" : "false",
               // What this build allows, so the browser never offers a button that can only 403.
               ctx->enable_write ? "true" : "false",
-              // Erasable means both: allowed here and the medium actually has an erase.
-              ctx->enable_erase &&
-                      (geo.caps & (storage::RAW_ERASE_SECTOR | storage::RAW_ERASE_BLOCK | storage::RAW_ERASE_CHIP)) != 0
+              // Erasable when allowed here — media with a real erase use the driver's erase(),
+              // overwrite-in-place media (no RAW_ERASE_* caps: EEPROM, FRAM) get the worker's
+              // pseudo erase, a chunked 0xFF fill via write(). Either way the endpoint works.
+              ctx->enable_erase ? "true" : "false",
+              // Tells the browser WHICH of the two it is, so labels don't promise an opcode
+              // the medium does not have.
+              (geo.caps & (storage::RAW_ERASE_SECTOR | storage::RAW_ERASE_BLOCK | storage::RAW_ERASE_CHIP)) == 0
                   ? "true"
                   : "false",
 #ifdef USE_STORAGE_DEVICE_NODES
