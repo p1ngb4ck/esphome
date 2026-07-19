@@ -179,6 +179,14 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->progress_mark = 0;
   slot->overwrite = overwrite;
   slot->pre_phase_done = false;
+  slot->cancel_result = StorageError::NOT_READY;
+  // A recycled slot may have carried a raw job before: clear the device pointer and cursors,
+  // otherwise overlaps_active_() sees a stale raw_device on this plain copy/move and
+  // serializes unrelated transfers against it — up to blocking them indefinitely.
+  slot->raw_device = nullptr;
+  slot->raw_address = 0;
+  slot->raw_erase_pos = 0;
+  slot->raw_erase_end = 0;
   slot->src_is_fs = src->get_storage_type() == StorageType::FILESYSTEM;
   slot->dst_is_fs = dst->get_storage_type() == StorageType::FILESYSTEM;
   // Tree ops keep their roots aside: src_path/dst_path are reused for the file currently in
@@ -286,6 +294,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->raw_erase_end = erase_first ? 1 : 0;  // pre-phase converts to a real byte range
   slot->overwrite = overwrite;
   slot->pre_phase_done = false;
+  slot->cancel_result = StorageError::NOT_READY;
   slot->callback = std::move(on_done);
   slot->result = StorageError::OK;
   slot->offset = 0;
@@ -393,6 +402,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
         // concurrently. Cancel and drain it in place: run_chunk_()'s entry check sees
         // CANCELLED and calls finish_request() immediately, closing any open handles before
         // this function returns — i.e. before the driver's unmount() runs.
+        req.cancel_result = StorageError::NOT_READY;
         req.state = RequestState::CANCELLED;
         this->run_chunk_(req);
         if (this->loop_active_index_ == i)
@@ -408,6 +418,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
         // may run at the same or a lower priority) actually gets CPU time to reach that
         // check — a tight spin here on a single-core target would starve it and deadlock
         // until the timeout below.
+        req.cancel_result = StorageError::NOT_READY;
         req.state = RequestState::CANCELLED;
         uint32_t start = millis();
         while (req.state.load() != RequestState::DONE) {
@@ -525,6 +536,7 @@ void StorageWorker::loop() {
       req.callback = nullptr;
       req.src_storage = nullptr;
       req.dst_storage = nullptr;
+      req.raw_device = nullptr;
       req.stuck_warned = false;
       req.state = RequestState::FREE;
       if (cb)
@@ -557,6 +569,9 @@ void StorageWorker::loop() {
         continue;
       }
       candidate.state = RequestState::RUNNING;
+      // The stall clock starts NOW, not at submission: a request that legitimately waited
+      // PENDING behind another transfer must get its full stall window once it actually runs.
+      candidate.last_progress_ms = millis();
       this->loop_active_index_ = i;
       break;
     }
@@ -564,8 +579,15 @@ void StorageWorker::loop() {
 
   if (this->loop_active_index_ != SIZE_MAX) {
     TransferRequest &req = this->pool_[this->loop_active_index_];
-    this->run_chunk_(req);
-    if (req.state.load() == RequestState::DONE)
+    // Only advance a request this engine still owns (RUNNING, or CANCELLED — which
+    // run_chunk_()'s entry check drains). Anything else means it was finished and possibly
+    // already freed from outside this section; running it would touch nulled storages.
+    RequestState st = req.state.load();
+    if (st == RequestState::RUNNING || st == RequestState::CANCELLED) {
+      this->run_chunk_(req);
+      st = req.state.load();
+    }
+    if (st != RequestState::RUNNING && st != RequestState::CANCELLED)
       this->loop_active_index_ = SIZE_MAX;
   }
 
@@ -888,18 +910,27 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
   if (to_file) {
     err = req.raw_device->read(req.raw_address + req.offset, req.chunk_buf.get(), want, &moved);
     if (err == StorageError::OK && moved > 0) {
-      size_t written = 0;
-      if (file_is_fs) {
-        err =
-            static_cast<FilesystemStorage *>(file_storage)->write(req.dst_handle, req.chunk_buf.get(), moved, &written);
-      } else {
-        err = static_cast<NetworkStorage *>(file_storage)
-                  ->write_chunk(file_path, req.chunk_buf.get(), req.offset, moved, &written);
+      // Write the chunk out fully — write()/write_chunk() may return partial writes, which
+      // are not errors (same retry-until-full loop the file-to-file chunk path uses).
+      size_t total_written = 0;
+      while (err == StorageError::OK && total_written < moved) {
+        size_t written = 0;
+        if (file_is_fs) {
+          err = static_cast<FilesystemStorage *>(file_storage)
+                    ->write(req.dst_handle, req.chunk_buf.get() + total_written, moved - total_written, &written);
+        } else {
+          err = static_cast<NetworkStorage *>(file_storage)
+                    ->write_chunk(file_path, req.chunk_buf.get() + total_written, req.offset + total_written,
+                                  moved - total_written, &written);
+        }
+        if (this->wait_for_network_ready_(req, err, file_storage))
+          return;
+        if (err == StorageError::OK && written == 0) {
+          err = StorageError::WRITE_ERROR;  // no progress and no error — a genuinely stuck sink
+          break;
+        }
+        total_written += written;
       }
-      if (this->wait_for_network_ready_(req, err, file_storage))
-        return;
-      if (err == StorageError::OK && written != moved)
-        err = StorageError::WRITE_ERROR;
     }
   } else {
     size_t got = 0;
@@ -1061,7 +1092,18 @@ void StorageWorker::check_stalled_() {
       } else if (now - req.last_progress_ms > REQUEST_STALL_TIMEOUT_MS) {
         ESP_LOGW(TAG, "Transfer '%s' -> '%s' made no progress for %us - timing it out", req.src_path, req.dst_path,
                  static_cast<unsigned>(REQUEST_STALL_TIMEOUT_MS / 1000));
-        finish_request(req, StorageError::TIMEOUT);
+        // Ownership contract: a RUNNING request is owned by an engine (loop-sliced or worker
+        // task) that is potentially inside a blocking driver call on its handles RIGHT NOW.
+        // Finishing it here closed those handles under the engine's feet and — worse — the
+        // completion sweep above then freed the slot in this very pass, while
+        // loop_active_index_ still pointed at it: the next section ran run_chunk_() on a FREE
+        // slot with nulled storages and the index never reset (FREE != DONE), permanently
+        // wedging the loop engine. Every later loop-sliced job then sat PENDING at 0 bytes
+        // and, with the pool full, submissions answered NOT_READY. Mark CANCELLED instead:
+        // the owning engine's next chunk boundary observes it, closes its own handles and
+        // finishes with the reason carried in cancel_result.
+        req.cancel_result = StorageError::TIMEOUT;
+        req.state = RequestState::CANCELLED;
       }
     } else if (st == RequestState::PENDING && now - req.submitted_ms > REQUEST_PENDING_CAP_MS) {
       ESP_LOGW(TAG, "Transfer '%s' -> '%s' pending for %us - timing it out", req.src_path, req.dst_path,
@@ -1095,9 +1137,11 @@ void StorageWorker::check_stalled_() {
 }
 
 void StorageWorker::run_chunk_(TransferRequest &req) {
-  // Cancellation / hotplug check, before doing any I/O this call.
+  // Cancellation check, before doing any I/O this call. Whoever set CANCELLED (hotplug
+  // drain or stall watchdog) put its reason into cancel_result — this is the only place a
+  // cancelled request is finished, always by the engine that owns it.
   if (req.state.load() == RequestState::CANCELLED) {
-    finish_request(req, StorageError::NOT_READY);
+    finish_request(req, req.cancel_result);
     return;
   }
   if (global_storage_registry != nullptr &&

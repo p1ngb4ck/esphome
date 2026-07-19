@@ -56,8 +56,9 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   bool isRequestHandlerTrivial() const override { return false; }
 
  protected:
-  void submit_and_answer_(AsyncWebServerRequest *request,
-                          std::function<storage::StorageError(storage::TransferJob *)> &&submit);
+  void submit_and_answer_(
+      AsyncWebServerRequest *request,
+      std::function<storage::StorageError(storage::TransferJob *, storage::CompletionCallback &&)> &&submit);
   // Runs `op` on the main loop and blocks the calling (httpd) task until it completed. Returns
   // false on timeout — the op may still run later, so it must only touch state that stays valid.
   bool run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms = 10000);
@@ -68,11 +69,27 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   bool parse_range_(AsyncWebServerRequest *request, storage::RawStorage *device, uint64_t *address, uint64_t *size);
 
   void handle_devices_(AsyncWebServerRequest *request);
+  // GET /raw/job?id=<n> — status of a raw worker job (same JSON shape as /files/job). Raw jobs
+  // need their own endpoint + result cache: the worker recycles a slot right after the
+  // completion callback ran, so a poller alone would miss DONE — and a missed final result
+  // silently swallowed every raw error (the browser treated the resulting 404 as success).
+  void handle_job_(AsyncWebServerRequest *request);
+  // Parks a finished raw job's result for handle_job_ (mirrors the file API's job cache).
+  void cache_job_result_(storage::TransferJob job, storage::StorageError result);
   // Device <-> file on a mounted storage, entirely on the node: the browser only names the
   // path, the bytes never travel through it. Sizes are guard-railed by the storage component's
   // max_blocking_transfer_size, like every other blocking helper.
   void handle_read_(AsyncWebServerRequest *request);
   void handle_erase_(AsyncWebServerRequest *request);
+
+  // Final results of recently finished raw jobs — small ring, browser polls every 500 ms.
+  static constexpr size_t JOB_CACHE_SIZE = 4;
+  struct JobCacheEntry {
+    storage::TransferJob job{storage::INVALID_TRANSFER_JOB};
+    storage::StorageError result{storage::StorageError::OK};
+  };
+  JobCacheEntry job_cache_[JOB_CACHE_SIZE]{};
+  size_t job_cache_next_{0};
 
   web_server_base::WebServerBase *base_{nullptr};
   storage::RawStorage *scoped_device_{nullptr};
