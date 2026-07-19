@@ -1091,6 +1091,13 @@ storage::FileHandle *LittleFSMount::alloc_handle_(const char *path) {
       return &this->handle_pool_[i];
     }
   }
+  // Every slot taken is a leak until proven otherwise — name the holders, so the next
+  // 'no space although plenty is free' report indicts the exact non-closing caller.
+  ESP_LOGW(TAG, "File handle pool exhausted (%d slots) while opening '%s' — handles still open:", LFS_VFS_MAX_FDS,
+           path);
+  for (int i = 0; i < LFS_VFS_MAX_FDS; i++) {
+    ESP_LOGW(TAG, "  [%d] '%s'", i, this->handle_paths_[i]);
+  }
   return nullptr;
 }
 
