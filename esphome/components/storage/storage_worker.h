@@ -172,6 +172,12 @@ struct TransferRequest {
   // "still connecting" (see run_chunk_) before it becomes the honest final answer.
   uint32_t submitted_ms{0};
   bool waiting_logged{false};
+  // Architecture contract: the file API is a pure HTTP -> storage-interface translator. All
+  // driver I/O that used to run in the HTTP handler's pre-phase (source/destination stat,
+  // overwrite clearing, the tree-vs-file decision) happens HERE, inside the engine that owns
+  // the storages — executed once on the request's first pass.
+  bool overwrite{false};
+  bool pre_phase_done{false};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -319,10 +325,15 @@ class StorageWorker : public Component {
   // invoked. Rejections: StorageError::NOT_READY (request pool full — this is backpressure,
   // not a frozen-enum addition, see the PR notes) or StorageError::INVALID_ARGS (a path
   // exceeds STORAGE_WORKER_MAX_PATH).
+  // overwrite=false answers ALREADY_EXISTS for an occupied destination; true clears it first
+  // (recursively for trees) — inside the worker, never in a caller's context. The worker also
+  // decides tree-vs-file itself by stat()ing the source: callers no longer pre-classify.
   storage::StorageError async_copy(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
-                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr);
+                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr,
+                                   bool overwrite = false);
   storage::StorageError async_move(storage::PathStorage *src, const char *src_path, storage::PathStorage *dst,
-                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr);
+                                   const char *dst_path, CompletionCallback &&on_done, TransferJob *job_out = nullptr,
+                                   bool overwrite = false);
 
   // Same, for a whole directory tree. The engine walks it — see RequestOp::COPY_TREE. The
   // destination root is created if missing; existing entries below it are overwritten.
@@ -377,7 +388,7 @@ class StorageWorker : public Component {
  protected:
   storage::StorageError submit_(RequestOp op, storage::PathStorage *src, const char *src_path,
                                 storage::PathStorage *dst, const char *dst_path, CompletionCallback &&on_done,
-                                TransferJob *job_out = nullptr);
+                                TransferJob *job_out = nullptr, bool overwrite = false);
 
   // Lazily creates both pools (and, where applicable, the shared background task) on the first
   // submit_()/begin_write()/begin_read() call. A path-based driver that links in the worker but
