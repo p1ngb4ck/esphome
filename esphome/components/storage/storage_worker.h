@@ -192,6 +192,12 @@ struct TransferRequest {
   // overlap-blocked behind them — come free again.
   uint32_t last_progress_ms{0};
   uint64_t progress_mark{0};
+  // Result the CANCELLED entry check finishes the request with. Ownership contract: only
+  // the engine that runs a request (loop-sliced engine or worker task) may finish a RUNNING
+  // request — everyone else (hotplug drain, stall watchdog) marks it CANCELLED and lets the
+  // owning engine's next run_chunk_() pass close handles and set DONE. This field carries
+  // WHY it was cancelled: NOT_READY for hotplug, TIMEOUT for the stall watchdog.
+  storage::StorageError cancel_result{storage::StorageError::NOT_READY};
   // Raw ops only. raw_address is the device offset of the transfer window; the erase cursor
   // walks [raw_erase_pos, raw_erase_end) one geometry-sized step per pass before any bytes
   // move. The file side lives in src/dst_storage + src/dst_path as usual; the device side is

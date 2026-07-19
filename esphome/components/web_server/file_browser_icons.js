@@ -123,13 +123,15 @@
     #esp-file-browser .efb-type { flex: none; display: flex; opacity: .75; }
     #esp-file-browser .efb-modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.45);
       display: flex; align-items: center; justify-content: center; z-index: 10; }
-    #esp-file-browser .efb-modal { background: #fafafa; color: #212121;
+    /* Canvas/CanvasText are the CSS system colors: they resolve against the element's
+       EFFECTIVE color-scheme — which the v3 app toggles by setting 'color-scheme' on <html>
+       (its theme button), independent of the OS preference. Hardcoded colors keyed to a
+       prefers-color-scheme media query desynced from that toggle (white modal chrome on the
+       dark page and vice versa); the system colors follow whatever the page currently is. */
+    #esp-file-browser .efb-modal { background: Canvas; color: CanvasText;
       border: 2px solid rgba(127,127,127,.3); border-radius: 12px; padding: 1em 1.25em;
       min-width: 18em; max-width: 90%; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
     #esp-file-browser .efb-modal-title { font-weight: 500; margin-bottom: .75em; }
-    @media (prefers-color-scheme: dark) {
-      #esp-file-browser .efb-modal { background: #252525; color: #e0e0e0; }
-    }
     #esp-file-browser .efb-field { display: flex; align-items: center; gap: .75em;
       justify-content: space-between; margin: .4em 0; }
     #esp-file-browser .efb-field-label { font-size: .9em; opacity: .8; }
@@ -444,36 +446,26 @@
 
     // A job that vanishes between polls finished and had its slot recycled — treat as done.
 
+    // Raw jobs poll /raw/job (their own endpoint + result cache): /files/job never learned a
+    // raw job's final result — the worker recycles the slot right after completion, the poll
+    // then 404'd and every raw error was silently swallowed as "done".
     const waitRawJob = async (job, label) => {
-
       for (;;) {
-
         await new Promise((res) => setTimeout(res, 500));
-
         let s;
-
-        try { s = await api(`/files/job?id=${job}`); } catch (e) { break; }
-
+        try { s = await api(`/raw/job?id=${job}`); } catch (e) { break; }
         if (!s || s.state === undefined) break;
-
         if (s.state === "done") {
-
-          if (s.result && s.result !== "ok") throw new Error(`${label}: ${s.result}`);
-
+          // error_to_string() spells success "OK" (uppercase) — comparing against "ok" turned
+          // every successful job into a reported error.
+          if (s.result && s.result !== "OK") throw new Error(`${label}: ${s.result}`);
           break;
-
         }
-
         if (s.bytes_total > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
-
         else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)}`);
-
       }
-
       setStatus(`${label} \u2014 done`);
-
       refresh();
-
     };
 
 

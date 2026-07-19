@@ -202,18 +202,89 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json.c_str());
 }
 
+void WebServerRawApi::cache_job_result_(storage::TransferJob job, storage::StorageError result) {
+  if (job == storage::INVALID_TRANSFER_JOB)
+    return;
+  JobCacheEntry &e = this->job_cache_[this->job_cache_next_];
+  this->job_cache_next_ = (this->job_cache_next_ + 1) % JOB_CACHE_SIZE;
+  e.job = job;
+  e.result = result;
+}
+
+void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
+  auto *param = request->getParam("id");
+  if (param == nullptr) {
+    request->send(400, "application/json", "{\"error\":\"missing id\"}");
+    return;
+  }
+  auto job = static_cast<storage::TransferJob>(strtoul(param->value().c_str(), nullptr, 10));
+  storage::TransferStatus st{};
+  bool found = false;
+  bool done_cached = false;
+  storage::StorageError cached_result = storage::StorageError::OK;
+  this->run_on_loop_([this, job, &st, &found, &done_cached, &cached_result]() {
+    // Cache first: a DONE job usually had its slot recycled already (same as /files/job).
+    for (const auto &e : this->job_cache_) {
+      if (e.job == job) {
+        cached_result = e.result;
+        done_cached = true;
+        found = true;
+        return;
+      }
+    }
+    if (storage::global_storage_worker != nullptr) {
+      found = storage::global_storage_worker->get_transfer_status(job, &st);
+    }
+  });
+  if (!found) {
+    request->send(404, "application/json", "{\"error\":\"unknown or expired job\"}");
+    return;
+  }
+  char buf[160];
+  if (done_cached) {
+    snprintf(buf, sizeof(buf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":0,\"bytes_total\":0}",
+             storage::error_to_string(cached_result));
+    request->send(200, "application/json", buf);
+    return;
+  }
+  const char *state = "pending";
+  if (st.state == storage::RequestState::RUNNING || st.state == storage::RequestState::CANCELLED) {
+    state = "running";
+  } else if (st.state == storage::RequestState::DONE) {
+    state = "done";
+  }
+  snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64 "}",
+           state, storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
+  request->send(200, "application/json", buf);
+}
+
 // Submits a raw worker job (translator contract: no driver I/O in HTTP context) and
 // answers {"job":N} — the browser polls /files/job like it does for copy/move. Submission
 // itself touches only the worker's pool and runs marshalled on the main loop.
-void WebServerRawApi::submit_and_answer_(AsyncWebServerRequest *request,
-                                         std::function<storage::StorageError(storage::TransferJob *)> &&submit) {
+void WebServerRawApi::submit_and_answer_(
+    AsyncWebServerRequest *request,
+    std::function<storage::StorageError(storage::TransferJob *, storage::CompletionCallback &&)> &&submit) {
   if (storage::global_storage_worker == nullptr) {
     request->send(501, "application/json", "{\"error\":\"no storage worker\"}");
     return;
   }
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
   storage::StorageError err = storage::StorageError::OK;
-  this->run_on_loop_([&submit, &job, &err]() { err = submit(&job); });
+  this->run_on_loop_([this, &submit, &job, &err]() {
+    // The job id only exists after submission; the completion callback reads it through a
+    // small heap slot filled right below — safe because submission and completion both run
+    // on the main loop, strictly in that order (same pattern as the file API's copy/move).
+    auto *job_slot = new storage::TransferJob(storage::INVALID_TRANSFER_JOB);  // NOLINT
+    err = submit(&job, [this, job_slot](storage::StorageError result) {
+      this->cache_job_result_(*job_slot, result);
+      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
+    });
+    if (err != storage::StorageError::OK) {
+      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) — callback will not fire
+    } else {
+      *job_slot = job;
+    }
+  });
   if (err != storage::StorageError::OK) {
     char ebuf[96];
     snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", storage::error_to_string(err));
@@ -241,15 +312,17 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
   if (auto *to_path = request->getParam("to_path")) {
     std::string to = to_path->value().c_str();
     bool overwrite = request->hasParam("overwrite");
-    this->submit_and_answer_(request, [device, address, size, to, overwrite](storage::TransferJob *job) {
-      const char *rel = nullptr;
-      storage::PathStorage *ps = storage::global_storage_registry != nullptr
-                                     ? storage::global_storage_registry->resolve_path(to.c_str(), &rel)
-                                     : nullptr;
-      if (ps == nullptr)
-        return storage::StorageError::NOT_FOUND;
-      return storage::global_storage_worker->async_raw_read(device, address, size, ps, rel, nullptr, job, overwrite);
-    });
+    this->submit_and_answer_(
+        request, [device, address, size, to, overwrite](storage::TransferJob *job, storage::CompletionCallback &&done) {
+          const char *rel = nullptr;
+          storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                         ? storage::global_storage_registry->resolve_path(to.c_str(), &rel)
+                                         : nullptr;
+          if (ps == nullptr)
+            return storage::StorageError::NOT_FOUND;
+          return storage::global_storage_worker->async_raw_read(device, address, size, ps, rel, std::move(done), job,
+                                                                overwrite);
+        });
     return;
   }
 
@@ -301,9 +374,11 @@ void WebServerRawApi::handle_erase_(AsyncWebServerRequest *request) {
     return;
   }
 
-  this->submit_and_answer_(request, [device, address, size](storage::TransferJob *job) {
-    return storage::global_storage_worker->async_raw_erase(device, address, size, nullptr, job);
-  });
+  this->submit_and_answer_(request,
+                           [device, address, size](storage::TransferJob *job, storage::CompletionCallback &&done) {
+                             return storage::global_storage_worker->async_raw_erase(device, address, size,
+                                                                                    std::move(done), job);
+                           });
 }
 
 void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
@@ -318,6 +393,10 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
     }
     if (strcmp(tail, "read") == 0) {
       this->handle_read_(request);
+      return;
+    }
+    if (strcmp(tail, "job") == 0) {
+      this->handle_job_(request);
       return;
     }
   } else if (request->method() == HTTP_POST) {
@@ -343,15 +422,18 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         uint64_t written = 0;
         std::string from = from_path->value().c_str();
         bool erase_first = request->hasParam("erase");
-        this->submit_and_answer_(request, [device, address, from, erase_first](storage::TransferJob *job) {
-          const char *rel = nullptr;
-          storage::PathStorage *ps = storage::global_storage_registry != nullptr
-                                         ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
-                                         : nullptr;
-          if (ps == nullptr)
-            return storage::StorageError::NOT_FOUND;
-          return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, nullptr, job);
-        });
+        this->submit_and_answer_(
+            request,
+            [device, address, from, erase_first](storage::TransferJob *job, storage::CompletionCallback &&done) {
+              const char *rel = nullptr;
+              storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                             ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
+                                             : nullptr;
+              if (ps == nullptr)
+                return storage::StorageError::NOT_FOUND;
+              return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first,
+                                                                     std::move(done), job);
+            });
       }
       // Otherwise the body handler did the work; report its outcome.
       if (this->write_.failed) {
