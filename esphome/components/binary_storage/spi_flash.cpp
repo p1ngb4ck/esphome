@@ -573,9 +573,15 @@ bool SPIFlash::erase_chip() {
   this->write_byte(CMD_CHIP_ERASE);
   this->disable();
 
-  // Chip erase can take a very long time (tens of seconds)
-  ESP_LOGI(TAG, "Chip erase in progress...");
-  bool success = this->wait_ready(60000);  // 60 second timeout
+  // Chip erase time scales with the device size — a fixed 60 s timed out on larger parts
+  // (datasheet maxima run to ~256 s for 16 MB and ~512 s for 32 MB NOR flash). Budget 20 s per
+  // MB plus a 30 s floor for command overhead and small-chip margin (the same 40 s-per-2 MB
+  // basis the Linux spi-nor driver uses). A generous timeout only matters in the error case; a
+  // healthy chip returns as soon as its status register clears.
+  const uint32_t capacity_mb = this->capacity_ / (1024UL * 1024UL);
+  const uint32_t erase_timeout_ms = 30000UL + capacity_mb * 20000UL;
+  ESP_LOGI(TAG, "Chip erase in progress... (timeout %" PRIu32 " s)", erase_timeout_ms / 1000);
+  bool success = this->wait_ready(erase_timeout_ms);
 
   if (success) {
     ESP_LOGI(TAG, "Chip erase complete");
