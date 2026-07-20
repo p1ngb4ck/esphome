@@ -479,6 +479,64 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   }
 }
 
+void perform_file_copy_async(const std::string &from, const std::string &to, bool is_move,
+                             Trigger<std::string> *on_complete) {
+  const char *op = is_move ? "move" : "copy";
+
+  // Helper: report a synchronous (pre-submission) failure — log it and fire the trigger with
+  // the message so an automation can react. Reused for every early-out below.
+  auto fail = [&](const std::string &msg) {
+    ESP_LOGW(TAG, "file_%s: %s", op, msg.c_str());
+    if (on_complete != nullptr)
+      on_complete->trigger(msg);
+  };
+
+  if (global_storage_registry == nullptr) {
+    fail("no storage registry");
+    return;
+  }
+  const char *src_rel = nullptr;
+  const char *dst_rel = nullptr;
+  PathStorage *src = global_storage_registry->resolve_path(from.c_str(), &src_rel);
+  PathStorage *dst = global_storage_registry->resolve_path(to.c_str(), &dst_rel);
+  if (src == nullptr || dst == nullptr) {
+    fail(std::string("no storage mounted for '") + (src == nullptr ? from : to) + "'");
+    return;
+  }
+
+#ifdef USE_STORAGE_WORKER
+  if (global_storage_worker != nullptr) {
+    // Overwrite: the action's historical semantics were "just do it" (the blocking helpers
+    // truncate/replace), so keep that — pass overwrite = true for parity.
+    auto on_done = [on_complete, from, to, is_move](StorageError result) {
+      if (result != StorageError::OK) {
+        ESP_LOGW(TAG, "file_%s: '%s' -> '%s' failed (%s)", is_move ? "move" : "copy", from.c_str(), to.c_str(),
+                 error_to_string(result));
+      }
+      if (on_complete != nullptr)
+        on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
+    };
+    StorageError err = is_move ? global_storage_worker->async_move(src, src_rel, dst, dst_rel, std::move(on_done),
+                                                                   nullptr, /*overwrite=*/true)
+                               : global_storage_worker->async_copy(src, src_rel, dst, dst_rel, std::move(on_done),
+                                                                   nullptr, /*overwrite=*/true);
+    // Submission itself can fail (pool full → NOT_READY, or bad args) before any callback is
+    // scheduled — report that synchronously so the trigger still fires exactly once.
+    if (err != StorageError::OK) {
+      fail(std::string("could not queue (") + error_to_string(err) + ")");
+    }
+    return;
+  }
+#endif
+
+  // No worker compiled in (raw-only node, or no path driver requested it): fall back to the
+  // blocking helper. This can exceed the 30 ms loop budget for large transfers — the async
+  // path above is the norm; this is only the degenerate no-worker build.
+  perform_file_copy(from, to, is_move);
+  if (on_complete != nullptr)
+    on_complete->trigger(std::string());  // best-effort: the sync helper only logs on failure
+}
+
 void perform_file_delete(const std::string &path, bool recursive) {
   if (global_storage_registry == nullptr) {
     ESP_LOGW(TAG, "file_delete: no storage registry");

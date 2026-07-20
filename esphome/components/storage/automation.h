@@ -7,6 +7,9 @@
 #include "esphome/core/defines.h"
 
 #include "storage.h"
+#ifdef USE_STORAGE_WORKER
+#include "storage_worker.h"  // global_storage_worker — async file/raw ops (fire-and-forget actions)
+#endif
 #if defined(USE_STORAGE_PREFERENCES) && defined(USE_ESP32)
 #include "preferences_backup.h"  // PrefSelection — file scope, NOT inside the namespace below
 #endif
@@ -93,6 +96,11 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 // Non-template workers for the actions below — all error logging lives in the .cpp.
 void perform_mount(MountableStorage *target, bool mount);
 void perform_file_copy(const std::string &from, const std::string &to, bool is_move);
+// Async variant used by FileCopyAction: submits to the worker (or, if the worker is not
+// compiled in, runs the blocking helper and fires the trigger inline). `on_complete` receives
+// the error text (empty = success) and may be nullptr.
+void perform_file_copy_async(const std::string &from, const std::string &to, bool is_move,
+                             Trigger<std::string> *on_complete);
 void perform_file_delete(const std::string &path, bool recursive);
 bool check_file_exists(const std::string &path);
 void perform_file_write(const std::string &path, std::string content, bool append, bool newline);
@@ -152,6 +160,12 @@ template<typename... Ts> class FileReadAction : public Action<Ts...> {
 // storage.file_copy / storage.file_move (move doubles as rename — see .cpp)
 // ---------------------------------------------------------------------------
 
+// Fire-and-forget: play() submits the copy/move to the async worker and returns immediately,
+// so the action sequence continues without blocking the loop for the transfer's duration. The
+// on_complete trigger fires later from the worker's completion callback (main loop) with the
+// error text — empty string on success. A same-storage move still takes the rename() fast path
+// inside the worker's pre-phase. Falls back to the synchronous helper only when the worker was
+// not compiled in (no path driver requested it); that path blocks, as before.
 template<typename... Ts> class FileCopyAction : public Action<Ts...> {
  public:
   explicit FileCopyAction(bool is_move) : is_move_(is_move) {}
@@ -159,12 +173,15 @@ template<typename... Ts> class FileCopyAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(std::string, from)
   TEMPLATABLE_VALUE(std::string, to)
 
+  Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
+
   void play(const Ts &...x) override {
-    perform_file_copy(this->from_.value(x...), this->to_.value(x...), this->is_move_);
+    perform_file_copy_async(this->from_.value(x...), this->to_.value(x...), this->is_move_, &this->complete_trigger_);
   }
 
  protected:
   bool is_move_;
+  Trigger<std::string> complete_trigger_;
 };
 
 #ifdef USE_STORAGE_RAW_ACTIONS
