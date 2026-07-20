@@ -1,0 +1,74 @@
+esphome:
+  name: storagereview
+  friendly_name: storage-review
+
+esp32:
+  board: esp32s3box
+  variant: ESP32S3
+  framework:
+    type: esp-idf
+  partitions: ../../test_build_components/partitions_testing.csv
+
+logger:
+  level: VERY_VERBOSE
+
+# Non-task-safe NetworkStorage needs a network stack.
+wifi:
+  ssid: "test"
+  password: "testpassword"
+
+# --- Task-safe storage #1: SD over MMC (STORAGE_CAP_IO_TASK_SAFE) ---
+sd_storage:
+  id: sd_card
+  type: sd_mmc
+  clk_pin: GPIO39
+  cmd_pin: GPIO40
+  data0_pin: GPIO41
+  path: /sdcard
+  mode_1bit: true
+
+# --- Non-task-safe storage: NFS (NetworkStorage, default caps = 0) ---
+nfs_client:
+  - id: nfs_share
+    server: 192.168.1.10
+    export: /export/data
+    mount_path: /nfs
+
+# The storage worker: driven by PollingComponent (the reviewed base). Explicit small
+# update_interval so the async transfers advance quickly.
+storage:
+  worker_update_interval: 5ms
+
+# Exercise every async action path + the on_complete trigger.
+script:
+  - id: exercise_async_actions
+    then:
+      # ASYNC file transfer, non-thread-safe involved (SD -> NFS)
+      - storage.file_copy:
+          from: /sdcard/data.bin
+          to: /nfs/data.bin
+          on_complete:
+            - logger.log:
+                format: "copy done: '%s'"
+                args: ["x.c_str()"]
+      # ASYNC move (same-storage rename fast path)
+      - storage.file_move:
+          from: /sdcard/a.txt
+          to: /sdcard/b.txt
+          on_complete:
+            - logger.log:
+                format: "move done: '%s'"
+                args: ["x.c_str()"]
+      # SYNCHRONOUS small-content write (by contract)
+      - storage.file_write:
+          path: /sdcard/log.txt
+          content: "hello"
+      - storage.file_append:
+          path: /sdcard/log.txt
+          content: "world"
+      # SYNCHRONOUS delete (by contract)
+      - storage.file_delete:
+          path: /sdcard/old.bin
+      - storage.file_delete:
+          path: /sdcard/olddir
+          recursive: true
