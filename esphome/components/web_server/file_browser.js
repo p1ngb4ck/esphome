@@ -121,6 +121,13 @@
     #esp-file-browser .efb-field { display: flex; align-items: center; gap: .75em;
       justify-content: space-between; margin: .4em 0; }
     #esp-file-browser .efb-field-label { font-size: .9em; opacity: .8; }
+    #esp-file-browser .efb-field-note { font-size: .85em; opacity: .7; margin: .4em 0; font-style: italic; }
+    #esp-file-browser .efb-picker { max-height: 40vh; overflow-y: auto; margin: .3em 0 .6em;
+      border: 1px solid rgba(127,127,127,.3); border-radius: 4px; padding: 4px 0; }
+    #esp-file-browser .efb-picker-row { font-size: .9em; }
+    #esp-file-browser .efb-picker-pick { margin-left: auto; padding: 0 .6em; cursor: pointer;
+      opacity: .7; font-size: .8em; text-decoration: underline; }
+    #esp-file-browser .efb-picker-pick:hover { opacity: 1; }
     #esp-file-browser .efb-field input[type=text] { flex: 1; min-width: 0; max-width: 60%;
       background: transparent; color: inherit; border: none;
       border-bottom: 1px solid rgba(127,127,127,.4); padding: 2px 0; font-family: ui-monospace, monospace; }
@@ -372,15 +379,139 @@
     return wrap;
   };
 
+  // --- embedded file/dir picker ------------------------------------------
+  // Reuses the same /files endpoints as the tree, but renders a minimal navigate-and-select
+  // view (no per-entry actions). mode "file" makes files selectable, mode "dir" makes
+  // directories selectable. onPick(path) is called with the chosen path.
+  const pickerView = (mode, onPick) => {
+    const box = $("div", { className: "efb-picker" });
+    const renderList = async (path, container, depth) => {
+      container.textContent = "";
+      let d;
+      try {
+        d = await api(`/files/list?path=${enc(path)}`);
+      } catch (e) {
+        container.append($("div", { className: "efb-muted efb-name", textContent: "Error: " + e.message }));
+        return;
+      }
+      const entries = d.entries.slice().sort((a, b) => (b.is_dir - a.is_dir) || a.name.localeCompare(b.name));
+      for (const e of entries) {
+        const p = path + "/" + e.name;
+        const row = $("div", { className: "efb-row efb-picker-row" });
+        row.style.paddingLeft = (8 + depth * 18) + "px";
+        if (e.is_dir) {
+          const twist = $("span", { className: "efb-twist", textContent: "\u25B8" });
+          const label = $("span", { className: "efb-name efb-dirname", textContent: e.name });
+          const kids = $("div");
+          kids.style.display = "none";
+          let open = false;
+          const toggle = () => {
+            open = !open;
+            twist.classList.toggle("efb-open", open);
+            kids.style.display = open ? "" : "none";
+            if (open) renderList(p, kids, depth + 1);
+            else kids.textContent = "";
+          };
+          twist.onclick = toggle;
+          label.onclick = mode === "dir" ? () => onPick(p) : toggle;
+          row.append(twist, label);
+          if (mode === "dir")
+            row.append($("span", { className: "efb-picker-pick", textContent: "select" , onclick: () => onPick(p) }));
+          const wrap = $("div");
+          wrap.append(row, kids);
+          container.append(wrap);
+        } else {
+          const label = $("span", { className: "efb-name", textContent: e.name });
+          const size = $("span", { className: "efb-size", textContent: fmtSize(e.size) });
+          row.append($("span", { className: "efb-twist efb-none", textContent: "\u25B8" }), label, size);
+          if (mode === "file") {
+            row.style.cursor = "pointer";
+            row.onclick = () => onPick(p);
+          }
+          container.append(row);
+        }
+      }
+    };
+    (async () => {
+      try {
+        for (const s of await api("/files/storages")) {
+          if (!s.mounted) continue;
+          const rootRow = $("div", { className: "efb-row efb-picker-row" });
+          const twist = $("span", { className: "efb-twist", textContent: "\u25B8" });
+          const label = $("span", { className: "efb-name efb-dirname", textContent: s.mount_path });
+          const kids = $("div");
+          kids.style.display = "none";
+          let open = false;
+          const toggle = () => {
+            open = !open;
+            twist.classList.toggle("efb-open", open);
+            kids.style.display = open ? "" : "none";
+            if (open) renderList(s.mount_path, kids, 1);
+            else kids.textContent = "";
+          };
+          twist.onclick = toggle;
+          label.onclick = mode === "dir" ? () => onPick(s.mount_path) : toggle;
+          rootRow.append(twist, label);
+          if (mode === "dir")
+            rootRow.append($("span", { className: "efb-picker-pick", textContent: "select", onclick: () => onPick(s.mount_path) }));
+          const wrap = $("div");
+          wrap.append(rootRow, kids);
+          box.append(wrap);
+        }
+      } catch (e) {
+        box.append($("div", { className: "efb-muted efb-name", textContent: "Error: " + e.message }));
+      }
+    })();
+    return box;
+  };
+
   // --- modal --------------------------------------------------------------
   // Raw operations need parameters (address, size, a path) that a single icon cannot carry —
   // and each of them is destructive or long-running enough to deserve a deliberate confirm.
+  //
+  // Field types: "text" (default), "check", "note" (read-only line, recomputed on every change
+  // via compute(values)), and "picker" (embedded file/dir chooser that fills a target text
+  // field). A picker field has no value of its own; it writes into fields[key=f.target].
   const modal = (title, fields, onSubmit) => {
     const back = $("div", { className: "efb-modal-back" });
     const box = $("div", { className: "efb-modal" });
     box.append($("div", { className: "efb-modal-title", textContent: title }));
     const inputs = {};
+    const notes = [];  // { el, compute }
+    const snapshot = () => {
+      const v = {};
+      for (const f of fields)
+        if (f.type !== "note" && f.type !== "picker")
+          v[f.key] = f.type === "check" ? inputs[f.key].checked : inputs[f.key].value.trim();
+      return v;
+    };
+    const refresh = () => {
+      const v = snapshot();
+      for (const n of notes) n.el.textContent = n.compute(v);
+    };
     for (const f of fields) {
+      if (f.type === "note") {
+        const line = $("div", { className: "efb-field-note" });
+        notes.push({ el: line, compute: f.compute });
+        box.append(line);
+        continue;
+      }
+      if (f.type === "picker") {
+        // Embedded chooser: clicking an entry writes its path into the target text field.
+        const line = $("div", { className: "efb-field-note", textContent: f.label });
+        box.append(line);
+        box.append(pickerView(f.mode, (path) => {
+          if (inputs[f.target]) {
+            // dir mode fills the directory; a filename field (if any) is appended by the caller's
+            // note/compute. file mode fills the whole path.
+            inputs[f.target].value = f.mode === "dir" && f.filenameKey && inputs[f.filenameKey]
+              ? path + "/" + (inputs[f.filenameKey].value.trim() || "")
+              : path;
+            refresh();
+          }
+        }));
+        continue;
+      }
       const row = $("label", { className: "efb-field" });
       row.append($("span", { className: "efb-field-label", textContent: f.label }));
       const el = f.type === "check"
@@ -388,18 +519,18 @@
         : $("input", { type: "text", value: f.value == null ? "" : String(f.value) });
       if (f.hint) el.placeholder = f.hint;
       inputs[f.key] = el;
+      el.addEventListener(f.type === "check" ? "change" : "input", refresh);
       row.append(el);
       box.append(row);
     }
+    refresh();
     const close = () => back.remove();
     const bar = $("div", { className: "efb-modal-bar" });
     const cancel = $("button", { textContent: "cancel" });
     cancel.onclick = close;
     const ok = $("button", { textContent: "ok" });
     ok.onclick = () => {
-      const values = {};
-      for (const f of fields)
-        values[f.key] = f.type === "check" ? inputs[f.key].checked : inputs[f.key].value.trim();
+      const values = snapshot();
       close();
       Promise.resolve(onSubmit(values)).catch((e) => setStatus("Error: " + e.message));
     };
@@ -461,6 +592,9 @@
       { key: "address", label: "Address", value: whole ? "0x0" : "0x0" },
       { key: "size", label: "Size (bytes)", value: whole ? dev.capacity : 256 },
       { key: "to_path", label: "To file on device", hint: "empty = download" },
+      { key: "filename", label: "Filename (for picker)", hint: "dump.bin" },
+      { type: "picker", mode: "dir", target: "to_path", filenameKey: "filename",
+        label: "…or pick a target directory (uses the filename above):" },
     ], async (v) => {
       const q = `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
       if (!v.to_path) {
@@ -481,6 +615,7 @@
         acts.push(btn("upload", "Write a file to this device", async () => modal(`Write to ${dev.node_name}`, [
           { key: "address", label: "Address", value: "0x0" },
           { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
+          { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },
           ...(dev.write_needs_erase
             ? [{ key: "erase", label: `Erase first (${fmtSize(dev.erase_sector)} sectors)`, type: "check", value: true }]
             : []),
