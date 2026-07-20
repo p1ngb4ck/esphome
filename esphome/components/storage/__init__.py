@@ -610,6 +610,7 @@ CONF_TO_FILE = "to_file"
 CONF_FROM_FILE = "from_file"
 CONF_ERASE_FIRST = "erase_first"
 CONF_ALL = "all"
+CONF_FORCE_SLICED_ERASE = "force_sliced_erase"
 
 
 def _validate_raw_data(value):
@@ -687,6 +688,10 @@ _RAW_ERASE_SCHEMA = cv.All(
             cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
             cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
             cv.Optional(CONF_ALL, default=False): cv.boolean,
+            # Opt out of the whole-chip fast path: force the block-by-block erase even where a
+            # single chip erase would be used (task-safe device, full span). Default keeps the
+            # fast path. Mainly a testing/benchmarking knob.
+            cv.Optional(CONF_FORCE_SLICED_ERASE, default=False): cv.boolean,
             # Fires (error text, empty = success) when the erase finishes on the worker.
             cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
         }
@@ -785,6 +790,7 @@ async def raw_erase_action_to_code(config, action_id, template_arg, args):
         var.set_size(await cg.templatable(config.get(CONF_SIZE, 0), args, cg.uint32))
     )
     cg.add(var.set_all(config[CONF_ALL]))
+    cg.add(var.set_force_sliced_erase(config[CONF_FORCE_SLICED_ERASE]))
     if CONF_ON_COMPLETE in config:
         await automation.build_automation(
             var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]

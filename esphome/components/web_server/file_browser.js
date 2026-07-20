@@ -499,11 +499,18 @@
           { key: "address", label: dev.pseudo_erase ? "Address" : `Address (multiple of ${fmtHex(dev.erase_sector)})`, value: "0x0" },
           { key: "size", label: dev.pseudo_erase ? "Size (bytes)" : `Size (multiple of ${fmtHex(dev.erase_sector)})`, value: dev.pseudo_erase ? 256 : dev.erase_sector },
           { key: "all", label: "Erase the whole device", type: "check", value: false },
+          // Only meaningful when a whole-chip erase would otherwise be used (can_erase_chip is
+          // already true only for a task-safe chip-erase-capable device). Checking it forces the
+          // slower block-by-block path instead — handy for comparing the two.
+          ...(dev.can_erase_chip
+            ? [{ key: "sliced", label: "Erase sector-by-sector (skip fast chip erase)", type: "check", value: false }]
+            : []),
         ], async (v) => {
           if (v.all && !confirm(`Erase all of ${dev.node_name}? Everything on it is gone.`)) return;
-          const q = v.all
+          const q = (v.all
             ? `device=${enc(dev.id)}&all=1`
-            : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
+            : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`)
+            + (v.sliced ? "&sliced=1" : "");
           setStatus(`erasing ${dev.node_name}\u2026`);
           const r = await api(`/raw/erase?${q}`, { method: "POST" });
           await waitRawJob(r.job, `erasing ${dev.node_name}`);

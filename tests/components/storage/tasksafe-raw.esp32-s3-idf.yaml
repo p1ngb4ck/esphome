@@ -40,3 +40,11 @@ binary_storage:
 
 storage:
   worker_update_interval: 5ms
+
+# Exercises the raw HTTP api (erase endpoint + ?sliced=1) and the file browser UI.
+web_server:
+  version: 3
+  raw_api:
+    device_id: my_flash
+    enable_write: true
+  file_browser:

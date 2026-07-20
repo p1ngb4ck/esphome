@@ -175,7 +175,16 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
               (geo.caps & storage::RAW_WRITE_NEEDS_ERASE) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_SECTOR) != 0 ? "true" : "false",
               (geo.caps & storage::RAW_ERASE_BLOCK) != 0 ? "true" : "false",
-              (geo.caps & storage::RAW_ERASE_CHIP) != 0 ? "true" : "false",
+              // can_erase_chip means "a whole-chip erase will actually be used here", not merely
+              // "the medium has a chip-erase opcode". The single blocking erase(0, capacity) is
+              // only taken on the worker task; a non-task-safe device always slices a full erase
+              // no matter what the medium supports. So the browser only sees this true — and only
+              // then offers the sector-by-sector opt-out — when the opcode is both supported and
+              // reachable: RAW_ERASE_CHIP and STORAGE_CAP_IO_TASK_SAFE.
+              ((geo.caps & storage::RAW_ERASE_CHIP) != 0 &&
+               (s->get_capabilities() & storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0)
+                  ? "true"
+                  : "false",
               // What this build allows, so the browser never offers a button that can only 403.
               ctx->enable_write ? "true" : "false",
               // Erasable when allowed here — media with a real erase use the driver's erase(),
@@ -378,11 +387,17 @@ void WebServerRawApi::handle_erase_(AsyncWebServerRequest *request) {
     return;
   }
 
-  this->submit_and_answer_(request,
-                           [device, address, size](storage::TransferJob *job, storage::CompletionCallback &&done) {
-                             return storage::global_storage_worker->async_raw_erase(device, address, size,
-                                                                                    std::move(done), job);
-                           });
+  // Opt-out from the whole-chip fast path: ?sliced=1 forces the block-at-a-time erase even when
+  // a single chip erase would be eligible (full span on a task-safe device). Lets the browser
+  // offer a "sector-by-sector" toggle so both paths can be exercised on the same device; absent
+  // the param, the worker picks the fast path automatically where it is safe.
+  auto *sliced = request->getParam("sliced");
+  const bool force_sliced = sliced != nullptr && sliced->value() == "1";
+
+  this->submit_and_answer_(request, [device, address, size, force_sliced](storage::TransferJob *job,
+                                                                          storage::CompletionCallback &&done) {
+    return storage::global_storage_worker->async_raw_erase(device, address, size, std::move(done), job, force_sliced);
+  });
 }
 
 void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {

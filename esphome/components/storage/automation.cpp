@@ -532,7 +532,7 @@ void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, con
 }
 
 void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size, bool all,
-                             Trigger<std::string> *on_complete) {
+                             Trigger<std::string> *on_complete, bool force_sliced) {
   if (all) {
     RawGeometry geo;
     device->get_raw_geometry(&geo);
@@ -542,7 +542,8 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 #ifdef USE_STORAGE_WORKER
   if (global_storage_worker != nullptr) {
     StorageError err = global_storage_worker->async_raw_erase(
-        device, address, size, [on_complete](StorageError r) { raw_fire_(on_complete, "erase", r); });
+        device, address, size, [on_complete](StorageError r) { raw_fire_(on_complete, "erase", r); }, nullptr,
+        force_sliced);
     if (err != StorageError::OK)
       raw_fail_(on_complete, "erase", std::string("could not queue (") + error_to_string(err) + ")");
     return;
