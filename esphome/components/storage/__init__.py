@@ -657,6 +657,8 @@ _RAW_READ_SCHEMA = cv.All(
             cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
             cv.Optional(CONF_TO_FILE): cv.templatable(cv.string),
             cv.Optional(CONF_ON_VALUE): automation.validate_automation(single=True),
+            # Fires (error text, empty = success) when a to_file read lands on the worker.
+            cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
         }
     ),
     _validate_raw_read,
@@ -672,6 +674,8 @@ _RAW_WRITE_SCHEMA = cv.All(
             # Media reporting RAW_WRITE_NEEDS_ERASE (NOR flash) need the covering sectors erased
             # first — which also wipes whatever else shares them, hence opt-in.
             cv.Optional(CONF_ERASE_FIRST, default=False): cv.boolean,
+            # Fires (error text, empty = success) when a from_file write lands on the worker.
+            cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
         }
     ),
     _validate_raw_write,
@@ -684,6 +688,8 @@ _RAW_ERASE_SCHEMA = cv.All(
             cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
             cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
             cv.Optional(CONF_ALL, default=False): cv.boolean,
+            # Fires (error text, empty = success) when the erase finishes on the worker.
+            cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
         }
     ),
     _validate_raw_erase,
@@ -718,6 +724,10 @@ async def raw_read_action_to_code(config, action_id, template_arg, args):
             [(cg.std_vector.template(cg.uint8), "x")],
             config[CONF_ON_VALUE],
         )
+    if CONF_ON_COMPLETE in config:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+        )
     return var
 
 
@@ -741,6 +751,10 @@ async def raw_write_action_to_code(config, action_id, template_arg, args):
             )
         )
         cg.add(var.set_has_from_file(True))
+    if CONF_ON_COMPLETE in config:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+        )
         return var
     data = config[CONF_DATA]
     if isinstance(data, bytes):
@@ -772,6 +786,10 @@ async def raw_erase_action_to_code(config, action_id, template_arg, args):
         var.set_size(await cg.templatable(config.get(CONF_SIZE, 0), args, cg.uint32))
     )
     cg.add(var.set_all(config[CONF_ALL]))
+    if CONF_ON_COMPLETE in config:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+        )
     return var
 
 
