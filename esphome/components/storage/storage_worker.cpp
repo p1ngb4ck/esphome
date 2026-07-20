@@ -27,6 +27,34 @@ void StorageWorker::setup() {
   this->stop_poller();
 }
 
+void StorageWorker::dump_config() {
+  // Everything here is fixed at compile time (STORAGE_COPY_CHUNK_SIZE and the variant build
+  // flags), so this just makes the resolved buffer policy visible in the boot log. Placement
+  // follows the alloc_dma_capable rule from the buffer-usage plan: only S3/P4 can DMA out of
+  // PSRAM, and only above the 32 kB cutoff does a buffer go there — the default chunk sizes all
+  // stay at or below that, hence internal on every platform.
+  const size_t chunk = STORAGE_COPY_CHUNK_SIZE;
+#if defined(USE_ESP32_VARIANT_ESP32S3)
+  const char *platform = "ESP32-S3";
+  const bool psram_dma_capable = true;
+#elif defined(USE_ESP32_VARIANT_ESP32P4)
+  const char *platform = "ESP32-P4";
+  const bool psram_dma_capable = true;
+#elif defined(USE_ESP32_VARIANT_ESP32)
+  const char *platform = "ESP32";
+  const bool psram_dma_capable = false;
+#else
+  const char *platform = "generic";
+  const bool psram_dma_capable = false;
+#endif
+  // > 32 kB would go to PSRAM, but only where PSRAM DMA is real (S3/P4); otherwise internal.
+  const bool in_psram = psram_dma_capable && chunk > 32768;
+  ESP_LOGCONFIG(TAG, "Storage worker:");
+  ESP_LOGCONFIG(TAG, "  Streaming/copy chunk: %u bytes", (unsigned) chunk);
+  ESP_LOGCONFIG(TAG, "  Placement: %s (DMA-capable)", in_psram ? "PSRAM" : "internal RAM");
+  ESP_LOGCONFIG(TAG, "  Platform: %s (PSRAM-DMA %s)", platform, psram_dma_capable ? "yes" : "no");
+}
+
 void StorageWorker::ensure_started_() {
   if (this->started_)
     return;

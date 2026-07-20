@@ -362,6 +362,10 @@ class StorageWorker : public PollingComponent {
   void set_max_streams(size_t count) { this->max_streams_ = count; }
 
   void setup() override;
+  // Reports the resolved streaming/copy chunk size, its RAM placement (internal vs PSRAM)
+  // and DMA-capability, and the platform those were chosen for — so the buffer policy is
+  // visible in the boot log without reading defines.
+  void dump_config() override;
   // The engine: advances the loop-sliced transfer/stream slots one time-budgeted batch per
   // call. Called by PollingComponent's scheduler interval (started with the first pending
   // work via start_poller() at the submit funnels, stopped again by update() itself once

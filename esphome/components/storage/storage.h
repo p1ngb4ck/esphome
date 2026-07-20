@@ -86,9 +86,10 @@ struct StorageInfo {
 static constexpr size_t STORAGE_NAME_MAX = 255;
 
 // Chunk size for the streaming copy() helper; multiple of 512 so FATFS can do direct
-// whole-sector transfers. Overridable from YAML (storage: copy_chunk_size), which sets
-// the USE_STORAGE_COPY_CHUNK_SIZE define via codegen; falls back to 16 kB otherwise
-// (also covers clang-tidy, which never sees generated defines).
+// whole-sector transfers. Overridable from YAML (storage: copy_chunk_size); when absent the
+// codegen picks a per-platform default (ESP32 16 kB, S3/P4 32 kB, else 16 kB) and sets the
+// USE_STORAGE_COPY_CHUNK_SIZE define. The 16 kB here is only the compile fallback when that
+// define is missing (e.g. clang-tidy, which never sees generated defines).
 #ifdef USE_STORAGE_COPY_CHUNK_SIZE
 static constexpr size_t STORAGE_COPY_CHUNK_SIZE = USE_STORAGE_COPY_CHUNK_SIZE;
 #else
