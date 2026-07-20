@@ -97,6 +97,7 @@ bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError e
     req.waiting_logged = true;
     ESP_LOGD(TAG, "Network storage not ready yet — waiting for it to come up");
   }
+  req.yield_batch_ = true;  // defer to the next pass rather than spinning the batch budget
   return true;  // stay RUNNING; the loop retries this request on the next pass
 }
 
@@ -178,6 +179,7 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->chunk_size = 0;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
+  slot->yield_batch_ = false;
   slot->last_progress_ms = millis();
   slot->progress_mark = 0;
   slot->overwrite = overwrite;
@@ -313,6 +315,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->file_total = size;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
+  slot->yield_batch_ = false;
   slot->last_progress_ms = millis();
   slot->progress_mark = 0;
   const bool file_fs = file_side != nullptr && file_side->get_storage_type() == StorageType::FILESYSTEM;
@@ -596,22 +599,27 @@ void StorageWorker::loop() {
     // run_chunk_()'s entry check drains); anything else was finished from outside and the
     // index is released without touching it.
     RequestState st = req.state.load();
-    bool advanced = false;
+    req.yield_batch_ = false;
     if (st == RequestState::RUNNING || st == RequestState::CANCELLED) {
-      // Snapshot the cursors so a no-progress step (e.g. a network storage still coming up,
-      // which stays RUNNING and retries) breaks the batch instead of spinning it hot.
-      const uint64_t before =
-          req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2) ^ (req.raw_erase_pos << 3);
       this->run_chunk_(req);
       st = req.state.load();
-      advanced = st != RequestState::RUNNING ||
-                 before != (req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2) ^
-                            (req.raw_erase_pos << 3));
     }
-    if (st != RequestState::RUNNING && st != RequestState::CANCELLED)
+    if (st != RequestState::RUNNING && st != RequestState::CANCELLED) {
       this->loop_active_index_ = SIZE_MAX;  // finished — the next budget slice picks a successor
-    if (!advanced)
-      break;  // no forward movement — try again next pass rather than busy-waiting here
+      continue;  // pull the next PENDING request into the remaining budget
+    }
+    if (req.yield_batch_)
+      break;  // waiting on a (re)connecting network storage — retry next pass, don't spin
+    // Still RUNNING: keep spending the budget on it. A pass that made no BYTE progress is
+    // NOT a stall to bail on here — the transfer's state machine legitimately spends whole
+    // passes on setup that moves no bytes (pre-phase: classifying the source, clearing the
+    // destination, materializing a directory tree; opening handles; each tree_step_). Those
+    // must be allowed to proceed to the next step on the very next iteration, not deferred a
+    // component phase each — deferring them was exactly the 0-byte stall. A genuinely stuck
+    // step is caught by check_stalled_()'s 30 s watchdog, not by this per-pass loop. The one
+    // case worth yielding on early is a network read still returning WOULD-block-ish partials
+    // via NOT_READY, which run_chunk_() handles by staying RUNNING; the budget bound below
+    // caps how long we spin on it before returning to the main loop anyway.
   } while (millis() - batch_start < LOOP_CHUNK_BUDGET_MS);
 
   // Completions produced inside this pass's batch are delivered in this same pass — a caller

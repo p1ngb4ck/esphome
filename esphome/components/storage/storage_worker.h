@@ -181,6 +181,12 @@ struct TransferRequest {
   // "still connecting" (see run_chunk_) before it becomes the honest final answer.
   uint32_t submitted_ms{0};
   bool waiting_logged{false};
+  // Set by run_chunk_() (via wait_for_network_ready_) when a step made no progress because a
+  // network storage is still (re)connecting. The loop-sliced batch reads and clears it to
+  // yield to the next main-loop pass instead of spinning its time budget on a storage that
+  // cannot advance yet — the ONE no-progress case that should defer rather than retry
+  // immediately (setup steps, by contrast, must proceed on the next iteration).
+  bool yield_batch_{false};
   // Architecture contract: the file API is a pure HTTP -> storage-interface translator. All
   // driver I/O that used to run in the HTTP handler's pre-phase (source/destination stat,
   // overwrite clearing, the tree-vs-file decision) happens HERE, inside the engine that owns
