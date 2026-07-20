@@ -454,22 +454,12 @@ bool SPIFlash::read_raw(uint32_t address, uint8_t *data, size_t length) {
     return false;
   }
 
-  // Read in chunks for better reliability
-  const size_t chunk_size = 256;
-
-  while (length > 0) {
-    size_t read_len = std::min(length, chunk_size);
-
-    if (!this->read_data_(address, data, read_len)) {
-      return false;
-    }
-
-    address += read_len;
-    data += read_len;
-    length -= read_len;
-  }
-
-  return true;
+  // One READ command for the whole range: the flash auto-increments its address for any
+  // length, and the ESP-IDF SPI layer already slices the transfer into MAX_TRANSFER_SIZE
+  // (4092 B) transactions transparently. The former 256 B loop re-issued a full
+  // enable/command/address/disable sequence per chunk for no benefit — this is both simpler
+  // and faster.
+  return this->read_data_(address, data, length);
 }
 
 bool SPIFlash::write_page_(uint32_t address, const uint8_t *data, size_t length) {
