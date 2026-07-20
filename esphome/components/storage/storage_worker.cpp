@@ -770,8 +770,6 @@ void StorageWorker::task_loop_() {
 }
 #endif
 
-namespace {
-
 // Picks entry #target out of a directory listing; the walk re-lists per step rather than
 // holding an open directory handle across calls, so nothing has to stay valid in between.
 struct WalkEntryCtx {
@@ -781,7 +779,7 @@ struct WalkEntryCtx {
   FileStat entry{};
 };
 
-bool walk_entry_cb(const FileStat *entry, void *ctx_raw) {
+static bool walk_entry_cb(const FileStat *entry, void *ctx_raw) {
   auto *ctx = static_cast<WalkEntryCtx *>(ctx_raw);
   if (ctx->seen == ctx->target) {
     ctx->entry = *entry;
@@ -793,7 +791,7 @@ bool walk_entry_cb(const FileStat *entry, void *ctx_raw) {
 }
 
 // Bounded "<root>[/<sub>][/<name>]" join; false on truncation.
-bool join_walk_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
+static bool join_walk_path(char *out, size_t out_size, const char *root, const char *sub, const char *name) {
   int n;
   if (name != nullptr) {
     n = (sub[0] != '\0') ? snprintf(out, out_size, "%s/%s/%s", root, sub, name)
@@ -809,7 +807,7 @@ bool join_walk_path(char *out, size_t out_size, const char *root, const char *su
 // close-error propagation) and marks it DONE for loop()/task_loop_() to deliver.
 // Closes whatever handles the request holds. A close failure only overrides an otherwise
 // successful result, mirroring storage::copy()'s close-error propagation.
-void close_handles(TransferRequest &req, StorageError *result) {
+static void close_handles(TransferRequest &req, StorageError *result) {
   if (!req.handles_open)
     return;
   if (req.src_is_fs && req.src_handle != nullptr)
@@ -823,14 +821,12 @@ void close_handles(TransferRequest &req, StorageError *result) {
   req.dst_handle = nullptr;
 }
 
-void finish_request(TransferRequest &req, StorageError result) {
+static void finish_request(TransferRequest &req, StorageError result) {
   close_handles(req, &result);
   req.chunk_buf.reset();
   req.result = result;
   req.state = RequestState::DONE;
 }
-
-}  // namespace
 
 // One step of a directory walk. Everything here is control plane — list, mkdir, rmdir, remove —
 // so it costs one call each and never blocks for long; the bytes go through run_chunk_()'s
@@ -1588,14 +1584,12 @@ bool StorageWorker::is_task_safe_(const StreamRequest &req) const {
 #endif
 }
 
-namespace {
-
 // Advances one stream by exactly the operation implied by its current state — open, one
 // write chunk, one read chunk, or close — then transitions to IDLE (more chunks expected,
 // open()/close() are one-shot so those always move straight past IDLE) or DONE. Unlike
 // run_chunk_(), this never decides what to do next on its own: state is set by the caller's
 // begin_*()/write_chunk()/read_chunk()/end_*() call, this function just executes it once.
-void run_stream_step(StreamRequest &req) {
+static void run_stream_step(StreamRequest &req) {
   if (req.state.load() == StreamState::CANCELLED) {
     if (req.is_fs && req.handle != nullptr)
       static_cast<FilesystemStorage *>(req.storage)->close(req.handle);
@@ -1694,15 +1688,12 @@ void run_stream_step(StreamRequest &req) {
   }
 }
 
-}  // namespace
-
 void StorageWorker::run_stream_step_(StreamRequest &req) {
   req.last_activity_ms = millis();  // the client is demonstrably still driving this stream
   run_stream_step(req);
 }
 
-namespace {
-bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_index) {
+static bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_index) {
   for (size_t i = 0; i < pool.size(); i++) {
     StreamState expected = StreamState::FREE;
     if (pool[i].state.compare_exchange_strong(expected, StreamState::OPENING)) {
@@ -1713,8 +1704,6 @@ bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_index) 
   }
   return false;
 }
-
-}  // namespace
 
 // Dispatches one step: hands off to the shared task queue if task-safe, otherwise marks it
 // pending for loop() to run on its next pass. Never runs the step inline from this call — the

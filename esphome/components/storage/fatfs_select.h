@@ -26,38 +26,39 @@ static constexpr uint8_t FS_SELECT_AUTO = 0;
 static constexpr uint8_t FS_SELECT_FAT32 = 1;
 static constexpr uint8_t FS_SELECT_EXFAT = 2;
 
-namespace fatfs_select_detail {
+// Internal helpers for boot-sector/partition probing, kept inline in this header (they are
+// used only by ensure_requested_filesystem below). Names are prefixed to avoid clashing with
+// any other storage-scope symbols.
+enum class FatfsDetected : uint8_t { NONE, FAT, EXFAT };
 
-enum class Detected : uint8_t { NONE, FAT, EXFAT };
-
-inline bool has_boot_signature(const uint8_t *sec) { return sec[510] == 0x55 && sec[511] == 0xAA; }
+inline bool fatfs_has_boot_signature(const uint8_t *sec) { return sec[510] == 0x55 && sec[511] == 0xAA; }
 
 // What filesystem sits in this boot sector? The same first-bytes FatFs itself keys on:
 // the exFAT name field ("EXFAT   " at offset 3) and the FAT jump instruction + signature.
-inline Detected classify_boot_sector(const uint8_t *sec) {
-  if (!has_boot_signature(sec))
-    return Detected::NONE;
+inline FatfsDetected fatfs_classify_boot_sector(const uint8_t *sec) {
+  if (!fatfs_has_boot_signature(sec))
+    return FatfsDetected::NONE;
   if (memcmp(sec + 3, "EXFAT   ", 8) == 0)
-    return Detected::EXFAT;
+    return FatfsDetected::EXFAT;
   if (sec[0] == 0xEB || sec[0] == 0xE9)
-    return Detected::FAT;
-  return Detected::NONE;
+    return FatfsDetected::FAT;
+  return FatfsDetected::NONE;
 }
 
 // Probe the medium BEFORE any mount: sector 0 directly, and — when sector 0 is a partition
 // table instead of a boot sector — one level of indirection: the first MBR partition, or
 // for a protective MBR (0xEE) the first GPT entry. Exactly the volumes FatFs would mount.
-inline Detected probe(const char *tag, uint8_t pdrv) {
+inline FatfsDetected fatfs_probe(const char *tag, uint8_t pdrv) {
   auto sec = std::make_unique<uint8_t[]>(FF_MAX_SS);
   if (disk_read(pdrv, sec.get(), 0, 1) != RES_OK) {
     ESP_LOGW(tag, "file_system probe: cannot read sector 0");
-    return Detected::NONE;
+    return FatfsDetected::NONE;
   }
-  Detected direct = classify_boot_sector(sec.get());
-  if (direct != Detected::NONE)
+  FatfsDetected direct = fatfs_classify_boot_sector(sec.get());
+  if (direct != FatfsDetected::NONE)
     return direct;
-  if (!has_boot_signature(sec.get()))
-    return Detected::NONE;
+  if (!fatfs_has_boot_signature(sec.get()))
+    return FatfsDetected::NONE;
   // Sector 0 is a partition table. First MBR entry: type at 0x1BE+4, start LBA at 0x1BE+8.
   const uint8_t *entry = sec.get() + 0x1BE;
   uint8_t part_type = entry[4];
@@ -67,19 +68,17 @@ inline Detected probe(const char *tag, uint8_t pdrv) {
     // Protective MBR -> GPT. Header at LBA 1: entry array start LBA at offset 72; the first
     // entry's first LBA at offset 32 within the entry.
     if (disk_read(pdrv, sec.get(), 1, 1) != RES_OK || memcmp(sec.get(), "EFI PART", 8) != 0)
-      return Detected::NONE;
+      return FatfsDetected::NONE;
     uint64_t entries_lba = 0;
     memcpy(&entries_lba, sec.get() + 72, sizeof(entries_lba));
     if (disk_read(pdrv, sec.get(), static_cast<LBA_t>(entries_lba), 1) != RES_OK)
-      return Detected::NONE;
+      return FatfsDetected::NONE;
     memcpy(&start_lba, sec.get() + 32, sizeof(start_lba));
   }
   if (start_lba == 0 || disk_read(pdrv, sec.get(), static_cast<LBA_t>(start_lba), 1) != RES_OK)
-    return Detected::NONE;
-  return classify_boot_sector(sec.get());
+    return FatfsDetected::NONE;
+  return fatfs_classify_boot_sector(sec.get());
 }
-
-}  // namespace fatfs_select_detail
 
 // Make the medium carry the requested filesystem BEFORE the one and only mount happens.
 // AUTO does nothing at all: f_mount's own boot-sector detection is the automatic mode.
@@ -88,19 +87,18 @@ inline Detected probe(const char *tag, uint8_t pdrv) {
 // subsequent mount is then already on the correct filesystem. Returns false only when the
 // reformat itself failed.
 inline bool ensure_requested_filesystem(const char *tag, uint8_t pdrv, const char *drive, uint8_t requested) {
-  using fatfs_select_detail::Detected;
   if (requested == FS_SELECT_AUTO)
     return true;
   const bool want_exfat = requested == FS_SELECT_EXFAT;
-  Detected found = fatfs_select_detail::probe(tag, pdrv);
-  if ((found == Detected::EXFAT) == want_exfat && found != Detected::NONE)
+  FatfsDetected found = fatfs_probe(tag, pdrv);
+  if ((found == FatfsDetected::EXFAT) == want_exfat && found != FatfsDetected::NONE)
     return true;
-  if (found == Detected::NONE) {
+  if (found == FatfsDetected::NONE) {
     ESP_LOGW(tag, "file_system: no recognizable filesystem on the medium - formatting as %s",
              want_exfat ? "exFAT" : "FAT32");
   } else {
     ESP_LOGW(tag, "file_system: found %s but %s is configured - REFORMATTING, all data on the medium is erased",
-             found == Detected::EXFAT ? "exFAT" : "FAT", want_exfat ? "exFAT" : "FAT32");
+             found == FatfsDetected::EXFAT ? "exFAT" : "FAT", want_exfat ? "exFAT" : "FAT32");
   }
   auto work = std::make_unique<uint8_t[]>(FF_MAX_SS);
   MKFS_PARM parm{};

@@ -17,13 +17,11 @@ using storage::StorageInfo;
 
 static const char *const TAG_BASE = "sd_storage";
 
-namespace {
-
 // Maps a FATFS FRESULT to the closest StorageError. `for_rmdir` selects FR_DENIED's mapping:
 // f_unlink() (used for rmdir — see rmdir() below, FATFS has no dedicated f_rmdir) returns
 // FR_DENIED both for "directory not empty" and for genuine permission/read-only failures, so the
 // caller must tell us which context applies.
-StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write) {
+static StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write) {
   switch (res) {
     case FR_OK:
       return StorageError::OK;
@@ -44,8 +42,6 @@ StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write
       return is_write ? StorageError::WRITE_ERROR : StorageError::READ_ERROR;
   }
 }
-
-}  // namespace
 
 bool SdStorageBase::build_full_path_(const char *rel_path, char *buf, size_t buf_size) const {
   size_t mount_len = strlen(this->mount_path_);
