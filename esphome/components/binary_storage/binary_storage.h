@@ -53,11 +53,24 @@ class BinaryStorage : public storage::RawStorage {
   virtual uint8_t get_erase_caps() const { return 0; }
   virtual bool is_ready() { return true; }
 
-  // Deliberately explicit (not just the inherited default): every binary_storage device is an
-  // external bus device (I2C/SPI/OneWire) and the bus is typically shared with components
-  // driven from the main loop, so data-plane I/O must never run on the async worker task.
-  // See StorageCaps in storage.h — do NOT add STORAGE_CAP_IO_TASK_SAFE here or in subclasses.
-  uint8_t get_capabilities() const override { return 0; }
+  // Task-safety of a raw device is a property of its BUS, not the driver: every
+  // binary_storage device is an external bus device (I2C/SPI/OneWire), and if that bus is
+  // shared with components driven from the main loop, running data-plane I/O on the async
+  // worker task would race their access and corrupt the bus. So the default is 0 (loop-sliced
+  // only) and that is the safe choice.
+  //
+  // A user who KNOWS this device is alone on its bus can opt in with assume_exclusive_bus (see
+  // set_assume_exclusive_bus / the config key). Only then — and only on a platform that
+  // actually has the background worker task — do we advertise STORAGE_CAP_IO_TASK_SAFE. This
+  // is a promise about hardware the driver cannot verify; a wrong promise corrupts the bus.
+  // See .ai/architecture/task-safe-raw-devices.md for the full contract.
+  uint8_t get_capabilities() const override {
+#if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
+    if (this->assume_exclusive_bus_)
+      return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE;
+#endif
+    return 0;
+  }
 
   //========================================================================
   // RawStorage interface (pure virtuals — implement in each device driver)
@@ -106,6 +119,10 @@ class BinaryStorage : public storage::RawStorage {
   // mode: littlefs — the device is a filesystem backing only: it never registers as a raw
   // storage, so it has no raw API presence, no device node, no automations target.
   void set_raw_enabled(bool enabled) { this->raw_enabled_ = enabled; }
+  // Opt-in: the user asserts this device is alone on its bus, so its data-plane I/O may run on
+  // the async worker task (see get_capabilities above and the contract in .ai/). Off by
+  // default; only has an effect on a platform with the worker task.
+  void set_assume_exclusive_bus(bool assume) { this->assume_exclusive_bus_ = assume; }
   // What the raw side may use. 0 when raw is disabled or the FS reservation swallows
   // everything (the latter is a config error caught in setup()).
   uint64_t get_raw_capacity() const {
@@ -140,6 +157,7 @@ class BinaryStorage : public storage::RawStorage {
   const char *storage_name_{nullptr};
   uint32_t fs_reserved_{0};  // bytes at the bottom owned by LittleFS (mode: both), 0 = none
   bool raw_enabled_{true};   // false for mode: littlefs — no raw registration or window
+  bool assume_exclusive_bus_{false};  // opt-in: device is alone on its bus → task-safe I/O
 #ifdef USE_STORAGE_DEVICE_NODES
   // nullptr = no node for this device (device_node: false, or no browser configured at all).
   const char *device_node_name_{nullptr};
