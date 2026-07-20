@@ -918,6 +918,16 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
 
   // Sliced erase: one geometry-sized step per pass — a chip-scale erase becomes many short
   // main-loop visits instead of one multi-second freeze.
+  //
+  // NOTE on whole-device erase: it is tempting to hand the driver erase(0, capacity) so it can
+  // use a single chip-erase opcode. We deliberately do NOT, because raw devices always run on
+  // the loop-sliced engine (see submit_raw_ / "Raw devices are main-loop citizens") and a chip
+  // erase busy-waits for its full duration — tens of seconds on a large NOR flash (see
+  // SPIFlash::erase_chip, wait_ready(60000)). That would freeze the main loop long enough to
+  // trip the task watchdog. Block-at-a-time keeps each pass short (one block's wait_ready) and
+  // the loop responsive; it is slower in total but does not stall the device. A blocking
+  // whole-chip erase belongs behind an explicit opt-in only once raw ops can run off the main
+  // loop (a task-safe raw path) — out of scope here.
   if (!to_file && req.raw_erase_pos < req.raw_erase_end) {
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
@@ -929,6 +939,10 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
       return;
     }
     req.raw_erase_pos += step;
+    // Advance the progress fingerprint: the stall watchdog keys off bytes_done, and a long
+    // erase (many blocks over many passes) writes no file bytes yet — without this it would
+    // look stalled and time out mid-erase. The pure raw_erase loop above does the same.
+    req.bytes_done.store(req.raw_erase_pos - req.raw_address);
     return;  // next pass continues the erase (or starts moving bytes)
   }
 
