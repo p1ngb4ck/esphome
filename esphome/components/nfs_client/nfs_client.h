@@ -377,6 +377,10 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
 
   bool connected_{false};
   bool mounted_{false};
+  // Flip mounted_ through here so a real state change (false<->true) feeds the file browser's
+  // change poll exactly once — the mount state is part of the roots listing. A no-op change
+  // (same value) notifies nobody. See note_dir_changed("").
+  void set_mounted_(bool mounted);
   NFSFileHandle root_fh_;
 
   //========================================================================

@@ -505,7 +505,7 @@ void NFSClient::drive_mount_state_() {
           ESP_LOGW(TAG, "Failed to connect to portmapper for NFS query, using configured port %u", this->port_);
           this->nfs_port_ = this->port_;
           this->nfs_port_discovered_ = false;
-          this->mounted_ = true;
+          this->set_mounted_(true);
           this->mount_state_ = MountState::MOUNTED;
           break;
         }
@@ -520,7 +520,7 @@ void NFSClient::drive_mount_state_() {
         this->nfs_port_discovered_ = false;
       }
       this->close_connection_();
-      this->mounted_ = true;
+      this->set_mounted_(true);
       this->mount_state_ = MountState::MOUNTED;
       break;
 
@@ -599,7 +599,7 @@ storage::StorageError NFSClient::unmount() {
   this->unmount_export_(this->export_path_);
   this->close_connection_();
   this->root_fh_.data.clear();
-  this->mounted_ = false;
+  this->set_mounted_(false);
   this->mount_state_ = MountState::IDLE;
   ESP_LOGI(TAG, "NFS unmounted");
 
@@ -1189,11 +1189,23 @@ void NFSClient::close_connection_() {
   this->connected_ = false;
 }
 
+void NFSClient::set_mounted_(bool mounted) {
+  if (this->mounted_ == mounted)
+    return;  // no real change — notify nobody
+  this->mounted_ = mounted;
+#ifdef USE_STORAGE_CHANGE_FEED
+  // Mount state is part of the roots listing: whoever flipped it (mount action, auto-connect,
+  // network loss, unmount), the browser's change poll must see it.
+  if (storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
+}
+
 void NFSClient::unmount_() {
   if (this->mounted_) {
     this->unmount_export_(this->export_path_);
     this->root_fh_.data.clear();
-    this->mounted_ = false;
+    this->set_mounted_(false);
   }
   this->close_connection_();
 }
