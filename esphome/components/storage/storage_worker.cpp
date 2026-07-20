@@ -883,6 +883,26 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
       return;
     }
     uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
+    // Whole-device fast path: on the worker task, a full-span erase from offset 0 hands the
+    // driver a single erase(0, capacity) so it can use the chip-erase opcode instead of walking
+    // the device sector by sector. Same conditions and stall-watchdog shield as the erase step
+    // in run_raw_chunk_'s write path — kept here too because a standalone raw_erase never goes
+    // through that path. force_sliced_erase opts out; off the task a chip-scale blocking erase
+    // would trip the 5s watchdog, so it stays sliced there.
+    const bool whole_device = on_task && !req.force_sliced_erase && req.raw_address == 0 && req.raw_erase_pos == 0 &&
+                              req.raw_erase_end == geo.capacity;
+    if (whole_device) {
+      req.blocking_erase_active.store(true);
+      StorageError eerr = req.raw_device->erase(0, static_cast<size_t>(geo.capacity));
+      req.blocking_erase_active.store(false);
+      if (eerr != StorageError::OK) {
+        finish_request(req, eerr);
+        return;
+      }
+      req.raw_erase_pos = req.raw_erase_end;
+      req.bytes_done.store(req.raw_erase_pos - req.raw_address);
+      return;
+    }
     step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
     StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
     if (eerr != StorageError::OK) {
