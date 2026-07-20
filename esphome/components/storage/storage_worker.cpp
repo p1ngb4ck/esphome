@@ -983,21 +983,12 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
       }
       req.raw_erase_pos = req.raw_erase_end;
       req.bytes_done.store(req.raw_erase_pos - req.raw_address);
-      return;  // erase done; next pass starts moving bytes (or finishes a pure erase)
+      return;  // erase done; next pass starts moving bytes
     }
-    uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
-    step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
-    StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
-    if (eerr != StorageError::OK) {
-      finish_request(req, eerr);
-      return;
-    }
-    req.raw_erase_pos += step;
-    // Advance the progress fingerprint: the stall watchdog keys off bytes_done, and a long
-    // erase (many blocks over many passes) writes no file bytes yet — without this it would
-    // look stalled and time out mid-erase. The pure raw_erase loop above does the same.
-    req.bytes_done.store(req.raw_erase_pos - req.raw_address);
-    return;  // next pass continues the erase (or starts moving bytes)
+    // Not whole-device: do NOT erase the whole range up front. The erase is interleaved with
+    // the write below — each chunk erases only the sectors it is about to touch (raw_erase_pos
+    // is the "erased up to" cursor). This shrinks the window between erasing a region and
+    // filling it, and avoids a long erase-only phase that writes no bytes. Fall through.
   }
 
   if (req.chunk_buf.get() == nullptr) {
@@ -1081,6 +1072,30 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
       if (got == 0) {
         finish_request(req, StorageError::READ_ERROR);  // file shrank underneath us
         return;
+      }
+      // Per-chunk erase: before writing this chunk, erase the sectors it will land in that are
+      // not already erased. raw_erase_pos is the "erased up to" cursor (0 when no erase was
+      // requested, so this is skipped). We erase up to the sector boundary at or above the end
+      // of this chunk, but never past raw_erase_end, and only the part beyond raw_erase_pos —
+      // so a sector shared by two chunks is erased exactly once, by the first chunk to reach it.
+      if (req.raw_erase_pos < req.raw_erase_end) {
+        RawGeometry geo{};
+        req.raw_device->get_raw_geometry(&geo);
+        uint64_t chunk_end = req.raw_address + req.offset + got;
+        uint64_t erase_to = chunk_end;
+        if (geo.erase_sector != 0 && (erase_to % geo.erase_sector) != 0)
+          erase_to += geo.erase_sector - (erase_to % geo.erase_sector);  // round up to sector
+        erase_to = std::min<uint64_t>(erase_to, req.raw_erase_end);
+        while (req.raw_erase_pos < erase_to) {
+          uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
+          step = std::min<uint64_t>(step, erase_to - req.raw_erase_pos);
+          StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
+          if (eerr != StorageError::OK) {
+            finish_request(req, eerr);
+            return;
+          }
+          req.raw_erase_pos += step;
+        }
       }
       err = req.raw_device->write(req.raw_address + req.offset, req.chunk_buf.get(), got, &moved);
     }
