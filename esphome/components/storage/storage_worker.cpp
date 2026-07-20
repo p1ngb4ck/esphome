@@ -412,7 +412,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
         // this function returns — i.e. before the driver's unmount() runs.
         req.cancel_result = StorageError::NOT_READY;
         req.state = RequestState::CANCELLED;
-        this->run_chunk_(req);
+        this->run_chunk_(req, /*on_task=*/false);
         if (this->loop_active_index_ == i)
           this->loop_active_index_ = SIZE_MAX;
       } else {
@@ -600,7 +600,7 @@ void StorageWorker::update() {
     // already freed from outside this section; running it would touch nulled storages.
     RequestState st = req.state.load();
     if (st == RequestState::RUNNING || st == RequestState::CANCELLED) {
-      this->run_chunk_(req);
+      this->run_chunk_(req, /*on_task=*/false);
       st = req.state.load();
     }
     if (st != RequestState::RUNNING && st != RequestState::CANCELLED)
@@ -687,7 +687,7 @@ void StorageWorker::task_loop_() {
       // would exit before that ever happens, leaking the handles/buffer and leaving the slot
       // (and the pending callback) stuck forever.
       while (req.state.load() != RequestState::DONE) {
-        this->run_chunk_(req);
+        this->run_chunk_(req, /*on_task=*/true);
       }
     } else {
       // STREAM: single step per queue entry, unlike TransferRequest above — the caller submits
@@ -775,7 +775,7 @@ void finish_request(TransferRequest &req, StorageError result) {
 // One step of a directory walk. Everything here is control plane — list, mkdir, rmdir, remove —
 // so it costs one call each and never blocks for long; the bytes go through run_chunk_()'s
 // chunk loop exactly as they do for a single file. Returns false once the request is finished.
-void StorageWorker::run_raw_chunk_(TransferRequest &req) {
+void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
   const bool to_file = req.op == RequestOp::RAW_READ_TO_FILE;
   PathStorage *file_storage = to_file ? req.dst_storage : req.src_storage;
   const char *file_path = to_file ? req.dst_path : req.src_path;
@@ -919,18 +919,40 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req) {
   // Sliced erase: one geometry-sized step per pass — a chip-scale erase becomes many short
   // main-loop visits instead of one multi-second freeze.
   //
-  // NOTE on whole-device erase: it is tempting to hand the driver erase(0, capacity) so it can
-  // use a single chip-erase opcode. We deliberately do NOT, because raw devices always run on
-  // the loop-sliced engine (see submit_raw_ / "Raw devices are main-loop citizens") and a chip
-  // erase busy-waits for its full duration — tens of seconds on a large NOR flash (see
-  // SPIFlash::erase_chip, wait_ready(60000)). That would freeze the main loop long enough to
-  // trip the task watchdog. Block-at-a-time keeps each pass short (one block's wait_ready) and
-  // the loop responsive; it is slower in total but does not stall the device. A blocking
-  // whole-chip erase belongs behind an explicit opt-in only once raw ops can run off the main
-  // loop (a task-safe raw path) — out of scope here.
+  // Whole-device erase strategy depends on which engine we are on:
+  //
+  //  - On the worker task (on_task), when the request covers the entire device from offset 0,
+  //    hand the driver a single erase(0, capacity) so it can use the chip-erase opcode. That
+  //    busy-waits for the full erase — tens of seconds on a large NOR flash (see
+  //    SPIFlash::erase_chip, wait_ready(60000)) — which is fine here: the task is deliberately
+  //    not on the 5s task watchdog (see task_loop_) and blocking on I/O is its whole purpose.
+  //    The one hazard is the stall watchdog (check_stalled_, main loop), which keys off
+  //    bytes_done and would time the request out at 30s since a single blocking call cannot
+  //    advance progress mid-flight; blocking_erase_active tells it to leave this request alone
+  //    for the duration. The flag is bounded by the driver's own wait_ready timeout.
+  //
+  //  - Otherwise (loop-sliced engine, or a partial-range erase) stay block-at-a-time: each pass
+  //    erases one geometry-sized unit and returns, keeping every main-loop pass short. A chip
+  //    erase here would freeze the loop long enough to trip the 5s watchdog, so it is never
+  //    done off the task.
   if (!to_file && req.raw_erase_pos < req.raw_erase_end) {
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
+    const bool whole_device =
+        on_task && req.raw_address == 0 && req.raw_erase_pos == 0 && req.raw_erase_end == geo.capacity;
+    if (whole_device) {
+      // Single blocking chip erase. Shield it from the stall watchdog while it runs.
+      req.blocking_erase_active.store(true);
+      StorageError eerr = req.raw_device->erase(0, static_cast<size_t>(geo.capacity));
+      req.blocking_erase_active.store(false);
+      if (eerr != StorageError::OK) {
+        finish_request(req, eerr);
+        return;
+      }
+      req.raw_erase_pos = req.raw_erase_end;
+      req.bytes_done.store(req.raw_erase_pos - req.raw_address);
+      return;  // erase done; next pass starts moving bytes (or finishes a pure erase)
+    }
     uint64_t step = geo.erase_block != 0 ? geo.erase_block : geo.erase_sector;
     step = std::min<uint64_t>(step, req.raw_erase_end - req.raw_erase_pos);
     StorageError eerr = req.raw_device->erase(req.raw_erase_pos, static_cast<size_t>(step));
@@ -1164,6 +1186,14 @@ void StorageWorker::check_stalled_() {
   for (auto &req : this->pool_) {
     RequestState st = req.state.load(std::memory_order_acquire);
     if (st == RequestState::RUNNING) {
+      // A whole-chip erase on the worker task blocks for its full duration without advancing
+      // bytes_done, so the progress fingerprint below would flag it as stalled. Leave it alone
+      // while it runs — the erase is bounded by the driver's own wait_ready timeout, after
+      // which run_chunk_ clears the flag and either finishes or reports the error.
+      if (req.blocking_erase_active.load()) {
+        req.last_progress_ms = now;  // keep the clock fresh so it is not timed out the instant it clears
+        continue;
+      }
       uint64_t mark = req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2);
       if (req.tree != nullptr)
         mark ^= (static_cast<uint64_t>(req.tree->files_done) << 32) ^ (static_cast<uint64_t>(req.tree->depth) << 56);
@@ -1217,7 +1247,7 @@ void StorageWorker::check_stalled_() {
   }
 }
 
-void StorageWorker::run_chunk_(TransferRequest &req) {
+void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   // Cancellation check, before doing any I/O this call. Whoever set CANCELLED (hotplug
   // drain or stall watchdog) put its reason into cancel_result — this is the only place a
   // cancelled request is finished, always by the engine that owns it.
@@ -1233,7 +1263,7 @@ void StorageWorker::run_chunk_(TransferRequest &req) {
   }
   if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE ||
       req.op == RequestOp::RAW_ERASE) {
-    this->run_raw_chunk_(req);
+    this->run_raw_chunk_(req, on_task);
     return;
   }
 

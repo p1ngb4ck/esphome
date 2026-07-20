@@ -206,6 +206,16 @@ struct TransferRequest {
   uint64_t raw_address{0};
   uint64_t raw_erase_pos{0};
   uint64_t raw_erase_end{0};
+  // Set by the worker task right before a blocking whole-chip erase(0, capacity) and cleared
+  // right after. A chip erase busy-waits for its full duration (tens of seconds) without
+  // advancing bytes_done, so the stall watchdog (check_stalled_, main loop) would otherwise
+  // time it out; it skips a RUNNING request while this is set. Only ever true on the worker
+  // task (the loop-sliced engine never does a whole-chip erase), so it is bounded by the
+  // driver's own wait_ready timeout — no risk of blinding the watchdog indefinitely.
+  // std::atomic<bool> is lock-free on every supported core (unlike the 64-bit counters), so
+  // it needs no conditional-atomic dance; the flag is written on the task and read on the
+  // main loop.
+  std::atomic<bool> blocking_erase_active{false};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -463,7 +473,9 @@ class StorageWorker : public PollingComponent {
   storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
                                     bool overwrite, CompletionCallback &&on_done, TransferJob *job_out);
-  void run_raw_chunk_(TransferRequest &req);
+  // on_task carries the engine flag from run_chunk_ (see there): the whole-chip erase fast path
+  // is only taken on the worker task.
+  void run_raw_chunk_(TransferRequest &req, bool on_task);
   void check_stalled_();
   uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
@@ -487,7 +499,10 @@ class StorageWorker : public PollingComponent {
   // checks, and the same-storage rename() fast path for MOVE. On completion (success, error,
   // or cancellation) sets req.result and req.state = RequestState::DONE; the caller (loop()
   // or the task) must not touch req again until the main loop has delivered the callback.
-  void run_chunk_(TransferRequest &req);
+  // on_task is true only when called from the worker task_loop_, false from the loop-sliced
+  // engine. It gates the one operation that may block for a long time — a whole-chip erase —
+  // to the task, where a long block is safe (the task is deliberately not on the 5s watchdog).
+  void run_chunk_(TransferRequest &req, bool on_task);
   // One step of a directory walk: pick the next entry, create a directory, or set up the next
   // file for the chunk loop. Returns false when the walk is over (request already finished).
   bool tree_step_(TransferRequest &req);
