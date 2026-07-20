@@ -37,6 +37,7 @@ CONF_TASK_PRIORITY = "task_priority"
 CONF_MAX_PENDING = "max_pending"
 CONF_MAX_STREAMS = "max_streams"
 CONF_WORKER_UPDATE_INTERVAL = "worker_update_interval"
+CONF_ON_COMPLETE = "on_complete"
 
 # Not yet in esphome/const.py
 CONF_ON_REGISTERED = "on_registered"
@@ -501,14 +502,28 @@ _FILE_COPY_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_FROM): cv.templatable(cv.string),
         cv.Required(CONF_TO): cv.templatable(cv.string),
+        # Fired from the worker's completion callback (main loop). `x` is the error text,
+        # empty string on success. The copy/move runs asynchronously — the action sequence
+        # does not wait for it.
+        cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
     }
 )
 
 
 async def _build_copy_action(config, action_id, template_arg, args, is_move):
+    # file_copy/move prefer the async worker (see perform_file_copy_async). We deliberately do
+    # NOT request_storage_worker() here: action codegen can run after the storage to_code has
+    # already snapshotted the worker count (LATE), so a late request would compile the action
+    # against a worker that was never created. Instead the C++ side degrades cleanly — if the
+    # worker isn't compiled in (no path driver requested it), it runs the blocking helper. Any
+    # node that can actually do file ops has a path driver, which requests the worker anyway.
     var = cg.new_Pvariable(action_id, template_arg, is_move)
     cg.add(var.set_from(await cg.templatable(config[CONF_FROM], args, cg.std_string)))
     cg.add(var.set_to(await cg.templatable(config[CONF_TO], args, cg.std_string)))
+    if CONF_ON_COMPLETE in config:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+        )
     return var
 
 
