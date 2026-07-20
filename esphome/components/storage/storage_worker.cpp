@@ -97,7 +97,6 @@ bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError e
     req.waiting_logged = true;
     ESP_LOGD(TAG, "Network storage not ready yet — waiting for it to come up");
   }
-  req.yield_batch_ = true;  // defer to the next pass rather than spinning the batch budget
   return true;  // stay RUNNING; the loop retries this request on the next pass
 }
 
@@ -179,7 +178,6 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->chunk_size = 0;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
-  slot->yield_batch_ = false;
   slot->last_progress_ms = millis();
   slot->progress_mark = 0;
   slot->overwrite = overwrite;
@@ -315,7 +313,6 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->file_total = size;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
-  slot->yield_batch_ = false;
   slot->last_progress_ms = millis();
   slot->progress_mark = 0;
   const bool file_fs = file_side != nullptr && file_side->get_storage_type() == StorageType::FILESYSTEM;
@@ -545,7 +542,10 @@ void StorageWorker::deliver_completions_() {
 }
 
 void StorageWorker::loop() {
-  // Nothing to do until the first async transfer is submitted. Cheap early-out every pass.
+  // Nothing to do until the first async transfer is submitted. Cheap early-out every main
+  // loop pass — far simpler and race-free compared to disable_loop()/enable_loop() gymnastics
+  // around lazy start (an enable_loop() issued while the component is still in LOOP state is a
+  // no-op, so a pre-start disable could never be undone — that was the stall).
   if (!this->started_)
     return;
 
@@ -558,75 +558,54 @@ void StorageWorker::loop() {
 
   this->deliver_completions_();
 
-  // The chunk engine: one OR MORE chunks per pass, under a small time budget. This loop is
-  // the ONLY thing that advances a loop-sliced job — nothing external drives chunks; callers
-  // submit once and afterwards only poll status. Tying progress to exactly one chunk per
-  // component-phase pass coupled transfer speed to the phase cadence; the budget decouples
-  // it while still returning to the main loop quickly.
-  static constexpr uint32_t LOOP_CHUNK_BUDGET_MS = 8;
-  const uint32_t batch_start = millis();
-  do {
-    if (this->loop_active_index_ == SIZE_MAX) {
-      // Pick the next PENDING request, FIFO by pool position (pool order matches submission
-      // order well enough in practice — this component makes no stronger ordering promise).
-      // Skip any request that overlaps a storage with something already RUNNING/CANCELLED
-      // (e.g. on the worker task) — it must wait its turn rather than run concurrently.
-      for (size_t i = 0; i < this->pool_.size(); i++) {
-        TransferRequest &candidate = this->pool_[i];
-        if (candidate.state.load() != RequestState::PENDING)
-          continue;
-        if (this->overlaps_active_(candidate)) {
-          if (!candidate.stuck_warned) {
-            ESP_LOGW(TAG, "Request pending indefinitely — blocked by another request on the same "
-                          "storage that never completed (likely a stuck slot after a drain "
-                          "timeout)");
-            candidate.stuck_warned = true;
-          }
-          continue;
+  if (this->loop_active_index_ == SIZE_MAX) {
+    // Pick the next PENDING request, FIFO by pool position (pool order matches submission
+    // order well enough in practice — this component makes no stronger ordering promise).
+    // Skip any request that overlaps a storage with something already RUNNING/CANCELLED (e.g.
+    // on the worker task) — it must wait its turn rather than run concurrently with it.
+    for (size_t i = 0; i < this->pool_.size(); i++) {
+      TransferRequest &candidate = this->pool_[i];
+      if (candidate.state.load() != RequestState::PENDING)
+        continue;
+      if (this->overlaps_active_(candidate)) {
+        // Known limitation: if the request it overlaps with is stuck (its owning engine never
+        // reached DONE after a drain timeout — see on_storage_unregistered_()), this request
+        // waits forever and its callback never fires. There is no reclaim path for the stuck
+        // slot itself: by the time a drain times out, the medium is presumed gone and the
+        // engine that owns it may still be touching it, so freeing the slot out from under
+        // that engine would be unsafe. Log once per request so this is at least diagnosable.
+        if (!candidate.stuck_warned) {
+          ESP_LOGW(TAG, "Request pending indefinitely — blocked by another request on the same "
+                        "storage that never completed (likely a stuck slot after a drain "
+                        "timeout)");
+          candidate.stuck_warned = true;
         }
-        candidate.state = RequestState::RUNNING;
-        // The stall clock starts NOW, not at submission: a request that legitimately waited
-        // PENDING behind another transfer gets its full stall window once it actually runs.
-        candidate.last_progress_ms = millis();
-        this->loop_active_index_ = i;
-        break;
+        continue;
       }
-      if (this->loop_active_index_ == SIZE_MAX)
-        break;  // nothing runnable this pass
+      candidate.state = RequestState::RUNNING;
+      // The stall clock starts NOW, not at submission: a request that legitimately waited
+      // PENDING behind another transfer must get its full stall window once it actually runs.
+      candidate.last_progress_ms = millis();
+      this->loop_active_index_ = i;
+      break;
     }
+  }
+
+  if (this->loop_active_index_ != SIZE_MAX) {
     TransferRequest &req = this->pool_[this->loop_active_index_];
     // Only advance a request this engine still owns (RUNNING, or CANCELLED — which
-    // run_chunk_()'s entry check drains); anything else was finished from outside and the
-    // index is released without touching it.
+    // run_chunk_()'s entry check drains). Anything else means it was finished and possibly
+    // already freed from outside this section; running it would touch nulled storages.
     RequestState st = req.state.load();
-    req.yield_batch_ = false;
     if (st == RequestState::RUNNING || st == RequestState::CANCELLED) {
       this->run_chunk_(req);
       st = req.state.load();
     }
-    if (st != RequestState::RUNNING && st != RequestState::CANCELLED) {
-      this->loop_active_index_ = SIZE_MAX;  // finished — the next budget slice picks a successor
-      continue;  // pull the next PENDING request into the remaining budget
-    }
-    if (req.yield_batch_)
-      break;  // waiting on a (re)connecting network storage — retry next pass, don't spin
-    // Still RUNNING: keep spending the budget on it. A pass that made no BYTE progress is
-    // NOT a stall to bail on here — the transfer's state machine legitimately spends whole
-    // passes on setup that moves no bytes (pre-phase: classifying the source, clearing the
-    // destination, materializing a directory tree; opening handles; each tree_step_). Those
-    // must be allowed to proceed to the next step on the very next iteration, not deferred a
-    // component phase each — deferring them was exactly the 0-byte stall. A genuinely stuck
-    // step is caught by check_stalled_()'s 30 s watchdog, not by this per-pass loop. The one
-    // case worth yielding on early is a network read still returning WOULD-block-ish partials
-    // via NOT_READY, which run_chunk_() handles by staying RUNNING; the budget bound below
-    // caps how long we spin on it before returning to the main loop anyway.
-  } while (millis() - batch_start < LOOP_CHUNK_BUDGET_MS);
+    if (st != RequestState::RUNNING && st != RequestState::CANCELLED)
+      this->loop_active_index_ = SIZE_MAX;
+  }
 
-  // Completions produced inside this pass's batch are delivered in this same pass — a caller
-  // chained on the callback (e.g. an automation submitting the next job) never waits an
-  // extra component phase for it.
-  this->deliver_completions_();
-  // Idle again? Then release the phase — the next submit_() re-acquires it.
+  // Idle again? Then stop asking for the phase — the next submit_() asks for it anew.
   bool busy = this->loop_active_index_ != SIZE_MAX;
   if (!busy) {
     for (const auto &req : this->pool_) {
@@ -644,20 +623,14 @@ void StorageWorker::loop() {
       }
     }
   }
-  // Drive the engine the native ESPHome way. The component phase gates on three terms
-  // (loop_interval_ / an active HighFrequencyLoopRequester / an explicit wake); a raised
-  // requester makes BOTH the difference that matters here: the phase then runs every main
-  // loop iteration instead of once per loop_interval_ (16 ms default), AND the loop skips
-  // its end-of-tick sleep entirely — so a busy transfer advances at full speed with no
-  // scheduler item of our own. enable_loop()/disable_loop() move this component in/out of the
-  // active loop partition so an idle node stops calling loop() at all (CPU saved). Recomputed
-  // from real pool state every pass — self-healing: submit_() enables + starts, this releases
-  // once everything is FREE. disable_loop() is called only from HERE (inside loop(), never
-  // before setup) — a pre-setup disable could not be undone by a later enable_loop(), which
-  // was the original stall.
-  if (busy) {
-    this->loop_requester_.start();
-  } else {
+  // Drive the engine the native ESPHome way: a raised HighFrequencyLoopRequester makes the
+  // component phase run every main-loop iteration (not once per loop_interval_) and suppresses
+  // the loop's end-of-tick sleep, so consecutive passes — one run_chunk_() each — follow fast.
+  // enable_loop()/disable_loop() additionally take this component out of the active loop
+  // partition when idle. disable_loop() is called ONLY from here (inside loop(), never before
+  // setup) — a pre-setup disable could not be undone by a later enable_loop(); that was the
+  // original stall.
+  if (!busy) {
     this->loop_requester_.stop();
     this->disable_loop();
   }
