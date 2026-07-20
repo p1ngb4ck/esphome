@@ -302,11 +302,9 @@ bool StorageRegistry::build_path(const PathStorage *s, const char *rel, char *ou
 // Free helper functions
 //========================================================================
 
-namespace {
-
 // Shared guard-rail check for the blocking helpers below. No-op (returns OK) when no limit is
 // configured (registry unset, or max_blocking_transfer_size == 0).
-StorageError check_blocking_transfer_size(uint64_t size) {
+static StorageError check_blocking_transfer_size(uint64_t size) {
   if (global_storage_registry == nullptr)
     return StorageError::OK;
   uint64_t limit = global_storage_registry->get_max_blocking_transfer_size();
@@ -314,8 +312,6 @@ StorageError check_blocking_transfer_size(uint64_t size) {
     return StorageError::TRANSFER_TOO_LARGE;
   return StorageError::OK;
 }
-
-}  // namespace
 
 StorageError error_from_errno(int err, bool writing) {
   switch (err) {
@@ -568,12 +564,10 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
   }
 }
 
-namespace {
-
 // The bytes of one file, given a chunk buffer to borrow. Split out of copy() so a directory
 // walk can reuse the same buffer for every file instead of allocating one per entry.
-StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
-                           const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size) {
+static StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                                  const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size) {
   bool src_is_fs = src_storage->get_storage_type() == StorageType::FILESYSTEM;
   bool dst_is_fs = dst_storage->get_storage_type() == StorageType::FILESYSTEM;
   auto *src_fs = src_is_fs ? static_cast<FilesystemStorage *>(src_storage) : nullptr;
@@ -655,8 +649,9 @@ StorageError copy_one_file(PathStorage *src_storage, const char *src_path, PathS
 static constexpr size_t COPY_TREE_PATH_MAX = 256;
 
 struct CopyTreeCtx;
-StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
-                                const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size, size_t depth);
+static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                                       const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size,
+                                       size_t depth);
 
 struct CopyTreeCtx {
   PathStorage *src_storage;
@@ -669,7 +664,7 @@ struct CopyTreeCtx {
   StorageError err{StorageError::OK};
 };
 
-bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
+static bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
   auto *ctx = static_cast<CopyTreeCtx *>(ctx_ptr);
 
   // Fixed stack buffers instead of std::string — no heap allocation per entry, same as
@@ -702,8 +697,9 @@ bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
   return true;
 }
 
-StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
-                                const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size, size_t depth) {
+static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
+                                       const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size,
+                                       size_t depth) {
   if (depth > STORAGE_MAX_RECURSION_DEPTH)
     return StorageError::INVALID_ARGS;
 
@@ -777,11 +773,9 @@ RamBuffer alloc_dma_capable(size_t want, bool on_task, size_t *actual_size) {
 
 // The chunk buffer the blocking (main-loop) copy paths borrow — never on the worker task, so
 // on_task is false: `want` bytes in internal RAM.
-RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
+static RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
   return alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, /*on_task=*/false, chunk_size_out);
 }
-
-}  // namespace
 
 StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path) {
   // A directory is copied whole — the API owns that, not its callers. Only pay for the stat()
@@ -827,9 +821,7 @@ StorageError move(PathStorage *src_storage, const char *src_path, PathStorage *d
   return src_stat.is_dir ? remove_recursive(src_storage, src_path) : src_storage->remove(src_path);
 }
 
-namespace {
-
-StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth);
+static StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth);
 
 struct RemoveRecursiveCtx {
   PathStorage *storage;
@@ -838,7 +830,7 @@ struct RemoveRecursiveCtx {
   StorageError err{StorageError::OK};
 };
 
-bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
+static bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
   auto *ctx = static_cast<RemoveRecursiveCtx *>(ctx_ptr);
 
   // Fixed stack buffer instead of std::string — no heap allocation per entry during recursion.
@@ -863,7 +855,7 @@ bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
   return true;
 }
 
-StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth) {
+static StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth) {
   if (depth > STORAGE_MAX_RECURSION_DEPTH)
     return StorageError::INVALID_ARGS;
 
@@ -876,8 +868,6 @@ StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, s
 
   return storage->rmdir(path);
 }
-
-}  // namespace
 
 StorageError remove_recursive(PathStorage *storage, const char *path) {
   return remove_recursive_at_depth(storage, path, 0);
