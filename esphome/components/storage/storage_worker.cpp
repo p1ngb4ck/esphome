@@ -155,10 +155,10 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   if (slot == nullptr)
     return StorageError::NOT_READY;
 
-  // Work is pending from here on: arm the scheduler pump — the guaranteed driver of the
-  // engine (see set_pump_()) — plus the phase request as a courtesy. Both are released again
-  // by process_() once every slot is free.
-  this->set_pump_(true);
+  // Work is pending from here on: put this component back in the active loop partition and
+  // raise the high-frequency request so the component phase runs every iteration at full
+  // speed (see loop()'s tail). Both are released again by loop() once every slot is free.
+  this->enable_loop();
   this->loop_requester_.start();
 
   slot->op = op;
@@ -323,7 +323,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   if (job_out != nullptr)
     *job_out = (slot->generation << 8) | static_cast<uint32_t>(slot - this->pool_.begin());
   // Raw devices are main-loop citizens (esp_flash & friends): always the loop-sliced engine.
-  this->set_pump_(true);
+  this->enable_loop();
   this->loop_requester_.start();
   return StorageError::OK;
 }
@@ -542,26 +542,7 @@ void StorageWorker::deliver_completions_() {
 }
 
 void StorageWorker::loop() {
-  // The component phase is gated (loop_interval_ / high-frequency / wake) — when it does run,
-  // service the engine too, but the guaranteed driver is the scheduler pump (see set_pump_()).
-  this->process_();
-}
-
-void StorageWorker::set_pump_(bool armed) {
-  if (armed == this->pump_armed_)
-    return;
-  this->pump_armed_ = armed;
-  if (armed) {
-    // Interval 0: one process_() per scheduler service — i.e. per main loop tick, always,
-    // independent of the component-phase gate; an armed item also bounds the loop's sleep.
-    this->set_interval("pump", 0, [this]() { this->process_(); });
-  } else {
-    this->cancel_interval("pump");
-  }
-}
-
-void StorageWorker::process_() {
-  // Nothing to do until the first async transfer is submitted. Cheap early-out.
+  // Nothing to do until the first async transfer is submitted. Cheap early-out every pass.
   if (!this->started_)
     return;
 
@@ -637,7 +618,7 @@ void StorageWorker::process_() {
   // chained on the callback (e.g. an automation submitting the next job) never waits an
   // extra component phase for it.
   this->deliver_completions_();
-  // Idle again? Then stop asking for the phase — the next submit_() asks for it anew.
+  // Idle again? Then release the phase — the next submit_() re-acquires it.
   bool busy = this->loop_active_index_ != SIZE_MAX;
   if (!busy) {
     for (const auto &req : this->pool_) {
@@ -655,14 +636,22 @@ void StorageWorker::process_() {
       }
     }
   }
-  // Recomputed from actual pool state on every service — self-healing: the pump can never
-  // stay disarmed while work exists (a submission arms it, and any service re-arms it), and
-  // it disarms itself once everything is FREE so an idle node schedules nothing.
-  this->set_pump_(busy);
+  // Drive the engine the native ESPHome way. The component phase gates on three terms
+  // (loop_interval_ / an active HighFrequencyLoopRequester / an explicit wake); a raised
+  // requester makes BOTH the difference that matters here: the phase then runs every main
+  // loop iteration instead of once per loop_interval_ (16 ms default), AND the loop skips
+  // its end-of-tick sleep entirely — so a busy transfer advances at full speed with no
+  // scheduler item of our own. enable_loop()/disable_loop() move this component in/out of the
+  // active loop partition so an idle node stops calling loop() at all (CPU saved). Recomputed
+  // from real pool state every pass — self-healing: submit_() enables + starts, this releases
+  // once everything is FREE. disable_loop() is called only from HERE (inside loop(), never
+  // before setup) — a pre-setup disable could not be undone by a later enable_loop(), which
+  // was the original stall.
   if (busy) {
     this->loop_requester_.start();
   } else {
     this->loop_requester_.stop();
+    this->disable_loop();
   }
 
   // Streams: two jobs, both per-slot and independent of any other slot (no FIFO ordering
@@ -1642,12 +1631,12 @@ void StorageWorker::dispatch_stream_step_(StreamRequest &req, size_t index) {
       return;
   }
 #endif
-  // Loop-sliced fallback: mark pending so the engine service runs it on its next pass rather
-  // than here — and arm the scheduler pump, since the step would otherwise wait for a gated
-  // component phase that nothing may be triggering (streams had the exact same hole as
-  // transfers: nothing external drives them, the worker must ask for its own service).
+  // Loop-sliced fallback: mark pending so loop() runs it on its next pass rather than here,
+  // and enable + raise the loop so that pass happens promptly and at full speed (streams
+  // share the transfer engine's driver — see loop()'s tail).
   req.pending_step_ = true;
-  this->set_pump_(true);
+  this->enable_loop();
+  this->loop_requester_.start();
 }
 
 StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, StreamHandle *out_handle,
