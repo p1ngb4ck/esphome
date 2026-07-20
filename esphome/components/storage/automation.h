@@ -93,6 +93,38 @@ std::string extract_trim(const std::string &s);
 // of range, key not found, regex not matching. An empty extraction result is not a failure.
 bool apply_extract_step(const ExtractStep &step, std::string &buf);
 
+// ===========================================================================
+// Blocking contract for the storage actions (READ THIS before "fixing" an action to be async).
+//
+// Storage actions come in two deliberate kinds, split by WHERE the data lives — not by
+// whim. The rule is: content that is already a RAM value stays synchronous; content that is
+// (or becomes) a file streams through the async worker.
+//
+//   ASYNC (fire-and-forget + on_complete trigger; runs on the worker, never blocks the loop):
+//     - file_copy / file_move          (file/tree <-> file/tree, streamed)
+//     - raw_read  with to_file         (device -> file, streamed)
+//     - raw_write with from_file       (file -> device, streamed)
+//     - raw_erase                      (sliced one geometry step per pass)
+//   These move potentially large amounts of data and MUST NOT hold the main loop; the worker
+//   streams them through one fixed chunk buffer (never a whole-file/whole-image RAM buffer).
+//
+//   SYNCHRONOUS (small content that is ALREADY a RAM value; blocks only for that small write):
+//     - file_write / file_append       (writes a std::string from the automation)
+//     - raw_read  into on_value        (returns a std::vector — the bytes land in RAM)
+//     - raw_write from inline data     (a flash/lambda byte array)
+//   These are intentionally NOT routed through the worker. The payload is a small in-RAM
+//   value, so there is nothing to stream and no large buffer to avoid; a worker job would add
+//   round-trips and a pool slot for no benefit. The blocking is bounded by the payload size,
+//   which the automation author already chose by constructing the value. The large-content
+//   counterpart already exists as a separate action: to write a big file use file_copy or
+//   raw_write with from_file; the interface deliberately offers BOTH shapes side by side.
+//   Note: on a slow NETWORK storage even a small write can take a while (the round-trip, not
+//   the size). That is a property of the medium, not a reason to convert these to async — the
+//   author picks the storage. If a use case genuinely needs a non-blocking small write, the
+//   right move is a dedicated RAM->file worker job, not the heavyweight stream API — but that
+//   job does not exist yet and is out of scope until a real need appears.
+// ===========================================================================
+
 // Non-template workers for the actions below — all error logging lives in the .cpp.
 void perform_mount(MountableStorage *target, bool mount);
 void perform_file_copy(const std::string &from, const std::string &to, bool is_move);
@@ -110,6 +142,9 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
 // storage.file_write / storage.file_append
 // ---------------------------------------------------------------------------
 
+// SYNCHRONOUS by design — see the blocking contract above. `content` is a std::string from
+// the automation (a small in-RAM value), so there is nothing to stream: writing a big file is
+// file_copy's / raw_write from_file's job, not this one.
 template<typename... Ts> class FileWriteAction : public Action<Ts...> {
  public:
   explicit FileWriteAction(bool append) : append_(append) {}
@@ -193,7 +228,10 @@ template<typename... Ts> class FileCopyAction : public Action<Ts...> {
 // flash semantics, and pass erase()'s verdict (NOT_SUPPORTED on erase-less media, INVALID_ARGS
 // on an unaligned range) straight through to the log rather than papering over it.
 //
-// Like the file_* actions above these are BLOCKING and honor max_blocking_transfer_size.
+// Blocking: see the contract block above. The file-based paths (raw_read to_file, raw_write
+// from_file, raw_erase) run ASYNC on the worker; raw_read into on_value and raw_write from
+// inline data are SYNCHRONOUS small-content paths. The sync perform_raw_* helpers below back
+// the small-content paths and the no-worker fallback; the perform_*_async ones back the rest.
 
 // Reads [address, address+size) into `out`. Returns false (already logged) on any failure;
 // `out` is left empty then, so a trigger never fires with half a result.
