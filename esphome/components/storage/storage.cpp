@@ -1,6 +1,9 @@
 #include "storage.h"
 
 #include <cerrno>
+#ifdef USE_ESP32
+#include <esp_heap_caps.h>
+#endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/core/string_ref.h"
@@ -715,22 +718,60 @@ StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, 
   return ctx.err;
 }
 
-// The chunk buffer both paths borrow. PREFER_INTERNAL: PSRAM isn't DMA-capable on classic
-// ESP32 (restricted on S3 too), so SD/SPI drivers would bounce-buffer anyway. Falls back to
-// smaller sizes under memory pressure.
-RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
-  size_t chunk_size = STORAGE_COPY_CHUNK_SIZE;
+// Streaming-buffer allocation with platform-chosen placement. See alloc_dma_capable's
+// declaration in storage.h for the policy; the mechanics live here.
+//
+// Uses heap_caps_malloc directly (not RAMAllocator) because only the cap-based API can request
+// MALLOC_CAP_DMA — RAMAllocator only ever asks for SPIRAM|8BIT or INTERNAL|8BIT, never DMA. The
+// result still frees through RamBufferDeleter: on ESP32 free() routes to the owning heap, so a
+// heap_caps_malloc'd block and a RAMAllocator block are freed identically.
+RamBuffer alloc_dma_capable(size_t want, size_t *actual_size) {
+  size_t size = want;
   uint8_t *raw = nullptr;
-  while (chunk_size >= 4096) {
-    raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
+#ifdef USE_ESP32
+  // Placement decision is compile-time: only S3/P4 can DMA out of PSRAM, and only above the
+  // 32 kB cutoff does a buffer earn a place there (small chunks are faster in internal RAM).
+#if defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+  constexpr bool psram_dma = true;
+#else
+  constexpr bool psram_dma = false;
+#endif
+  constexpr size_t PSRAM_CUTOFF = 32768;
+  while (size >= 4096) {
+    if (psram_dma && size > PSRAM_CUTOFF) {
+      // Large buffer on a PSRAM-DMA chip: DMA-capable external RAM. The allocator resolves the
+      // cache-line / DMA alignment the subsystem needs, so no manual alignment here.
+      raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+      if (raw == nullptr)  // PSRAM tight/fragmented — retry the same size internally before halving
+        raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+    } else {
+      // Internal, DMA-capable. This is the path on classic ESP32 / REST and for every buffer
+      // at or below the cutoff on S3/P4.
+      raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+    }
     if (raw != nullptr)
       break;
-    chunk_size /= 2;
+    size /= 2;
   }
-  *chunk_size_out = chunk_size;
+#else
+  // Non-ESP32: no heap_caps / no external RAM notion — plain malloc, same halving discipline.
+  while (size >= 4096) {
+    raw = static_cast<uint8_t *>(malloc(size));  // NOLINT(cppcoreguidelines-no-malloc)
+    if (raw != nullptr)
+      break;
+    size /= 2;
+  }
+#endif
+  *actual_size = raw != nullptr ? size : 0;
   if (raw == nullptr)
     return RamBuffer(nullptr, RamBufferDeleter{0});
-  return RamBuffer(raw, RamBufferDeleter{chunk_size});
+  return RamBuffer(raw, RamBufferDeleter{size});
+}
+
+// The chunk buffer both blocking copy paths borrow. Thin wrapper over alloc_dma_capable at the
+// configured chunk size — placement (internal vs PSRAM-DMA) is decided there per platform.
+RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
+  return alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, chunk_size_out);
 }
 
 }  // namespace
