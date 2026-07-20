@@ -12,7 +12,33 @@ static const char *const TAG = "storage";
 StorageRegistry *global_storage_registry = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 #ifdef USE_STORAGE_CHANGE_FEED
-void StorageRegistry::note_dir_changed(const std::string &dir) {
+// Collapse duplicate slashes and drop any trailing slash, so a directory is reported to the
+// change feed in exactly the form the browser holds it as an openDirs key (the same shape the
+// file API's normalize_vfs_path produces). Callers assemble paths as mount_path + "/" + rel,
+// which can introduce "//" (empty rel, or a rel with a leading slash) or a trailing slash — an
+// un-normalized string would never string-match the client's key and the relist would be lost.
+// "" (the roots marker) passes through unchanged.
+static std::string normalize_feed_dir(const std::string &dir) {
+  std::string out;
+  out.reserve(dir.size());
+  bool prev_slash = false;
+  for (char ch : dir) {
+    if (ch == '/') {
+      if (prev_slash)
+        continue;
+      prev_slash = true;
+    } else {
+      prev_slash = false;
+    }
+    out += ch;
+  }
+  while (out.size() > 1 && out.back() == '/')
+    out.pop_back();
+  return out;
+}
+
+void StorageRegistry::note_dir_changed(const std::string &dir_raw) {
+  const std::string dir = normalize_feed_dir(dir_raw);
   // Coalesce bursts into the same directory: bumping the newest entry's seq is enough — a
   // client behind it is handed the dir exactly once either way.
   size_t newest = (this->dir_changes_next_ + DIR_CHANGES_SIZE - 1) % DIR_CHANGES_SIZE;
@@ -26,7 +52,11 @@ void StorageRegistry::note_dir_changed(const std::string &dir) {
   e.dir = dir;
 }
 
-void StorageRegistry::note_parent_changed(const std::string &path) {
+void StorageRegistry::note_parent_changed(const std::string &path_raw) {
+  // Normalize first so a trailing or doubled slash cannot split the parent at the wrong place
+  // (e.g. "/sd//foo/" must yield "/sd", not "/sd//foo"). note_dir_changed normalizes again,
+  // which is harmless.
+  const std::string path = normalize_feed_dir(path_raw);
   size_t slash = path.rfind('/');
   // A top-level path's parent is the roots level itself — the feed's "" marker.
   this->note_dir_changed(slash == std::string::npos || slash == 0 ? std::string() : path.substr(0, slash));
