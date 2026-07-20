@@ -206,29 +206,19 @@ def _transfer_buffer_final_validate(config):
 FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
 
 
-# Per-platform default streaming/copy chunk size, chosen from the research in
-# .ai / the buffer-usage plan: past the SD write-saturation knee (~4 kB) on every
-# target, sized up where the chip has the internal RAM headroom to spare.
-#   ESP32 (classic): 16 kB   S3: 32 kB   P4: 32 kB   REST/non-esp32: 16 kB
-# All are multiples of 512 (kept in sync with validate_sector_multiple) and stay in
-# internal RAM under the 32 kB alloc_dma_capable cutoff. An explicit copy_chunk_size
-# always overrides this. The four-way split (ESP32/S3/P4/REST) matches the DMA-capability
-# grouping: S3 and P4 have PSRAM-DMA and more internal RAM, ESP32/REST do not.
-_PLATFORM_CHUNK_DEFAULTS = {
-    "ESP32": 16384,
-    "ESP32S3": 32768,
-    "ESP32P4": 32768,
-}
-_REST_CHUNK_DEFAULT = 16384
+# Default streaming/copy chunk size. Flat 16 kB on every platform: the 20 ms loop-slice budget
+# (see the buffer-usage plan) caps a main-loop chunk near 16 kB even on the fastest S3 SD path,
+# so a larger loop chunk is unsafe. The platform distinction lives one level down, in the C++
+# allocator (alloc_dma_capable): on the worker task — which has no 20 ms budget — S3/P4 stage a
+# 32 kB chunk in DMA-capable PSRAM, while every loop-path buffer stays 16 kB internal. An
+# explicit copy_chunk_size still overrides this default (the user's last word). Multiple of 512
+# to keep FATFS whole-sector transfers.
+_DEFAULT_COPY_CHUNK_SIZE = 16384
 
 
 def _default_copy_chunk_size() -> int:
-    """Resolve the platform default at codegen time (falls back to REST off-esp32)."""
-    if not CORE.is_esp32:
-        return _REST_CHUNK_DEFAULT
-    from esphome.components.esp32 import get_esp32_variant
-
-    return _PLATFORM_CHUNK_DEFAULTS.get(get_esp32_variant(), _REST_CHUNK_DEFAULT)
+    """The loop-safe base chunk size (platform-independent — see the note above)."""
+    return _DEFAULT_COPY_CHUNK_SIZE
 
 
 # storage is a dependency of every driver and would otherwise run BEFORE them (default

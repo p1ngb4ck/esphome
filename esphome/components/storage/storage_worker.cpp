@@ -28,11 +28,9 @@ void StorageWorker::setup() {
 }
 
 void StorageWorker::dump_config() {
-  // Everything here is fixed at compile time (STORAGE_COPY_CHUNK_SIZE and the variant build
-  // flags), so this just makes the resolved buffer policy visible in the boot log. Placement
-  // follows the alloc_dma_capable rule from the buffer-usage plan: only S3/P4 can DMA out of
-  // PSRAM, and only above the 32 kB cutoff does a buffer go there — the default chunk sizes all
-  // stay at or below that, hence internal on every platform.
+  // Fixed at compile time (STORAGE_COPY_CHUNK_SIZE and the variant flags) — surfaces the
+  // resolved buffer policy in the boot log. Loop path is always `chunk` bytes internal (20 ms
+  // budget); the worker task on S3/P4 stages a 32 kB chunk in DMA-capable PSRAM.
   const size_t chunk = STORAGE_COPY_CHUNK_SIZE;
 #if defined(USE_ESP32_VARIANT_ESP32S3)
   const char *platform = "ESP32-S3";
@@ -47,11 +45,13 @@ void StorageWorker::dump_config() {
   const char *platform = "generic";
   const bool psram_dma_capable = false;
 #endif
-  // > 32 kB would go to PSRAM, but only where PSRAM DMA is real (S3/P4); otherwise internal.
-  const bool in_psram = psram_dma_capable && chunk > 32768;
   ESP_LOGCONFIG(TAG, "Storage worker:");
-  ESP_LOGCONFIG(TAG, "  Streaming/copy chunk: %u bytes", (unsigned) chunk);
-  ESP_LOGCONFIG(TAG, "  Placement: %s (DMA-capable)", in_psram ? "PSRAM" : "internal RAM");
+  ESP_LOGCONFIG(TAG, "  Loop chunk: %u bytes (internal RAM, DMA-capable)", (unsigned) chunk);
+  if (psram_dma_capable) {
+    ESP_LOGCONFIG(TAG, "  Task chunk: 32768 bytes (PSRAM, DMA-capable)");
+  } else {
+    ESP_LOGCONFIG(TAG, "  Task chunk: %u bytes (internal RAM, DMA-capable)", (unsigned) chunk);
+  }
   ESP_LOGCONFIG(TAG, "  Platform: %s (PSRAM-DMA %s)", platform, psram_dma_capable ? "yes" : "no");
 }
 
@@ -883,7 +883,7 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
       // on pressure. The buffer is written once and reused across passes.
       if (req.chunk_buf.get() == nullptr) {
         size_t chunk_size = 0;
-        req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+        req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
         if (req.chunk_buf.get() == nullptr) {
           finish_request(req, StorageError::NO_SPACE);
           return;
@@ -1036,7 +1036,7 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
     // Platform-aware streaming buffer (alloc_dma_capable): internal RAM under the cutoff,
     // DMA-capable, halving on pressure down to 4 KiB before giving up.
     size_t chunk_size = 0;
-    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
     if (req.chunk_buf.get() == nullptr) {
       finish_request(req, StorageError::NO_SPACE);
       return;
@@ -1459,7 +1459,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
     }
 
     size_t chunk_size = 0;
-    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
     if (req.chunk_buf.get() == nullptr) {
       finish_request(req, StorageError::NO_SPACE);
       return;
