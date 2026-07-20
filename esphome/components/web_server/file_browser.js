@@ -116,15 +116,15 @@
        dark page and vice versa); the system colors follow whatever the page currently is. */
     #esp-file-browser .efb-modal { background: Canvas; color: CanvasText;
       border: 2px solid rgba(127,127,127,.3); border-radius: 12px; padding: 1em 1.25em;
-      min-width: 18em; max-width: 90%; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
+      min-width: 32em; max-width: 92%; width: 40em; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
     #esp-file-browser .efb-modal-title { font-weight: 500; margin-bottom: .75em; }
     #esp-file-browser .efb-field { display: flex; align-items: center; gap: .75em;
       justify-content: space-between; margin: .4em 0; }
     #esp-file-browser .efb-field-label { font-size: .9em; opacity: .8; }
     #esp-file-browser .efb-field-note { font-size: .85em; opacity: .7; margin: .4em 0; font-style: italic; }
-    #esp-file-browser .efb-picker { max-height: 40vh; overflow-y: auto; margin: .3em 0 .6em;
-      border: 1px solid rgba(127,127,127,.3); border-radius: 4px; padding: 4px 0; }
-    #esp-file-browser .efb-picker-row { font-size: .9em; }
+    #esp-file-browser .efb-picker { min-height: 16em; max-height: 55vh; overflow-y: auto;
+      margin: .3em 0 .6em; border: 1px solid rgba(127,127,127,.3); border-radius: 4px; padding: 4px 0; }
+    #esp-file-browser .efb-picker-row { font-size: .9em; display: flex; align-items: center; }
     #esp-file-browser .efb-picker-pick { margin-left: auto; padding: 0 .6em; cursor: pointer;
       opacity: .7; font-size: .8em; text-decoration: underline; }
     #esp-file-browser .efb-picker-pick:hover { opacity: 1; }
