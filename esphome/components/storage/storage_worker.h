@@ -342,11 +342,11 @@ class StorageWorker : public Component {
   void set_max_streams(size_t count) { this->max_streams_ = count; }
 
   void setup() override;
-  // loop() only forwards to process_(). The actual engine service is SCHEDULER-driven (see
-  // process_()/set_pump_(); Application services the scheduler unconditionally on every main
-  // loop tick and bounds its sleep by the next scheduler deadline) — the component phase that
-  // calls loop() is gated (loop_interval_ / high-frequency request / wake) and therefore not
-  // a reliable driver on its own.
+  // The engine: advances the loop-sliced transfer/stream slots one time-budgeted batch per
+  // call. Driven the native ESPHome way — enable_loop() + a HighFrequencyLoopRequester raised
+  // while work is pending make the component phase run every main-loop iteration with no
+  // end-of-tick sleep (see the request/release logic at loop()'s tail); disable_loop() from
+  // inside loop() stops the calls entirely once idle.
   void loop() override;
   // DATA, not AFTER_CONNECTION: the worker has no networking dependency of its own (NFS/SMB
   // storages are accessed through the storage:: interface, not directly), so there's no reason
@@ -452,20 +452,11 @@ class StorageWorker : public Component {
   // started_ is set.
   void ensure_started_();
 
-  // One full engine service: watchdog, completion delivery, the time-budgeted chunk batch,
-  // delivery again, then (dis)arming the pump. Called from loop() when the gated component
-  // phase happens to run, and — decisively — from the scheduler pump while any slot is busy.
-  void process_();
-  // Arms/disarms a 0 ms scheduler interval calling process_(). The scheduler is the ONE
-  // mechanism Application services on every tick regardless of the component-phase gate and
-  // regardless of loop_interval_, and an armed item keeps the main loop from sleeping past
-  // it — so a busy worker is guaranteed service at full speed with no assumption about what
-  // triggers the component phase. Idempotent via pump_armed_.
-  void set_pump_(bool armed);
-  bool pump_armed_{false};
-
-  // Kept purely as a courtesy to the rest of the system (skips the phase-gate bookkeeping
-  // while transfers run); correctness no longer depends on it in any way.
+  // Raised while any slot or stream is busy: makes the component phase run every main-loop
+  // iteration (instead of once per loop_interval_) AND suppresses the loop's end-of-tick
+  // sleep, so a transfer advances at full speed. Started on submit, stopped by loop() once
+  // everything is FREE — paired there with enable_loop()/disable_loop(), which additionally
+  // take this component out of the active loop partition when idle.
   HighFrequencyLoopRequester loop_requester_;
 
   // True if every storage involved may have its data-plane calls run off the main loop.
