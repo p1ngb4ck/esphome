@@ -77,6 +77,18 @@ bool StorageWorker::is_task_safe_(const TransferRequest &req) const {
 #if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
   if (!this->task_running_)
     return false;
+  // Every storage this op touches must be task-safe, or a background task would race the main
+  // loop on it. A copy/move touches src_storage AND dst_storage (both non-null, no raw_device).
+  // A raw op touches raw_device AND exactly one path-storage side (the file; the other side is
+  // null) — so we OR the two path sides to pick the one that is set, and additionally require
+  // the raw device's own capability.
+  if (req.raw_device != nullptr) {
+    const Storage *file_side = req.src_storage != nullptr ? req.src_storage : req.dst_storage;
+    if (file_side == nullptr)  // raw_erase: device only, no file side
+      return (req.raw_device->get_capabilities() & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0;
+    return (req.raw_device->get_capabilities() & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0 &&
+           (file_side->get_capabilities() & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0;
+  }
   uint8_t src_caps = req.src_storage->get_capabilities();
   uint8_t dst_caps = req.dst_storage->get_capabilities();
   return (src_caps & StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0 &&
@@ -327,7 +339,26 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
     slot->generation = 1;
   if (job_out != nullptr)
     *job_out = (slot->generation << 8) | static_cast<uint32_t>(slot - this->pool_.begin());
-  // Raw devices are main-loop citizens (esp_flash & friends): always the loop-sliced engine.
+
+#if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
+  // A raw device that declared itself alone on a hardware bus (assume_exclusive_bus) reports
+  // STORAGE_CAP_IO_TASK_SAFE, so its blocking I/O may run on the worker task instead of the
+  // main loop. Same contract as the copy path: only dispatch when every storage the op touches
+  // is task-safe (is_task_safe_ checks raw_device + the file side) and nothing active already
+  // holds one of them. Otherwise — the common case of a shared-bus device — fall through to the
+  // loop-sliced engine below, exactly as before.
+  if (this->is_task_safe_(*slot) && !this->overlaps_active_(*slot)) {
+    QueueEntry entry{QueueEntryKind::TRANSFER, static_cast<size_t>(slot - this->pool_.begin())};
+    slot->state = RequestState::RUNNING;
+    if (xQueueSend(this->task_queue_, &entry, 0) == pdTRUE) {
+      return StorageError::OK;
+    }
+    // Queue send failed despite a free slot — fall through to loop-sliced rather than lose it.
+    slot->state = RequestState::PENDING;
+  }
+#endif
+  // Loop-sliced engine: raw devices without the task-safe opt-in are main-loop citizens
+  // (esp_flash & friends), and this is also the fallback when task dispatch is skipped above.
   this->start_poller();
   return StorageError::OK;
 }
