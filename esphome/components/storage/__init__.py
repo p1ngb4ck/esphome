@@ -86,7 +86,10 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional("psram_transfer_buffer_override_limit", default=False): cv.boolean,
         cv.GenerateID(): cv.declare_id(StorageRegistry),
-        cv.Optional(CONF_COPY_CHUNK_SIZE, default=16384): cv.All(
+        # No static default: an absent value means "use the per-platform default"
+        # (see _default_copy_chunk_size() / to_code). An explicit value overrides it and
+        # is still range- and sector-checked here.
+        cv.Optional(CONF_COPY_CHUNK_SIZE): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
         ),
         # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
@@ -203,6 +206,31 @@ def _transfer_buffer_final_validate(config):
 FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
 
 
+# Per-platform default streaming/copy chunk size, chosen from the research in
+# .ai / the buffer-usage plan: past the SD write-saturation knee (~4 kB) on every
+# target, sized up where the chip has the internal RAM headroom to spare.
+#   ESP32 (classic): 16 kB   S3: 32 kB   P4: 32 kB   REST/non-esp32: 16 kB
+# All are multiples of 512 (kept in sync with validate_sector_multiple) and stay in
+# internal RAM under the 32 kB alloc_dma_capable cutoff. An explicit copy_chunk_size
+# always overrides this. The four-way split (ESP32/S3/P4/REST) matches the DMA-capability
+# grouping: S3 and P4 have PSRAM-DMA and more internal RAM, ESP32/REST do not.
+_PLATFORM_CHUNK_DEFAULTS = {
+    "ESP32": 16384,
+    "ESP32S3": 32768,
+    "ESP32P4": 32768,
+}
+_REST_CHUNK_DEFAULT = 16384
+
+
+def _default_copy_chunk_size() -> int:
+    """Resolve the platform default at codegen time (falls back to REST off-esp32)."""
+    if not CORE.is_esp32:
+        return _REST_CHUNK_DEFAULT
+    from esphome.components.esp32 import get_esp32_variant
+
+    return _PLATFORM_CHUNK_DEFAULTS.get(get_esp32_variant(), _REST_CHUNK_DEFAULT)
+
+
 # storage is a dependency of every driver and would otherwise run BEFORE them (default
 # priority), reading device_count/worker_count as 0 — every driver's own to_code() is where
 # request_storage_device()/request_storage_worker() actually get called. LATE (-100) runs
@@ -230,7 +258,9 @@ async def to_code(config):
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
     cg.add_define("USE_STORAGE")
-    cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", config[CONF_COPY_CHUNK_SIZE])
+    # Absent copy_chunk_size -> per-platform default; explicit value overrides.
+    copy_chunk_size = config.get(CONF_COPY_CHUNK_SIZE) or _default_copy_chunk_size()
+    cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", copy_chunk_size)
     cg.add(var.set_max_blocking_transfer_size(config[CONF_MAX_BLOCKING_TRANSFER_SIZE]))
     cg.add(var.set_move_fallback_copy(config[CONF_MOVE_FALLBACK_COPY]))
 
