@@ -20,7 +20,6 @@ from esphome.const import (
     CONF_PATH,
     CONF_SIZE,
     CONF_TO,
-    CONF_TYPE,
 )
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv

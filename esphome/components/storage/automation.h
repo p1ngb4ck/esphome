@@ -279,7 +279,8 @@ template<typename... Ts> class RawReadAction : public Action<Ts...> {
     if (this->has_to_file_) {
       // Streams device -> file on the worker (no whole-image RAM buffer); on_complete fires
       // with the error text (empty = success) when it lands.
-      perform_raw_read_to_file_async(this->device_, address, size, this->to_file_.value(x...), &this->complete_trigger_);
+      perform_raw_read_to_file_async(this->device_, address, size, this->to_file_.value(x...),
+                                     &this->complete_trigger_);
       return;
     }
     // Read-into-variable: this returns the bytes in a std::vector (RAM), so it stays
