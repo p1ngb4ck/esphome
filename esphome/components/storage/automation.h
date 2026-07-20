@@ -112,6 +112,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 //     - file_write / file_append       (writes a std::string from the automation)
 //     - raw_read  into on_value        (returns a std::vector — the bytes land in RAM)
 //     - raw_write from inline data     (a flash/lambda byte array)
+//     - file_delete / recursive delete (removes directory entries — moves no bulk data)
 //   These are intentionally NOT routed through the worker. The payload is a small in-RAM
 //   value, so there is nothing to stream and no large buffer to avoid; a worker job would add
 //   round-trips and a pool slot for no benefit. The blocking is bounded by the payload size,
@@ -123,6 +124,10 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 //   author picks the storage. If a use case genuinely needs a non-blocking small write, the
 //   right move is a dedicated RAM->file worker job, not the heavyweight stream API — but that
 //   job does not exist yet and is out of scope until a real need appears.
+//   file_delete is synchronous for a second reason beyond size: it moves no bulk data (each
+//   step is a directory-entry unlink/rmdir, short even over NFS), AND synchronous is the safer
+//   semantics for a destructive op — the path is provably gone before the next action runs, so
+//   a "delete then recreate at the same path" sequence can't race its own delete.
 // ===========================================================================
 
 // Non-template workers for the actions below — all error logging lives in the .cpp.
