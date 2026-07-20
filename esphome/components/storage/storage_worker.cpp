@@ -510,8 +510,7 @@ void StorageWorker::deliver_completions_() {
       // still intact. Whatever the result: a partially landed tree is still a change.
       // (Streaming requests are not fed: reads change nothing, and the write stream's
       // consumers note their own completion — they know the path, this loop does not.)
-      if (global_storage_registry != nullptr && req.op == RequestOp::RAW_READ_TO_FILE &&
-          req.dst_storage != nullptr) {
+      if (global_storage_registry != nullptr && req.op == RequestOp::RAW_READ_TO_FILE && req.dst_storage != nullptr) {
         // A raw read landed (or failed to land — partially is still a change) a file: the
         // feed learns about its parent directory exactly like any other transfer's.
         global_storage_registry->note_parent_changed(std::string(req.dst_storage->get_mount_path()) + "/" +
