@@ -334,8 +334,13 @@ struct QueueEntry {
 // the next chunk via run_stream_step_() — but share one task_stack_size_/task_priority_, one
 // background task, and one task_queue_ (tagged by QueueEntry::kind) rather than paying for two
 // of each.
-class StorageWorker : public Component {
+class StorageWorker : public PollingComponent {
  public:
+  // update_interval defaults to 5 ms (codegen sets it via set_update_interval); the engine is
+  // driven by PollingComponent's scheduler interval, i.e. a scheduler item serviced every
+  // fired tick (Phase A) — the same mechanism PN532/sensors use — not the gated component
+  // loop(). start_poller()/stop_poller() (below) arm and disarm that interval with work.
+  StorageWorker() : PollingComponent(5) {}
   void set_task_stack_size(uint32_t size) { this->task_stack_size_ = size; }
   void set_task_priority(uint8_t priority) { this->task_priority_ = priority; }
   void set_max_pending(size_t count) { this->max_pending_ = count; }
@@ -343,11 +348,11 @@ class StorageWorker : public Component {
 
   void setup() override;
   // The engine: advances the loop-sliced transfer/stream slots one time-budgeted batch per
-  // call. Driven the native ESPHome way — enable_loop() + a HighFrequencyLoopRequester raised
-  // while work is pending make the component phase run every main-loop iteration with no
-  // end-of-tick sleep (see the request/release logic at loop()'s tail); disable_loop() from
-  // inside loop() stops the calls entirely once idle.
-  void loop() override;
+  // call. Called by PollingComponent's scheduler interval (started with the first pending
+  // work via start_poller() at the submit funnels, stopped again by update() itself once
+  // every slot and stream is FREE). No custom driver: the scheduler runs this on Phase A of
+  // every fired tick, independent of the gated component loop().
+  void update() override;
   // DATA, not AFTER_CONNECTION: the worker has no networking dependency of its own (NFS/SMB
   // storages are accessed through the storage:: interface, not directly), so there's no reason
   // to delay pool/task creation until after Wi-Fi/API come up. StorageRegistry (BUS) is
@@ -451,13 +456,6 @@ class StorageWorker : public Component {
   // only subscribes to the hotplug callback. Idempotent: subsequent calls are a no-op once
   // started_ is set.
   void ensure_started_();
-
-  // Raised while any slot or stream is busy: makes the component phase run every main-loop
-  // iteration (instead of once per loop_interval_) AND suppresses the loop's end-of-tick
-  // sleep, so a transfer advances at full speed. Started on submit, stopped by loop() once
-  // everything is FREE — paired there with enable_loop()/disable_loop(), which additionally
-  // take this component out of the active loop partition when idle.
-  HighFrequencyLoopRequester loop_requester_;
 
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;

@@ -36,6 +36,7 @@ CONF_TASK_STACK_SIZE = "task_stack_size"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_MAX_PENDING = "max_pending"
 CONF_MAX_STREAMS = "max_streams"
+CONF_WORKER_UPDATE_INTERVAL = "worker_update_interval"
 
 # Not yet in esphome/const.py
 CONF_ON_REGISTERED = "on_registered"
@@ -54,7 +55,7 @@ PathStorage = storage_ns.class_("PathStorage", Storage)
 RawStorage = storage_ns.class_("RawStorage", Storage)
 MountableStorage = storage_ns.class_("MountableStorage")
 StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
-StorageWorker = storage_ns.class_("StorageWorker", cg.Component)
+StorageWorker = storage_ns.class_("StorageWorker", cg.PollingComponent)
 
 
 def validate_sector_multiple(value):
@@ -109,6 +110,12 @@ CONFIG_SCHEMA = cv.Schema(
         # streams are typically much longer-lived than a single copy/move (e.g. one HTTP
         # upload in progress), so a node doing one at a time needs very few slots.
         cv.Optional(CONF_MAX_STREAMS, default=2): cv.int_range(min=1, max=8),
+        # How often the async worker's engine runs (PollingComponent update_interval). The
+        # worker is driven by this scheduler interval, not the gated component loop(); a small
+        # value keeps chunked transfers moving at a good rate without busy-spinning the CPU.
+        cv.Optional(
+            CONF_WORKER_UPDATE_INTERVAL, default="5ms"
+        ): cv.positive_time_period_milliseconds,
         # Fired for every storage device, not just file-browser-style consumers — any
         # component that cares about hotplug/availability can listen here instead of
         # each reinventing its own notion of "storage changed". See
@@ -251,6 +258,7 @@ async def to_code(config):
         cg.add(worker_var.set_task_priority(config[CONF_TASK_PRIORITY]))
         cg.add(worker_var.set_max_pending(config[CONF_MAX_PENDING]))
         cg.add(worker_var.set_max_streams(config[CONF_MAX_STREAMS]))
+        cg.add(worker_var.set_update_interval(config[CONF_WORKER_UPDATE_INTERVAL]))
 
         cg.add(cg.RawExpression(f"{storage_ns}::global_storage_worker = {worker_var}"))
 

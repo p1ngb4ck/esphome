@@ -21,6 +21,10 @@ void StorageWorker::setup() {
   if (global_storage_registry != nullptr) {
     global_storage_registry->add_on_unregistered_callback([this](Storage *s) { this->on_storage_unregistered_(s); });
   }
+  // PollingComponent::call_setup() auto-starts the poller before setup(); stop it here so an
+  // idle worker schedules nothing. The first submit funnel (start_poller()) arms it when work
+  // actually arrives, and update() stops it again once everything is FREE.
+  this->stop_poller();
 }
 
 void StorageWorker::ensure_started_() {
@@ -155,11 +159,12 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   if (slot == nullptr)
     return StorageError::NOT_READY;
 
-  // Work is pending from here on: put this component back in the active loop partition and
-  // raise the high-frequency request so the component phase runs every iteration at full
-  // speed (see loop()'s tail). Both are released again by loop() once every slot is free.
-  this->enable_loop();
-  this->loop_requester_.start();
+  // Work is pending from here on: start the poller (idempotent — set_interval replaces any
+  // existing one). The scheduler then services update() every update_interval until update()
+  // stops the poller again once every slot and stream is FREE. This is the single funnel for
+  // transfers submitted through submit_(); submit_raw_() and dispatch_stream_step_() have
+  // their own start_poller() so every new job — whatever its source — arms the engine.
+  this->start_poller();
 
   slot->op = op;
   slot->src_storage = src;
@@ -323,8 +328,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   if (job_out != nullptr)
     *job_out = (slot->generation << 8) | static_cast<uint32_t>(slot - this->pool_.begin());
   // Raw devices are main-loop citizens (esp_flash & friends): always the loop-sliced engine.
-  this->enable_loop();
-  this->loop_requester_.start();
+  this->start_poller();
   return StorageError::OK;
 }
 
@@ -541,11 +545,10 @@ void StorageWorker::deliver_completions_() {
   }
 }
 
-void StorageWorker::loop() {
-  // Nothing to do until the first async transfer is submitted. Cheap early-out every main
-  // loop pass — far simpler and race-free compared to disable_loop()/enable_loop() gymnastics
-  // around lazy start (an enable_loop() issued while the component is still in LOOP state is a
-  // no-op, so a pre-start disable could never be undone — that was the stall).
+void StorageWorker::update() {
+  // Nothing to do until the first async transfer is submitted. The poller is only running
+  // because start_poller() was called at a submit funnel, so this is normally non-empty; the
+  // early-out just covers a stray tick before ensure_started_() has built the pools.
   if (!this->started_)
     return;
 
@@ -605,7 +608,7 @@ void StorageWorker::loop() {
       this->loop_active_index_ = SIZE_MAX;
   }
 
-  // Idle again? Then stop asking for the phase — the next submit_() asks for it anew.
+  // Idle again? Then stop the poller — the next submit funnel re-arms it.
   bool busy = this->loop_active_index_ != SIZE_MAX;
   if (!busy) {
     for (const auto &req : this->pool_) {
@@ -623,17 +626,13 @@ void StorageWorker::loop() {
       }
     }
   }
-  // Drive the engine the native ESPHome way: a raised HighFrequencyLoopRequester makes the
-  // component phase run every main-loop iteration (not once per loop_interval_) and suppresses
-  // the loop's end-of-tick sleep, so consecutive passes — one run_chunk_() each — follow fast.
-  // enable_loop()/disable_loop() additionally take this component out of the active loop
-  // partition when idle. disable_loop() is called ONLY from here (inside loop(), never before
-  // setup) — a pre-setup disable could not be undone by a later enable_loop(); that was the
-  // original stall.
-  if (!busy) {
-    this->loop_requester_.stop();
-    this->disable_loop();
-  }
+  // Nothing left to do: stop the PollingComponent poller so an idle node schedules no worker
+  // ticks at all. A subsequent submit (transfer, raw, or stream) calls start_poller() again.
+  // Note the whole-pool/stream scan above must clear busy first — stopping the poller while a
+  // task-dispatched request is still in flight would drop the tick that delivers its
+  // completion; the scan keeps the poller alive until that slot returns to FREE.
+  if (!busy)
+    this->stop_poller();
 
   // Streams: two jobs, both per-slot and independent of any other slot (no FIFO ordering
   // needed — unlike TransferRequest's loop_active_index_, every stream's step is
@@ -1616,8 +1615,7 @@ void StorageWorker::dispatch_stream_step_(StreamRequest &req, size_t index) {
   // and enable + raise the loop so that pass happens promptly and at full speed (streams
   // share the transfer engine's driver — see loop()'s tail).
   req.pending_step_ = true;
-  this->enable_loop();
-  this->loop_requester_.start();
+  this->start_poller();
 }
 
 StorageError StorageWorker::begin_write(PathStorage *storage, const char *path, StreamHandle *out_handle,
