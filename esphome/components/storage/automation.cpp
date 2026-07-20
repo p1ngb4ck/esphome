@@ -264,11 +264,10 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
 }
 
 #ifdef USE_STORAGE_RAW_ACTIONS
-namespace {
 
 // Every raw action asks the device what it is before touching it — capacity and geometry come
 // from the driver (see RawGeometry), never from an assumption about the medium.
-bool raw_preflight(RawStorage *device, const char *op, uint64_t address, uint64_t size, RawGeometry *geo) {
+static bool raw_preflight(RawStorage *device, const char *op, uint64_t address, uint64_t size, RawGeometry *geo) {
   device->get_raw_geometry(geo);
   if (geo->capacity == 0) {
     ESP_LOGW(TAG, "raw_%s: device reports no capacity", op);
@@ -283,7 +282,7 @@ bool raw_preflight(RawStorage *device, const char *op, uint64_t address, uint64_
 }
 
 // Same guard rail the blocking file helpers use: these actions run on the main loop.
-bool raw_size_allowed(const char *op, uint64_t size) {
+static bool raw_size_allowed(const char *op, uint64_t size) {
   uint64_t limit = global_storage_registry != nullptr ? global_storage_registry->get_max_blocking_transfer_size() : 0;
   if (limit != 0 && size > limit) {
     ESP_LOGW(TAG, "raw_%s: %" PRIu32 " bytes exceeds max_blocking_transfer_size (%" PRIu32 ")", op, (uint32_t) size,
@@ -295,7 +294,7 @@ bool raw_size_allowed(const char *op, uint64_t size) {
 
 // Erases the sector range covering [address, address+len) — expanding to sector bounds, which
 // is what makes this destructive to neighbours and therefore opt-in.
-bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint64_t address, size_t len) {
+static bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint64_t address, size_t len) {
   if (geo.erase_sector == 0) {
     ESP_LOGW(TAG, "raw_write: erase_first requested but this device has no erase");
     return false;
@@ -315,7 +314,7 @@ bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint64_t ad
 }
 
 // Reads the range into an already-sized buffer, honoring the partial-read contract.
-bool raw_read_into(RawStorage *device, uint64_t address, uint8_t *buf, size_t size, size_t *done_out) {
+static bool raw_read_into(RawStorage *device, uint64_t address, uint8_t *buf, size_t size, size_t *done_out) {
   size_t done = 0;
   while (done < size) {
     size_t got = 0;
@@ -331,8 +330,6 @@ bool raw_read_into(RawStorage *device, uint64_t address, uint8_t *buf, size_t si
   *done_out = done;
   return true;
 }
-
-}  // namespace
 
 bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::vector<uint8_t> &out) {
   RawGeometry geo;
@@ -456,22 +453,20 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
 
 // --- async raw helpers: submit to the worker, stream, fire on_complete (error text) ---------
 
-namespace {
 // Shared completion glue for the async raw actions: log on failure, fire the trigger once with
 // the error text (empty = success).
-void raw_fire_(Trigger<std::string> *on_complete, const char *op, StorageError result) {
+static void raw_fire_(Trigger<std::string> *on_complete, const char *op, StorageError result) {
   if (result != StorageError::OK)
     ESP_LOGW(TAG, "raw_%s failed (%s)", op, error_to_string(result));
   if (on_complete != nullptr)
     on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
 }
 // Report a pre-submission failure and fire the trigger once so it always fires exactly once.
-void raw_fail_(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
+static void raw_fail_(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
   ESP_LOGW(TAG, "raw_%s: %s", op, msg.c_str());
   if (on_complete != nullptr)
     on_complete->trigger(msg);
 }
-}  // namespace
 
 void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64_t size, const std::string &path,
                                     Trigger<std::string> *on_complete) {

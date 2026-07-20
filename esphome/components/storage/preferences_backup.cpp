@@ -92,7 +92,6 @@ static std::vector<RuntimeEntry> &runtime_registry() {
 }
 
 #ifdef USE_TEXT
-namespace detail {
 static void register_text_pref_impl(esphome::EntityBase *entity, const char *name, uint32_t min_len, uint32_t max_len,
                                     const char *pattern) {
   // template_text does NOT use make_entity_preference: its key adds trait
@@ -114,7 +113,6 @@ static void register_text_pref_impl(esphome::EntityBase *entity, const char *nam
   }
   runtime_registry().push_back({key, name, EntityKind::STRING, static_cast<uint16_t>(max_len + 1), entity});
 }
-}  // namespace detail
 #endif  // USE_TEXT
 
 // Runtime safety net: codegen registration depends on the Python-side
@@ -204,8 +202,8 @@ static void sweep_app_entities() {
     // impl copies the name into its owned entry
     char buf[OBJECT_ID_MAX_LEN];
     const StringRef oid = e->get_object_id_to(std::span<char, OBJECT_ID_MAX_LEN>(buf));
-    detail::register_text_pref_impl(e, oid.c_str(), e->traits.get_min_length(), e->traits.get_max_length(),
-                                    e->traits.get_pattern_c_str());
+    register_text_pref_impl(e, oid.c_str(), e->traits.get_min_length(), e->traits.get_max_length(),
+                            e->traits.get_pattern_c_str());
   }
 #endif
 }
@@ -1092,7 +1090,6 @@ static PathStorage *resolve_file_target(const char *path, const char **rel) {
 // Layout: header + entries, each entry {key u32, len u16, blob}. The blobs go in exactly as
 // NVS holds them — component-private structs, no decoding, no rendering. The header is what
 // lets import distinguish "an export starts here" from "whatever was here before".
-namespace {
 
 constexpr uint32_t RAW_MAGIC = 0x57525045;  // 'EPRW'
 constexpr uint8_t RAW_VERSION = 1;
@@ -1108,17 +1105,17 @@ struct RawHeader {
 
 static_assert(sizeof(RawHeader) == 16, "raw preferences header must stay 16 bytes");
 
-void append_u16(std::string &out, uint16_t v) {
+static void append_u16(std::string &out, uint16_t v) {
   out.push_back(static_cast<char>(v & 0xFF));
   out.push_back(static_cast<char>(v >> 8));
 }
-void append_u32(std::string &out, uint32_t v) {
+static void append_u32(std::string &out, uint32_t v) {
   for (int i = 0; i < 4; i++)
     out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
 }
 
 // Blocking chunked helpers — the RawStorage contract is "caller chunks and yields".
-bool raw_read_exact(RawStorage *device, uint64_t address, uint8_t *buf, size_t len) {
+static bool raw_read_exact(RawStorage *device, uint64_t address, uint8_t *buf, size_t len) {
   size_t done = 0;
   while (done < len) {
     size_t got = 0;
@@ -1129,7 +1126,7 @@ bool raw_read_exact(RawStorage *device, uint64_t address, uint8_t *buf, size_t l
   return true;
 }
 
-bool raw_write_exact(RawStorage *device, uint64_t address, const uint8_t *buf, size_t len) {
+static bool raw_write_exact(RawStorage *device, uint64_t address, const uint8_t *buf, size_t len) {
   size_t done = 0;
   while (done < len) {
     size_t written = 0;
@@ -1140,8 +1137,6 @@ bool raw_write_exact(RawStorage *device, uint64_t address, const uint8_t *buf, s
   }
   return true;
 }
-
-}  // namespace
 
 bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t window, const PrefSelection *sel,
                                size_t count, bool restrict_to_selection, esphome::EntityBase *const *selected_entities,
