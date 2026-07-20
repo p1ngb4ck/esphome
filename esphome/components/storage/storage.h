@@ -517,6 +517,19 @@ struct RamBufferDeleter {
 };
 using RamBuffer = std::unique_ptr<uint8_t[], RamBufferDeleter>;
 
+// Allocates a DMA-capable streaming buffer with placement chosen for the platform, following
+// the buffer-usage plan. Requests `want` bytes and halves down to a 4 kB floor under memory
+// pressure; on success *actual_size holds the size obtained. Placement:
+//   - no PSRAM-DMA chip (classic ESP32, and anything that is not S3/P4): always internal RAM.
+//   - S3 / P4 (PSRAM can be a DMA target): <= 32 kB stays internal (fastest for small chunks —
+//     PSRAM's bandwidth drops under CPU contention); > 32 kB goes to PSRAM with
+//     MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA (the heap allocator handles cache/DMA alignment), and
+//     falls back to internal if that allocation fails.
+// The returned buffer frees through RamBufferDeleter (free() == heap_caps_free() on ESP32), so
+// it is interchangeable with any other RamBuffer regardless of which heap it came from. Returns
+// a null RamBuffer (get() == nullptr) if even the 4 kB floor cannot be met.
+RamBuffer alloc_dma_capable(size_t want, size_t *actual_size);
+
 // Reads an entire file in one call. Allocates the buffer via RAMAllocator internally (nothrow —
 // returns StorageError::NO_SPACE on allocation failure rather than throwing/aborting, since
 // ESPHome builds with exceptions disabled). Do not call from hot paths or after setup() on the

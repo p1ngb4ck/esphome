@@ -878,24 +878,17 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
     if ((geo.caps & (RAW_ERASE_SECTOR | RAW_ERASE_BLOCK | RAW_ERASE_CHIP)) == 0) {
-      // Pseudo erase: fill one chunk of 0xFF per pass. Same allocator discipline as the
-      // transfer chunk loop — prefer internal RAM, halve on pressure, never a whole-range
-      // buffer. The buffer is written once and reused across passes.
+      // Pseudo erase: fill one chunk of 0xFF per pass. Shares the platform-aware streaming
+      // buffer policy (alloc_dma_capable) — internal RAM under the cutoff, DMA-capable, halving
+      // on pressure. The buffer is written once and reused across passes.
       if (req.chunk_buf.get() == nullptr) {
-        size_t chunk_size = USE_STORAGE_COPY_CHUNK_SIZE;
-        uint8_t *raw = nullptr;
-        while (chunk_size >= 4096) {
-          raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
-          if (raw != nullptr)
-            break;
-          chunk_size /= 2;
-        }
-        if (raw == nullptr) {
+        size_t chunk_size = 0;
+        req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+        if (req.chunk_buf.get() == nullptr) {
           finish_request(req, StorageError::NO_SPACE);
           return;
         }
-        memset(raw, 0xFF, chunk_size);
-        req.chunk_buf = RamBuffer(raw, RamBufferDeleter{chunk_size});
+        memset(req.chunk_buf.get(), 0xFF, chunk_size);
         req.chunk_size = chunk_size;
       }
       size_t step = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, req.raw_erase_end - req.raw_erase_pos));
@@ -1040,21 +1033,14 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
   }
 
   if (req.chunk_buf.get() == nullptr) {
-    // Same allocator discipline as the file-to-file chunk loop: prefer internal RAM, halve
-    // on pressure down to 4 KiB before giving up.
-    size_t chunk_size = USE_STORAGE_COPY_CHUNK_SIZE;
-    uint8_t *raw = nullptr;
-    while (chunk_size >= 4096) {
-      raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
-      if (raw != nullptr)
-        break;
-      chunk_size /= 2;
-    }
-    if (raw == nullptr) {
+    // Platform-aware streaming buffer (alloc_dma_capable): internal RAM under the cutoff,
+    // DMA-capable, halving on pressure down to 4 KiB before giving up.
+    size_t chunk_size = 0;
+    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+    if (req.chunk_buf.get() == nullptr) {
       finish_request(req, StorageError::NO_SPACE);
       return;
     }
-    req.chunk_buf = RamBuffer(raw, RamBufferDeleter{chunk_size});
     req.chunk_size = chunk_size;
   }
   if (!req.handles_open) {
@@ -1472,19 +1458,12 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
       }
     }
 
-    size_t chunk_size = STORAGE_COPY_CHUNK_SIZE;
-    uint8_t *raw = nullptr;
-    while (chunk_size >= 4096) {
-      raw = RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::PREFER_INTERNAL).allocate(chunk_size);
-      if (raw != nullptr)
-        break;
-      chunk_size /= 2;
-    }
-    if (raw == nullptr) {
+    size_t chunk_size = 0;
+    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, &chunk_size);
+    if (req.chunk_buf.get() == nullptr) {
       finish_request(req, StorageError::NO_SPACE);
       return;
     }
-    req.chunk_buf = RamBuffer(raw, RamBufferDeleter{chunk_size});
     req.chunk_size = chunk_size;
 
     if (req.src_is_fs) {
