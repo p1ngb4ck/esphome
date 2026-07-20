@@ -207,6 +207,17 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
 // Erases [address, address+size), or the whole device when `all` is set.
 void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all);
 
+// Async variants used by the actions: submit to the worker (streaming, no whole-image RAM
+// buffer) and fire `on_complete` (error text, empty = success) from the completion callback.
+// Fall back to the blocking helpers only when the worker isn't compiled in. `on_complete` may
+// be nullptr.
+void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64_t size, const std::string &path,
+                                    Trigger<std::string> *on_complete);
+void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, const std::string &path, bool erase_first,
+                                       Trigger<std::string> *on_complete);
+void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size, bool all,
+                             Trigger<std::string> *on_complete);
+
 template<typename... Ts> class RawReadAction : public Action<Ts...> {
  public:
   explicit RawReadAction(RawStorage *device) : device_(device) {}
@@ -217,14 +228,19 @@ template<typename... Ts> class RawReadAction : public Action<Ts...> {
 
   void set_has_to_file(bool has_to_file) { this->has_to_file_ = has_to_file; }
   Trigger<std::vector<uint8_t>> *get_value_trigger() { return &this->value_trigger_; }
+  Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
 
   void play(const Ts &...x) override {
     const uint32_t address = this->address_.value(x...);
     const uint32_t size = this->size_.value(x...);
     if (this->has_to_file_) {
-      perform_raw_read_to_file(this->device_, address, size, this->to_file_.value(x...));
+      // Streams device -> file on the worker (no whole-image RAM buffer); on_complete fires
+      // with the error text (empty = success) when it lands.
+      perform_raw_read_to_file_async(this->device_, address, size, this->to_file_.value(x...), &this->complete_trigger_);
       return;
     }
+    // Read-into-variable: this returns the bytes in a std::vector (RAM), so it stays
+    // synchronous and is meant for small reads. Large content should use to_file instead.
     std::vector<uint8_t> data;
     if (!perform_raw_read(this->device_, address, size, data))
       return;  // already logged; no trigger on a failed read
@@ -235,6 +251,7 @@ template<typename... Ts> class RawReadAction : public Action<Ts...> {
   RawStorage *device_;
   bool has_to_file_{false};
   Trigger<std::vector<uint8_t>> value_trigger_;
+  Trigger<std::string> complete_trigger_;
 };
 
 template<typename... Ts> class RawWriteAction : public Action<Ts...> {
@@ -256,11 +273,16 @@ template<typename... Ts> class RawWriteAction : public Action<Ts...> {
   }
   void set_has_from_file(bool has_from_file) { this->has_from_file_ = has_from_file; }
   void set_erase_first(bool erase_first) { this->erase_first_ = erase_first; }
+  Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
 
   void play(const Ts &...x) override {
     const uint32_t address = this->address_.value(x...);
     if (this->has_from_file_) {
-      perform_raw_write_from_file(this->device_, address, this->from_file_.value(x...), this->erase_first_);
+      // Streams file -> device on the worker (no whole-file RAM buffer — this used to read the
+      // entire file into RAM first, which capped it at the transfer limit and could not do a
+      // 20 MB image). on_complete fires with the error text (empty = success).
+      perform_raw_write_from_file_async(this->device_, address, this->from_file_.value(x...), this->erase_first_,
+                                        &this->complete_trigger_);
       return;
     }
     if (this->len_ >= 0) {
@@ -280,6 +302,7 @@ template<typename... Ts> class RawWriteAction : public Action<Ts...> {
   int len_{-1};
   bool has_from_file_{false};
   bool erase_first_{false};
+  Trigger<std::string> complete_trigger_;
 };
 
 template<typename... Ts> class RawEraseAction : public Action<Ts...> {
@@ -290,14 +313,19 @@ template<typename... Ts> class RawEraseAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(uint32_t, size)
 
   void set_all(bool all) { this->all_ = all; }
+  Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
 
   void play(const Ts &...x) override {
-    perform_raw_erase(this->device_, this->address_.value(x...), this->size_.value(x...), this->all_);
+    // Sliced on the worker (one geometry step per pass) so a chip-scale erase never freezes
+    // the loop; on_complete fires with the error text (empty = success).
+    perform_raw_erase_async(this->device_, this->address_.value(x...), this->size_.value(x...), this->all_,
+                            &this->complete_trigger_);
   }
 
  protected:
   RawStorage *device_;
   bool all_{false};
+  Trigger<std::string> complete_trigger_;
 };
 
 #endif  // USE_STORAGE_RAW_ACTIONS
