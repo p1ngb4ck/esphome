@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
+import re
 
 from esphome import automation, pins
 import esphome.codegen as cg
@@ -13,20 +13,22 @@ from esphome.components.esp32 import (
 )
 from esphome.components.storage import request_storage_device, request_storage_worker
 import esphome.config_validation as cv
-import esphome.final_validate as fv
 from esphome.const import (
     CONF_ADDRESS,
     CONF_CAPACITY,
     CONF_DATA,
+    CONF_I2C_ID,
     CONF_ID,
     CONF_LENGTH,
     CONF_MODE,
     CONF_MODEL,
     CONF_PIN,
+    CONF_SPI_ID,
     CONF_TYPE,
     CONF_VALUE,
 )
 from esphome.core import CORE
+import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = []
@@ -109,6 +111,7 @@ CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
 CONF_MOUNT_ID = "mount_id"
 CONF_STORAGE_NAME = "storage_name"
+CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
 CONF_DEVICE_NODE = "device_node"
 CONF_DEVICE_NODE_NAME = "device_node_name"
 
@@ -202,6 +205,21 @@ def _add_littlefs_sdkconfig():
     add_idf_sdkconfig_option("CONFIG_LITTLEFS_PAGE_SIZE", 256)
 
 
+# Opt-in shared by the bus-attached raw devices (SPI + I2C). The user asserts this device is
+# alone on its bus and the bus is a real hardware bus, making its data-plane I/O safe to run
+# on the async worker task. This is NOT believed blindly: FINAL_VALIDATE enforces the promise
+# (no other device on the same bus; hardware bus on esp32) and errors otherwise — a safety net
+# for the unwary. Only the value lives here; the bus itself is never modified, only inspected.
+# See .ai/architecture/task-safe-raw-devices.md.
+_ASSUME_EXCLUSIVE_BUS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_ASSUME_EXCLUSIVE_BUS, default=False): cv.All(
+            cv.boolean, cv.only_on_esp32
+        ),
+    }
+)
+
+
 # EEPROM Configuration Schema
 EEPROM_SCHEMA = (
     cv.Schema(
@@ -234,6 +252,7 @@ EEPROM_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(i2c.i2c_device_schema(0x50))
+    .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
 
 # FRAM Configuration Schema
@@ -267,6 +286,7 @@ FRAM_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(i2c.i2c_device_schema(0x50))
+    .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
 
 # SPI Flash Configuration Schema
@@ -303,6 +323,7 @@ SPI_FLASH_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(spi.spi_device_schema(cs_pin_required=True))
+    .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
 
 # SPI FRAM Configuration Schema
@@ -336,6 +357,7 @@ SPI_FRAM_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(spi.spi_device_schema(cs_pin_required=True))
+    .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
 
 # SPI MRAM Configuration Schema
@@ -369,6 +391,7 @@ SPI_MRAM_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(spi.spi_device_schema(cs_pin_required=True))
+    .extend(_ASSUME_EXCLUSIVE_BUS_SCHEMA)
 )
 
 # OneWire EEPROM Configuration Schema
@@ -566,10 +589,89 @@ def _validate_device_node(config):
     return config
 
 
+def _count_devices_on_bus(fconf, bus_key, bus_id):
+    """Count how many component configs across the whole config reference the same bus id.
+
+    Walks every domain's component list and looks for the bus-id key (spi_id / i2c_id). The
+    bus is only READ here — never modified. Returns (count, names) where names lists the ids of
+    the other devices for a helpful error.
+    """
+    count = 0
+    names = []
+    root = fconf.get_config_for_path([])
+    for domain_conf in root.values():
+        entries = domain_conf if isinstance(domain_conf, list) else [domain_conf]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ref = entry.get(bus_key)
+            if ref is not None and str(ref) == str(bus_id):
+                count += 1
+                if (other_id := entry.get(CONF_ID)) is not None:
+                    names.append(str(other_id))
+    return count, names
+
+
+def _validate_assume_exclusive_bus(config, fconf):
+    """Enforce the assume_exclusive_bus promise (see the opt-in schema and .ai/).
+
+    The user asserts the device is alone on a real hardware bus. We do not believe it blindly:
+    (A) no other device may reference the same bus, and (B) the bus must be a hardware bus on
+    esp32. Either failing is an error. The bus config is only inspected, never changed.
+    """
+    if not config.get(CONF_ASSUME_EXCLUSIVE_BUS):
+        return
+
+    device_type = config[CONF_TYPE].upper()
+    is_spi = device_type in ["SPI_FLASH", "FLASH", "SPI_FRAM", "SPI_MRAM", "MRAM"]
+    bus_key = CONF_SPI_ID if is_spi else CONF_I2C_ID
+    bus_id = config.get(bus_key)
+    if bus_id is None:
+        # Should not happen for a bus device, but fail loudly rather than silently skip.
+        raise cv.Invalid(
+            f"'{CONF_ASSUME_EXCLUSIVE_BUS}' is only valid on an SPI or I2C device"
+        )
+
+    # --- Check A: this device must be alone on its bus ---
+    count, others = _count_devices_on_bus(fconf, bus_key, bus_id)
+    if count > 1:
+        shared_with = ", ".join(n for n in others if n != str(config.get(CONF_ID))) or (
+            f"{count - 1} other device(s)"
+        )
+        raise cv.Invalid(
+            f"'{CONF_ASSUME_EXCLUSIVE_BUS}: true' requires this device to be the only thing on "
+            f"bus '{bus_id}', but it is shared with: {shared_with}. A background task driving a "
+            f"shared bus would corrupt the other devices' traffic. Give this device its own bus, "
+            f"or remove '{CONF_ASSUME_EXCLUSIVE_BUS}'."
+        )
+
+    # --- Check B: the bus must be a real hardware bus on esp32 ---
+    if not CORE.is_esp32:
+        raise cv.Invalid(
+            f"'{CONF_ASSUME_EXCLUSIVE_BUS}' needs a hardware bus on ESP32 (the async worker "
+            f"task only exists there)."
+        )
+    if is_spi:
+        # A software (bit-banged) SPI bus is driven from the main loop and is not task-safe.
+        # The validated bus config carries 'interface' == 'software' for software SPI, and a
+        # resolved 'interface_index' for a hardware one.
+        bus_path = fconf.get_path_for_id(bus_id)[:-1]
+        bus_conf = fconf.get_config_for_path(bus_path)
+        if bus_conf.get("interface") == "software" or "interface_index" not in bus_conf:
+            raise cv.Invalid(
+                f"'{CONF_ASSUME_EXCLUSIVE_BUS}: true' on '{config.get(CONF_ID)}' needs a "
+                f"hardware SPI bus, but bus '{bus_id}' is software (bit-banged) — that is driven "
+                f"from the main loop and cannot be task-safe. Use a hardware SPI interface."
+            )
+    # I2C on esp32 is always a hardware bus (IDFI2CBus); no software-I2C path exists, so
+    # CORE.is_esp32 is sufficient for the I2C case.
+
+
 def _final_validate(config):
     _validate_fs_split(config)
     _validate_device_node(config)
     _validate_prefill_fits(config)
+    _validate_assume_exclusive_bus(config, fv.full_config.get())
     # Resolved here because it depends on another component's config; stored back for to_code().
     if (node_name := _node_name_of(config)) is not None:
         config[CONF_DEVICE_NODE_NAME] = node_name
@@ -757,6 +859,13 @@ async def to_code(config):
 
     # Raw device always registers itself
     request_storage_device()
+
+    # assume_exclusive_bus: FINAL_VALIDATE already enforced the promise (alone on a hardware
+    # bus on esp32). Tell the driver it may advertise task-safe I/O, and request the worker
+    # with task_safe=True so the background task is actually created for it.
+    if config.get(CONF_ASSUME_EXCLUSIVE_BUS):
+        cg.add(var.set_assume_exclusive_bus(True))
+        request_storage_worker(task_safe=True)
 
     if mode == MODE_BOTH:
         # The split contract: filesystem first, raw rebased above it.
