@@ -30,10 +30,14 @@ class TransferBuffer : public Component {
   uint8_t *try_acquire(size_t need);
   void release();
   size_t capacity() const { return this->buf_ != nullptr ? this->size_ : 0; }
+  // True only when the arena is DMA-capable PSRAM (S3/P4). Consumers that want to DMA out of the
+  // buffer must check this; on other chips the arena is memcpy-staging only.
+  bool is_dma_capable() const { return this->dma_capable_; }
 
  protected:
   size_t size_{0};
   bool override_limit_{false};
+  bool dma_capable_{false};
   uint8_t *buf_{nullptr};
   std::atomic<bool> busy_{false};
 };

@@ -718,43 +718,50 @@ StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, 
   return ctx.err;
 }
 
-// Streaming-buffer allocation with platform-chosen placement. See alloc_dma_capable's
+// Streaming-buffer allocation with placement chosen from the execution context. See the
 // declaration in storage.h for the policy; the mechanics live here.
 //
+// The 20 ms loop-slice budget caps a main-loop chunk at ~16 kB even on the fastest S3 SD path
+// (a slow SPI write does not manage more in 20 ms), so the loop path stays at `want` in internal
+// RAM. The worker task carries no such budget, so on a chip whose PSRAM can be a DMA target
+// (S3/P4) it stages a larger 32 kB chunk in DMA-capable PSRAM — fewer I/O calls, DMA straight
+// out of the arena. Everywhere else the task path is the same as the loop path: `want` internal.
+//
 // Uses heap_caps_malloc directly (not RAMAllocator) because only the cap-based API can request
-// MALLOC_CAP_DMA — RAMAllocator only ever asks for SPIRAM|8BIT or INTERNAL|8BIT, never DMA. The
-// result still frees through RamBufferDeleter: on ESP32 free() routes to the owning heap, so a
-// heap_caps_malloc'd block and a RAMAllocator block are freed identically.
-RamBuffer alloc_dma_capable(size_t want, size_t *actual_size) {
-  size_t size = want;
+// MALLOC_CAP_DMA. The result still frees through RamBufferDeleter: on ESP32 free() routes to the
+// owning heap, so a heap_caps_malloc'd block and a RAMAllocator block are freed identically.
+RamBuffer alloc_dma_capable(size_t want, bool on_task, size_t *actual_size) {
   uint8_t *raw = nullptr;
 #ifdef USE_ESP32
-  // Placement decision is compile-time: only S3/P4 can DMA out of PSRAM, and only above the
-  // 32 kB cutoff does a buffer earn a place there (small chunks are faster in internal RAM).
 #if defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
   constexpr bool psram_dma = true;
 #else
   constexpr bool psram_dma = false;
 #endif
-  constexpr size_t PSRAM_CUTOFF = 32768;
-  while (size >= 4096) {
-    if (psram_dma && size > PSRAM_CUTOFF) {
-      // Large buffer on a PSRAM-DMA chip: DMA-capable external RAM. The allocator resolves the
-      // cache-line / DMA alignment the subsystem needs, so no manual alignment here.
-      raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-      if (raw == nullptr)  // PSRAM tight/fragmented — retry the same size internally before halving
-        raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
-    } else {
-      // Internal, DMA-capable. This is the path on classic ESP32 / REST and for every buffer
-      // at or below the cutoff on S3/P4.
-      raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+  // Task path on a PSRAM-DMA chip: try a 32 kB DMA-capable PSRAM chunk first. On failure fall
+  // through to the internal path below at `want` (never leaves the transfer without a buffer).
+  constexpr size_t TASK_PSRAM_CHUNK = 32768;
+  if (on_task && psram_dma) {
+    raw = static_cast<uint8_t *>(heap_caps_malloc(TASK_PSRAM_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+    if (raw != nullptr) {
+      *actual_size = TASK_PSRAM_CHUNK;
+      return RamBuffer(raw, RamBufferDeleter{TASK_PSRAM_CHUNK});
     }
+  }
+  // Internal, DMA-capable, halving on memory pressure down to a 4 kB floor. This is the loop
+  // path everywhere, the whole story on non-PSRAM-DMA chips, and the fallback when the PSRAM
+  // staging allocation above could not be met.
+  size_t size = want;
+  while (size >= 4096) {
+    raw = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
     if (raw != nullptr)
       break;
     size /= 2;
   }
 #else
   // Non-ESP32: no heap_caps / no external RAM notion — plain malloc, same halving discipline.
+  (void) on_task;
+  size_t size = want;
   while (size >= 4096) {
     raw = static_cast<uint8_t *>(malloc(size));  // NOLINT(cppcoreguidelines-no-malloc)
     if (raw != nullptr)
@@ -768,10 +775,10 @@ RamBuffer alloc_dma_capable(size_t want, size_t *actual_size) {
   return RamBuffer(raw, RamBufferDeleter{size});
 }
 
-// The chunk buffer both blocking copy paths borrow. Thin wrapper over alloc_dma_capable at the
-// configured chunk size — placement (internal vs PSRAM-DMA) is decided there per platform.
+// The chunk buffer the blocking (main-loop) copy paths borrow — never on the worker task, so
+// on_task is false: `want` bytes in internal RAM.
 RamBuffer alloc_copy_chunk(size_t *chunk_size_out) {
-  return alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, chunk_size_out);
+  return alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, /*on_task=*/false, chunk_size_out);
 }
 
 }  // namespace

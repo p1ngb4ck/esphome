@@ -40,8 +40,19 @@ void TransferBuffer::setup() {
     ESP_LOGW(TAG, "size %u exceeds 80%% of PSRAM (%u) — safety limit overridden by config", (unsigned) this->size_,
              (unsigned) ((total / 5) * 4));
   }
-  RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
-  this->buf_ = allocator.allocate(this->size_);
+  // On S3/P4 the arena may be a DMA target (a consumer can DMA straight out of it), so ask for
+  // DMA-capable PSRAM there — the allocator resolves the cache-line/DMA alignment. Everywhere
+  // else PSRAM cannot be a DMA source for SPI/SDMMC, so plain external RAM is all that is useful
+  // (consumers memcpy through it). External-only either way: a multi-MB arena must never land in
+  // internal RAM. Allocation can still fail (fragmentation, other consumers) — then the buffer
+  // stays disabled and every consumer keeps streaming, the documented fallback.
+#if defined(USE_ESP32_VARIANT_ESP32S3) || defined(USE_ESP32_VARIANT_ESP32P4)
+  this->buf_ = static_cast<uint8_t *>(heap_caps_malloc(this->size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+  this->dma_capable_ = this->buf_ != nullptr;
+#else
+  this->buf_ = static_cast<uint8_t *>(heap_caps_malloc(this->size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  this->dma_capable_ = false;
+#endif
   if (this->buf_ == nullptr) {
     ESP_LOGW(TAG, "PSRAM allocation of %u bytes failed — transfer buffer disabled, transfers stream directly",
              (unsigned) this->size_);
@@ -53,6 +64,8 @@ void TransferBuffer::dump_config() {
   ESP_LOGCONFIG(TAG, "Transfer buffer:");
   ESP_LOGCONFIG(TAG, "  Size: %u bytes (%s)", (unsigned) this->size_,
                 this->buf_ != nullptr ? "allocated in PSRAM" : "ALLOCATION FAILED — disabled");
+  if (this->buf_ != nullptr)
+    ESP_LOGCONFIG(TAG, "  DMA-capable: %s", this->dma_capable_ ? "yes (S3/P4)" : "no (memcpy staging)");
 }
 
 uint8_t *TransferBuffer::try_acquire(size_t need) {

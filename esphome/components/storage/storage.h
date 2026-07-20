@@ -85,11 +85,13 @@ struct StorageInfo {
 // All storage drivers must fit filenames within this bound.
 static constexpr size_t STORAGE_NAME_MAX = 255;
 
-// Chunk size for the streaming copy() helper; multiple of 512 so FATFS can do direct
-// whole-sector transfers. Overridable from YAML (storage: copy_chunk_size); when absent the
-// codegen picks a per-platform default (ESP32 16 kB, S3/P4 32 kB, else 16 kB) and sets the
-// USE_STORAGE_COPY_CHUNK_SIZE define. The 16 kB here is only the compile fallback when that
-// define is missing (e.g. clang-tidy, which never sees generated defines).
+// Base streaming/copy chunk size; multiple of 512 so FATFS can do direct whole-sector
+// transfers. Overridable from YAML (storage: copy_chunk_size); when absent the codegen sets a
+// flat 16 kB default (the most a slow SD write clears inside one 20 ms main-loop slice — see
+// alloc_dma_capable). The platform distinction is not here but in that allocator: the worker
+// task on S3/P4 stages a 32 kB DMA-capable PSRAM chunk, every loop-path buffer stays this size
+// internal. The 16 kB below is only the compile fallback when the define is missing (e.g.
+// clang-tidy, which never sees generated defines).
 #ifdef USE_STORAGE_COPY_CHUNK_SIZE
 static constexpr size_t STORAGE_COPY_CHUNK_SIZE = USE_STORAGE_COPY_CHUNK_SIZE;
 #else
@@ -517,18 +519,18 @@ struct RamBufferDeleter {
 };
 using RamBuffer = std::unique_ptr<uint8_t[], RamBufferDeleter>;
 
-// Allocates a DMA-capable streaming buffer with placement chosen for the platform, following
-// the buffer-usage plan. Requests `want` bytes and halves down to a 4 kB floor under memory
-// pressure; on success *actual_size holds the size obtained. Placement:
-//   - no PSRAM-DMA chip (classic ESP32, and anything that is not S3/P4): always internal RAM.
-//   - S3 / P4 (PSRAM can be a DMA target): <= 32 kB stays internal (fastest for small chunks —
-//     PSRAM's bandwidth drops under CPU contention); > 32 kB goes to PSRAM with
-//     MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA (the heap allocator handles cache/DMA alignment), and
-//     falls back to internal if that allocation fails.
-// The returned buffer frees through RamBufferDeleter (free() == heap_caps_free() on ESP32), so
-// it is interchangeable with any other RamBuffer regardless of which heap it came from. Returns
-// a null RamBuffer (get() == nullptr) if even the 4 kB floor cannot be met.
-RamBuffer alloc_dma_capable(size_t want, size_t *actual_size);
+// Allocates a streaming buffer whose size and placement follow the execution context, per the
+// buffer-usage plan's 20 ms-budget analysis:
+//   - loop path (on_task = false), and every non-PSRAM-DMA chip: `want` bytes in internal,
+//     DMA-capable RAM, halving to a 4 kB floor under memory pressure. 16 kB is the safe default
+//     (the most a slow SD write clears inside one 20 ms loop slice).
+//   - worker task (on_task = true) on S3/P4 (PSRAM can be a DMA target): a 32 kB chunk in
+//     MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA (the allocator handles cache/DMA alignment), falling
+//     back to the internal path at `want` if PSRAM is tight. The task has no 20 ms budget, so a
+//     larger chunk cuts I/O calls and DMAs straight out of PSRAM.
+// On success *actual_size holds the size obtained. Frees through RamBufferDeleter regardless of
+// heap (free() == heap_caps_free() on ESP32). Returns a null RamBuffer if even 4 kB cannot be met.
+RamBuffer alloc_dma_capable(size_t want, bool on_task, size_t *actual_size);
 
 // Reads an entire file in one call. Allocates the buffer via RAMAllocator internally (nothrow —
 // returns StorageError::NO_SPACE on allocation failure rather than throwing/aborting, since
