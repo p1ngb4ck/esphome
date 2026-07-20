@@ -259,7 +259,7 @@ void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64
 void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, const std::string &path, bool erase_first,
                                        Trigger<std::string> *on_complete);
 void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size, bool all,
-                             Trigger<std::string> *on_complete);
+                             Trigger<std::string> *on_complete, bool force_sliced = false);
 
 template<typename... Ts> class RawReadAction : public Action<Ts...> {
  public:
@@ -357,18 +357,21 @@ template<typename... Ts> class RawEraseAction : public Action<Ts...> {
   TEMPLATABLE_VALUE(uint32_t, size)
 
   void set_all(bool all) { this->all_ = all; }
+  void set_force_sliced_erase(bool force_sliced) { this->force_sliced_erase_ = force_sliced; }
   Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
 
   void play(const Ts &...x) override {
     // Sliced on the worker (one geometry step per pass) so a chip-scale erase never freezes
-    // the loop; on_complete fires with the error text (empty = success).
+    // the loop; on_complete fires with the error text (empty = success). force_sliced_erase
+    // suppresses the whole-chip fast path even where it would be eligible (see run_raw_chunk_).
     perform_raw_erase_async(this->device_, this->address_.value(x...), this->size_.value(x...), this->all_,
-                            &this->complete_trigger_);
+                            &this->complete_trigger_, this->force_sliced_erase_);
   }
 
  protected:
   RawStorage *device_;
   bool all_{false};
+  bool force_sliced_erase_{false};
   Trigger<std::string> complete_trigger_;
 };
 

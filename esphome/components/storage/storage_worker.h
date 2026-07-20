@@ -206,6 +206,11 @@ struct TransferRequest {
   uint64_t raw_address{0};
   uint64_t raw_erase_pos{0};
   uint64_t raw_erase_end{0};
+  // Opt-out from the whole-chip fast path: when true, a full-span erase that would otherwise
+  // take the single blocking erase(0, capacity) on the task instead walks block by block (the
+  // same path the loop-sliced engine always uses). Default false = chip erase when eligible.
+  // Set by the caller (raw_erase action / raw HTTP api); only consulted in run_raw_chunk_.
+  bool force_sliced_erase{false};
   // Set by the worker task right before a blocking whole-chip erase(0, capacity) and cleared
   // right after. A chip erase busy-waits for its full duration (tens of seconds) without
   // advancing bytes_done, so the stall watchdog (check_stalled_, main loop) would otherwise
@@ -412,7 +417,8 @@ class StorageWorker : public PollingComponent {
   // chunked write(), sliced per pass like everything else. Byte-addressable, so no sector
   // alignment is demanded there; media with a real erase keep the aligned driver erase().
   storage::StorageError async_raw_erase(storage::RawStorage *device, uint64_t address, uint64_t size,
-                                        CompletionCallback &&on_done, TransferJob *job_out = nullptr);
+                                        CompletionCallback &&on_done, TransferJob *job_out = nullptr,
+                                        bool force_sliced = false);
 
   // Snapshot of a transfer's externally observable state, for progress bars / job-status
   // endpoints. Main-loop-only (like all control-plane calls). Returns false when the job
@@ -472,7 +478,8 @@ class StorageWorker : public PollingComponent {
   bool wait_for_network_ready_(TransferRequest &req, storage::StorageError err, const storage::Storage *side);
   storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
-                                    bool overwrite, CompletionCallback &&on_done, TransferJob *job_out);
+                                    bool overwrite, CompletionCallback &&on_done, TransferJob *job_out,
+                                    bool force_sliced = false);
   // on_task carries the engine flag from run_chunk_ (see there): the whole-chip erase fast path
   // is only taken on the worker task.
   void run_raw_chunk_(TransferRequest &req, bool on_task);

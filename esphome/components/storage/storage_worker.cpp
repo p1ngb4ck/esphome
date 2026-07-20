@@ -276,16 +276,16 @@ StorageError StorageWorker::async_raw_write(PathStorage *src, const char *src_pa
 }
 
 StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address, uint64_t size,
-                                            CompletionCallback &&on_done, TransferJob *job_out) {
+                                            CompletionCallback &&on_done, TransferJob *job_out, bool force_sliced) {
   if (device == nullptr || size == 0)
     return StorageError::INVALID_ARGS;
   return this->submit_raw_(RequestOp::RAW_ERASE, device, address, size, nullptr, "", true, false, std::move(on_done),
-                           job_out);
+                           job_out, force_sliced);
 }
 
 StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64_t address, uint64_t size,
                                         PathStorage *file_side, const char *file_path, bool erase_first, bool overwrite,
-                                        CompletionCallback &&on_done, TransferJob *job_out) {
+                                        CompletionCallback &&on_done, TransferJob *job_out, bool force_sliced) {
   this->ensure_started_();
   if (strlen(file_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::INVALID_ARGS;
@@ -312,6 +312,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->raw_address = address;
   slot->raw_erase_pos = 0;
   slot->raw_erase_end = erase_first ? 1 : 0;  // pre-phase converts to a real byte range
+  slot->force_sliced_erase = force_sliced;
   slot->overwrite = overwrite;
   slot->pre_phase_done = false;
   slot->cancel_result = StorageError::NOT_READY;
@@ -969,8 +970,8 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
   if (!to_file && req.raw_erase_pos < req.raw_erase_end) {
     RawGeometry geo{};
     req.raw_device->get_raw_geometry(&geo);
-    const bool whole_device =
-        on_task && req.raw_address == 0 && req.raw_erase_pos == 0 && req.raw_erase_end == geo.capacity;
+    const bool whole_device = on_task && !req.force_sliced_erase && req.raw_address == 0 && req.raw_erase_pos == 0 &&
+                              req.raw_erase_end == geo.capacity;
     if (whole_device) {
       // Single blocking chip erase. Shield it from the stall watchdog while it runs.
       req.blocking_erase_active.store(true);
