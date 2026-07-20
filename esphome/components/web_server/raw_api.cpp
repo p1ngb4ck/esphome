@@ -266,8 +266,9 @@ void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
   } else if (st.state == storage::RequestState::DONE) {
     state = "done";
   }
-  snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64 "}",
-           state, storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
+  snprintf(buf, sizeof(buf),
+           "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64 "}", state,
+           storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
   request->send(200, "application/json", buf);
 }
 
@@ -439,18 +440,17 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
         std::string from = from_path->value().c_str();
         bool erase_first = request->hasParam("erase");
-        this->submit_and_answer_(
-            request,
-            [device, address, from, erase_first](storage::TransferJob *job, storage::CompletionCallback &&done) {
-              const char *rel = nullptr;
-              storage::PathStorage *ps = storage::global_storage_registry != nullptr
-                                             ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
-                                             : nullptr;
-              if (ps == nullptr)
-                return storage::StorageError::NOT_FOUND;
-              return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first,
-                                                                     std::move(done), job);
-            });
+        this->submit_and_answer_(request, [device, address, from, erase_first](storage::TransferJob *job,
+                                                                               storage::CompletionCallback &&done) {
+          const char *rel = nullptr;
+          storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                         ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
+                                         : nullptr;
+          if (ps == nullptr)
+            return storage::StorageError::NOT_FOUND;
+          return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, std::move(done),
+                                                                 job);
+        });
         // One request, one job, one answer — submit_and_answer_() already responded with
         // {job:N}. Falling through here sent a SECOND response from the body-write reporting
         // block below on the same request.
