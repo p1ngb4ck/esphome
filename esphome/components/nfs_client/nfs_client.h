@@ -415,7 +415,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool network_was_connected_{false};
 
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
-  struct sockaddr_in server_addr_ {};
+  struct sockaddr_in server_addr_{};
   bool server_addr_resolved_{false};
 #endif
 
