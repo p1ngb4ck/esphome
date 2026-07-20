@@ -429,6 +429,12 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   //========================================================================
 
   RPCClient rpc_;
+  // Fixed RPC response buffer: must hold the largest single RPC reply, which is a READ (its
+  // NFS maxcount is 32 kB) plus RPC/NFS header overhead — 64 kB covers it with margin. Sized as
+  // one block (not a halving streaming chunk): a short buffer would truncate replies, so this is
+  // deliberately not routed through alloc_dma_capable. Filled by TCP recv(), never DMA, so no
+  // DMA caps are needed — PSRAM placement (below) is only to spare internal RAM.
+  static constexpr size_t RPC_RESPONSE_BUFFER_SIZE = 65536;
   std::unique_ptr<uint8_t[]> rpc_response_buffer_;
 
   //========================================================================
