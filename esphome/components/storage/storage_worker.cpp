@@ -296,11 +296,21 @@ StorageError StorageWorker::async_raw_read(RawStorage *device, uint64_t address,
 
 StorageError StorageWorker::async_raw_write(PathStorage *src, const char *src_path, RawStorage *device,
                                             uint64_t address, bool erase_first, CompletionCallback &&on_done,
-                                            TransferJob *job_out) {
+                                            TransferJob *job_out, uint8_t verify_passes) {
   if (device == nullptr || src == nullptr || src_path == nullptr)
     return StorageError::INVALID_ARGS;
   return this->submit_raw_(RequestOp::RAW_WRITE_FROM_FILE, device, address, 0, src, src_path, erase_first, false,
-                           std::move(on_done), job_out);
+                           std::move(on_done), job_out, false, verify_passes);
+}
+
+StorageError StorageWorker::async_raw_verify_file(PathStorage *src, const char *src_path, RawStorage *device,
+                                                  uint64_t address, CompletionCallback &&on_done, TransferJob *job_out,
+                                                  uint8_t verify_passes) {
+  if (device == nullptr || src == nullptr || src_path == nullptr)
+    return StorageError::INVALID_ARGS;
+  // No erase, never a write — the pre-phase enters the verify phase directly.
+  return this->submit_raw_(RequestOp::RAW_VERIFY_FILE, device, address, 0, src, src_path, false, false,
+                           std::move(on_done), job_out, false, verify_passes == 0 ? 1 : verify_passes);
 }
 
 StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address, uint64_t size,
@@ -313,7 +323,8 @@ StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address
 
 StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64_t address, uint64_t size,
                                         PathStorage *file_side, const char *file_path, bool erase_first, bool overwrite,
-                                        CompletionCallback &&on_done, TransferJob *job_out, bool force_sliced) {
+                                        CompletionCallback &&on_done, TransferJob *job_out, bool force_sliced,
+                                        uint8_t verify_passes) {
   this->ensure_started_();
   if (strlen(file_path) >= STORAGE_WORKER_MAX_PATH)
     return StorageError::INVALID_ARGS;
@@ -330,7 +341,7 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->op = op;
   // The file side rides in the regular storage/path fields so close_handles(), progress and
   // the completion drain treat a raw op exactly like any transfer. The unused side is null.
-  const bool file_is_src = op == RequestOp::RAW_WRITE_FROM_FILE;
+  const bool file_is_src = op == RequestOp::RAW_WRITE_FROM_FILE || op == RequestOp::RAW_VERIFY_FILE;
   slot->src_storage = file_is_src ? file_side : nullptr;
   slot->dst_storage = file_is_src ? nullptr : file_side;
   strncpy(file_is_src ? slot->src_path : slot->dst_path, file_path, STORAGE_WORKER_MAX_PATH - 1);
@@ -341,6 +352,9 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->raw_erase_pos = 0;
   slot->raw_erase_end = erase_first ? 1 : 0;  // pre-phase converts to a real byte range
   slot->force_sliced_erase = force_sliced;
+  slot->verify_passes = verify_passes;
+  slot->verify_pass_done = 0;
+  slot->verifying = false;
   slot->overwrite = overwrite;
   slot->pre_phase_done = false;
   slot->cancel_result = StorageError::NOT_READY;
@@ -828,6 +842,82 @@ static void finish_request(TransferRequest &req, StorageError result) {
   req.state = RequestState::DONE;
 }
 
+// Start (or restart) a read-back pass over the just-written range. Rewinds the source file to
+// the beginning and resets the byte cursor; the chunk loop then re-reads the device and compares.
+// Returns false (after finishing the request) only on a rewind error.
+bool StorageWorker::begin_verify_pass_(TransferRequest &req) {
+  if (req.src_is_fs) {
+    // File-system source: seek the open handle back to the start.
+    StorageError serr = static_cast<FilesystemStorage *>(req.src_storage)->seek(req.src_handle, 0);
+    if (serr != StorageError::OK) {
+      finish_request(req, serr);
+      return false;
+    }
+  }
+  // Network sources are read by absolute offset (read_chunk), so there is no handle to rewind.
+  req.verifying = true;
+  req.offset = 0;
+  return true;
+}
+
+// One verify chunk: read the device span [raw_address+offset, +want) into chunk_buf, then read
+// the same span from the source file in small stack-sized slices and memcmp each — so the whole
+// comparison needs only the one chunk_buf plus a tiny stack buffer, no second large allocation.
+// Returns false when it has finished the request (mismatch, I/O error, completed pass) or is
+// waiting on the network; true to keep looping within the same call is not used (one chunk/call).
+bool StorageWorker::verify_chunk_(TransferRequest &req) {
+  const uint64_t total = req.bytes_total.load();
+  size_t want = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, total - req.offset));
+  size_t got = 0;
+  StorageError err = req.raw_device->read(req.raw_address + req.offset, req.chunk_buf.get(), want, &got);
+  if (err != StorageError::OK) {
+    finish_request(req, err);
+    return false;
+  }
+  if (got == 0) {
+    finish_request(req, StorageError::READ_ERROR);
+    return false;
+  }
+  // Compare against the file in small slices reusing a stack buffer.
+  uint8_t cmp[256];
+  size_t compared = 0;
+  const bool file_is_fs = req.src_is_fs;
+  Storage *file_storage = req.src_storage;
+  while (compared < got) {
+    size_t slice = std::min<size_t>(sizeof(cmp), got - compared);
+    size_t fgot = 0;
+    if (file_is_fs) {
+      err = static_cast<FilesystemStorage *>(file_storage)->read(req.src_handle, cmp, slice, &fgot);
+    } else {
+      err = static_cast<NetworkStorage *>(file_storage)
+                ->read_chunk(req.src_path, cmp, req.offset + compared, slice, &fgot);
+    }
+    if (this->wait_for_network_ready_(req, err, file_storage))
+      return false;
+    if (err != StorageError::OK) {
+      finish_request(req, err);
+      return false;
+    }
+    if (fgot == 0) {
+      finish_request(req, StorageError::READ_ERROR);  // file shrank underneath the verify
+      return false;
+    }
+    if (memcmp(req.chunk_buf.get() + compared, cmp, fgot) != 0) {
+      finish_request(req, StorageError::VERIFY_MISMATCH);
+      return false;
+    }
+    compared += fgot;
+  }
+  req.offset += got;
+  req.bytes_done.store(req.offset);
+  if (req.offset >= total) {
+    // Pass complete. More passes queued -> rewind and go again; otherwise the write is verified.
+    req.verify_pass_done++;
+    req.verifying = false;  // the outer loop's offset>=total branch decides next pass vs done
+  }
+  return false;  // one chunk per call; the loop re-enters via the engine
+}
+
 // One step of a directory walk. Everything here is control plane — list, mkdir, rmdir, remove —
 // so it costs one call each and never blocks for long; the bytes go through run_chunk_()'s
 // chunk loop exactly as they do for a single file. Returns false once the request is finished.
@@ -982,6 +1072,14 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
         req.raw_erase_pos = req.raw_address;
         req.raw_erase_end = req.raw_address + len;
       }
+      // Standalone verify: no write phase — go straight into read-back-and-compare. At least one
+      // pass; the file handle is opened by the chunk loop below (handles_open path) exactly as
+      // the write path opens it, and begin/verify use the same src handle.
+      if (req.op == RequestOp::RAW_VERIFY_FILE) {
+        if (req.verify_passes == 0)
+          req.verify_passes = 1;
+        req.verifying = true;
+      }
     }
   }
 
@@ -1057,7 +1155,21 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
 
   const uint64_t total = req.bytes_total.load();
   if (req.offset >= total) {
+    // Write (or the current verify pass) reached the end. If verify passes remain, rewind and
+    // read the whole written range back, comparing against the source file; otherwise done.
+    if (!to_file && req.verify_passes > 0 && req.verify_pass_done < req.verify_passes) {
+      if (!this->begin_verify_pass_(req))
+        return;  // begin_verify_pass_ finished the request on error
+      return;
+    }
     finish_request(req, StorageError::OK);
+    return;
+  }
+  if (req.verifying) {
+    // Verify phase: read one device chunk into chunk_buf, then read the same span from the file
+    // in small slices and memcmp — no second full buffer. A mismatch fails the request.
+    if (!this->verify_chunk_(req))
+      return;  // verify_chunk_ finished the request (mismatch or error) or is waiting on network
     return;
   }
   size_t want = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, total - req.offset));
@@ -1339,7 +1451,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
     return;
   }
   if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE ||
-      req.op == RequestOp::RAW_ERASE) {
+      req.op == RequestOp::RAW_ERASE || req.op == RequestOp::RAW_VERIFY_FILE) {
     this->run_raw_chunk_(req, on_task);
     return;
   }

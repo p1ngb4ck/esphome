@@ -619,12 +619,30 @@
           ...(dev.write_needs_erase
             ? [{ key: "erase", label: `Erase first (${fmtSize(dev.erase_sector)} sectors)`, type: "check", value: true }]
             : []),
+          { key: "verify", label: "Verify after write (read back and compare)", type: "check", value: true },
+          { key: "verify_passes", label: "Verify passes", value: 1 },
         ], async (v) => {
           if (!v.from_path) throw new Error("no file given");
           setStatus(`writing ${v.from_path} \u2192 ${dev.node_name}\u2026`);
-          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}`;
+          const passes = v.verify ? Math.max(1, parseInt(v.verify_passes) || 1) : 0;
+          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}&verify=${passes}`;
           const r = await api(`/raw/write?${q}${v.erase ? "&erase=1" : ""}`, { method: "POST" });
           await waitRawJob(r.job, `writing ${v.from_path} \u2192 ${dev.node_name}`);
+        }), () => {}));
+      }
+      if (dev.writable) {
+        acts.push(btn("info", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
+          { key: "address", label: "Address", value: "0x0" },
+          { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
+          { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },
+          { key: "passes", label: "Verify passes", value: 1 },
+        ], async (v) => {
+          if (!v.from_path) throw new Error("no file given");
+          setStatus(`verifying ${dev.node_name} against ${v.from_path}\u2026`);
+          const passes = Math.max(1, parseInt(v.passes) || 1);
+          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}&passes=${passes}`;
+          const r = await api(`/raw/verify?${q}`, { method: "POST" });
+          await waitRawJob(r.job, `verifying ${dev.node_name} against ${v.from_path}`);
         }), () => {}));
       }
       if (dev.erasable) {

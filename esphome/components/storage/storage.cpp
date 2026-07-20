@@ -375,6 +375,8 @@ const char *error_to_string(StorageError error) {
       return "TOO_MANY_OPEN_FILES";
     case StorageError::TRANSFER_TOO_LARGE:
       return "TRANSFER_TOO_LARGE";
+    case StorageError::VERIFY_MISMATCH:
+      return "VERIFY_MISMATCH";
   }
   return "UNKNOWN";
 }

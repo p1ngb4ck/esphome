@@ -35,6 +35,7 @@ enum class StorageError : uint8_t {
   // above) — assigned its own value past the highest errno referenced here.
   WRITE_ERROR = 120,
   TRANSFER_TOO_LARGE = 121,  // no POSIX equivalent: transfer rejected by max_blocking_transfer_size
+  VERIFY_MISMATCH = 122,     // no POSIX equivalent: post-write read-back did not match the source
 };
 
 // fopen()-equivalent semantics — drivers must match these exactly:

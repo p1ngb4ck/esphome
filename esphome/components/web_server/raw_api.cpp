@@ -440,8 +440,13 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
         std::string from = from_path->value().c_str();
         bool erase_first = request->hasParam("erase");
-        this->submit_and_answer_(request, [device, address, from, erase_first](storage::TransferJob *job,
-                                                                               storage::CompletionCallback &&done) {
+        // Verify read-back after write. Default on with 1 pass; ?verify=N sets the pass count,
+        // ?verify=0 turns it off.
+        uint8_t verify_passes = 1;
+        if (auto *vp = request->getParam("verify"))
+          verify_passes = static_cast<uint8_t>(strtoul(vp->value().c_str(), nullptr, 10));
+        this->submit_and_answer_(request, [device, address, from, erase_first, verify_passes](
+                                              storage::TransferJob *job, storage::CompletionCallback &&done) {
           const char *rel = nullptr;
           storage::PathStorage *ps = storage::global_storage_registry != nullptr
                                          ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
@@ -449,7 +454,7 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
           if (ps == nullptr)
             return storage::StorageError::NOT_FOUND;
           return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, std::move(done),
-                                                                 job);
+                                                                 job, verify_passes);
         });
         // One request, one job, one answer — submit_and_answer_() already responded with
         // {job:N}. Falling through here sent a SECOND response from the body-write reporting
@@ -467,6 +472,36 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
         request->send(200, "application/json", buf);
       }
       this->write_ = WriteState{};
+      return;
+    }
+    if (strcmp(tail, "verify") == 0) {
+      // Device-vs-file verify, no write. Requires a from_path (the file to compare against).
+      if (auto *from_path = request->getParam("from_path")) {
+        storage::RawStorage *device = this->find_device_(request);
+        if (device == nullptr) {
+          request->send(404, "application/json", "{\"error\":\"no such device\"}");
+          return;
+        }
+        auto *addr_param = request->getParam("address");
+        uint64_t address = addr_param != nullptr ? strtoull(addr_param->value().c_str(), nullptr, 0) : 0;
+        std::string from = from_path->value().c_str();
+        uint8_t verify_passes = 1;
+        if (auto *vp = request->getParam("passes"))
+          verify_passes = static_cast<uint8_t>(strtoul(vp->value().c_str(), nullptr, 10));
+        this->submit_and_answer_(request, [device, address, from, verify_passes](storage::TransferJob *job,
+                                                                                 storage::CompletionCallback &&done) {
+          const char *rel = nullptr;
+          storage::PathStorage *ps = storage::global_storage_registry != nullptr
+                                         ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
+                                         : nullptr;
+          if (ps == nullptr)
+            return storage::StorageError::NOT_FOUND;
+          return storage::global_storage_worker->async_raw_verify_file(ps, rel, device, address, std::move(done), job,
+                                                                       verify_passes);
+        });
+        return;
+      }
+      request->send(400, "application/json", "{\"error\":\"verify needs from_path\"}");
       return;
     }
   }

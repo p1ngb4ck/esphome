@@ -45,6 +45,11 @@ enum class RequestOp : uint8_t {
   RAW_WRITE_FROM_FILE,
   // Device-only: the sliced erase alone, then done. Same freeze-avoidance rationale.
   RAW_ERASE,
+  // Device-vs-file verify with no write: reads the device range back and compares it against a
+  // file, verify_passes times. The read-back-and-compare phase is the same one a write's own
+  // verify uses, entered directly from the pre-phase (no write step). Uses the file as the src
+  // side like RAW_WRITE_FROM_FILE does.
+  RAW_VERIFY_FILE,
   // Whole directory tree, walked by the engine itself: list, mkdir, copy each file, and for a
   // move remove each source entry as it is drained. Deliberately here and not in the caller:
   // on task-safe media the worker task then owns the entire operation start to finish, exactly
@@ -211,6 +216,15 @@ struct TransferRequest {
   // same path the loop-sliced engine always uses). Default false = chip erase when eligible.
   // Set by the caller (raw_erase action / raw HTTP api); only consulted in run_raw_chunk_.
   bool force_sliced_erase{false};
+  // Verify phase for RAW_WRITE_FROM_FILE. verify_passes is how many times the written range is
+  // read back and compared against the source file after the write completes (0 = no verify).
+  // verify_pass_done counts finished passes; verifying flags that the chunk loop is in the
+  // read-back-and-compare phase rather than the write phase. Uses the same chunk_buf: each chunk
+  // reads the device into the buffer, then reads the file in small slices and memcmp's them, so
+  // no second full buffer is allocated.
+  uint8_t verify_passes{0};
+  uint8_t verify_pass_done{0};
+  bool verifying{false};
   // Set by the worker task right before a blocking whole-chip erase(0, capacity) and cleared
   // right after. A chip erase busy-waits for its full duration (tens of seconds) without
   // advancing bytes_done, so the stall watchdog (check_stalled_, main loop) would otherwise
@@ -415,7 +429,14 @@ class StorageWorker : public PollingComponent {
                                        TransferJob *job_out = nullptr, bool overwrite = false);
   storage::StorageError async_raw_write(storage::PathStorage *src, const char *src_path, storage::RawStorage *device,
                                         uint64_t address, bool erase_first, CompletionCallback &&on_done,
-                                        TransferJob *job_out = nullptr);
+                                        TransferJob *job_out = nullptr, uint8_t verify_passes = 0);
+  // Device-vs-file verify with no write: compares [address, address+filesize) on the device
+  // against the file, verify_passes times (at least 1). Same read-back-and-compare phase a
+  // write's own verify uses.
+  storage::StorageError async_raw_verify_file(storage::PathStorage *src, const char *src_path,
+                                              storage::RawStorage *device, uint64_t address,
+                                              CompletionCallback &&on_done, TransferJob *job_out = nullptr,
+                                              uint8_t verify_passes = 1);
   // Media without any RAW_ERASE_* capability (EEPROM, FRAM — overwrite in place, no erase
   // opcode) get a PSEUDO erase: the worker fills [address, address+size) with 0xFF via
   // chunked write(), sliced per pass like everything else. Byte-addressable, so no sector
@@ -480,10 +501,16 @@ class StorageWorker : public PollingComponent {
   // True if every storage involved may have its data-plane calls run off the main loop.
   bool is_task_safe_(const TransferRequest &req) const;
   bool wait_for_network_ready_(TransferRequest &req, storage::StorageError err, const storage::Storage *side);
+  // Verify phase for RAW_WRITE_FROM_FILE. begin_verify_pass_ rewinds the source file and resets
+  // the cursor to start a read-back pass; verify_chunk_ reads one device chunk and compares it
+  // against the file. Both return false when they have finished the request (error/mismatch) or
+  // are waiting on the network — the caller must return immediately in that case.
+  bool begin_verify_pass_(TransferRequest &req);
+  bool verify_chunk_(TransferRequest &req);
   storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
                                     bool overwrite, CompletionCallback &&on_done, TransferJob *job_out,
-                                    bool force_sliced = false);
+                                    bool force_sliced = false, uint8_t verify_passes = 0);
   // on_task carries the engine flag from run_chunk_ (see there): the whole-chip erase fast path
   // is only taken on the worker task.
   void run_raw_chunk_(TransferRequest &req, bool on_task);
