@@ -28,15 +28,15 @@ namespace esphome::sd_storage {
 static const char *const TAG = "sd_storage";
 
 void SdMmc::setup() {
-  ESP_LOGI(TAG, "Initializing SD/MMC card");
-  ESP_LOGI(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
+  ESP_LOGD(TAG, "Initializing SD/MMC card");
+  ESP_LOGD(TAG, "  CLK pin: %d, CMD pin: %d, DATA0 pin: %d", this->clk_pin_, this->cmd_pin_, this->data0_pin_);
   if (!this->mode_1bit_) {
-    ESP_LOGI(TAG, "  DATA1 pin: %d, DATA2 pin: %d, DATA3 pin: %d", this->data1_pin_, this->data2_pin_,
+    ESP_LOGD(TAG, "  DATA1 pin: %d, DATA2 pin: %d, DATA3 pin: %d", this->data1_pin_, this->data2_pin_,
              this->data3_pin_);
   } else {
-    ESP_LOGI(TAG, "  Operating in 1-bit mode");
+    ESP_LOGD(TAG, "  Operating in 1-bit mode");
   }
-  ESP_LOGI(TAG, "  Mount path: %s, Slot: %d", this->mount_path_, this->slot_);
+  ESP_LOGD(TAG, "  Mount path: %s, Slot: %d", this->mount_path_, this->slot_);
 
   if (this->cs_pin_ != nullptr) {
     this->cs_pin_->setup();
@@ -66,7 +66,7 @@ void SdMmc::setup() {
         ESP_LOGE(TAG, "Failed to mount SD/MMC card");
       }
     } else {
-      ESP_LOGI(TAG, "Waiting for card (CD)");
+      ESP_LOGD(TAG, "Waiting for card (CD)");
     }
   } else if (this->mount() != storage::StorageError::OK) {
     ESP_LOGE(TAG, "Failed to mount SD/MMC card");
@@ -110,7 +110,7 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
 #endif
   err = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
-    ESP_LOGI(TAG, "Initialising SD card slot %d (attempt %d/3)", this->slot_, attempt);
+    ESP_LOGD(TAG, "Initialising SD card slot %d (attempt %d/3)", this->slot_, attempt);
     err = sdmmc_card_init(&host, card);
     if (err == ESP_OK)
       break;
@@ -220,7 +220,7 @@ storage::StorageError SdMmc::mount() {
   ret = this->mount_manual_(host, slot_config);
 #else
   for (int attempt = 1; attempt <= 3; attempt++) {
-    ESP_LOGI(TAG, "Mounting SD card slot %d to '%s' (attempt %d/3)", this->slot_, this->mount_path_, attempt);
+    ESP_LOGD(TAG, "Mounting SD card slot %d to '%s' (attempt %d/3)", this->slot_, this->mount_path_, attempt);
     ret = esp_vfs_fat_sdmmc_mount(this->mount_path_, &host, &slot_config, &mount_config, &this->card_);
     if (ret == ESP_OK)
       break;
@@ -279,11 +279,11 @@ storage::StorageError SdMmc::unmount() {
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->quiesce_storage(this);
 
-  ESP_LOGI(TAG, "Syncing filesystem before unmount");
+  ESP_LOGD(TAG, "Syncing filesystem before unmount");
   // Closes any handles still open from user/lambda code, while the VFS is still mounted to
   // receive the flush/close calls.
   this->flush_open_handles_();
-  ESP_LOGI(TAG, "All data flushed");
+  ESP_LOGD(TAG, "All data flushed");
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
   this->unmount_manual_();

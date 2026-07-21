@@ -63,7 +63,7 @@ void FlashPartition::setup() {
 
   size_t total = 0, used = 0;
   if (esp_littlefs_info(this->partition_label_, &total, &used) == ESP_OK) {
-    ESP_LOGI(TAG, "Partition size: total=%" PRIu32 ", used=%" PRIu32, (uint32_t) total, (uint32_t) used);
+    ESP_LOGD(TAG, "Partition size: total=%" PRIu32 ", used=%" PRIu32, (uint32_t) total, (uint32_t) used);
   }
 
   // Permanent registration: registered-but-unmounted is this device's normal state after a
