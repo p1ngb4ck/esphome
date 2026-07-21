@@ -36,6 +36,13 @@
   const enc = encodeURIComponent;
 
   // Material Design icon paths (24x24), rendered inline so they follow currentColor.
+  const TYPE_ICONS = {
+    sd: "M18,8H16V4H18M15,8H13V4H15M12,8H10V4H12M18,2H10L4,8V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V4A2,2 0 0,0 18,2Z",
+    usb: "M15,7V11H16V13H13V5H15L12,1L9,5H11V13H8V10.93C8.7,10.56 9.2,9.85 9.2,9C9.2,7.78 8.21,6.8 7,6.8C5.78,6.8 4.8,7.78 4.8,9C4.8,9.85 5.3,10.56 6,10.93V13A2,2 0 0,0 8,15H11V18.05C10.29,18.41 9.8,19.15 9.8,20C9.8,21.22 10.78,22.2 12,22.2C13.22,22.2 14.2,21.22 14.2,20C14.2,19.15 13.71,18.41 13,18.05V15H16A2,2 0 0,0 18,13V11H19V7H15Z",
+    net: "M10,2C8.89,2 8,2.89 8,4V7C8,8.11 8.89,9 10,9H11V11H2V13H6V15H5C3.89,15 3,15.89 3,17V20C3,21.11 3.89,22 5,22H9C10.11,22 11,21.11 11,20V17C11,15.89 10.11,15 9,15H8V13H16V15H15C13.89,15 13,15.89 13,17V20C13,21.11 13.89,22 15,22H19C20.11,22 21,21.11 21,20V17C21,15.89 20.11,15 19,15H18V13H22V11H13V9H14C15.11,9 16,8.11 16,7V4C16,2.89 15.11,2 14,2H10Z",
+    mem: "M6,4H18V5H21V7H18V9H21V11H18V13H21V15H18V17H21V19H18V20H6V19H3V17H6V15H3V13H6V11H3V9H6V7H3V5H6V4M8,6V18H16V6H8M10,8H14V16H10V8Z",
+    disk: "M12,3C7.58,3 4,4.79 4,7C4,9.21 7.58,11 12,11C16.42,11 20,9.21 20,7C20,4.79 16.42,3 12,3M4,9V12C4,14.21 7.58,16 12,16C16.42,16 20,14.21 20,12V9C20,11.21 16.42,13 12,13C7.58,13 4,11.21 4,9M4,14V17C4,19.21 7.58,21 12,21C16.42,21 20,19.21 20,17V14C20,16.21 16.42,18 12,18C7.58,18 4,16.21 4,14Z",
+  };
   const ACTION_ICONS = {
     download: "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z",
     upload: "M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z",
@@ -52,13 +59,6 @@
     erase: "M15.14,3C14.63,3 14.12,3.2 13.73,3.59L2.59,14.73C1.81,15.5 1.81,16.77 2.59,17.56L5,20H12.5L20.41,12.09C21.2,11.3 21.2,10.03 20.41,9.24L16.76,5.59L15.14,3M17,18A2,2 0 0,0 19,20A2,2 0 0,0 21,18C21,16.67 19,14.5 19,14.5C19,14.5 17,16.67 17,18Z",
     all: "M9,3V4H4V6H5V19A2,2 0 0,0 7,21H17A2,2 0 0,0 19,19V6H20V4H15V3H9M7,6H17V19H7V6M9,8V17H11V8H9M13,8V17H15V8H13Z",
   };
-  const TYPE_ICONS = {
-    sd: "M18,8H16V4H18M15,8H13V4H15M12,8H10V4H12M18,2H10L4,8V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V4A2,2 0 0,0 18,2Z",
-    usb: "M15,7V11H16V13H13V5H15L12,1L9,5H11V13H8V10.93C8.7,10.56 9.2,9.85 9.2,9C9.2,7.78 8.21,6.8 7,6.8C5.78,6.8 4.8,7.78 4.8,9C4.8,9.85 5.3,10.56 6,10.93V13A2,2 0 0,0 8,15H11V18.05C10.29,18.41 9.8,19.15 9.8,20C9.8,21.22 10.78,22.2 12,22.2C13.22,22.2 14.2,21.22 14.2,20C14.2,19.15 13.71,18.41 13,18.05V15H16A2,2 0 0,0 18,13V11H19V7H15Z",
-    net: "M10,2C8.89,2 8,2.89 8,4V7C8,8.11 8.89,9 10,9H11V11H2V13H6V15H5C3.89,15 3,15.89 3,17V20C3,21.11 3.89,22 5,22H9C10.11,22 11,21.11 11,20V17C11,15.89 10.11,15 9,15H8V13H16V15H15C13.89,15 13,15.89 13,17V20C13,21.11 13.89,22 15,22H19C20.11,22 21,21.11 21,20V17C21,15.89 20.11,15 19,15H18V13H22V11H13V9H14C15.11,9 16,8.11 16,7V4C16,2.89 15.11,2 14,2H10Z",
-    mem: "M6,4H18V5H21V7H18V9H21V11H18V13H21V15H18V17H21V19H18V20H6V19H3V17H6V15H3V13H6V11H3V9H6V7H3V5H6V4M8,6V18H16V6H8M10,8H14V16H10V8Z",
-    disk: "M12,3C7.58,3 4,4.79 4,7C4,9.21 7.58,11 12,11C16.42,11 20,9.21 20,7C20,4.79 16.42,3 12,3M4,9V12C4,14.21 7.58,16 12,16C16.42,16 20,14.21 20,12V9C20,11.21 16.42,13 12,13C7.58,13 4,11.21 4,9M4,14V17C4,19.21 7.58,21 12,21C16.42,21 20,19.21 20,17V14C20,16.21 16.42,18 12,18C7.58,18 4,16.21 4,14Z",
-  };
   const ICONS = { ...TYPE_ICONS, ...ACTION_ICONS };
   const icon = (name) => {
     const NS = "http://www.w3.org/2000/svg";
@@ -72,8 +72,7 @@
     s.append(path);
     return s;
   };
-  // Type/medium icons do not go through act() — they are identification, not actions,
-  // and render as icons in both variants.
+  // This variant renders action buttons as mdi icons: act() is the icon renderer itself.
   const act = icon;
   // Icon per medium: 'kind' from /files/storages when the driver reports one (sd, usb,
   // nfs, flash, littlefs, eeprom, ...), otherwise the coarse type (filesystem/network).
@@ -130,11 +129,18 @@
        dark page and vice versa); the system colors follow whatever the page currently is. */
     #esp-file-browser .efb-modal { background: Canvas; color: CanvasText;
       border: 2px solid rgba(127,127,127,.3); border-radius: 12px; padding: 1em 1.25em;
-      min-width: 18em; max-width: 90%; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
+      min-width: 32em; max-width: 92%; width: 40em; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
     #esp-file-browser .efb-modal-title { font-weight: 500; margin-bottom: .75em; }
     #esp-file-browser .efb-field { display: flex; align-items: center; gap: .75em;
       justify-content: space-between; margin: .4em 0; }
     #esp-file-browser .efb-field-label { font-size: .9em; opacity: .8; }
+    #esp-file-browser .efb-field-note { font-size: .85em; opacity: .7; margin: .4em 0; font-style: italic; }
+    #esp-file-browser .efb-picker { min-height: 16em; max-height: 55vh; overflow-y: auto;
+      margin: .3em 0 .6em; border: 1px solid rgba(127,127,127,.3); border-radius: 4px; padding: 4px 0; }
+    #esp-file-browser .efb-picker-row { font-size: .9em; display: flex; align-items: center; }
+    #esp-file-browser .efb-picker-pick { margin-left: auto; padding: 0 .6em; cursor: pointer;
+      opacity: .7; font-size: .8em; text-decoration: underline; }
+    #esp-file-browser .efb-picker-pick:hover { opacity: 1; }
     #esp-file-browser .efb-field input[type=text] { flex: 1; min-width: 0; max-width: 60%;
       background: transparent; color: inherit; border: none;
       border-bottom: 1px solid rgba(127,127,127,.4); padding: 2px 0; font-family: ui-monospace, monospace; }
@@ -272,33 +278,41 @@
     return r;
   };
 
-  // Copy and move share one flow. The API refuses an existing destination with 409 instead of
-  // replacing it silently, so that is exactly where the user gets asked — and only then does
-  // overwrite=1 go out.
-  const transfer = async (op, from, to) => {
-    const q = `from=${enc(from)}&to=${enc(to)}`;
-    let r = await fetch(`/files/${op}?${q}`, { method: "POST" });
-    if (r.status === 409) {
-      if (!confirm(`${to} already exists \u2014 overwrite it?`)) return;
-      r = await fetch(`/files/${op}?${q}&overwrite=1`, { method: "POST" });
-    }
+  // Copy and move share one flow. overwrite is chosen up front in the modal; when it is off and
+  // the destination exists the API still answers 409, which we surface as an error.
+  const transfer = async (op, from, to, overwrite) => {
+    const q = `from=${enc(from)}&to=${enc(to)}${overwrite ? "&overwrite=1" : ""}`;
+    const r = await fetch(`/files/${op}?${q}`, { method: "POST" });
     if (!r.ok) {
-      let msg = r.status;
+      let msg = r.status === 409 ? `${to} already exists (enable overwrite to replace)` : r.status;
       try { msg = (await r.json()).error || msg; } catch (e) {}
       throw new Error(msg);
     }
     await pollJob((await r.json()).job, op);
   };
 
+  // Target picker shared by copy and move: pick a destination directory (or type it), give the
+  // new name, choose overwrite. dir + name compose the full destination path.
+  const transferModal = (op, path, name, isDir) => {
+    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+    modal(`${op === "copy" ? "Copy" : "Move / rename"} ${isDir ? "directory " : ""}${name}`, [
+      { key: "to_dir", label: "Destination directory", value: parent },
+      { type: "picker", mode: "dir", target: "to_dir", label: "…or pick a destination directory:" },
+      { key: "new_name", label: "Name", value: name },
+      { key: "overwrite", label: "Overwrite if it exists", type: "check", value: false },
+      { type: "note", compute: (v) =>
+        "Destination: " + ((v.to_dir || parent).replace(/\/$/, "")) + "/" + (v.new_name || name) },
+    ], async (v) => {
+      const dir = (v.to_dir || parent).replace(/\/$/, "");
+      const nm = (v.new_name || name).trim();
+      if (!nm) throw new Error("no name given");
+      await transfer(op, path, dir + "/" + nm, v.overwrite);
+    });
+  };
+
   const copyMoveDel = (path, name, isDir, reload) => [
-    btn("copy", "Copy", async () => {
-      const to = prompt(`Copy ${isDir ? "directory " : ""}to (full path)`, path);
-      if (to) await transfer("copy", path, to);
-    }, reload),
-    btn(isDir ? "movedir" : "move", "Move / rename", async () => {
-      const to = prompt(`Move/rename ${isDir ? "directory " : ""}to (full path)`, path);
-      if (to) await transfer("move", path, to);
-    }, reload),
+    btn("copy", "Copy", async () => transferModal("copy", path, name, isDir), reload),
+    btn(isDir ? "movedir" : "move", "Move / rename", async () => transferModal("move", path, name, isDir), reload),
     btn("del", "Delete", () => confirm(isDir ? `Delete ${name} recursively?` : `Delete ${name}?`)
       ? api(`/files/delete?path=${enc(path)}${isDir ? "&recursive=1" : ""}`, { method: "POST" }) : Promise.resolve(),
       reload, "efb-danger"),
@@ -386,15 +400,139 @@
     return wrap;
   };
 
+  // --- embedded file/dir picker ------------------------------------------
+  // Reuses the same /files endpoints as the tree, but renders a minimal navigate-and-select
+  // view (no per-entry actions). mode "file" makes files selectable, mode "dir" makes
+  // directories selectable. onPick(path) is called with the chosen path.
+  const pickerView = (mode, onPick) => {
+    const box = $("div", { className: "efb-picker" });
+    const renderList = async (path, container, depth) => {
+      container.textContent = "";
+      let d;
+      try {
+        d = await api(`/files/list?path=${enc(path)}`);
+      } catch (e) {
+        container.append($("div", { className: "efb-muted efb-name", textContent: "Error: " + e.message }));
+        return;
+      }
+      const entries = d.entries.slice().sort((a, b) => (b.is_dir - a.is_dir) || a.name.localeCompare(b.name));
+      for (const e of entries) {
+        const p = path + "/" + e.name;
+        const row = $("div", { className: "efb-row efb-picker-row" });
+        row.style.paddingLeft = (8 + depth * 18) + "px";
+        if (e.is_dir) {
+          const twist = $("span", { className: "efb-twist", textContent: "\u25B8" });
+          const label = $("span", { className: "efb-name efb-dirname", textContent: e.name });
+          const kids = $("div");
+          kids.style.display = "none";
+          let open = false;
+          const toggle = () => {
+            open = !open;
+            twist.classList.toggle("efb-open", open);
+            kids.style.display = open ? "" : "none";
+            if (open) renderList(p, kids, depth + 1);
+            else kids.textContent = "";
+          };
+          twist.onclick = toggle;
+          label.onclick = mode === "dir" ? () => onPick(p) : toggle;
+          row.append(twist, label);
+          if (mode === "dir")
+            row.append($("span", { className: "efb-picker-pick", textContent: "select" , onclick: () => onPick(p) }));
+          const wrap = $("div");
+          wrap.append(row, kids);
+          container.append(wrap);
+        } else {
+          const label = $("span", { className: "efb-name", textContent: e.name });
+          const size = $("span", { className: "efb-size", textContent: fmtSize(e.size) });
+          row.append($("span", { className: "efb-twist efb-none", textContent: "\u25B8" }), label, size);
+          if (mode === "file") {
+            row.style.cursor = "pointer";
+            row.onclick = () => onPick(p);
+          }
+          container.append(row);
+        }
+      }
+    };
+    (async () => {
+      try {
+        for (const s of await api("/files/storages")) {
+          if (!s.mounted) continue;
+          const rootRow = $("div", { className: "efb-row efb-picker-row" });
+          const twist = $("span", { className: "efb-twist", textContent: "\u25B8" });
+          const label = $("span", { className: "efb-name efb-dirname", textContent: s.mount_path });
+          const kids = $("div");
+          kids.style.display = "none";
+          let open = false;
+          const toggle = () => {
+            open = !open;
+            twist.classList.toggle("efb-open", open);
+            kids.style.display = open ? "" : "none";
+            if (open) renderList(s.mount_path, kids, 1);
+            else kids.textContent = "";
+          };
+          twist.onclick = toggle;
+          label.onclick = mode === "dir" ? () => onPick(s.mount_path) : toggle;
+          rootRow.append(twist, label);
+          if (mode === "dir")
+            rootRow.append($("span", { className: "efb-picker-pick", textContent: "select", onclick: () => onPick(s.mount_path) }));
+          const wrap = $("div");
+          wrap.append(rootRow, kids);
+          box.append(wrap);
+        }
+      } catch (e) {
+        box.append($("div", { className: "efb-muted efb-name", textContent: "Error: " + e.message }));
+      }
+    })();
+    return box;
+  };
+
   // --- modal --------------------------------------------------------------
   // Raw operations need parameters (address, size, a path) that a single icon cannot carry —
   // and each of them is destructive or long-running enough to deserve a deliberate confirm.
+  //
+  // Field types: "text" (default), "check", "note" (read-only line, recomputed on every change
+  // via compute(values)), and "picker" (embedded file/dir chooser that fills a target text
+  // field). A picker field has no value of its own; it writes into fields[key=f.target].
   const modal = (title, fields, onSubmit) => {
     const back = $("div", { className: "efb-modal-back" });
     const box = $("div", { className: "efb-modal" });
     box.append($("div", { className: "efb-modal-title", textContent: title }));
     const inputs = {};
+    const notes = [];  // { el, compute }
+    const snapshot = () => {
+      const v = {};
+      for (const f of fields)
+        if (f.type !== "note" && f.type !== "picker")
+          v[f.key] = f.type === "check" ? inputs[f.key].checked : inputs[f.key].value.trim();
+      return v;
+    };
+    const refresh = () => {
+      const v = snapshot();
+      for (const n of notes) n.el.textContent = n.compute(v);
+    };
     for (const f of fields) {
+      if (f.type === "note") {
+        const line = $("div", { className: "efb-field-note" });
+        notes.push({ el: line, compute: f.compute });
+        box.append(line);
+        continue;
+      }
+      if (f.type === "picker") {
+        // Embedded chooser: clicking an entry writes its path into the target text field.
+        const line = $("div", { className: "efb-field-note", textContent: f.label });
+        box.append(line);
+        box.append(pickerView(f.mode, (path) => {
+          if (inputs[f.target]) {
+            // dir mode fills the directory; a filename field (if any) is appended by the caller's
+            // note/compute. file mode fills the whole path.
+            inputs[f.target].value = f.mode === "dir" && f.filenameKey && inputs[f.filenameKey]
+              ? path + "/" + (inputs[f.filenameKey].value.trim() || "")
+              : path;
+            refresh();
+          }
+        }));
+        continue;
+      }
       const row = $("label", { className: "efb-field" });
       row.append($("span", { className: "efb-field-label", textContent: f.label }));
       const el = f.type === "check"
@@ -402,18 +540,18 @@
         : $("input", { type: "text", value: f.value == null ? "" : String(f.value) });
       if (f.hint) el.placeholder = f.hint;
       inputs[f.key] = el;
+      el.addEventListener(f.type === "check" ? "change" : "input", refresh);
       row.append(el);
       box.append(row);
     }
+    refresh();
     const close = () => back.remove();
     const bar = $("div", { className: "efb-modal-bar" });
     const cancel = $("button", { textContent: "cancel" });
     cancel.onclick = close;
     const ok = $("button", { textContent: "ok" });
     ok.onclick = () => {
-      const values = {};
-      for (const f of fields)
-        values[f.key] = f.type === "check" ? inputs[f.key].checked : inputs[f.key].value.trim();
+      const values = snapshot();
       close();
       Promise.resolve(onSubmit(values)).catch((e) => setStatus("Error: " + e.message));
     };
@@ -475,6 +613,9 @@
       { key: "address", label: "Address", value: whole ? "0x0" : "0x0" },
       { key: "size", label: "Size (bytes)", value: whole ? dev.capacity : 256 },
       { key: "to_path", label: "To file on device", hint: "empty = download" },
+      { key: "filename", label: "Filename (for picker)", hint: "dump.bin" },
+      { type: "picker", mode: "dir", target: "to_path", filenameKey: "filename",
+        label: "…or pick a target directory (uses the filename above):" },
     ], async (v) => {
       const q = `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
       if (!v.to_path) {
@@ -495,15 +636,34 @@
         acts.push(btn("upload", "Write a file to this device", async () => modal(`Write to ${dev.node_name}`, [
           { key: "address", label: "Address", value: "0x0" },
           { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
+          { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },
           ...(dev.write_needs_erase
             ? [{ key: "erase", label: `Erase first (${fmtSize(dev.erase_sector)} sectors)`, type: "check", value: true }]
             : []),
+          { key: "verify", label: "Verify after write (read back and compare)", type: "check", value: true },
+          { key: "verify_passes", label: "Verify passes", value: 1 },
         ], async (v) => {
           if (!v.from_path) throw new Error("no file given");
           setStatus(`writing ${v.from_path} \u2192 ${dev.node_name}\u2026`);
-          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}`;
+          const passes = v.verify ? Math.max(1, parseInt(v.verify_passes) || 1) : 0;
+          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}&verify=${passes}`;
           const r = await api(`/raw/write?${q}${v.erase ? "&erase=1" : ""}`, { method: "POST" });
           await waitRawJob(r.job, `writing ${v.from_path} \u2192 ${dev.node_name}`);
+        }), () => {}));
+      }
+      if (dev.writable) {
+        acts.push(btn("info", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
+          { key: "address", label: "Address", value: "0x0" },
+          { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
+          { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },
+          { key: "passes", label: "Verify passes", value: 1 },
+        ], async (v) => {
+          if (!v.from_path) throw new Error("no file given");
+          setStatus(`verifying ${dev.node_name} against ${v.from_path}\u2026`);
+          const passes = Math.max(1, parseInt(v.passes) || 1);
+          const q = `device=${enc(dev.id)}&address=${enc(v.address)}&from_path=${enc(v.from_path)}&passes=${passes}`;
+          const r = await api(`/raw/verify?${q}`, { method: "POST" });
+          await waitRawJob(r.job, `verifying ${dev.node_name} against ${v.from_path}`);
         }), () => {}));
       }
       if (dev.erasable) {
@@ -513,11 +673,18 @@
           { key: "address", label: dev.pseudo_erase ? "Address" : `Address (multiple of ${fmtHex(dev.erase_sector)})`, value: "0x0" },
           { key: "size", label: dev.pseudo_erase ? "Size (bytes)" : `Size (multiple of ${fmtHex(dev.erase_sector)})`, value: dev.pseudo_erase ? 256 : dev.erase_sector },
           { key: "all", label: "Erase the whole device", type: "check", value: false },
+          // Only meaningful when a whole-chip erase would otherwise be used (can_erase_chip is
+          // already true only for a task-safe chip-erase-capable device). Checking it forces the
+          // slower block-by-block path instead — handy for comparing the two.
+          ...(dev.can_erase_chip
+            ? [{ key: "sliced", label: "Erase sector-by-sector (skip fast chip erase)", type: "check", value: false }]
+            : []),
         ], async (v) => {
           if (v.all && !confirm(`Erase all of ${dev.node_name}? Everything on it is gone.`)) return;
-          const q = v.all
+          const q = (v.all
             ? `device=${enc(dev.id)}&all=1`
-            : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`;
+            : `device=${enc(dev.id)}&address=${enc(v.address)}&size=${enc(v.size)}`)
+            + (v.sliced ? "&sliced=1" : "");
           setStatus(`erasing ${dev.node_name}\u2026`);
           const r = await api(`/raw/erase?${q}`, { method: "POST" });
           await waitRawJob(r.job, `erasing ${dev.node_name}`);
