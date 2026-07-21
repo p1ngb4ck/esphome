@@ -6,7 +6,7 @@ from esphome.const import CONF_AUDIO_DAC, CONF_DATA, CONF_ID, CONF_VOLUME
 from esphome.core import CORE, ID
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 
-AUTO_LOAD = ["audio"]
+AUTO_LOAD = ["audio", "speaker_media_player_base"]
 CODEOWNERS = ["@jesserockz", "@kahrendt"]
 
 IS_PLATFORM_COMPONENT = True
