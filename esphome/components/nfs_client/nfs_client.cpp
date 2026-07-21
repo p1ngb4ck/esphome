@@ -163,81 +163,81 @@ bool NFSFileHandle::decode(XDRBuffer &xdr) {
 bool NFSFileAttr::decode(XDRBuffer &xdr) {
   uint32_t type_val;
   if (!xdr.decode_uint32(type_val)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at type");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at type");
     return false;
   }
   this->type = static_cast<NFSFileType>(type_val);
 
   if (!xdr.decode_uint32(this->mode)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mode");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at mode");
     return false;
   }
   if (!xdr.decode_uint32(this->nlink)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at nlink");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at nlink");
     return false;
   }
   if (!xdr.decode_uint32(this->uid)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at uid");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at uid");
     return false;
   }
   if (!xdr.decode_uint32(this->gid)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at gid");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at gid");
     return false;
   }
   if (!xdr.decode_uint64(this->size)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at size");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at size");
     return false;
   }
   if (!xdr.decode_uint64(this->used)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at used");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at used");
     return false;
   }
   // Skip rdev/specinfo (8 bytes) — only meaningful for device files
   uint64_t rdev;
   if (!xdr.decode_uint64(rdev)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at rdev");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at rdev");
     return false;
   }
   if (!xdr.decode_uint64(this->fsid)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at fsid, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(),
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at fsid, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(),
              (uint32_t) xdr.size());
     return false;
   }
   if (!xdr.decode_uint64(this->fileid)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at fileid");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at fileid");
     return false;
   }
   // nfstime3: seconds and nseconds are both uint32 (RFC 1813 section 2.2)
   uint32_t atime_sec_32, mtime_sec_32, ctime_sec_32;
 
   if (!xdr.decode_uint32(atime_sec_32)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at atime_sec");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at atime_sec");
     return false;
   }
   this->atime_sec = atime_sec_32;
 
   if (!xdr.decode_uint32(this->atime_nsec)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at atime_nsec");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at atime_nsec");
     return false;
   }
   if (!xdr.decode_uint32(mtime_sec_32)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mtime_sec");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at mtime_sec");
     return false;
   }
   this->mtime_sec = mtime_sec_32;
 
   if (!xdr.decode_uint32(this->mtime_nsec)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mtime_nsec");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at mtime_nsec");
     return false;
   }
   if (!xdr.decode_uint32(ctime_sec_32)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at ctime_sec");
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at ctime_sec");
     return false;
   }
   this->ctime_sec = ctime_sec_32;
 
   if (!xdr.decode_uint32(this->ctime_nsec)) {
-    ESP_LOGD(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%" PRIu32 ", size=%" PRIu32,
+    ESP_LOGV(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%" PRIu32 ", size=%" PRIu32,
              (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
@@ -1225,7 +1225,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   length_buf[3] = length & 0xFF;
 
   if (send(this->socket_, length_buf, 4, 0) != 4) {
-    ESP_LOGE(TAG, "Failed to send RPC length");
+    ESP_LOGVV(TAG, "Failed to send RPC length");
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
@@ -1233,7 +1233,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   }
 
   if (send(this->socket_, request.data().data(), request.size(), 0) != static_cast<int>(request.size())) {
-    ESP_LOGE(TAG, "Failed to send RPC data");
+    ESP_LOGVV(TAG, "Failed to send RPC data");
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
@@ -1242,7 +1242,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
 
   uint8_t response_length_buf[4];
   if (recv(this->socket_, response_length_buf, 4, MSG_WAITALL) != 4) {
-    ESP_LOGE(TAG, "Failed to receive RPC response length");
+    ESP_LOGVV(TAG, "Failed to receive RPC response length");
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
@@ -1255,7 +1255,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   response_length &= 0x7FFFFFFF;
 
   if (response_length > RPC_RESPONSE_BUFFER_SIZE) {
-    ESP_LOGE(TAG, "Response too large: %" PRIu32 " bytes", response_length);
+    ESP_LOGVV(TAG, "Response too large: %" PRIu32 " bytes", response_length);
     close(this->socket_);
     this->socket_ = -1;
     this->connected_ = false;
@@ -1267,10 +1267,10 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   while (total_received < response_length) {
     int received = recv(this->socket_, response_data.data() + total_received, response_length - total_received, 0);
     if (received <= 0) {
-      ESP_LOGE(TAG,
-               "Failed to receive RPC response data: received=%d, expected=%" PRIu32 ", total_received=%" PRIu32
-               ", errno=%d",
-               received, response_length, (uint32_t) total_received, errno);
+      ESP_LOGVV(TAG,
+                "Failed to receive RPC response data: received=%d, expected=%" PRIu32 ", total_received=%" PRIu32
+                ", errno=%d",
+                received, response_length, (uint32_t) total_received, errno);
       close(this->socket_);
       this->socket_ = -1;
       this->connected_ = false;
@@ -1296,7 +1296,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
     delay(10);
   }
   if (this->client_->available() < 4) {
-    ESP_LOGE(TAG, "Timeout waiting for response");
+    ESP_LOGVV(TAG, "Timeout waiting for response");
     return false;
   }
 
@@ -1309,7 +1309,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   response_length &= 0x7FFFFFFF;
 
   if (response_length > RPC_RESPONSE_BUFFER_SIZE) {
-    ESP_LOGE(TAG, "Response too large: %" PRIu32 " bytes", response_length);
+    ESP_LOGVV(TAG, "Response too large: %" PRIu32 " bytes", response_length);
     return false;
   }
 
@@ -1325,7 +1325,7 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
       if (bytes_read > 0) {
         total_read += bytes_read;
       } else if (bytes_read < 0) {
-        ESP_LOGE(TAG, "Failed to read response data");
+        ESP_LOGVV(TAG, "Failed to read response data");
         return false;
       }
     } else {
@@ -1334,8 +1334,8 @@ bool NFSClient::send_rpc_(const XDRBuffer &request, XDRBuffer &response) {
   }
 
   if (total_read < response_length) {
-    ESP_LOGE(TAG, "Timeout waiting for full response: got %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_read,
-             response_length);
+    ESP_LOGVV(TAG, "Timeout waiting for full response: got %" PRIu32 " / %" PRIu32 " bytes", (uint32_t) total_read,
+              response_length);
     return false;
   }
 
@@ -1756,7 +1756,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
   // Skip wcc_data (pre_op_attr + post_op_attr)
   bool has_pre_op;
   if (!response.decode_bool(has_pre_op)) {
-    ESP_LOGD(TAG, "WRITE: failed to decode has_pre_op");
+    ESP_LOGV(TAG, "WRITE: failed to decode has_pre_op");
     return false;
   }
   if (has_pre_op) {
@@ -1771,7 +1771,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
 
   bool has_post_op;
   if (!response.decode_bool(has_post_op)) {
-    ESP_LOGD(TAG, "WRITE: failed to decode has_post_op");
+    ESP_LOGV(TAG, "WRITE: failed to decode has_post_op");
     return false;
   }
   if (has_post_op) {
@@ -1781,7 +1781,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
 
   uint32_t bytes_written;
   if (!response.decode_uint32(bytes_written)) {
-    ESP_LOGD(TAG, "WRITE: failed to decode bytes_written");
+    ESP_LOGV(TAG, "WRITE: failed to decode bytes_written");
     return false;
   }
 
@@ -2014,19 +2014,19 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     bool has_dir_attr;
     if (!response.decode_bool(has_dir_attr)) {
-      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_dir_attr");
+      ESP_LOGV(TAG, "READDIRPLUS: Failed to decode has_dir_attr");
       return false;
     }
     if (has_dir_attr) {
       NFSFileAttr dir_attr;
       if (!dir_attr.decode(response)) {
-        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode dir_attributes");
+        ESP_LOGV(TAG, "READDIRPLUS: Failed to decode dir_attributes");
         return false;
       }
     }
 
     if (!response.decode_bytes(cookieverf, 8)) {
-      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode cookieverf");
+      ESP_LOGV(TAG, "READDIRPLUS: Failed to decode cookieverf");
       return false;
     }
 
@@ -2035,18 +2035,18 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       NFSDirEntry entry;
       if (!response.decode_uint64(entry.fileid) || !response.decode_string(entry.name) ||
           !response.decode_uint64(entry.cookie)) {
-        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode entry base");
+        ESP_LOGV(TAG, "READDIRPLUS: Failed to decode entry base");
         return false;
       }
 
       bool has_name_attr;
       if (!response.decode_bool(has_name_attr)) {
-        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_name_attr for %s", entry.name.c_str());
+        ESP_LOGV(TAG, "READDIRPLUS: Failed to decode has_name_attr for %s", entry.name.c_str());
         return false;
       }
       if (has_name_attr) {
         if (!entry.attr.decode(response)) {
-          ESP_LOGD(TAG, "READDIRPLUS: Failed to decode name_attributes for %s", entry.name.c_str());
+          ESP_LOGV(TAG, "READDIRPLUS: Failed to decode name_attributes for %s", entry.name.c_str());
           return false;
         }
         entry.has_attr = true;
@@ -2054,13 +2054,13 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
       bool has_name_handle;
       if (!response.decode_bool(has_name_handle)) {
-        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_name_handle for %s", entry.name.c_str());
+        ESP_LOGV(TAG, "READDIRPLUS: Failed to decode has_name_handle for %s", entry.name.c_str());
         return false;
       }
       if (has_name_handle) {
         std::string fh_data;
         if (!response.decode_string(fh_data)) {
-          ESP_LOGD(TAG, "READDIRPLUS: Failed to skip name_handle for %s", entry.name.c_str());
+          ESP_LOGV(TAG, "READDIRPLUS: Failed to skip name_handle for %s", entry.name.c_str());
           return false;
         }
       }
@@ -2073,7 +2073,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     bool eof;
     if (!response.decode_bool(eof)) {
-      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode EOF");
+      ESP_LOGV(TAG, "READDIRPLUS: Failed to decode EOF");
       return false;
     }
 
