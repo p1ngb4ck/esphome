@@ -163,81 +163,81 @@ bool NFSFileHandle::decode(XDRBuffer &xdr) {
 bool NFSFileAttr::decode(XDRBuffer &xdr) {
   uint32_t type_val;
   if (!xdr.decode_uint32(type_val)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at type");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at type");
     return false;
   }
   this->type = static_cast<NFSFileType>(type_val);
 
   if (!xdr.decode_uint32(this->mode)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mode");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mode");
     return false;
   }
   if (!xdr.decode_uint32(this->nlink)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at nlink");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at nlink");
     return false;
   }
   if (!xdr.decode_uint32(this->uid)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at uid");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at uid");
     return false;
   }
   if (!xdr.decode_uint32(this->gid)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at gid");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at gid");
     return false;
   }
   if (!xdr.decode_uint64(this->size)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at size");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at size");
     return false;
   }
   if (!xdr.decode_uint64(this->used)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at used");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at used");
     return false;
   }
   // Skip rdev/specinfo (8 bytes) — only meaningful for device files
   uint64_t rdev;
   if (!xdr.decode_uint64(rdev)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at rdev");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at rdev");
     return false;
   }
   if (!xdr.decode_uint64(this->fsid)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fsid, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(),
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at fsid, position=%" PRIu32 ", size=%" PRIu32, (uint32_t) xdr.position(),
              (uint32_t) xdr.size());
     return false;
   }
   if (!xdr.decode_uint64(this->fileid)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at fileid");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at fileid");
     return false;
   }
   // nfstime3: seconds and nseconds are both uint32 (RFC 1813 section 2.2)
   uint32_t atime_sec_32, mtime_sec_32, ctime_sec_32;
 
   if (!xdr.decode_uint32(atime_sec_32)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_sec");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at atime_sec");
     return false;
   }
   this->atime_sec = atime_sec_32;
 
   if (!xdr.decode_uint32(this->atime_nsec)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at atime_nsec");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at atime_nsec");
     return false;
   }
   if (!xdr.decode_uint32(mtime_sec_32)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_sec");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mtime_sec");
     return false;
   }
   this->mtime_sec = mtime_sec_32;
 
   if (!xdr.decode_uint32(this->mtime_nsec)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at mtime_nsec");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at mtime_nsec");
     return false;
   }
   if (!xdr.decode_uint32(ctime_sec_32)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_sec");
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at ctime_sec");
     return false;
   }
   this->ctime_sec = ctime_sec_32;
 
   if (!xdr.decode_uint32(this->ctime_nsec)) {
-    ESP_LOGW(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%" PRIu32 ", size=%" PRIu32,
+    ESP_LOGD(TAG, "NFSFileAttr::decode failed at ctime_nsec, position=%" PRIu32 ", size=%" PRIu32,
              (uint32_t) xdr.position(), (uint32_t) xdr.size());
     return false;
   }
@@ -1611,7 +1611,14 @@ bool NFSClient::nfs_lookup_(const NFSFileHandle &dir_fh, const std::string &name
 
   uint32_t nfs_status{0};
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "LOOKUP failed: status=%" PRIu32, nfs_status);
+    // NOENT is the expected, common case: LOOKUP is how a not-yet-existing path is probed
+    // (e.g. the existence check before a write). NFS is stateless, so this is normal traffic,
+    // not a fault — keep it at verbose. Any other status is a real problem and stays a warning.
+    if (nfs_status == NFS3ERR_NOENT) {
+      ESP_LOGV(TAG, "LOOKUP: not found (status=%" PRIu32 ")", nfs_status);
+    } else {
+      ESP_LOGW(TAG, "LOOKUP failed: status=%" PRIu32, nfs_status);
+    }
     return false;
   }
 
@@ -1653,7 +1660,13 @@ bool NFSClient::nfs_getattr_(const NFSFileHandle &fh, NFSFileAttr &attr) {
     return false;
   }
   if (nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "GETATTR failed: NFS status=%" PRIu32, nfs_status);
+    // NOENT is expected here too — GETATTR is used to stat a path that may not exist. Verbose
+    // for the normal not-found case; a warning only for genuine failures.
+    if (nfs_status == NFS3ERR_NOENT) {
+      ESP_LOGV(TAG, "GETATTR: not found (status=%" PRIu32 ")", nfs_status);
+    } else {
+      ESP_LOGW(TAG, "GETATTR failed: NFS status=%" PRIu32, nfs_status);
+    }
     return false;
   }
 
@@ -1737,7 +1750,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
   // Skip wcc_data (pre_op_attr + post_op_attr)
   bool has_pre_op;
   if (!response.decode_bool(has_pre_op)) {
-    ESP_LOGW(TAG, "WRITE: failed to decode has_pre_op");
+    ESP_LOGD(TAG, "WRITE: failed to decode has_pre_op");
     return false;
   }
   if (has_pre_op) {
@@ -1752,7 +1765,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
 
   bool has_post_op;
   if (!response.decode_bool(has_post_op)) {
-    ESP_LOGW(TAG, "WRITE: failed to decode has_post_op");
+    ESP_LOGD(TAG, "WRITE: failed to decode has_post_op");
     return false;
   }
   if (has_post_op) {
@@ -1762,7 +1775,7 @@ bool NFSClient::nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8
 
   uint32_t bytes_written;
   if (!response.decode_uint32(bytes_written)) {
-    ESP_LOGW(TAG, "WRITE: failed to decode bytes_written");
+    ESP_LOGD(TAG, "WRITE: failed to decode bytes_written");
     return false;
   }
 
@@ -1802,7 +1815,13 @@ bool NFSClient::nfs_create_(const NFSFileHandle &dir_fh, const std::string &name
 
   uint32_t nfs_status{0};
   if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "CREATE failed: status=%" PRIu32, nfs_status);
+    // EXIST is the expected case when the caller is checking/handling overwrite (surfaced as
+    // ALREADY_EXISTS upstream), so it is verbose; other statuses are real failures.
+    if (nfs_status == NFS3ERR_EXIST) {
+      ESP_LOGV(TAG, "CREATE: already exists (status=%" PRIu32 ")", nfs_status);
+    } else {
+      ESP_LOGW(TAG, "CREATE failed: status=%" PRIu32, nfs_status);
+    }
     return false;
   }
 
@@ -1981,19 +2000,19 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     bool has_dir_attr;
     if (!response.decode_bool(has_dir_attr)) {
-      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_dir_attr");
+      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_dir_attr");
       return false;
     }
     if (has_dir_attr) {
       NFSFileAttr dir_attr;
       if (!dir_attr.decode(response)) {
-        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode dir_attributes");
+        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode dir_attributes");
         return false;
       }
     }
 
     if (!response.decode_bytes(cookieverf, 8)) {
-      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode cookieverf");
+      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode cookieverf");
       return false;
     }
 
@@ -2002,18 +2021,18 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
       NFSDirEntry entry;
       if (!response.decode_uint64(entry.fileid) || !response.decode_string(entry.name) ||
           !response.decode_uint64(entry.cookie)) {
-        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode entry base");
+        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode entry base");
         return false;
       }
 
       bool has_name_attr;
       if (!response.decode_bool(has_name_attr)) {
-        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_name_attr for %s", entry.name.c_str());
+        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_name_attr for %s", entry.name.c_str());
         return false;
       }
       if (has_name_attr) {
         if (!entry.attr.decode(response)) {
-          ESP_LOGW(TAG, "READDIRPLUS: Failed to decode name_attributes for %s", entry.name.c_str());
+          ESP_LOGD(TAG, "READDIRPLUS: Failed to decode name_attributes for %s", entry.name.c_str());
           return false;
         }
         entry.has_attr = true;
@@ -2021,13 +2040,13 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
       bool has_name_handle;
       if (!response.decode_bool(has_name_handle)) {
-        ESP_LOGW(TAG, "READDIRPLUS: Failed to decode has_name_handle for %s", entry.name.c_str());
+        ESP_LOGD(TAG, "READDIRPLUS: Failed to decode has_name_handle for %s", entry.name.c_str());
         return false;
       }
       if (has_name_handle) {
         std::string fh_data;
         if (!response.decode_string(fh_data)) {
-          ESP_LOGW(TAG, "READDIRPLUS: Failed to skip name_handle for %s", entry.name.c_str());
+          ESP_LOGD(TAG, "READDIRPLUS: Failed to skip name_handle for %s", entry.name.c_str());
           return false;
         }
       }
@@ -2040,7 +2059,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
 
     bool eof;
     if (!response.decode_bool(eof)) {
-      ESP_LOGW(TAG, "READDIRPLUS: Failed to decode EOF");
+      ESP_LOGD(TAG, "READDIRPLUS: Failed to decode EOF");
       return false;
     }
 

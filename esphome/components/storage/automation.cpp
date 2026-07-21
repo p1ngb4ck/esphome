@@ -19,10 +19,10 @@ namespace esphome::storage {
 static const char *const TAG = "storage.automation";
 
 void warn_invalid_bool(const std::string &s) {
-  ESP_LOGW(TAG, "file_read: '%s' is not a valid bool; global unchanged", s.c_str());
+  ESP_LOGV(TAG, "file_read: '%s' is not a valid bool; global unchanged", s.c_str());
 }
 void warn_invalid_number(const std::string &s) {
-  ESP_LOGW(TAG, "file_read: '%s' is not a valid number; global unchanged", s.c_str());
+  ESP_LOGV(TAG, "file_read: '%s' is not a valid number; global unchanged", s.c_str());
 }
 
 std::string extract_trim(const std::string &s) {
@@ -52,7 +52,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
         current++;
         start = end + 1;
       }
-      ESP_LOGW(TAG, "file_read: line %d not found (%d lines)", step.index, current - 1);
+      ESP_LOGV(TAG, "file_read: line %d not found (%d lines)", step.index, current - 1);
       return false;
     }
     case ExtractStepType::SPLIT: {
@@ -69,7 +69,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
         current++;
         start = end + step.arg.size();
       }
-      ESP_LOGW(TAG, "file_read: split element %d not found", step.index);
+      ESP_LOGV(TAG, "file_read: split element %d not found", step.index);
       return false;
     }
     case ExtractStepType::KEY: {
@@ -86,7 +86,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
         }
         start = end + 1;
       }
-      ESP_LOGW(TAG, "file_read: key '%s' not found", step.arg.c_str());
+      ESP_LOGV(TAG, "file_read: key '%s' not found", step.arg.c_str());
       return false;
     }
     case ExtractStepType::TRIM:
@@ -100,7 +100,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
       JsonDocument doc = json::parse_json(reinterpret_cast<const uint8_t *>(buf.data()), buf.size());
       JsonVariantConst node = doc.as<JsonVariantConst>();
       if (node.isNull()) {
-        ESP_LOGW(TAG, "extract json: invalid JSON document");
+        ESP_LOGV(TAG, "extract json: invalid JSON document");
         return false;
       }
       const std::string &ptr = step.arg;
@@ -113,7 +113,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
             char *end = nullptr;
             unsigned long idx = strtoul(token.c_str(), &end, 10);
             if (end == nullptr || *end != '\0') {
-              ESP_LOGW(TAG, "extract json: '%s' is not an array index", token.c_str());
+              ESP_LOGV(TAG, "extract json: '%s' is not an array index", token.c_str());
               return false;
             }
             node = node.as<JsonArrayConst>()[idx];
@@ -121,7 +121,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
             node = node[token.c_str()];
           }
           if (node.isNull()) {
-            ESP_LOGW(TAG, "extract json: path element '%s' not found", token.c_str());
+            ESP_LOGV(TAG, "extract json: path element '%s' not found", token.c_str());
             return false;
           }
         }
@@ -147,18 +147,18 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
       std::regex re(step.arg);
       std::smatch m;
       if (!std::regex_search(buf, m, re)) {
-        ESP_LOGW(TAG, "file_read: regex '%s' did not match", step.arg.c_str());
+        ESP_LOGV(TAG, "file_read: regex '%s' did not match", step.arg.c_str());
         return false;
       }
       int group = step.index;
       if (group >= static_cast<int>(m.size())) {
-        ESP_LOGW(TAG, "file_read: regex group %d does not exist (%zu groups)", group, m.size() - 1);
+        ESP_LOGV(TAG, "file_read: regex group %d does not exist (%zu groups)", group, m.size() - 1);
         return false;
       }
       buf = m[group].str();
       return true;
 #else
-      ESP_LOGW(TAG, "file_read: regex step configured but not compiled in");
+      ESP_LOGE(TAG, "file_read: regex step configured but not compiled in");
       return false;
 #endif
     }
@@ -175,13 +175,13 @@ void perform_file_write(const std::string &path, std::string content, bool appen
     content += '\n';
 
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "file_%s: no storage registry", op);
+    ESP_LOGE(TAG, "file_%s: no storage registry", op);
     return;
   }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
-    ESP_LOGW(TAG, "file_%s: no storage mounted for '%s'", op, path.c_str());
+    ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, path.c_str());
     return;
   }
 
@@ -195,7 +195,7 @@ void perform_file_write(const std::string &path, std::string content, bool appen
     FileHandle *handle = nullptr;
     err = fs->open(rel, handle, OpenMode::APPEND);
     if (err != StorageError::OK) {
-      ESP_LOGW(TAG, "file_append: open '%s' failed (%s)", path.c_str(), error_to_string(err));
+      ESP_LOGE(TAG, "file_append: open '%s' failed (%s)", path.c_str(), error_to_string(err));
       return;
     }
     size_t written = 0;
@@ -219,7 +219,7 @@ void perform_file_write(const std::string &path, std::string content, bool appen
     if (err == StorageError::OK) {
       offset = st.size;
     } else if (err != StorageError::NOT_FOUND) {
-      ESP_LOGW(TAG, "file_append: stat '%s' failed (%s)", path.c_str(), error_to_string(err));
+      ESP_LOGE(TAG, "file_append: stat '%s' failed (%s)", path.c_str(), error_to_string(err));
       return;
     }
     size_t written = 0;
@@ -229,19 +229,19 @@ void perform_file_write(const std::string &path, std::string content, bool appen
   }
 
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "file_%s: writing '%s' failed (%s)", op, path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "file_%s: writing '%s' failed (%s)", op, path.c_str(), error_to_string(err));
   }
 }
 
 bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &steps, std::string &out) {
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "file_read: no storage registry");
+    ESP_LOGE(TAG, "file_read: no storage registry");
     return false;
   }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
-    ESP_LOGW(TAG, "file_read: no storage mounted for '%s'", path.c_str());
+    ESP_LOGE(TAG, "file_read: no storage mounted for '%s'", path.c_str());
     return false;
   }
 
@@ -251,7 +251,7 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
   StorageError err = read_file(ps, rel, buf, &size);
   if (err != StorageError::OK) {
     // Error path leaves any configured global untouched and does not fire on_value.
-    ESP_LOGW(TAG, "file_read: reading '%s' failed (%s)", path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "file_read: reading '%s' failed (%s)", path.c_str(), error_to_string(err));
     return false;
   }
 
@@ -270,11 +270,11 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
 static bool raw_preflight(RawStorage *device, const char *op, uint64_t address, uint64_t size, RawGeometry *geo) {
   device->get_raw_geometry(geo);
   if (geo->capacity == 0) {
-    ESP_LOGW(TAG, "raw_%s: device reports no capacity", op);
+    ESP_LOGE(TAG, "raw_%s: device reports no capacity", op);
     return false;
   }
   if (address >= geo->capacity || size > geo->capacity - address) {
-    ESP_LOGW(TAG, "raw_%s: 0x%08" PRIX32 " + %" PRIu32 " exceeds the device capacity %" PRIu32, op, (uint32_t) address,
+    ESP_LOGE(TAG, "raw_%s: 0x%08" PRIX32 " + %" PRIu32 " exceeds the device capacity %" PRIu32, op, (uint32_t) address,
              (uint32_t) size, (uint32_t) geo->capacity);
     return false;
   }
@@ -285,7 +285,7 @@ static bool raw_preflight(RawStorage *device, const char *op, uint64_t address, 
 static bool raw_size_allowed(const char *op, uint64_t size) {
   uint64_t limit = global_storage_registry != nullptr ? global_storage_registry->get_max_blocking_transfer_size() : 0;
   if (limit != 0 && size > limit) {
-    ESP_LOGW(TAG, "raw_%s: %" PRIu32 " bytes exceeds max_blocking_transfer_size (%" PRIu32 ")", op, (uint32_t) size,
+    ESP_LOGE(TAG, "raw_%s: %" PRIu32 " bytes exceeds max_blocking_transfer_size (%" PRIu32 ")", op, (uint32_t) size,
              (uint32_t) limit);
     return false;
   }
@@ -296,7 +296,7 @@ static bool raw_size_allowed(const char *op, uint64_t size) {
 // is what makes this destructive to neighbours and therefore opt-in.
 static bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint64_t address, size_t len) {
   if (geo.erase_sector == 0) {
-    ESP_LOGW(TAG, "raw_write: erase_first requested but this device has no erase");
+    ESP_LOGE(TAG, "raw_write: erase_first requested but this device has no erase");
     return false;
   }
   uint64_t start = address - (address % geo.erase_sector);
@@ -307,7 +307,7 @@ static bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint
            (uint32_t) (end - start));
   StorageError err = device->erase(start, static_cast<size_t>(end - start));
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "raw_write: erase failed (%s)", error_to_string(err));
+    ESP_LOGE(TAG, "raw_write: erase failed (%s)", error_to_string(err));
     return false;
   }
   return true;
@@ -320,7 +320,7 @@ static bool raw_read_into(RawStorage *device, uint64_t address, uint8_t *buf, si
     size_t got = 0;
     StorageError err = device->read(address + done, buf + done, size - done, &got);
     if (err != StorageError::OK) {
-      ESP_LOGW(TAG, "raw_read: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
+      ESP_LOGE(TAG, "raw_read: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
       return false;
     }
     if (got == 0)
@@ -350,23 +350,25 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
   device->get_raw_geometry(&geo);
   if (size == 0)  // "to the end of the device"
     size = geo.capacity > address ? geo.capacity - address : 0;
+  ESP_LOGI(TAG, "Transfer started: read 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) size,
+           path.c_str());
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "raw_read: no storage registry");
+    ESP_LOGE(TAG, "raw_read: no storage registry");
     return false;
   }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
-    ESP_LOGW(TAG, "raw_read: no storage mounted for '%s'", path.c_str());
+    ESP_LOGE(TAG, "raw_read: no storage mounted for '%s'", path.c_str());
     return false;
   }
 
   auto buf_size = static_cast<size_t>(size);
   uint8_t *raw = RAMAllocator<uint8_t>().allocate(buf_size);
   if (raw == nullptr) {
-    ESP_LOGW(TAG, "raw_read: cannot allocate %" PRIu32 " bytes", (uint32_t) buf_size);
+    ESP_LOGE(TAG, "raw_read: cannot allocate %" PRIu32 " bytes", (uint32_t) buf_size);
     return false;
   }
   RamBuffer buf(raw, RamBufferDeleter{buf_size});
@@ -376,10 +378,11 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
 
   StorageError err = write_file(ps, rel, buf.get(), done);
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "raw_read: writing '%s' failed (%s)", path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "raw_read: writing '%s' failed (%s)", path.c_str(), error_to_string(err));
     return false;
   }
-  ESP_LOGD(TAG, "raw_read: 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) done, path.c_str());
+  ESP_LOGI(TAG, "Transfer done: read 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) done,
+           path.c_str());
   return true;
 }
 
@@ -397,11 +400,11 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
     size_t written = 0;
     StorageError err = device->write(address + done, data + done, len - done, &written);
     if (err != StorageError::OK) {
-      ESP_LOGW(TAG, "raw_write: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
+      ESP_LOGE(TAG, "raw_write: failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + done), error_to_string(err));
       return false;
     }
     if (written == 0) {
-      ESP_LOGW(TAG, "raw_write: device stopped accepting data at 0x%08" PRIX32, (uint32_t) (address + done));
+      ESP_LOGE(TAG, "raw_write: device stopped accepting data at 0x%08" PRIX32, (uint32_t) (address + done));
       return false;
     }
     done += written;
@@ -411,24 +414,29 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
 }
 
 bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first) {
+  ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "raw_write: no storage registry");
+    ESP_LOGE(TAG, "raw_write: no storage registry");
     return false;
   }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
-    ESP_LOGW(TAG, "raw_write: no storage mounted for '%s'", path.c_str());
+    ESP_LOGE(TAG, "raw_write: no storage mounted for '%s'", path.c_str());
     return false;
   }
   RamBuffer buf;
   size_t size = 0;
   StorageError err = read_file(ps, rel, buf, &size);
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "raw_write: reading '%s' failed (%s)", path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "raw_write: reading '%s' failed (%s)", path.c_str(), error_to_string(err));
     return false;
   }
-  return perform_raw_write(device, address, buf.get(), size, erase_first);
+  bool ok = perform_raw_write(device, address, buf.get(), size, erase_first);
+  if (ok)
+    ESP_LOGI(TAG, "Transfer done: write '%s' (%" PRIu32 " bytes) -> 0x%08" PRIX32, path.c_str(), (uint32_t) size,
+             (uint32_t) address);
+  return ok;
 }
 
 void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all) {
@@ -444,7 +452,7 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
   // the neighbouring data with it), and silently rounding would defeat that.
   StorageError err = device->erase(address, static_cast<size_t>(size));
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " failed (%s)", (uint32_t) address, (uint32_t) size,
+    ESP_LOGE(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " failed (%s)", (uint32_t) address, (uint32_t) size,
              error_to_string(err));
     return;
   }
@@ -457,13 +465,15 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
 // the error text (empty = success).
 static void raw_fire_(Trigger<std::string> *on_complete, const char *op, StorageError result) {
   if (result != StorageError::OK)
-    ESP_LOGW(TAG, "raw_%s failed (%s)", op, error_to_string(result));
+    ESP_LOGE(TAG, "raw_%s failed (%s)", op, error_to_string(result));
+  else
+    ESP_LOGI(TAG, "Transfer done: raw %s", op);
   if (on_complete != nullptr)
     on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
 }
 // Report a pre-submission failure and fire the trigger once so it always fires exactly once.
 static void raw_fail_(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
-  ESP_LOGW(TAG, "raw_%s: %s", op, msg.c_str());
+  ESP_LOGE(TAG, "raw_%s: %s", op, msg.c_str());
   if (on_complete != nullptr)
     on_complete->trigger(msg);
 }
@@ -487,6 +497,8 @@ void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64
       raw_fail_(on_complete, "read", std::string("no storage mounted for '") + path + "'");
       return;
     }
+    ESP_LOGI(TAG, "Transfer started: read 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) size,
+             path.c_str());
     StorageError err = global_storage_worker->async_raw_read(
         device, address, size, ps, rel, [on_complete](StorageError r) { raw_fire_(on_complete, "read", r); }, nullptr,
         /*overwrite=*/true);
@@ -514,6 +526,7 @@ void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, con
       raw_fail_(on_complete, "write", std::string("no storage mounted for '") + path + "'");
       return;
     }
+    ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
     StorageError err = global_storage_worker->async_raw_write(
         ps, rel, device, address, erase_first, [on_complete](StorageError r) { raw_fire_(on_complete, "write", r); });
     if (err != StorageError::OK)
@@ -552,8 +565,9 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 
 void perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
   const char *op = is_move ? "move" : "copy";
+  ESP_LOGI(TAG, "Transfer started: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "file_%s: no storage registry", op);
+    ESP_LOGE(TAG, "file_%s: no storage registry", op);
     return;
   }
   const char *src_rel = nullptr;
@@ -561,7 +575,7 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   PathStorage *src = global_storage_registry->resolve_path(from.c_str(), &src_rel);
   PathStorage *dst = global_storage_registry->resolve_path(to.c_str(), &dst_rel);
   if (src == nullptr || dst == nullptr) {
-    ESP_LOGW(TAG, "file_%s: no storage mounted for '%s'", op, src == nullptr ? from.c_str() : to.c_str());
+    ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, src == nullptr ? from.c_str() : to.c_str());
     return;
   }
   // move() internally takes the same-storage rename() fast path and only falls back to
@@ -570,18 +584,21 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   // (recursively, source decides), and honor max_blocking_transfer_size per file.
   StorageError err = is_move ? move(src, src_rel, dst, dst_rel) : copy(src, src_rel, dst, dst_rel);
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "file_%s: '%s' -> '%s' failed (%s)", op, from.c_str(), to.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "file_%s: '%s' -> '%s' failed (%s)", op, from.c_str(), to.c_str(), error_to_string(err));
+    return;
   }
+  ESP_LOGI(TAG, "Transfer done: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
 }
 
 void perform_file_copy_async(const std::string &from, const std::string &to, bool is_move,
                              Trigger<std::string> *on_complete) {
   const char *op = is_move ? "move" : "copy";
+  ESP_LOGI(TAG, "Transfer started: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
 
   // Helper: report a synchronous (pre-submission) failure — log it and fire the trigger with
   // the message so an automation can react. Reused for every early-out below.
   auto fail = [&](const std::string &msg) {
-    ESP_LOGW(TAG, "file_%s: %s", op, msg.c_str());
+    ESP_LOGE(TAG, "file_%s: %s", op, msg.c_str());
     if (on_complete != nullptr)
       on_complete->trigger(msg);
   };
@@ -605,8 +622,10 @@ void perform_file_copy_async(const std::string &from, const std::string &to, boo
     // truncate/replace), so keep that — pass overwrite = true for parity.
     auto on_done = [on_complete, from, to, is_move](StorageError result) {
       if (result != StorageError::OK) {
-        ESP_LOGW(TAG, "file_%s: '%s' -> '%s' failed (%s)", is_move ? "move" : "copy", from.c_str(), to.c_str(),
+        ESP_LOGE(TAG, "file_%s: '%s' -> '%s' failed (%s)", is_move ? "move" : "copy", from.c_str(), to.c_str(),
                  error_to_string(result));
+      } else {
+        ESP_LOGI(TAG, "Transfer done: %s '%s' -> '%s'", is_move ? "move" : "copy", from.c_str(), to.c_str());
       }
       if (on_complete != nullptr)
         on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
@@ -634,19 +653,19 @@ void perform_file_copy_async(const std::string &from, const std::string &to, boo
 
 void perform_file_delete(const std::string &path, bool recursive) {
   if (global_storage_registry == nullptr) {
-    ESP_LOGW(TAG, "file_delete: no storage registry");
+    ESP_LOGE(TAG, "file_delete: no storage registry");
     return;
   }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
-    ESP_LOGW(TAG, "file_delete: no storage mounted for '%s'", path.c_str());
+    ESP_LOGE(TAG, "file_delete: no storage mounted for '%s'", path.c_str());
     return;
   }
   // remove() deletes files and empty directories; remove_recursive() walks subtrees.
   StorageError err = recursive ? remove_recursive(ps, rel) : ps->remove(rel);
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "file_delete: '%s' failed (%s)", path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "file_delete: '%s' failed (%s)", path.c_str(), error_to_string(err));
   }
 }
 
@@ -662,7 +681,7 @@ bool check_file_exists(const std::string &path) {
   // Only NOT_FOUND is a clean "no" — surface anything else (unmounted/faulted medium) so a
   // transient failure is visible instead of silently reading as absence.
   if (!found && err != StorageError::NOT_FOUND && err != StorageError::OK) {
-    ESP_LOGW(TAG, "file_exists: checking '%s' failed (%s)", path.c_str(), error_to_string(err));
+    ESP_LOGE(TAG, "file_exists: checking '%s' failed (%s)", path.c_str(), error_to_string(err));
   }
   return found;
 }
@@ -670,7 +689,7 @@ bool check_file_exists(const std::string &path) {
 void perform_mount(MountableStorage *target, bool mount) {
   StorageError err = mount ? target->mount() : target->unmount();
   if (err != StorageError::OK) {
-    ESP_LOGW(TAG, "%s failed (%s)", mount ? "mount" : "unmount", error_to_string(err));
+    ESP_LOGE(TAG, "%s failed (%s)", mount ? "mount" : "unmount", error_to_string(err));
   }
 }
 

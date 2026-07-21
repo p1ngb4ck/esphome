@@ -69,13 +69,13 @@ void StorageWorker::ensure_started_() {
   for (size_t i = 0; i < this->max_pending_; i++) {
     this->pool_.emplace_back();  // default-construct in place — TransferRequest isn't movable
   }
-  ESP_LOGCONFIG(TAG, "Request pool size: %zu", this->max_pending_);
+  ESP_LOGD(TAG, "Request pool size: %zu", this->max_pending_);
 
   this->stream_pool_.init(this->max_streams_);
   for (size_t i = 0; i < this->max_streams_; i++) {
     this->stream_pool_.emplace_back();
   }
-  ESP_LOGCONFIG(TAG, "Stream pool size: %zu", this->max_streams_);
+  ESP_LOGD(TAG, "Stream pool size: %zu", this->max_streams_);
 
   // The define is derived purely from drivers' task_safe flags in codegen; the platform
   // condition lives here so a task-safe driver on a non-FreeRTOS target degrades to
