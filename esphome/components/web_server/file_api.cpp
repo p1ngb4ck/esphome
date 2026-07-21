@@ -73,36 +73,44 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
   }
 #endif
 
+  // Per-operation access enforced here, at the single dispatch point. Endpoints not listed
+  // (/files/storages, /files/changes, /files/job) stay open: they are the browser's bootstrap
+  // and status channels, not data operations. A disallowed operation is rejected with 403.
   if (is_get) {
     if (url == "/files/storages")
       return this->handle_storages_(request);
     if (url == "/files/list")
-      return this->handle_list_(request);
+      return this->enable_list_ ? this->handle_list_(request) : this->send_forbidden_(request, "list");
     if (url == "/files/stat")
-      return this->handle_stat_(request);
+      return this->enable_list_ ? this->handle_stat_(request) : this->send_forbidden_(request, "list");
     if (url == "/files/download")
-      return this->handle_download_(request);
+      return this->enable_read_ ? this->handle_download_(request) : this->send_forbidden_(request, "read");
     if (url == "/files/job")
       return this->handle_job_(request);
     if (url == "/files/changes")
       return this->handle_changes_(request);
   } else {
     if (url == "/files/mkdir")
-      return this->handle_mkdir_(request);
+      return this->enable_write_ ? this->handle_mkdir_(request) : this->send_forbidden_(request, "write");
     if (url == "/files/delete")
-      return this->handle_delete_(request);
-    if (url == "/files/copy")
-      return this->handle_copy_move_(request, false);
-    if (url == "/files/move")
-      return this->handle_copy_move_(request, true);
+      return this->enable_delete_ ? this->handle_delete_(request) : this->send_forbidden_(request, "delete");
+    if (url == "/files/copy")  // copy reads the source and writes a new file: a read operation here
+      return this->enable_read_ ? this->handle_copy_move_(request, false) : this->send_forbidden_(request, "read");
+    if (url == "/files/move")  // move deletes the source, so it is gated as a delete
+      return this->enable_delete_ ? this->handle_copy_move_(request, true) : this->send_forbidden_(request, "delete");
     if (url == "/files/mount")
-      return this->handle_mount_(request, true);
+      return this->enable_mount_ ? this->handle_mount_(request, true) : this->send_forbidden_(request, "mount");
     if (url == "/files/unmount")
-      return this->handle_mount_(request, false);
+      return this->enable_unmount_ ? this->handle_mount_(request, false) : this->send_forbidden_(request, "unmount");
     if (url == "/files/upload")
-      return this->handle_upload_response_(request);
+      return this->enable_write_ ? this->handle_upload_response_(request) : this->send_forbidden_(request, "write");
   }
   request->send(404);
+}
+
+void WebServerFileApi::send_forbidden_(AsyncWebServerRequest *request, const char *what) {
+  ESP_LOGD(TAG, "Rejecting '%s' request: disabled by config", what);
+  request->send(403, "application/json", "{\"error\":\"operation disabled\"}");
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +244,21 @@ static void append_json_escaped(std::string &out, const char *s) {
 void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
   std::string json;
   bool ok = this->run_on_loop_([this, &json]() {
-    json = "[";
+    // Advertise the per-operation access this build allows, so the browser only renders buttons
+    // that can actually work (a disabled operation is also enforced server-side with 403).
+    json = "{\"access\":{\"list\":";
+    json += this->enable_list_ ? "true" : "false";
+    json += ",\"read\":";
+    json += this->enable_read_ ? "true" : "false";
+    json += ",\"write\":";
+    json += this->enable_write_ ? "true" : "false";
+    json += ",\"delete\":";
+    json += this->enable_delete_ ? "true" : "false";
+    json += ",\"mount\":";
+    json += this->enable_mount_ ? "true" : "false";
+    json += ",\"unmount\":";
+    json += this->enable_unmount_ ? "true" : "false";
+    json += "},\"storages\":[";
     struct Ctx {
       std::string *out;
       storage::PathStorage *scope;
@@ -284,7 +306,7 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           *ctx->out += '}';
         },
         &ctx);
-    json += ']';
+    json += "]}";
   });
   if (!ok) {
     request->send(504);

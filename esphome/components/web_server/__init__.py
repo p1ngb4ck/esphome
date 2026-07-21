@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import gzip
 import logging
-import re
 from pathlib import Path
+import re
 
 import esphome.codegen as cg
 from esphome.components import storage, web_server_base
@@ -45,8 +45,6 @@ from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
-AUTO_LOAD = ["json", "web_server_base"]
-
 AUTH_TYPE_BASIC = "basic"
 AUTH_TYPE_DIGEST = "digest"
 
@@ -58,18 +56,31 @@ CONF_ALLOWED_ORIGINS = "allowed_origins"
 # Not yet in esphome/const.py
 CONF_FILE_API = "file_api"
 
-FILE_API_DEFAULTS = {"max_dir_entries": 64}
+FILE_API_DEFAULTS = {
+    "max_dir_entries": 64,
+    "enable_list": True,
+    "enable_read": True,
+    "enable_write": True,
+    "enable_delete": True,
+    "enable_mount": True,
+    "enable_unmount": True,
+}
 CONF_FILE_BROWSER = "file_browser"
 CONF_ACTIONS_AS_ICONS = "actions_as_icons"
 CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
 CONF_MAX_DIR_ENTRIES = "max_dir_entries"
 CONF_STORAGE_ID = "storage_id"
-CONF_ENABLE_UPLOAD = "enable_upload"
-CONF_ENABLE_DOWNLOAD = "enable_download"
-CONF_ENABLE_DELETION = "enable_deletion"
+# file_api per-operation access options. Each gates a group of endpoints server-side (a
+# disallowed call is rejected with 403) and is advertised to the browser so it never renders a
+# button that could only fail. All default to True (no behaviour change for existing configs).
+CONF_ENABLE_LIST = "enable_list"  # /files/list, /files/stat
+CONF_ENABLE_READ = "enable_read"  # /files/download, /files/copy (copy is a read)
+CONF_ENABLE_WRITE = "enable_write"  # /files/upload, /files/mkdir (shared with raw_api)
+CONF_ENABLE_DELETE = "enable_delete"  # /files/delete, /files/move (move deletes source)
+CONF_ENABLE_MOUNT = "enable_mount"  # /files/mount
+CONF_ENABLE_UNMOUNT = "enable_unmount"  # /files/unmount
 CONF_RAW_API = "raw_api"
 CONF_DEVICE_ID = "device_id"
-CONF_ENABLE_WRITE = "enable_write"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
@@ -350,6 +361,15 @@ CONFIG_SCHEMA = cv.All(
                     cv.Optional(CONF_MAX_DIR_ENTRIES, default=64): cv.int_range(
                         min=1, max=1024
                     ),
+                    # Per-operation access. Each defaults to True (no change for existing
+                    # configs); set to False to have the API reject that group with 403 and
+                    # the browser hide the corresponding buttons.
+                    cv.Optional(CONF_ENABLE_LIST, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_READ, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_WRITE, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_DELETE, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_MOUNT, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_UNMOUNT, default=True): cv.boolean,
                 }
             ),
             # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
@@ -548,6 +568,12 @@ async def to_code(config):
         await cg.register_component(api_var, {})
         cg.add(api_var.set_web_server_base(paren))
         cg.add(api_var.set_max_dir_entries(file_api_config[CONF_MAX_DIR_ENTRIES]))
+        cg.add(api_var.set_enable_list(file_api_config[CONF_ENABLE_LIST]))
+        cg.add(api_var.set_enable_read(file_api_config[CONF_ENABLE_READ]))
+        cg.add(api_var.set_enable_write(file_api_config[CONF_ENABLE_WRITE]))
+        cg.add(api_var.set_enable_delete(file_api_config[CONF_ENABLE_DELETE]))
+        cg.add(api_var.set_enable_mount(file_api_config[CONF_ENABLE_MOUNT]))
+        cg.add(api_var.set_enable_unmount(file_api_config[CONF_ENABLE_UNMOUNT]))
         if storage_id := file_api_config.get(CONF_STORAGE_ID):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
         if file_browser:
@@ -574,17 +600,20 @@ async def to_code(config):
             add_resource_as_progmem("FILE_BROWSER_JS", js)
 
     raw_api_config = config.get(CONF_RAW_API)
-    if raw_api_config is None and file_browser:
-        # A configured device node needs an API to talk to, exactly like file_browser implies
-        # file_api above. Read-only: showing a node is not consent to write or erase.
-        # binary_storage's final validation resolves the node name into its config, so the
-        # presence of that key is the reliable signal here — and needs no import of a component
-        # that may not even be vendored.
-        if any(
+    # A configured device node needs an API to talk to, exactly like file_browser implies
+    # file_api above. Read-only: showing a node is not consent to write or erase.
+    # binary_storage's final validation resolves the node name into its config, so the
+    # presence of that key is the reliable signal here — and needs no import of a component
+    # that may not even be vendored.
+    if (
+        raw_api_config is None
+        and file_browser
+        and any(
             "device_node_name" in device
             for device in CORE.config.get("binary_storage", [])
-        ):
-            raw_api_config = {CONF_ENABLE_WRITE: True}
+        )
+    ):
+        raw_api_config = {CONF_ENABLE_WRITE: True}
     if raw_api_config is not None:
         cg.add_define("USE_WEBSERVER_RAW_API")
         # Same pattern as the file api above: no YAML-visible id, a real Component whose
