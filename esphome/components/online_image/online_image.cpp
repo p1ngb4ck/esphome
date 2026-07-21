@@ -82,6 +82,7 @@ void OnlineImage::update() {
   }
 #endif
 
+#ifdef USE_ONLINE_IMAGE_HTTP
   std::vector<http_request::Header> headers;
 
   // Add caching headers if we have them
@@ -164,6 +165,7 @@ void OnlineImage::update() {
   ESP_LOGI(TAG, "Downloading image (Size: %zu)", total_size);
   this->start_time_ = millis();
   this->enable_loop();
+#endif  // USE_ONLINE_IMAGE_HTTP
 }
 
 void OnlineImage::loop() {
@@ -180,6 +182,7 @@ void OnlineImage::loop() {
   }
 #endif
 
+#ifdef USE_ONLINE_IMAGE_HTTP
   if (!this->downloader_) {
     ESP_LOGE(TAG, "Downloader not instantiated; cannot download");
     this->end_connection_();
@@ -252,6 +255,7 @@ void OnlineImage::loop() {
       ESP_LOGV(TAG, "Decoder waiting for more data");
     }
   }
+#endif  // USE_ONLINE_IMAGE_HTTP
 }
 
 void OnlineImage::end_connection_() {
@@ -272,10 +276,12 @@ void OnlineImage::end_connection_() {
     this->storage_size_ = 0;
   }
 #endif
+#ifdef USE_ONLINE_IMAGE_HTTP
   if (this->downloader_) {
     this->downloader_->end();
     this->downloader_ = nullptr;
   }
+#endif
   this->download_buffer_.reset();
   this->disable_loop();
 }

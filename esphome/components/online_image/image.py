@@ -5,13 +5,30 @@ from esphome.components.const import CONF_REQUEST_HEADERS
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 from esphome.components.image import CONF_TRANSPARENCY, add_metadata
 import esphome.config_validation as cv
-from esphome.const import CONF_BUFFER_SIZE, CONF_ID, CONF_ON_ERROR, CONF_TYPE, CONF_URL
+from esphome.const import (
+    CONF_BUFFER_SIZE,
+    CONF_ID,
+    CONF_ON_ERROR,
+    CONF_PATH,
+    CONF_TYPE,
+    CONF_URL,
+)
 from esphome.core import Lambda
 from esphome.types import ConfigType
 
-AUTO_LOAD = ["runtime_image"]
-DEPENDENCIES = ["http_request"]
 CODEOWNERS = ["@guillempages", "@clydebarrow"]
+
+
+def AUTO_LOAD(config: ConfigType) -> list[str]:
+    """runtime_image is always needed. http_request is only required for a network url: source;
+    a local path: source needs storage instead and pulls in nothing http-related."""
+    load = ["runtime_image"]
+    if config and config.get(CONF_PATH) is not None:
+        load.append("storage")
+    else:
+        load.append("http_request")
+    return load
+
 
 CONF_ON_DOWNLOAD_FINISHED = "on_download_finished"
 CONF_UPDATE = "update"
@@ -31,13 +48,25 @@ ReleaseImageAction = online_image_ns.class_(
 )
 
 
+def _validate_local_path(value):
+    """A local storage source is a POSIX path (/sdcard/img.png); file:// is accepted as an
+    optional backward-compatible alias and left in place for the reader to strip."""
+    value = cv.string_strict(value)
+    if not value.startswith("file://") and not value.startswith("/"):
+        raise cv.Invalid("path must be an absolute POSIX path (e.g. /sdcard/img.png)")
+    return value
+
+
 ONLINE_IMAGE_SCHEMA = (
     runtime_image.runtime_image_schema(OnlineImage)
     .extend(
         {
-            # Online Image specific options
+            # Source is exactly one of:
+            #   url:  an http(s):// address, fetched via http_request
+            #   path: a local storage path (POSIX; file:// accepted as an alias)
             cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
-            cv.Required(CONF_URL): cv.url,
+            cv.Optional(CONF_URL): cv.url,
+            cv.Optional(CONF_PATH): _validate_local_path,
             cv.Optional(CONF_BUFFER_SIZE, default=65536): cv.int_range(256, 65536),
             cv.Optional(CONF_REQUEST_HEADERS): cv.All(
                 cv.Schema({cv.string: cv.templatable(cv.string)})
@@ -49,10 +78,27 @@ ONLINE_IMAGE_SCHEMA = (
     .extend(cv.polling_component_schema("never"))
 )
 
+
+def _validate_source(config: ConfigType) -> ConfigType:
+    has_url = config.get(CONF_URL) is not None
+    has_path = config.get(CONF_PATH) is not None
+    if has_url == has_path:
+        raise cv.Invalid(
+            "Specify exactly one image source: 'url' (an http(s):// address) or "
+            "'path' (a local storage path)."
+        )
+    # A local path never uses http_request; drop the auto-generated id so the component
+    # neither parents nor auto-loads http_request.
+    if has_path:
+        config.pop(CONF_HTTP_REQUEST_ID, None)
+    return config
+
+
 # Shared schema used by both the (deprecated) top-level `online_image:` key and
 # the `image:` `platform: online_image` entry.
 ONLINE_IMAGE_CONFIG_SCHEMA = cv.All(
     ONLINE_IMAGE_SCHEMA,
+    _validate_source,
     cv.require_framework_version(
         # esp8266 not supported yet; if enabled in the future, minimum version of 2.7.0 is needed
         # esp8266_arduino=cv.Version(2, 7, 0),
@@ -121,10 +167,10 @@ async def setup_online_image(config: ConfigType) -> None:
         config[CONF_TRANSPARENCY],
     )
 
-    url = config[CONF_URL]
+    source = config[CONF_URL] if CONF_URL in config else config[CONF_PATH]
     var = cg.new_Pvariable(
         config[CONF_ID],
-        url,
+        source,
         settings.width,
         settings.height,
         settings.format_enum,
@@ -135,7 +181,9 @@ async def setup_online_image(config: ConfigType) -> None:
         settings.byte_order_big_endian,
     )
     await cg.register_component(var, config)
-    await cg.register_parented(var, config[CONF_HTTP_REQUEST_ID])
+    if CONF_HTTP_REQUEST_ID in config:
+        cg.add_define("USE_ONLINE_IMAGE_HTTP")
+        await cg.register_parented(var, config[CONF_HTTP_REQUEST_ID])
 
     for key, value in config.get(CONF_REQUEST_HEADERS, {}).items():
         if isinstance(value, Lambda):
