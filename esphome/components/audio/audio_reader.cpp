@@ -52,13 +52,7 @@ enum HttpStatus {
   HTTP_STATUS_INTERNAL_ERROR = 500
 };
 
-AudioReader::~AudioReader() {
-  this->cleanup_connection_();
-  if (this->file_handle_ != nullptr) {
-    fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
-  }
-}
+AudioReader::~AudioReader() { this->cleanup_connection_(); }
 
 esp_err_t AudioReader::add_sink(const std::weak_ptr<ring_buffer::RingBuffer> &output_ring_buffer) {
   if (current_audio_file_ != nullptr) {
@@ -86,74 +80,6 @@ esp_err_t AudioReader::start(AudioFile *audio_file, AudioFileType &file_type) {
   return ESP_OK;
 }
 
-esp_err_t AudioReader::start_file_path(const std::string &file_path, AudioFileType &file_type) {
-  file_type = AudioFileType::NONE;
-
-  // Clean up any existing file handle
-  if (this->file_handle_ != nullptr) {
-    fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
-  }
-
-  // Open file for reading
-  this->file_handle_ = fopen(file_path.c_str(), "rb");
-  if (this->file_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file: %s", file_path.c_str());
-    return ESP_ERR_NOT_FOUND;
-  }
-
-  // Get file size
-  fseek(this->file_handle_, 0, SEEK_END);
-  this->file_size_ = ftell(this->file_handle_);
-  fseek(this->file_handle_, 0, SEEK_SET);
-  this->file_position_ = 0;
-
-  ESP_LOGD(TAG, "Opened file: %s (size: %zu bytes)", file_path.c_str(), this->file_size_);
-
-  // Detect file type from extension
-  std::string path_lower = str_lower_case(file_path);
-
-  if (str_endswith(path_lower, ".wav")) {
-    file_type = AudioFileType::WAV;
-  }
-#ifdef USE_AUDIO_MP3_SUPPORT
-  else if (str_endswith(path_lower, ".mp3")) {
-    file_type = AudioFileType::MP3;
-  }
-#endif
-#ifdef USE_AUDIO_FLAC_SUPPORT
-  else if (str_endswith(path_lower, ".flac")) {
-    file_type = AudioFileType::FLAC;
-  }
-#endif
-#ifdef USE_AUDIO_AAC_SUPPORT
-  else if (str_endswith(path_lower, ".aac") || str_endswith(path_lower, ".m4a")) {
-    file_type = AudioFileType::AAC;
-  }
-#endif
-  else {
-    ESP_LOGE(TAG, "Unsupported file format: %s", file_path.c_str());
-    fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
-    return ESP_ERR_NOT_SUPPORTED;
-  }
-
-  this->audio_file_type_ = file_type;
-  this->last_data_read_ms_ = millis();
-
-  // Allocate transfer buffer for file streaming
-  this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(this->buffer_size_);
-  if (this->output_transfer_buffer_ == nullptr) {
-    fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
-    return ESP_ERR_NO_MEM;
-  }
-
-  ESP_LOGI(TAG, "Started file path streaming: %s (type: %s)", file_path.c_str(), audio_file_type_to_string(file_type));
-
-  return ESP_OK;
-}
-
 esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
   file_type = AudioFileType::NONE;
 
@@ -161,6 +87,71 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
 
   if (uri.empty()) {
     return ESP_ERR_INVALID_ARG;
+  }
+
+  // A network URL is identified by its scheme (http/https). Anything else is a local storage
+  // path: a bare POSIX path (/sdcard/...) or the optional file:// alias, both resolved through
+  // the storage registry. No scheme => local, so file:// is never required.
+  const bool is_network = uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0;
+  if (!is_network) {
+#ifdef USE_STORAGE
+    // Storage-backed local file: resolve the mount, open a DATA-PLANE handle
+    // (task-agnostic by contract) and stream through the transfer buffer —
+    // same downstream path as http, so the decoder pipeline is untouched.
+    const char *path = uri.c_str();
+    if (uri.rfind("file://", 0) == 0)  // strip the optional alias prefix
+      path += strlen("file://");
+    const char *rel = nullptr;
+    if (storage::global_storage_registry == nullptr ||
+        (this->storage_ = storage::global_storage_registry->resolve_path(path, &rel)) == nullptr || rel == nullptr) {
+      ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", path);
+      return ESP_ERR_NOT_FOUND;
+    }
+    file_type = detect_audio_file_type(nullptr, path);  // by extension
+    if (file_type == AudioFileType::NONE) {
+      ESP_LOGE(TAG, "Unsupported audio file type: %s", path);
+      this->storage_ = nullptr;
+      return ESP_ERR_NOT_SUPPORTED;
+    }
+    // The handle API lives on FilesystemStorage; NetworkStorage (NFS) is
+    // stateless by design and reads chunks by path+offset. get_storage_type()
+    // is the no-RTTI discrimination hook the storage API provides for this.
+    if (this->storage_->get_storage_type() == storage::StorageType::FILESYSTEM) {
+      auto *fs = static_cast<storage::FilesystemStorage *>(this->storage_);
+      storage::StorageError serr = fs->open(rel, this->storage_handle_, storage::OpenMode::READ);
+      if (serr != storage::StorageError::OK) {
+        ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
+        this->storage_ = nullptr;
+        this->storage_handle_ = nullptr;
+        return ESP_ERR_NOT_FOUND;
+      }
+    } else if (this->storage_->get_storage_type() == storage::StorageType::NETWORK) {
+      storage::FileStat st;
+      storage::StorageError serr = this->storage_->stat(rel, &st);  // early existence check
+      if (serr != storage::StorageError::OK) {
+        ESP_LOGE(TAG, "'%s' not found on network storage (%s)", path, storage::error_to_string(serr));
+        this->storage_ = nullptr;
+        return ESP_ERR_NOT_FOUND;
+      }
+      this->storage_path_ = rel;  // owned copy — rel points into resolver scratch
+      this->storage_offset_ = 0;
+    } else {
+      ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", path);
+      this->storage_ = nullptr;
+      return ESP_ERR_NOT_SUPPORTED;
+    }
+    this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(this->buffer_size_);
+    if (this->output_transfer_buffer_ == nullptr) {
+      this->cleanup_connection_();
+      return ESP_ERR_NO_MEM;
+    }
+    this->audio_file_type_ = file_type;
+    this->last_data_read_ms_ = millis();
+    return ESP_OK;
+#else
+    ESP_LOGE(TAG, "Local storage paths require the storage component in the build");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
   }
 
   esp_http_client_config_t client_config = {};
@@ -280,10 +271,12 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
 AudioReaderState AudioReader::read() {
   if (this->client_ != nullptr) {
     return this->http_read_();
-  } else if (this->file_handle_ != nullptr) {
-    return this->file_path_read_();
   } else if (this->current_audio_file_ != nullptr) {
     return this->file_read_();
+#ifdef USE_STORAGE
+  } else if (this->storage_ != nullptr) {
+    return this->storage_read_();
+#endif
   }
 
   return AudioReaderState::FAILED;
@@ -356,53 +349,44 @@ AudioReaderState AudioReader::http_read_() {
   return AudioReaderState::READING;
 }
 
-AudioReaderState AudioReader::file_path_read_() {
-  if (this->file_handle_ == nullptr) {
-    return AudioReaderState::FAILED;
-  }
-
-  // Transfer any buffered data to the sink first
+#ifdef USE_STORAGE
+AudioReaderState AudioReader::storage_read_() {
   this->output_transfer_buffer_->transfer_data_to_sink(pdMS_TO_TICKS(READ_WRITE_TIMEOUT_MS), false);
 
-  // Check if we have space in the transfer buffer
-  size_t free_space = this->output_transfer_buffer_->free();
-  if (free_space == 0) {
-    // Buffer is full, try again later
-    return AudioReaderState::READING;
-  }
-
-  // Check if we've reached end of file
-  if (this->file_position_ >= this->file_size_) {
-    // Wait for all buffered data to be transferred
-    if (this->output_transfer_buffer_->available() == 0) {
-      fclose(this->file_handle_);
-      this->file_handle_ = nullptr;
-      ESP_LOGI(TAG, "Finished reading file");
-      return AudioReaderState::FINISHED;
+  if (this->output_transfer_buffer_->free() > 0) {
+    size_t received = 0;
+    storage::StorageError serr;
+    if (this->storage_handle_ != nullptr) {
+      serr = static_cast<storage::FilesystemStorage *>(this->storage_)
+                 ->read(this->storage_handle_, this->output_transfer_buffer_->get_buffer_end(),
+                        this->output_transfer_buffer_->free(), &received);
+    } else {
+      serr = static_cast<storage::NetworkStorage *>(this->storage_)
+                 ->read_chunk(this->storage_path_.c_str(), this->output_transfer_buffer_->get_buffer_end(),
+                              this->storage_offset_, this->output_transfer_buffer_->free(), &received);
+      this->storage_offset_ += received;
     }
-    return AudioReaderState::READING;
-  }
-
-  // Read a chunk from the file
-  size_t to_read = std::min(free_space, this->buffer_size_);
-  size_t bytes_read = fread(this->output_transfer_buffer_->get_buffer_end(), 1, to_read, this->file_handle_);
-
-  if (bytes_read > 0) {
-    this->output_transfer_buffer_->increase_buffer_length(bytes_read);
-    this->file_position_ += bytes_read;
-    this->last_data_read_ms_ = millis();
-  } else {
-    // Read error or EOF
-    if (ferror(this->file_handle_)) {
-      ESP_LOGE(TAG, "File read error at position %zu", this->file_position_);
-      fclose(this->file_handle_);
-      this->file_handle_ = nullptr;
+    if (serr != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
+      this->cleanup_connection_();
       return AudioReaderState::FAILED;
+    }
+    if (received > 0) {
+      this->output_transfer_buffer_->increase_buffer_length(received);
+      this->last_data_read_ms_ = millis();
+      return AudioReaderState::READING;
+    }
+    // Partial-read contract: OK with 0 bytes means EOF. Finish once the
+    // transfer buffer has fully drained into the sink.
+    if (this->output_transfer_buffer_->available() == 0) {
+      this->cleanup_connection_();
+      return AudioReaderState::FINISHED;
     }
   }
 
   return AudioReaderState::READING;
 }
+#endif  // USE_STORAGE
 
 void AudioReader::cleanup_connection_() {
   if (this->client_ != nullptr) {
@@ -410,6 +394,15 @@ void AudioReader::cleanup_connection_() {
     esp_http_client_cleanup(this->client_);
     this->client_ = nullptr;
   }
+#ifdef USE_STORAGE
+  if (this->storage_handle_ != nullptr) {
+    static_cast<storage::FilesystemStorage *>(this->storage_)->close(this->storage_handle_);
+    this->storage_handle_ = nullptr;
+  }
+  this->storage_ = nullptr;
+  this->storage_path_.clear();
+  this->storage_offset_ = 0;
+#endif
 }
 
 }  // namespace esphome::audio

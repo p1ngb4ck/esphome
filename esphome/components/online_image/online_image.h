@@ -85,8 +85,8 @@ class OnlineImage final : public PollingComponent,
 
   std::shared_ptr<http_request::HttpContainer> downloader_{nullptr};
 #ifdef USE_STORAGE
-  /// file:// source — FILESYSTEM storages stream via handle, NETWORK (NFS) via
-  /// stateless read_chunk with a self-tracked offset (same pattern as audio).
+  /// Local storage source (bare path or file:// alias) — FILESYSTEM storages stream via handle,
+  /// NETWORK (NFS) via stateless read_chunk with a self-tracked offset (same pattern as audio).
   bool start_storage_read_();
   void storage_loop_();
   storage::PathStorage *storage_{nullptr};

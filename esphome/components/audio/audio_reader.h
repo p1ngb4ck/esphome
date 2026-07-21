@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
 #ifdef USE_ESP32
 
 #include "audio.h"
@@ -10,6 +12,10 @@
 #include "esp_err.h"
 
 #include <esp_http_client.h>
+
+#ifdef USE_STORAGE
+#include "esphome/components/storage/storage.h"
+#endif
 
 namespace esphome::audio {
 
@@ -22,7 +28,11 @@ enum class AudioReaderState : uint8_t {
 class AudioReader {
   /*
    * @brief Class that facilitates reading a raw audio file.
-   * Files can be read from flash (stored in a AudioFile struct) or from an http source.
+   * Files can be read from flash (stored in a AudioFile struct), from an http source, or —
+   * with the storage component in the build — from any mounted storage by a local path
+   * (/sdcard/music/track.flac; the file:// prefix is accepted as an optional alias). Anything
+   * without an http(s):// scheme is treated as a local storage path. Storage reads use the
+   * DATA-PLANE handle API and are therefore safe from the speaker task.
    * The file data is sent to a ring buffer sink.
    */
  public:
@@ -49,12 +59,6 @@ class AudioReader {
   /// @return ESP_OK
   esp_err_t start(AudioFile *audio_file, AudioFileType &file_type);
 
-  /// @brief Starts reading an audio file from a local file path. The transfer buffer is allocated here.
-  /// @param file_path Local file path (e.g., "/usb/music.mp3", "/sd/audio.flac").
-  /// @param file_type AudioFileType variable passed-by-reference indicating the type of file being read.
-  /// @return ESP_OK if successful, ESP_ERR_NOT_FOUND if file doesn't exist, ESP_ERR_NOT_SUPPORTED if format unknown.
-  esp_err_t start_file_path(const std::string &file_path, AudioFileType &file_type);
-
   /// @brief Reads new file data from the source and sends to the ring buffer sink.
   /// @return AudioReaderState
   AudioReaderState read();
@@ -64,8 +68,10 @@ class AudioReader {
   static esp_err_t http_event_handler(esp_http_client_event_t *evt);
 
   AudioReaderState file_read_();
+#ifdef USE_STORAGE
+  AudioReaderState storage_read_();
+#endif
   AudioReaderState http_read_();
-  AudioReaderState file_path_read_();
 
   std::shared_ptr<ring_buffer::RingBuffer> file_ring_buffer_;
   std::unique_ptr<AudioSinkTransferBuffer> output_transfer_buffer_;
@@ -79,11 +85,14 @@ class AudioReader {
   AudioFile *current_audio_file_{nullptr};
   AudioFileType audio_file_type_{AudioFileType::NONE};
   const uint8_t *file_current_{nullptr};
-
-  // File path streaming members
-  FILE *file_handle_{nullptr};
-  size_t file_size_{0};
-  size_t file_position_{0};
+#ifdef USE_STORAGE
+  // FILESYSTEM storages stream through a handle; NETWORK storages (NFS) are
+  // stateless by design — chunked reads by path + self-tracked offset.
+  storage::PathStorage *storage_{nullptr};
+  storage::FileHandle *storage_handle_{nullptr};  // FILESYSTEM only
+  std::string storage_path_;                      // NETWORK only (owned copy)
+  uint64_t storage_offset_{0};                    // NETWORK only
+#endif
 };
 }  // namespace esphome::audio
 
