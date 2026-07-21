@@ -29,14 +29,12 @@ struct MediaCallCommand {
   optional<bool> announce;
   optional<std::string *> url;  // Must be manually deleted after receiving this struct from a queue
   optional<audio::AudioFile *> file;
-  optional<std::string *> file_path;  // Must be manually deleted after receiving this struct from a queue
   optional<bool> enqueue;
 };
 
 struct PlaylistItem {
   optional<std::string> url;
   optional<audio::AudioFile *> file;
-  optional<std::string> file_path;
 };
 
 struct VolumeRestoreState {

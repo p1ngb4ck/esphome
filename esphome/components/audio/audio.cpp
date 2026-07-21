@@ -118,6 +118,11 @@ AudioFileType detect_audio_file_type(const char *content_type, const char *url) 
       return AudioFileType::OPUS;
     }
 #endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+    if (str_endswith_ignore_case(url, ".aac") || str_endswith_ignore_case(url, ".m4a")) {
+      return AudioFileType::AAC;
+    }
+#endif
   }
 
   return AudioFileType::NONE;

@@ -33,8 +33,6 @@ enum EventGroupBits : uint32_t {
   READER_COMMAND_INIT_HTTP = (1 << 4),
   // Read audio from an audio file from the flash; cleared by reader task and set by start_file
   READER_COMMAND_INIT_FILE = (1 << 5),
-  // Read audio from a local file path; cleared by reader task and set by start_file_path
-  READER_COMMAND_INIT_FILE_PATH = (1 << 9),
 
   // Audio file type is read after checking it is supported; cleared by decoder task
   READER_MESSAGE_LOADED_MEDIA_TYPE = (1 << 6),
@@ -74,14 +72,6 @@ void AudioPipeline::start_file(audio::AudioFile *audio_file) {
   }
   this->current_audio_file_ = audio_file;
   this->pending_file_ = true;
-}
-
-void AudioPipeline::start_file_path(const std::string &file_path) {
-  if (this->is_playing_) {
-    xEventGroupSetBits(this->event_group_, PIPELINE_COMMAND_STOP);
-  }
-  this->current_file_path_ = file_path;
-  this->pending_file_path_ = true;
 }
 
 esp_err_t AudioPipeline::stop() {
@@ -164,7 +154,7 @@ AudioPipelineState AudioPipeline::process_state() {
 
   EventBits_t event_bits = xEventGroupGetBits(this->event_group_);
 
-  if (this->pending_url_ || this->pending_file_ || this->pending_file_path_) {
+  if (this->pending_url_ || this->pending_file_) {
     // Init command pending
     if (!(event_bits & EventGroupBits::PIPELINE_COMMAND_STOP)) {
       // Only start if there is no pending stop command
@@ -181,10 +171,6 @@ AudioPipelineState AudioPipeline::process_state() {
         xEventGroupSetBits(this->event_group_, EventGroupBits::READER_COMMAND_INIT_FILE);
         this->playback_ms_ = 0;
         this->pending_file_ = false;
-      } else if (this->pending_file_path_) {
-        xEventGroupSetBits(this->event_group_, EventGroupBits::READER_COMMAND_INIT_FILE_PATH);
-        this->playback_ms_ = 0;
-        this->pending_file_path_ = false;
       }
 
       this->is_playing_ = true;
@@ -302,19 +288,17 @@ void AudioPipeline::read_task(void *params) {
     xEventGroupSetBits(this_pipeline->event_group_, EventGroupBits::READER_MESSAGE_FINISHED);
 
     // Wait until the pipeline notifies us the source of the media file
-    EventBits_t event_bits =
-        xEventGroupWaitBits(this_pipeline->event_group_,
-                            EventGroupBits::READER_COMMAND_INIT_FILE | EventGroupBits::READER_COMMAND_INIT_HTTP |
-                                EventGroupBits::READER_COMMAND_INIT_FILE_PATH,  // Bit message to read
-                            pdFALSE,                                            // Clear the bit on exit
-                            pdFALSE,                                            // Wait for all the bits,
-                            portMAX_DELAY);                                     // Block indefinitely until bit is set
+    EventBits_t event_bits = xEventGroupWaitBits(
+        this_pipeline->event_group_,
+        EventGroupBits::READER_COMMAND_INIT_FILE | EventGroupBits::READER_COMMAND_INIT_HTTP,  // Bit message to read
+        pdFALSE,                                                                              // Clear the bit on exit
+        pdFALSE,                                                                              // Wait for all the bits,
+        portMAX_DELAY);  // Block indefinitely until bit is set
 
     if (!(event_bits & EventGroupBits::PIPELINE_COMMAND_STOP)) {
       xEventGroupClearBits(this_pipeline->event_group_, EventGroupBits::READER_MESSAGE_FINISHED |
                                                             EventGroupBits::READER_COMMAND_INIT_FILE |
-                                                            EventGroupBits::READER_COMMAND_INIT_HTTP |
-                                                            EventGroupBits::READER_COMMAND_INIT_FILE_PATH);
+                                                            EventGroupBits::READER_COMMAND_INIT_HTTP);
       InfoErrorEvent event;
       event.source = InfoErrorSource::READER;
       esp_err_t err = ESP_OK;
@@ -324,8 +308,6 @@ void AudioPipeline::read_task(void *params) {
 
       if (event_bits & EventGroupBits::READER_COMMAND_INIT_FILE) {
         err = reader->start(this_pipeline->current_audio_file_, this_pipeline->current_audio_file_type_);
-      } else if (event_bits & EventGroupBits::READER_COMMAND_INIT_FILE_PATH) {
-        err = reader->start_file_path(this_pipeline->current_file_path_, this_pipeline->current_audio_file_type_);
       } else {
         err = reader->start(this_pipeline->current_uri_, this_pipeline->current_audio_file_type_);
       }

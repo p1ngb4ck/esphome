@@ -133,7 +133,7 @@ void SpeakerMediaPlayer::watch_media_commands_() {
   if (xQueueReceive(this->media_control_command_queue_, &media_command, 0) == pdTRUE) {
     bool enqueue = media_command.enqueue.has_value() && media_command.enqueue.value();
 
-    if (media_command.url.has_value() || media_command.file.has_value() || media_command.file_path.has_value()) {
+    if (media_command.url.has_value() || media_command.file.has_value()) {
 #ifdef USE_SPEAKER_MEDIA_PLAYER_ON_OFF
       if (this->state == media_player::MEDIA_PLAYER_STATE_OFF) {
         this->state = media_player::MEDIA_PLAYER_STATE_ON;
@@ -148,10 +148,6 @@ void SpeakerMediaPlayer::watch_media_commands_() {
       if (media_command.file.has_value()) {
         playlist_item.file = media_command.file;
       }
-      if (media_command.file_path.has_value()) {
-        playlist_item.file_path = *media_command.file_path.value();
-        delete media_command.file_path.value();
-      }
 
       if (this->single_pipeline_() || (media_command.announce.has_value() && media_command.announce.value())) {
         if (!enqueue) {
@@ -160,8 +156,6 @@ void SpeakerMediaPlayer::watch_media_commands_() {
           this->announcement_playlist_.clear();
           if (media_command.file.has_value()) {
             this->announcement_pipeline_->start_file(playlist_item.file.value());
-          } else if (media_command.file_path.has_value()) {
-            this->announcement_pipeline_->start_file_path(playlist_item.file_path.value());
           } else if (media_command.url.has_value()) {
             this->announcement_pipeline_->start_url(playlist_item.url.value());
           }
@@ -181,8 +175,6 @@ void SpeakerMediaPlayer::watch_media_commands_() {
             // Not paused, just directly start the file
             if (media_command.file.has_value()) {
               this->media_pipeline_->start_file(playlist_item.file.value());
-            } else if (media_command.file_path.has_value()) {
-              this->media_pipeline_->start_file_path(playlist_item.file_path.value());
             } else if (media_command.url.has_value()) {
               this->media_pipeline_->start_url(playlist_item.url.value());
             }
@@ -396,8 +388,6 @@ void SpeakerMediaPlayer::loop() {
           this->announcement_pipeline_->start_url(playlist_item.url.value());
         } else if (playlist_item.file.has_value()) {
           this->announcement_pipeline_->start_file(playlist_item.file.value());
-        } else if (playlist_item.file_path.has_value()) {
-          this->announcement_pipeline_->start_file_path(playlist_item.file_path.value());
         }
 
         if (timeout_ms > 0) {
@@ -437,8 +427,6 @@ void SpeakerMediaPlayer::loop() {
               this->media_pipeline_->start_url(playlist_item.url.value());
             } else if (playlist_item.file.has_value()) {
               this->media_pipeline_->start_file(playlist_item.file.value());
-            } else if (playlist_item.file_path.has_value()) {
-              this->media_pipeline_->start_file_path(playlist_item.file_path.value());
             }
 
             if (timeout_ms > 0) {
@@ -518,22 +506,8 @@ void SpeakerMediaPlayer::control(const media_player::MediaPlayerCall &call) {
 
   const auto &media_url = call.get_media_url();
   if (media_url.has_value()) {
-    std::string media_url_str = *media_url;
-
-    // Detect local file paths (start with '/' or 'file://')
-    if (media_url_str[0] == '/' || media_url_str.rfind("file://", 0) == 0) {
-      // Local file path
-      std::string file_path = media_url_str;
-      if (file_path.rfind("file://", 0) == 0) {
-        // Strip 'file://' prefix
-        file_path = file_path.substr(7);
-      }
-      media_command.file_path = new std::string(file_path);
-    } else {
-      // HTTP/HTTPS URL
-      media_command.url =
-          new std::string(media_url_str);  // Must be manually deleted after receiving media_command from a queue
-    }
+    media_command.url =
+        new std::string(*media_url);  // Must be manually deleted after receiving media_command from a queue
 
     auto cmd = call.get_command();
     if (cmd.has_value()) {
