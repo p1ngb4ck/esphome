@@ -107,6 +107,9 @@ class AudioStreamInfo {
 
 enum class AudioFileType : uint8_t {
   NONE = 0,
+#ifdef USE_AUDIO_AAC_SUPPORT
+  AAC,
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FLAC,
 #endif

@@ -42,6 +42,10 @@ bool AudioStreamInfo::operator==(const AudioStreamInfo &rhs) const {
 
 const char *audio_file_type_to_string(AudioFileType file_type) {
   switch (file_type) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioFileType::AAC:
+      return "AAC";
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
       return "FLAC";

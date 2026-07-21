@@ -15,6 +15,12 @@
 
 #include "esp_err.h"
 
+// Audio codec libraries
+#ifdef USE_AUDIO_AAC_SUPPORT
+// AAC comes from esp_audio_codec (via adapter for API compatibility)
+#include "aac_decoder_adapter.h"
+#endif
+
 // micro-flac
 #ifdef USE_AUDIO_FLAC_SUPPORT
 #include <micro_flac/flac_decoder.h>
@@ -121,6 +127,10 @@ class AudioDecoder {
   void set_pause_output_state(bool pause_state) { this->pause_output_ = pause_state; }
 
  protected:
+#ifdef USE_AUDIO_AAC_SUPPORT
+  FileDecoderState decode_aac_();
+  std::unique_ptr<esp_audio_codec_adapter::AACDecoder> aac_decoder_;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
   FileDecoderState decode_flac_();
   std::unique_ptr<micro_flac::FLACDecoder> flac_decoder_;

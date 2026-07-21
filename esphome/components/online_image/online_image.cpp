@@ -30,17 +30,14 @@ bool OnlineImage::validate_url_(const std::string &url) {
     return false;
   }
 #ifdef USE_STORAGE
-  // A local storage source is anything without an http(s):// scheme: a bare POSIX path
-  // (/sdcard/img.png) or the optional file:// alias. It is resolved at read time.
-  if (!url.starts_with("http://") && !url.starts_with("https://")) {
-    return true;
-  }
-#else
-  if (!url.starts_with("http://") && !url.starts_with("https://")) {
-    ESP_LOGE(TAG, "URL must start with http:// or https:// (local storage paths require the storage component)");
-    return false;
+  if (url.starts_with("file://")) {
+    return true;  // mounted-storage source, resolved at read time
   }
 #endif
+  if (!url.starts_with("http://") && !url.starts_with("https://")) {
+    ESP_LOGE(TAG, "URL must start with http:// or https:// (or file:// with the storage component)");
+    return false;
+  }
   return true;
 }
 
@@ -59,7 +56,7 @@ void OnlineImage::update() {
   ESP_LOGD(TAG, "Updating image from %s", this->url_.c_str());
 
 #ifdef USE_STORAGE
-  if (!this->url_.starts_with("http://") && !this->url_.starts_with("https://")) {
+  if (this->url_.starts_with("file://")) {
     if (!this->start_storage_read_()) {
       this->end_connection_();
       this->download_error_callback_.call();
@@ -294,9 +291,7 @@ void OnlineImage::release() {
 
 #ifdef USE_STORAGE
 bool OnlineImage::start_storage_read_() {
-  const char *path = this->url_.c_str();
-  if (this->url_.starts_with("file://"))  // optional alias prefix
-    path += strlen("file://");
+  const char *path = this->url_.c_str() + strlen("file://");
   const char *rel = nullptr;
   if (storage::global_storage_registry == nullptr ||
       (this->storage_ = storage::global_storage_registry->resolve_path(path, &rel)) == nullptr || rel == nullptr) {
