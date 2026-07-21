@@ -118,7 +118,7 @@ struct IsocCbCtx {
 };
 
 struct IsocStream {
-  std::unique_ptr<usb_transfer_t *[]> xfers {};
+  std::unique_ptr<usb_transfer_t *[]> xfers{};
   std::unique_ptr<IsocCbCtx[]> ctxs{};
   std::atomic<uint8_t> pending_urbs{0};
   uint8_t num_urbs{0};
@@ -235,10 +235,6 @@ class USBHost final : public Component {
   void loop() override;
   void setup() override;
 
-  // Enable simultaneous HS + FS USB host on ESP32-P4 (requires espressif/usb >= 1.4.0).
-  // peripheral_map = BIT0 | BIT1 → both controllers; default BIT0 = HS only.
-  void set_dual_host(bool enable) { this->dual_host_ = enable; }
-
   // ── Submission engine (called by USBClient thin forwarders) ────────────────
 
   // Bulk / interrupt IN and OUT — always compiled if any client uses them
@@ -275,7 +271,6 @@ class USBHost final : public Component {
 
  protected:
   std::vector<USBClient *> clients_{};
-  bool dual_host_{false};
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().
