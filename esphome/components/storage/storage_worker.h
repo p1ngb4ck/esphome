@@ -84,6 +84,16 @@ enum class RequestState : uint8_t {
   DONE,
 };
 
+// Coarse phase of a raw transfer, surfaced so a status line can say what a running job is
+// doing (erase -> write -> verify). NONE for transfers that have no such phases (plain
+// file copy/read) or that are not running.
+enum class TransferPhase : uint8_t {
+  NONE,
+  ERASE,
+  WRITE,
+  VERIFY,
+};
+
 // Opaque transfer-job handle: (generation << 8) | slot_index. max_pending is capped at 16 so
 // 8 bits of slot index are plenty; 0 is the invalid handle (generations start at 1).
 using TransferJob = uint32_t;
@@ -123,6 +133,12 @@ struct TransferStatus {
   storage::StorageError result{storage::StorageError::OK};
   uint64_t bytes_done{0};
   uint64_t bytes_total{0};  // 0 = unknown (indeterminate progress)
+  // Coarse phase of a raw write/verify job (erase/write/verify), plus how far a multi-pass
+  // verify has progressed. verify_passes is the configured pass count; verify_pass is the
+  // 1-based pass currently running (0 outside the verify phase). Both 0 for non-raw work.
+  TransferPhase phase{TransferPhase::NONE};
+  uint8_t verify_pass{0};
+  uint8_t verify_passes{0};
   // Per-file progress of the file in flight. For a single-file transfer these mirror
   // bytes_done/bytes_total; for a tree they are what bytes_total cannot be — the tree's
   // total is unknown without walking it twice, but the current file's is one cheap stat.

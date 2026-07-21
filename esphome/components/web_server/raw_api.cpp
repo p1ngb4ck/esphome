@@ -253,7 +253,7 @@ void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
     request->send(404, "application/json", "{\"error\":\"unknown or expired job\"}");
     return;
   }
-  char buf[160];
+  char buf[224];
   if (done_cached) {
     snprintf(buf, sizeof(buf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":0,\"bytes_total\":0}",
              storage::error_to_string(cached_result));
@@ -266,9 +266,26 @@ void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
   } else if (st.state == storage::RequestState::DONE) {
     state = "done";
   }
+  const char *phase;
+  switch (st.phase) {
+    case storage::TransferPhase::ERASE:
+      phase = "erase";
+      break;
+    case storage::TransferPhase::WRITE:
+      phase = "write";
+      break;
+    case storage::TransferPhase::VERIFY:
+      phase = "verify";
+      break;
+    default:
+      phase = "";
+      break;
+  }
   snprintf(buf, sizeof(buf),
-           "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64 "}", state,
-           storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
+           "{\"state\":\"%s\",\"result\":\"%s\",\"bytes_done\":%" PRIu64 ",\"bytes_total\":%" PRIu64
+           ",\"phase\":\"%s\",\"verify_pass\":%u,\"verify_passes\":%u}",
+           state, storage::error_to_string(st.result), st.bytes_done, st.bytes_total, phase, st.verify_pass,
+           st.verify_passes);
   request->send(200, "application/json", buf);
 }
 

@@ -47,6 +47,9 @@
     download: "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z",
     upload: "M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z",
     info: "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z",
+    // mdi check-decagram — a distinct "verified against a reference" glyph, so verify no
+    // longer shares the info (i-in-circle) icon used by Details.
+    verify: "M23,12L20.56,9.22L20.9,5.54L17.29,4.72L15.4,1.54L12,3L8.6,1.54L6.71,4.72L3.1,5.53L3.44,9.21L1,12L3.44,14.78L3.1,18.46L6.71,19.28L8.6,22.46L12,21L15.4,22.46L17.29,19.28L20.9,18.47L20.56,14.79L23,12M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z",
     copy: "M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z",
     // mdi file-move / folder-move — the specific "this thing moves" glyphs; a plain arrow
     // next to the copy + trash icons read like a legend ("put the copy in the bin").
@@ -587,25 +590,41 @@
 
     // A job that vanishes between polls finished and had its slot recycled — treat as done.
 
+    // Human phase prefix for the status line: "erasing… ", "verifying (pass 2/3)… ", etc.
+    // Empty for the plain write phase and for jobs without phases, so the byte counters read
+    // naturally on their own.
+    const phaseLabel = (s) => {
+      if (s.phase === "erase") return "erasing ";
+      if (s.phase === "verify") {
+        const p = s.verify_passes > 1 ? ` (pass ${s.verify_pass}/${s.verify_passes})` : "";
+        return `verifying${p} `;
+      }
+      return "";
+    };
+
     // Raw jobs poll /raw/job (their own endpoint + result cache): /files/job never learned a
     // raw job's final result — the worker recycles the slot right after completion, the poll
     // then 404'd and every raw error was silently swallowed as "done".
     const waitRawJob = async (job, label) => {
+      let verified = 0;  // remember the verify pass count seen, to report it on completion
       for (;;) {
         await new Promise((res) => setTimeout(res, 500));
         let s;
         try { s = await api(`/raw/job?id=${job}`); } catch (e) { break; }
         if (!s || s.state === undefined) break;
+        if (s.phase === "verify" && s.verify_passes) verified = s.verify_passes;
         if (s.state === "done") {
           // error_to_string() spells success "OK" (uppercase) — comparing against "ok" turned
           // every successful job into a reported error.
           if (s.result && s.result !== "OK") throw new Error(`${label}: ${s.result}`);
           break;
         }
-        if (s.bytes_total > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
-        else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)}`);
+        if (s.bytes_total > 0) setStatus(`${label}\u2026 ${phaseLabel(s)}${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
+        else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${phaseLabel(s)}${fmtSize(s.bytes_done)}`);
+        else if (s.phase) setStatus(`${label}\u2026 ${phaseLabel(s)}`.trim());
       }
-      setStatus(`${label} \u2014 done`);
+      const vsuffix = verified ? ` \u2014 verified (${verified} pass${verified > 1 ? "es" : ""})` : "";
+      setStatus(`${label} \u2014 done${vsuffix}`);
       // Relist whatever is expanded — same as the change poll's reset path. (A raw job may
       // have written a file into any open directory.)
       for (const r of openDirs.values()) r().catch(() => {});
@@ -655,7 +674,7 @@
         }), () => {}));
       }
       if (dev.writable) {
-        acts.push(btn("info", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
+        acts.push(btn("verify", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
           { key: "address", label: "Address", value: "0x0" },
           { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
           { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },
