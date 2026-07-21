@@ -89,12 +89,18 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  if (uri.rfind("file://", 0) == 0) {
+  // A network URL is identified by its scheme (http/https). Anything else is a local storage
+  // path: a bare POSIX path (/sdcard/...) or the optional file:// alias, both resolved through
+  // the storage registry. No scheme => local, so file:// is never required.
+  const bool is_network = uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0;
+  if (!is_network) {
 #ifdef USE_STORAGE
     // Storage-backed local file: resolve the mount, open a DATA-PLANE handle
     // (task-agnostic by contract) and stream through the transfer buffer —
     // same downstream path as http, so the decoder pipeline is untouched.
-    const char *path = uri.c_str() + strlen("file://");
+    const char *path = uri.c_str();
+    if (uri.rfind("file://", 0) == 0)  // strip the optional alias prefix
+      path += strlen("file://");
     const char *rel = nullptr;
     if (storage::global_storage_registry == nullptr ||
         (this->storage_ = storage::global_storage_registry->resolve_path(path, &rel)) == nullptr || rel == nullptr) {
@@ -143,7 +149,7 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     this->last_data_read_ms_ = millis();
     return ESP_OK;
 #else
-    ESP_LOGE(TAG, "file:// URIs require the storage component in the build");
+    ESP_LOGE(TAG, "Local storage paths require the storage component in the build");
     return ESP_ERR_NOT_SUPPORTED;
 #endif
   }
