@@ -55,7 +55,7 @@ void FlashPartition::setup() {
     storage::global_storage_registry->note_dir_changed("");  // mount state is roots-listing state
 #endif
 
-#if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
+#if defined(USE_BINARY_STORAGE_PREFILL) && defined(USE_OTA_PARTITIONS)
   // So an incoming pre-fill image (an in-band pre-fill OTA) can have this mount step
   // aside instead of forcing a reboot.
   ota::register_data_partition_listener(this);
@@ -493,7 +493,7 @@ bool FlashPartition::format_lfs_() {
   return true;
 }
 
-#if defined(USE_OTA) && defined(USE_OTA_PARTITIONS)
+#if defined(USE_BINARY_STORAGE_PREFILL) && defined(USE_OTA_PARTITIONS)
 void FlashPartition::on_ota_data_partition_before_write() {
   // Nothing may be mid-flight on this filesystem when the flash changes under it.
   if (storage::global_storage_registry != nullptr)

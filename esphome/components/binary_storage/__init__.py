@@ -779,6 +779,11 @@ async def to_code(config):
 
         if prefill := config.get(CONF_PRE_FILL):
             _stage_prefill(config[CONF_PARTITION_LABEL], prefill)
+            # Only a pre-fill build touches OTA at all: the OTA path is one of several ways the
+            # pre-fill image reaches the partition, and its listener coordinates the unmount/
+            # remount so an in-band pre-fill OTA needn't force a reboot. Without pre_fill,
+            # binary_storage has no OTA involvement whatsoever.
+            cg.add_define("USE_BINARY_STORAGE_PREFILL")
 
         # The device's identity in the registry is its YAML id — nothing else to choose.
         storage_id = str(config[CONF_ID])
