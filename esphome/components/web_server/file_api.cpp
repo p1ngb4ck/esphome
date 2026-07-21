@@ -974,7 +974,12 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       path += filename;
     }
     storage::StorageError err = storage::StorageError::OK;
-    bool ok = this->run_on_loop_([this, &path, &err]() {
+    // Default-safe like copy/move: an existing destination is refused with ALREADY_EXISTS unless
+    // ?overwrite=1 is set. (The write/append distinction is an action-level contract elsewhere;
+    // an interactive upload has no such choice, so the modal offers an overwrite checkbox.)
+    auto *ow = request->getParam("overwrite");
+    const bool overwrite = ow != nullptr && ow->value() == "1";
+    bool ok = this->run_on_loop_([this, &path, &err, overwrite]() {
       const char *rel = nullptr;
       storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
       if (ps == nullptr) {
@@ -984,6 +989,20 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       this->upload_.storage = ps;
       strncpy(this->upload_.rel_path, rel, sizeof(this->upload_.rel_path) - 1);
       this->upload_.dst_is_fs = ps->get_storage_type() == storage::StorageType::FILESYSTEM;
+      if (!overwrite) {
+        // Refuse a silent overwrite: if the destination already exists, answer ALREADY_EXISTS.
+        // stat() OK means it exists; NOT_FOUND is the wanted case; any other error is surfaced.
+        storage::FileStat st{};
+        storage::StorageError serr = ps->stat(this->upload_.rel_path, &st);
+        if (serr == storage::StorageError::OK) {
+          err = storage::StorageError::ALREADY_EXISTS;
+          return;
+        }
+        if (serr != storage::StorageError::NOT_FOUND) {
+          err = serr;
+          return;
+        }
+      }
       if (this->upload_.dst_is_fs) {
         err = static_cast<storage::FilesystemStorage *>(ps)->open(this->upload_.rel_path, this->upload_.handle,
                                                                   storage::OpenMode::WRITE);

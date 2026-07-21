@@ -148,6 +148,7 @@
     #esp-file-browser button.efb-danger { color: #d32f2f; }
     #esp-file-browser button.efb-danger:hover { background: rgba(211,47,47,.12); }
     #esp-file-browser input[type=file] { font-size: .8em; flex: 1; min-width: 0; }
+    #esp-file-browser .efb-ow { font-size: .8em; opacity: .8; display: flex; align-items: center; gap: .25em; white-space: nowrap; }
     /* busy spinner shown while a directory listing is in flight */
     #esp-file-browser .efb-spin { flex: none; width: 12px; height: 12px; border: 2px solid rgba(3,169,244,.25);
       border-top-color: #03a9f4; border-radius: 50%; animation: efb-rot .7s linear infinite; }
@@ -234,6 +235,8 @@
 
   const uploadRow = (path, reload) => {
     const up = $("input", { type: "file" });
+    const ow = $("input", { type: "checkbox", title: "Overwrite if the file already exists" });
+    const owLabel = $("label", { className: "efb-ow" }, ow, document.createTextNode(" overwrite"));
     const startBtn = $("button", { title: "Upload", disabled: true }, act("upload"));
     up.onchange = () => { startBtn.disabled = !up.files.length; };
     startBtn.onclick = () => {
@@ -244,7 +247,7 @@
       fd.append("file", f);
       // XHR instead of fetch: fetch has no upload progress events
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/files/upload?path=${enc(path + "/" + f.name)}`);
+      xhr.open("POST", `/files/upload?path=${enc(path + "/" + f.name)}${ow.checked ? "&overwrite=1" : ""}`);
       xhr.upload.onprogress = (e) => setStatus(e.lengthComputable
         ? `uploading ${f.name}: ${Math.round(100 * e.loaded / e.total)}% (${fmtSize(e.loaded)}/${fmtSize(e.total)})`
         : `uploading ${f.name}: ${fmtSize(e.loaded)}…`);
@@ -260,7 +263,7 @@
           }
           setStatus(`upload done: ${f.name} (${fmtSize(j.bytes || 0)})`);
         } else {
-          let msg = xhr.status;
+          let msg = xhr.status === 409 ? `${f.name} already exists (tick overwrite to replace)` : xhr.status;
           try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
           setStatus("Upload error: " + msg);
         }
@@ -271,7 +274,7 @@
       xhr.send(fd);
     };
     const r = $("div", { className: "efb-row" });
-    r.append(up, startBtn, btn("mkdir", "New directory", async () => {
+    r.append(up, owLabel, startBtn, btn("mkdir", "New directory", async () => {
       const n = prompt("New directory name");
       if (n) await api(`/files/mkdir?path=${enc(path + "/" + n)}`, { method: "POST" });
     }, reload));
