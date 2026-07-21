@@ -28,6 +28,18 @@
     }
     return r.json();
   };
+  // Per-operation access advertised by /files/storages. Defaults are permissive so a button is
+  // only ever hidden once the server has said the operation is disabled. Server-side each
+  // disabled operation is still enforced with 403 — this only keeps the UI honest.
+  const ACCESS = { list: true, read: true, write: true, delete: true, mount: true, unmount: true };
+  // /files/storages now returns { access, storages }; capture access and return the array so the
+  // two call sites can keep iterating storages as before.
+  const loadStorages = async () => {
+    const r = await api("/files/storages");
+    if (r && r.access)
+      Object.assign(ACCESS, r.access);
+    return (r && r.storages) || [];
+  };
   // Rewritten by codegen from the file_browser: change_poll_interval option; 0 disables the
   // auto-refresh poll entirely.
   const CHANGE_POLL_MS = 5000;
@@ -300,23 +312,31 @@
     });
   };
 
-  const copyMoveDel = (path, name, isDir, reload) => [
-    btn("copy", "Copy", async () => transferModal("copy", path, name, isDir), reload),
-    btn(isDir ? "movedir" : "move", "Move / rename", async () => transferModal("move", path, name, isDir), reload),
-    btn("del", "Delete", () => confirm(isDir ? `Delete ${name} recursively?` : `Delete ${name}?`)
-      ? api(`/files/delete?path=${enc(path)}${isDir ? "&recursive=1" : ""}`, { method: "POST" }) : Promise.resolve(),
-      reload, "efb-danger"),
-  ];
+  // copy is a read (source read, new file written); move deletes the source, so it is grouped
+  // with delete. Each button appears only when its operation is allowed.
+  const copyMoveDel = (path, name, isDir, reload) => {
+    const out = [];
+    if (ACCESS.read)
+      out.push(btn("copy", "Copy", async () => transferModal("copy", path, name, isDir), reload));
+    if (ACCESS.delete) {
+      out.push(btn(isDir ? "movedir" : "move", "Move / rename", async () => transferModal("move", path, name, isDir), reload));
+      out.push(btn("del", "Delete", () => confirm(isDir ? `Delete ${name} recursively?` : `Delete ${name}?`)
+        ? api(`/files/delete?path=${enc(path)}${isDir ? "&recursive=1" : ""}`, { method: "POST" }) : Promise.resolve(),
+        reload, "efb-danger"));
+    }
+    return out;
+  };
 
   const fileRow = (path, e, depth, reload) => {
     const r = $("div", { className: "efb-row" });
     r.style.paddingLeft = (8 + depth * 18) + "px";
-    const dl = $("a", { title: "Download", className: "efb-act", href: `/files/download?path=${enc(path)}` }, act("download"));
     r.append(
       $("span", { className: "efb-twist efb-none", textContent: "\u25B8" }),
       $("span", { className: "efb-name", textContent: e.name }),
-      $("span", { className: "efb-size", textContent: fmtSize(e.size) }),
-      dl,
+      $("span", { className: "efb-size", textContent: fmtSize(e.size) }));
+    if (ACCESS.read)
+      r.append($("a", { title: "Download", className: "efb-act", href: `/files/download?path=${enc(path)}` }, act("download")));
+    r.append(
       btn("info", "Details", async () => {
         const st = await api(`/files/stat?path=${enc(path)}`);
         alert(`${st.name}\nSize: ${st.size} bytes (${fmtSize(st.size)})\nModified: ${st.mtime ? new Date(st.mtime * 1000).toLocaleString() : "unknown"}`);
@@ -345,8 +365,10 @@
         children.textContent = "";
         if (currentUpload != null && currentUpload.parentNode != null)
           currentUpload.remove();
-        currentUpload = uploadRow(path, reloadChildren);
-        children.append(currentUpload);
+        // Upload + New-directory both write, so the whole row appears only when write is allowed.
+        currentUpload = ACCESS.write ? uploadRow(path, reloadChildren) : null;
+        if (currentUpload != null)
+          children.append(currentUpload);
         const entries = d.entries.slice().sort((a, b) =>
           (b.is_dir - a.is_dir) || a.name.localeCompare(b.name));
         for (const e of entries) {
@@ -445,7 +467,7 @@
     };
     (async () => {
       try {
-        for (const s of await api("/files/storages")) {
+        for (const s of await loadStorages()) {
           if (!s.mounted) continue;
           const rootRow = $("div", { className: "efb-row efb-picker-row" });
           const twist = $("span", { className: "efb-twist", textContent: "\u25B8" });
@@ -715,13 +737,13 @@
     tree.textContent = "";
     openDirs.clear();  // every node below is rebuilt collapsed
     try {
-      const storages = await api("/files/storages");
+      const storages = await loadStorages();
       for (const s of storages) {
                 const extras = s.mounted ? [] : [$("span", { className: "efb-muted", textContent: "not mounted" })];
-        if (s.can_mount && !s.mounted) {
+        if (ACCESS.mount && s.can_mount && !s.mounted) {
           extras.push(btn("mount", "Mount", () => api(`/files/mount?path=${enc(s.mount_path)}`, { method: "POST" }), renderRoots));
         }
-        if (s.can_unmount && s.mounted) {
+        if (ACCESS.unmount && s.can_unmount && s.mounted) {
           extras.push(btn("unmount", "Unmount", () => api(`/files/unmount?path=${enc(s.mount_path)}`, { method: "POST" }), renderRoots));
         }
         const node = dirNode(s.mount_path, s.mount_path, 0, { extras, canExpand: !!s.mounted });

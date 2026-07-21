@@ -59,6 +59,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // Optional single-storage scoping (mirrors http_file_api's storage_id option): when set,
   // only paths under this storage's mount path are served.
   void set_scoped_storage(storage::PathStorage *s) { this->scoped_storage_ = s; }
+  // Per-operation access gates. A disallowed request is answered with 403; the allowed set is
+  // also advertised in /files/storages so the browser hides buttons that could only fail.
+  void set_enable_list(bool enable) { this->enable_list_ = enable; }
+  void set_enable_read(bool enable) { this->enable_read_ = enable; }
+  void set_enable_write(bool enable) { this->enable_write_ = enable; }
+  void set_enable_delete(bool enable) { this->enable_delete_ = enable; }
+  void set_enable_mount(bool enable) { this->enable_mount_ = enable; }
+  void set_enable_unmount(bool enable) { this->enable_unmount_ = enable; }
 
   bool canHandle(AsyncWebServerRequest *request) const override;
   void handleRequest(AsyncWebServerRequest *request) override;
@@ -96,6 +104,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 #endif
   void handle_job_(AsyncWebServerRequest *request);
   void handle_mount_(AsyncWebServerRequest *request, bool mount);
+  // Sends a 403 with a small JSON body; `what` names the disallowed operation group for the log.
+  void send_forbidden_(AsyncWebServerRequest *request, const char *what);
   void handle_upload_response_(AsyncWebServerRequest *request);
 
   static void send_error_(AsyncWebServerRequest *request, storage::StorageError err);
@@ -104,6 +114,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   web_server_base::WebServerBase *base_{nullptr};
   storage::PathStorage *scoped_storage_{nullptr};
   uint16_t max_dir_entries_{64};
+  // All default true: an instance constructed without explicit setters (shouldn't happen via
+  // codegen, but keeps the default permissive) behaves as before.
+  bool enable_list_{true};
+  bool enable_read_{true};
+  bool enable_write_{true};
+  bool enable_delete_{true};
+  bool enable_mount_{true};
+  bool enable_unmount_{true};
   SemaphoreHandle_t op_done_{nullptr};
 
   // Everything this component does in loop() — walking a directory transfer, draining a staged
