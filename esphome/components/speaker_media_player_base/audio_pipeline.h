@@ -77,10 +77,6 @@ class AudioPipeline {
   /// @return ESP_OK if successful or an appropriate error if not
   void start_file(audio::AudioFile *audio_file);
 
-  /// @brief Starts an audio pipeline given a local file path
-  /// @param file_path path to local file (e.g., "/usb/music.mp3", "/sd/audio.flac")
-  void start_file_path(const std::string &file_path);
-
   /// @brief Stops the pipeline. Sends a stop signal to each task (if running) and clears the ring buffers.
   /// @return ESP_OK if successful or ESP_ERR_TIMEOUT if the tasks did not indicate they stopped
   esp_err_t stop();
@@ -125,13 +121,11 @@ class AudioPipeline {
   // Pending file start state used to ensure the pipeline fully stops before attempting to start the next file
   bool pending_url_{false};
   bool pending_file_{false};
-  bool pending_file_path_{false};
 
   speaker::Speaker *speaker_{nullptr};
 
   std::string current_uri_{};
   audio::AudioFile *current_audio_file_{nullptr};
-  std::string current_file_path_;
 
   audio::AudioFileType current_audio_file_type_;
   audio::AudioStreamInfo current_audio_stream_info_;
