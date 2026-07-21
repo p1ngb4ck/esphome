@@ -885,7 +885,7 @@ void LittleFSMount::list_files() const {
     return;
   }
 
-  ESP_LOGI(TAG, "Listing files in LittleFS at %s:", this->mount_path_);
+  ESP_LOGD(TAG, "Listing files in LittleFS at %s:", this->mount_path_);
 
   lfs_dir_t dir;
   int err = lfs_dir_open(lfs_cast(this->lfs_), &dir, "/");
@@ -901,9 +901,9 @@ void LittleFSMount::list_files() const {
       break;
 
     if (info.type == LFS_TYPE_REG) {
-      ESP_LOGI(TAG, "  File: %s, Size: %" PRIu32, info.name, (uint32_t) info.size);
+      ESP_LOGD(TAG, "  File: %s, Size: %" PRIu32, info.name, (uint32_t) info.size);
     } else if (info.type == LFS_TYPE_DIR) {
-      ESP_LOGI(TAG, "  Directory: %s", info.name);
+      ESP_LOGD(TAG, "  Directory: %s", info.name);
     }
   }
 
@@ -1064,7 +1064,7 @@ void LittleFSMount::register_with_vfs_() {
     ESP_LOGE(TAG, "Failed to register LittleFS with VFS: %s", esp_err_to_name(err));
   } else {
     this->vfs_registered_ = true;
-    ESP_LOGI(TAG, "LittleFS registered with VFS at %s", this->mount_path_);
+    ESP_LOGD(TAG, "LittleFS registered with VFS at %s", this->mount_path_);
   }
 }
 

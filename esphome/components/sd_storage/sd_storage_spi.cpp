@@ -20,7 +20,12 @@ extern "C" {
 
 #ifndef VFS_FAT_MOUNT_DEFAULT_CONFIG
 #define VFS_FAT_MOUNT_DEFAULT_CONFIG() \
-  { .format_if_mount_failed = false, .max_files = 5, .allocation_unit_size = 0, .disk_status_check_enable = false, }
+  { \
+      .format_if_mount_failed = false, \
+      .max_files = 5, \
+      .allocation_unit_size = 0, \
+      .disk_status_check_enable = false, \
+  }
 #endif
 
 namespace esphome::sd_storage {
@@ -32,7 +37,7 @@ using storage::StorageError;
 using storage::StorageInfo;
 
 void SdSpi::setup() {
-  ESP_LOGI(TAG_SPI, "Initializing SD card in SPI mode");
+  ESP_LOGD(TAG_SPI, "Initializing SD card in SPI mode");
 
   auto setup_input_pullup = [](GPIOPin *pin) {
     pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
@@ -70,7 +75,7 @@ void SdSpi::setup() {
         ESP_LOGE(TAG_SPI, "Failed to mount SD card");
       }
     } else {
-      ESP_LOGI(TAG_SPI, "Waiting for card (CD)");
+      ESP_LOGD(TAG_SPI, "Waiting for card (CD)");
     }
   } else if (this->mount() != StorageError::OK) {
     ESP_LOGE(TAG_SPI, "Failed to mount SD card");
@@ -205,7 +210,7 @@ void SdSpi::unmount_manual_() {
 #endif  // USE_STORAGE_FILE_SYSTEM_SELECT
 
 StorageError SdSpi::mount() {
-  ESP_LOGI(TAG_SPI, "Mounting SD card via SPI");
+  ESP_LOGD(TAG_SPI, "Mounting SD card via SPI");
 
   esp_vfs_fat_sdmmc_mount_config_t mount_config = VFS_FAT_MOUNT_DEFAULT_CONFIG();
   mount_config.format_if_mount_failed = false;
@@ -308,11 +313,11 @@ StorageError SdSpi::unmount() {
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->quiesce_storage(this);
 
-  ESP_LOGI(TAG_SPI, "Syncing filesystem before unmount");
+  ESP_LOGD(TAG_SPI, "Syncing filesystem before unmount");
   // Closes any handles still open from user/lambda code, while the VFS is still mounted to
   // receive the flush/close calls.
   this->flush_open_handles_();
-  ESP_LOGI(TAG_SPI, "All data flushed");
+  ESP_LOGD(TAG_SPI, "All data flushed");
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
   this->unmount_manual_();

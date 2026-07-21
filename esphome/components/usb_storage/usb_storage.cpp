@@ -223,7 +223,7 @@ bool USBStorageClient::scsi_inquiry_() {
   char vendor[9]{}, product[17]{};
   memcpy(vendor, resp.vendor_id, 8);
   memcpy(product, resp.product_id, 16);
-  ESP_LOGI(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
+  ESP_LOGD(TAG, "SCSI INQUIRY: vendor='%s' product='%s' type=0x%02X", vendor, product,
            resp.peripheral_qualifier_type & 0x1F);
   return (resp.peripheral_qualifier_type & 0x1F) == 0x00;
 }
@@ -250,7 +250,7 @@ bool USBStorageClient::scsi_read_capacity_() {
 
   this->sector_count_ = __builtin_bswap32(resp.last_lba) + 1;
   this->sector_size_ = __builtin_bswap32(resp.block_size);
-  ESP_LOGI(TAG, "SCSI READ CAPACITY: sectors=%" PRIu32 " sector_size=%" PRIu32 " (%.1f MB)", this->sector_count_,
+  ESP_LOGD(TAG, "SCSI READ CAPACITY: sectors=%" PRIu32 " sector_size=%" PRIu32 " (%.1f MB)", this->sector_count_,
            this->sector_size_, static_cast<float>(this->sector_count_) * this->sector_size_ / (1024.0f * 1024.0f));
   return this->sector_size_ > 0 && this->sector_count_ > 0;
 }
@@ -531,13 +531,13 @@ void USBStorageDevice::unmount_device() {
     this->client_->unmount_filesystem();
 }
 
-void USBStorageDevice::log_list_dir_start_(const char *path) const { ESP_LOGI(TAG, "Listing files in: %s", path); }
+void USBStorageDevice::log_list_dir_start_(const char *path) const { ESP_LOGD(TAG, "Listing files in: %s", path); }
 
 bool USBStorageDevice::log_list_dir_entry(const storage::FileStat *entry, void *ctx) {
   if (entry->is_dir) {
-    ESP_LOGI(TAG, "  [DIR]  %s", entry->name);
+    ESP_LOGD(TAG, "  [DIR]  %s", entry->name);
   } else {
-    ESP_LOGI(TAG, "  [FILE] %s (%llu bytes)", entry->name, static_cast<unsigned long long>(entry->size));
+    ESP_LOGD(TAG, "  [FILE] %s (%llu bytes)", entry->name, static_cast<unsigned long long>(entry->size));
   }
   return true;  // keep enumerating — this is a "list everything" action
 }
@@ -637,7 +637,7 @@ storage::StorageError USBStorageDevice::unmount() {
   // no worker job referencing this device). Typical USB "safe eject" behaviour: in-flight
   // transfers finish, then we sync and unmount. Returns OK = unmount accepted/initiated.
   this->unmount_pending_ = true;
-  ESP_LOGI(TAG, "Unmount requested; will complete once active transfers finish");
+  ESP_LOGD(TAG, "Unmount requested; will complete once active transfers finish");
   return storage::StorageError::OK;
 }
 

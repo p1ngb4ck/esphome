@@ -99,7 +99,7 @@ void SPIFlash::auto_configure_from_jedec_id_() {
   // Codes 11-25 cover 2KB to 32MB (code 25 = 32MB for 256Mbit chips)
   if (capacity_code >= 11 && capacity_code <= 25) {
     this->capacity_ = 1UL << capacity_code;
-    ESP_LOGI(TAG, "Auto-detected capacity: %" PRIu32 " bytes (%.1f MB)", this->capacity_,
+    ESP_LOGD(TAG, "Auto-detected capacity: %" PRIu32 " bytes (%.1f MB)", this->capacity_,
              this->capacity_ / (1024.0f * 1024.0f));
   }
 
@@ -107,11 +107,11 @@ void SPIFlash::auto_configure_from_jedec_id_() {
   if (this->jedec_id_ == 0xC22019) {
     // Macronix MX25L25635F - 256Mbit (32MB) 3.3V SPI NOR Flash
     // Commonly found in PlayStation 4 consoles (SAA-001, SAB-001)
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Detected: Macronix MX25L25635F");
-    ESP_LOGI(TAG, "  256Mbit (32MB) 3.3V SPI NOR Flash");
-    ESP_LOGI(TAG, "  4-byte addressing required");
-    ESP_LOGI(TAG, "========================================");
+    ESP_LOGD(TAG, "========================================");
+    ESP_LOGD(TAG, "  Detected: Macronix MX25L25635F");
+    ESP_LOGD(TAG, "  256Mbit (32MB) 3.3V SPI NOR Flash");
+    ESP_LOGD(TAG, "  4-byte addressing required");
+    ESP_LOGD(TAG, "========================================");
     return;
   }
 
@@ -204,7 +204,7 @@ bool SPIFlash::enable_quad_mode_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "Quad mode enabled successfully");
+  ESP_LOGD(TAG, "Quad mode enabled successfully");
   return true;
 }
 
@@ -240,7 +240,7 @@ bool SPIFlash::disable_quad_mode_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "Quad mode disabled successfully");
+  ESP_LOGD(TAG, "Quad mode disabled successfully");
   return true;
 }
 
@@ -328,7 +328,7 @@ bool SPIFlash::enter_4byte_mode_() {
   this->disable();
 
   if (config_reg & 0x20) {
-    ESP_LOGI(TAG, "Entered 4-byte address mode (verified, CR=0x%02X)", config_reg);
+    ESP_LOGD(TAG, "Entered 4-byte address mode (verified, CR=0x%02X)", config_reg);
   } else {
     ESP_LOGE(TAG, "4-byte address mode NOT confirmed! CR=0x%02X (bit 5 not set)", config_reg);
     ESP_LOGE(TAG, "Operations above 16MB will fail! Check chip compatibility.");
@@ -345,7 +345,7 @@ bool SPIFlash::exit_4byte_mode_() {
   this->disable();
 
   this->four_byte_mode_ = false;
-  ESP_LOGI(TAG, "Exited 4-byte address mode");
+  ESP_LOGD(TAG, "Exited 4-byte address mode");
   return true;
 }
 
