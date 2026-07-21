@@ -577,22 +577,36 @@
     // Raw jobs poll /raw/job (their own endpoint + result cache): /files/job never learned a
     // raw job's final result — the worker recycles the slot right after completion, the poll
     // then 404'd and every raw error was silently swallowed as "done".
+    // Human phase prefix for the status line: "erasing… ", "verifying (pass 2/3)… ", etc.
+    // Empty for the plain write phase and for phase-less jobs.
+    const phaseLabel = (s) => {
+      if (s.phase === "erase") return "erasing ";
+      if (s.phase === "verify") {
+        const p = s.verify_passes > 1 ? ` (pass ${s.verify_pass}/${s.verify_passes})` : "";
+        return `verifying${p} `;
+      }
+      return "";
+    };
     const waitRawJob = async (job, label) => {
+      let verified = 0;
       for (;;) {
         await new Promise((res) => setTimeout(res, 500));
         let s;
         try { s = await api(`/raw/job?id=${job}`); } catch (e) { break; }
         if (!s || s.state === undefined) break;
+        if (s.phase === "verify" && s.verify_passes) verified = s.verify_passes;
         if (s.state === "done") {
           // error_to_string() spells success "OK" (uppercase) — comparing against "ok" turned
           // every successful job into a reported error.
           if (s.result && s.result !== "OK") throw new Error(`${label}: ${s.result}`);
           break;
         }
-        if (s.bytes_total > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
-        else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${fmtSize(s.bytes_done)}`);
+        if (s.bytes_total > 0) setStatus(`${label}\u2026 ${phaseLabel(s)}${fmtSize(s.bytes_done)} / ${fmtSize(s.bytes_total)}`);
+        else if (s.bytes_done > 0) setStatus(`${label}\u2026 ${phaseLabel(s)}${fmtSize(s.bytes_done)}`);
+        else if (s.phase) setStatus(`${label}\u2026 ${phaseLabel(s)}`.trim());
       }
-      setStatus(`${label} \u2014 done`);
+      const vsuffix = verified ? ` \u2014 verified (${verified} pass${verified > 1 ? "es" : ""})` : "";
+      setStatus(`${label} \u2014 done${vsuffix}`);
       // Relist whatever is expanded — same as the change poll's reset path. (A raw job may
       // have written a file into any open directory.)
       for (const r of openDirs.values()) r().catch(() => {});
@@ -642,7 +656,7 @@
         }), () => {}));
       }
       if (dev.writable) {
-        acts.push(btn("info", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
+        acts.push(btn("verify", "Verify against a file", async () => modal(`Verify ${dev.node_name} against a file`, [
           { key: "address", label: "Address", value: "0x0" },
           { key: "from_path", label: "File on device", hint: "/sdcard/fw.bin" },
           { type: "picker", mode: "file", target: "from_path", label: "…or pick a file:" },

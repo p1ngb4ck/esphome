@@ -454,6 +454,22 @@ bool StorageWorker::get_transfer_status(TransferJob job, TransferStatus *out) co
   out->bytes_total = req.bytes_total.load();
   out->file_done = req.file_done.load();
   out->file_total = req.file_total.load();
+  // Coarse phase for the status line. Only raw write/verify jobs have phases; a running job
+  // is verifying if the chunk loop flagged it, still erasing while the erase cursor trails its
+  // end, otherwise writing. verify_pass is 1-based within the verify phase.
+  out->phase = TransferPhase::NONE;
+  out->verify_passes = req.verify_passes;
+  out->verify_pass = 0;
+  if (state == RequestState::RUNNING) {
+    if (req.verifying) {
+      out->phase = TransferPhase::VERIFY;
+      out->verify_pass = static_cast<uint8_t>(req.verify_pass_done + 1);
+    } else if (req.raw_erase_pos < req.raw_erase_end) {
+      out->phase = TransferPhase::ERASE;
+    } else if (req.op == RequestOp::RAW_WRITE_FROM_FILE) {
+      out->phase = TransferPhase::WRITE;
+    }
+  }
   // Label of the file in flight: for a tree src_path holds exactly that (tree_step_ reuses
   // the single-file fields); basename only and truncated — this feeds a status line. The
   // worker task may be rewriting src_path between files while we copy; the counters above
@@ -908,6 +924,8 @@ bool StorageWorker::verify_chunk_(TransferRequest &req) {
       return false;
     }
     if (memcmp(req.chunk_buf.get() + compared, cmp, fgot) != 0) {
+      ESP_LOGW(TAG, "Verify FAILED: mismatch on pass %u/%u at byte %llu", req.verify_pass_done + 1, req.verify_passes,
+               static_cast<unsigned long long>(req.offset + compared));
       finish_request(req, StorageError::VERIFY_MISMATCH);
       return false;
     }
@@ -1166,6 +1184,12 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
       if (!this->begin_verify_pass_(req))
         return;  // begin_verify_pass_ finished the request on error
       return;
+    }
+    // Overall verify result to the log (individual passes are not logged): all requested
+    // passes read back and matched the source.
+    if (!to_file && req.verify_passes > 0) {
+      ESP_LOGI(TAG, "Verify OK: %u/%u pass(es) matched over %llu bytes", req.verify_pass_done, req.verify_passes,
+               static_cast<unsigned long long>(total));
     }
     finish_request(req, StorageError::OK);
     return;
