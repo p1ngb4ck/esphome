@@ -736,9 +736,16 @@ RamBuffer alloc_dma_capable(size_t want, bool on_task, size_t *actual_size) {
 #else
   constexpr bool psram_dma = false;
 #endif
-  // Task path on a PSRAM-DMA chip: try a 32 kB DMA-capable PSRAM chunk first. On failure fall
+  // Task path on a PSRAM-DMA chip: stage a large DMA-capable PSRAM chunk. Sizes match the
+  // proven throughput of the previous monolithic component — 64 kB on P4 (wide SDMMC bus +
+  // guaranteed PSRAM), 32 kB on S3. Bigger fread/fwrite blocks cut per-call VFS/FatFs overhead,
+  // and the task carries no 20 ms loop budget so the larger block is safe here. On failure fall
   // through to the internal path below at `want` (never leaves the transfer without a buffer).
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  constexpr size_t TASK_PSRAM_CHUNK = 65536;
+#else
   constexpr size_t TASK_PSRAM_CHUNK = 32768;
+#endif
   if (on_task && psram_dma) {
     raw = static_cast<uint8_t *>(heap_caps_malloc(TASK_PSRAM_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
     if (raw != nullptr) {

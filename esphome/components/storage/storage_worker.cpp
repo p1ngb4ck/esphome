@@ -30,7 +30,7 @@ void StorageWorker::setup() {
 void StorageWorker::dump_config() {
   // Fixed at compile time (STORAGE_COPY_CHUNK_SIZE and the variant flags) — surfaces the
   // resolved buffer policy in the boot log. Loop path is always `chunk` bytes internal (20 ms
-  // budget); the worker task on S3/P4 stages a 32 kB chunk in DMA-capable PSRAM.
+  // budget); the worker task on S3/P4 stages a 64 kB (P4) / 32 kB (S3) chunk in DMA-capable PSRAM.
   const size_t chunk = STORAGE_COPY_CHUNK_SIZE;
 #if defined(USE_ESP32_VARIANT_ESP32S3)
   const char *platform = "ESP32-S3";
@@ -48,7 +48,12 @@ void StorageWorker::dump_config() {
   ESP_LOGCONFIG(TAG, "Storage worker:");
   ESP_LOGCONFIG(TAG, "  Loop chunk: %u bytes (internal RAM, DMA-capable)", (unsigned) chunk);
   if (psram_dma_capable) {
-    ESP_LOGCONFIG(TAG, "  Task chunk: 32768 bytes (PSRAM, DMA-capable)");
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+    const unsigned task_chunk = 65536;
+#else
+    const unsigned task_chunk = 32768;
+#endif
+    ESP_LOGCONFIG(TAG, "  Task chunk: %u bytes (PSRAM, DMA-capable)", task_chunk);
   } else {
     ESP_LOGCONFIG(TAG, "  Task chunk: %u bytes (internal RAM, DMA-capable)", (unsigned) chunk);
   }

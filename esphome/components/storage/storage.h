@@ -90,7 +90,7 @@ static constexpr size_t STORAGE_NAME_MAX = 255;
 // transfers. Overridable from YAML (storage: copy_chunk_size); when absent the codegen sets a
 // flat 16 kB default (the most a slow SD write clears inside one 20 ms main-loop slice — see
 // alloc_dma_capable). The platform distinction is not here but in that allocator: the worker
-// task on S3/P4 stages a 32 kB DMA-capable PSRAM chunk, every loop-path buffer stays this size
+// task on S3/P4 stages a 64 kB (P4) / 32 kB (S3) DMA-capable PSRAM chunk, every loop-path buffer stays this size
 // internal. The 16 kB below is only the compile fallback when the define is missing (e.g.
 // clang-tidy, which never sees generated defines).
 #ifdef USE_STORAGE_COPY_CHUNK_SIZE
@@ -525,9 +525,10 @@ using RamBuffer = std::unique_ptr<uint8_t[], RamBufferDeleter>;
 //   - loop path (on_task = false), and every non-PSRAM-DMA chip: `want` bytes in internal,
 //     DMA-capable RAM, halving to a 4 kB floor under memory pressure. 16 kB is the safe default
 //     (the most a slow SD write clears inside one 20 ms loop slice).
-//   - worker task (on_task = true) on S3/P4 (PSRAM can be a DMA target): a 32 kB chunk in
-//     MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA (the allocator handles cache/DMA alignment), falling
-//     back to the internal path at `want` if PSRAM is tight. The task has no 20 ms budget, so a
+//   - worker task (on_task = true) on S3/P4 (PSRAM can be a DMA target): a 64 kB (P4) / 32 kB
+//     (S3) chunk in MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA (the allocator handles cache/DMA
+//     alignment), falling back to the internal path at `want` if PSRAM is tight. The task has no
+//     20 ms budget, so a
 //     larger chunk cuts I/O calls and DMAs straight out of PSRAM.
 // On success *actual_size holds the size obtained. Frees through RamBufferDeleter regardless of
 // heap (free() == heap_caps_free() on ESP32). Returns a null RamBuffer if even 4 kB cannot be met.
