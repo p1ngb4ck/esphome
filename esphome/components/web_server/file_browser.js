@@ -265,33 +265,41 @@
     return r;
   };
 
-  // Copy and move share one flow. The API refuses an existing destination with 409 instead of
-  // replacing it silently, so that is exactly where the user gets asked — and only then does
-  // overwrite=1 go out.
-  const transfer = async (op, from, to) => {
-    const q = `from=${enc(from)}&to=${enc(to)}`;
-    let r = await fetch(`/files/${op}?${q}`, { method: "POST" });
-    if (r.status === 409) {
-      if (!confirm(`${to} already exists \u2014 overwrite it?`)) return;
-      r = await fetch(`/files/${op}?${q}&overwrite=1`, { method: "POST" });
-    }
+  // Copy and move share one flow. overwrite is chosen up front in the modal; when it is off and
+  // the destination exists the API still answers 409, which we surface as an error.
+  const transfer = async (op, from, to, overwrite) => {
+    const q = `from=${enc(from)}&to=${enc(to)}${overwrite ? "&overwrite=1" : ""}`;
+    const r = await fetch(`/files/${op}?${q}`, { method: "POST" });
     if (!r.ok) {
-      let msg = r.status;
+      let msg = r.status === 409 ? `${to} already exists (enable overwrite to replace)` : r.status;
       try { msg = (await r.json()).error || msg; } catch (e) {}
       throw new Error(msg);
     }
     await pollJob((await r.json()).job, op);
   };
 
+  // Target picker shared by copy and move: pick a destination directory (or type it), give the
+  // new name, choose overwrite. dir + name compose the full destination path.
+  const transferModal = (op, path, name, isDir) => {
+    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+    modal(`${op === "copy" ? "Copy" : "Move / rename"} ${isDir ? "directory " : ""}${name}`, [
+      { key: "to_dir", label: "Destination directory", value: parent },
+      { type: "picker", mode: "dir", target: "to_dir", label: "…or pick a destination directory:" },
+      { key: "new_name", label: "Name", value: name },
+      { key: "overwrite", label: "Overwrite if it exists", type: "check", value: false },
+      { type: "note", compute: (v) =>
+        "Destination: " + ((v.to_dir || parent).replace(/\/$/, "")) + "/" + (v.new_name || name) },
+    ], async (v) => {
+      const dir = (v.to_dir || parent).replace(/\/$/, "");
+      const nm = (v.new_name || name).trim();
+      if (!nm) throw new Error("no name given");
+      await transfer(op, path, dir + "/" + nm, v.overwrite);
+    });
+  };
+
   const copyMoveDel = (path, name, isDir, reload) => [
-    btn("copy", "Copy", async () => {
-      const to = prompt(`Copy ${isDir ? "directory " : ""}to (full path)`, path);
-      if (to) await transfer("copy", path, to);
-    }, reload),
-    btn(isDir ? "movedir" : "move", "Move / rename", async () => {
-      const to = prompt(`Move/rename ${isDir ? "directory " : ""}to (full path)`, path);
-      if (to) await transfer("move", path, to);
-    }, reload),
+    btn("copy", "Copy", async () => transferModal("copy", path, name, isDir), reload),
+    btn(isDir ? "movedir" : "move", "Move / rename", async () => transferModal("move", path, name, isDir), reload),
     btn("del", "Delete", () => confirm(isDir ? `Delete ${name} recursively?` : `Delete ${name}?`)
       ? api(`/files/delete?path=${enc(path)}${isDir ? "&recursive=1" : ""}`, { method: "POST" }) : Promise.resolve(),
       reload, "efb-danger"),
