@@ -7,15 +7,26 @@ from esphome.components.const import CONF_SHA256
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PATH, CONF_SOURCE, CONF_TYPE
 from esphome.core import CORE, ID, HexInt
+from esphome.types import ConfigType
 
 CODEOWNERS = ["@swoboda1337"]
-AUTO_LOAD = ["sha256", "watchdog", "json"]
 DEPENDENCIES = ["esp32_hosted"]
 
 CONF_HTTP_REQUEST_ID = "http_request_id"
 
 TYPE_EMBEDDED = "embedded"
 TYPE_HTTP = "http"
+TYPE_STORAGE = "storage"
+
+
+def AUTO_LOAD(config: ConfigType) -> list[str]:
+    """sha256/watchdog/json are always needed; the storage firmware source additionally needs
+    the storage component, pulled in only when 'type: storage' is selected — other sources pay
+    nothing for it."""
+    base = ["sha256", "watchdog", "json"]
+    if config and config.get(CONF_TYPE) == TYPE_STORAGE:
+        return base + ["storage"]
+    return base
 
 esp32_hosted_ns = cg.esphome_ns.namespace("esp32_hosted")
 http_request_ns = cg.esphome_ns.namespace("http_request")
@@ -54,11 +65,22 @@ HTTP_SCHEMA = BASE_SCHEMA.extend(
     }
 )
 
+# Read the co-processor firmware from a mounted storage at runtime. CONF_SOURCE is a plain
+# storage path (e.g. /sdcard/slave_fw.bin) resolved through the storage registry — not a URL and
+# not a build-time file, so it is validated as a string and never opened during config.
+STORAGE_SCHEMA = BASE_SCHEMA.extend(
+    {
+        cv.Required(CONF_SOURCE): cv.string_strict,
+        cv.Required(CONF_SHA256): _validate_sha256,
+    }
+)
+
 CONFIG_SCHEMA = cv.All(
     cv.typed_schema(
         {
             TYPE_EMBEDDED: EMBEDDED_SCHEMA,
             TYPE_HTTP: HTTP_SCHEMA,
+            TYPE_STORAGE: STORAGE_SCHEMA,
         }
     ),
     esp32.only_on_variant(
@@ -91,7 +113,8 @@ FINAL_VALIDATE_SCHEMA = _validate_firmware
 async def to_code(config: dict[str, Any]) -> None:
     var = await update.new_update(config)
 
-    if config[CONF_TYPE] == TYPE_EMBEDDED:
+    firmware_type = config[CONF_TYPE]
+    if firmware_type == TYPE_EMBEDDED:
         path = config[CONF_PATH]
         with CORE.relative_config_path(path).open("rb") as f:
             firmware_data = f.read()
@@ -103,6 +126,13 @@ async def to_code(config: dict[str, Any]) -> None:
         cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
         cg.add(var.set_firmware_data(prog_arr))
         cg.add(var.set_firmware_size(len(firmware_data)))
+    elif firmware_type == TYPE_STORAGE:
+        # Read the firmware from a mounted storage at runtime. The path is resolved through the
+        # storage registry when the update is performed; the sha256 is verified while streaming.
+        sha256_bytes = bytes.fromhex(config[CONF_SHA256])
+        cg.add(var.set_firmware_sha256([HexInt(b) for b in sha256_bytes]))
+        cg.add(var.set_storage_path(config[CONF_SOURCE]))
+        cg.add_define("USE_ESP32_HOSTED_STORAGE_UPDATE")
     else:
         http_request_var = await cg.get_variable(config[CONF_HTTP_REQUEST_ID])
         cg.add(var.set_http_request_parent(http_request_var))
