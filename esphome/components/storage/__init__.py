@@ -522,10 +522,13 @@ _EXTRACT_STEP_SCHEMA = cv.All(
             cv.Optional(CONF_LINE): cv.positive_not_null_int,
             # '/'-separated pointer into a JSON document ("a/b/0").
             cv.Optional(CONF_JSON): cv.string_strict,
-            cv.Optional(CONF_SPLIT): cv.string_strict,
+            # Non-empty: an empty separator makes the split loop spin without advancing and
+            # hand back the whole buffer, and an empty key matches every line -- both are
+            # silently useless rather than wrong, which is worse to debug than a rejection.
+            cv.Optional(CONF_SPLIT): cv.All(cv.string_strict, cv.Length(min=1)),
             cv.Optional(CONF_INDEX): cv.positive_int,
-            cv.Optional(CONF_KEY): cv.string_strict,
-            cv.Optional(CONF_SEPARATOR): cv.string_strict,
+            cv.Optional(CONF_KEY): cv.All(cv.string_strict, cv.Length(min=1)),
+            cv.Optional(CONF_SEPARATOR): cv.All(cv.string_strict, cv.Length(min=1)),
             cv.Optional(CONF_REGEX): _validate_regex,
             cv.Optional(CONF_GROUP): cv.positive_int,
             cv.Optional(CONF_TRIM): cv.boolean,
