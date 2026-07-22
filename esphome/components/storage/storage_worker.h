@@ -153,7 +153,10 @@ struct TransferStatus {
 // Position inside a directory tree, allocated only for COPY_TREE/MOVE_TREE. Kept out of
 // TransferRequest so a pool sized for plain file transfers does not carry it per slot.
 struct TreeWalk {
-  static constexpr size_t MAX_DEPTH = 8;
+  // Same bound as the blocking walks in storage.cpp: a tree this walk creates has to stay
+  // within what copy()/remove_recursive() can handle afterwards, so both refuse at the same
+  // nesting. One index slot per level, root level included — hence the + 1.
+  static constexpr size_t MAX_DEPTH = STORAGE_MAX_RECURSION_DEPTH + 1;
 
   char src_root[STORAGE_WORKER_MAX_PATH]{};
   char dst_root[STORAGE_WORKER_MAX_PATH]{};

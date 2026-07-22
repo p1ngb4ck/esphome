@@ -1345,7 +1345,8 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
 
     if (ctx.entry.is_dir) {
       if (w.depth + 1 >= TreeWalk::MAX_DEPTH) {
-        finish_request(req, StorageError::NOT_SUPPORTED);
+        // Same answer the blocking walks give for the same reason (storage.cpp).
+        finish_request(req, StorageError::INVALID_ARGS);
         return false;
       }
       char dst_dir[STORAGE_WORKER_MAX_PATH];
