@@ -12,7 +12,7 @@ from esphome.components.storage import (
     MountableStorage,
     file_system_to_code,
     final_validate_file_system,
-    request_path_length,
+    request_fatfs_path_length,
     request_storage_device,
     request_storage_worker,
     validate_file_system_value,
@@ -379,8 +379,9 @@ async def to_code(config):
         cg.add(var.set_cd_pin(await cg.gpio_pin_expression(cd_pin)))
 
     request_storage_device()
-    # FATFS long filenames: 255 characters plus the terminator.
-    request_path_length(256)
+    # Bounded by FATFS long filenames, i.e. by CONFIG_FATFS_MAX_LFN — resolved at codegen
+    # time rather than baked in, so a user who lowers it gets a matching API bound.
+    request_fatfs_path_length()
     # SdMmc has a dedicated SDIO controller and is always safe to drive from the worker's
     # background task. SdSpi shares a general SPI bus, so it is task-safe only when the user has
     # opted in with assume_exclusive_bus (enforced in FINAL_VALIDATE: alone on the bus).

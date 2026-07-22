@@ -17,7 +17,7 @@ from esphome.components.storage import (
     MountableStorage,
     file_system_to_code,
     final_validate_file_system,
-    request_path_length,
+    request_fatfs_path_length,
     request_storage_device,
     request_storage_worker,
     validate_file_system_value,
@@ -71,8 +71,9 @@ async def register_usb_storage_device(device_config, storage_client):
     cg.add(storage_client.add_device(var))
 
     request_storage_device()
-    # FATFS long filenames: 255 characters plus the terminator.
-    request_path_length(256)
+    # Bounded by FATFS long filenames, i.e. by CONFIG_FATFS_MAX_LFN — resolved at codegen
+    # time rather than baked in, so a user who lowers it gets a matching API bound.
+    request_fatfs_path_length()
     # USB MSC transfers are self-contained (own endpoint transfers via a FreeRTOS semaphore, no
     # shared bus with other main-loop-driven components) — task-safe, unlike e.g. SdSpi.
     request_storage_worker(task_safe=True)
