@@ -103,9 +103,16 @@ CONFIG_SCHEMA = cv.Schema(
         # raises the tree walks' stack use -- two buffers per recursion level -- so the range
         # is bounded and _validate_walk_budget() below checks it against task_stack_size.
         cv.Optional(CONF_PATH_MAX): cv.int_range(min=64, max=1024),
-        # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
-        # preserves current behavior). See max_blocking_transfer_size's comment in storage.h.
-        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=0): cv.int_range(min=0),
+        # Guard-rail for the blocking copy/read/write helpers, which hold the whole payload
+        # in RAM: storage.file_read takes whatever size the file happens to be, and on a node
+        # without PSRAM that is the one storage action whose cost the automation author does
+        # not choose. Anything bigger belongs on the worker (storage.file_copy, raw_write
+        # from_file). It also bounds storage.preferences_export/import, which share these
+        # helpers -- an export past the ceiling is a sign to narrow it with the action's
+        # `preferences:` filter. 0 disables the check. See storage.h for the C++ side.
+        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=16384): cv.int_range(
+            min=0
+        ),
         # A same-storage move is a rename, which some backends refuse across their own
         # internals (an NFS export can span file systems, and RENAME never crosses one).
         # On, such a refusal is redone as copy + remove so the move still happens; off, it is

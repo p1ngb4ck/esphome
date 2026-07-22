@@ -403,7 +403,10 @@ class StorageRegistry : public Component {
   // Guard-rail for the BLOCKING helpers below (read_file()/write_file()/copy()/move()):
   // transfers larger than this are rejected with StorageError::TRANSFER_TOO_LARGE instead of
   // freezing the node, so callers get routed through the async worker (storage_worker.h)
-  // instead. 0 (default) means unlimited — preserves current behavior.
+  // instead. These helpers hold the whole payload in RAM, so the ceiling is what keeps an
+  // automation from asking for a file whose size it never chose — the bulk paths are the
+  // worker's. Codegen sets it from YAML (max_blocking_transfer_size); 0 disables the check
+  // entirely, which only makes sense when every caller bounds its own sizes.
   void set_max_blocking_transfer_size(uint64_t size) { this->max_blocking_transfer_size_ = size; }
   uint64_t get_max_blocking_transfer_size() const { return this->max_blocking_transfer_size_; }
 
