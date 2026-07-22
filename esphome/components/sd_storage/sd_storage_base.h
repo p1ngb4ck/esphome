@@ -26,7 +26,7 @@ enum class CardType : uint8_t {
 };
 
 struct SdFileHandle : public storage::FileHandle {
-  char path_buf[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)]{};
+  char path_buf[(ESP_VFS_PATH_MAX + storage::STORAGE_PATH_MAX + 1)]{};
 };
 
 template<typename... Ts> class MountCardAction;
