@@ -1010,7 +1010,7 @@ bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
 
   total_bytes = tbytes;
   free_bytes = fbytes;
-  ESP_LOGD(TAG, "FSSTAT: total=%llu, free=%llu, avail=%llu", tbytes, fbytes, abytes);
+  ESP_LOGV(TAG, "FSSTAT: total=%llu, free=%llu, avail=%llu", tbytes, fbytes, abytes);
   return true;
 }
 
@@ -1549,7 +1549,7 @@ bool NFSClient::resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFil
   fh = this->root_fh_;
 
   if (path.empty() || path == "/") {
-    ESP_LOGD(TAG, "resolve_path_: getting root attributes");
+    ESP_LOGV(TAG, "resolve_path_: getting root attributes");
     return this->nfs_getattr_(fh, attr);
   }
 
@@ -1983,7 +1983,7 @@ bool NFSClient::nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &
 }
 
 bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries) {
-  ESP_LOGI(TAG, "NFS READDIRPLUS starting");
+  ESP_LOGV(TAG, "NFS READDIRPLUS starting");
   entries.clear();
   uint64_t cookie = 0;
   uint8_t cookieverf[8] = {0};
@@ -2080,7 +2080,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     if (eof) {
-      ESP_LOGI(TAG, "READDIRPLUS: Got %" PRIu32 " entries", (uint32_t) entries.size());
+      ESP_LOGV(TAG, "READDIRPLUS: Got %" PRIu32 " entries", (uint32_t) entries.size());
       break;
     }
 
