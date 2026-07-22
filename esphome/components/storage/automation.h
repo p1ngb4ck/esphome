@@ -132,7 +132,10 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 
 // Non-template workers for the actions below — all error logging lives in the .cpp.
 void perform_mount(MountableStorage *target, bool mount);
-void perform_file_copy(const std::string &from, const std::string &to, bool is_move);
+// Returns the error so the no-worker fallback in perform_file_copy_async() can report it —
+// on_complete's contract is "error text, empty = success", which a void return cannot honour.
+// The raw helpers below already work this way.
+StorageError perform_file_copy(const std::string &from, const std::string &to, bool is_move);
 // Async variant used by FileCopyAction: submits to the worker (or, if the worker is not
 // compiled in, runs the blocking helper and fires the trigger inline). `on_complete` receives
 // the error text (empty = success) and may be nullptr.

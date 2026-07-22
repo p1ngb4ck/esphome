@@ -563,12 +563,12 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 }
 #endif  // USE_STORAGE_RAW_ACTIONS
 
-void perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
+StorageError perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
   const char *op = is_move ? "move" : "copy";
   ESP_LOGI(TAG, "Transfer started: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "file_%s: no storage registry", op);
-    return;
+    return StorageError::NOT_READY;
   }
   const char *src_rel = nullptr;
   const char *dst_rel = nullptr;
@@ -576,7 +576,7 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   PathStorage *dst = global_storage_registry->resolve_path(to.c_str(), &dst_rel);
   if (src == nullptr || dst == nullptr) {
     ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, src == nullptr ? from.c_str() : to.c_str());
-    return;
+    return StorageError::NOT_FOUND;
   }
   // move() internally takes the same-storage rename() fast path and only falls back to
   // copy+delete across devices — so this action doubles as a rename action. Both helpers are
@@ -585,9 +585,10 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   StorageError err = is_move ? move(src, src_rel, dst, dst_rel) : copy(src, src_rel, dst, dst_rel);
   if (err != StorageError::OK) {
     ESP_LOGE(TAG, "file_%s: '%s' -> '%s' failed (%s)", op, from.c_str(), to.c_str(), error_to_string(err));
-    return;
+    return err;
   }
   ESP_LOGI(TAG, "Transfer done: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
+  return StorageError::OK;
 }
 
 void perform_file_copy_async(const std::string &from, const std::string &to, bool is_move,
@@ -646,9 +647,9 @@ void perform_file_copy_async(const std::string &from, const std::string &to, boo
   // No worker compiled in (raw-only node, or no path driver requested it): fall back to the
   // blocking helper. This can exceed the 30 ms loop budget for large transfers — the async
   // path above is the norm; this is only the degenerate no-worker build.
-  perform_file_copy(from, to, is_move);
+  StorageError err = perform_file_copy(from, to, is_move);
   if (on_complete != nullptr)
-    on_complete->trigger(std::string());  // best-effort: the sync helper only logs on failure
+    on_complete->trigger(err == StorageError::OK ? std::string() : std::string(error_to_string(err)));
 }
 
 void perform_file_delete(const std::string &path, bool recursive) {
