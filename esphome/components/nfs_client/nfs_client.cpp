@@ -4,6 +4,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/network/util.h"
 
+#include <cerrno>
 #include <cstring>
 #include <algorithm>
 
@@ -1046,7 +1047,8 @@ bool NFSClient::resolve_hostname_() {
     }
   }
 
-  struct addrinfo hints{}, *result = nullptr;
+  struct addrinfo hints {
+  }, *result = nullptr;
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
