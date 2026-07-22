@@ -139,6 +139,20 @@ script:
                 path: /sdcard/tmp
                 recursive: true
 
+  # Instantiates the preference actions with a NON-EMPTY template pack. A script with
+  # parameters is the cheapest way to get one: Action<Ts...>::play() takes (const Ts &...),
+  # and a play() declared as (Ts...) only collapses onto it while the pack is empty, so every
+  # argument-less trigger (on_press, on_boot) hides a mismatch. Exercised here the way an
+  # on_value or a parameterised script would use them.
+  - id: exercise_preferences_with_args
+    parameters:
+      label: string
+    then:
+      - storage.export_preferences:
+          path: !lambda 'return "/sdcard/prefs-" + label + ".kv";'
+      - storage.import_preferences:
+          path: !lambda 'return "/sdcard/prefs-" + label + ".kv";'
+
 button:
   - platform: template
     name: "Backup selected preferences"

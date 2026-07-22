@@ -444,7 +444,7 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
   }
   void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->device_ != nullptr) {
       preferences_export_to_raw(this->device_, this->address_, this->resolved_window_(), this->selection_, this->count_,
                                 this->restrict_, this->selected_entities_.data(), this->selected_entities_.size());
@@ -492,7 +492,7 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   }
   void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->device_ != nullptr) {
       preferences_import_from_raw(this->device_, this->address_, this->resolved_window_(), this->reboot_,
                                   this->selection_, this->count_, this->restrict_, this->selected_entities_.data(),
