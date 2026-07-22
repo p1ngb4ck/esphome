@@ -2870,9 +2870,11 @@ _EXFAT_PATCHES = (
 _EXFAT_MARKER = ".esphome_exfat_override"
 
 
-def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) -> None:
-    """exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on
-    is a patched copy of the component. ESP-IDF auto-discovers <project>/components with the
+def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> None:
+    """Patch a project-local copy of FatFs so exFAT is compiled in.
+
+    exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on is a
+    patched copy of the component. ESP-IDF auto-discovers <project>/components with the
     highest precedence (project components override same-named IDF components), and the
     generated project root is the build dir — so a patched copy at
     <build>/components/fatfs/ wins, with zero cmake anywhere and nothing outside this build
@@ -2885,7 +2887,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
 
     dest = Path(CORE.build_path) / "components" / "fatfs"
     marker = dest / _EXFAT_MARKER
-    stamp = f"v4:{idf_version}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
+    stamp = f"v4:{idf_ver}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
     if not enabled:
         # Only remove what is provably ours.
         if marker.is_file():
@@ -2893,11 +2895,11 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
         return
     if marker.is_file() and marker.read_text() == stamp:
         return  # current copy is up to date
-    src = _get_framework_path(idf_version) / "components" / "fatfs"
+    src = _get_framework_path(idf_ver) / "components" / "fatfs"
     if not src.is_dir():
         # First-ever build: the toolchain would install the IDF minutes from now anyway —
         # front-load it so the copy source exists.
-        check_esp_idf_install(idf_version, targets=[variant])
+        check_esp_idf_install(idf_ver, targets=[variant])
     if not src.is_dir():
         raise cv.Invalid(
             "enable_exfat: cannot locate the ESP-IDF fatfs component to patch "
@@ -2915,7 +2917,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
         if n != 1:
             raise cv.Invalid(
                 f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
-                f"unexpected FatFs layout in IDF {idf_version}"
+                f"unexpected FatFs layout in IDF {idf_ver}"
             )
     # Kconfig bool symbols that are disabled produce no #define, yet ff.c uses several of
     # them in plain C expressions (e.g. `if (FF_USE_LABEL && vol)`) — inside the original
@@ -2933,9 +2935,9 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_version: str, variant: str) ->
     probed = set()
     skip_dirs = {"test_apps", "host_test", "fatfs_utils"}
     for f in dest.rglob("*"):
-        if f.suffix not in (".c", ".h") or skip_dirs & set(
+        if f.suffix not in (".c", ".h") or skip_dirs & {
             part.name for part in f.parents
-        ):
+        }:
             continue
         for line in f.read_text(errors="replace").splitlines():
             if re.search(r"#\s*if(n?def)?\b", line) or "defined" in line:
