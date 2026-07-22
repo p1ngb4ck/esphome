@@ -16,6 +16,7 @@ from esphome.const import (
     CONF_COMPRESSION,
     CONF_CSS_INCLUDE,
     CONF_CSS_URL,
+    CONF_DEVICE_ID,
     CONF_ENABLE_PRIVATE_NETWORK_ACCESS,
     CONF_ID,
     CONF_INCLUDE_INTERNAL,
@@ -80,7 +81,6 @@ CONF_ENABLE_DELETE = "enable_delete"  # /files/delete, /files/move (move deletes
 CONF_ENABLE_MOUNT = "enable_mount"  # /files/mount
 CONF_ENABLE_UNMOUNT = "enable_unmount"  # /files/unmount
 CONF_RAW_API = "raw_api"
-CONF_DEVICE_ID = "device_id"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
