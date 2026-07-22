@@ -288,6 +288,10 @@ def _walk_stack_bytes(path_max: int, depth: int) -> int:
 # where that has not run at all (no FATFS driver -> the option is never touched).
 _FATFS_MAX_LFN_DEFAULT = 255
 
+# 8.3 plus the dot and the terminator -- the longest name FatFs produces without long-filename
+# support, which a user can switch off to save flash.
+_FATFS_SHORT_NAME_MAX = 13
+
 
 def _resolve_path_max(config) -> int:
     """The API's path bound, resolved once every contributor has had its say.
@@ -311,6 +315,14 @@ def _resolve_path_max(config) -> int:
         from esphome.components.esp32.const import KEY_ESP32, KEY_SDKCONFIG_OPTIONS
 
         opts = CORE.data.get(KEY_ESP32, {}).get(KEY_SDKCONFIG_OPTIONS, {})
+        # Long filenames off: FatFs hands back 8.3 names, and CONFIG_FATFS_MAX_LFN is not
+        # written at all in that case -- reading it would fall back to 255 and size every
+        # buffer twenty times larger than anything the medium can produce.
+        lfn_off = opts.get("CONFIG_FATFS_LFN_NONE")
+        lfn_off = getattr(lfn_off, "value", lfn_off)
+        if str(lfn_off).strip().lower() in ("y", "true", "1"):
+            bounds.append(_FATFS_SHORT_NAME_MAX)
+            return max(bounds)
         lfn = opts.get("CONFIG_FATFS_MAX_LFN", _FATFS_MAX_LFN_DEFAULT)
         # A YAML sdkconfig_options entry arrives wrapped so it is written out verbatim; the
         # esp32 component's own default is a plain int. Both carry the same number.
