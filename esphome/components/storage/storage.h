@@ -95,6 +95,16 @@ static constexpr size_t STORAGE_COPY_CHUNK_SIZE = USE_STORAGE_COPY_CHUNK_SIZE;
 static constexpr size_t STORAGE_COPY_CHUNK_SIZE = 16384;
 #endif
 
+// Number of configured storage devices — the registry is sized to it at runtime, and the
+// for_each* enumerators use it to size their stack snapshot. Set by codegen; the fallback is
+// only for builds that never see the generated define (clang-tidy, IDEs). Never 0: a
+// zero-length array is not valid C++.
+#if defined(USE_STORAGE_MAX_DEVICES) && USE_STORAGE_MAX_DEVICES > 0
+static constexpr size_t STORAGE_MAX_DEVICES = USE_STORAGE_MAX_DEVICES;
+#else
+static constexpr size_t STORAGE_MAX_DEVICES = 8;
+#endif
+
 // Max directory nesting depth for remove_recursive() below. Stack cost per level is
 // driver-dependent — it's not just the path buffer and call frame recorded here, but also
 // whatever the driver's own list_dir()/remove()/rmdir() stack up per call (e.g. sd_storage's
@@ -408,7 +418,15 @@ class StorageRegistry : public Component {
   size_t size() const { return this->storages_.size(); }
   Storage *get(size_t index) const { return index < this->storages_.size() ? this->storages_[index] : nullptr; }
 
-  // Enumerate by type — callback receives each matching device and caller ctx
+  // Enumerate by type — callback receives each matching device and caller ctx.
+  //
+  // Each of these walks a snapshot of the registry taken when the call starts, so a callback
+  // may register or unregister storages without disturbing the walk: no entry is skipped,
+  // repeated, or read past the end. The flip side is that the set is fixed at entry — a
+  // storage registered from inside a callback is not visited until the next call, and one
+  // unregistered from inside a callback is still visited if the walk had not reached it yet.
+  // That pointer stays valid (ESPHome components are static and never destroyed); callers who
+  // must not act on a departed device check is_registered() in the callback.
   void for_each(void (*cb)(Storage *s, void *ctx), void *ctx);
   void for_each_filesystem(void (*cb)(FilesystemStorage *s, void *ctx), void *ctx);
   void for_each_raw(void (*cb)(RawStorage *s, void *ctx), void *ctx);
@@ -463,6 +481,10 @@ class StorageRegistry : public Component {
 #endif
 
  protected:
+  // Copies the currently registered entries into `out` (which must hold STORAGE_MAX_DEVICES
+  // pointers) and returns how many were written — the snapshot the for_each* walkers iterate.
+  size_t snapshot_(Storage **out) const;
+
   // Single allocation at set_device_count() — no realloc machinery
   FixedVector<Storage *> storages_;
   // Guards storages_ against the one cross-thread access pattern: the worker task reads via

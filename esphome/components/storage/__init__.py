@@ -246,6 +246,8 @@ async def to_code(config):
 
     device_count = _get_data().device_count
     cg.add(var.set_device_count(device_count))
+    # Compile-time bound for the enumeration snapshot in StorageRegistry::for_each*.
+    cg.add_define("USE_STORAGE_MAX_DEVICES", device_count)
 
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 

@@ -188,51 +188,73 @@ bool StorageRegistry::is_registered(const Storage *s) const {
   return false;
 }
 
-void StorageRegistry::for_each(void (*cb)(Storage *s, void *ctx), void *ctx) {
+size_t StorageRegistry::snapshot_(Storage **out) const {
+  size_t n = 0;
   for (auto *s : this->storages_) {
-    cb(s, ctx);
+    if (n >= STORAGE_MAX_DEVICES)
+      break;  // codegen sizes both to device_count, so this cannot trip in a real build
+    out[n++] = s;
+  }
+  return n;
+}
+
+void StorageRegistry::for_each(void (*cb)(Storage *s, void *ctx), void *ctx) {
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    cb(entries[i], ctx);
   }
 }
 
 void StorageRegistry::for_each_filesystem(void (*cb)(FilesystemStorage *s, void *ctx), void *ctx) {
-  for (auto *s : this->storages_) {
-    if (s->get_storage_type() == StorageType::FILESYSTEM)
-      cb(static_cast<FilesystemStorage *>(s), ctx);
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    if (entries[i]->get_storage_type() == StorageType::FILESYSTEM)
+      cb(static_cast<FilesystemStorage *>(entries[i]), ctx);
   }
 }
 
 void StorageRegistry::for_each_raw(void (*cb)(RawStorage *s, void *ctx), void *ctx) {
-  for (auto *s : this->storages_) {
-    if (s->get_storage_type() == StorageType::RAW)
-      cb(static_cast<RawStorage *>(s), ctx);
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    if (entries[i]->get_storage_type() == StorageType::RAW)
+      cb(static_cast<RawStorage *>(entries[i]), ctx);
   }
 }
 
 void StorageRegistry::for_each_network(void (*cb)(NetworkStorage *s, void *ctx), void *ctx) {
-  for (auto *s : this->storages_) {
-    if (s->get_storage_type() == StorageType::NETWORK)
-      cb(static_cast<NetworkStorage *>(s), ctx);
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    if (entries[i]->get_storage_type() == StorageType::NETWORK)
+      cb(static_cast<NetworkStorage *>(entries[i]), ctx);
   }
 }
 
 void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, void *ctx), void *ctx) {
-  for (auto *s : this->storages_) {
-    StorageType type = s->get_storage_type();
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    StorageType type = entries[i]->get_storage_type();
     if (type == StorageType::FILESYSTEM) {
-      cb(static_cast<FilesystemStorage *>(s), ctx);
+      cb(static_cast<FilesystemStorage *>(entries[i]), ctx);
     } else if (type == StorageType::NETWORK) {
-      cb(static_cast<NetworkStorage *>(s), ctx);
+      cb(static_cast<NetworkStorage *>(entries[i]), ctx);
     }
   }
 }
 
 void StorageRegistry::for_each_path_based(void (*cb)(PathStorage *s, StorageType type, void *ctx), void *ctx) {
-  for (auto *s : this->storages_) {
-    StorageType type = s->get_storage_type();
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    StorageType type = entries[i]->get_storage_type();
     if (type == StorageType::FILESYSTEM) {
-      cb(static_cast<FilesystemStorage *>(s), type, ctx);
+      cb(static_cast<FilesystemStorage *>(entries[i]), type, ctx);
     } else if (type == StorageType::NETWORK) {
-      cb(static_cast<NetworkStorage *>(s), type, ctx);
+      cb(static_cast<NetworkStorage *>(entries[i]), type, ctx);
     }
   }
 }
