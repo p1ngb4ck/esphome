@@ -1487,7 +1487,11 @@ void StorageWorker::check_stalled_() {
         continue;
       }
       uint64_t mark = req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2);
-      if (is_tree_op(req.op))
+      // Test the pointer as well, not just the op: this runs on the main loop against a
+      // request the worker task may be running right now, and the pre-phase writes req.tree
+      // and req.op as two separate plain stores. Observing the op without the walk is a
+      // narrow window, but it is a null dereference when it happens.
+      if (is_tree_op(req.op) && req.tree != nullptr)
         mark ^= (static_cast<uint64_t>(req.tree->files_done) << 32) ^ (static_cast<uint64_t>(req.tree->depth) << 56);
       if (mark != req.progress_mark) {
         req.progress_mark = mark;
