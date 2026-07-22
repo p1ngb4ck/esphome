@@ -346,6 +346,20 @@ bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::ve
   RawGeometry geo;
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  // std::vector::resize() has no way to report a failed allocation in an exceptions-free
+  // build — it aborts. Ask the nothrow allocator first, which answers with a null pointer, and
+  // hand the block straight back: nothing else allocates between here and the resize below, so
+  // it gets the same memory. read_file() avoids the question entirely by owning a RAMAllocator
+  // buffer; this path has to end up with a std::vector because that is what the trigger takes.
+  if (size > out.capacity()) {
+    RAMAllocator<uint8_t> allocator;
+    uint8_t *probe = allocator.allocate(size);
+    if (probe == nullptr) {
+      ESP_LOGE(TAG, "raw_read: cannot allocate %" PRIu32 " bytes", (uint32_t) size);
+      return false;
+    }
+    allocator.deallocate(probe, size);
+  }
   out.resize(size);
   size_t done = 0;
   if (!raw_read_into(device, address, out.data(), size, &done)) {
