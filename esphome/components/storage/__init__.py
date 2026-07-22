@@ -153,6 +153,9 @@ class StorageData:
     device_count: int = 0
     # Largest path length any configured driver reported via request_path_length().
     path_max: int = 0
+    # Set by FATFS-backed drivers, whose bound is not a constant but whatever
+    # CONFIG_FATFS_MAX_LFN ends up being — see request_fatfs_path_length().
+    fatfs_path_bound: bool = False
     worker_count: int = 0
     worker_task_safe: bool = False
     # Raw preference regions per device id: every export/import action's address, plus the
@@ -186,6 +189,17 @@ def request_path_length(length: int) -> None:
     """
     data = _get_data()
     data.path_max = max(data.path_max, length)
+
+
+def request_fatfs_path_length() -> None:
+    """Called by drivers whose paths are bounded by FATFS long filenames.
+
+    Their limit is not a constant: CONFIG_FATFS_MAX_LFN is a sdkconfig option the esp32
+    component sets a default for and the user can override. Resolving it here at codegen time
+    (rather than baking 255 into the driver) means a user who lowers it to save flash gets an
+    API bound that matches, and one who has no FATFS driver at all is unaffected.
+    """
+    _get_data().fatfs_path_bound = True
 
 
 def request_storage_worker(task_safe: bool = False) -> None:
@@ -268,6 +282,52 @@ def _walk_stack_bytes(path_max: int, depth: int) -> int:
     return 2 * path_max + (depth + 1) * _WALK_DRIVER_STACK_PER_LEVEL
 
 
+# ESP-IDF's own default when nothing sets CONFIG_FATFS_MAX_LFN; the esp32 component applies
+# the same value from _reconcile_vfs_fatfs_sdkconfig(). Only read as a fallback for the case
+# where that has not run at all (no FATFS driver -> the option is never touched).
+_FATFS_MAX_LFN_DEFAULT = 255
+
+
+def _resolve_path_max(config) -> int:
+    """The API's path bound, resolved once every contributor has had its say.
+
+    An explicit `path_max:` wins. Otherwise it is the largest bound any configured driver
+    needs -- the maximum, not the minimum: the buffers have to carry the longest path any of
+    them accepts, and a driver with a tighter limit of its own refuses over-long paths itself.
+    FATFS-backed drivers contribute CONFIG_FATFS_MAX_LFN rather than a constant, which is why
+    this runs at FINAL - 1: esp32 reconciles that option at FINAL.
+    """
+    if (explicit := config.get(CONF_PATH_MAX)) is not None:
+        return explicit
+    data = _get_data()
+    # Only what drivers actually reported counts. _DEFAULT_PATH_MAX is the answer when nobody
+    # did (storage configured without a device), not a floor under the derivation — used as
+    # one it would swallow a lowered CONFIG_FATFS_MAX_LFN and make this whole resolution moot.
+    bounds = []
+    if data.path_max > 0:
+        bounds.append(data.path_max)
+    if data.fatfs_path_bound and CORE.is_esp32:
+        from esphome.components.esp32.const import KEY_ESP32, KEY_SDKCONFIG_OPTIONS
+
+        opts = CORE.data.get(KEY_ESP32, {}).get(KEY_SDKCONFIG_OPTIONS, {})
+        lfn = opts.get("CONFIG_FATFS_MAX_LFN", _FATFS_MAX_LFN_DEFAULT)
+        # A YAML sdkconfig_options entry arrives wrapped so it is written out verbatim; the
+        # esp32 component's own default is a plain int. Both carry the same number.
+        lfn = getattr(lfn, "value", lfn)
+        try:
+            # A name plus its terminator is the longest single component FATFS will hand back.
+            bounds.append(int(lfn) + 1)
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "storage: CONFIG_FATFS_MAX_LFN is %r, which is not a number — using %d for the "
+                "path bound instead",
+                lfn,
+                _DEFAULT_PATH_MAX,
+            )
+            bounds.append(_DEFAULT_PATH_MAX)
+    return max(bounds) if bounds else _DEFAULT_PATH_MAX
+
+
 def _default_copy_chunk_size() -> int:
     """The loop-safe base chunk size (platform-independent — see the note above)."""
     return _DEFAULT_COPY_CHUNK_SIZE
@@ -302,25 +362,31 @@ async def to_code(config):
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
     cg.add_define("USE_STORAGE")
-    # Absent path_max -> the largest any configured driver asked for; explicit value overrides.
-    path_max = config.get(CONF_PATH_MAX) or max(_get_data().path_max, _DEFAULT_PATH_MAX)
-    cg.add_define("USE_STORAGE_PATH_MAX", path_max)
     cg.add_define("USE_STORAGE_MAX_RECURSION_DEPTH", _MAX_RECURSION_DEPTH)
-    # The tree walks run on the worker task when one is configured; a path bound raised past
-    # what its stack can carry would overflow rather than fail cleanly.
-    if _get_data().worker_count > 0:
-        needed = _walk_stack_bytes(path_max, _MAX_RECURSION_DEPTH)
-        budget = int(config[CONF_TASK_STACK_SIZE] * _WALK_STACK_HEADROOM)
-        if needed > budget:
-            _LOGGER.warning(
-                "storage: a %d-level tree walk with path_max %d needs roughly %d bytes of "
-                "stack, leaving little headroom in task_stack_size (%d). Raise "
-                "task_stack_size if deep copy/remove operations misbehave.",
-                _MAX_RECURSION_DEPTH,
-                path_max,
-                needed,
-                config[CONF_TASK_STACK_SIZE],
-            )
+
+    # The path bound cannot be settled here: a FATFS driver contributes CONFIG_FATFS_MAX_LFN,
+    # which the esp32 component reconciles at FINAL. Emit it from behind that.
+    @coroutine_with_priority(CoroPriority.FINAL - 1)
+    async def _emit_path_max():
+        path_max = _resolve_path_max(config)
+        cg.add_define("USE_STORAGE_PATH_MAX", path_max)
+        # The tree walks run on the worker task when one is configured; a path bound raised
+        # past what its stack can carry would overflow rather than fail cleanly.
+        if _get_data().worker_count > 0:
+            needed = _walk_stack_bytes(path_max, _MAX_RECURSION_DEPTH)
+            budget = int(config[CONF_TASK_STACK_SIZE] * _WALK_STACK_HEADROOM)
+            if needed > budget:
+                _LOGGER.warning(
+                    "storage: a %d-level tree walk with path_max %d needs roughly %d bytes of "
+                    "stack, leaving little headroom in task_stack_size (%d). Raise "
+                    "task_stack_size if deep copy/remove operations misbehave.",
+                    _MAX_RECURSION_DEPTH,
+                    path_max,
+                    needed,
+                    config[CONF_TASK_STACK_SIZE],
+                )
+
+    CORE.add_job(_emit_path_max)
     # Absent copy_chunk_size -> per-platform default; explicit value overrides.
     copy_chunk_size = config.get(CONF_COPY_CHUNK_SIZE) or _default_copy_chunk_size()
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", copy_chunk_size)
