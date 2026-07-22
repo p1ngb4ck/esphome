@@ -9,9 +9,10 @@
 
 namespace esphome::binary_storage {
 
-// Local path-buffer bound for the filesystem drivers in this component
-// (the storage API itself only bounds names via storage::STORAGE_NAME_MAX).
-static constexpr size_t STORAGE_MAX_PATH_LEN = 256;
+// Full VFS path buffer for the filesystem drivers in this component: the storage API's bound
+// for the relative path, plus room for the mount point it gets prefixed with (ESP_VFS_PATH_MAX
+// is 15). Derived so it cannot drift from what the API hands down.
+static constexpr size_t STORAGE_MAX_PATH_LEN = storage::STORAGE_PATH_MAX + 32;
 
 #ifdef USE_BINARY_STORAGE_LITTLEFS
 // Block device configuration for LittleFS integration.
@@ -155,8 +156,8 @@ class BinaryStorage : public storage::RawStorage {
 
   const char *storage_id_{nullptr};
   const char *storage_name_{nullptr};
-  uint32_t fs_reserved_{0};  // bytes at the bottom owned by LittleFS (mode: both), 0 = none
-  bool raw_enabled_{true};   // false for mode: littlefs — no raw registration or window
+  uint32_t fs_reserved_{0};           // bytes at the bottom owned by LittleFS (mode: both), 0 = none
+  bool raw_enabled_{true};            // false for mode: littlefs — no raw registration or window
   bool assume_exclusive_bus_{false};  // opt-in: device is alone on its bus → task-safe I/O
 #ifdef USE_STORAGE_DEVICE_NODES
   // nullptr = no node for this device (device_node: false, or no browser configured at all).

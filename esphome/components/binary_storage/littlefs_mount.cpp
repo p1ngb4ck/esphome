@@ -777,8 +777,8 @@ storage::StorageError LittleFSMount::list_dir(const char *path,
       continue;
 
     storage::FileStat fs_entry{};
-    strncpy(fs_entry.name, entry->d_name, STORAGE_MAX_PATH_LEN - 1);
-    fs_entry.name[STORAGE_MAX_PATH_LEN - 1] = '\0';
+    strncpy(fs_entry.name, entry->d_name, storage::STORAGE_NAME_MAX);
+    fs_entry.name[storage::STORAGE_NAME_MAX] = '\0';
     fs_entry.is_dir = (entry->d_type == DT_DIR);
     fs_entry.size = 0;
 
