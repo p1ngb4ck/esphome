@@ -99,7 +99,30 @@ enum class EntityKind : uint8_t {
   DATE,
   TIME,
   DATETIME,
+  U32,  // sensors whose restore value is a uint32_t (duty_time)
+  I32,  // sensors whose restore value is an int32_t (rotary_encoder)
 };
+
+// Codegen -> runtime bridge for entities the sweep cannot type by itself.
+//
+// The sweep works off App's entity lists, which say what an entity IS but not what it stores.
+// That is enough everywhere the list already implies the layout (a cover stores
+// CoverRestoreState), and not enough for sensors: integration and total_daily_energy keep a
+// float, duty_time a uint32_t, rotary_encoder an int32_t -- four bytes each, indistinguishable
+// at runtime in a build without RTTI. Codegen does know, because the platform is right there in
+// the YAML, so it emits one of these per sensor it recognises. Registrations land before the
+// sweep runs, and the sweep leaves a key that is already known alone -- so an unrecognised
+// platform still falls back to the sweep's RAW entry, named but hex.
+void register_entity_pref(esphome::EntityBase *entity, EntityKind kind);
+
+// Same bridge for preferences that belong to no entity at all: safe_mode's boot counter and
+// friends live under a constant of the owning component's own choosing, so the sweep -- which
+// only ever walks entities -- cannot name them and they export as a bare number.
+//
+// Codegen emits the call with the owning component's SYMBOL, not its value, and only when that
+// component is configured. The constant therefore stays where it belongs: rename or move it and
+// the build says so, rather than this component quietly exporting a stale number.
+void register_key_pref(uint32_t key, const char *name, EntityKind kind);
 
 // Entity naming/typing is resolved ENTIRELY at runtime by the sweep in
 // preferences_backup.cpp (App entity lists + per-type version constants);

@@ -156,7 +156,10 @@ enum NFSStatus : uint32_t {
 
 static constexpr size_t NFS_FHSIZE3 = 64;
 static constexpr size_t NFS_MAXNAMLEN = 255;
-static constexpr size_t NFS_MAXPATHLEN = 1024;
+// Sanity cap for any XDR string decoded off the wire (directory entry names, file handle
+// blobs). Bounded by what the storage API can carry rather than by the NFSv3 protocol maximum:
+// a longer string could never be handed up anyway.
+static constexpr size_t NFS_MAXPATHLEN = storage::STORAGE_PATH_MAX;
 
 //========================================================================
 // XDR Buffer (RFC 1832)
@@ -415,7 +418,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool network_was_connected_{false};
 
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
-  struct sockaddr_in server_addr_{};
+  struct sockaddr_in server_addr_ {};
   bool server_addr_resolved_{false};
 #endif
 
@@ -468,7 +471,8 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8_t *data, size_t length);
   bool nfs_create_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh);
   bool nfs_remove_(const NFSFileHandle &dir_fh, const std::string &name);
-  bool nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh);
+  bool nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh,
+                  uint32_t *nfs_status_out = nullptr);
   bool nfs_rmdir_(const NFSFileHandle &dir_fh, const std::string &name);
   bool nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries);
   bool nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &old_name, const NFSFileHandle &new_dir_fh,

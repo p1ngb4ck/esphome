@@ -95,13 +95,43 @@ static constexpr size_t STORAGE_COPY_CHUNK_SIZE = USE_STORAGE_COPY_CHUNK_SIZE;
 static constexpr size_t STORAGE_COPY_CHUNK_SIZE = 16384;
 #endif
 
-// Max directory nesting depth for remove_recursive() below. Stack cost per level is
-// driver-dependent — it's not just the path buffer and call frame recorded here, but also
-// whatever the driver's own list_dir()/remove()/rmdir() stack up per call (e.g. sd_storage's
-// LFN buffers put this closer to ~1.3kB/level than the ~600B this constant alone would
-// suggest). ESP32 task stacks are typically only 8-16kB, so this default is chosen
-// conservatively across drivers rather than tuned to the cheapest one.
-static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = 8;
+// Number of configured storage devices — the registry is sized to it at runtime, and the
+// for_each* enumerators use it to size their stack snapshot. Set by codegen; the fallback is
+// only for builds that never see the generated define (clang-tidy, IDEs). Never 0: a
+// zero-length array is not valid C++.
+#if defined(USE_STORAGE_MAX_DEVICES) && USE_STORAGE_MAX_DEVICES > 0
+static constexpr size_t STORAGE_MAX_DEVICES = USE_STORAGE_MAX_DEVICES;
+#else
+static constexpr size_t STORAGE_MAX_DEVICES = 8;
+#endif
+
+// Longest path the interface carries through its own buffers — the tree walks in storage.cpp
+// and the worker's request slots. It has to fit the longest path any configured driver accepts,
+// so it is the MAXIMUM over them, not the minimum: a driver with a tighter limit of its own
+// (LittleFS) refuses an over-long path itself, which is its business, not this bound's. A path
+// that does not fit is reported as INVALID_ARGS rather than silently truncated.
+//
+// 256 matches what the VFS-backed drivers can carry (ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN).
+// The fallback applies until codegen derives the value from the configured drivers.
+#if defined(USE_STORAGE_PATH_MAX) && USE_STORAGE_PATH_MAX > 0
+static constexpr size_t STORAGE_PATH_MAX = USE_STORAGE_PATH_MAX;
+#else
+static constexpr size_t STORAGE_PATH_MAX = 256;
+#endif
+
+// Max directory nesting depth for the tree walks (copy(), remove_recursive()). Budgeted against
+// the stack they run on, not picked for convenience. The path buffers are allocated once by the
+// walk's entry point and extended/truncated per level rather than re-allocated (see
+// append_path_segment in storage.cpp), so they cost 2 * STORAGE_PATH_MAX flat. What scales with
+// depth is the walk's frame plus the driver's list_dir()/remove() frames, ~830 B per level
+// (sd_storage's FATFS LFN buffers dominate). Five levels come to ~4.7 kB against the 8 kB
+// default of both the worker task and the loop task. Deeper trees are refused with
+// INVALID_ARGS rather than risking a stack overflow.
+#if defined(USE_STORAGE_MAX_RECURSION_DEPTH) && USE_STORAGE_MAX_RECURSION_DEPTH > 0
+static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = USE_STORAGE_MAX_RECURSION_DEPTH;
+#else
+static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = 4;
+#endif
 
 struct FileStat {
   // Basename of the entry only (e.g. "file.txt"), never a full/relative path — this holds for
@@ -192,7 +222,14 @@ struct RawGeometry {
   uint8_t caps{0};           // RawEraseCaps bitmask
 };
 
-// Offset-based byte access (raw flash, FRAM, EEPROM, NVS blobs)
+// Offset-based byte access (raw flash, FRAM, EEPROM, NVS blobs).
+//
+// Raw media are permanently attached — soldered chips on I2C/SPI/OneWire, or a fixed flash
+// region. A RawStorage therefore registers once and stays registered for the node's lifetime:
+// it does not inherit MountableStorage, and nothing unregisters or quiesces it. Consumers can
+// hold one without watching for it to disappear, and the worker's drain path never has to
+// match on a raw device. Contention is a separate question and does apply — two operations on
+// one chip still must not overlap.
 class RawStorage : public Storage {
  public:
   StorageType get_storage_type() const override { return StorageType::RAW; }
@@ -366,7 +403,10 @@ class StorageRegistry : public Component {
   // Guard-rail for the BLOCKING helpers below (read_file()/write_file()/copy()/move()):
   // transfers larger than this are rejected with StorageError::TRANSFER_TOO_LARGE instead of
   // freezing the node, so callers get routed through the async worker (storage_worker.h)
-  // instead. 0 (default) means unlimited — preserves current behavior.
+  // instead. These helpers hold the whole payload in RAM, so the ceiling is what keeps an
+  // automation from asking for a file whose size it never chose — the bulk paths are the
+  // worker's. Codegen sets it from YAML (max_blocking_transfer_size); 0 disables the check
+  // entirely, which only makes sense when every caller bounds its own sizes.
   void set_max_blocking_transfer_size(uint64_t size) { this->max_blocking_transfer_size_ = size; }
   uint64_t get_max_blocking_transfer_size() const { return this->max_blocking_transfer_size_; }
 
@@ -395,12 +435,28 @@ class StorageRegistry : public Component {
   void quiesce_storage(Storage *s);
   bool is_registered(const Storage *s) const;
 
-  // Stable enumeration by index — pairs with get_mount_path() on PathStorage entries to let a
-  // caller build its own index <-> mountpoint view without needing a for_each() callback.
+  // Enumeration by index, for callers that cannot use the for_each* callbacks below — those
+  // always run to completion, so work that has to be spread over several main-loop passes
+  // (one device per loop()) needs its own cursor.
+  //
+  // An index identifies a POSITION, never a device: unregister_storage() fills the freed slot
+  // by moving the last entry into it, so any index at or after the removed one can point at a
+  // different device afterwards, and size() shrinks. An index held across register_storage()
+  // or unregister_storage() is therefore stale — re-derive it, or hold the Storage* and ask
+  // is_registered() above, which is what actually answers "is this still the same device".
+  // get() returns nullptr for an out-of-range index so a stale cursor cannot read past the end.
   size_t size() const { return this->storages_.size(); }
-  Storage *get(size_t index) const { return this->storages_[index]; }
+  Storage *get(size_t index) const { return index < this->storages_.size() ? this->storages_[index] : nullptr; }
 
-  // Enumerate by type — callback receives each matching device and caller ctx
+  // Enumerate by type — callback receives each matching device and caller ctx.
+  //
+  // Each of these walks a snapshot of the registry taken when the call starts, so a callback
+  // may register or unregister storages without disturbing the walk: no entry is skipped,
+  // repeated, or read past the end. The flip side is that the set is fixed at entry — a
+  // storage registered from inside a callback is not visited until the next call, and one
+  // unregistered from inside a callback is still visited if the walk had not reached it yet.
+  // That pointer stays valid (ESPHome components are static and never destroyed); callers who
+  // must not act on a departed device check is_registered() in the callback.
   void for_each(void (*cb)(Storage *s, void *ctx), void *ctx);
   void for_each_filesystem(void (*cb)(FilesystemStorage *s, void *ctx), void *ctx);
   void for_each_raw(void (*cb)(RawStorage *s, void *ctx), void *ctx);
@@ -455,6 +511,10 @@ class StorageRegistry : public Component {
 #endif
 
  protected:
+  // Copies the currently registered entries into `out` (which must hold STORAGE_MAX_DEVICES
+  // pointers) and returns how many were written — the snapshot the for_each* walkers iterate.
+  size_t snapshot_(Storage **out) const;
+
   // Single allocation at set_device_count() — no realloc machinery
   FixedVector<Storage *> storages_;
   // Guards storages_ against the one cross-thread access pattern: the worker task reads via
@@ -561,6 +621,9 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
 // though, and max_blocking_transfer_size is checked per file, not per tree: a tree of many
 // small files passes it and can still take a while. Callers that must not block use the async
 // worker instead (StorageWorker::async_copy()/async_copy_tree(), storage_worker.h).
+// On failure the destination is NOT rolled back: a partially written file stays where it is, and
+// a partially copied tree keeps whatever already landed. The source is never touched. A caller
+// that needs all-or-nothing has to clean the destination up itself.
 StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path);
 
 // Moves a file or a whole directory tree, within the same storage or across two different

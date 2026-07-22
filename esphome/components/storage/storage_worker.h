@@ -31,7 +31,7 @@ using CompletionCallback = std::function<void(storage::StorageError)>;
 // submit time, since the caller's pointers must not be assumed to outlive submission — the
 // request may still be pending when the calling code returns. Longer paths are rejected with
 // StorageError::INVALID_ARGS.
-static constexpr size_t STORAGE_WORKER_MAX_PATH = 256;
+static constexpr size_t STORAGE_WORKER_MAX_PATH = STORAGE_PATH_MAX;
 
 enum class RequestOp : uint8_t {
   COPY,
@@ -153,7 +153,10 @@ struct TransferStatus {
 // Position inside a directory tree, allocated only for COPY_TREE/MOVE_TREE. Kept out of
 // TransferRequest so a pool sized for plain file transfers does not carry it per slot.
 struct TreeWalk {
-  static constexpr size_t MAX_DEPTH = 8;
+  // Same bound as the blocking walks in storage.cpp: a tree this walk creates has to stay
+  // within what copy()/remove_recursive() can handle afterwards, so both refuse at the same
+  // nesting. One index slot per level, root level included — hence the + 1.
+  static constexpr size_t MAX_DEPTH = STORAGE_MAX_RECURSION_DEPTH + 1;
 
   char src_root[STORAGE_WORKER_MAX_PATH]{};
   char dst_root[STORAGE_WORKER_MAX_PATH]{};
@@ -187,8 +190,6 @@ struct TransferRequest {
   storage::FileHandle *src_handle{nullptr};
   storage::FileHandle *dst_handle{nullptr};
   uint64_t offset{0};
-  storage::RamBuffer chunk_buf;
-  size_t chunk_size{0};
   bool src_is_fs{false};
   bool dst_is_fs{false};
   bool handles_open{false};
@@ -470,8 +471,10 @@ class StorageWorker : public PollingComponent {
   bool get_transfer_status(TransferJob job, TransferStatus *out) const;
 
   // True if any active (PENDING/RUNNING/CANCELLED) transfer references `storage` as source or
-  // destination. Main-loop-only, like all control-plane queries. Used e.g. by a removable
-  // device to defer its unmount until no in-flight job still touches it.
+  // destination, or any stream has it open (anything other than FREE/DONE). Main-loop-only,
+  // like all control-plane queries. Used by a removable device to defer its unmount until no
+  // in-flight job still touches it — raw media never unmount (see RawStorage in storage.h),
+  // so they never ask.
   bool is_busy_with(const storage::Storage *storage) const;
 
   // Opens `path` for writing (create/truncate, like OpenMode::WRITE) and returns a handle
@@ -522,7 +525,7 @@ class StorageWorker : public PollingComponent {
   // against the file. Both return false when they have finished the request (error/mismatch) or
   // are waiting on the network — the caller must return immediately in that case.
   bool begin_verify_pass_(TransferRequest &req);
-  bool verify_chunk_(TransferRequest &req);
+  bool verify_chunk_(TransferRequest &req, bool on_task);
   storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
                                     bool overwrite, CompletionCallback &&on_done, TransferJob *job_out,
@@ -530,9 +533,23 @@ class StorageWorker : public PollingComponent {
   // on_task carries the engine flag from run_chunk_ (see there): the whole-chip erase fast path
   // is only taken on the worker task.
   void run_raw_chunk_(TransferRequest &req, bool on_task);
+  // This engine's streaming buffer, allocated on first use. Returns nullptr (and leaves
+  // *size_out untouched) if it cannot be had.
+  uint8_t *chunk_buffer_(bool on_task, size_t *size_out);
   void check_stalled_();
   uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
+  // Same contention question overlaps_active_() answers for transfers, asked for a stream:
+  // does anything else currently drive this storage's data plane? Keeps a stream step off the
+  // task while a transfer holds the same storage on the loop engine (and the other way round),
+  // which is what makes the interface's "calls on one instance are externally serialized"
+  // contract hold across the two engines.
+  // from_loop: the caller is loop(), about to run this step on the main loop. Another stream
+  // that is itself only queued for the loop then does NOT contend — this same thread runs them
+  // one after another, and treating them as contending would leave two streams on one storage
+  // holding each other forever. At dispatch time (from_loop=false) it does contend, so the
+  // candidate goes to the loop as well instead of racing it from the task.
+  bool stream_overlaps_active_(const StreamRequest &candidate, bool from_loop) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
   // engine) shares a storage instance with `candidate`. Used at both dispatch points to
@@ -578,6 +595,18 @@ class StorageWorker : public PollingComponent {
   // immediately afterward with no in-flight data-plane calls left against it. See the .cpp for
   // the full per-engine drain sequence.
   void on_storage_unregistered_(storage::Storage *s);
+
+  // One streaming buffer per engine rather than one per request. A buffer's content never
+  // outlives the run_chunk_() call that filled it, and neither engine runs two requests at
+  // once, so requests can share. The two engines keep their own because the size and heap
+  // follow the execution context (see alloc_dma_capable): the loop path stays small enough for
+  // its 20 ms slice, the task path stages a larger DMA-capable PSRAM chunk. Allocated on first
+  // use and kept afterwards — a 16-64 kB allocate/free cycle per transfer is exactly the
+  // fragmentation pattern to avoid.
+  storage::RamBuffer chunk_buf_loop_;
+  storage::RamBuffer chunk_buf_task_;
+  size_t chunk_size_loop_{0};
+  size_t chunk_size_task_{0};
 
   FixedVector<TransferRequest> pool_;
   FixedVector<StreamRequest> stream_pool_;

@@ -23,6 +23,10 @@
 
 // Codecs compile against the REAL component restore structs — field access by
 // name, layouts stay the compiler's problem, sizeof gates every decode.
+#ifdef USE_SENSOR
+// Only for App.get_sensors() — nothing is decoded from a sensor, see the sweep.
+#include "esphome/components/sensor/sensor.h"
+#endif
 #ifdef USE_FAN
 #include "esphome/components/fan/fan.h"
 #endif
@@ -139,6 +143,21 @@ static void register_if_missing(esphome::EntityBase *e, uint32_t version, Entity
   runtime_registry().emplace_back(RuntimeEntry{key, std::string(oid.c_str(), oid.size()), kind, aux, e});
 }
 
+void register_entity_pref(esphome::EntityBase *entity, EntityKind kind) {
+  if (entity != nullptr)
+    register_if_missing(entity, 0, kind);
+}
+
+void register_key_pref(uint32_t key, const char *name, EntityKind kind) {
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key)
+      return;  // an entity already claimed it; entities win, they can be selected by id
+  }
+  // No entity pointer: an action's `preferences:` filter selects by object, so these are only
+  // ever part of an unrestricted export -- which is what a component-owned key should be.
+  runtime_registry().emplace_back(RuntimeEntry{key, std::string(name), kind, 0, nullptr});
+}
+
 static void sweep_app_entities() {
   static bool done = false;
   if (done)
@@ -159,6 +178,15 @@ static void sweep_app_entities() {
 #ifdef USE_MEDIA_PLAYER
   for (auto *e : App.get_media_players())
     register_if_missing(e, 0, EntityKind::MEDIA_VOLUME);
+#endif
+#ifdef USE_SENSOR
+  // Named, but not rendered: what a restoring sensor stores is its platform's business and the
+  // platforms disagree -- integration and total_daily_energy keep a float, duty_time a uint32_t,
+  // rotary_encoder an int32_t, all four bytes and indistinguishable at runtime (no RTTI). RAW
+  // still turns "2817293318=hex:..." into "<the sensor's id>=hex:...", which is the difference
+  // between a line nobody can place and one that names itself.
+  for (auto *e : App.get_sensors())
+    register_if_missing(e, 0, EntityKind::RAW);
 #endif
 #ifdef USE_FAN
   for (auto *e : App.get_fans())
@@ -399,7 +427,7 @@ static bool decode_scalar(const char *s, size_t len, PrefType t, uint8_t *p) {
       return true;
     }
     default: {
-      long long v = strtoll(buf, &end, 10);
+      int64_t v = strtoll(buf, &end, 10);
       if (end == nullptr || *end != '\0')
         return false;
       int64_t iv = v;
@@ -489,9 +517,9 @@ static bool decode_value(const char *s, size_t len, const PrefSelection &sel, ui
   snprintf(b, sizeof(b), "%.9g", (double) v);
   kv_field(out, k, b, first);
 }
-[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, long v, bool &first) {
+[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, int32_t v, bool &first) {
   char b[16];
-  snprintf(b, sizeof(b), "%ld", v);
+  snprintf(b, sizeof(b), "%" PRId32, v);
   kv_field(out, k, b, first);
 }
 [[maybe_unused]] static void kv_field_b(std::string &out, const char *k, bool v, bool &first) {
@@ -533,7 +561,7 @@ struct FieldReader {
     out = strtof(b, &e);
     return e != nullptr && *e == '\0';
   }
-  bool i(const char *key, long &out) {
+  bool i(const char *key, int32_t &out) {
     char b[24];
     if (!this->get(key, b, sizeof(b)))
       return false;
@@ -576,6 +604,26 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       out += b;
       return true;
     }
+    case EntityKind::U32: {
+      if (len != sizeof(uint32_t))
+        return false;
+      uint32_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%" PRIu32, v);
+      out += b;
+      return true;
+    }
+    case EntityKind::I32: {
+      if (len != sizeof(int32_t))
+        return false;
+      int32_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%" PRId32, v);
+      out += b;
+      return true;
+    }
     case EntityKind::STRING: {
       // length-prefixed char[SZ]; same layout as string globals
       if (len < 1 || blob[0] >= len)
@@ -597,7 +645,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       kv_field_b(out, "state", st.state, first);
       kv_field_i(out, "speed", st.speed, first);
       kv_field_b(out, "oscillating", st.oscillating, first);
-      kv_field_i(out, "direction", static_cast<long>(st.direction), first);
+      kv_field_i(out, "direction", static_cast<int32_t>(st.direction), first);
       kv_field_i(out, "preset_mode", st.preset_mode, first);
       out += '}';
       return true;
@@ -649,7 +697,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       kv_field_f(out, "cold_white", st.cold_white, first);
       kv_field_f(out, "warm_white", st.warm_white, first);
       kv_field_i(out, "effect", st.effect, first);
-      kv_field_i(out, "color_mode", static_cast<long>(st.color_mode), first);
+      kv_field_i(out, "color_mode", static_cast<int32_t>(st.color_mode), first);
       out += '}';
       return true;
     }
@@ -662,12 +710,13 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       memcpy(&st, blob, sizeof(st));
       bool first = true;
       out += '{';
-      kv_field_i(out, "mode", static_cast<long>(st.mode), first);
+      kv_field_i(out, "mode", static_cast<int32_t>(st.mode), first);
       kv_field_b(out, "uses_custom_fan_mode", st.uses_custom_fan_mode, first);
-      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<long>(st.fan_mode), first);
+      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<int32_t>(st.fan_mode),
+                 first);
       kv_field_b(out, "uses_custom_preset", st.uses_custom_preset, first);
-      kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<long>(st.preset), first);
-      kv_field_i(out, "swing_mode", static_cast<long>(st.swing_mode), first);
+      kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<int32_t>(st.preset), first);
+      kv_field_i(out, "swing_mode", static_cast<int32_t>(st.swing_mode), first);
       // two-point control shares the union — export both words, they alias
       kv_field_f(out, "target_temperature_low", st.target_temperature_low, first);
       kv_field_f(out, "target_temperature_high", st.target_temperature_high, first);
@@ -806,6 +855,34 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
       *blob_len = sizeof(size_t);
       return true;
     }
+    case EntityKind::U32: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      uint32_t v = static_cast<uint32_t>(strtoul(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(v);
+      return true;
+    }
+    case EntityKind::I32: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      int32_t v = static_cast<int32_t>(strtol(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(v);
+      return true;
+    }
     case EntityKind::STRING: {
       if (re.aux == 0 || len >= re.aux)
         return false;
@@ -822,7 +899,7 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
   if (len < 2 || s[0] != '{' || s[len - 1] != '}')
     return false;
   FieldReader r{s + 1, s + len - 1};
-  long li;
+  int32_t li;
   switch (re.kind) {
 #ifdef USE_FAN
     case EntityKind::FAN: {
@@ -1056,7 +1133,7 @@ static size_t collect_entries(nvs_handle_t handle, const PrefSelection *sel, siz
     nvs_entry_info_t info;
     nvs_entry_info(it, &info);
     char *end = nullptr;
-    unsigned long key = strtoul(info.key, &end, 10);
+    uint32_t key = static_cast<uint32_t>(strtoul(info.key, &end, 10));
     if (end != nullptr && *end == '\0' && nvs_read_entry(handle, static_cast<uint32_t>(key), e)) {
       // Unrestricted mode still knows names/types for everything codegen
       // could see (all restore_value globals) — render those readable.
@@ -1162,14 +1239,31 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
     return false;
   }
 
+  // Budget checked while the payload grows, not after: the "nothing written" promise below is
+  // about the medium, but the RAM is spent by then — and std::string has no way to report a
+  // failed growth in an exceptions-free build, it aborts. Stop at the first entry that would
+  // not fit and report it instead.
+  const uint64_t budget = window > sizeof(RawHeader) ? window - sizeof(RawHeader) : 0;
+  bool over_budget = false;
   std::string payload;
   size_t exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
                                     [&](const NvsEntry &e, const PrefSelection *s) {
+                                      if (over_budget)
+                                        return;
+                                      if (payload.size() + 6 + e.len > budget) {
+                                        over_budget = true;
+                                        return;
+                                      }
                                       append_u32(payload, e.key);
                                       append_u16(payload, static_cast<uint16_t>(e.len));
                                       payload.append(reinterpret_cast<const char *>(e.blob), e.len);
                                     });
   nvs_close(handle);
+  if (over_budget) {
+    ESP_LOGE(TAG, "Export does not fit the %" PRIu32 " bytes reserved at 0x%08" PRIX32 " — nothing written",
+             (uint32_t) window, (uint32_t) address);
+    return false;
+  }
 
   RawHeader hdr{};
   hdr.magic = RAW_MAGIC;
@@ -1179,12 +1273,6 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
   hdr.crc32 = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
 
   const uint64_t total = sizeof(RawHeader) + payload.size();
-  if (total > window) {
-    ESP_LOGE(TAG,
-             "Export needs %" PRIu32 " bytes but only %" PRIu32 " are reserved at 0x%08" PRIX32 " — nothing written",
-             (uint32_t) total, (uint32_t) window, (uint32_t) address);
-    return false;
-  }
 
   // Media that only clear bits on write need the covering sectors erased first. Rounding the
   // erase outward would take the region in front of us with it, so demand alignment instead of
@@ -1315,9 +1403,12 @@ bool preferences_import_from_raw(RawStorage *device, uint64_t address, uint64_t 
     }
     imported++;
   }
-  if (ok && (err = nvs_commit(handle)) != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
-    ok = false;
+  if (ok) {
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+      ok = false;
+    }
   }
   nvs_close(handle);
   if (!ok)
@@ -1355,30 +1446,49 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     return false;
   }
 
+  // Same reasoning as the raw export: max_blocking_transfer_size is what write_file() below
+  // would reject the result by, but by then the whole rendering already sits in RAM, and a
+  // std::string that cannot grow aborts rather than reporting it. Stop rendering once the
+  // limit is reached. 0 means the check is off, per the option's contract.
+  const uint64_t budget =
+      global_storage_registry != nullptr ? global_storage_registry->get_max_blocking_transfer_size() : 0;
+  bool over_budget = false;
+  size_t json_bytes = 0;  // running estimate for the json branch, which cannot measure itself
   std::string out;
   size_t exported = 0;
   if (as_json) {
     auto buf = json::build_json([&](JsonObject root) {
       root["version"] = 1;
       JsonObject prefs = root["preferences"].to<JsonObject>();
-      exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
-                                 [&](const NvsEntry &e, const PrefSelection *s) {
-                                   char key_str[16];
-                                   snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-                                   std::string value;
-                                   const RuntimeEntry *re =
-                                       s == nullptr
-                                           ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
-                                                            selected_entity_count)
-                                           : nullptr;
-                                   if (s != nullptr) {
-                                     encode_value(value, *s, e.blob, e.len);
-                                   } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
-                                     value = HEX_PREFIX;
-                                     append_hex(value, e.blob, e.len);
-                                   }
-                                   prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
-                                 });
+      exported = collect_entries(
+          handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
+          [&](const NvsEntry &e, const PrefSelection *s) {
+            if (over_budget)
+              return;
+            char key_str[16];
+            snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+            std::string value;
+            const RuntimeEntry *re =
+                s == nullptr
+                    ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr, selected_entity_count)
+                    : nullptr;
+            if (s != nullptr) {
+              encode_value(value, *s, e.blob, e.len);
+            } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
+              value = HEX_PREFIX;
+              append_hex(value, e.blob, e.len);
+            }
+            const char *name = s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str);
+            // The document is ArduinoJson's, so there is no size to read
+            // back mid-build — track what this entry will render as
+            // instead: "name":"value", quotes, colon and separator.
+            json_bytes += strlen(name) + value.size() + 6;
+            if (budget != 0 && json_bytes > budget) {
+              over_budget = true;
+              return;
+            }
+            prefs[name] = value;
+          });
     });
     out.assign(buf.data(), buf.size());
   } else {
@@ -1386,6 +1496,12 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     out += "# <global id or numeric NVS key>=<typed value or hex:...>\n";
     exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
                                [&](const NvsEntry &e, const PrefSelection *s) {
+                                 if (over_budget)
+                                   return;
+                                 if (budget != 0 && out.size() >= budget) {
+                                   over_budget = true;
+                                   return;
+                                 }
                                  if (s != nullptr) {
                                    out += s->name;
                                    out += '=';
@@ -1411,6 +1527,13 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
                                });
   }
   nvs_close(handle);
+  if (over_budget) {
+    ESP_LOGE(TAG,
+             "Export exceeds max_blocking_transfer_size (%" PRIu32 " bytes) — nothing written. Narrow it with the "
+             "action's 'preferences:' filter, or raise the limit.",
+             (uint32_t) budget);
+    return false;
+  }
 
   StorageError werr = write_file(ps, rel, reinterpret_cast<const uint8_t *>(out.data()), out.size());
   if (werr != StorageError::OK) {
@@ -1460,7 +1583,7 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
     memcpy(buf, name, name_len);
     buf[name_len] = '\0';
     char *end = nullptr;
-    unsigned long v = strtoul(buf, &end, 10);
+    uint32_t v = static_cast<uint32_t>(strtoul(buf, &end, 10));
     if (end == nullptr || *end != '\0' || (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
       skipped++;  // unknown name, or filtered out by the configured selection
       return true;
@@ -1577,9 +1700,12 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
                       selected_entities, selected_entity_count, imported, skipped);
     }
   }
-  if (ok && (err = nvs_commit(handle)) != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
-    ok = false;
+  if (ok) {
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+      ok = false;
+    }
   }
   nvs_close(handle);
 

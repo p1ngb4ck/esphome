@@ -111,7 +111,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
         if (!token.empty()) {
           if (node.is<JsonArrayConst>()) {
             char *end = nullptr;
-            unsigned long idx = strtoul(token.c_str(), &end, 10);
+            uint64_t idx = strtoul(token.c_str(), &end, 10);
             if (end == nullptr || *end != '\0') {
               ESP_LOGV(TAG, "extract json: '%s' is not an array index", token.c_str());
               return false;
@@ -303,6 +303,17 @@ static bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint
   uint64_t end = address + len;
   if ((end % geo.erase_sector) != 0)
     end += geo.erase_sector - (end % geo.erase_sector);
+  // Rounding up can leave the device behind when its capacity is not a whole number of erase
+  // sectors. Asking a driver to erase past its own end is not something to find out about from
+  // whatever it happens to return — say so here, the way the preferences export does when its
+  // rounded erase would leave the region it was given.
+  if (end > geo.capacity) {
+    ESP_LOGE(TAG,
+             "raw_write: erase_first would have to erase up to %" PRIu32 " to cover this write, past the device's "
+             "%" PRIu32 " bytes — this device's last sector is partial",
+             (uint32_t) end, (uint32_t) geo.capacity);
+    return false;
+  }
   ESP_LOGD(TAG, "raw_write: erasing 0x%08" PRIX32 " + %" PRIu32 " before writing", (uint32_t) start,
            (uint32_t) (end - start));
   StorageError err = device->erase(start, static_cast<size_t>(end - start));
@@ -335,6 +346,20 @@ bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::ve
   RawGeometry geo;
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  // std::vector::resize() has no way to report a failed allocation in an exceptions-free
+  // build — it aborts. Ask the nothrow allocator first, which answers with a null pointer, and
+  // hand the block straight back: nothing else allocates between here and the resize below, so
+  // it gets the same memory. read_file() avoids the question entirely by owning a RAMAllocator
+  // buffer; this path has to end up with a std::vector because that is what the trigger takes.
+  if (size > out.capacity()) {
+    RAMAllocator<uint8_t> allocator;
+    uint8_t *probe = allocator.allocate(size);
+    if (probe == nullptr) {
+      ESP_LOGE(TAG, "raw_read: cannot allocate %" PRIu32 " bytes", (uint32_t) size);
+      return false;
+    }
+    allocator.deallocate(probe, size);
+  }
   out.resize(size);
   size_t done = 0;
   if (!raw_read_into(device, address, out.data(), size, &done)) {
@@ -433,9 +458,10 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
     return false;
   }
   bool ok = perform_raw_write(device, address, buf.get(), size, erase_first);
-  if (ok)
+  if (ok) {
     ESP_LOGI(TAG, "Transfer done: write '%s' (%" PRIu32 " bytes) -> 0x%08" PRIX32, path.c_str(), (uint32_t) size,
              (uint32_t) address);
+  }
   return ok;
 }
 
@@ -463,16 +489,17 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
 
 // Shared completion glue for the async raw actions: log on failure, fire the trigger once with
 // the error text (empty = success).
-static void raw_fire_(Trigger<std::string> *on_complete, const char *op, StorageError result) {
-  if (result != StorageError::OK)
+static void raw_fire(Trigger<std::string> *on_complete, const char *op, StorageError result) {
+  if (result != StorageError::OK) {
     ESP_LOGE(TAG, "raw_%s failed (%s)", op, error_to_string(result));
-  else
+  } else {
     ESP_LOGI(TAG, "Transfer done: raw %s", op);
+  }
   if (on_complete != nullptr)
     on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
 }
 // Report a pre-submission failure and fire the trigger once so it always fires exactly once.
-static void raw_fail_(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
+static void raw_fail(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
   ESP_LOGE(TAG, "raw_%s: %s", op, msg.c_str());
   if (on_complete != nullptr)
     on_complete->trigger(msg);
@@ -488,22 +515,22 @@ void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64
       size = geo.capacity > address ? geo.capacity - address : 0;
     }
     if (global_storage_registry == nullptr) {
-      raw_fail_(on_complete, "read", "no storage registry");
+      raw_fail(on_complete, "read", "no storage registry");
       return;
     }
     const char *rel = nullptr;
     PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
     if (ps == nullptr) {
-      raw_fail_(on_complete, "read", std::string("no storage mounted for '") + path + "'");
+      raw_fail(on_complete, "read", std::string("no storage mounted for '") + path + "'");
       return;
     }
     ESP_LOGI(TAG, "Transfer started: read 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) size,
              path.c_str());
     StorageError err = global_storage_worker->async_raw_read(
-        device, address, size, ps, rel, [on_complete](StorageError r) { raw_fire_(on_complete, "read", r); }, nullptr,
+        device, address, size, ps, rel, [on_complete](StorageError r) { raw_fire(on_complete, "read", r); }, nullptr,
         /*overwrite=*/true);
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "read", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "read", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif
@@ -517,20 +544,20 @@ void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, con
 #ifdef USE_STORAGE_WORKER
   if (global_storage_worker != nullptr) {
     if (global_storage_registry == nullptr) {
-      raw_fail_(on_complete, "write", "no storage registry");
+      raw_fail(on_complete, "write", "no storage registry");
       return;
     }
     const char *rel = nullptr;
     PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
     if (ps == nullptr) {
-      raw_fail_(on_complete, "write", std::string("no storage mounted for '") + path + "'");
+      raw_fail(on_complete, "write", std::string("no storage mounted for '") + path + "'");
       return;
     }
     ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
     StorageError err = global_storage_worker->async_raw_write(
-        ps, rel, device, address, erase_first, [on_complete](StorageError r) { raw_fire_(on_complete, "write", r); });
+        ps, rel, device, address, erase_first, [on_complete](StorageError r) { raw_fire(on_complete, "write", r); });
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "write", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "write", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif
@@ -550,10 +577,10 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 #ifdef USE_STORAGE_WORKER
   if (global_storage_worker != nullptr) {
     StorageError err = global_storage_worker->async_raw_erase(
-        device, address, size, [on_complete](StorageError r) { raw_fire_(on_complete, "erase", r); }, nullptr,
+        device, address, size, [on_complete](StorageError r) { raw_fire(on_complete, "erase", r); }, nullptr,
         force_sliced);
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "erase", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "erase", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif
@@ -563,12 +590,12 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 }
 #endif  // USE_STORAGE_RAW_ACTIONS
 
-void perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
+StorageError perform_file_copy(const std::string &from, const std::string &to, bool is_move) {
   const char *op = is_move ? "move" : "copy";
   ESP_LOGI(TAG, "Transfer started: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "file_%s: no storage registry", op);
-    return;
+    return StorageError::NOT_READY;
   }
   const char *src_rel = nullptr;
   const char *dst_rel = nullptr;
@@ -576,7 +603,7 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   PathStorage *dst = global_storage_registry->resolve_path(to.c_str(), &dst_rel);
   if (src == nullptr || dst == nullptr) {
     ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, src == nullptr ? from.c_str() : to.c_str());
-    return;
+    return StorageError::NOT_FOUND;
   }
   // move() internally takes the same-storage rename() fast path and only falls back to
   // copy+delete across devices — so this action doubles as a rename action. Both helpers are
@@ -585,9 +612,10 @@ void perform_file_copy(const std::string &from, const std::string &to, bool is_m
   StorageError err = is_move ? move(src, src_rel, dst, dst_rel) : copy(src, src_rel, dst, dst_rel);
   if (err != StorageError::OK) {
     ESP_LOGE(TAG, "file_%s: '%s' -> '%s' failed (%s)", op, from.c_str(), to.c_str(), error_to_string(err));
-    return;
+    return err;
   }
   ESP_LOGI(TAG, "Transfer done: %s '%s' -> '%s'", op, from.c_str(), to.c_str());
+  return StorageError::OK;
 }
 
 void perform_file_copy_async(const std::string &from, const std::string &to, bool is_move,
@@ -646,9 +674,9 @@ void perform_file_copy_async(const std::string &from, const std::string &to, boo
   // No worker compiled in (raw-only node, or no path driver requested it): fall back to the
   // blocking helper. This can exceed the 30 ms loop budget for large transfers — the async
   // path above is the norm; this is only the degenerate no-worker build.
-  perform_file_copy(from, to, is_move);
+  StorageError err = perform_file_copy(from, to, is_move);
   if (on_complete != nullptr)
-    on_complete->trigger(std::string());  // best-effort: the sync helper only logs on failure
+    on_complete->trigger(err == StorageError::OK ? std::string() : std::string(error_to_string(err)));
 }
 
 void perform_file_delete(const std::string &path, bool recursive) {

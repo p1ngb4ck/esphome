@@ -132,7 +132,10 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 
 // Non-template workers for the actions below — all error logging lives in the .cpp.
 void perform_mount(MountableStorage *target, bool mount);
-void perform_file_copy(const std::string &from, const std::string &to, bool is_move);
+// Returns the error so the no-worker fallback in perform_file_copy_async() can report it —
+// on_complete's contract is "error text, empty = success", which a void return cannot honour.
+// The raw helpers below already work this way.
+StorageError perform_file_copy(const std::string &from, const std::string &to, bool is_move);
 // Async variant used by FileCopyAction: submits to the worker (or, if the worker is not
 // compiled in, runs the blocking helper and fires the trigger inline). `on_complete` receives
 // the error text (empty = success) and may be nullptr.
@@ -175,8 +178,8 @@ template<typename... Ts> class FileReadAction : public Action<Ts...> {
  public:
   TEMPLATABLE_VALUE(std::string, path)
 
-  void add_step(ExtractStepType type, std::string arg, std::string sep, int index) {
-    this->steps_.push_back(ExtractStep{type, std::move(arg), std::move(sep), index});
+  void add_step(ExtractStepType type, const std::string &arg, const std::string &sep, int index) {
+    this->steps_.push_back(ExtractStep{type, arg, sep, index});
   }
   void set_global_setter(std::function<void(const std::string &)> setter) { this->setter_ = std::move(setter); }
   Trigger<std::string> *get_value_trigger() { return &this->value_trigger_; }
@@ -444,7 +447,7 @@ template<typename... Ts> class ExportPreferencesAction : public Action<Ts...> {
   }
   void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->device_ != nullptr) {
       preferences_export_to_raw(this->device_, this->address_, this->resolved_window_(), this->selection_, this->count_,
                                 this->restrict_, this->selected_entities_.data(), this->selected_entities_.size());
@@ -492,7 +495,7 @@ template<typename... Ts> class ImportPreferencesAction : public Action<Ts...> {
   }
   void add_selected_entity(esphome::EntityBase *entity) { this->selected_entities_.push_back(entity); }
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     if (this->device_ != nullptr) {
       preferences_import_from_raw(this->device_, this->address_, this->resolved_window_(), this->reboot_,
                                   this->selection_, this->count_, this->restrict_, this->selected_entities_.data(),

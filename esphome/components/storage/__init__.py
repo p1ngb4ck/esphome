@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import hashlib
+import logging
 import re
 
 from esphome import automation, core
@@ -28,9 +29,12 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 
+_LOGGER = logging.getLogger(__name__)
+
 DOMAIN = "storage"
 
 CONF_COPY_CHUNK_SIZE = "copy_chunk_size"
+CONF_PATH_MAX = "path_max"
 CONF_MAX_BLOCKING_TRANSFER_SIZE = "max_blocking_transfer_size"
 CONF_MOVE_FALLBACK_COPY = "move_fallback_copy"
 CONF_TASK_STACK_SIZE = "task_stack_size"
@@ -94,9 +98,21 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_COPY_CHUNK_SIZE): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
         ),
-        # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
-        # preserves current behavior). See max_blocking_transfer_size's comment in storage.h.
-        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=0): cv.int_range(min=0),
+        # Longest relative path the API carries. No static default: absent means "the largest
+        # any configured driver asked for" (see request_path_length / to_code). Raising it also
+        # raises the tree walks' stack use -- two buffers per recursion level -- so the range
+        # is bounded and _validate_walk_budget() below checks it against task_stack_size.
+        cv.Optional(CONF_PATH_MAX): cv.int_range(min=64, max=1024),
+        # Guard-rail for the blocking copy/read/write helpers, which hold the whole payload
+        # in RAM: storage.file_read takes whatever size the file happens to be, and on a node
+        # without PSRAM that is the one storage action whose cost the automation author does
+        # not choose. Anything bigger belongs on the worker (storage.file_copy, raw_write
+        # from_file). It also bounds storage.preferences_export/import, which share these
+        # helpers -- an export past the ceiling is a sign to narrow it with the action's
+        # `preferences:` filter. 0 disables the check. See storage.h for the C++ side.
+        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=16384): cv.int_range(
+            min=0
+        ),
         # A same-storage move is a rename, which some backends refuse across their own
         # internals (an NFS export can span file systems, and RENAME never crosses one).
         # On, such a refusal is redone as copy + remove so the move still happens; off, it is
@@ -135,6 +151,11 @@ CONFIG_SCHEMA = cv.Schema(
 @dataclass
 class StorageData:
     device_count: int = 0
+    # Largest path length any configured driver reported via request_path_length().
+    path_max: int = 0
+    # Set by FATFS-backed drivers, whose bound is not a constant but whatever
+    # CONFIG_FATFS_MAX_LFN ends up being — see request_fatfs_path_length().
+    fatfs_path_bound: bool = False
     worker_count: int = 0
     worker_task_safe: bool = False
     # Raw preference regions per device id: every export/import action's address, plus the
@@ -142,6 +163,7 @@ class StorageData:
     # once at the end — see _resolve_raw_pref_regions().
     raw_pref_regions: dict = field(default_factory=dict)
     raw_pref_job_queued: bool = False
+    sensor_pref_job_queued: bool = False
 
 
 def _get_data() -> StorageData:
@@ -157,6 +179,28 @@ def request_storage_device() -> None:
     internal FixedVector is sized exactly — no compile-time upper bound needed.
     """
     _get_data().device_count += 1
+
+
+def request_path_length(length: int) -> None:
+    """Called by each storage driver's to_code() with the longest relative path it can carry.
+
+    The API sizes its own buffers to the largest of these, so a driver with a tighter limit of
+    its own still refuses over-long paths itself -- that is the driver's business, not this
+    bound's. An explicit `path_max:` in YAML overrides the collected value.
+    """
+    data = _get_data()
+    data.path_max = max(data.path_max, length)
+
+
+def request_fatfs_path_length() -> None:
+    """Called by drivers whose paths are bounded by FATFS long filenames.
+
+    Their limit is not a constant: CONFIG_FATFS_MAX_LFN is a sdkconfig option the esp32
+    component sets a default for and the user can override. Resolving it here at codegen time
+    (rather than baking 255 into the driver) means a user who lowers it to save flash gets an
+    API bound that matches, and one who has no FATFS driver at all is unaffected.
+    """
+    _get_data().fatfs_path_bound = True
 
 
 def request_storage_worker(task_safe: bool = False) -> None:
@@ -218,6 +262,73 @@ FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
 _DEFAULT_COPY_CHUNK_SIZE = 16384
 
 
+# Fallback when no driver reported anything (storage configured without a device).
+# Mirrors STORAGE_PATH_MAX's compile-time fallback in storage.h.
+_DEFAULT_PATH_MAX = 256
+
+# The copy walk's two path buffers are allocated once and shared by every level (see
+# append_path_segment in storage.cpp), so they are a flat cost. What scales with depth is the
+# walk's own frame plus the driver's list_dir()/remove() frames, where the FATFS LFN buffers
+# dominate. Keep 25% of the task stack free for whatever called into the walk.
+_WALK_DRIVER_STACK_PER_LEVEL = 830
+_WALK_STACK_HEADROOM = 0.75
+
+# Max directory nesting the tree walks descend into. Emitted as a define so storage.h and the
+# budget check below cannot drift apart.
+_MAX_RECURSION_DEPTH = 4
+
+
+def _walk_stack_bytes(path_max: int, depth: int) -> int:
+    """Worst-case stack the tree walks need for `depth` levels of recursion."""
+    return 2 * path_max + (depth + 1) * _WALK_DRIVER_STACK_PER_LEVEL
+
+
+# ESP-IDF's own default when nothing sets CONFIG_FATFS_MAX_LFN; the esp32 component applies
+# the same value from _reconcile_vfs_fatfs_sdkconfig(). Only read as a fallback for the case
+# where that has not run at all (no FATFS driver -> the option is never touched).
+_FATFS_MAX_LFN_DEFAULT = 255
+
+
+def _resolve_path_max(config) -> int:
+    """The API's path bound, resolved once every contributor has had its say.
+
+    An explicit `path_max:` wins. Otherwise it is the largest bound any configured driver
+    needs -- the maximum, not the minimum: the buffers have to carry the longest path any of
+    them accepts, and a driver with a tighter limit of its own refuses over-long paths itself.
+    FATFS-backed drivers contribute CONFIG_FATFS_MAX_LFN rather than a constant, which is why
+    this runs at FINAL - 1: esp32 reconciles that option at FINAL.
+    """
+    if (explicit := config.get(CONF_PATH_MAX)) is not None:
+        return explicit
+    data = _get_data()
+    # Only what drivers actually reported counts. _DEFAULT_PATH_MAX is the answer when nobody
+    # did (storage configured without a device), not a floor under the derivation — used as
+    # one it would swallow a lowered CONFIG_FATFS_MAX_LFN and make this whole resolution moot.
+    bounds = []
+    if data.path_max > 0:
+        bounds.append(data.path_max)
+    if data.fatfs_path_bound and CORE.is_esp32:
+        from esphome.components.esp32.const import KEY_ESP32, KEY_SDKCONFIG_OPTIONS
+
+        opts = CORE.data.get(KEY_ESP32, {}).get(KEY_SDKCONFIG_OPTIONS, {})
+        lfn = opts.get("CONFIG_FATFS_MAX_LFN", _FATFS_MAX_LFN_DEFAULT)
+        # A YAML sdkconfig_options entry arrives wrapped so it is written out verbatim; the
+        # esp32 component's own default is a plain int. Both carry the same number.
+        lfn = getattr(lfn, "value", lfn)
+        try:
+            # A name plus its terminator is the longest single component FATFS will hand back.
+            bounds.append(int(lfn) + 1)
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "storage: CONFIG_FATFS_MAX_LFN is %r, which is not a number — using %d for the "
+                "path bound instead",
+                lfn,
+                _DEFAULT_PATH_MAX,
+            )
+            bounds.append(_DEFAULT_PATH_MAX)
+    return max(bounds) if bounds else _DEFAULT_PATH_MAX
+
+
 def _default_copy_chunk_size() -> int:
     """The loop-safe base chunk size (platform-independent — see the note above)."""
     return _DEFAULT_COPY_CHUNK_SIZE
@@ -246,10 +357,37 @@ async def to_code(config):
 
     device_count = _get_data().device_count
     cg.add(var.set_device_count(device_count))
+    # Compile-time bound for the enumeration snapshot in StorageRegistry::for_each*.
+    cg.add_define("USE_STORAGE_MAX_DEVICES", device_count)
 
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
     cg.add_define("USE_STORAGE")
+    cg.add_define("USE_STORAGE_MAX_RECURSION_DEPTH", _MAX_RECURSION_DEPTH)
+
+    # The path bound cannot be settled here: a FATFS driver contributes CONFIG_FATFS_MAX_LFN,
+    # which the esp32 component reconciles at FINAL. Emit it from behind that.
+    @coroutine_with_priority(CoroPriority.FINAL - 1)
+    async def _emit_path_max():
+        path_max = _resolve_path_max(config)
+        cg.add_define("USE_STORAGE_PATH_MAX", path_max)
+        # The tree walks run on the worker task when one is configured; a path bound raised
+        # past what its stack can carry would overflow rather than fail cleanly.
+        if _get_data().worker_count > 0:
+            needed = _walk_stack_bytes(path_max, _MAX_RECURSION_DEPTH)
+            budget = int(config[CONF_TASK_STACK_SIZE] * _WALK_STACK_HEADROOM)
+            if needed > budget:
+                _LOGGER.warning(
+                    "storage: a %d-level tree walk with path_max %d needs roughly %d bytes of "
+                    "stack, leaving little headroom in task_stack_size (%d). Raise "
+                    "task_stack_size if deep copy/remove operations misbehave.",
+                    _MAX_RECURSION_DEPTH,
+                    path_max,
+                    needed,
+                    config[CONF_TASK_STACK_SIZE],
+                )
+
+    CORE.add_job(_emit_path_max)
     # Absent copy_chunk_size -> per-platform default; explicit value overrides.
     copy_chunk_size = config.get(CONF_COPY_CHUNK_SIZE) or _default_copy_chunk_size()
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", copy_chunk_size)
@@ -868,6 +1006,62 @@ _RESTORING_STRING_RE = re.compile(
 )
 
 
+# Sensor platforms whose restore type codegen can name but the runtime sweep cannot: they all
+# arrive as sensor::Sensor in App's list, four bytes wide, and a build without RTTI cannot tell
+# them apart. The platform is right there in the YAML, so map the registered class to the kind
+# and let register_entity_pref() carry it over. A platform that is not listed here keeps the
+# sweep's RAW entry -- named, hex value -- which is the safe fallback: a wrong kind would render
+# a wrong number AND write wrong bytes back on import.
+_SENSOR_PREF_KINDS = {
+    "total_daily_energy::TotalDailyEnergy": "FLOAT",
+    "integration::IntegrationSensor": "FLOAT",
+    "duty_time_sensor::DutyTimeSensor": "U32",
+    "rotary_encoder::RotaryEncoderSensor": "I32",
+}
+
+
+# Preferences owned by a component rather than an entity: (component, C++ symbol, exported
+# name, kind). Emitted only when that component is configured, and by SYMBOL -- the value stays
+# in the owning component's header, so a rename breaks the build instead of silently exporting a
+# number that has moved on. Without this they show up as a bare key, since the sweep only walks
+# entities.
+_COMPONENT_PREF_KEYS = (("safe_mode", "safe_mode::RTC_KEY", "safe_mode", "U32"),)
+
+
+async def _register_component_prefs():
+    """Names the component-owned preferences whose owners are part of this build."""
+    for component, symbol, name, kind in _COMPONENT_PREF_KEYS:
+        if component not in CORE.config:
+            continue
+        cg.add(
+            cg.RawExpression(
+                f'{storage_ns}::register_key_pref({symbol}, "{name}", '
+                f"{storage_ns}::EntityKind::{kind})"
+            )
+        )
+
+
+async def _register_typed_sensors():
+    """Emits one register_entity_pref() per sensor whose restore type is known.
+
+    FINAL priority: every sensor platform's own to_code() must have registered its variable
+    before CORE.variables can be walked for them.
+    """
+    for reg_id in CORE.variables:
+        # Registered types carry no esphome:: prefix; tolerate one anyway.
+        type_str = str(reg_id.type).removeprefix("esphome::")
+        kind = _SENSOR_PREF_KINDS.get(type_str)
+        if kind is None:
+            continue
+        var = await cg.get_variable(reg_id)
+        cg.add(
+            cg.RawExpression(
+                f"{storage_ns}::register_entity_pref({var}, "
+                f"{storage_ns}::EntityKind::{kind})"
+            )
+        )
+
+
 def _pref_type_from_class(type_str: str) -> tuple[str, int] | None:
     """(PrefType tag, count) from a declared global's C++ class string —
     codegen-world data only (ID.type of the registered variable). None when
@@ -1046,6 +1240,16 @@ def _register_raw_pref_region(device_id, device_var, address, size, var):
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
+    # Once per build, not per action: naming is a property of the node, not of the action.
+    data = _get_data()
+    if not data.sensor_pref_job_queued:
+        data.sensor_pref_job_queued = True
+        CORE.add_job(
+            coroutine_with_priority(CoroPriority.FINAL)(_register_typed_sensors)
+        )
+        CORE.add_job(
+            coroutine_with_priority(CoroPriority.FINAL)(_register_component_prefs)
+        )
     if CONF_PATH in config:
         template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
         cg.add(var.set_path(template_))
@@ -1201,11 +1405,8 @@ def final_validate_file_system(config) -> None:
 
 async def file_system_to_code(var, config) -> None:
     """Emit the selection define + setter — only when the option may exist at all."""
-    from esphome.core import CORE
-
     if not _esp32_exfat_enabled(CORE.config):
         return  # not even the auto path is compiled in
-    import esphome.codegen as cg
 
     cg.add_define("USE_STORAGE_FILE_SYSTEM_SELECT")
     fs = config.get(CONF_FILE_SYSTEM, FILE_SYSTEM_AUTO)

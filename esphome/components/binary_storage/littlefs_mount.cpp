@@ -777,8 +777,8 @@ storage::StorageError LittleFSMount::list_dir(const char *path,
       continue;
 
     storage::FileStat fs_entry{};
-    strncpy(fs_entry.name, entry->d_name, STORAGE_MAX_PATH_LEN - 1);
-    fs_entry.name[STORAGE_MAX_PATH_LEN - 1] = '\0';
+    strncpy(fs_entry.name, entry->d_name, storage::STORAGE_NAME_MAX);
+    fs_entry.name[storage::STORAGE_NAME_MAX] = '\0';
     fs_entry.is_dir = (entry->d_type == DT_DIR);
     fs_entry.size = 0;
 
@@ -813,7 +813,7 @@ storage::StorageError LittleFSMount::mkdir(const char *path) {
   snprintf(full_path, sizeof(full_path), "%s/%s", this->mount_path_, path[0] == '/' ? path + 1 : path);
 
   if (::mkdir(full_path, 0755) != 0)
-    return errno == EEXIST ? storage::StorageError::INVALID_ARGS : storage::StorageError::WRITE_ERROR;
+    return errno == EEXIST ? storage::StorageError::ALREADY_EXISTS : storage::StorageError::WRITE_ERROR;
 
   return storage::StorageError::OK;
 }

@@ -11,7 +11,11 @@ from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     require_vfs_dir,
 )
-from esphome.components.storage import request_storage_device, request_storage_worker
+from esphome.components.storage import (
+    request_path_length,
+    request_storage_device,
+    request_storage_worker,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADDRESS,
@@ -728,9 +732,7 @@ def _stage_prefill(label: str, prefill: list) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(entry[CONF_PRE_FILL_SOURCE], dest)
     add_idf_sdkconfig_option("CONFIG_ESPHOME_LITTLEFS_PREFILL_PARTITION", label)
-    add_idf_sdkconfig_option(
-        "CONFIG_ESPHOME_LITTLEFS_PREFILL_DIR", staging.as_posix()
-    )
+    add_idf_sdkconfig_option("CONFIG_ESPHOME_LITTLEFS_PREFILL_DIR", staging.as_posix())
 
 
 async def to_code(config):
@@ -792,6 +794,8 @@ async def to_code(config):
         cg.add(var.set_storage_name(storage_name))
 
         request_storage_device()
+        # LittleFS name limit: 255 characters plus the terminator.
+        request_path_length(256)
         # Path-based driver -> async worker. task_safe: esp_littlefs serializes internally
         # and esp_partition flash I/O is task-safe in IDF for every instance of this driver
         # (see FlashPartition::get_capabilities()).
@@ -864,6 +868,8 @@ async def to_code(config):
 
     # Raw device always registers itself
     request_storage_device()
+    # LittleFS name limit: 255 characters plus the terminator.
+    request_path_length(256)
 
     # assume_exclusive_bus: FINAL_VALIDATE already enforced the promise (alone on a hardware
     # bus on esp32). Tell the driver it may advertise task-safe I/O, and request the worker
@@ -904,6 +910,8 @@ async def to_code(config):
 
         # LittleFSMount registers as a separate filesystem storage device
         request_storage_device()
+        # LittleFS name limit: 255 characters plus the terminator.
+        request_path_length(256)
         # Path-based driver -> async worker; never task-safe (bus-attached backing device,
         # see LittleFSMount::get_capabilities()).
         request_storage_worker()

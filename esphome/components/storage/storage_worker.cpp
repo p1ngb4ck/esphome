@@ -137,6 +137,22 @@ bool StorageWorker::is_task_safe_(const TransferRequest &req) const {
 // the honest final answer (server truly gone).
 static constexpr uint32_t NETWORK_READY_WINDOW_MS = 20000;
 
+// Whether a request walks a directory tree. Read the op, not the presence of req.tree: the
+// walk allocation stays on the slot after a tree finishes so the next one reuses it, so a
+// non-null tree says nothing about what this request is.
+static bool is_tree_op(RequestOp op) { return op == RequestOp::COPY_TREE || op == RequestOp::MOVE_TREE; }
+
+// Gives `req` a zeroed walk, reusing the slot's existing allocation when there is one — ~800
+// bytes of allocate/free per tree operation is the churn this avoids. False if it cannot be had.
+static bool ensure_tree(TransferRequest &req) {
+  if (req.tree == nullptr) {
+    req.tree = make_unique<TreeWalk>();
+    return req.tree != nullptr;
+  }
+  *req.tree = TreeWalk{};
+  return true;
+}
+
 bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError err, const Storage *side) {
   if (err != StorageError::NOT_READY || side == nullptr || side->get_storage_type() != StorageType::NETWORK)
     return false;
@@ -147,6 +163,14 @@ bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError e
     ESP_LOGD(TAG, "Network storage not ready yet — waiting for it to come up");
   }
   return true;  // stay RUNNING; the loop retries this request on the next pass
+}
+
+// A stream whose step is queued or running is calling into its storage right now. An IDLE one
+// only holds a handle open, which the interface permits alongside other work — so it does not
+// contend, or an upload sitting between chunks would block every transfer on that storage.
+static bool stream_step_active(StreamState state) {
+  return state == StreamState::OPENING || state == StreamState::WRITING || state == StreamState::READING ||
+         state == StreamState::CLOSING || state == StreamState::CANCELLED;
 }
 
 bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
@@ -164,6 +188,34 @@ bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
         (req.raw_device != nullptr && req.raw_device == candidate.raw_device))
       return true;
   }
+  // Streams drive the same storages through the same drivers — see stream_overlaps_active_().
+  for (const auto &sreq : this->stream_pool_) {
+    if (sreq.storage == nullptr || !stream_step_active(sreq.state.load()))
+      continue;
+    if (sreq.storage == candidate.src_storage || sreq.storage == candidate.dst_storage)
+      return true;
+  }
+  return false;
+}
+
+bool StorageWorker::stream_overlaps_active_(const StreamRequest &candidate, bool from_loop) const {
+  if (candidate.storage == nullptr)
+    return false;
+  for (const auto &req : this->pool_) {
+    RequestState state = req.state.load();
+    if (state != RequestState::RUNNING && state != RequestState::CANCELLED)
+      continue;
+    if (req.src_storage == candidate.storage || req.dst_storage == candidate.storage)
+      return true;
+  }
+  for (const auto &sreq : this->stream_pool_) {
+    if (&sreq == &candidate || sreq.storage != candidate.storage)
+      continue;
+    if (from_loop && sreq.pending_step_)
+      continue;  // queued for this same thread — it runs after us, it does not race us
+    if (stream_step_active(sreq.state.load()))
+      return true;
+  }
   return false;
 }
 
@@ -177,6 +229,16 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
     if (state == RequestState::FREE || state == RequestState::DONE)
       continue;
     if (req.src_storage == storage || req.dst_storage == storage)
+      return true;
+  }
+  // A stream counts whatever it is doing, IDLE included: unlike the contention question above,
+  // this one asks whether the medium may be taken away — and an idle stream still holds an
+  // open handle on it.
+  for (const auto &sreq : this->stream_pool_) {
+    StreamState state = sreq.state.load();
+    if (state == StreamState::FREE || state == StreamState::DONE)
+      continue;
+    if (sreq.storage == storage)
       return true;
   }
   return false;
@@ -224,8 +286,6 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   slot->src_handle = nullptr;
   slot->dst_handle = nullptr;
   slot->handles_open = false;
-  slot->chunk_buf.reset();
-  slot->chunk_size = 0;
   slot->submitted_ms = millis();
   slot->waiting_logged = false;
   slot->last_progress_ms = millis();
@@ -245,15 +305,12 @@ StorageError StorageWorker::submit_(RequestOp op, PathStorage *src, const char *
   // Tree ops keep their roots aside: src_path/dst_path are reused for the file currently in
   // flight, so everything below this point works on a tree exactly as it does on one file.
   if (op == RequestOp::COPY_TREE || op == RequestOp::MOVE_TREE) {
-    slot->tree = make_unique<TreeWalk>();
-    if (slot->tree == nullptr) {
+    if (!ensure_tree(*slot)) {
       slot->state = RequestState::FREE;
       return StorageError::NO_SPACE;  // same answer the chunk buffer gives when it cannot be had
     }
     strncpy(slot->tree->src_root, src_path, STORAGE_WORKER_MAX_PATH - 1);
     strncpy(slot->tree->dst_root, dst_path, STORAGE_WORKER_MAX_PATH - 1);
-  } else {
-    slot->tree.reset();
   }
   slot->bytes_done = 0;
   slot->bytes_total = 0;
@@ -369,9 +426,6 @@ StorageError StorageWorker::submit_raw_(RequestOp op, RawStorage *device, uint64
   slot->src_handle = nullptr;
   slot->dst_handle = nullptr;
   slot->handles_open = false;
-  slot->chunk_buf.reset();
-  slot->chunk_size = 0;
-  slot->tree.reset();
   slot->bytes_done = 0;
   slot->bytes_total = size;  // read: known now; write: pre-phase stats the file
   slot->file_done = 0;
@@ -550,8 +604,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
 
   // Same drain contract for streams: by the time this returns, no data-plane call into `s` is
   // still in flight and any handle it held is closed.
-  for (size_t i = 0; i < this->stream_pool_.size(); i++) {
-    StreamRequest &req = this->stream_pool_[i];
+  for (auto &req : this->stream_pool_) {
     if (req.storage != s)
       continue;
     StreamState state = req.state.load();
@@ -566,30 +619,34 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
       continue;
     }
     // A step (OPENING/WRITING/READING/CLOSING) is in flight or queued. Mark CANCELLED;
-    // run_stream_step_()'s entry check sees it and closes/finishes immediately. If it's
-    // already running on the worker task, wait (bounded) for it to reach DONE — same
-    // rationale/timeout as the TransferRequest drain above.
+    // run_stream_step_()'s entry check sees it and closes/finishes immediately.
     req.state = StreamState::CANCELLED;
 #if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
-    uint32_t start = millis();
-    while (req.state.load() != StreamState::DONE) {
-      if (millis() - start > 500) {
-        ESP_LOGE(TAG, "Timed out waiting for in-flight stream to cancel — the storage medium is "
-                      "likely gone; proceeding with unmount anyway.");
-        req.callback = nullptr;
-        break;
+    // pending_step_ tells the two dispatch routes apart, and only the main loop ever writes
+    // it: false means the step went to the worker task (queued or already running), so wait
+    // (bounded) for the task to observe CANCELLED and reach DONE — same rationale/timeout as
+    // the TransferRequest drain above.
+    if (!req.pending_step_) {
+      uint32_t start = millis();
+      while (req.state.load() != StreamState::DONE) {
+        if (millis() - start > 500) {
+          ESP_LOGE(TAG, "Timed out waiting for in-flight stream to cancel — the storage medium is "
+                        "likely gone; proceeding with unmount anyway.");
+          req.callback = nullptr;
+          break;
+        }
+        vTaskDelay(1);
       }
-      vTaskDelay(1);
+      continue;
     }
-#else
-    // Loop-sliced only: run the (now-cancelled) step directly here rather than waiting for
-    // the next loop() pass — we're on the main loop right now too (this callback only ever
+#endif
+    // Queued for the loop-sliced engine: run the (now-cancelled) step right here rather than
+    // waiting for the next loop() pass — we're on the main loop too (this callback only ever
     // fires from unregister_storage(), main-loop-only per StorageRegistry's contract), so
-    // nothing else can be touching this slot concurrently. run_stream_step_()'s entry check
-    // sees CANCELLED and closes the handle immediately, before this function returns.
+    // nothing else can be touching this slot. Its entry check closes the handle before this
+    // function returns, which is what the drain contract promises.
     req.pending_step_ = false;
     this->run_stream_step_(req);
-#endif
   }
 }
 
@@ -605,23 +662,26 @@ void StorageWorker::deliver_completions_() {
       // still intact. Whatever the result: a partially landed tree is still a change.
       // (Streaming requests are not fed: reads change nothing, and the write stream's
       // consumers note their own completion — they know the path, this loop does not.)
+      char feed_path[STORAGE_WORKER_MAX_PATH];
       if (global_storage_registry != nullptr && req.op == RequestOp::RAW_READ_TO_FILE && req.dst_storage != nullptr) {
         // A raw read landed (or failed to land — partially is still a change) a file: the
         // feed learns about its parent directory exactly like any other transfer's.
-        global_storage_registry->note_parent_changed(std::string(req.dst_storage->get_mount_path()) + "/" +
-                                                     req.dst_path);
+        if (StorageRegistry::build_path(req.dst_storage, req.dst_path, feed_path, sizeof(feed_path)))
+          global_storage_registry->note_parent_changed(feed_path);
       } else if (global_storage_registry != nullptr && req.dst_storage != nullptr && req.src_storage != nullptr) {
-        const bool is_tree = req.tree != nullptr;
+        const bool is_tree = is_tree_op(req.op);
         const char *dst_rel = is_tree ? req.tree->dst_root : req.dst_path;
-        std::string dst = std::string(req.dst_storage->get_mount_path()) + "/" + dst_rel;
-        global_storage_registry->note_parent_changed(dst);
-        if (is_tree) {
-          // Merging into an existing (possibly open) directory changes its listing too.
-          global_storage_registry->note_dir_changed(dst);
+        if (StorageRegistry::build_path(req.dst_storage, dst_rel, feed_path, sizeof(feed_path))) {
+          global_storage_registry->note_parent_changed(feed_path);
+          if (is_tree) {
+            // Merging into an existing (possibly open) directory changes its listing too.
+            global_storage_registry->note_dir_changed(feed_path);
+          }
         }
         if (req.op == RequestOp::MOVE || req.op == RequestOp::MOVE_TREE) {
           const char *src_rel = is_tree ? req.tree->src_root : req.src_path;
-          global_storage_registry->note_parent_changed(std::string(req.src_storage->get_mount_path()) + "/" + src_rel);
+          if (StorageRegistry::build_path(req.src_storage, src_rel, feed_path, sizeof(feed_path)))
+            global_storage_registry->note_parent_changed(feed_path);
         }
       }
 #endif
@@ -737,7 +797,9 @@ void StorageWorker::update() {
   //     reentrantly from inside the caller's own begin_*/write_chunk/read_chunk/end_* call).
   //  2. Deliver completions for whichever streams finished a step (task or loop-sliced).
   for (auto &req : this->stream_pool_) {
-    if (req.pending_step_) {
+    // Hold a queued step while a transfer (or another stream) drives the same storage — the
+    // slot stays non-FREE, so the poller keeps ticking and the step runs on a later pass.
+    if (req.pending_step_ && !this->stream_overlaps_active_(req, /*from_loop=*/true)) {
       req.pending_step_ = false;
       this->run_stream_step_(req);
     }
@@ -845,9 +907,9 @@ static bool join_walk_path(char *out, size_t out_size, const char *root, const c
 static void close_handles(TransferRequest &req, StorageError *result) {
   if (!req.handles_open)
     return;
-  if (req.src_is_fs && req.src_handle != nullptr)
+  if (req.src_is_fs && req.src_handle != nullptr && req.src_storage != nullptr)
     static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
-  if (req.dst_is_fs && req.dst_handle != nullptr) {
+  if (req.dst_is_fs && req.dst_handle != nullptr && req.dst_storage != nullptr) {
     StorageError close_err = static_cast<FilesystemStorage *>(req.dst_storage)->close(req.dst_handle);
     if (*result == StorageError::OK)
       *result = close_err;
@@ -858,7 +920,6 @@ static void close_handles(TransferRequest &req, StorageError *result) {
 
 static void finish_request(TransferRequest &req, StorageError result) {
   close_handles(req, &result);
-  req.chunk_buf.reset();
   req.result = result;
   req.state = RequestState::DONE;
 }
@@ -881,16 +942,37 @@ bool StorageWorker::begin_verify_pass_(TransferRequest &req) {
   return true;
 }
 
-// One verify chunk: read the device span [raw_address+offset, +want) into chunk_buf, then read
+// One verify chunk: read the device span [raw_address+offset, +want) into the engine's chunk
+// buffer, then read
 // the same span from the source file in small stack-sized slices and memcmp each — so the whole
-// comparison needs only the one chunk_buf plus a tiny stack buffer, no second large allocation.
+// comparison needs only that one buffer plus a tiny stack buffer, no second large allocation.
 // Returns false when it has finished the request (mismatch, I/O error, completed pass) or is
 // waiting on the network; true to keep looping within the same call is not used (one chunk/call).
-bool StorageWorker::verify_chunk_(TransferRequest &req) {
+uint8_t *StorageWorker::chunk_buffer_(bool on_task, size_t *size_out) {
+  RamBuffer &buf = on_task ? this->chunk_buf_task_ : this->chunk_buf_loop_;
+  size_t &size = on_task ? this->chunk_size_task_ : this->chunk_size_loop_;
+  if (buf.get() == nullptr) {
+    size_t got = 0;
+    buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &got);
+    if (buf.get() == nullptr)
+      return nullptr;
+    size = got;
+  }
+  *size_out = size;
+  return buf.get();
+}
+
+bool StorageWorker::verify_chunk_(TransferRequest &req, bool on_task) {
   const uint64_t total = req.bytes_total.load();
-  size_t want = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, total - req.offset));
+  size_t chunk_size = 0;
+  uint8_t *chunk = this->chunk_buffer_(on_task, &chunk_size);
+  if (chunk == nullptr) {
+    finish_request(req, StorageError::NO_SPACE);
+    return false;
+  }
+  size_t want = static_cast<size_t>(std::min<uint64_t>(chunk_size, total - req.offset));
   size_t got = 0;
-  StorageError err = req.raw_device->read(req.raw_address + req.offset, req.chunk_buf.get(), want, &got);
+  StorageError err = req.raw_device->read(req.raw_address + req.offset, chunk, want, &got);
   if (err != StorageError::OK) {
     finish_request(req, err);
     return false;
@@ -923,7 +1005,7 @@ bool StorageWorker::verify_chunk_(TransferRequest &req) {
       finish_request(req, StorageError::READ_ERROR);  // file shrank underneath the verify
       return false;
     }
-    if (memcmp(req.chunk_buf.get() + compared, cmp, fgot) != 0) {
+    if (memcmp(chunk + compared, cmp, fgot) != 0) {
       ESP_LOGW(TAG, "Verify FAILED: mismatch on pass %u/%u at byte %llu", req.verify_pass_done + 1, req.verify_passes,
                static_cast<unsigned long long>(req.offset + compared));
       finish_request(req, StorageError::VERIFY_MISMATCH);
@@ -989,20 +1071,18 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
     if ((geo.caps & (RAW_ERASE_SECTOR | RAW_ERASE_BLOCK | RAW_ERASE_CHIP)) == 0) {
       // Pseudo erase: fill one chunk of 0xFF per pass. Shares the platform-aware streaming
       // buffer policy (alloc_dma_capable) — internal RAM under the cutoff, DMA-capable, halving
-      // on pressure. The buffer is written once and reused across passes.
-      if (req.chunk_buf.get() == nullptr) {
-        size_t chunk_size = 0;
-        req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
-        if (req.chunk_buf.get() == nullptr) {
-          finish_request(req, StorageError::NO_SPACE);
-          return;
-        }
-        memset(req.chunk_buf.get(), 0xFF, chunk_size);
-        req.chunk_size = chunk_size;
+      // on pressure. The fill happens on every pass: the buffer belongs to the engine, not to
+      // this request, so another transfer may have used it in between.
+      size_t chunk_size = 0;
+      uint8_t *chunk = this->chunk_buffer_(on_task, &chunk_size);
+      if (chunk == nullptr) {
+        finish_request(req, StorageError::NO_SPACE);
+        return;
       }
-      size_t step = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, req.raw_erase_end - req.raw_erase_pos));
+      size_t step = static_cast<size_t>(std::min<uint64_t>(chunk_size, req.raw_erase_end - req.raw_erase_pos));
+      memset(chunk, 0xFF, step);
       size_t written = 0;
-      StorageError werr = req.raw_device->write(req.raw_erase_pos, req.chunk_buf.get(), step, &written);
+      StorageError werr = req.raw_device->write(req.raw_erase_pos, chunk, step, &written);
       if (werr != StorageError::OK || written == 0) {
         finish_request(req, werr != StorageError::OK ? werr : StorageError::WRITE_ERROR);
         return;
@@ -1149,16 +1229,13 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
     // filling it, and avoids a long erase-only phase that writes no bytes. Fall through.
   }
 
-  if (req.chunk_buf.get() == nullptr) {
-    // Platform-aware streaming buffer (alloc_dma_capable): internal RAM under the cutoff,
-    // DMA-capable, halving on pressure down to 4 KiB before giving up.
-    size_t chunk_size = 0;
-    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
-    if (req.chunk_buf.get() == nullptr) {
-      finish_request(req, StorageError::NO_SPACE);
-      return;
-    }
-    req.chunk_size = chunk_size;
+  // Platform-aware streaming buffer, owned by the engine (alloc_dma_capable): internal RAM
+  // under the cutoff, DMA-capable, halving on pressure down to 4 KiB before giving up.
+  size_t chunk_size = 0;
+  uint8_t *chunk = this->chunk_buffer_(on_task, &chunk_size);
+  if (chunk == nullptr) {
+    finish_request(req, StorageError::NO_SPACE);
+    return;
   }
   if (!req.handles_open) {
     if (file_is_fs) {
@@ -1195,17 +1272,17 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
     return;
   }
   if (req.verifying) {
-    // Verify phase: read one device chunk into chunk_buf, then read the same span from the file
+    // Verify phase: read one device chunk into the engine buffer, then read the same span from the file
     // in small slices and memcmp — no second full buffer. A mismatch fails the request.
-    if (!this->verify_chunk_(req))
+    if (!this->verify_chunk_(req, on_task))
       return;  // verify_chunk_ finished the request (mismatch or error) or is waiting on network
     return;
   }
-  size_t want = static_cast<size_t>(std::min<uint64_t>(req.chunk_size, total - req.offset));
+  size_t want = static_cast<size_t>(std::min<uint64_t>(chunk_size, total - req.offset));
   size_t moved = 0;
   StorageError err = StorageError::OK;
   if (to_file) {
-    err = req.raw_device->read(req.raw_address + req.offset, req.chunk_buf.get(), want, &moved);
+    err = req.raw_device->read(req.raw_address + req.offset, chunk, want, &moved);
     if (err == StorageError::OK && moved > 0) {
       // Write the chunk out fully — write()/write_chunk() may return partial writes, which
       // are not errors (same retry-until-full loop the file-to-file chunk path uses).
@@ -1214,11 +1291,11 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
         size_t written = 0;
         if (file_is_fs) {
           err = static_cast<FilesystemStorage *>(file_storage)
-                    ->write(req.dst_handle, req.chunk_buf.get() + total_written, moved - total_written, &written);
+                    ->write(req.dst_handle, chunk + total_written, moved - total_written, &written);
         } else {
           err = static_cast<NetworkStorage *>(file_storage)
-                    ->write_chunk(file_path, req.chunk_buf.get() + total_written, req.offset + total_written,
-                                  moved - total_written, &written);
+                    ->write_chunk(file_path, chunk + total_written, req.offset + total_written, moved - total_written,
+                                  &written);
         }
         if (this->wait_for_network_ready_(req, err, file_storage))
           return;
@@ -1232,10 +1309,9 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
   } else {
     size_t got = 0;
     if (file_is_fs) {
-      err = static_cast<FilesystemStorage *>(file_storage)->read(req.src_handle, req.chunk_buf.get(), want, &got);
+      err = static_cast<FilesystemStorage *>(file_storage)->read(req.src_handle, chunk, want, &got);
     } else {
-      err = static_cast<NetworkStorage *>(file_storage)
-                ->read_chunk(file_path, req.chunk_buf.get(), req.offset, want, &got);
+      err = static_cast<NetworkStorage *>(file_storage)->read_chunk(file_path, chunk, req.offset, want, &got);
     }
     if (this->wait_for_network_ready_(req, err, file_storage))
       return;
@@ -1268,7 +1344,7 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
           req.raw_erase_pos += step;
         }
       }
-      err = req.raw_device->write(req.raw_address + req.offset, req.chunk_buf.get(), got, &moved);
+      err = req.raw_device->write(req.raw_address + req.offset, chunk, got, &moved);
     }
   }
   if (err != StorageError::OK || moved == 0) {
@@ -1281,6 +1357,12 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
 }
 
 bool StorageWorker::tree_step_(TransferRequest &req) {
+  // Both sides are set for every op that walks a tree — raw transfers, which leave one of them
+  // null, never get here. Saying so locally keeps the invariant checkable at this end too.
+  if (req.src_storage == nullptr || req.dst_storage == nullptr) {
+    finish_request(req, StorageError::INVALID_ARGS);
+    return false;
+  }
   TreeWalk &w = *req.tree;
   const bool is_move = req.op == RequestOp::MOVE_TREE;
 
@@ -1342,7 +1424,8 @@ bool StorageWorker::tree_step_(TransferRequest &req) {
 
     if (ctx.entry.is_dir) {
       if (w.depth + 1 >= TreeWalk::MAX_DEPTH) {
-        finish_request(req, StorageError::NOT_SUPPORTED);
+        // Same answer the blocking walks give for the same reason (storage.cpp).
+        finish_request(req, StorageError::INVALID_ARGS);
         return false;
       }
       char dst_dir[STORAGE_WORKER_MAX_PATH];
@@ -1413,7 +1496,11 @@ void StorageWorker::check_stalled_() {
         continue;
       }
       uint64_t mark = req.offset ^ (req.bytes_done.load() << 1) ^ (req.file_done.load() << 2);
-      if (req.tree != nullptr)
+      // Test the pointer as well, not just the op: this runs on the main loop against a
+      // request the worker task may be running right now, and the pre-phase writes req.tree
+      // and req.op as two separate plain stores. Observing the op without the walk is a
+      // narrow window, but it is a null dereference when it happens.
+      if (is_tree_op(req.op) && req.tree != nullptr)
         mark ^= (static_cast<uint64_t>(req.tree->files_done) << 32) ^ (static_cast<uint64_t>(req.tree->depth) << 56);
       if (mark != req.progress_mark) {
         req.progress_mark = mark;
@@ -1484,6 +1571,12 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
     this->run_raw_chunk_(req, on_task);
     return;
   }
+  // Past the raw dispatch every op is path-to-path, so both sides are set — the submit funnels
+  // reject anything else. Everything below dereferences them without asking again.
+  if (req.src_storage == nullptr || req.dst_storage == nullptr) {
+    finish_request(req, StorageError::INVALID_ARGS);
+    return;
+  }
 
   // The relocated handler pre-phase, executed once inside the engine that owns the storages
   // (the file API is a pure translator and performs no driver I/O of its own): classify the
@@ -1507,7 +1600,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
     // Explicit tree submissions (async_copy_tree()/async_move_tree(), e.g. automations) keep
     // their historical contract: an existing destination root is merged into, entries below
     // it overwritten by the walk itself. Only the self-classifying API enforces overwrite.
-    const bool explicit_tree = req.tree != nullptr;
+    const bool explicit_tree = is_tree_op(req.op);
     FileStat dst_st{};
     StorageError derr = req.dst_storage->stat(req.dst_path, &dst_st);
     if (this->wait_for_network_ready_(req, derr, req.dst_storage)) {
@@ -1537,10 +1630,9 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
         }
       }
     }
-    if (src_is_dir && !same_storage_move && req.tree == nullptr) {
+    if (src_is_dir && !same_storage_move && !is_tree_op(req.op)) {
       // A directory source that rename() cannot take in one step: become a tree job.
-      req.tree = make_unique<TreeWalk>();
-      if (req.tree == nullptr) {
+      if (!ensure_tree(req)) {
         finish_request(req, StorageError::NO_SPACE);
         return;
       }
@@ -1552,7 +1644,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
 
   // A tree between files: take the next walk step. It either sets up the next file (and falls
   // through to the chunk loop below) or finishes the request — no caller involved either way.
-  if (req.tree != nullptr && !req.tree->file_in_flight) {
+  if (is_tree_op(req.op) && !req.tree->file_in_flight) {
     if (!this->tree_step_(req))
       return;
   }
@@ -1589,19 +1681,11 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
       if (req.src_storage->stat(req.src_path, &src_stat) == StorageError::OK && !src_stat.is_dir) {
         // bytes_total belongs to the request as a whole and stays 0 for a tree (unknown
         // without walking it twice); the file in flight is one cheap stat either way.
-        if (req.tree == nullptr)
+        if (!is_tree_op(req.op))
           req.bytes_total.store(src_stat.size);
         req.file_total.store(src_stat.size);
       }
     }
-
-    size_t chunk_size = 0;
-    req.chunk_buf = alloc_dma_capable(STORAGE_COPY_CHUNK_SIZE, on_task, &chunk_size);
-    if (req.chunk_buf.get() == nullptr) {
-      finish_request(req, StorageError::NO_SPACE);
-      return;
-    }
-    req.chunk_size = chunk_size;
 
     if (req.src_is_fs) {
       StorageError err =
@@ -1624,15 +1708,21 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   }
 
   // One chunk: read, then write it out fully (write_chunk/write can themselves return partial
-  // writes — loop here same as the synchronous copy() helper does).
+  // writes — loop here same as the synchronous copy() helper does). The buffer belongs to the
+  // engine and only has to survive this call — nothing carries over to the next one.
+  size_t chunk_size = 0;
+  uint8_t *chunk = this->chunk_buffer_(on_task, &chunk_size);
+  if (chunk == nullptr) {
+    finish_request(req, StorageError::NO_SPACE);
+    return;
+  }
   size_t bytes_read = 0;
   StorageError err;
   if (req.src_is_fs) {
-    err = static_cast<FilesystemStorage *>(req.src_storage)
-              ->read(req.src_handle, req.chunk_buf.get(), req.chunk_size, &bytes_read);
+    err = static_cast<FilesystemStorage *>(req.src_storage)->read(req.src_handle, chunk, chunk_size, &bytes_read);
   } else {
     err = static_cast<NetworkStorage *>(req.src_storage)
-              ->read_chunk(req.src_path, req.chunk_buf.get(), req.offset, req.chunk_size, &bytes_read);
+              ->read_chunk(req.src_path, chunk, req.offset, chunk_size, &bytes_read);
   }
   if (err != StorageError::OK) {
     if (this->wait_for_network_ready_(req, err, req.src_storage))
@@ -1642,7 +1732,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   }
   if (bytes_read == 0) {
     // EOF of the file in flight.
-    if (req.tree != nullptr) {
+    if (is_tree_op(req.op)) {
       // Close it before touching the entry itself, then let the walk pick the next one on the
       // next call. The chunk buffer stays — the next file reuses it.
       close_handles(req, &err);
@@ -1675,12 +1765,11 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   while (total_written < bytes_read) {
     size_t bytes_written = 0;
     if (req.dst_is_fs) {
-      err =
-          static_cast<FilesystemStorage *>(req.dst_storage)
-              ->write(req.dst_handle, req.chunk_buf.get() + total_written, bytes_read - total_written, &bytes_written);
+      err = static_cast<FilesystemStorage *>(req.dst_storage)
+                ->write(req.dst_handle, chunk + total_written, bytes_read - total_written, &bytes_written);
     } else {
       err = static_cast<NetworkStorage *>(req.dst_storage)
-                ->write_chunk(req.dst_path, req.chunk_buf.get() + total_written, req.offset + total_written,
+                ->write_chunk(req.dst_path, chunk + total_written, req.offset + total_written,
                               bytes_read - total_written, &bytes_written);
     }
     if (err != StorageError::OK) {
@@ -1700,7 +1789,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   // Progress for get_transfer_status(): offset equals bytes fully read AND written at this
   // point (the write loop above completed), so it doubles as bytes_done. Atomic store because
   // the main loop may snapshot progress while the worker task runs this transfer.
-  req.bytes_done.store(req.tree != nullptr ? req.tree->bytes_base + req.offset : req.offset);
+  req.bytes_done.store(is_tree_op(req.op) ? req.tree->bytes_base + req.offset : req.offset);
   req.file_done.store(req.offset);
   // Request stays RUNNING; the next call (next loop() iteration, or the task's own loop)
   // picks up at the new offset. No watchdog feed here by design — see task_loop_()'s comment
@@ -1852,7 +1941,7 @@ static bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_
 // caller's own begin_*/write_chunk/read_chunk/end_* call frame.
 void StorageWorker::dispatch_stream_step_(StreamRequest &req, size_t index) {
 #if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
-  if (this->is_task_safe_(req)) {
+  if (this->is_task_safe_(req) && !this->stream_overlaps_active_(req, /*from_loop=*/false)) {
     QueueEntry entry{QueueEntryKind::STREAM, index};
     if (xQueueSend(this->task_queue_, &entry, 0) == pdTRUE)
       return;

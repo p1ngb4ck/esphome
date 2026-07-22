@@ -4,6 +4,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/network/util.h"
 
+#include <cerrno>
 #include <cstring>
 #include <algorithm>
 
@@ -823,8 +824,14 @@ storage::StorageError NFSClient::mkdir(const char *path) {
   }
 
   NFSFileHandle fh;
-  return this->nfs_mkdir_(parent_fh, dirname, 0777, fh) ? storage::StorageError::OK
-                                                        : storage::StorageError::WRITE_ERROR;
+  uint32_t nfs_status = 0;
+  if (this->nfs_mkdir_(parent_fh, dirname, 0777, fh, &nfs_status)) {
+    return storage::StorageError::OK;
+  }
+  // Distinguish 'already there' (fine for mkdir-p style callers, e.g. the
+  // store_yaml export tree recreation) from real write failures — same
+  // mapping the local-filesystem drivers use for EEXIST.
+  return nfs_status == NFS3ERR_EXIST ? storage::StorageError::ALREADY_EXISTS : storage::StorageError::WRITE_ERROR;
 }
 
 storage::StorageError NFSClient::rmdir(const char *path) {
@@ -1003,7 +1010,7 @@ bool NFSClient::get_space_info(uint64_t &total_bytes, uint64_t &free_bytes) {
 
   total_bytes = tbytes;
   free_bytes = fbytes;
-  ESP_LOGD(TAG, "FSSTAT: total=%llu, free=%llu, avail=%llu", tbytes, fbytes, abytes);
+  ESP_LOGV(TAG, "FSSTAT: total=%llu, free=%llu, avail=%llu", tbytes, fbytes, abytes);
   return true;
 }
 
@@ -1040,7 +1047,8 @@ bool NFSClient::resolve_hostname_() {
     }
   }
 
-  struct addrinfo hints{}, *result = nullptr;
+  struct addrinfo hints {
+  }, *result = nullptr;
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
@@ -1541,7 +1549,7 @@ bool NFSClient::resolve_path_(const std::string &path, NFSFileHandle &fh, NFSFil
   fh = this->root_fh_;
 
   if (path.empty() || path == "/") {
-    ESP_LOGD(TAG, "resolve_path_: getting root attributes");
+    ESP_LOGV(TAG, "resolve_path_: getting root attributes");
     return this->nfs_getattr_(fh, attr);
   }
 
@@ -1861,7 +1869,8 @@ bool NFSClient::nfs_remove_(const NFSFileHandle &dir_fh, const std::string &name
   return true;
 }
 
-bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh) {
+bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh,
+                           uint32_t *nfs_status_out) {
   ESP_LOGD(TAG, "NFS MKDIR: %s (mode 0%" PRIo32 ")", name.c_str(), (uint32_t) mode);
 
   uint32_t xid = RPCClient::generate_xid();
@@ -1891,8 +1900,15 @@ bool NFSClient::nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name,
   }
 
   uint32_t nfs_status{0};
-  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
-    ESP_LOGW(TAG, "MKDIR failed: status=%" PRIu32, nfs_status);
+  bool decoded = response.decode_uint32(nfs_status);
+  if (nfs_status_out != nullptr)
+    *nfs_status_out = decoded ? nfs_status : 0;
+  if (!decoded || nfs_status != NFS3_OK) {
+    // NFS3ERR_EXIST is an expected answer for idempotent mkdir-p callers —
+    // the StorageError mapping below reports it, no warning spam here.
+    if (nfs_status != NFS3ERR_EXIST) {
+      ESP_LOGW(TAG, "MKDIR failed: status=%" PRIu32, nfs_status);
+    }
     return false;
   }
 
@@ -1967,7 +1983,7 @@ bool NFSClient::nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &
 }
 
 bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntry> &entries) {
-  ESP_LOGI(TAG, "NFS READDIRPLUS starting");
+  ESP_LOGV(TAG, "NFS READDIRPLUS starting");
   entries.clear();
   uint64_t cookie = 0;
   uint8_t cookieverf[8] = {0};
@@ -2064,7 +2080,7 @@ bool NFSClient::nfs_readdir_(const NFSFileHandle &dir_fh, std::vector<NFSDirEntr
     }
 
     if (eof) {
-      ESP_LOGI(TAG, "READDIRPLUS: Got %" PRIu32 " entries", (uint32_t) entries.size());
+      ESP_LOGV(TAG, "READDIRPLUS: Got %" PRIu32 " entries", (uint32_t) entries.size());
       break;
     }
 
