@@ -493,6 +493,8 @@ const char *error_to_string(StorageError error);
 // (SD, USB). Collapsing every failure into WRITE_ERROR loses exactly what a caller needs to
 // react: "destination exists" (EEXIST) is a different answer than "source is gone" (ENOENT).
 // `writing` picks the fallback direction for errnos with no direct mapping.
+// Call this only once an operation has actually failed: `err` must be a real errno, never 0.
+// A zero is not treated as success — it hits the same fallback as any unmapped value.
 StorageError error_from_errno(int err, bool writing);
 
 // stat()-based existence/size checks — thin wrappers, work on any PathStorage
