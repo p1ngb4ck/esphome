@@ -604,8 +604,7 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
 
   // Same drain contract for streams: by the time this returns, no data-plane call into `s` is
   // still in flight and any handle it held is closed.
-  for (size_t i = 0; i < this->stream_pool_.size(); i++) {
-    StreamRequest &req = this->stream_pool_[i];
+  for (auto &req : this->stream_pool_) {
     if (req.storage != s)
       continue;
     StreamState state = req.state.load();
@@ -908,9 +907,9 @@ static bool join_walk_path(char *out, size_t out_size, const char *root, const c
 static void close_handles(TransferRequest &req, StorageError *result) {
   if (!req.handles_open)
     return;
-  if (req.src_is_fs && req.src_handle != nullptr)
+  if (req.src_is_fs && req.src_handle != nullptr && req.src_storage != nullptr)
     static_cast<FilesystemStorage *>(req.src_storage)->close(req.src_handle);
-  if (req.dst_is_fs && req.dst_handle != nullptr) {
+  if (req.dst_is_fs && req.dst_handle != nullptr && req.dst_storage != nullptr) {
     StorageError close_err = static_cast<FilesystemStorage *>(req.dst_storage)->close(req.dst_handle);
     if (*result == StorageError::OK)
       *result = close_err;
@@ -1358,6 +1357,12 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
 }
 
 bool StorageWorker::tree_step_(TransferRequest &req) {
+  // Both sides are set for every op that walks a tree — raw transfers, which leave one of them
+  // null, never get here. Saying so locally keeps the invariant checkable at this end too.
+  if (req.src_storage == nullptr || req.dst_storage == nullptr) {
+    finish_request(req, StorageError::INVALID_ARGS);
+    return false;
+  }
   TreeWalk &w = *req.tree;
   const bool is_move = req.op == RequestOp::MOVE_TREE;
 
@@ -1564,6 +1569,12 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   if (req.op == RequestOp::RAW_READ_TO_FILE || req.op == RequestOp::RAW_WRITE_FROM_FILE ||
       req.op == RequestOp::RAW_ERASE || req.op == RequestOp::RAW_VERIFY_FILE) {
     this->run_raw_chunk_(req, on_task);
+    return;
+  }
+  // Past the raw dispatch every op is path-to-path, so both sides are set — the submit funnels
+  // reject anything else. Everything below dereferences them without asking again.
+  if (req.src_storage == nullptr || req.dst_storage == nullptr) {
+    finish_request(req, StorageError::INVALID_ARGS);
     return;
   }
 

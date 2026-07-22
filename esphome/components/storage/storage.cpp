@@ -721,9 +721,10 @@ static bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
                              ctx->chunk_buf, ctx->chunk_size, ctx->depth + 1);
   } else {
     err = check_blocking_transfer_size(entry->size);
-    if (err == StorageError::OK)
+    if (err == StorageError::OK) {
       err = copy_one_file(ctx->src_storage, ctx->src_path, ctx->dst_storage, ctx->dst_path, ctx->chunk_buf,
                           ctx->chunk_size);
+    }
   }
   App.feed_wdt();
 

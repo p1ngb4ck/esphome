@@ -111,7 +111,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
         if (!token.empty()) {
           if (node.is<JsonArrayConst>()) {
             char *end = nullptr;
-            unsigned long idx = strtoul(token.c_str(), &end, 10);
+            uint64_t idx = strtoul(token.c_str(), &end, 10);
             if (end == nullptr || *end != '\0') {
               ESP_LOGV(TAG, "extract json: '%s' is not an array index", token.c_str());
               return false;
@@ -444,9 +444,10 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
     return false;
   }
   bool ok = perform_raw_write(device, address, buf.get(), size, erase_first);
-  if (ok)
+  if (ok) {
     ESP_LOGI(TAG, "Transfer done: write '%s' (%" PRIu32 " bytes) -> 0x%08" PRIX32, path.c_str(), (uint32_t) size,
              (uint32_t) address);
+  }
   return ok;
 }
 
@@ -474,16 +475,17 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
 
 // Shared completion glue for the async raw actions: log on failure, fire the trigger once with
 // the error text (empty = success).
-static void raw_fire_(Trigger<std::string> *on_complete, const char *op, StorageError result) {
-  if (result != StorageError::OK)
+static void raw_fire(Trigger<std::string> *on_complete, const char *op, StorageError result) {
+  if (result != StorageError::OK) {
     ESP_LOGE(TAG, "raw_%s failed (%s)", op, error_to_string(result));
-  else
+  } else {
     ESP_LOGI(TAG, "Transfer done: raw %s", op);
+  }
   if (on_complete != nullptr)
     on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
 }
 // Report a pre-submission failure and fire the trigger once so it always fires exactly once.
-static void raw_fail_(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
+static void raw_fail(Trigger<std::string> *on_complete, const char *op, const std::string &msg) {
   ESP_LOGE(TAG, "raw_%s: %s", op, msg.c_str());
   if (on_complete != nullptr)
     on_complete->trigger(msg);
@@ -499,22 +501,22 @@ void perform_raw_read_to_file_async(RawStorage *device, uint64_t address, uint64
       size = geo.capacity > address ? geo.capacity - address : 0;
     }
     if (global_storage_registry == nullptr) {
-      raw_fail_(on_complete, "read", "no storage registry");
+      raw_fail(on_complete, "read", "no storage registry");
       return;
     }
     const char *rel = nullptr;
     PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
     if (ps == nullptr) {
-      raw_fail_(on_complete, "read", std::string("no storage mounted for '") + path + "'");
+      raw_fail(on_complete, "read", std::string("no storage mounted for '") + path + "'");
       return;
     }
     ESP_LOGI(TAG, "Transfer started: read 0x%08" PRIX32 " + %" PRIu32 " -> '%s'", (uint32_t) address, (uint32_t) size,
              path.c_str());
     StorageError err = global_storage_worker->async_raw_read(
-        device, address, size, ps, rel, [on_complete](StorageError r) { raw_fire_(on_complete, "read", r); }, nullptr,
+        device, address, size, ps, rel, [on_complete](StorageError r) { raw_fire(on_complete, "read", r); }, nullptr,
         /*overwrite=*/true);
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "read", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "read", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif
@@ -528,20 +530,20 @@ void perform_raw_write_from_file_async(RawStorage *device, uint64_t address, con
 #ifdef USE_STORAGE_WORKER
   if (global_storage_worker != nullptr) {
     if (global_storage_registry == nullptr) {
-      raw_fail_(on_complete, "write", "no storage registry");
+      raw_fail(on_complete, "write", "no storage registry");
       return;
     }
     const char *rel = nullptr;
     PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
     if (ps == nullptr) {
-      raw_fail_(on_complete, "write", std::string("no storage mounted for '") + path + "'");
+      raw_fail(on_complete, "write", std::string("no storage mounted for '") + path + "'");
       return;
     }
     ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
     StorageError err = global_storage_worker->async_raw_write(
-        ps, rel, device, address, erase_first, [on_complete](StorageError r) { raw_fire_(on_complete, "write", r); });
+        ps, rel, device, address, erase_first, [on_complete](StorageError r) { raw_fire(on_complete, "write", r); });
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "write", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "write", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif
@@ -561,10 +563,10 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
 #ifdef USE_STORAGE_WORKER
   if (global_storage_worker != nullptr) {
     StorageError err = global_storage_worker->async_raw_erase(
-        device, address, size, [on_complete](StorageError r) { raw_fire_(on_complete, "erase", r); }, nullptr,
+        device, address, size, [on_complete](StorageError r) { raw_fire(on_complete, "erase", r); }, nullptr,
         force_sliced);
     if (err != StorageError::OK)
-      raw_fail_(on_complete, "erase", std::string("could not queue (") + error_to_string(err) + ")");
+      raw_fail(on_complete, "erase", std::string("could not queue (") + error_to_string(err) + ")");
     return;
   }
 #endif

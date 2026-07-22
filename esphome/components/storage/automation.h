@@ -178,8 +178,8 @@ template<typename... Ts> class FileReadAction : public Action<Ts...> {
  public:
   TEMPLATABLE_VALUE(std::string, path)
 
-  void add_step(ExtractStepType type, std::string arg, std::string sep, int index) {
-    this->steps_.push_back(ExtractStep{type, std::move(arg), std::move(sep), index});
+  void add_step(ExtractStepType type, const std::string &arg, const std::string &sep, int index) {
+    this->steps_.push_back(ExtractStep{type, arg, sep, index});
   }
   void set_global_setter(std::function<void(const std::string &)> setter) { this->setter_ = std::move(setter); }
   Trigger<std::string> *get_value_trigger() { return &this->value_trigger_; }
