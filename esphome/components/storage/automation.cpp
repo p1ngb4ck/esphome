@@ -303,6 +303,17 @@ static bool raw_erase_for_write(RawStorage *device, const RawGeometry &geo, uint
   uint64_t end = address + len;
   if ((end % geo.erase_sector) != 0)
     end += geo.erase_sector - (end % geo.erase_sector);
+  // Rounding up can leave the device behind when its capacity is not a whole number of erase
+  // sectors. Asking a driver to erase past its own end is not something to find out about from
+  // whatever it happens to return — say so here, the way the preferences export does when its
+  // rounded erase would leave the region it was given.
+  if (end > geo.capacity) {
+    ESP_LOGE(TAG,
+             "raw_write: erase_first would have to erase up to %" PRIu32 " to cover this write, past the device's "
+             "%" PRIu32 " bytes — this device's last sector is partial",
+             (uint32_t) end, (uint32_t) geo.capacity);
+    return false;
+  }
   ESP_LOGD(TAG, "raw_write: erasing 0x%08" PRIX32 " + %" PRIu32 " before writing", (uint32_t) start,
            (uint32_t) (end - start));
   StorageError err = device->erase(start, static_cast<size_t>(end - start));
