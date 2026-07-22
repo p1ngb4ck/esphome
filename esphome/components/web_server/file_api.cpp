@@ -714,8 +714,9 @@ void WebServerFileApi::loop() {
       this->flush_.result = err;
       this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
       if (err == storage::StorageError::OK && this->flush_.storage != nullptr) {
-        storage::global_storage_registry->note_parent_changed(std::string(this->flush_.storage->get_mount_path()) +
-                                                              "/" + this->flush_.rel_path);
+        char abs[storage::STORAGE_WORKER_MAX_PATH];
+        if (storage::StorageRegistry::build_path(this->flush_.storage, this->flush_.rel_path, abs, sizeof(abs)))
+          storage::global_storage_registry->note_parent_changed(abs);
       }
       this->loop_requester_.stop();
       ESP_LOGD(TAG, "staged upload flushed: %u/%u bytes (%s)", (unsigned) this->flush_.done,
@@ -1121,8 +1122,9 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         !this->upload_.staged_handoff) {
       // The file is fully on storage: its directory gained an entry. Rebuild the absolute
       // path the client used (resolve_() split it) — the note itself is main-loop-only.
-      std::string abs = std::string(this->upload_.storage->get_mount_path()) + "/" + this->upload_.rel_path;
-      this->run_on_loop_([&abs]() { storage::global_storage_registry->note_parent_changed(abs); });
+      char abs[storage::STORAGE_WORKER_MAX_PATH];
+      if (storage::StorageRegistry::build_path(this->upload_.storage, this->upload_.rel_path, abs, sizeof(abs)))
+        this->run_on_loop_([&abs]() { storage::global_storage_registry->note_parent_changed(abs); });
     }
   }
 }
