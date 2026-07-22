@@ -115,6 +115,15 @@ enum class EntityKind : uint8_t {
 // platform still falls back to the sweep's RAW entry, named but hex.
 void register_entity_pref(esphome::EntityBase *entity, EntityKind kind);
 
+// Same bridge for preferences that belong to no entity at all: safe_mode's boot counter and
+// friends live under a constant of the owning component's own choosing, so the sweep -- which
+// only ever walks entities -- cannot name them and they export as a bare number.
+//
+// Codegen emits the call with the owning component's SYMBOL, not its value, and only when that
+// component is configured. The constant therefore stays where it belongs: rename or move it and
+// the build says so, rather than this component quietly exporting a stale number.
+void register_key_pref(uint32_t key, const char *name, EntityKind kind);
+
 // Entity naming/typing is resolved ENTIRELY at runtime by the sweep in
 // preferences_backup.cpp (App entity lists + per-type version constants);
 // codegen contributes only the globals table and, for listed entity IDs,

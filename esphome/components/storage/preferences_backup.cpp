@@ -148,6 +148,16 @@ void register_entity_pref(esphome::EntityBase *entity, EntityKind kind) {
     register_if_missing(entity, 0, kind);
 }
 
+void register_key_pref(uint32_t key, const char *name, EntityKind kind) {
+  for (const auto &r : runtime_registry()) {
+    if (r.key == key)
+      return;  // an entity already claimed it; entities win, they can be selected by id
+  }
+  // No entity pointer: an action's `preferences:` filter selects by object, so these are only
+  // ever part of an unrestricted export -- which is what a component-owned key should be.
+  runtime_registry().emplace_back(RuntimeEntry{key, std::string(name), kind, 0, nullptr});
+}
+
 static void sweep_app_entities() {
   static bool done = false;
   if (done)

@@ -1020,6 +1020,27 @@ _SENSOR_PREF_KINDS = {
 }
 
 
+# Preferences owned by a component rather than an entity: (component, C++ symbol, exported
+# name, kind). Emitted only when that component is configured, and by SYMBOL -- the value stays
+# in the owning component's header, so a rename breaks the build instead of silently exporting a
+# number that has moved on. Without this they show up as a bare key, since the sweep only walks
+# entities.
+_COMPONENT_PREF_KEYS = (("safe_mode", "safe_mode::RTC_KEY", "safe_mode", "U32"),)
+
+
+async def _register_component_prefs():
+    """Names the component-owned preferences whose owners are part of this build."""
+    for component, symbol, name, kind in _COMPONENT_PREF_KEYS:
+        if component not in CORE.config:
+            continue
+        cg.add(
+            cg.RawExpression(
+                f'{storage_ns}::register_key_pref({symbol}, "{name}", '
+                f"{storage_ns}::EntityKind::{kind})"
+            )
+        )
+
+
 async def _register_typed_sensors():
     """Emits one register_entity_pref() per sensor whose restore type is known.
 
@@ -1225,6 +1246,9 @@ async def _build_preferences_action(config, action_id, template_arg, args):
         data.sensor_pref_job_queued = True
         CORE.add_job(
             coroutine_with_priority(CoroPriority.FINAL)(_register_typed_sensors)
+        )
+        CORE.add_job(
+            coroutine_with_priority(CoroPriority.FINAL)(_register_component_prefs)
         )
     if CONF_PATH in config:
         template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
