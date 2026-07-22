@@ -783,15 +783,15 @@ RamBuffer alloc_dma_capable(size_t want, bool on_task, size_t *actual_size) {
   // and the task carries no 20 ms loop budget so the larger block is safe here. On failure fall
   // through to the internal path below at `want` (never leaves the transfer without a buffer).
 #if defined(USE_ESP32_VARIANT_ESP32P4)
-  constexpr size_t TASK_PSRAM_CHUNK = 65536;
+  constexpr size_t task_psram_chunk = 65536;
 #else
-  constexpr size_t TASK_PSRAM_CHUNK = 32768;
+  constexpr size_t task_psram_chunk = 32768;
 #endif
   if (on_task && psram_dma) {
-    raw = static_cast<uint8_t *>(heap_caps_malloc(TASK_PSRAM_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+    raw = static_cast<uint8_t *>(heap_caps_malloc(task_psram_chunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
     if (raw != nullptr) {
-      *actual_size = TASK_PSRAM_CHUNK;
-      return RamBuffer(raw, RamBufferDeleter{TASK_PSRAM_CHUNK});
+      *actual_size = task_psram_chunk;
+      return RamBuffer(raw, RamBufferDeleter{task_psram_chunk});
     }
   }
   // Internal, DMA-capable, halving on memory pressure down to a 4 kB floor. This is the loop

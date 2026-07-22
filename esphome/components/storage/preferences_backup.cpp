@@ -399,7 +399,7 @@ static bool decode_scalar(const char *s, size_t len, PrefType t, uint8_t *p) {
       return true;
     }
     default: {
-      long long v = strtoll(buf, &end, 10);
+      int64_t v = strtoll(buf, &end, 10);
       if (end == nullptr || *end != '\0')
         return false;
       int64_t iv = v;
@@ -489,9 +489,9 @@ static bool decode_value(const char *s, size_t len, const PrefSelection &sel, ui
   snprintf(b, sizeof(b), "%.9g", (double) v);
   kv_field(out, k, b, first);
 }
-[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, long v, bool &first) {
+[[maybe_unused]] static void kv_field_i(std::string &out, const char *k, int32_t v, bool &first) {
   char b[16];
-  snprintf(b, sizeof(b), "%ld", v);
+  snprintf(b, sizeof(b), "%" PRId32, v);
   kv_field(out, k, b, first);
 }
 [[maybe_unused]] static void kv_field_b(std::string &out, const char *k, bool v, bool &first) {
@@ -533,7 +533,7 @@ struct FieldReader {
     out = strtof(b, &e);
     return e != nullptr && *e == '\0';
   }
-  bool i(const char *key, long &out) {
+  bool i(const char *key, int32_t &out) {
     char b[24];
     if (!this->get(key, b, sizeof(b)))
       return false;
@@ -597,7 +597,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       kv_field_b(out, "state", st.state, first);
       kv_field_i(out, "speed", st.speed, first);
       kv_field_b(out, "oscillating", st.oscillating, first);
-      kv_field_i(out, "direction", static_cast<long>(st.direction), first);
+      kv_field_i(out, "direction", static_cast<int32_t>(st.direction), first);
       kv_field_i(out, "preset_mode", st.preset_mode, first);
       out += '}';
       return true;
@@ -649,7 +649,7 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       kv_field_f(out, "cold_white", st.cold_white, first);
       kv_field_f(out, "warm_white", st.warm_white, first);
       kv_field_i(out, "effect", st.effect, first);
-      kv_field_i(out, "color_mode", static_cast<long>(st.color_mode), first);
+      kv_field_i(out, "color_mode", static_cast<int32_t>(st.color_mode), first);
       out += '}';
       return true;
     }
@@ -662,12 +662,13 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       memcpy(&st, blob, sizeof(st));
       bool first = true;
       out += '{';
-      kv_field_i(out, "mode", static_cast<long>(st.mode), first);
+      kv_field_i(out, "mode", static_cast<int32_t>(st.mode), first);
       kv_field_b(out, "uses_custom_fan_mode", st.uses_custom_fan_mode, first);
-      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<long>(st.fan_mode), first);
+      kv_field_i(out, "fan_mode", st.uses_custom_fan_mode ? st.custom_fan_mode : static_cast<int32_t>(st.fan_mode),
+                 first);
       kv_field_b(out, "uses_custom_preset", st.uses_custom_preset, first);
-      kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<long>(st.preset), first);
-      kv_field_i(out, "swing_mode", static_cast<long>(st.swing_mode), first);
+      kv_field_i(out, "preset", st.uses_custom_preset ? st.custom_preset : static_cast<int32_t>(st.preset), first);
+      kv_field_i(out, "swing_mode", static_cast<int32_t>(st.swing_mode), first);
       // two-point control shares the union — export both words, they alias
       kv_field_f(out, "target_temperature_low", st.target_temperature_low, first);
       kv_field_f(out, "target_temperature_high", st.target_temperature_high, first);
@@ -822,7 +823,7 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
   if (len < 2 || s[0] != '{' || s[len - 1] != '}')
     return false;
   FieldReader r{s + 1, s + len - 1};
-  long li;
+  int32_t li;
   switch (re.kind) {
 #ifdef USE_FAN
     case EntityKind::FAN: {
@@ -1056,7 +1057,7 @@ static size_t collect_entries(nvs_handle_t handle, const PrefSelection *sel, siz
     nvs_entry_info_t info;
     nvs_entry_info(it, &info);
     char *end = nullptr;
-    unsigned long key = strtoul(info.key, &end, 10);
+    uint32_t key = static_cast<uint32_t>(strtoul(info.key, &end, 10));
     if (end != nullptr && *end == '\0' && nvs_read_entry(handle, static_cast<uint32_t>(key), e)) {
       // Unrestricted mode still knows names/types for everything codegen
       // could see (all restore_value globals) — render those readable.
@@ -1326,9 +1327,12 @@ bool preferences_import_from_raw(RawStorage *device, uint64_t address, uint64_t 
     }
     imported++;
   }
-  if (ok && (err = nvs_commit(handle)) != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
-    ok = false;
+  if (ok) {
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+      ok = false;
+    }
   }
   nvs_close(handle);
   if (!ok)
@@ -1503,7 +1507,7 @@ static bool import_one(nvs_handle_t handle, const char *name, size_t name_len, c
     memcpy(buf, name, name_len);
     buf[name_len] = '\0';
     char *end = nullptr;
-    unsigned long v = strtoul(buf, &end, 10);
+    uint32_t v = static_cast<uint32_t>(strtoul(buf, &end, 10));
     if (end == nullptr || *end != '\0' || (restrict_to_selection && find_by_key(v, sel, count) == nullptr)) {
       skipped++;  // unknown name, or filtered out by the configured selection
       return true;
@@ -1620,9 +1624,12 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
                       selected_entities, selected_entity_count, imported, skipped);
     }
   }
-  if (ok && (err = nvs_commit(handle)) != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
-    ok = false;
+  if (ok) {
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+      ok = false;
+    }
   }
   nvs_close(handle);
 
