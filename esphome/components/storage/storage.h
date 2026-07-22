@@ -3,7 +3,6 @@
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
-#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -11,31 +10,28 @@
 
 namespace esphome::storage {
 
-// Values mirror POSIX errno codes (only the ones actually used here are defined) so a
-// driver's error can be reasoned about against familiar numbers — this is not an errno
-// passthrough (drivers still return StorageError, not int), it's just keeping the integer
-// values consistent with their closest POSIX equivalent. Values without a natural errno
-// counterpart (OK, WRITE_ERROR, TRANSFER_TOO_LARGE) get their own, non-colliding numbers
-// above the highest errno in use here, so no accidental collisions creep in later either.
+// The closest POSIX errno is noted per entry; error_from_errno() below does the actual
+// translation. Values are sequential rather than errno numbers: errno numbering is
+// toolchain-specific, and nothing here persists or transmits them (error_to_string() is what
+// leaves the device).
 enum class StorageError : uint8_t {
   OK = 0,
-  NOT_FOUND = ENOENT,            // 2
-  READ_ERROR = EIO,              // 5 — I/O error
-  PERMISSION_DENIED = EACCES,    // 13
-  ALREADY_EXISTS = EEXIST,       // 17
-  NOT_READY = ENODEV,            // 19
-  INVALID_ARGS = EINVAL,         // 22
-  TOO_MANY_OPEN_FILES = EMFILE,  // 24
-  NO_SPACE = ENOSPC,             // 28
-  NOT_EMPTY = ENOTEMPTY,         // 39
-  CORRUPT = EILSEQ,              // 84 on newlib/ESP-IDF — closest POSIX equivalent (illegal byte sequence)
-  NOT_SUPPORTED = ENOTSUP,       // 95 on newlib/ESP-IDF
-  TIMEOUT = ETIMEDOUT,           // 116 on newlib/ESP-IDF
-  // No distinct POSIX errno for a write-direction I/O error (EIO is used by READ_ERROR
-  // above) — assigned its own value past the highest errno referenced here.
-  WRITE_ERROR = 120,
-  TRANSFER_TOO_LARGE = 121,  // no POSIX equivalent: transfer rejected by max_blocking_transfer_size
-  VERIFY_MISMATCH = 122,     // no POSIX equivalent: post-write read-back did not match the source
+  NOT_FOUND,            // ENOENT
+  READ_ERROR,           // EIO
+  PERMISSION_DENIED,    // EACCES
+  ALREADY_EXISTS,       // EEXIST
+  NOT_READY,            // ENODEV
+  INVALID_ARGS,         // EINVAL
+  TOO_MANY_OPEN_FILES,  // EMFILE
+  NO_SPACE,             // ENOSPC
+  NOT_EMPTY,            // ENOTEMPTY
+  CORRUPT,              // EILSEQ (illegal byte sequence)
+  NOT_SUPPORTED,        // ENOTSUP
+  TIMEOUT,              // ETIMEDOUT
+  // No distinct POSIX errno for a write-direction I/O error — EIO is used by READ_ERROR above.
+  WRITE_ERROR,
+  TRANSFER_TOO_LARGE,  // no POSIX equivalent: transfer rejected by max_blocking_transfer_size
+  VERIFY_MISMATCH,     // no POSIX equivalent: post-write read-back did not match the source
 };
 
 // fopen()-equivalent semantics — drivers must match these exactly:
