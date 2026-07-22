@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import hashlib
+import logging
 import re
 
 from esphome import automation, core
@@ -28,9 +29,12 @@ import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 
+_LOGGER = logging.getLogger(__name__)
+
 DOMAIN = "storage"
 
 CONF_COPY_CHUNK_SIZE = "copy_chunk_size"
+CONF_PATH_MAX = "path_max"
 CONF_MAX_BLOCKING_TRANSFER_SIZE = "max_blocking_transfer_size"
 CONF_MOVE_FALLBACK_COPY = "move_fallback_copy"
 CONF_TASK_STACK_SIZE = "task_stack_size"
@@ -94,6 +98,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_COPY_CHUNK_SIZE): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
         ),
+        # Longest relative path the API carries. No static default: absent means "the largest
+        # any configured driver asked for" (see request_path_length / to_code). Raising it also
+        # raises the tree walks' stack use -- two buffers per recursion level -- so the range
+        # is bounded and _validate_walk_budget() below checks it against task_stack_size.
+        cv.Optional(CONF_PATH_MAX): cv.int_range(min=64, max=1024),
         # Guard-rail for the blocking copy/read/write helpers: 0 means unlimited (default,
         # preserves current behavior). See max_blocking_transfer_size's comment in storage.h.
         cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=0): cv.int_range(min=0),
@@ -135,6 +144,8 @@ CONFIG_SCHEMA = cv.Schema(
 @dataclass
 class StorageData:
     device_count: int = 0
+    # Largest path length any configured driver reported via request_path_length().
+    path_max: int = 0
     worker_count: int = 0
     worker_task_safe: bool = False
     # Raw preference regions per device id: every export/import action's address, plus the
@@ -157,6 +168,17 @@ def request_storage_device() -> None:
     internal FixedVector is sized exactly — no compile-time upper bound needed.
     """
     _get_data().device_count += 1
+
+
+def request_path_length(length: int) -> None:
+    """Called by each storage driver's to_code() with the longest relative path it can carry.
+
+    The API sizes its own buffers to the largest of these, so a driver with a tighter limit of
+    its own still refuses over-long paths itself -- that is the driver's business, not this
+    bound's. An explicit `path_max:` in YAML overrides the collected value.
+    """
+    data = _get_data()
+    data.path_max = max(data.path_max, length)
 
 
 def request_storage_worker(task_safe: bool = False) -> None:
@@ -218,6 +240,27 @@ FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
 _DEFAULT_COPY_CHUNK_SIZE = 16384
 
 
+# Fallback when no driver reported anything (storage configured without a device).
+# Mirrors STORAGE_PATH_MAX's compile-time fallback in storage.h.
+_DEFAULT_PATH_MAX = 256
+
+# The copy walk's two path buffers are allocated once and shared by every level (see
+# append_path_segment in storage.cpp), so they are a flat cost. What scales with depth is the
+# walk's own frame plus the driver's list_dir()/remove() frames, where the FATFS LFN buffers
+# dominate. Keep 25% of the task stack free for whatever called into the walk.
+_WALK_DRIVER_STACK_PER_LEVEL = 830
+_WALK_STACK_HEADROOM = 0.75
+
+# Max directory nesting the tree walks descend into. Emitted as a define so storage.h and the
+# budget check below cannot drift apart.
+_MAX_RECURSION_DEPTH = 4
+
+
+def _walk_stack_bytes(path_max: int, depth: int) -> int:
+    """Worst-case stack the tree walks need for `depth` levels of recursion."""
+    return 2 * path_max + (depth + 1) * _WALK_DRIVER_STACK_PER_LEVEL
+
+
 def _default_copy_chunk_size() -> int:
     """The loop-safe base chunk size (platform-independent — see the note above)."""
     return _DEFAULT_COPY_CHUNK_SIZE
@@ -252,6 +295,25 @@ async def to_code(config):
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
     cg.add_define("USE_STORAGE")
+    # Absent path_max -> the largest any configured driver asked for; explicit value overrides.
+    path_max = config.get(CONF_PATH_MAX) or max(_get_data().path_max, _DEFAULT_PATH_MAX)
+    cg.add_define("USE_STORAGE_PATH_MAX", path_max)
+    cg.add_define("USE_STORAGE_MAX_RECURSION_DEPTH", _MAX_RECURSION_DEPTH)
+    # The tree walks run on the worker task when one is configured; a path bound raised past
+    # what its stack can carry would overflow rather than fail cleanly.
+    if _get_data().worker_count > 0:
+        needed = _walk_stack_bytes(path_max, _MAX_RECURSION_DEPTH)
+        budget = int(config[CONF_TASK_STACK_SIZE] * _WALK_STACK_HEADROOM)
+        if needed > budget:
+            _LOGGER.warning(
+                "storage: a %d-level tree walk with path_max %d needs roughly %d bytes of "
+                "stack, leaving little headroom in task_stack_size (%d). Raise "
+                "task_stack_size if deep copy/remove operations misbehave.",
+                _MAX_RECURSION_DEPTH,
+                path_max,
+                needed,
+                config[CONF_TASK_STACK_SIZE],
+            )
     # Absent copy_chunk_size -> per-platform default; explicit value overrides.
     copy_chunk_size = config.get(CONF_COPY_CHUNK_SIZE) or _default_copy_chunk_size()
     cg.add_define("USE_STORAGE_COPY_CHUNK_SIZE", copy_chunk_size)

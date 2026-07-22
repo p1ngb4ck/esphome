@@ -672,16 +672,33 @@ static StorageError copy_one_file(PathStorage *src_storage, const char *src_path
   return err;
 }
 
+// Appends "/<name>" to the path already in `buf` at offset `len`, and returns the new length —
+// 0 if it would not fit. Both walks below build their paths this way, in one buffer that is
+// extended on the way down and truncated on the way back up, so a path costs its bytes once
+// instead of once per recursion level.
+static size_t append_path_segment(char *buf, size_t len, const char *name) {
+  int n = snprintf(buf + len, STORAGE_PATH_MAX - len, "/%s", name);
+  if (n < 0 || static_cast<size_t>(n) >= STORAGE_PATH_MAX - len) {
+    buf[len] = '\0';  // snprintf already wrote what fit — leave the caller's path untouched
+    return 0;
+  }
+  return len + static_cast<size_t>(n);
+}
+
 struct CopyTreeCtx;
-static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
-                                       const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size,
-                                       size_t depth);
+static StorageError copy_tree_at_depth(PathStorage *src_storage, char *src_path, size_t src_len,
+                                       PathStorage *dst_storage, char *dst_path, size_t dst_len,
+                                       const RamBuffer &chunk_buf, size_t chunk_size, size_t depth);
 
 struct CopyTreeCtx {
   PathStorage *src_storage;
-  const char *src_base;
   PathStorage *dst_storage;
-  const char *dst_base;
+  // Buffers owned by copy(), shared by every level; *_len is where this level's directory path
+  // ends and a child segment gets appended.
+  char *src_path;
+  char *dst_path;
+  size_t src_len;
+  size_t dst_len;
   const RamBuffer &chunk_buf;
   size_t chunk_size;
   size_t depth;
@@ -691,28 +708,28 @@ struct CopyTreeCtx {
 static bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
   auto *ctx = static_cast<CopyTreeCtx *>(ctx_ptr);
 
-  // Fixed stack buffers instead of std::string — no heap allocation per entry, same as
-  // remove_recursive's walk right below.
-  char src_child[STORAGE_PATH_MAX];
-  char dst_child[STORAGE_PATH_MAX];
-  int n1 = snprintf(src_child, sizeof(src_child), "%s/%s", ctx->src_base, entry->name);
-  int n2 = snprintf(dst_child, sizeof(dst_child), "%s/%s", ctx->dst_base, entry->name);
-  if (n1 < 0 || static_cast<size_t>(n1) >= sizeof(src_child) || n2 < 0 ||
-      static_cast<size_t>(n2) >= sizeof(dst_child)) {
+  size_t src_len = append_path_segment(ctx->src_path, ctx->src_len, entry->name);
+  size_t dst_len = append_path_segment(ctx->dst_path, ctx->dst_len, entry->name);
+  if (src_len == 0 || dst_len == 0) {
     ctx->err = StorageError::INVALID_ARGS;
     return false;
   }
 
   StorageError err;
   if (entry->is_dir) {
-    err = copy_tree_at_depth(ctx->src_storage, src_child, ctx->dst_storage, dst_child, ctx->chunk_buf, ctx->chunk_size,
-                             ctx->depth + 1);
+    err = copy_tree_at_depth(ctx->src_storage, ctx->src_path, src_len, ctx->dst_storage, ctx->dst_path, dst_len,
+                             ctx->chunk_buf, ctx->chunk_size, ctx->depth + 1);
   } else {
     err = check_blocking_transfer_size(entry->size);
     if (err == StorageError::OK)
-      err = copy_one_file(ctx->src_storage, src_child, ctx->dst_storage, dst_child, ctx->chunk_buf, ctx->chunk_size);
+      err = copy_one_file(ctx->src_storage, ctx->src_path, ctx->dst_storage, ctx->dst_path, ctx->chunk_buf,
+                          ctx->chunk_size);
   }
   App.feed_wdt();
+
+  // Back to this level's directory before the next entry is appended.
+  ctx->src_path[ctx->src_len] = '\0';
+  ctx->dst_path[ctx->dst_len] = '\0';
 
   if (err != StorageError::OK) {
     ctx->err = err;
@@ -721,9 +738,9 @@ static bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
   return true;
 }
 
-static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
-                                       const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size,
-                                       size_t depth) {
+static StorageError copy_tree_at_depth(PathStorage *src_storage, char *src_path, size_t src_len,
+                                       PathStorage *dst_storage, char *dst_path, size_t dst_len,
+                                       const RamBuffer &chunk_buf, size_t chunk_size, size_t depth) {
   if (depth > STORAGE_MAX_RECURSION_DEPTH)
     return StorageError::INVALID_ARGS;
 
@@ -731,7 +748,7 @@ static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src
   if (err != StorageError::OK && err != StorageError::ALREADY_EXISTS)
     return err;
 
-  CopyTreeCtx ctx{src_storage, src_path, dst_storage, dst_path, chunk_buf, chunk_size, depth};
+  CopyTreeCtx ctx{src_storage, dst_storage, src_path, dst_path, src_len, dst_len, chunk_buf, chunk_size, depth};
   err = src_storage->list_dir(src_path, copy_tree_cb, &ctx);
   if (err != StorageError::OK)
     return err;
@@ -822,8 +839,18 @@ StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *d
   if (chunk_buf == nullptr)
     return StorageError::NO_SPACE;
 
-  if (src_stat.is_dir)
-    return copy_tree_at_depth(src_storage, src_path, dst_storage, dst_path, chunk_buf, chunk_size, 0);
+  if (src_stat.is_dir) {
+    // The walk's two path buffers live here, once, and every level extends and truncates them.
+    char src_buf[STORAGE_PATH_MAX];
+    char dst_buf[STORAGE_PATH_MAX];
+    int src_len = snprintf(src_buf, sizeof(src_buf), "%s", src_path);
+    int dst_len = snprintf(dst_buf, sizeof(dst_buf), "%s", dst_path);
+    if (src_len < 0 || static_cast<size_t>(src_len) >= sizeof(src_buf) || dst_len < 0 ||
+        static_cast<size_t>(dst_len) >= sizeof(dst_buf))
+      return StorageError::INVALID_ARGS;
+    return copy_tree_at_depth(src_storage, src_buf, static_cast<size_t>(src_len), dst_storage, dst_buf,
+                              static_cast<size_t>(dst_len), chunk_buf, chunk_size, 0);
+  }
 
   StorageError err = check_blocking_transfer_size(src_stat.size);
   if (err != StorageError::OK)
@@ -853,11 +880,14 @@ StorageError move(PathStorage *src_storage, const char *src_path, PathStorage *d
   return src_stat.is_dir ? remove_recursive(src_storage, src_path) : src_storage->remove(src_path);
 }
 
-static StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth);
+static StorageError remove_recursive_at_depth(PathStorage *storage, char *path, size_t len, size_t depth);
 
 struct RemoveRecursiveCtx {
   PathStorage *storage;
-  const char *base_path;
+  // Buffer owned by remove_recursive(), shared by every level; `len` is where this level's
+  // directory path ends and a child segment gets appended.
+  char *path;
+  size_t len;
   size_t depth;
   StorageError err{StorageError::OK};
 };
@@ -865,20 +895,21 @@ struct RemoveRecursiveCtx {
 static bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
   auto *ctx = static_cast<RemoveRecursiveCtx *>(ctx_ptr);
 
-  // Fixed stack buffer instead of std::string — no heap allocation per entry during recursion.
-  char child_path[STORAGE_PATH_MAX];
-  int written = snprintf(child_path, sizeof(child_path), "%s/%s", ctx->base_path, entry->name);
-  if (written < 0 || static_cast<size_t>(written) >= sizeof(child_path)) {
+  size_t len = append_path_segment(ctx->path, ctx->len, entry->name);
+  if (len == 0) {
     ctx->err = StorageError::INVALID_ARGS;
     return false;  // path too long for the fixed buffer
   }
 
   StorageError err;
   if (entry->is_dir) {
-    err = remove_recursive_at_depth(ctx->storage, child_path, ctx->depth + 1);
+    err = remove_recursive_at_depth(ctx->storage, ctx->path, len, ctx->depth + 1);
   } else {
-    err = ctx->storage->remove(child_path);
+    err = ctx->storage->remove(ctx->path);
   }
+
+  // Back to this level's directory before the next entry is appended.
+  ctx->path[ctx->len] = '\0';
 
   if (err != StorageError::OK) {
     ctx->err = err;
@@ -887,11 +918,11 @@ static bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
   return true;
 }
 
-static StorageError remove_recursive_at_depth(PathStorage *storage, const char *path, size_t depth) {
+static StorageError remove_recursive_at_depth(PathStorage *storage, char *path, size_t len, size_t depth) {
   if (depth > STORAGE_MAX_RECURSION_DEPTH)
     return StorageError::INVALID_ARGS;
 
-  RemoveRecursiveCtx ctx{storage, path, depth};
+  RemoveRecursiveCtx ctx{storage, path, len, depth};
   StorageError err = storage->list_dir(path, remove_recursive_cb, &ctx);
   if (err != StorageError::OK)
     return err;
@@ -902,7 +933,12 @@ static StorageError remove_recursive_at_depth(PathStorage *storage, const char *
 }
 
 StorageError remove_recursive(PathStorage *storage, const char *path) {
-  return remove_recursive_at_depth(storage, path, 0);
+  // The walk's path buffer lives here, once, and every level extends and truncates it.
+  char buf[STORAGE_PATH_MAX];
+  int len = snprintf(buf, sizeof(buf), "%s", path);
+  if (len < 0 || static_cast<size_t>(len) >= sizeof(buf))
+    return StorageError::INVALID_ARGS;
+  return remove_recursive_at_depth(storage, buf, static_cast<size_t>(len), 0);
 }
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT

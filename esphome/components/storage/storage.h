@@ -119,13 +119,19 @@ static constexpr size_t STORAGE_PATH_MAX = USE_STORAGE_PATH_MAX;
 static constexpr size_t STORAGE_PATH_MAX = 256;
 #endif
 
-// Max directory nesting depth for the tree walks (copy(), remove_recursive()). Budgeted
-// against the stack they run on, not picked for convenience: per level the copy walk holds two
-// STORAGE_PATH_MAX buffers plus its frame (~640 B) and the driver's own list_dir()/remove()
-// frames on top (sd_storage's FATFS LFN buffers add ~700 B), so roughly 1.3 kB per level. A
-// depth of 4 means five levels, ~6.7 kB — which fits the worker task's 8 kB default with
-// headroom. Deeper trees are refused with INVALID_ARGS rather than risking a stack overflow.
+// Max directory nesting depth for the tree walks (copy(), remove_recursive()). Budgeted against
+// the stack they run on, not picked for convenience. The path buffers are allocated once by the
+// walk's entry point and extended/truncated per level rather than re-allocated (see
+// append_path_segment in storage.cpp), so they cost 2 * STORAGE_PATH_MAX flat. What scales with
+// depth is the walk's frame plus the driver's list_dir()/remove() frames, ~830 B per level
+// (sd_storage's FATFS LFN buffers dominate). Five levels come to ~4.7 kB against the 8 kB
+// default of both the worker task and the loop task. Deeper trees are refused with
+// INVALID_ARGS rather than risking a stack overflow.
+#if defined(USE_STORAGE_MAX_RECURSION_DEPTH) && USE_STORAGE_MAX_RECURSION_DEPTH > 0
+static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = USE_STORAGE_MAX_RECURSION_DEPTH;
+#else
 static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = 4;
+#endif
 
 struct FileStat {
   // Basename of the entry only (e.g. "file.txt"), never a full/relative path — this holds for
