@@ -167,7 +167,22 @@
 #define USE_SETUP_PRIORITY_OVERRIDE
 #define USE_STATUS_LED
 #define USE_STATUS_SENSOR
+#define USE_STORAGE
+#define USE_STORAGE_CHANGE_FEED
+#define USE_STORAGE_COPY_CHUNK_SIZE 16384  // NOLINT
+#define USE_STORAGE_DEVICE_NODES
+#define USE_STORAGE_JSON_EXTRACT
 #define USE_STORAGE_MAX_DEVICES 8  // NOLINT
+#define USE_STORAGE_PREFERENCES
+#define USE_STORAGE_RAW_ACTIONS
+#define USE_STORAGE_REGEX_EXTRACT
+#define USE_STORAGE_TRANSFER_BUFFER
+#define USE_STORAGE_WORKER
+#define USE_STORAGE_WORKER_TASK
+// USE_STORAGE_FILE_SYSTEM_SELECT is deliberately absent: it gates storage/fatfs_select.h,
+// which includes FatFs's ff.h/diskio.h. Those come from a managed component that only exists
+// in a driver's build, so defining it here would leave static analysis with an unresolvable
+// include instead of extra coverage.
 #define USE_SWITCH
 #define USE_TEXT
 #define USE_TEXT_SENSOR
