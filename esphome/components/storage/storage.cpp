@@ -672,12 +672,6 @@ static StorageError copy_one_file(PathStorage *src_storage, const char *src_path
   return err;
 }
 
-// Bound for one "<dir>/<name>" step of the walk. Two of these live on the stack per recursion
-// level, so this is deliberately not generous: STORAGE_MAX_RECURSION_DEPTH levels deep it is
-// what the main loop's stack has to carry, and a path that does not fit is reported as
-// INVALID_ARGS rather than silently truncated.
-static constexpr size_t COPY_TREE_PATH_MAX = 256;
-
 struct CopyTreeCtx;
 static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage,
                                        const char *dst_path, const RamBuffer &chunk_buf, size_t chunk_size,
@@ -699,8 +693,8 @@ static bool copy_tree_cb(const FileStat *entry, void *ctx_ptr) {
 
   // Fixed stack buffers instead of std::string — no heap allocation per entry, same as
   // remove_recursive's walk right below.
-  char src_child[COPY_TREE_PATH_MAX];
-  char dst_child[COPY_TREE_PATH_MAX];
+  char src_child[STORAGE_PATH_MAX];
+  char dst_child[STORAGE_PATH_MAX];
   int n1 = snprintf(src_child, sizeof(src_child), "%s/%s", ctx->src_base, entry->name);
   int n2 = snprintf(dst_child, sizeof(dst_child), "%s/%s", ctx->dst_base, entry->name);
   if (n1 < 0 || static_cast<size_t>(n1) >= sizeof(src_child) || n2 < 0 ||
@@ -750,8 +744,9 @@ static StorageError copy_tree_at_depth(PathStorage *src_storage, const char *src
 // The 20 ms loop-slice budget caps a main-loop chunk at ~16 kB even on the fastest S3 SD path
 // (a slow SPI write does not manage more in 20 ms), so the loop path stays at `want` in internal
 // RAM. The worker task carries no such budget, so on a chip whose PSRAM can be a DMA target
-// (S3/P4) it stages a larger 32 kB chunk in DMA-capable PSRAM — fewer I/O calls, DMA straight
-// out of the arena. Everywhere else the task path is the same as the loop path: `want` internal.
+// (S3/P4) it stages a larger chunk (64 kB on P4, 32 kB on S3) in DMA-capable PSRAM — fewer I/O
+// calls, DMA straight out of the arena. Everywhere else the task path is the same as the loop
+// path: `want` internal.
 //
 // Uses heap_caps_malloc directly (not RAMAllocator) because only the cap-based API can request
 // MALLOC_CAP_DMA. The result still frees through RamBufferDeleter: on ESP32 free() routes to the
@@ -871,7 +866,7 @@ static bool remove_recursive_cb(const FileStat *entry, void *ctx_ptr) {
   auto *ctx = static_cast<RemoveRecursiveCtx *>(ctx_ptr);
 
   // Fixed stack buffer instead of std::string — no heap allocation per entry during recursion.
-  char child_path[STORAGE_NAME_MAX * 2 + 2];
+  char child_path[STORAGE_PATH_MAX];
   int written = snprintf(child_path, sizeof(child_path), "%s/%s", ctx->base_path, entry->name);
   if (written < 0 || static_cast<size_t>(written) >= sizeof(child_path)) {
     ctx->err = StorageError::INVALID_ARGS;

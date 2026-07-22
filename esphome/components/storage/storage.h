@@ -105,13 +105,27 @@ static constexpr size_t STORAGE_MAX_DEVICES = USE_STORAGE_MAX_DEVICES;
 static constexpr size_t STORAGE_MAX_DEVICES = 8;
 #endif
 
-// Max directory nesting depth for remove_recursive() below. Stack cost per level is
-// driver-dependent — it's not just the path buffer and call frame recorded here, but also
-// whatever the driver's own list_dir()/remove()/rmdir() stack up per call (e.g. sd_storage's
-// LFN buffers put this closer to ~1.3kB/level than the ~600B this constant alone would
-// suggest). ESP32 task stacks are typically only 8-16kB, so this default is chosen
-// conservatively across drivers rather than tuned to the cheapest one.
-static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = 8;
+// Longest path the interface carries through its own buffers — the tree walks in storage.cpp
+// and the worker's request slots. It has to fit the longest path any configured driver accepts,
+// so it is the MAXIMUM over them, not the minimum: a driver with a tighter limit of its own
+// (LittleFS) refuses an over-long path itself, which is its business, not this bound's. A path
+// that does not fit is reported as INVALID_ARGS rather than silently truncated.
+//
+// 256 matches what the VFS-backed drivers can carry (ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN).
+// The fallback applies until codegen derives the value from the configured drivers.
+#if defined(USE_STORAGE_PATH_MAX) && USE_STORAGE_PATH_MAX > 0
+static constexpr size_t STORAGE_PATH_MAX = USE_STORAGE_PATH_MAX;
+#else
+static constexpr size_t STORAGE_PATH_MAX = 256;
+#endif
+
+// Max directory nesting depth for the tree walks (copy(), remove_recursive()). Budgeted
+// against the stack they run on, not picked for convenience: per level the copy walk holds two
+// STORAGE_PATH_MAX buffers plus its frame (~640 B) and the driver's own list_dir()/remove()
+// frames on top (sd_storage's FATFS LFN buffers add ~700 B), so roughly 1.3 kB per level. A
+// depth of 4 means five levels, ~6.7 kB — which fits the worker task's 8 kB default with
+// headroom. Deeper trees are refused with INVALID_ARGS rather than risking a stack overflow.
+static constexpr size_t STORAGE_MAX_RECURSION_DEPTH = 4;
 
 struct FileStat {
   // Basename of the entry only (e.g. "file.txt"), never a full/relative path — this holds for
@@ -591,6 +605,9 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
 // though, and max_blocking_transfer_size is checked per file, not per tree: a tree of many
 // small files passes it and can still take a while. Callers that must not block use the async
 // worker instead (StorageWorker::async_copy()/async_copy_tree(), storage_worker.h).
+// On failure the destination is NOT rolled back: a partially written file stays where it is, and
+// a partially copied tree keeps whatever already landed. The source is never touched. A caller
+// that needs all-or-nothing has to clean the destination up itself.
 StorageError copy(PathStorage *src_storage, const char *src_path, PathStorage *dst_storage, const char *dst_path);
 
 // Moves a file or a whole directory tree, within the same storage or across two different

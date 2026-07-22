@@ -31,7 +31,7 @@ using CompletionCallback = std::function<void(storage::StorageError)>;
 // submit time, since the caller's pointers must not be assumed to outlive submission — the
 // request may still be pending when the calling code returns. Longer paths are rejected with
 // StorageError::INVALID_ARGS.
-static constexpr size_t STORAGE_WORKER_MAX_PATH = 256;
+static constexpr size_t STORAGE_WORKER_MAX_PATH = STORAGE_PATH_MAX;
 
 enum class RequestOp : uint8_t {
   COPY,
