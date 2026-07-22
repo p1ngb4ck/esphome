@@ -119,7 +119,6 @@ script:
           extract:
             - key: name
               separator: "="
-            - regex: "([A-Za-z0-9_]+)"
           to_global: g_label
           on_value:
             - logger.log:
@@ -164,8 +163,7 @@ button:
     name: "Backup all preferences"
     on_press:
       - storage.export_preferences:
-          path: !lambda 'return "/sdcard/prefs.json";'
-          format: json
+          path: !lambda 'return "/sdcard/prefs.kv";'
   - platform: template
     name: "Restore preferences"
     on_press:
