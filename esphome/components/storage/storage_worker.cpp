@@ -605,23 +605,26 @@ void StorageWorker::deliver_completions_() {
       // still intact. Whatever the result: a partially landed tree is still a change.
       // (Streaming requests are not fed: reads change nothing, and the write stream's
       // consumers note their own completion — they know the path, this loop does not.)
+      char feed_path[STORAGE_WORKER_MAX_PATH];
       if (global_storage_registry != nullptr && req.op == RequestOp::RAW_READ_TO_FILE && req.dst_storage != nullptr) {
         // A raw read landed (or failed to land — partially is still a change) a file: the
         // feed learns about its parent directory exactly like any other transfer's.
-        global_storage_registry->note_parent_changed(std::string(req.dst_storage->get_mount_path()) + "/" +
-                                                     req.dst_path);
+        if (StorageRegistry::build_path(req.dst_storage, req.dst_path, feed_path, sizeof(feed_path)))
+          global_storage_registry->note_parent_changed(feed_path);
       } else if (global_storage_registry != nullptr && req.dst_storage != nullptr && req.src_storage != nullptr) {
         const bool is_tree = req.tree != nullptr;
         const char *dst_rel = is_tree ? req.tree->dst_root : req.dst_path;
-        std::string dst = std::string(req.dst_storage->get_mount_path()) + "/" + dst_rel;
-        global_storage_registry->note_parent_changed(dst);
-        if (is_tree) {
-          // Merging into an existing (possibly open) directory changes its listing too.
-          global_storage_registry->note_dir_changed(dst);
+        if (StorageRegistry::build_path(req.dst_storage, dst_rel, feed_path, sizeof(feed_path))) {
+          global_storage_registry->note_parent_changed(feed_path);
+          if (is_tree) {
+            // Merging into an existing (possibly open) directory changes its listing too.
+            global_storage_registry->note_dir_changed(feed_path);
+          }
         }
         if (req.op == RequestOp::MOVE || req.op == RequestOp::MOVE_TREE) {
           const char *src_rel = is_tree ? req.tree->src_root : req.src_path;
-          global_storage_registry->note_parent_changed(std::string(req.src_storage->get_mount_path()) + "/" + src_rel);
+          if (StorageRegistry::build_path(req.src_storage, src_rel, feed_path, sizeof(feed_path)))
+            global_storage_registry->note_parent_changed(feed_path);
         }
       }
 #endif
