@@ -471,8 +471,10 @@ class StorageWorker : public PollingComponent {
   bool get_transfer_status(TransferJob job, TransferStatus *out) const;
 
   // True if any active (PENDING/RUNNING/CANCELLED) transfer references `storage` as source or
-  // destination. Main-loop-only, like all control-plane queries. Used e.g. by a removable
-  // device to defer its unmount until no in-flight job still touches it.
+  // destination, or any stream has it open (anything other than FREE/DONE). Main-loop-only,
+  // like all control-plane queries. Used by a removable device to defer its unmount until no
+  // in-flight job still touches it — raw media never unmount (see RawStorage in storage.h),
+  // so they never ask.
   bool is_busy_with(const storage::Storage *storage) const;
 
   // Opens `path` for writing (create/truncate, like OpenMode::WRITE) and returns a handle

@@ -228,7 +228,7 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
     RequestState state = req.state.load();
     if (state == RequestState::FREE || state == RequestState::DONE)
       continue;
-    if (req.src_storage == storage || req.dst_storage == storage || req.raw_device == storage)
+    if (req.src_storage == storage || req.dst_storage == storage)
       return true;
   }
   // A stream counts whatever it is doing, IDLE included: unlike the contention question above,

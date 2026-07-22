@@ -222,7 +222,14 @@ struct RawGeometry {
   uint8_t caps{0};           // RawEraseCaps bitmask
 };
 
-// Offset-based byte access (raw flash, FRAM, EEPROM, NVS blobs)
+// Offset-based byte access (raw flash, FRAM, EEPROM, NVS blobs).
+//
+// Raw media are permanently attached — soldered chips on I2C/SPI/OneWire, or a fixed flash
+// region. A RawStorage therefore registers once and stays registered for the node's lifetime:
+// it does not inherit MountableStorage, and nothing unregisters or quiesces it. Consumers can
+// hold one without watching for it to disappear, and the worker's drain path never has to
+// match on a raw device. Contention is a separate question and does apply — two operations on
+// one chip still must not overlap.
 class RawStorage : public Storage {
  public:
   StorageType get_storage_type() const override { return StorageType::RAW; }
