@@ -243,20 +243,7 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
 
   FILE *f = fopen(h->path_buf, fmode);
   if (f == nullptr) {
-    switch (errno) {
-      case ENOENT:
-        return storage::StorageError::NOT_FOUND;
-      case ENOSPC:
-        return storage::StorageError::NO_SPACE;
-      case EACCES:
-      case EROFS:
-        return storage::StorageError::PERMISSION_DENIED;
-      case EMFILE:
-      case ENFILE:
-        return storage::StorageError::TOO_MANY_OPEN_FILES;
-      default:
-        return mode == storage::OpenMode::READ ? storage::StorageError::READ_ERROR : storage::StorageError::WRITE_ERROR;
-    }
+    return storage::error_from_errno(errno, mode != storage::OpenMode::READ);
   }
 
   h->in_use = true;
