@@ -620,30 +620,34 @@ void StorageWorker::on_storage_unregistered_(Storage *s) {
       continue;
     }
     // A step (OPENING/WRITING/READING/CLOSING) is in flight or queued. Mark CANCELLED;
-    // run_stream_step_()'s entry check sees it and closes/finishes immediately. If it's
-    // already running on the worker task, wait (bounded) for it to reach DONE — same
-    // rationale/timeout as the TransferRequest drain above.
+    // run_stream_step_()'s entry check sees it and closes/finishes immediately.
     req.state = StreamState::CANCELLED;
 #if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
-    uint32_t start = millis();
-    while (req.state.load() != StreamState::DONE) {
-      if (millis() - start > 500) {
-        ESP_LOGE(TAG, "Timed out waiting for in-flight stream to cancel — the storage medium is "
-                      "likely gone; proceeding with unmount anyway.");
-        req.callback = nullptr;
-        break;
+    // pending_step_ tells the two dispatch routes apart, and only the main loop ever writes
+    // it: false means the step went to the worker task (queued or already running), so wait
+    // (bounded) for the task to observe CANCELLED and reach DONE — same rationale/timeout as
+    // the TransferRequest drain above.
+    if (!req.pending_step_) {
+      uint32_t start = millis();
+      while (req.state.load() != StreamState::DONE) {
+        if (millis() - start > 500) {
+          ESP_LOGE(TAG, "Timed out waiting for in-flight stream to cancel — the storage medium is "
+                        "likely gone; proceeding with unmount anyway.");
+          req.callback = nullptr;
+          break;
+        }
+        vTaskDelay(1);
       }
-      vTaskDelay(1);
+      continue;
     }
-#else
-    // Loop-sliced only: run the (now-cancelled) step directly here rather than waiting for
-    // the next loop() pass — we're on the main loop right now too (this callback only ever
+#endif
+    // Queued for the loop-sliced engine: run the (now-cancelled) step right here rather than
+    // waiting for the next loop() pass — we're on the main loop too (this callback only ever
     // fires from unregister_storage(), main-loop-only per StorageRegistry's contract), so
-    // nothing else can be touching this slot concurrently. run_stream_step_()'s entry check
-    // sees CANCELLED and closes the handle immediately, before this function returns.
+    // nothing else can be touching this slot. Its entry check closes the handle before this
+    // function returns, which is what the drain contract promises.
     req.pending_step_ = false;
     this->run_stream_step_(req);
-#endif
   }
 }
 
