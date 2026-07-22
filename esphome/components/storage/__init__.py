@@ -8,8 +8,10 @@ from esphome.components import globals as globals_
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADDRESS,
+    CONF_ALL,
     CONF_ARGS,
     CONF_DATA,
+    CONF_DEVICE,
     CONF_FORMAT,
     CONF_FROM,
     CONF_GROUP,
@@ -629,7 +631,6 @@ async def unmount_action_to_code(config, action_id, template_arg, args):
 CONF_TO_FILE = "to_file"
 CONF_FROM_FILE = "from_file"
 CONF_ERASE_FIRST = "erase_first"
-CONF_ALL = "all"
 CONF_FORCE_SLICED_ERASE = "force_sliced_erase"
 
 
@@ -828,7 +829,6 @@ async def raw_erase_action_to_code(config, action_id, template_arg, args):
 # with it, only those entries round-trip and export under their YAML id;
 # without it, the whole namespace round-trips under numeric NVS keys.
 
-CONF_DEVICE = "device"
 CONF_PREFERENCES = "preferences"
 CONF_REBOOT = "reboot"
 

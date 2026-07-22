@@ -11,8 +11,6 @@
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
 
-#include "esphome/core/log.h"
-
 #include "diskio.h"  // NOLINT(modernize-deprecated-headers) - FatFs's own header
 #include "ff.h"
 
@@ -25,6 +23,14 @@ namespace esphome::storage {
 static constexpr uint8_t FS_SELECT_AUTO = 0;
 static constexpr uint8_t FS_SELECT_FAT32 = 1;
 static constexpr uint8_t FS_SELECT_EXFAT = 2;
+
+// Logging for this header. Defined in storage.cpp so logging stays out of headers; the
+// signatures name no FatFs type, so storage.cpp needs no FatFs include.
+void fatfs_log_probe_read_failed(const char *tag);
+void fatfs_log_reformat_no_filesystem(const char *tag, bool want_exfat);
+void fatfs_log_reformat_mismatch(const char *tag, bool found_exfat, bool want_exfat);
+void fatfs_log_format_failed(const char *tag, bool want_exfat, int result);
+void fatfs_log_format_done(const char *tag, bool want_exfat);
 
 // Internal helpers for boot-sector/partition probing, kept inline in this header (they are
 // used only by ensure_requested_filesystem below). Names are prefixed to avoid clashing with
@@ -51,7 +57,7 @@ inline FatfsDetected fatfs_classify_boot_sector(const uint8_t *sec) {
 inline FatfsDetected fatfs_probe(const char *tag, uint8_t pdrv) {
   auto sec = std::make_unique<uint8_t[]>(FF_MAX_SS);
   if (disk_read(pdrv, sec.get(), 0, 1) != RES_OK) {
-    ESP_LOGW(tag, "file_system probe: cannot read sector 0");
+    fatfs_log_probe_read_failed(tag);
     return FatfsDetected::NONE;
   }
   FatfsDetected direct = fatfs_classify_boot_sector(sec.get());
@@ -94,11 +100,9 @@ inline bool ensure_requested_filesystem(const char *tag, uint8_t pdrv, const cha
   if ((found == FatfsDetected::EXFAT) == want_exfat && found != FatfsDetected::NONE)
     return true;
   if (found == FatfsDetected::NONE) {
-    ESP_LOGW(tag, "file_system: no recognizable filesystem on the medium - formatting as %s",
-             want_exfat ? "exFAT" : "FAT32");
+    fatfs_log_reformat_no_filesystem(tag, want_exfat);
   } else {
-    ESP_LOGW(tag, "file_system: found %s but %s is configured - REFORMATTING, all data on the medium is erased",
-             found == FatfsDetected::EXFAT ? "exFAT" : "FAT", want_exfat ? "exFAT" : "FAT32");
+    fatfs_log_reformat_mismatch(tag, found == FatfsDetected::EXFAT, want_exfat);
   }
   auto work = std::make_unique<uint8_t[]>(FF_MAX_SS);
   MKFS_PARM parm{};
@@ -107,10 +111,10 @@ inline bool ensure_requested_filesystem(const char *tag, uint8_t pdrv, const cha
   parm.fmt = want_exfat ? FM_EXFAT : (FM_FAT | FM_FAT32);
   FRESULT res = f_mkfs(drive, &parm, work.get(), FF_MAX_SS);
   if (res != FR_OK) {
-    ESP_LOGE(tag, "file_system: formatting as %s failed (FatFs error %d)", want_exfat ? "exFAT" : "FAT32", res);
+    fatfs_log_format_failed(tag, want_exfat, static_cast<int>(res));
     return false;
   }
-  ESP_LOGI(tag, "file_system: medium formatted as %s", want_exfat ? "exFAT" : "FAT32");
+  fatfs_log_format_done(tag, want_exfat);
   return true;
 }
 
