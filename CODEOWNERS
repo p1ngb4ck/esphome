@@ -68,6 +68,7 @@ esphome/components/beken_spi_led_strip/* @Mat931
 esphome/components/bh1750/* @OttoWinter
 esphome/components/bh1900nux/* @B48D81EFCC
 esphome/components/binary_sensor/* @esphome/core
+esphome/components/binary_storage/* @p1ngb4ck
 esphome/components/bk72xx/* @kuba2k2
 esphome/components/bl0906/* @athom-tech @jesserockz @tarontop
 esphome/components/bl0939/* @ziceva
@@ -191,6 +192,7 @@ esphome/components/fastled_base/* @OttoWinter
 esphome/components/feedback/* @ianchi
 esphome/components/file/* @esphome/core
 esphome/components/fingerprint_grow/* @alexborro @loongyh @OnFreund
+esphome/components/firmware_update/* @p1ngb4ck
 esphome/components/font/* @clydebarrow @esphome/core
 esphome/components/fs3000/* @kahrendt
 esphome/components/ft5x06/* @clydebarrow
@@ -245,6 +247,7 @@ esphome/components/host/* @clydebarrow @esphome/core
 esphome/components/host/time/* @clydebarrow
 esphome/components/hrxl_maxsonar_wr/* @netmikey
 esphome/components/hte501/* @Stock-M
+esphome/components/http_file_api/* @p1ngb4ck
 esphome/components/http_request/ota/* @oarcher
 esphome/components/http_request/update/* @jesserockz
 esphome/components/htu31d/* @betterengineering
@@ -372,6 +375,7 @@ esphome/components/nextion/sensor/* @senexcrenshaw
 esphome/components/nextion/switch/* @senexcrenshaw
 esphome/components/nextion/text_sensor/* @senexcrenshaw
 esphome/components/nfc/* @jesserockz @kbx81
+esphome/components/nfs_client/* @p1ngb4ck
 esphome/components/noblex/* @AGalfra
 esphome/components/npi19/* @bakerkj
 esphome/components/nrf52/* @tomaszduda23
@@ -444,6 +448,7 @@ esphome/components/rx8130/* @beormund
 esphome/components/safe_mode/* @jsuanet @kbx81 @paulmonigatti
 esphome/components/scd4x/* @martgras @sjtrny
 esphome/components/script/* @esphome/core
+esphome/components/sd_storage/* @p1ngb4ck
 esphome/components/sdl/* @bdm310 @clydebarrow
 esphome/components/sdm_meter/* @jesserockz @polyfaces
 esphome/components/sdp3x/* @Azimath
@@ -489,6 +494,7 @@ esphome/components/spa06_i2c/* @danielkent-net
 esphome/components/spa06_spi/* @danielkent-net
 esphome/components/speaker/* @jesserockz @kahrendt
 esphome/components/speaker/media_player/* @kahrendt @synesthesiam
+esphome/components/speaker_media_player_base/* @kahrendt @synesthesiam
 esphome/components/speaker_source/* @kahrendt
 esphome/components/spi/* @clydebarrow @esphome/core
 esphome/components/spi_device/* @clydebarrow
@@ -516,6 +522,8 @@ esphome/components/st7735/* @SenexCrenshaw
 esphome/components/st7789v/* @kbx81
 esphome/components/st7920/* @marsjan155
 esphome/components/statsd/* @Links2004
+esphome/components/storage/* @p1ngb4ck
+esphome/components/store_yaml/* @bdraco
 esphome/components/stts22h/* @B48D81EFCC
 esphome/components/substitutions/* @esphome/core
 esphome/components/sun/* @OttoWinter
@@ -578,6 +586,7 @@ esphome/components/update/* @jesserockz
 esphome/components/uponor_smatrix/* @kroimon
 esphome/components/usb_cdc_acm/* @kbx81
 esphome/components/usb_host/* @clydebarrow
+esphome/components/usb_storage/* @p1ngb4ck
 esphome/components/usb_uart/* @clydebarrow
 esphome/components/valve/* @esphome/core
 esphome/components/vbus/* @ssieb
