@@ -174,9 +174,20 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     char rel[256]{};
     // httpd_resp_set_hdr() stores the pointer (no copy) — must outlive every send.
     char disposition[300]{};
+    // Likewise for the type: always a string literal from content_type_for().
+    const char *type{"application/octet-stream"};
+    // Byte range the client asked for. end is inclusive, as in the HTTP header. When
+    // has_range is false the whole file is sent and these are ignored.
+    bool has_range{false};
+    uint64_t range_start{0};
+    uint64_t range_end{0};
+    char content_range[64]{};
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
   void pump_download_(DownloadJob *job);
+  // MIME type for a file name, by extension. Returns a literal, never null: anything not
+  // listed is application/octet-stream, which is what every download was before.
+  static const char *content_type_for(const char *name);
   static void download_task_trampoline_(void *arg);
   void download_task_();
   QueueHandle_t dl_queue_{nullptr};

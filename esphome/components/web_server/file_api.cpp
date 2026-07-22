@@ -808,6 +808,32 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
 // Download (chunked, one main-loop hop per chunk)
 // ---------------------------------------------------------------------------
 
+// Extensions worth naming: the ones a browser can show inline. Everything else keeps the
+// octet-stream every download used to get, so nothing that worked before changes.
+const char *WebServerFileApi::content_type_for(const char *name) {
+  const char *dot = strrchr(name, '.');
+  if (dot == nullptr)
+    return "application/octet-stream";
+  struct Entry {
+    const char *ext;
+    const char *type;
+  };
+  static const Entry TABLE[] = {
+      {".png", "image/png"},   {".jpg", "image/jpeg"},        {".jpeg", "image/jpeg"},     {".gif", "image/gif"},
+      {".webp", "image/webp"}, {".bmp", "image/bmp"},         {".svg", "image/svg+xml"},   {".ico", "image/x-icon"},
+      {".txt", "text/plain"},  {".log", "text/plain"},        {".yaml", "text/plain"},     {".yml", "text/plain"},
+      {".conf", "text/plain"}, {".cfg", "text/plain"},        {".ini", "text/plain"},      {".csv", "text/csv"},
+      {".md", "text/plain"},   {".json", "application/json"}, {".html", "text/html"},      {".htm", "text/html"},
+      {".css", "text/css"},    {".js", "text/javascript"},    {".pdf", "application/pdf"}, {".wav", "audio/wav"},
+      {".mp3", "audio/mpeg"},  {".flac", "audio/flac"},       {".ogg", "audio/ogg"},       {".mp4", "video/mp4"},
+  };
+  for (const auto &e : TABLE) {
+    if (strcasecmp(dot, e.ext) == 0)
+      return e.type;
+  }
+  return "application/octet-stream";
+}
+
 void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   auto *param = request->getParam("path");
   if (param == nullptr) {
@@ -858,6 +884,41 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   // Build the transfer job up front; the disposition buffer must live inside the job
   // because httpd_resp_set_hdr() keeps the pointer until the response is finished.
   auto *job = new DownloadJob{};  // NOLINT(cppcoreguidelines-owning-memory)
+  // inline=1 asks the browser to render the file rather than save it, which is what an image
+  // preview or a text editor wants. Absent, the response is byte-for-byte what it always was.
+  const auto *inline_param = request->getParam("inline");
+  const bool want_inline = inline_param != nullptr && inline_param->value() == "1";
+  if (want_inline)
+    job->type = content_type_for(path.c_str());
+  // Range: bytes=START-[END]. Only the single-range form, which is all a browser sends for
+  // media and all a log tail needs. Anything else is ignored and the whole file goes out.
+  const AsyncWebHeader *range_hdr = request->getHeader("Range");
+  if (range_hdr != nullptr && size > 0) {
+    const std::string spec = range_hdr->value().c_str();
+    if (spec.rfind("bytes=", 0) == 0) {
+      const size_t dash = spec.find('-', 6);
+      if (dash != std::string::npos) {
+        char *endp = nullptr;
+        const uint64_t start = strtoull(spec.c_str() + 6, &endp, 10);
+        const bool has_start = endp != spec.c_str() + 6;
+        uint64_t end = size - 1;
+        if (dash + 1 < spec.size()) {
+          char *endp2 = nullptr;
+          const uint64_t parsed = strtoull(spec.c_str() + dash + 1, &endp2, 10);
+          if (endp2 != spec.c_str() + dash + 1)
+            end = parsed;
+        }
+        if (has_start && start < size) {
+          job->has_range = true;
+          job->range_start = start;
+          job->range_end = end < size ? end : size - 1;
+          snprintf(job->content_range, sizeof(job->content_range), "bytes %llu-%llu/%llu",
+                   (unsigned long long) job->range_start, (unsigned long long) job->range_end,
+                   (unsigned long long) size);
+        }
+      }
+    }
+  }
   job->ps = ps;
   job->handle = handle;
   job->is_fs = is_fs;
@@ -871,7 +932,8 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
       if (*p != '"' && *p != '\\' && static_cast<uint8_t>(*p) >= 0x20)
         safe_name += *p;
     }
-    snprintf(job->disposition, sizeof(job->disposition), "attachment; filename=\"%s\"", safe_name.c_str());
+    snprintf(job->disposition, sizeof(job->disposition), "%s; filename=\"%s\"", want_inline ? "inline" : "attachment",
+             safe_name.c_str());
   }
 
   httpd_req_t *req = *request;
@@ -906,20 +968,49 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 // httpd_req_async_handler_complete() — only the task path owns an async copy.
 void WebServerFileApi::pump_download_(DownloadJob *job) {
   httpd_req_t *req = job->req;
-  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_type(req, job->type);
   httpd_resp_set_hdr(req, "Content-Disposition", job->disposition);
+  // Advertised unconditionally: a client that knows it may ask for a range can poll the tail
+  // of a growing file instead of fetching all of it again.
+  httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+
+  uint64_t offset = 0;
+  uint64_t remaining = job->size;
+  if (job->has_range) {
+    httpd_resp_set_status(req, "206 Partial Content");
+    httpd_resp_set_hdr(req, "Content-Range", job->content_range);
+    offset = job->range_start;
+    remaining = job->range_end - job->range_start + 1;
+    if (job->is_fs && job->handle != nullptr) {
+      auto *ps_c = job->ps;
+      auto *handle_c = job->handle;
+      const int64_t start = static_cast<int64_t>(offset);
+      storage::StorageError serr = storage::StorageError::OK;
+      this->run_on_loop_([ps_c, handle_c, start, &serr]() {
+        serr = static_cast<storage::FilesystemStorage *>(ps_c)->seek(handle_c, start, storage::SeekMode::SET);
+      });
+      if (serr != storage::StorageError::OK) {
+        ESP_LOGW(TAG, "download '%s': seek to %lld failed (%s)", job->rel, (long long) start,
+                 storage::error_to_string(serr));
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return;
+      }
+    }
+  }
 
   auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
-  uint64_t offset = 0;
   bool failed = false;
   storage::StorageError err = storage::StorageError::OK;
   while (true) {
     size_t got = 0;
-    bool loop_ok = this->run_on_loop_([this, job, &offset, buf, &got, &err]() {
+    const size_t want = job->has_range && remaining < FILE_API_CHUNK ? static_cast<size_t>(remaining) : FILE_API_CHUNK;
+    if (want == 0)
+      break;
+    bool loop_ok = this->run_on_loop_([this, job, &offset, buf, &got, &err, want]() {
       if (job->is_fs) {
-        err = static_cast<storage::FilesystemStorage *>(job->ps)->read(job->handle, buf, FILE_API_CHUNK, &got);
+        err = static_cast<storage::FilesystemStorage *>(job->ps)->read(job->handle, buf, want, &got);
       } else {
-        err = static_cast<storage::NetworkStorage *>(job->ps)->read_chunk(job->rel, buf, offset, FILE_API_CHUNK, &got);
+        err = static_cast<storage::NetworkStorage *>(job->ps)->read_chunk(job->rel, buf, offset, want, &got);
       }
     });
     if (!loop_ok || err != storage::StorageError::OK) {
@@ -929,12 +1020,20 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
     if (got == 0)
       break;  // EOF
     offset += got;
+    if (remaining >= got)
+      remaining -= got;
+    else
+      remaining = 0;
     if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), got) != ESP_OK) {
       failed = true;  // client went away — still close the handle below
       break;
     }
-    if (offset >= job->size && job->size != 0)
+    if (job->has_range) {
+      if (remaining == 0)
+        break;
+    } else if (offset >= job->size && job->size != 0) {
       break;
+    }
   }
   delete[] buf;  // NOLINT(cppcoreguidelines-owning-memory)
 
