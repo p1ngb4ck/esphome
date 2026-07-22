@@ -156,7 +156,10 @@ enum NFSStatus : uint32_t {
 
 static constexpr size_t NFS_FHSIZE3 = 64;
 static constexpr size_t NFS_MAXNAMLEN = 255;
-static constexpr size_t NFS_MAXPATHLEN = 1024;
+// Sanity cap for any XDR string decoded off the wire (directory entry names, file handle
+// blobs). Bounded by what the storage API can carry rather than by the NFSv3 protocol maximum:
+// a longer string could never be handed up anyway.
+static constexpr size_t NFS_MAXPATHLEN = storage::STORAGE_PATH_MAX;
 
 //========================================================================
 // XDR Buffer (RFC 1832)
@@ -415,7 +418,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool network_was_connected_{false};
 
 #if defined(USE_ESP_IDF) || defined(USE_ESP32)
-  struct sockaddr_in server_addr_{};
+  struct sockaddr_in server_addr_ {};
   bool server_addr_resolved_{false};
 #endif
 
