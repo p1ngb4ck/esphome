@@ -190,8 +190,6 @@ struct TransferRequest {
   storage::FileHandle *src_handle{nullptr};
   storage::FileHandle *dst_handle{nullptr};
   uint64_t offset{0};
-  storage::RamBuffer chunk_buf;
-  size_t chunk_size{0};
   bool src_is_fs{false};
   bool dst_is_fs{false};
   bool handles_open{false};
@@ -525,7 +523,7 @@ class StorageWorker : public PollingComponent {
   // against the file. Both return false when they have finished the request (error/mismatch) or
   // are waiting on the network — the caller must return immediately in that case.
   bool begin_verify_pass_(TransferRequest &req);
-  bool verify_chunk_(TransferRequest &req);
+  bool verify_chunk_(TransferRequest &req, bool on_task);
   storage::StorageError submit_raw_(RequestOp op, storage::RawStorage *device, uint64_t address, uint64_t size,
                                     storage::PathStorage *file_side, const char *file_path, bool erase_first,
                                     bool overwrite, CompletionCallback &&on_done, TransferJob *job_out,
@@ -533,6 +531,9 @@ class StorageWorker : public PollingComponent {
   // on_task carries the engine flag from run_chunk_ (see there): the whole-chip erase fast path
   // is only taken on the worker task.
   void run_raw_chunk_(TransferRequest &req, bool on_task);
+  // This engine's streaming buffer, allocated on first use. Returns nullptr (and leaves
+  // *size_out untouched) if it cannot be had.
+  uint8_t *chunk_buffer_(bool on_task, size_t *size_out);
   void check_stalled_();
   uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
@@ -581,6 +582,18 @@ class StorageWorker : public PollingComponent {
   // immediately afterward with no in-flight data-plane calls left against it. See the .cpp for
   // the full per-engine drain sequence.
   void on_storage_unregistered_(storage::Storage *s);
+
+  // One streaming buffer per engine rather than one per request. A buffer's content never
+  // outlives the run_chunk_() call that filled it, and neither engine runs two requests at
+  // once, so requests can share. The two engines keep their own because the size and heap
+  // follow the execution context (see alloc_dma_capable): the loop path stays small enough for
+  // its 20 ms slice, the task path stages a larger DMA-capable PSRAM chunk. Allocated on first
+  // use and kept afterwards — a 16-64 kB allocate/free cycle per transfer is exactly the
+  // fragmentation pattern to avoid.
+  storage::RamBuffer chunk_buf_loop_;
+  storage::RamBuffer chunk_buf_task_;
+  size_t chunk_size_loop_{0};
+  size_t chunk_size_task_{0};
 
   FixedVector<TransferRequest> pool_;
   FixedVector<StreamRequest> stream_pool_;
