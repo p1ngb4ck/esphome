@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 from esphome.components.storage import (
     MountableStorage,
+    request_path_length,
     request_storage_device,
     request_storage_worker,
 )
@@ -96,4 +97,6 @@ async def to_code(config):
             cg.add(var.set_mount_path(mount_path))
 
         request_storage_device()
+        # NFSv3 NFS_MAXNAMLEN is 255; plus the terminator.
+        request_path_length(256)
         request_storage_worker(task_safe=True)

@@ -12,6 +12,7 @@ from esphome.components.storage import (
     MountableStorage,
     file_system_to_code,
     final_validate_file_system,
+    request_path_length,
     request_storage_device,
     request_storage_worker,
     validate_file_system_value,
@@ -287,9 +288,10 @@ def _final_validate_assume_exclusive_bus(config):
     if bus_id is not None:
         count, others = _count_devices_on_spi_bus(fconf, bus_id)
         if count > 1:
-            shared_with = ", ".join(
-                n for n in others if n != str(config.get(CONF_ID))
-            ) or f"{count - 1} other device(s)"
+            shared_with = (
+                ", ".join(n for n in others if n != str(config.get(CONF_ID)))
+                or f"{count - 1} other device(s)"
+            )
             raise cv.Invalid(
                 f"'{CONF_ASSUME_EXCLUSIVE_BUS}: true' requires this SD card to be the only "
                 f"device on bus '{bus_id}', but it is shared with: {shared_with}. A background "
@@ -377,10 +379,14 @@ async def to_code(config):
         cg.add(var.set_cd_pin(await cg.gpio_pin_expression(cd_pin)))
 
     request_storage_device()
+    # FATFS long filenames: 255 characters plus the terminator.
+    request_path_length(256)
     # SdMmc has a dedicated SDIO controller and is always safe to drive from the worker's
     # background task. SdSpi shares a general SPI bus, so it is task-safe only when the user has
     # opted in with assume_exclusive_bus (enforced in FINAL_VALIDATE: alone on the bus).
-    sd_spi_exclusive = card_type == TYPE_SD_SPI and config.get(CONF_ASSUME_EXCLUSIVE_BUS)
+    sd_spi_exclusive = card_type == TYPE_SD_SPI and config.get(
+        CONF_ASSUME_EXCLUSIVE_BUS
+    )
     if sd_spi_exclusive:
         cg.add(var.set_assume_exclusive_bus(True))
     request_storage_worker(task_safe=(card_type == TYPE_SD_MMC or sd_spi_exclusive))
