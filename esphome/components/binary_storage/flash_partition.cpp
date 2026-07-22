@@ -328,8 +328,11 @@ storage::StorageError FlashPartition::list_dir(const char *path,
       continue;
 
     storage::FileStat fs_entry{};
-    strncpy(fs_entry.name, entry->d_name, STORAGE_MAX_PATH_LEN - 1);
-    fs_entry.name[STORAGE_MAX_PATH_LEN - 1] = '\0';
+    // Bound by the field being written, not by the path constant: FileStat::name holds a
+    // basename (storage::STORAGE_NAME_MAX + 1 bytes), while STORAGE_MAX_PATH_LEN measures a
+    // full VFS path and is the larger of the two.
+    strncpy(fs_entry.name, entry->d_name, sizeof(fs_entry.name) - 1);
+    fs_entry.name[sizeof(fs_entry.name) - 1] = '\0';
     fs_entry.is_dir = (entry->d_type == DT_DIR);
     fs_entry.size = 0;
 
