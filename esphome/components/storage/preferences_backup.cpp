@@ -1162,14 +1162,31 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
     return false;
   }
 
+  // Budget checked while the payload grows, not after: the "nothing written" promise below is
+  // about the medium, but the RAM is spent by then — and std::string has no way to report a
+  // failed growth in an exceptions-free build, it aborts. Stop at the first entry that would
+  // not fit and report it instead.
+  const uint64_t budget = window > sizeof(RawHeader) ? window - sizeof(RawHeader) : 0;
+  bool over_budget = false;
   std::string payload;
   size_t exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
                                     [&](const NvsEntry &e, const PrefSelection *s) {
+                                      if (over_budget)
+                                        return;
+                                      if (payload.size() + 6 + e.len > budget) {
+                                        over_budget = true;
+                                        return;
+                                      }
                                       append_u32(payload, e.key);
                                       append_u16(payload, static_cast<uint16_t>(e.len));
                                       payload.append(reinterpret_cast<const char *>(e.blob), e.len);
                                     });
   nvs_close(handle);
+  if (over_budget) {
+    ESP_LOGE(TAG, "Export does not fit the %" PRIu32 " bytes reserved at 0x%08" PRIX32 " — nothing written",
+             (uint32_t) window, (uint32_t) address);
+    return false;
+  }
 
   RawHeader hdr{};
   hdr.magic = RAW_MAGIC;
@@ -1179,12 +1196,6 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
   hdr.crc32 = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
 
   const uint64_t total = sizeof(RawHeader) + payload.size();
-  if (total > window) {
-    ESP_LOGE(TAG,
-             "Export needs %" PRIu32 " bytes but only %" PRIu32 " are reserved at 0x%08" PRIX32 " — nothing written",
-             (uint32_t) total, (uint32_t) window, (uint32_t) address);
-    return false;
-  }
 
   // Media that only clear bits on write need the covering sectors erased first. Rounding the
   // erase outward would take the region in front of us with it, so demand alignment instead of
@@ -1355,30 +1366,49 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     return false;
   }
 
+  // Same reasoning as the raw export: max_blocking_transfer_size is what write_file() below
+  // would reject the result by, but by then the whole rendering already sits in RAM, and a
+  // std::string that cannot grow aborts rather than reporting it. Stop rendering once the
+  // limit is reached. 0 means the check is off, per the option's contract.
+  const uint64_t budget =
+      global_storage_registry != nullptr ? global_storage_registry->get_max_blocking_transfer_size() : 0;
+  bool over_budget = false;
+  size_t json_bytes = 0;  // running estimate for the json branch, which cannot measure itself
   std::string out;
   size_t exported = 0;
   if (as_json) {
     auto buf = json::build_json([&](JsonObject root) {
       root["version"] = 1;
       JsonObject prefs = root["preferences"].to<JsonObject>();
-      exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
-                                 [&](const NvsEntry &e, const PrefSelection *s) {
-                                   char key_str[16];
-                                   snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
-                                   std::string value;
-                                   const RuntimeEntry *re =
-                                       s == nullptr
-                                           ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr,
-                                                            selected_entity_count)
-                                           : nullptr;
-                                   if (s != nullptr) {
-                                     encode_value(value, *s, e.blob, e.len);
-                                   } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
-                                     value = HEX_PREFIX;
-                                     append_hex(value, e.blob, e.len);
-                                   }
-                                   prefs[s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str)] = value;
-                                 });
+      exported = collect_entries(
+          handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
+          [&](const NvsEntry &e, const PrefSelection *s) {
+            if (over_budget)
+              return;
+            char key_str[16];
+            snprintf(key_str, sizeof(key_str), "%" PRIu32, e.key);
+            std::string value;
+            const RuntimeEntry *re =
+                s == nullptr
+                    ? runtime_by_key(e.key, restrict_to_selection ? selected_entities : nullptr, selected_entity_count)
+                    : nullptr;
+            if (s != nullptr) {
+              encode_value(value, *s, e.blob, e.len);
+            } else if (re == nullptr || !encode_entity_value(value, *re, e.blob, e.len)) {
+              value = HEX_PREFIX;
+              append_hex(value, e.blob, e.len);
+            }
+            const char *name = s != nullptr ? s->name : (re != nullptr ? re->name.c_str() : key_str);
+            // The document is ArduinoJson's, so there is no size to read
+            // back mid-build — track what this entry will render as
+            // instead: "name":"value", quotes, colon and separator.
+            json_bytes += strlen(name) + value.size() + 6;
+            if (budget != 0 && json_bytes > budget) {
+              over_budget = true;
+              return;
+            }
+            prefs[name] = value;
+          });
     });
     out.assign(buf.data(), buf.size());
   } else {
@@ -1386,6 +1416,12 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
     out += "# <global id or numeric NVS key>=<typed value or hex:...>\n";
     exported = collect_entries(handle, sel, count, restrict_to_selection, selected_entities, selected_entity_count,
                                [&](const NvsEntry &e, const PrefSelection *s) {
+                                 if (over_budget)
+                                   return;
+                                 if (budget != 0 && out.size() >= budget) {
+                                   over_budget = true;
+                                   return;
+                                 }
                                  if (s != nullptr) {
                                    out += s->name;
                                    out += '=';
@@ -1411,6 +1447,13 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
                                });
   }
   nvs_close(handle);
+  if (over_budget) {
+    ESP_LOGE(TAG,
+             "Export exceeds max_blocking_transfer_size (%" PRIu32 " bytes) — nothing written. Narrow it with the "
+             "action's 'preferences:' filter, or raise the limit.",
+             (uint32_t) budget);
+    return false;
+  }
 
   StorageError werr = write_file(ps, rel, reinterpret_cast<const uint8_t *>(out.data()), out.size());
   if (werr != StorageError::OK) {
