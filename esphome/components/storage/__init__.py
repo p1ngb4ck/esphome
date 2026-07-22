@@ -163,6 +163,7 @@ class StorageData:
     # once at the end — see _resolve_raw_pref_regions().
     raw_pref_regions: dict = field(default_factory=dict)
     raw_pref_job_queued: bool = False
+    sensor_pref_job_queued: bool = False
 
 
 def _get_data() -> StorageData:
@@ -1005,6 +1006,41 @@ _RESTORING_STRING_RE = re.compile(
 )
 
 
+# Sensor platforms whose restore type codegen can name but the runtime sweep cannot: they all
+# arrive as sensor::Sensor in App's list, four bytes wide, and a build without RTTI cannot tell
+# them apart. The platform is right there in the YAML, so map the registered class to the kind
+# and let register_entity_pref() carry it over. A platform that is not listed here keeps the
+# sweep's RAW entry -- named, hex value -- which is the safe fallback: a wrong kind would render
+# a wrong number AND write wrong bytes back on import.
+_SENSOR_PREF_KINDS = {
+    "total_daily_energy::TotalDailyEnergy": "FLOAT",
+    "integration::IntegrationSensor": "FLOAT",
+    "duty_time_sensor::DutyTimeSensor": "U32",
+    "rotary_encoder::RotaryEncoderSensor": "I32",
+}
+
+
+async def _register_typed_sensors():
+    """Emits one register_entity_pref() per sensor whose restore type is known.
+
+    FINAL priority: every sensor platform's own to_code() must have registered its variable
+    before CORE.variables can be walked for them.
+    """
+    for reg_id in CORE.variables:
+        # Registered types carry no esphome:: prefix; tolerate one anyway.
+        type_str = str(reg_id.type).removeprefix("esphome::")
+        kind = _SENSOR_PREF_KINDS.get(type_str)
+        if kind is None:
+            continue
+        var = await cg.get_variable(reg_id)
+        cg.add(
+            cg.RawExpression(
+                f"{storage_ns}::register_entity_pref({var}, "
+                f"{storage_ns}::EntityKind::{kind})"
+            )
+        )
+
+
 def _pref_type_from_class(type_str: str) -> tuple[str, int] | None:
     """(PrefType tag, count) from a declared global's C++ class string —
     codegen-world data only (ID.type of the registered variable). None when
@@ -1183,6 +1219,13 @@ def _register_raw_pref_region(device_id, device_var, address, size, var):
 async def _build_preferences_action(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
+    # Once per build, not per action: naming is a property of the node, not of the action.
+    data = _get_data()
+    if not data.sensor_pref_job_queued:
+        data.sensor_pref_job_queued = True
+        CORE.add_job(
+            coroutine_with_priority(CoroPriority.FINAL)(_register_typed_sensors)
+        )
     if CONF_PATH in config:
         template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
         cg.add(var.set_path(template_))

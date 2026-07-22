@@ -143,6 +143,11 @@ static void register_if_missing(esphome::EntityBase *e, uint32_t version, Entity
   runtime_registry().emplace_back(RuntimeEntry{key, std::string(oid.c_str(), oid.size()), kind, aux, e});
 }
 
+void register_entity_pref(esphome::EntityBase *entity, EntityKind kind) {
+  if (entity != nullptr)
+    register_if_missing(entity, 0, kind);
+}
+
 static void sweep_app_entities() {
   static bool done = false;
   if (done)
@@ -589,6 +594,26 @@ static bool encode_entity_value(std::string &out, const RuntimeEntry &re, const 
       out += b;
       return true;
     }
+    case EntityKind::U32: {
+      if (len != sizeof(uint32_t))
+        return false;
+      uint32_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%" PRIu32, v);
+      out += b;
+      return true;
+    }
+    case EntityKind::I32: {
+      if (len != sizeof(int32_t))
+        return false;
+      int32_t v;
+      memcpy(&v, blob, sizeof(v));
+      char b[16];
+      snprintf(b, sizeof(b), "%" PRId32, v);
+      out += b;
+      return true;
+    }
     case EntityKind::STRING: {
       // length-prefixed char[SZ]; same layout as string globals
       if (len < 1 || blob[0] >= len)
@@ -818,6 +843,34 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
         return false;
       memcpy(blob, &v, sizeof(v));
       *blob_len = sizeof(size_t);
+      return true;
+    }
+    case EntityKind::U32: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      uint32_t v = static_cast<uint32_t>(strtoul(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(v);
+      return true;
+    }
+    case EntityKind::I32: {
+      char b[16];
+      if (len == 0 || len >= sizeof(b))
+        return false;
+      memcpy(b, s, len);
+      b[len] = '\0';
+      char *e = nullptr;
+      int32_t v = static_cast<int32_t>(strtol(b, &e, 10));
+      if (e == nullptr || *e != '\0')
+        return false;
+      memcpy(blob, &v, sizeof(v));
+      *blob_len = sizeof(v);
       return true;
     }
     case EntityKind::STRING: {
