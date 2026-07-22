@@ -29,7 +29,7 @@ namespace esphome::storage {
 
 // Logging helpers implemented in automation.cpp (log macros must stay out of headers).
 // printf-style args from YAML flow verbatim through C varargs in the generated
-// str_sprintf() call; a std::string there is undefined behavior (non-POD through
+// str_sprintf call; a std::string there is undefined behavior (non-POD through
 // "..." renders garbage or corrupts memory, and only warns via -Wformat).
 // Normalizing every arg through this overload set means no config ever needs a
 // manual .c_str() — and args that already have one pass through unchanged.
