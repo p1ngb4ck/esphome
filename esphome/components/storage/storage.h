@@ -395,10 +395,18 @@ class StorageRegistry : public Component {
   void quiesce_storage(Storage *s);
   bool is_registered(const Storage *s) const;
 
-  // Stable enumeration by index — pairs with get_mount_path() on PathStorage entries to let a
-  // caller build its own index <-> mountpoint view without needing a for_each() callback.
+  // Enumeration by index, for callers that cannot use the for_each* callbacks below — those
+  // always run to completion, so work that has to be spread over several main-loop passes
+  // (one device per loop()) needs its own cursor.
+  //
+  // An index identifies a POSITION, never a device: unregister_storage() fills the freed slot
+  // by moving the last entry into it, so any index at or after the removed one can point at a
+  // different device afterwards, and size() shrinks. An index held across register_storage()
+  // or unregister_storage() is therefore stale — re-derive it, or hold the Storage* and ask
+  // is_registered() above, which is what actually answers "is this still the same device".
+  // get() returns nullptr for an out-of-range index so a stale cursor cannot read past the end.
   size_t size() const { return this->storages_.size(); }
-  Storage *get(size_t index) const { return this->storages_[index]; }
+  Storage *get(size_t index) const { return index < this->storages_.size() ? this->storages_[index] : nullptr; }
 
   // Enumerate by type — callback receives each matching device and caller ctx
   void for_each(void (*cb)(Storage *s, void *ctx), void *ctx);
