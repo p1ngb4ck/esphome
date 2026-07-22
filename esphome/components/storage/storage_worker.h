@@ -537,6 +537,17 @@ class StorageWorker : public PollingComponent {
   void check_stalled_();
   uint32_t last_stall_check_ms_{0};
   bool is_task_safe_(const StreamRequest &req) const;
+  // Same contention question overlaps_active_() answers for transfers, asked for a stream:
+  // does anything else currently drive this storage's data plane? Keeps a stream step off the
+  // task while a transfer holds the same storage on the loop engine (and the other way round),
+  // which is what makes the interface's "calls on one instance are externally serialized"
+  // contract hold across the two engines.
+  // from_loop: the caller is loop(), about to run this step on the main loop. Another stream
+  // that is itself only queued for the loop then does NOT contend — this same thread runs them
+  // one after another, and treating them as contending would leave two streams on one storage
+  // holding each other forever. At dispatch time (from_loop=false) it does contend, so the
+  // candidate goes to the loop as well instead of racing it from the task.
+  bool stream_overlaps_active_(const StreamRequest &candidate, bool from_loop) const;
 
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
   // engine) shares a storage instance with `candidate`. Used at both dispatch points to

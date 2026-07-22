@@ -165,6 +165,14 @@ bool StorageWorker::wait_for_network_ready_(TransferRequest &req, StorageError e
   return true;  // stay RUNNING; the loop retries this request on the next pass
 }
 
+// A stream whose step is queued or running is calling into its storage right now. An IDLE one
+// only holds a handle open, which the interface permits alongside other work — so it does not
+// contend, or an upload sitting between chunks would block every transfer on that storage.
+static bool stream_step_active(StreamState state) {
+  return state == StreamState::OPENING || state == StreamState::WRITING || state == StreamState::READING ||
+         state == StreamState::CLOSING || state == StreamState::CANCELLED;
+}
+
 bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
   for (const auto &req : this->pool_) {
     if (&req == &candidate)
@@ -180,6 +188,34 @@ bool StorageWorker::overlaps_active_(const TransferRequest &candidate) const {
         (req.raw_device != nullptr && req.raw_device == candidate.raw_device))
       return true;
   }
+  // Streams drive the same storages through the same drivers — see stream_overlaps_active_().
+  for (const auto &sreq : this->stream_pool_) {
+    if (sreq.storage == nullptr || !stream_step_active(sreq.state.load()))
+      continue;
+    if (sreq.storage == candidate.src_storage || sreq.storage == candidate.dst_storage)
+      return true;
+  }
+  return false;
+}
+
+bool StorageWorker::stream_overlaps_active_(const StreamRequest &candidate, bool from_loop) const {
+  if (candidate.storage == nullptr)
+    return false;
+  for (const auto &req : this->pool_) {
+    RequestState state = req.state.load();
+    if (state != RequestState::RUNNING && state != RequestState::CANCELLED)
+      continue;
+    if (req.src_storage == candidate.storage || req.dst_storage == candidate.storage)
+      return true;
+  }
+  for (const auto &sreq : this->stream_pool_) {
+    if (&sreq == &candidate || sreq.storage != candidate.storage)
+      continue;
+    if (from_loop && sreq.pending_step_)
+      continue;  // queued for this same thread — it runs after us, it does not race us
+    if (stream_step_active(sreq.state.load()))
+      return true;
+  }
   return false;
 }
 
@@ -192,7 +228,17 @@ bool StorageWorker::is_busy_with(const storage::Storage *storage) const {
     RequestState state = req.state.load();
     if (state == RequestState::FREE || state == RequestState::DONE)
       continue;
-    if (req.src_storage == storage || req.dst_storage == storage)
+    if (req.src_storage == storage || req.dst_storage == storage || req.raw_device == storage)
+      return true;
+  }
+  // A stream counts whatever it is doing, IDLE included: unlike the contention question above,
+  // this one asks whether the medium may be taken away — and an idle stream still holds an
+  // open handle on it.
+  for (const auto &sreq : this->stream_pool_) {
+    StreamState state = sreq.state.load();
+    if (state == StreamState::FREE || state == StreamState::DONE)
+      continue;
+    if (sreq.storage == storage)
       return true;
   }
   return false;
@@ -748,7 +794,9 @@ void StorageWorker::update() {
   //     reentrantly from inside the caller's own begin_*/write_chunk/read_chunk/end_* call).
   //  2. Deliver completions for whichever streams finished a step (task or loop-sliced).
   for (auto &req : this->stream_pool_) {
-    if (req.pending_step_) {
+    // Hold a queued step while a transfer (or another stream) drives the same storage — the
+    // slot stays non-FREE, so the poller keeps ticking and the step runs on a later pass.
+    if (req.pending_step_ && !this->stream_overlaps_active_(req, /*from_loop=*/true)) {
       req.pending_step_ = false;
       this->run_stream_step_(req);
     }
@@ -1874,7 +1922,7 @@ static bool find_free_stream_slot(FixedVector<StreamRequest> &pool, size_t *out_
 // caller's own begin_*/write_chunk/read_chunk/end_* call frame.
 void StorageWorker::dispatch_stream_step_(StreamRequest &req, size_t index) {
 #if defined(USE_ESP32) && defined(USE_STORAGE_WORKER_TASK)
-  if (this->is_task_safe_(req)) {
+  if (this->is_task_safe_(req) && !this->stream_overlaps_active_(req, /*from_loop=*/false)) {
     QueueEntry entry{QueueEntryKind::STREAM, index};
     if (xQueueSend(this->task_queue_, &entry, 0) == pdTRUE)
       return;
