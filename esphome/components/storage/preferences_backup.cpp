@@ -23,6 +23,10 @@
 
 // Codecs compile against the REAL component restore structs — field access by
 // name, layouts stay the compiler's problem, sizeof gates every decode.
+#ifdef USE_SENSOR
+// Only for App.get_sensors() — nothing is decoded from a sensor, see the sweep.
+#include "esphome/components/sensor/sensor.h"
+#endif
 #ifdef USE_FAN
 #include "esphome/components/fan/fan.h"
 #endif
@@ -159,6 +163,15 @@ static void sweep_app_entities() {
 #ifdef USE_MEDIA_PLAYER
   for (auto *e : App.get_media_players())
     register_if_missing(e, 0, EntityKind::MEDIA_VOLUME);
+#endif
+#ifdef USE_SENSOR
+  // Named, but not rendered: what a restoring sensor stores is its platform's business and the
+  // platforms disagree -- integration and total_daily_energy keep a float, duty_time a uint32_t,
+  // rotary_encoder an int32_t, all four bytes and indistinguishable at runtime (no RTTI). RAW
+  // still turns "2817293318=hex:..." into "<the sensor's id>=hex:...", which is the difference
+  // between a line nobody can place and one that names itself.
+  for (auto *e : App.get_sensors())
+    register_if_missing(e, 0, EntityKind::RAW);
 #endif
 #ifdef USE_FAN
   for (auto *e : App.get_fans())
