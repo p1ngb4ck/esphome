@@ -1,5 +1,5 @@
 #include "transfer_buffer.h"
-#ifdef USE_STORAGE_TRANSFER_BUFFER
+#if defined(USE_STORAGE_TRANSFER_BUFFER) && defined(USE_ESP32)
 
 #include <esp_heap_caps.h>
 
@@ -80,4 +80,4 @@ uint8_t *TransferBuffer::try_acquire(size_t need) {
 void TransferBuffer::release() { this->busy_.store(false); }
 
 }  // namespace esphome::storage
-#endif  // USE_STORAGE_TRANSFER_BUFFER
+#endif  // USE_STORAGE_TRANSFER_BUFFER && USE_ESP32

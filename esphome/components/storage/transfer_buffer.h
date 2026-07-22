@@ -1,6 +1,10 @@
 #pragma once
 #include "esphome/core/defines.h"
-#ifdef USE_STORAGE_TRANSFER_BUFFER
+// ESP32-only in fact as well as in name: the arena is external RAM reached through
+// heap_caps_malloc, and codegen only sets the define when the psram component is configured
+// (_transfer_buffer_final_validate enforces that). Spelling USE_ESP32 out keeps every other
+// target -- and the host build the C++ unit tests use -- from reaching for esp_heap_caps.h.
+#if defined(USE_STORAGE_TRANSFER_BUFFER) && defined(USE_ESP32)
 
 #include <atomic>
 #include <cstddef>
@@ -45,4 +49,4 @@ class TransferBuffer : public Component {
 extern TransferBuffer *global_transfer_buffer;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 }  // namespace esphome::storage
-#endif  // USE_STORAGE_TRANSFER_BUFFER
+#endif  // USE_STORAGE_TRANSFER_BUFFER && USE_ESP32
