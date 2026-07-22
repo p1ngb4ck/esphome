@@ -338,6 +338,12 @@ StorageError error_from_errno(int err, bool writing) {
     case ENOTSUP:
     case EXDEV:  // rename() across volumes — the caller must copy instead
       return StorageError::NOT_SUPPORTED;
+    case ENODEV:
+      return StorageError::NOT_READY;
+    case ETIMEDOUT:
+      return StorageError::TIMEOUT;
+    case EILSEQ:
+      return StorageError::CORRUPT;
     default:
       return writing ? StorageError::WRITE_ERROR : StorageError::READ_ERROR;
   }
