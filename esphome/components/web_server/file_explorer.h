@@ -7,6 +7,12 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/string_ref.h"
+// The storage-backed path reads through the worker's stream API. asset_source: flash needs no
+// storage at all, and storage_worker.h is itself behind this define, so the whole half is
+// conditional. Codegen requests the worker whenever asset_source: storage is configured.
+#ifdef USE_STORAGE_WORKER
+#include "esphome/components/storage/storage_worker.h"
+#endif
 
 namespace esphome {
 namespace web_server {
@@ -63,9 +69,26 @@ class FileExplorerAssets : public Component {
  protected:
   // Copies a PROGMEM asset into PSRAM. Returns false when PSRAM could not be had.
   bool load_from_flash_(Asset &asset);
-  // Reads a STORAGE asset into PSRAM if its storage is mounted. Returns false when the file
-  // is not available yet — that is not an error, loop() tries again.
-  bool load_from_storage_(Asset &asset);
+
+#ifdef USE_STORAGE_WORKER
+  // Storage-backed assets are read through the worker's stream API, so the read is chunked,
+  // runs off the main loop where the storage allows it, and is not subject to the blocking
+  // helpers' max_blocking_transfer_size ceiling -- which is what rejected these files before:
+  // the ceiling exists precisely to route bulk reads here (see storage.h).
+  //
+  // One asset is in flight at a time. Not a limitation worth engineering around: there are at
+  // most a handful, they are read once at startup, and a single stream slot keeps this from
+  // competing with the file API for the worker's pool.
+  void start_load_(size_t index);
+  void on_open_(storage::StorageError err);
+  void on_read_(storage::StorageError err);
+  void on_closed_(storage::StorageError err);
+  // Releases the in-flight buffer and clears the slot, so loop() can try again later.
+  void abandon_load_(const char *reason, storage::StorageError err);
+  // Called once the last storage-backed asset has landed.
+  void finish_if_complete_();
+
+#endif
 
   Asset *assets_{nullptr};
   size_t asset_count_{0};
@@ -73,6 +96,22 @@ class FileExplorerAssets : public Component {
   // Only set once, so a storage that never appears does not log on every loop.
   bool warned_pending_{false};
   uint32_t last_try_ms_{0};
+
+#ifdef USE_STORAGE_WORKER
+  // In-flight read. loading_ is the index into assets_, or NO_LOAD when nothing is open.
+  static constexpr size_t NO_LOAD = SIZE_MAX;
+  size_t loading_{NO_LOAD};
+  storage::StreamHandle stream_{};
+  bool stream_open_{false};
+  // The destination buffer stays owned here until the asset is complete: read_chunk() needs it
+  // to stay valid until its callback fires, and a failed read must free it rather than publish
+  // a half-filled asset.
+  uint8_t *pending_buf_{nullptr};
+  size_t pending_len_{0};
+  size_t pending_off_{0};
+  // read_chunk() fills this before invoking the callback, so it has to outlive the call.
+  size_t last_read_{0};
+#endif
 };
 
 }  // namespace web_server

@@ -641,6 +641,15 @@ async def _add_file_explorer(config, var, api_var) -> None:
 
     cg.add_define("USE_WEBSERVER_FILE_EXPLORER")
 
+    if source == ASSETS_STORAGE:
+        # Reading the assets off the medium goes through the worker's stream API (chunked, no
+        # max_blocking_transfer_size ceiling), so the worker has to be compiled in. A path-based
+        # driver normally requests it; asking here as well makes it independent of which driver
+        # the user happened to configure.
+        from esphome.components.storage import request_storage_worker
+
+        request_storage_worker()
+
     assets_id = ID(f"{var}_file_explorer", is_declaration=True, type=FileExplorerAssets)
     CORE.component_ids.add(str(assets_id))
     assets_var = cg.new_Pvariable(assets_id)
