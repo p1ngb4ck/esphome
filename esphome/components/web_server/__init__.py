@@ -627,7 +627,7 @@ def _flash_row(here: Path, rel: str, url: str, ctype: str, compress: bool) -> st
     )
 
 
-async def _add_file_explorer(config, paren, var) -> None:
+async def _add_file_explorer(config, var, api_var) -> None:
     """Emits the advanced browser: an asset table plus the component that serves it.
 
     Serving is always out of PSRAM. asset_source only decides how the widget's bytes get
@@ -645,7 +645,9 @@ async def _add_file_explorer(config, paren, var) -> None:
     CORE.component_ids.add(str(assets_id))
     assets_var = cg.new_Pvariable(assets_id)
     await cg.register_component(assets_var, {})
-    cg.add(assets_var.set_base(paren))
+    # The assets are served by the file_api handler, not by a handler of their own -- see
+    # WebServerFileApi::set_file_explorer(). This is the only wire between the two.
+    cg.add(api_var.set_file_explorer(assets_var))
 
     rows = [_flash_row(here, *entry) for entry in _ADAPTER_ASSETS]
 
@@ -786,7 +788,7 @@ async def to_code(config):
         if storage_id := file_api_config.get(CONF_STORAGE_ID):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
         if file_browser and config[CONF_FILE_BROWSER][CONF_VARIANT] == BROWSER_ADVANCED:
-            await _add_file_explorer(config, paren, var)
+            await _add_file_explorer(config, var, api_var)
         elif file_browser:
             cg.add_define("USE_WEBSERVER_FILE_BROWSER")
             # Two prebuilt variants differing only in action-button rendering; the option

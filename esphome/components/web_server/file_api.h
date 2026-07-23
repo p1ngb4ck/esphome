@@ -11,6 +11,9 @@
 #include "esphome/components/storage/storage_worker.h"
 #include "esphome/components/web_server_base/web_server_base.h"
 #include "esphome/core/component.h"
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+#include "file_explorer.h"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -55,6 +58,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   float get_setup_priority() const override { return setup_priority::WIFI - 1.0f; }
 
   void set_web_server_base(web_server_base::WebServerBase *base) { this->base_ = base; }
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  // The advanced browser's assets are served from this handler rather than from one of their
+  // own: the URLs sit next to /files/*, the dependency is guaranteed by codegen (the explorer
+  // is only ever emitted inside the file_api block), and it keeps the handler chain -- walked
+  // by every request -- one entry shorter. Same shape as the simple browser's
+  // /file_browser.js above.
+  void set_file_explorer(FileExplorerAssets *fe) { this->file_explorer_ = fe; }
+#endif
   void set_max_dir_entries(uint16_t n) { this->max_dir_entries_ = n; }
   // Optional single-storage scoping (mirrors http_file_api's storage_id option): when set,
   // only paths under this storage's mount path are served.
@@ -112,6 +123,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   static int http_status_for_(storage::StorageError err);
 
   web_server_base::WebServerBase *base_{nullptr};
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  FileExplorerAssets *file_explorer_{nullptr};
+#endif
   storage::PathStorage *scoped_storage_{nullptr};
   uint16_t max_dir_entries_{64};
   // All default true: an instance constructed without explicit setters (shouldn't happen via

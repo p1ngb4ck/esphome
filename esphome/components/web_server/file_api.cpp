@@ -52,6 +52,10 @@ bool WebServerFileApi::canHandle(AsyncWebServerRequest *request) const {
   if (method == HTTP_GET && url == "/file_browser.js")
     return true;
 #endif
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  if (method == HTTP_GET && this->file_explorer_ != nullptr && this->file_explorer_->find(url) != nullptr)
+    return true;
+#endif
   if (strncmp(url.c_str(), "/files/", 7) != 0)
     return false;
   return method == HTTP_GET || method == HTTP_POST;
@@ -70,6 +74,30 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
     response->addHeader("Cache-Control", "public, max-age=3600");
     request->send(response);
     return;
+  }
+#endif
+
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  if (is_get && this->file_explorer_ != nullptr) {
+    const auto *asset = this->file_explorer_->find(url);
+    if (asset != nullptr) {
+      if (asset->psram == nullptr) {
+        // Storage-backed and not there yet. 503 with Retry-After rather than 404: the asset
+        // is configured, it is simply not loaded, and a reloading browser should try again.
+        auto *pending = request->beginResponse(503, "text/plain", "assets not loaded yet");
+        pending->addHeader("Retry-After", "5");
+        request->send(pending);
+        return;
+      }
+      auto *response = request->beginResponse(200, asset->content_type, asset->psram, asset->len);
+      if (asset->gzipped)
+        response->addHeader("Content-Encoding", "gzip");
+      // These change only with the firmware or the files on the card; letting the browser keep
+      // them saves re-sending ~300 kB on every page load.
+      response->addHeader("Cache-Control", "public, max-age=86400");
+      request->send(response);
+      return;
+    }
   }
 #endif
 

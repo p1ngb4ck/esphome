@@ -1,5 +1,5 @@
 #include "file_explorer.h"
-#if defined(USE_WEBSERVER_FILE_EXPLORER) && defined(USE_ESP32)
+#if defined(USE_WEBSERVER_FILE_EXPLORER) && defined(USE_ESP_IDF)
 
 #include <cstring>
 
@@ -118,39 +118,12 @@ bool FileExplorerAssets::load_from_storage_(Asset &asset) {
   return true;
 }
 
-bool FileExplorerAssets::matches(const std::string &url) const {
+const FileExplorerAssets::Asset *FileExplorerAssets::find(StringRef url) const {
   for (size_t i = 0; i < this->asset_count_; i++) {
     if (url == this->assets_[i].url)
-      return true;
+      return &this->assets_[i];
   }
-  return false;
-}
-
-bool FileExplorerAssets::handle(AsyncWebServerRequest *request) {
-  const std::string url = request->url().c_str();
-  for (size_t i = 0; i < this->asset_count_; i++) {
-    Asset &a = this->assets_[i];
-    if (url != a.url)
-      continue;
-    if (a.psram == nullptr) {
-      // Storage-backed and not there yet. 503 with Retry-After rather than 404: the asset is
-      // configured, it is simply not loaded, and a reloading browser should try again.
-      AsyncWebServerResponse *resp = request->beginResponse(503, "text/plain", "assets not loaded yet");
-      resp->addHeader("Retry-After", "5");
-      request->send(resp);
-      return true;
-    }
-    AsyncWebServerResponse *resp =
-        request->beginResponse_P(200, a.content_type, a.psram, a.len);
-    if (a.gzipped)
-      resp->addHeader("Content-Encoding", "gzip");
-    // These change only with the firmware or the files on the card; letting the browser keep
-    // them saves re-sending ~300 kB on every page load.
-    resp->addHeader("Cache-Control", "public, max-age=86400");
-    request->send(resp);
-    return true;
-  }
-  return false;
+  return nullptr;
 }
 
 void FileExplorerAssets::dump_config() {
@@ -165,4 +138,4 @@ void FileExplorerAssets::dump_config() {
 }  // namespace web_server
 }  // namespace esphome
 
-#endif  // USE_WEBSERVER_FILE_EXPLORER && USE_ESP32
+#endif  // USE_WEBSERVER_FILE_EXPLORER && USE_ESP_IDF

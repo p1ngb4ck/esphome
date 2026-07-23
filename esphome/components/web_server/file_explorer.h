@@ -1,12 +1,12 @@
 #pragma once
 #include "esphome/core/defines.h"
-#if defined(USE_WEBSERVER_FILE_EXPLORER) && defined(USE_ESP32)
+#if defined(USE_WEBSERVER_FILE_EXPLORER) && defined(USE_ESP_IDF)
 
 #include <cstddef>
 #include <cstdint>
 
-#include "esphome/components/web_server_base/web_server_base.h"
 #include "esphome/core/component.h"
+#include "esphome/core/string_ref.h"
 
 namespace esphome {
 namespace web_server {
@@ -45,7 +45,6 @@ class FileExplorerAssets : public Component {
   float get_setup_priority() const override { return setup_priority::LATE; }
   void dump_config() override;
 
-  void set_base(web_server_base::WebServerBase *base) { this->base_ = base; }
   // Codegen emits one call per asset; the array it points at is a static in the generated
   // code, so this object never owns it.
   void set_assets(Asset *assets, size_t count) {
@@ -56,9 +55,10 @@ class FileExplorerAssets : public Component {
   // True once every asset has its bytes in PSRAM. Until then the handler answers 503.
   bool ready() const { return this->ready_; }
 
-  // Handles a GET for one of the asset URLs. Returns false when the URL is not ours.
-  bool handle(AsyncWebServerRequest *request);
-  bool matches(const std::string &url) const;
+  // Looks up the asset for a URL. Returns nullptr when the URL is not one of ours. The
+  // returned asset may still have a null psram: it is configured but not loaded yet, and it
+  // is the caller that decides what to answer in that case.
+  const Asset *find(StringRef url) const;
 
  protected:
   // Copies a PROGMEM asset into PSRAM. Returns false when PSRAM could not be had.
@@ -67,7 +67,6 @@ class FileExplorerAssets : public Component {
   // is not available yet — that is not an error, loop() tries again.
   bool load_from_storage_(Asset &asset);
 
-  web_server_base::WebServerBase *base_{nullptr};
   Asset *assets_{nullptr};
   size_t asset_count_{0};
   bool ready_{false};
