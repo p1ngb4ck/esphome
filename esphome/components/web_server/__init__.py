@@ -77,10 +77,20 @@ BROWSER_ADVANCED = "advanced"
 ASSETS_FLASH = "flash"
 ASSETS_STORAGE = "storage"
 
-# The advanced browser: the vendored js-fileexplorer widget plus the adapter that binds it to
-# /files/*. Each entry is (file on disk, URL, content type, compress). The two adapter files
-# are ours; the rest is upstream, unmodified.
-_ADVANCED_ASSETS = (
+# The adapter is ours and versioned with the component: it talks to whatever /files/* this
+# firmware exposes. Putting it on removable media would let a firmware update move the API
+# while the adapter stayed behind, so it is always compiled in -- roughly 4 kB gzipped.
+# (file in this directory, URL, content type, compress)
+_ADAPTER_ASSETS = (
+    ("file_explorer/adapter.js", "/file-explorer/adapter.js", "text/javascript", True),
+    ("file_explorer/adapter.css", "/file-explorer/adapter.css", "text/css", True),
+)
+
+# The widget itself (cubiclesoft/js-fileexplorer, unmodified) is what asset_source decides
+# about. With asset_source: storage these files are not read at codegen time at all -- they
+# live on the medium and the paths below are just strings -- so a user who does not want ~56 kB
+# of third-party code in the repository does not need it there.
+_WIDGET_ASSETS = (
     (
         "file_explorer/file-explorer.js",
         "/file-explorer/file-explorer.js",
@@ -93,8 +103,6 @@ _ADVANCED_ASSETS = (
         "text/css",
         True,
     ),
-    ("file_explorer/adapter.js", "/file-explorer/adapter.js", "text/javascript", True),
-    ("file_explorer/adapter.css", "/file-explorer/adapter.css", "text/css", True),
     (
         "file_explorer/fileexplorer_sprites.png",
         "/file-explorer/fileexplorer_sprites.png",
@@ -468,16 +476,18 @@ CONFIG_SCHEMA = cv.All(
                         cv.Optional(CONF_VARIANT, default=BROWSER_SIMPLE): cv.one_of(
                             BROWSER_SIMPLE, BROWSER_ADVANCED, lower=True
                         ),
-                        # Where the advanced browser's assets come from before they are
-                        # copied into PSRAM. flash costs the flash and is available from the
-                        # first boot; storage costs none and answers 503 until the storage
-                        # holding them is mounted.
+                        # Where the widget's assets come from before they are copied into
+                        # PSRAM. flash compiles them in (~56 kB) and they are there from the
+                        # first boot; storage reads them off the medium instead, costs no
+                        # flash, and answers 503 until that storage is mounted. The adapter
+                        # is compiled in either way. With storage the widget files are not
+                        # needed in the repository at all.
                         cv.Optional(CONF_ASSET_SOURCE, default=ASSETS_FLASH): cv.one_of(
                             ASSETS_FLASH, ASSETS_STORAGE, lower=True
                         ),
-                        # Directory the assets are read from with asset_source: storage.
-                        # The compressible ones are expected there already gzipped, so the
-                        # bytes served are the same in both modes.
+                        # Directory the widget files are read from with
+                        # asset_source: storage. The compressible ones are expected there
+                        # already gzipped, so the bytes served are the same in both modes.
                         cv.Optional(
                             CONF_ASSET_PATH, default="/sdcard/file-explorer"
                         ): cv.string_strict,
@@ -603,12 +613,26 @@ def _asset_symbol(name: str) -> str:
     return "FE_" + name.replace(".", "_").replace("-", "_").upper()
 
 
+def _flash_row(here: Path, rel: str, url: str, ctype: str, compress: bool) -> str:
+    """Compiles one asset in and returns its table row."""
+    data = (here / rel).read_bytes()
+    if compress:
+        data = gzip.compress(data, 9)
+    symbol = _asset_symbol(Path(rel).name)
+    add_bytes_as_progmem(symbol, data)
+    return (
+        f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
+        f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, "
+        f'{"true" if compress else "false"}, nullptr, 0}}'
+    )
+
+
 async def _add_file_explorer(config, paren, var) -> None:
     """Emits the advanced browser: an asset table plus the component that serves it.
 
-    Serving is always out of PSRAM. asset_source only decides how the bytes get there --
-    compiled in and copied at setup(), or read off a PathStorage once it mounts -- and the
-    response is identical either way.
+    Serving is always out of PSRAM. asset_source only decides how the widget's bytes get
+    there -- compiled in and copied at setup(), or read off a PathStorage once it mounts --
+    and the response is identical either way. The adapter is always compiled in.
     """
     browser = config[CONF_FILE_BROWSER]
     source = browser[CONF_ASSET_SOURCE]
@@ -623,23 +647,30 @@ async def _add_file_explorer(config, paren, var) -> None:
     await cg.register_component(assets_var, {})
     cg.add(assets_var.set_base(paren))
 
-    rows = []
-    for rel, url, ctype, compress in _ADVANCED_ASSETS:
+    rows = [_flash_row(here, *entry) for entry in _ADAPTER_ASSETS]
+
+    missing = []
+    for rel, url, ctype, compress in _WIDGET_ASSETS:
         name = Path(rel).name
-        gz = "true" if compress else "false"
         if source == ASSETS_FLASH:
-            data = (here / rel).read_bytes()
-            if compress:
-                data = gzip.compress(data, 9)
-            symbol = _asset_symbol(name)
-            add_bytes_as_progmem(symbol, data)
-            rows.append(
-                f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
-                f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, {gz}, nullptr, 0}}"
-            )
+            if not (here / rel).is_file():
+                missing.append(name)
+                continue
+            rows.append(_flash_row(here, rel, url, ctype, compress))
         else:
+            # Not read here: the file is on the medium. Compressible ones are expected there
+            # already gzipped so the bytes served match the flash path exactly.
             disk = f"{base_dir}/{name}.gz" if compress else f"{base_dir}/{name}"
+            gz = "true" if compress else "false"
             rows.append(f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", {gz}, nullptr, 0}}')
+
+    if missing:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_FLASH}' compiles the file explorer widget in, but "
+            f"{', '.join(missing)} is not in {here / 'file_explorer'}. Either place the "
+            f"widget files there, or use '{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' and put them "
+            f"on the medium instead."
+        )
 
     table = ",\n    ".join(rows)
     cg.add_global(
@@ -653,20 +684,6 @@ async def _add_file_explorer(config, paren, var) -> None:
             cg.RawExpression("ESPHOME_WEBSERVER_FE_ASSETS"), len(rows)
         )
     )
-
-    if source == ASSETS_STORAGE:
-        # The read goes through storage's blocking helper, which refuses anything over
-        # max_blocking_transfer_size. Warn rather than fail: the ceiling is the user's to set,
-        # and an asset that does not load degrades to a 503 rather than breaking the node.
-        biggest = max((here / rel).stat().st_size for rel, _, _, _ in _ADVANCED_ASSETS)
-        limit = CORE.config.get("storage", {}).get("max_blocking_transfer_size", 16384)
-        if limit and biggest > limit:
-            _LOGGER.warning(
-                "web_server: the largest file browser asset is %d bytes but storage's "
-                "max_blocking_transfer_size is %d — raise it or the assets will not load",
-                biggest,
-                limit,
-            )
 
 
 @coroutine_with_priority(CoroPriority.WEB)
