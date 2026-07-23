@@ -557,11 +557,9 @@ def build_index_html(config) -> str:
     html += "<esp-app></esp-app>"
     if (browser := config.get(CONF_FILE_BROWSER)) is not None:
         if browser.get(CONF_VARIANT) == BROWSER_ADVANCED:
-            # The widget needs a container element and its own stylesheet; the adapter binds
-            # it to /files/* once both have loaded.
-            html += '<link rel=stylesheet href="/file-explorer/file-explorer.css">'
-            html += '<link rel=stylesheet href="/file-explorer/adapter.css">'
-            html += '<div id=file-explorer></div>'
+            # Only the scripts go here. The adapter builds the card and mounts it into the v3
+            # app's shadow root, so both stylesheets have to be linked from INSIDE that card --
+            # document-level <link>s do not cross a shadow boundary. The adapter does that.
             html += '<script src="/file-explorer/file-explorer.js"></script>'
             html += '<script src="/file-explorer/adapter.js"></script>'
         else:

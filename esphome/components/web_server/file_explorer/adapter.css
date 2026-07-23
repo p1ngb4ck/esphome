@@ -1,98 +1,181 @@
-/* Only the parts the adapter adds: the storage toolbar and the three overlays (image preview,
-   text editor, log follower). file-explorer.css covers the widget itself and is not touched.
-   Kept small on purpose — this is served from the node. */
+/* Only the parts the adapter adds: the card the browser sits in, the storage toolbar, and the
+   three overlays (image preview, text editor, log follower). file-explorer.css covers the
+   widget itself and is not touched. Kept small on purpose — this is served from the node.
 
-.esph-fe-bar {
-  display: flex;
-  gap: 6px;
-  padding: 6px;
-  border-bottom: 1px solid #ccc;
-  background: #f4f4f4;
+   Everything is scoped under #esp-file-explorer. The card is mounted INSIDE the v3 app's
+   shadow root, so this sheet is linked from within the card rather than from the document
+   head; the scoping keeps it honest anyway if it ever ends up in the light DOM.
+
+   Colours follow the v3 bundle rather than a palette of their own: neutral greys as
+   rgba(127,127,127,·) so they read on either theme, #03a9f4 for anything interactive, and the
+   Canvas/CanvasText system colors for dialog chrome. The latter matters — the v3 app toggles
+   its theme by setting 'color-scheme' on <html>, independent of the OS preference, and only
+   the system colors follow that toggle. Hardcoded colours keyed to prefers-color-scheme
+   desync from it (white dialogs on the dark page and vice versa). */
+
+#esp-file-explorer {
+  font-family: -apple-system, system-ui, Helvetica, Roboto, Oxygen, Ubuntu, sans-serif;
+  color: inherit;
 }
 
-.esph-fe-bar button {
-  padding: 4px 10px;
-  font-size: 13px;
+/* tab header + frame: verbatim v3 tab-header / tab-container */
+#esp-file-explorer .esph-fe-tab {
+  display: inline-flex;
+  max-width: 90%;
+  font-weight: 400;
+  padding-inline: 1.5em;
+  padding-top: 0.5em;
+  padding-bottom: 0.5em;
+  align-items: center;
+  border-radius: 12px 12px 0 0;
+  background-color: rgba(127, 127, 127, 0.3);
+  margin-top: 1em;
+  user-select: none;
+}
+
+#esp-file-explorer .esph-fe-frame {
+  border: 2px solid rgba(127, 127, 127, 0.3);
+  border-radius: 0 12px 12px 12px;
+  padding: 4px;
+}
+
+/* js-fileexplorer lays itself out inside the element it is handed, so that element needs a
+   height of its own or the frame collapses. min-height rather than height, to leave the
+   widget free to grow. */
+#esp-file-explorer #file-explorer {
+  min-height: 24em;
+}
+
+/* actions: verbatim v3 button style — flat, borderless, uppercase */
+#esp-file-explorer .esph-fe-bar button,
+#esp-file-explorer .esph-fe-dialog-foot button {
+  font-family: ui-monospace, system-ui, Helvetica, Roboto, Oxygen, Ubuntu, sans-serif;
   cursor: pointer;
+  border-radius: 4px;
+  color: #03a9f4;
+  border: none;
+  background-color: unset;
+  padding: 8px;
+  font-weight: 500;
+  font-size: 12.25px;
+  letter-spacing: 1.09375px;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: all 350ms;
+  flex: none;
 }
 
-.esph-fe-overlay {
+#esp-file-explorer .esph-fe-bar button:hover,
+#esp-file-explorer .esph-fe-dialog-foot button:hover {
+  background: rgba(3, 169, 244, 0.12);
+}
+
+#esp-file-explorer .esph-fe-bar button:disabled,
+#esp-file-explorer .esph-fe-dialog-foot button:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+#esp-file-explorer .esph-fe-bar {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.3);
+  margin-bottom: 4px;
+}
+
+/* Overlays. position:fixed resolves against the viewport from inside the shadow root too,
+   as long as no ancestor establishes a containing block (transform/filter/perspective) —
+   the v3 app does not. */
+#esp-file-explorer .esph-fe-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.55);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 10;
 }
 
-.esph-fe-dialog {
-  background: #fff;
-  border-radius: 4px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+#esp-file-explorer .esph-fe-dialog {
+  background: Canvas;
+  color: CanvasText;
+  border: 2px solid rgba(127, 127, 127, 0.3);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
-  max-width: 90vw;
+  max-width: 92vw;
   max-height: 90vh;
 }
 
-.esph-fe-dialog-head {
-  padding: 8px 12px;
-  font-weight: 600;
-  border-bottom: 1px solid #ddd;
+#esp-file-explorer .esph-fe-dialog-head {
+  padding: 0.75em 1.25em;
+  font-weight: 500;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.3);
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
 }
 
-.esph-fe-dialog-foot {
-  padding: 8px 12px;
-  border-top: 1px solid #ddd;
+#esp-file-explorer .esph-fe-dialog-foot {
+  padding: 0.4em 1em;
+  border-top: 1px solid rgba(127, 127, 127, 0.3);
   display: flex;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
   justify-content: flex-end;
   min-height: 20px;
 }
 
-.esph-fe-close {
+/* The close glyph is not a v3 action button: no uppercase, no letter-spacing. */
+#esp-file-explorer .esph-fe-close {
   border: none;
   background: none;
+  color: inherit;
+  opacity: 0.6;
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
   padding: 0 4px;
+  transition: opacity 350ms;
 }
 
-.esph-fe-image {
+#esp-file-explorer .esph-fe-close:hover {
+  opacity: 1;
+}
+
+#esp-file-explorer .esph-fe-image {
   max-width: 86vw;
   max-height: 74vh;
   object-fit: contain;
   display: block;
 }
 
-.esph-fe-editor {
+#esp-file-explorer .esph-fe-editor {
   width: 80vw;
   height: 70vh;
   border: none;
   padding: 10px;
-  font-family: monospace;
+  background: transparent;
+  color: inherit;
+  font-family: ui-monospace, monospace;
   font-size: 13px;
   resize: none;
   outline: none;
 }
 
-.esph-fe-tail {
+/* The log tail keeps a fixed dark ground on both themes: it is terminal output, and the v3
+   log card above it reads the same way. */
+#esp-file-explorer .esph-fe-tail {
   width: 80vw;
   height: 70vh;
   margin: 0;
   padding: 10px;
   overflow: auto;
-  font-family: monospace;
+  font-family: ui-monospace, monospace;
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
@@ -100,8 +183,8 @@
   color: #ddd;
 }
 
-.esph-fe-status {
+#esp-file-explorer .esph-fe-status {
   flex: 1;
-  font-size: 12px;
-  color: #666;
+  font-size: 0.85em;
+  opacity: 0.6;
 }

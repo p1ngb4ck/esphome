@@ -188,7 +188,9 @@
     box.appendChild(contentElem);
     box.appendChild(foot);
     back.appendChild(box);
-    document.body.appendChild(back);
+    // Into the card, not document.body: the card sits in the v3 app's shadow root, and a
+    // dialog parked outside it would get none of this sheet's rules.
+    (card || document.body).appendChild(back);
 
     var closed = false;
     function shut() {
@@ -529,18 +531,84 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Card and mounting
+  // ---------------------------------------------------------------------------
+
+  // Built in start(), read by overlay() — the dialogs go inside it.
+  var card = null;
+
+  // The v3 page frames each section as a tab header over a rounded container. The browser is
+  // another such section, so it builds the same two elements rather than sitting in the page
+  // as a bare block. Same shape the simple browser (file_browser.js) produces.
+  function buildCard() {
+    var el = document.createElement('div');
+    el.id = 'esp-file-explorer';
+
+    // Both stylesheets are linked from in here rather than from the document head: the card
+    // is mounted into an open shadow root, and document-level sheets do not cross that
+    // boundary. Relative URLs inside file-explorer.css (the sprite sheet, the icon font)
+    // resolve against the sheet's own URL, so they still land on /file-explorer/*.
+    ['/file-explorer/file-explorer.css', '/file-explorer/adapter.css'].forEach(function (href) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = href;
+      el.appendChild(link);
+    });
+
+    var tab = document.createElement('div');
+    tab.className = 'esph-fe-tab';
+    tab.textContent = 'Files';
+
+    var frame = document.createElement('div');
+    frame.className = 'esph-fe-frame';
+
+    // The widget's own container. Kept as a separate element so file-explorer.js owns its
+    // subtree outright and the frame's padding is not something it has to reason about.
+    var host = document.createElement('div');
+    host.id = 'file-explorer';
+    frame.appendChild(host);
+
+    el.appendChild(tab);
+    el.appendChild(frame);
+    return { card: el, host: host };
+  }
+
+  // Places the card directly below the entity table — above the log, which grows. The v3 app
+  // renders into an open shadow root; if it has not rendered yet, retry once shortly after,
+  // and fall back to appending next to <esp-app> so the browser is reachable either way.
+  function attach(el) {
+    var app = document.querySelector('esp-app');
+
+    function mount() {
+      var table = app && app.shadowRoot && app.shadowRoot.querySelector('esp-entity-table');
+      if (table && table.parentNode) {
+        table.parentNode.insertBefore(el, table.nextSibling);
+        return true;
+      }
+      return false;
+    }
+
+    if (!mount()) {
+      setTimeout(function () {
+        if (!mount()) (app ? app.parentNode : document.body).appendChild(el);
+      }, 300);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Entry point
   // ---------------------------------------------------------------------------
 
   function start() {
-    var parent = document.getElementById('file-explorer');
-    if (!parent) return;
+    var built = buildCard();
+    card = built.card;
+    attach(card);
     // The access rights decide which callbacks are defined at all — the widget only shows a
     // rename affordance when onrename exists, so a read-only node gets a read-only browser
     // rather than buttons that fail.
     request('GET', API + '/storages', function (ok, body) {
       var access = ok && body && body.access ? body.access : { list: true, read: true, write: false };
-      build(parent, access);
+      build(built.host, access);
     });
   }
 
