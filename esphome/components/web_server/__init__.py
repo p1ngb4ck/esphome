@@ -68,6 +68,46 @@ FILE_API_DEFAULTS = {
 CONF_FILE_BROWSER = "file_browser"
 CONF_ACTIONS_AS_ICONS = "actions_as_icons"
 CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
+CONF_VARIANT = "variant"
+CONF_ASSET_SOURCE = "asset_source"
+CONF_ASSET_PATH = "asset_path"
+
+BROWSER_SIMPLE = "simple"
+BROWSER_ADVANCED = "advanced"
+ASSETS_FLASH = "flash"
+ASSETS_STORAGE = "storage"
+
+# The advanced browser: the vendored js-fileexplorer widget plus the adapter that binds it to
+# /files/*. Each entry is (file on disk, URL, content type, compress). The two adapter files
+# are ours; the rest is upstream, unmodified.
+_ADVANCED_ASSETS = (
+    (
+        "file_explorer/file-explorer.js",
+        "/file-explorer/file-explorer.js",
+        "text/javascript",
+        True,
+    ),
+    (
+        "file_explorer/file-explorer.css",
+        "/file-explorer/file-explorer.css",
+        "text/css",
+        True,
+    ),
+    ("file_explorer/adapter.js", "/file-explorer/adapter.js", "text/javascript", True),
+    ("file_explorer/adapter.css", "/file-explorer/adapter.css", "text/css", True),
+    (
+        "file_explorer/fileexplorer_sprites.png",
+        "/file-explorer/fileexplorer_sprites.png",
+        "image/png",
+        False,
+    ),
+    (
+        "file_explorer/fileexplorer_actions.woff",
+        "/file-explorer/fileexplorer_actions.woff",
+        "font/woff",
+        False,
+    ),
+)
 CONF_MAX_DIR_ENTRIES = "max_dir_entries"
 CONF_STORAGE_ID = "storage_id"
 # file_api per-operation access options. Each gates a group of endpoints server-side (a
@@ -100,6 +140,7 @@ WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
 
 WebServerFileApi = web_server_ns.class_("WebServerFileApi", cg.Component)
 WebServerRawApi = web_server_ns.class_("WebServerRawApi", cg.Component)
+FileExplorerAssets = web_server_ns.class_("FileExplorerAssets", cg.Component)
 
 sorting_groups = {}
 
@@ -247,7 +288,37 @@ def _final_validate_sorting(config: ConfigType) -> ConfigType:
     return config
 
 
-FINAL_VALIDATE_SCHEMA = _final_validate_sorting
+def _final_validate_file_explorer(config: ConfigType) -> ConfigType:
+    """The advanced browser serves its assets out of external RAM in both modes.
+
+    There is no variant that trades PSRAM away -- flash and storage differ in where the bytes
+    come from, not in where they are served from -- so psram is required either way. Same shape
+    of check as storage's transfer_buffer, and for the same reason: the option promises
+    something only the hardware can deliver.
+    """
+    browser = config.get(CONF_FILE_BROWSER)
+    if browser is None or browser.get(CONF_VARIANT) != BROWSER_ADVANCED:
+        return config
+    full = fv.full_config.get()
+    if "psram" not in full:
+        raise cv.Invalid(
+            f"'{CONF_FILE_BROWSER}: {CONF_VARIANT}: {BROWSER_ADVANCED}' serves its assets from "
+            f"external RAM and needs the 'psram' component configured",
+            path=[CONF_FILE_BROWSER, CONF_VARIANT],
+        )
+    if browser.get(CONF_ASSET_SOURCE) == ASSETS_STORAGE and "storage" not in full:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' needs the 'storage' component to read the "
+            f"assets from",
+            path=[CONF_FILE_BROWSER, CONF_ASSET_SOURCE],
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = cv.All(
+    _final_validate_sorting,
+    _final_validate_file_explorer,
+)
 
 
 def _consume_web_server_sockets(config: ConfigType) -> ConfigType:
@@ -389,6 +460,27 @@ CONFIG_SCHEMA = cv.All(
                         cv.Optional(
                             CONF_CHANGE_POLL_INTERVAL, default="5s"
                         ): cv.positive_time_period_milliseconds,
+                        # simple   the browser embedded in this component, ~13 kB
+                        # advanced the vendored js-fileexplorer widget with an image
+                        #          preview, a plain-textarea editor and a tail -f style
+                        #          follower, ~60 kB. Needs psram either way; see
+                        #          _final_validate_file_explorer().
+                        cv.Optional(CONF_VARIANT, default=BROWSER_SIMPLE): cv.one_of(
+                            BROWSER_SIMPLE, BROWSER_ADVANCED, lower=True
+                        ),
+                        # Where the advanced browser's assets come from before they are
+                        # copied into PSRAM. flash costs the flash and is available from the
+                        # first boot; storage costs none and answers 503 until the storage
+                        # holding them is mounted.
+                        cv.Optional(CONF_ASSET_SOURCE, default=ASSETS_FLASH): cv.one_of(
+                            ASSETS_FLASH, ASSETS_STORAGE, lower=True
+                        ),
+                        # Directory the assets are read from with asset_source: storage.
+                        # The compressible ones are expected there already gzipped, so the
+                        # bytes served are the same in both modes.
+                        cv.Optional(
+                            CONF_ASSET_PATH, default="/sdcard/file-explorer"
+                        ): cv.string_strict,
                     }
                 ),
             ),
@@ -453,9 +545,19 @@ def build_index_html(config) -> str:
     if js_include:
         html += "<script type=module src=/0.js></script>"
     html += "<esp-app></esp-app>"
-    if config.get(CONF_FILE_BROWSER) is not None:
-        # Injected module renders a "Files" card inside this same page (next to <esp-app>).
-        html += "<script src=/file_browser.js></script>"
+    if (browser := config.get(CONF_FILE_BROWSER)) is not None:
+        if browser.get(CONF_VARIANT) == BROWSER_ADVANCED:
+            # The widget needs a container element and its own stylesheet; the adapter binds
+            # it to /files/* once both have loaded.
+            html += '<link rel=stylesheet href="/file-explorer/file-explorer.css">'
+            html += '<link rel=stylesheet href="/file-explorer/adapter.css">'
+            html += '<div id=file-explorer></div>'
+            html += '<script src="/file-explorer/file-explorer.js"></script>'
+            html += '<script src="/file-explorer/adapter.js"></script>'
+        else:
+            # Injected module renders a "Files" card inside this same page (next to
+            # <esp-app>).
+            html += "<script src=/file_browser.js></script>"
     if config[CONF_JS_URL]:
         html += f'<script src="{config[CONF_JS_URL]}"></script>'
     html += "</body></html>"
@@ -475,6 +577,96 @@ def add_resource_as_progmem(
     size_t = f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {content_encoded_size}"
     cg.add_global(cg.RawExpression(uint8_t))
     cg.add_global(cg.RawExpression(size_t))
+
+
+def add_bytes_as_progmem(resource_name: str, data: bytes) -> None:
+    """Like add_resource_as_progmem(), for content that is already bytes.
+
+    The widget's sprite sheet and icon font are binary and must not go through a utf-8 encode,
+    and the gzipping is decided per asset rather than for all of them.
+    """
+    bytes_as_int = ", ".join(str(x) for x in data)
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr uint8_t ESPHOME_WEBSERVER_{resource_name}[{len(data)}] "
+            f"PROGMEM = {{{bytes_as_int}}}"
+        )
+    )
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {len(data)}"
+        )
+    )
+
+
+def _asset_symbol(name: str) -> str:
+    return "FE_" + name.replace(".", "_").replace("-", "_").upper()
+
+
+async def _add_file_explorer(config, paren, var) -> None:
+    """Emits the advanced browser: an asset table plus the component that serves it.
+
+    Serving is always out of PSRAM. asset_source only decides how the bytes get there --
+    compiled in and copied at setup(), or read off a PathStorage once it mounts -- and the
+    response is identical either way.
+    """
+    browser = config[CONF_FILE_BROWSER]
+    source = browser[CONF_ASSET_SOURCE]
+    base_dir = browser[CONF_ASSET_PATH].rstrip("/")
+    here = Path(__file__).parent
+
+    cg.add_define("USE_WEBSERVER_FILE_EXPLORER")
+
+    assets_id = ID(f"{var}_file_explorer", is_declaration=True, type=FileExplorerAssets)
+    CORE.component_ids.add(str(assets_id))
+    assets_var = cg.new_Pvariable(assets_id)
+    await cg.register_component(assets_var, {})
+    cg.add(assets_var.set_base(paren))
+
+    rows = []
+    for rel, url, ctype, compress in _ADVANCED_ASSETS:
+        name = Path(rel).name
+        gz = "true" if compress else "false"
+        if source == ASSETS_FLASH:
+            data = (here / rel).read_bytes()
+            if compress:
+                data = gzip.compress(data, 9)
+            symbol = _asset_symbol(name)
+            add_bytes_as_progmem(symbol, data)
+            rows.append(
+                f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
+                f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, {gz}, nullptr, 0}}"
+            )
+        else:
+            disk = f"{base_dir}/{name}.gz" if compress else f"{base_dir}/{name}"
+            rows.append(f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", {gz}, nullptr, 0}}')
+
+    table = ",\n    ".join(rows)
+    cg.add_global(
+        cg.RawExpression(
+            "static esphome::web_server::FileExplorerAssets::Asset "
+            f"ESPHOME_WEBSERVER_FE_ASSETS[] = {{\n    {table}\n}}"
+        )
+    )
+    cg.add(
+        assets_var.set_assets(
+            cg.RawExpression("ESPHOME_WEBSERVER_FE_ASSETS"), len(rows)
+        )
+    )
+
+    if source == ASSETS_STORAGE:
+        # The read goes through storage's blocking helper, which refuses anything over
+        # max_blocking_transfer_size. Warn rather than fail: the ceiling is the user's to set,
+        # and an asset that does not load degrades to a 503 rather than breaking the node.
+        biggest = max((here / rel).stat().st_size for rel, _, _, _ in _ADVANCED_ASSETS)
+        limit = CORE.config.get("storage", {}).get("max_blocking_transfer_size", 16384)
+        if limit and biggest > limit:
+            _LOGGER.warning(
+                "web_server: the largest file browser asset is %d bytes but storage's "
+                "max_blocking_transfer_size is %d — raise it or the assets will not load",
+                biggest,
+                limit,
+            )
 
 
 @coroutine_with_priority(CoroPriority.WEB)
@@ -576,7 +768,9 @@ async def to_code(config):
         cg.add(api_var.set_enable_unmount(file_api_config[CONF_ENABLE_UNMOUNT]))
         if storage_id := file_api_config.get(CONF_STORAGE_ID):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
-        if file_browser:
+        if file_browser and config[CONF_FILE_BROWSER][CONF_VARIANT] == BROWSER_ADVANCED:
+            await _add_file_explorer(config, paren, var)
+        elif file_browser:
             cg.add_define("USE_WEBSERVER_FILE_BROWSER")
             # Two prebuilt variants differing only in action-button rendering; the option
             # decides at codegen which one is embedded — the other never reaches the build.
