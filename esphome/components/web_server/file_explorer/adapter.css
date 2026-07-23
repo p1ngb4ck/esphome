@@ -1,0 +1,107 @@
+/* Only the parts the adapter adds: the storage toolbar and the three overlays (image preview,
+   text editor, log follower). file-explorer.css covers the widget itself and is not touched.
+   Kept small on purpose — this is served from the node. */
+
+.esph-fe-bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid #ccc;
+  background: #f4f4f4;
+}
+
+.esph-fe-bar button {
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.esph-fe-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.esph-fe-dialog {
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+.esph-fe-dialog-head {
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.esph-fe-dialog-foot {
+  padding: 8px 12px;
+  border-top: 1px solid #ddd;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 20px;
+}
+
+.esph-fe-close {
+  border: none;
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.esph-fe-image {
+  max-width: 86vw;
+  max-height: 74vh;
+  object-fit: contain;
+  display: block;
+}
+
+.esph-fe-editor {
+  width: 80vw;
+  height: 70vh;
+  border: none;
+  padding: 10px;
+  font-family: monospace;
+  font-size: 13px;
+  resize: none;
+  outline: none;
+}
+
+.esph-fe-tail {
+  width: 80vw;
+  height: 70vh;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #1e1e1e;
+  color: #ddd;
+}
+
+.esph-fe-status {
+  flex: 1;
+  font-size: 12px;
+  color: #666;
+}
