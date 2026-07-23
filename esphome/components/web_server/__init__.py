@@ -89,7 +89,9 @@ _ADAPTER_ASSETS = (
 # The widget itself (cubiclesoft/js-fileexplorer, unmodified) is what asset_source decides
 # about. With asset_source: storage these files are not read at codegen time at all -- they
 # live on the medium and the paths below are just strings -- so a user who does not want ~56 kB
-# of third-party code in the repository does not need it there.
+# of third-party code in the repository does not need it there. Either way the widget is MIT,
+# and its terms are in file_explorer/LICENSE.txt -- upstream ships no LICENSE file, so that
+# copy is the one that travels with the code.
 _WIDGET_ASSETS = (
     (
         "file_explorer/file-explorer.js",
