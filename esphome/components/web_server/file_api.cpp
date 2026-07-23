@@ -892,9 +892,9 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     job->type = content_type_for(path.c_str());
   // Range: bytes=START-[END]. Only the single-range form, which is all a browser sends for
   // media and all a log tail needs. Anything else is ignored and the whole file goes out.
-  const AsyncWebHeader *range_hdr = request->getHeader("Range");
-  if (range_hdr != nullptr && size > 0) {
-    const std::string spec = range_hdr->value().c_str();
+  const optional<std::string> range_hdr = request->get_header("Range");
+  if (range_hdr.has_value() && size > 0) {
+    const std::string &spec = range_hdr.value();
     if (spec.rfind("bytes=", 0) == 0) {
       const size_t dash = spec.find('-', 6);
       if (dash != std::string::npos) {
