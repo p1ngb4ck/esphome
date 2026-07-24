@@ -1,7 +1,7 @@
 #pragma once
 // file_system selection for FatFs-backed media (sd_storage / usb_storage).
 //
-// Only exists in builds with esp32 enable_exfat — codegen defines
+// Only exists in builds with esp32 enable_exfat -- codegen defines
 // USE_STORAGE_FILE_SYSTEM_SELECT together with the YAML option (see
 // storage/__init__.py: file_system_to_code). Builds without exFAT contain none of this and
 // their mount paths are untouched.
@@ -54,8 +54,8 @@ inline FatfsDetected fatfs_classify_boot_sector(const uint8_t *sec) {
   return FatfsDetected::NONE;
 }
 
-// Probe the medium BEFORE any mount: sector 0 directly, and — when sector 0 is a partition
-// table instead of a boot sector — one level of indirection: the first MBR partition, or
+// Probe the medium BEFORE any mount: sector 0 directly, and -- when sector 0 is a partition
+// table instead of a boot sector -- one level of indirection: the first MBR partition, or
 // for a protective MBR (0xEE) the first GPT entry. Exactly the volumes FatFs would mount.
 inline FatfsDetected fatfs_probe(const char *tag, uint8_t pdrv) {
   auto sec = std::make_unique<uint8_t[]>(FF_MAX_SS);
@@ -102,7 +102,7 @@ inline FatfsDetected fatfs_probe(const char *tag, uint8_t pdrv) {
 // Make the medium carry the requested filesystem BEFORE the one and only mount happens.
 // AUTO does nothing at all: f_mount's own boot-sector detection is the automatic mode.
 // fat32/exfat probe the first sectors; a different (or no recognizable) filesystem is
-// reformatted to the requested one right here — destructive by configured contract, and the
+// reformatted to the requested one right here -- destructive by configured contract, and the
 // subsequent mount is then already on the correct filesystem. Returns false only when the
 // reformat itself failed.
 inline bool ensure_requested_filesystem(const char *tag, uint8_t pdrv, const char *drive, uint8_t requested) {
