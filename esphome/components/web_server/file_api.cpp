@@ -127,16 +127,16 @@ bool WebServerFileApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout
     xSemaphoreGive(done);
   });
   // Wait WITHOUT an arbitrary deadline. Every op captures references into this handler's
-  // stack frame (&err, &json, result buffers) — a timed-out wait returned into a frame the
+  // stack frame (&err, &json, result buffers) -- a timed-out wait returned into a frame the
   // still-queued op would later write through: undefined behavior that surfaced as transfers
   // frozen at 0 bytes and, after one slow storage call, a wedged file API for good. The op
   // is bounded by the storage contract (short blocking calls; the NFS inline mount caps at
-  // 8 s), and if the main loop truly never runs it, the device is gone anyway — a stuck
+  // 8 s), and if the main loop truly never runs it, the device is gone anyway -- a stuck
   // httpd task is then the honest symptom, not corrupted memory.
   (void) timeout_ms;
   while (xSemaphoreTake(done, pdMS_TO_TICKS(1000)) != pdTRUE) {
     // Re-take in slices so a genuinely long op does not trip esp_http_server's socket
-    // supervision silently — the loop is purely a wait, never a bail-out.
+    // supervision silently -- the loop is purely a wait, never a bail-out.
   }
   return true;
 }
@@ -148,7 +148,7 @@ bool WebServerFileApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout
 bool WebServerFileApi::path_is_safe_(const char *path) {
   if (path == nullptr || path[0] != '/')
     return false;
-  // Reject any '..' segment — resolve_path() does longest-prefix matching on the string, so
+  // Reject any '..' segment -- resolve_path() does longest-prefix matching on the string, so
   // traversal must be stopped before it reaches a driver.
   return strstr(path, "..") == nullptr;
 }
@@ -168,7 +168,7 @@ storage::PathStorage *WebServerFileApi::resolve_(const char *vfs_path, const cha
 
 int WebServerFileApi::http_status_for_(storage::StorageError err) {
   // The exists()/stat() lesson applies HTTP-wide: a faulted/unmounted medium must never be
-  // reported as absence — NOT_READY is 503, only NOT_FOUND is 404.
+  // reported as absence -- NOT_READY is 503, only NOT_FOUND is 404.
   switch (err) {
     case storage::StorageError::OK:
       return 200;
@@ -202,7 +202,7 @@ void WebServerFileApi::send_error_(AsyncWebServerRequest *request, storage::Stor
 // stripped (a lone "/" survives). Done once at the edge, before anything compares or splits it.
 //
 // FatFs itself tolerates "//" and "dir/" (it skips duplicate separators and ignores a
-// terminating one), which is why this looked harmless — but our own string logic does not: the
+// terminating one), which is why this looked harmless -- but our own string logic does not: the
 // self-copy guard below compares prefixes, and "from=/a/" made "/a/b" look like it was NOT
 // inside the source. The registry's rel path carries the same slashes on to the drivers, and
 // network ones have no reason to be as forgiving as FatFs.
@@ -278,7 +278,7 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           *ctx->out += type == storage::StorageType::NETWORK ? "network" : "filesystem";
           // Close the type string value, then per-direction capabilities: a plain "mountable"
           // bool cannot express drivers whose medium mounts itself (USB hotplug) and only
-          // supports safe-eject — the UI must gate each button separately (see
+          // supports safe-eject -- the UI must gate each button separately (see
           // MountableStorage::get_mount_caps()).
           storage::MountableStorage *m = s->as_mountable();
           uint8_t caps = m != nullptr ? m->get_mount_caps() : 0;
@@ -345,7 +345,7 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
           auto *ctx = static_cast<Ctx *>(c);
           if (ctx->remaining == 0) {
             ctx->truncated = true;
-            return false;  // stop enumeration — not an error per the list_dir contract
+            return false;  // stop enumeration -- not an error per the list_dir contract
           }
           ctx->remaining--;
           if (!ctx->first)
@@ -427,7 +427,7 @@ void WebServerFileApi::handle_changes_(AsyncWebServerRequest *request) {
     snprintf(buf, sizeof(buf), "{\"seq\":%" PRIu32, reg->change_seq());
     json = buf;
     if (since == 0) {
-      // First contact: the client renders fresh anyway — it only needs a cursor.
+      // First contact: the client renders fresh anyway -- it only needs a cursor.
       json += ",\"dirs\":[]}";
       return;
     }
@@ -438,7 +438,7 @@ void WebServerFileApi::handle_changes_(AsyncWebServerRequest *request) {
         oldest = e.seq;
     }
     if (oldest != 0 && oldest > since + 1) {
-      // Entries between the cursor and the ring's oldest were evicted — what exactly changed
+      // Entries between the cursor and the ring's oldest were evicted -- what exactly changed
       // is unknowable, so the client is told to consider everything it shows dirty.
       json += ",\"reset\":true,\"dirs\":[]}";
       return;
@@ -597,12 +597,12 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
   normalize_vfs_path(to_s);
   // Existing destinations are refused, not silently replaced: same-storage moves went through
   // rename() (which cannot overwrite at all), while copies and cross-storage moves happily
-  // truncated whatever was there — the same command meant two different things depending on
+  // truncated whatever was there -- the same command meant two different things depending on
   // which medium the destination sat on. Now both refuse with ALREADY_EXISTS (409) unless the
   // caller says otherwise.
   auto *ow = request->getParam("overwrite");
   const bool overwrite = ow != nullptr && ow->value() == "1";
-  // Copying/moving a directory into itself would recurse forever — reject early on the
+  // Copying/moving a directory into itself would recurse forever -- reject early on the
   // full VFS strings ('/a' -> '/a/b' style; exact-prefix with a path boundary).
   if (to_s.size() > from_s.size() && to_s.compare(0, from_s.size(), from_s) == 0 && to_s[from_s.size()] == '/') {
     request->send(400, "application/json", "{\"error\":\"destination is inside the source\"}");
@@ -627,17 +627,17 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
       err = storage::StorageError::NOT_SUPPORTED;
       return;
     }
-    // A directory that cannot be renamed into place is a tree job — the worker walks it. This
+    // A directory that cannot be renamed into place is a tree job -- the worker walks it. This
     // endpoint's part is over once the job is submitted: it hands back the id and nothing here
     // touches the transfer again. Asking for its status is optional and drives nothing.
     // Completion parks the final status in the job cache (this callback runs on the main
-    // loop) — the worker recycles its slot right after, so polling alone would miss DONE.
+    // loop) -- the worker recycles its slot right after, so polling alone would miss DONE.
     // The job id only exists after submission, so the callback reads it through a small
     // heap slot filled right below; safe because both submission and completion run on the
     // main loop, strictly in that order. Freed by the callback (fires exactly once).
     auto *job_slot = new storage::TransferJob(storage::INVALID_TRANSFER_JOB);  // NOLINT
     // The change feed needs nothing from this callback: the worker notes every completed
-    // transfer itself at its dispatch point — including ones no HTTP request submitted.
+    // transfer itself at its dispatch point -- including ones no HTTP request submitted.
     auto on_done = [this, job_slot](storage::StorageError result) {
       this->cache_job_result_(*job_slot, result);
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
@@ -646,7 +646,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     err = is_move ? w->async_move(src, src_rel, dst, dst_rel, on_done, &job, overwrite)
                   : w->async_copy(src, src_rel, dst, dst_rel, on_done, &job, overwrite);
     if (err != storage::StorageError::OK) {
-      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) — callback will not fire
+      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) -- callback will not fire
     } else {
       *job_slot = job;
     }
@@ -677,7 +677,7 @@ void WebServerFileApi::cache_job_result_(storage::TransferJob job, storage::Stor
   e.status.state = storage::RequestState::DONE;
   e.status.result = result;
   // bytes are best-effort in the cache: the pool slot may already be recycled, so report
-  // done == total == 0 (unknown) — the UI switches to "finished" on state DONE anyway.
+  // done == total == 0 (unknown) -- the UI switches to "finished" on state DONE anyway.
   e.status.bytes_done = 0;
   e.status.bytes_total = 0;
 }
@@ -791,7 +791,7 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
            state, storage::error_to_string(st.result), st.bytes_done, st.bytes_total);
   std::string json = buf;
   if (st.file[0] != '\0') {
-    // The file currently in flight — for a tree job the only place a percentage can honestly
+    // The file currently in flight -- for a tree job the only place a percentage can honestly
     // come from, since the tree's bytes_total is unknown (see TransferStatus).
     json += ",\"file\":\"";
     append_json_escaped(json, st.file);
@@ -878,7 +878,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   httpd_req_t *req = *request;
   httpd_req_t *async_req = nullptr;
   if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(req, &async_req) != ESP_OK) {
-    // No async slot (or no pipeline) — degrade gracefully to the old synchronous pump.
+    // No async slot (or no pipeline) -- degrade gracefully to the old synchronous pump.
     // The server blocks for this one transfer, but the download still succeeds.
     job->req = req;
     this->pump_download_(job);
@@ -904,7 +904,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 
 // Streams one download job to its request: headers, chunk loop (one main-loop hop per
 // chunk), storage-handle close and the terminating zero chunk. Does NOT call
-// httpd_req_async_handler_complete() — only the task path owns an async copy.
+// httpd_req_async_handler_complete() -- only the task path owns an async copy.
 void WebServerFileApi::pump_download_(DownloadJob *job) {
   httpd_req_t *req = job->req;
   httpd_resp_set_type(req, "application/octet-stream");
@@ -931,7 +931,7 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
       break;  // EOF
     offset += got;
     if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), got) != ESP_OK) {
-      failed = true;  // client went away — still close the handle below
+      failed = true;  // client went away -- still close the handle below
       break;
     }
     if (offset >= job->size && job->size != 0)
@@ -1101,7 +1101,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         this->upload_.handle_open = false;    // the flush owns and closes the handle now
         this->upload_.staged_handoff = true;  // the change note fires at flush completion
       } else {
-        storage::global_transfer_buffer->release();  // receive failed — nothing to flush
+        storage::global_transfer_buffer->release();  // receive failed -- nothing to flush
       }
       this->upload_.staged = nullptr;
     }
@@ -1111,7 +1111,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     storage::StorageError close_err = storage::StorageError::OK;
     if (this->upload_.handle_open) {
       this->run_on_loop_([this, &close_err]() {
-        // Close errors must surface — FATFS-backed drivers flush on close.
+        // Close errors must surface -- FATFS-backed drivers flush on close.
         close_err = static_cast<storage::FilesystemStorage *>(this->upload_.storage)->close(this->upload_.handle);
         this->upload_.handle_open = false;
       });
@@ -1121,7 +1121,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     if (this->upload_.error == storage::StorageError::OK && this->upload_.storage != nullptr &&
         !this->upload_.staged_handoff) {
       // The file is fully on storage: its directory gained an entry. Rebuild the absolute
-      // path the client used (resolve_() split it) — the note itself is main-loop-only.
+      // path the client used (resolve_() split it) -- the note itself is main-loop-only.
       char abs[storage::STORAGE_WORKER_MAX_PATH];
       if (storage::StorageRegistry::build_path(this->upload_.storage, this->upload_.rel_path, abs, sizeof(abs)))
         this->run_on_loop_([&abs]() { storage::global_storage_registry->note_parent_changed(abs); });
@@ -1131,7 +1131,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
 
 void WebServerFileApi::handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index,
                                   size_t total) {
-  // Diagnostic: if this fires for /files/upload, the POST went down the RAW body path —
+  // Diagnostic: if this fires for /files/upload, the POST went down the RAW body path --
   // i.e. the backend's content-type check never classified the request as multipart.
   if (index == 0) {
     ESP_LOGW(TAG, "upload: request took the raw-body path (not classified as multipart)");
@@ -1141,7 +1141,7 @@ void WebServerFileApi::handleBody(AsyncWebServerRequest *request, uint8_t *data,
 void WebServerFileApi::handle_upload_response_(AsyncWebServerRequest *request) {
   if (!this->upload_.active) {
     // handleRequest fired for POST /files/upload but handleUpload never received a start
-    // marker — the multipart body produced no file part for this handler.
+    // marker -- the multipart body produced no file part for this handler.
     ESP_LOGW(TAG, "upload: no multipart file part reached the handler");
   }
   storage::StorageError err = this->upload_.error;

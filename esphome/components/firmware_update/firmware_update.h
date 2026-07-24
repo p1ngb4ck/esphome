@@ -18,7 +18,7 @@ namespace esphome::firmware_update {
 // share), instead of over the air. The image is streamed straight into the shared OTA flash
 // backend: a plain app image goes to the next app slot, and a combined pre-fill image (app +
 // named data-partition, self-described by its EPF2 header) is routed to both partitions by the
-// backend — the same code the network/HTTP OTA paths use, so nothing is compiled twice.
+// backend -- the same code the network/HTTP OTA paths use, so nothing is compiled twice.
 class FirmwareUpdateComponent final : public ota::OTAComponent {
  public:
   void dump_config() override;

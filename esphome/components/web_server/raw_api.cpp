@@ -39,7 +39,7 @@ bool WebServerRawApi::run_on_loop_(std::function<void()> &&op, uint32_t timeout_
     op();
     xSemaphoreGive(done);
   });
-  // Wait WITHOUT a deadline — same defect and same fix as the file API's marshaller: every
+  // Wait WITHOUT a deadline -- same defect and same fix as the file API's marshaller: every
   // op captures references into this handler's stack frame, so a timed-out wait returned
   // into a frame the still-queued op would later write through. Sliced re-take only so a
   // long op (a whole-chip erase) is a visible wait, never an abandonment.
@@ -161,10 +161,10 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           *ctx->out += "\",\"kind\":\"";
           append_json_escaped(*ctx->out, info.kind != nullptr ? info.kind : "");
           // Sized generously above the worst case (template + a 20-digit capacity, three
-          // 10-digit geometry fields and seven "false") — snprintf would silently truncate a
+          // 10-digit geometry fields and seven "false") -- snprintf would silently truncate a
           // shorter buffer and hand the browser JSON it cannot parse.
           char buf[320];
-          // The geometry is what a client needs to offer only what this medium can do — the
+          // The geometry is what a client needs to offer only what this medium can do -- the
           // capability bits, not a guess from the kind string.
           snprintf(
               buf, sizeof(buf),
@@ -178,8 +178,8 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
               // can_erase_chip means "a whole-chip erase will actually be used here", not merely
               // "the medium has a chip-erase opcode". The single blocking erase(0, capacity) is
               // only taken on the worker task; a non-task-safe device always slices a full erase
-              // no matter what the medium supports. So the browser only sees this true — and only
-              // then offers the sector-by-sector opt-out — when the opcode is both supported and
+              // no matter what the medium supports. So the browser only sees this true -- and only
+              // then offers the sector-by-sector opt-out -- when the opcode is both supported and
               // reachable: RAW_ERASE_CHIP and STORAGE_CAP_IO_TASK_SAFE.
               ((geo.caps & storage::RAW_ERASE_CHIP) != 0 &&
                (s->get_capabilities() & storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE) != 0)
@@ -187,7 +187,7 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
                   : "false",
               // What this build allows, so the browser never offers a button that can only 403.
               ctx->enable_write ? "true" : "false",
-              // Erasable when allowed here — media with a real erase use the driver's erase(),
+              // Erasable when allowed here -- media with a real erase use the driver's erase(),
               // overwrite-in-place media (no RAW_ERASE_* caps: EEPROM, FRAM) get the worker's
               // pseudo erase, a chunked 0xFF fill via write(). Either way the endpoint works.
               ctx->enable_erase ? "true" : "false",
@@ -197,7 +197,7 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
                   ? "true"
                   : "false",
 #ifdef USE_STORAGE_DEVICE_NODES
-              // Presentation hint for the browser — the API itself serves every device.
+              // Presentation hint for the browser -- the API itself serves every device.
               s->has_device_node() ? "true" : "false"
 #else
               "false"
@@ -290,7 +290,7 @@ void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
 }
 
 // Submits a raw worker job (translator contract: no driver I/O in HTTP context) and
-// answers {"job":N} — the browser polls /files/job like it does for copy/move. Submission
+// answers {"job":N} -- the browser polls /files/job like it does for copy/move. Submission
 // itself touches only the worker's pool and runs marshalled on the main loop.
 void WebServerRawApi::submit_and_answer_(
     AsyncWebServerRequest *request,
@@ -303,7 +303,7 @@ void WebServerRawApi::submit_and_answer_(
   storage::StorageError err = storage::StorageError::OK;
   this->run_on_loop_([this, &submit, &job, &err]() {
     // The job id only exists after submission; the completion callback reads it through a
-    // small heap slot filled right below — safe because submission and completion both run
+    // small heap slot filled right below -- safe because submission and completion both run
     // on the main loop, strictly in that order (same pattern as the file API's copy/move).
     auto *job_slot = new storage::TransferJob(storage::INVALID_TRANSFER_JOB);  // NOLINT
     err = submit(&job, [this, job_slot](storage::StorageError result) {
@@ -311,7 +311,7 @@ void WebServerRawApi::submit_and_answer_(
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
     });
     if (err != storage::StorageError::OK) {
-      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) — callback will not fire
+      delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) -- callback will not fire
     } else {
       *job_slot = job;
     }
@@ -377,7 +377,7 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
     if (!loop_ok || err != storage::StorageError::OK || got == 0) {
       ESP_LOGW(TAG, "read failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + offset),
                storage::error_to_string(err));
-      break;  // response already started — end it short rather than lie with a status code
+      break;  // response already started -- end it short rather than lie with a status code
     }
     if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), got) != ESP_OK)
       break;  // client went away
@@ -389,7 +389,7 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
 
 void WebServerRawApi::handle_erase_(AsyncWebServerRequest *request) {
   // Erase rides the write permission: it is a technical necessity of some media, not a
-  // capability of its own — a device you may write is a device you may erase.
+  // capability of its own -- a device you may write is a device you may erase.
   if (!this->enable_write_) {
     request->send(403, "application/json", "{\"error\":\"erase disabled\"}");
     return;
@@ -473,7 +473,7 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
           return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, std::move(done),
                                                                  job, verify_passes);
         });
-        // One request, one job, one answer — submit_and_answer_() already responded with
+        // One request, one job, one answer -- submit_and_answer_() already responded with
         // {job:N}. Falling through here sent a SECOND response from the body-write reporting
         // block below on the same request.
         return;

@@ -21,7 +21,7 @@ TYPE_STORAGE = "storage"
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
     """sha256/watchdog/json are always needed; the storage firmware source additionally needs
-    the storage component, pulled in only when 'type: storage' is selected — other sources pay
+    the storage component, pulled in only when 'type: storage' is selected -- other sources pay
     nothing for it."""
     base = ["sha256", "watchdog", "json"]
     if config and config.get(CONF_TYPE) == TYPE_STORAGE:
@@ -66,7 +66,7 @@ HTTP_SCHEMA = BASE_SCHEMA.extend(
 )
 
 # Read the co-processor firmware from a mounted storage at runtime. CONF_SOURCE is a plain
-# storage path (e.g. /sdcard/slave_fw.bin) resolved through the storage registry — not a URL and
+# storage path (e.g. /sdcard/slave_fw.bin) resolved through the storage registry -- not a URL and
 # not a build-time file, so it is validated as a string and never opened during config.
 STORAGE_SCHEMA = BASE_SCHEMA.extend(
     {

@@ -140,7 +140,7 @@ void Esp32HostedUpdate::setup() {
   this->status_clear_error();
   this->publish_state();
 #elif defined(USE_ESP32_HOSTED_STORAGE_UPDATE)
-  // Storage mode: no availability/version discovery — the firmware to install is whatever the
+  // Storage mode: no availability/version discovery -- the firmware to install is whatever the
   // user placed on the configured storage path. Offer it as available; the install reads and
   // verifies (sha256) at perform() time.
   this->update_info_.latest_version = "storage";
@@ -477,7 +477,7 @@ bool Esp32HostedUpdate::stream_firmware_from_storage_() {
     return false;
   }
 
-  // Stream to the coprocessor while computing SHA256. One reused chunk buffer (MCU) — never the
+  // Stream to the coprocessor while computing SHA256. One reused chunk buffer (MCU) -- never the
   // whole firmware in RAM. Mirrors the http streaming path.
   sha256::SHA256 hasher;
   hasher.init();
