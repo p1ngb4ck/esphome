@@ -342,6 +342,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
                                    size_t *bytes_transferred) override;
   storage::StorageError write_chunk(const char *path, const uint8_t *buf, uint64_t offset, size_t len,
                                     size_t *bytes_transferred) override;
+  storage::StorageError truncate(const char *path, uint64_t size) override;
   storage::StorageError stat(const char *path, storage::FileStat *stat) override;
   storage::StorageError list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
                                  void *ctx) override;
@@ -470,6 +471,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   bool nfs_read_(const NFSFileHandle &fh, uint64_t offset, uint32_t count, std::vector<uint8_t> &data);
   bool nfs_write_(const NFSFileHandle &fh, uint64_t offset, const uint8_t *data, size_t length);
   bool nfs_create_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh);
+  bool nfs_setattr_size_(const NFSFileHandle &fh, uint64_t size);
   bool nfs_remove_(const NFSFileHandle &dir_fh, const std::string &name);
   bool nfs_mkdir_(const NFSFileHandle &dir_fh, const std::string &name, uint32_t mode, NFSFileHandle &fh,
                   uint32_t *nfs_status_out = nullptr);

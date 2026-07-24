@@ -352,9 +352,7 @@ void NFSClient::setup() {
   ESP_LOGCONFIG(TAG, "  Server: %s:%u", this->server_.c_str(), this->port_);
   ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
   ESP_LOGCONFIG(TAG, "  UID: %" PRIu32 ", GID: %" PRIu32, this->uid_, this->gid_);
-  if (this->mount_path_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
-  }
+  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
 
 #if defined(USE_PSRAM) && defined(USE_ESP_IDF)
   {
@@ -543,9 +541,7 @@ void NFSClient::dump_config() {
   ESP_LOGCONFIG(TAG, "  Export: %s", this->export_path_.c_str());
   ESP_LOGCONFIG(TAG, "  Status: %s", this->mounted_ ? "Mounted" : "Not mounted");
   ESP_LOGCONFIG(TAG, "  Auto connect on network up: %s", YESNO(this->auto_connect_));
-  if (this->mount_path_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
-  }
+  ESP_LOGCONFIG(TAG, "  Mount path: %s", this->mount_path_);
 }
 
 //========================================================================
@@ -741,6 +737,41 @@ storage::StorageError NFSClient::write_chunk(const char *path, const uint8_t *bu
   }
 
   *bytes_transferred = len;
+  return storage::StorageError::OK;
+}
+
+storage::StorageError NFSClient::truncate(const char *path, uint64_t size) {
+  if (path == nullptr) {
+    return storage::StorageError::INVALID_ARGS;
+  }
+  if (!this->mounted_) {
+    return storage::StorageError::NOT_READY;
+  }
+
+  const std::string path_str(path);
+  NFSFileHandle fh;
+  NFSFileAttr attr;
+
+  if (!this->resolve_path_(path_str, fh, attr)) {
+    // Contract: truncate() creates the file when it is absent, so a caller preparing a
+    // destination does not have to probe for it first. A fresh file is already the requested
+    // length when that length is 0, which is what every caller in the interface asks for.
+    NFSFileHandle parent_fh;
+    std::string filename;
+    if (!this->resolve_parent_path_(path_str, parent_fh, filename)) {
+      return storage::StorageError::NOT_FOUND;
+    }
+    if (!this->nfs_create_(parent_fh, filename, 0644, fh)) {
+      return storage::StorageError::WRITE_ERROR;
+    }
+    if (size == 0) {
+      return storage::StorageError::OK;
+    }
+  }
+
+  if (!this->nfs_setattr_size_(fh, size)) {
+    return storage::StorageError::WRITE_ERROR;
+  }
   return storage::StorageError::OK;
 }
 
@@ -1979,6 +2010,46 @@ bool NFSClient::nfs_rename_(const NFSFileHandle &old_dir_fh, const std::string &
     return false;
   }
 
+  return true;
+}
+
+bool NFSClient::nfs_setattr_size_(const NFSFileHandle &fh, uint64_t size) {
+  ESP_LOGD(TAG, "NFS SETATTR: size=%" PRIu64, size);
+
+  uint32_t xid = RPCClient::generate_xid();
+  XDRBuffer request;
+  this->rpc_.build_call(request, xid, NFS_PROGRAM, NFS_VERSION_3, NFSPROC3_SETATTR, this->uid_, this->gid_);
+  fh.encode(request);
+
+  // sattr3: only the size is set. Mode, uid and gid stay as they are -- this is a truncate,
+  // not a chown, and a caller shortening a file must not silently reset its permissions.
+  request.encode_bool(false);  // mode: don't set
+  request.encode_bool(false);  // uid: don't set
+  request.encode_bool(false);  // gid: don't set
+  request.encode_bool(true);   // size: set
+  request.encode_uint64(size);
+  request.encode_uint32(0);  // atime: DONT_CHANGE
+  request.encode_uint32(0);  // mtime: DONT_CHANGE
+
+  // sattr_guard3: unguarded. A guard only protects against a concurrent change between a
+  // GETATTR and this call, and nothing here reads attributes first.
+  request.encode_bool(false);
+
+  XDRBuffer response;
+  if (!this->send_rpc_(request, response)) {
+    return false;
+  }
+
+  RPCAcceptStatus rpc_status;
+  if (!this->rpc_.parse_reply(response, xid, rpc_status)) {
+    return false;
+  }
+
+  uint32_t nfs_status{0};
+  if (!response.decode_uint32(nfs_status) || nfs_status != NFS3_OK) {
+    ESP_LOGW(TAG, "SETATTR failed: status=%" PRIu32, nfs_status);
+    return false;
+  }
   return true;
 }
 
