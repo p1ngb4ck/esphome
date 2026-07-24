@@ -3,7 +3,7 @@
 #include "esphome/core/defines.h"
 
 // Compiled in only when `web_server: file_api:` is configured (codegen sets the define) and
-// only on the ESP-IDF backend — codegen validation rejects Arduino and web_server versions
+// only on the ESP-IDF backend -- codegen validation rejects Arduino and web_server versions
 // other than 3, so no runtime fallbacks live here.
 #if defined(USE_WEBSERVER_FILE_API) && defined(USE_ESP_IDF)
 
@@ -30,7 +30,7 @@
 #ifdef USE_WEBSERVER_FILE_BROWSER
 // Gzipped browser module, embedded by codegen from file_browser.js. Global namespace on
 // purpose: add_resource_as_progmem() defines the constexpr symbol at global scope in
-// main.cpp — this extern declaration (visible there via this header) is what gives that
+// main.cpp -- this extern declaration (visible there via this header) is what gives that
 // definition external linkage, same pattern as web_server.h's CSS/JS_INCLUDE symbols.
 extern const uint8_t ESPHOME_WEBSERVER_FILE_BROWSER_JS[] PROGMEM;
 extern const size_t ESPHOME_WEBSERVER_FILE_BROWSER_JS_SIZE;
@@ -39,12 +39,12 @@ extern const size_t ESPHOME_WEBSERVER_FILE_BROWSER_JS_SIZE;
 namespace esphome::web_server {
 
 // REST file operations on top of the storage interface, served under /files/* as part of the
-// existing web_server (same port, same auth once web_server grows one — not a separate page).
+// existing web_server (same port, same auth once web_server grows one -- not a separate page).
 //
 // Threading: httpd callbacks (handleRequest/handleUpload) run on the httpd server task, but
 // the storage contract is main-loop-only for control-plane calls. Every storage access is
-// therefore marshalled onto the main loop via Component::defer() — the documented thread-safe
-// FIFO bridge, the same one web_server's entity actions use — while the httpd task blocks on
+// therefore marshalled onto the main loop via Component::defer() -- the documented thread-safe
+// FIFO bridge, the same one web_server's entity actions use -- while the httpd task blocks on
 // a semaphore until the loop ran the operation. Chunked transfers (download/upload) repeat
 // that per chunk, which is exactly the loop-sliced pacing the storage design prescribes.
 class WebServerFileApi : public Component, public AsyncWebHandler {
@@ -87,7 +87,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 
  protected:
   // Runs `op` on the main loop and blocks the calling (httpd) task until it completed.
-  // Returns false on timeout — the op may still run later, so ops must only touch state that
+  // Returns false on timeout -- the op may still run later, so ops must only touch state that
   // stays valid (members of this component). See the class comment for the rationale.
   bool run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms = 10000);
 
@@ -107,7 +107,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 #ifdef USE_STORAGE_WORKER
   // Recursive directory transfer orchestrator: copies one file at a time through the async
   // worker (main loop stays responsive), directories via mkdir + descend. Memory-bounded:
-  // no entry lists — entry #i of a directory is found by re-enumerating with a counting
+  // no entry lists -- entry #i of a directory is found by re-enumerating with a counting
   // callback (the same RAM-free trick remove_recursive() uses, O(n²) listings), and the
   // walker keeps one subpath buffer plus a per-level index stack instead of paths per level.
   // For moves, each file is deleted right after its copy completed and each directory is
@@ -138,14 +138,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   bool enable_unmount_{true};
   SemaphoreHandle_t op_done_{nullptr};
 
-  // Everything this component does in loop() — walking a directory transfer, draining a staged
-  // upload — only happens when Application's component phase runs, and that phase is gated
+  // Everything this component does in loop() -- walking a directory transfer, draining a staged
+  // upload -- only happens when Application's component phase runs, and that phase is gated
   // (loop_interval_, a high-frequency request, or an explicit wake). Nothing else asks for it:
   // an HTTP request drives nothing, it only reads status, and the browser sends nothing more
   // once a transfer is under way. Held while there is work, released when there is none.
   HighFrequencyLoopRequester loop_requester_;
 
-  // /files/changes — serves the storage registry's directory-change feed (see storage.h:
+  // /files/changes -- serves the storage registry's directory-change feed (see storage.h:
   // note_dir_changed()): the ring itself lives there so the worker and the raw API feed it
   // too; this endpoint only reads it against the client's cursor.
   void handle_changes_(AsyncWebServerRequest *request);
@@ -165,7 +165,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 
   // /files/job serves two kinds of id, told apart by their top two bits: the worker's own
   // TransferJob handles are small counters and leave both clear, anything tagged here is ours.
-  // Keep every id space in this one place — two of them silently shared a single flag bit
+  // Keep every id space in this one place -- two of them silently shared a single flag bit
   // once, and every job answered 404 because the wrong branch claimed it.
   static constexpr uint32_t JOB_SPACE_MASK = 0xC0000000u;
   static constexpr uint32_t JOB_COUNTER_MASK = 0x3FFFFFFFu;
@@ -178,7 +178,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // --- Async download pipeline. The one-and-only httpd server task hands finished-
   // validated downloads to a single bounded transfer task via httpd_req_async_handler_begin(),
   // so the server task (and with it the v3 event stream) stays responsive during transfers.
-  // Storage access keeps marshalling through run_on_loop_() — storage is main-loop-only.
+  // Storage access keeps marshalling through run_on_loop_() -- storage is main-loop-only.
   struct DownloadJob {
     httpd_req_t *req{nullptr};  // async request copy; owns the socket until complete()
     storage::PathStorage *ps{nullptr};
@@ -186,7 +186,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool is_fs{false};
     uint64_t size{0};
     char rel[256]{};
-    // httpd_resp_set_hdr() stores the pointer (no copy) — must outlive every send.
+    // httpd_resp_set_hdr() stores the pointer (no copy) -- must outlive every send.
     char disposition[300]{};
     // Likewise for the type: always a string literal from content_type_for().
     const char *type{"application/octet-stream"};
@@ -230,7 +230,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 #ifdef USE_STORAGE_TRANSFER_BUFFER
   // Post-response flush of a staged upload: loop() drains the arena to storage chunk-wise
   // (storage is main-loop-only by contract), queryable through /files/job. Its own id space
-  // (see JOB_SPACE_MASK) — distinct from the directory transfers' as well as the worker's.
+  // (see JOB_SPACE_MASK) -- distinct from the directory transfers' as well as the worker's.
   static constexpr uint32_t FLUSH_JOB_FLAG = 0xC0000000u;
   struct StagedFlush {
     bool active{false};

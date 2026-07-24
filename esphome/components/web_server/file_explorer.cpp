@@ -98,7 +98,7 @@ void FileExplorerAssets::start_load_(size_t index) {
   const char *rel = nullptr;
   storage::PathStorage *ps = storage::global_storage_registry->resolve_path(asset.storage_path, &rel);
   if (ps == nullptr)
-    return;  // not mounted yet — loop() comes back
+    return;  // not mounted yet -- loop() comes back
 
   // One stat for the size. Metadata only, so it is not the bulk read the ceiling guards
   // against, and the buffer has to be sized before the first chunk lands in it.

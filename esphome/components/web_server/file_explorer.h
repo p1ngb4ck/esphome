@@ -24,9 +24,9 @@ namespace web_server {
 // internal RAM and the response path. What differs is where the bytes come from before they
 // get there:
 //
-//   FLASH   — a gzipped copy is compiled in as PROGMEM and copied to PSRAM once at setup().
+//   FLASH   -- a gzipped copy is compiled in as PROGMEM and copied to PSRAM once at setup().
 //             Always available, costs the flash.
-//   STORAGE — the files sit on a PathStorage and are read into PSRAM as soon as that storage
+//   STORAGE -- the files sit on a PathStorage and are read into PSRAM as soon as that storage
 //             is mounted, which may be seconds after boot or never. Costs no flash; the
 //             browser answers 503 until the read succeeds.
 //

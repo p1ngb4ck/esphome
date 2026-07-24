@@ -3,7 +3,7 @@
 #include "esphome/core/defines.h"
 
 // Compiled in only when `web_server: raw_api:` is configured (codegen sets the define) and only
-// on the ESP-IDF backend — same gating as the file API next door.
+// on the ESP-IDF backend -- same gating as the file API next door.
 #if defined(USE_WEBSERVER_RAW_API) && defined(USE_ESP_IDF)
 
 #include "esphome/components/storage/storage.h"
@@ -19,13 +19,13 @@
 
 namespace esphome::web_server {
 
-// Address-based HTTP access to raw media (NOR flash, FRAM, EEPROM) — the counterpart to the
+// Address-based HTTP access to raw media (NOR flash, FRAM, EEPROM) -- the counterpart to the
 // file API, which speaks paths a raw medium does not have.
 //
 // Endpoints (all under /raw/, device selected by its storage id):
 //   GET  /raw/devices
 //   GET  /raw/read?device=<id>&address=<n>&size=<n>   (or &all=1)
-//   POST /raw/write?device=<id>&address=<n>[&erase=1] — payload is the raw request body
+//   POST /raw/write?device=<id>&address=<n>[&erase=1] -- payload is the raw request body
 //   POST /raw/erase?device=<id>&address=<n>&size=<n>  (or &all=1)
 //
 // What a device accepts is never assumed: /raw/devices reports the geometry the driver itself
@@ -36,7 +36,7 @@ namespace esphome::web_server {
 // undoable, and this API has no confirmation of its own.
 //
 // Threading: handlers run on the httpd server task, but RawStorage drivers are main-loop-only
-// by contract (binary_storage never sets STORAGE_CAP_IO_TASK_SAFE — they share their I2C/SPI
+// by contract (binary_storage never sets STORAGE_CAP_IO_TASK_SAFE -- they share their I2C/SPI
 // bus with main-loop components), so every device call is marshalled with run_on_loop_(), the
 // same way the file API does it.
 class WebServerRawApi : public Component, public AsyncWebHandler {
@@ -60,7 +60,7 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
       AsyncWebServerRequest *request,
       std::function<storage::StorageError(storage::TransferJob *, storage::CompletionCallback &&)> &&submit);
   // Runs `op` on the main loop and blocks the calling (httpd) task until it completed. Returns
-  // false on timeout — the op may still run later, so it must only touch state that stays valid.
+  // false on timeout -- the op may still run later, so it must only touch state that stays valid.
   bool run_on_loop_(std::function<void()> &&op, uint32_t timeout_ms = 10000);
 
   // Resolves the ?device= parameter against the registry (honoring the optional scope).
@@ -69,9 +69,9 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   bool parse_range_(AsyncWebServerRequest *request, storage::RawStorage *device, uint64_t *address, uint64_t *size);
 
   void handle_devices_(AsyncWebServerRequest *request);
-  // GET /raw/job?id=<n> — status of a raw worker job (same JSON shape as /files/job). Raw jobs
+  // GET /raw/job?id=<n> -- status of a raw worker job (same JSON shape as /files/job). Raw jobs
   // need their own endpoint + result cache: the worker recycles a slot right after the
-  // completion callback ran, so a poller alone would miss DONE — and a missed final result
+  // completion callback ran, so a poller alone would miss DONE -- and a missed final result
   // silently swallowed every raw error (the browser treated the resulting 404 as success).
   void handle_job_(AsyncWebServerRequest *request);
   // Parks a finished raw job's result for handle_job_ (mirrors the file API's job cache).
@@ -82,7 +82,7 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   void handle_read_(AsyncWebServerRequest *request);
   void handle_erase_(AsyncWebServerRequest *request);
 
-  // Final results of recently finished raw jobs — small ring, browser polls every 500 ms.
+  // Final results of recently finished raw jobs -- small ring, browser polls every 500 ms.
   static constexpr size_t JOB_CACHE_SIZE = 4;
   struct JobCacheEntry {
     storage::TransferJob job{storage::INVALID_TRANSFER_JOB};

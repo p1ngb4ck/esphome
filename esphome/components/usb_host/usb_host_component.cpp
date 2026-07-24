@@ -18,7 +18,7 @@ void USBHost::setup() {
   usb_host_config_t config{};
 #if defined(USE_ESP32_VARIANT_ESP32P4) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
   if (this->dual_host_) {
-    // BIT0 = FS peripheral, BIT1 = HS peripheral — both simultaneously.
+    // BIT0 = FS peripheral, BIT1 = HS peripheral -- both simultaneously.
     // Requires espressif/usb >= 1.4.0 (peripheral_map field added in that release, IDF 6.0+).
     config.peripheral_map = BIT(0) | BIT(1);
     ESP_LOGI(TAG, "USB dual-host enabled (HS + FS)");
@@ -134,7 +134,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
     ok = xSemaphoreTake(sem, pdMS_TO_TICKS(6000)) == pdTRUE;
     if (!ok) {
       // ESP-IDF owns the transfer until the callback fires (guaranteed on disconnect too),
-      // so do not free xfer/sem here — the callback will run and give the semaphore.
+      // so do not free xfer/sem here -- the callback will run and give the semaphore.
       ESP_LOGE(TAG, "set_interface: wait timeout");
       return false;
     }
@@ -201,7 +201,7 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
   USBClient *client = ctx->client;
   IsocStream *stream = ctx->stream;
 
-  // Capture handles now — they may be cleared by disconnect() before the defer runs.
+  // Capture handles now -- they may be cleared by disconnect() before the defer runs.
   usb_host_client_handle_t client_handle = client->handle_;
   usb_device_handle_t device_handle = client->device_handle_;
 
@@ -237,7 +237,7 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
     }
     usb_host_transfer_submit(xfer);
   } else {
-    // stream_close() set streaming=false — free and defer cleanup when all URBs done.
+    // stream_close() set streaming=false -- free and defer cleanup when all URBs done.
     finish_urb();
   }
 }
@@ -295,7 +295,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
       stream.pending_urbs.store(i, std::memory_order_release);
       stream.streaming = false;
       if (i == 0) {
-        // Nothing was submitted — clean up synchronously right now.
+        // Nothing was submitted -- clean up synchronously right now.
         stream.xfers.reset();
         stream.ctxs.reset();
         this->do_set_interface(client_handle, device_handle, stream.interface_num, 0);
@@ -317,7 +317,7 @@ void USBHost::stream_close(IsocStream &stream, usb_host_client_handle_t client_h
 
   // Signal callbacks to stop resubmitting. In-flight URBs will return, free
   // themselves, and the last one defers alt-setting reset, interface release,
-  // and buffer cleanup to the main loop via get_usb_host()->defer() — no blocking needed.
+  // and buffer cleanup to the main loop via get_usb_host()->defer() -- no blocking needed.
   stream.streaming = false;
 }
 

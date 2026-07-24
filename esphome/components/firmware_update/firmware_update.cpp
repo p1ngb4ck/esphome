@@ -11,7 +11,7 @@ namespace esphome::firmware_update {
 
 static const char *const TAG = "firmware_update";
 
-// Firmware read chunk size. One reused buffer on the stack — never the whole image in RAM.
+// Firmware read chunk size. One reused buffer on the stack -- never the whole image in RAM.
 static constexpr size_t CHUNK_SIZE = 1024;
 
 void FirmwareUpdateComponent::dump_config() {
@@ -115,7 +115,7 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
     return begin_result;
   }
 
-  // Stream while computing MD5, exactly as the HTTP path does — the backend verifies this digest
+  // Stream while computing MD5, exactly as the HTTP path does -- the backend verifies this digest
   // against the image at end(), on top of the app image's own intrinsic (esp_ota) validation.
   md5::MD5Digest md5{};
   md5.init();
@@ -176,7 +176,7 @@ uint8_t FirmwareUpdateComponent::stream_from_storage_(ota::OTABackendPtr &backen
   }
 
   // Hand the computed digest to the backend and finalize. end() checks the digest, lets the app
-  // image validate itself (esp_ota_end) and only then switches the boot slot — a mismatch or an
+  // image validate itself (esp_ota_end) and only then switches the boot slot -- a mismatch or an
   // invalid image aborts without activating anything.
   char md5_str[33];
   md5.calculate();
