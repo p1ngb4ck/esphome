@@ -1,18 +1,1 @@
-nfs_client:
-  - id: my_nfs
-    server: 192.168.1.100
-    export: /volume1/data
-    port: 2049
-    mount_path: /nfs/nas
-    uid: 1000
-    gid: 1000
-  - id: my_nfs2
-    server: 192.168.1.101
-    export: /volume1/media
-    mount_path: /nfs/media
-  - id: my_nfs3
-    server: 192.168.1.100
-    export: /volume1/backups
-    mount_path: /nfs/backups
-    uid: 1001
-    gid: 1001
+<<: !include common.yaml
