@@ -5,11 +5,9 @@
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
 
-#include <sys/socket.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include <sys/time.h>
 #include <cctype>
 #include <cerrno>
 #include <cstring>
