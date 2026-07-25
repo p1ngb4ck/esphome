@@ -4,7 +4,7 @@ sd_storage:
   spi_id: spi_bus
   cs_pin: GPIO13
   cd_pin: GPIO4
-  path: /sdcard
+  mount_path: /sdcard
   on_mounted:
     - logger.log:
         format: "SD card mounted at %s"
@@ -18,10 +18,6 @@ script:
   - id: sd_card_exercise
     then:
       - sd_storage.unmount: sd_card
-      # generic storage-level mount actions (MountableStorage opt-in)
-      - storage.unmount: sd_card
-      - storage.mount:
-          id: sd_card
       - sd_storage.mount: sd_card
       - if:
           condition:

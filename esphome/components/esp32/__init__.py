@@ -2773,10 +2773,10 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> Non
     exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on is a
     patched copy of the component. ESP-IDF auto-discovers <project>/components with the
     highest precedence (project components override same-named IDF components), and the
-    generated project root is the build dir — so a patched copy at
+    generated project root is the build dir -- so a patched copy at
     <build>/components/fatfs/ wins, with zero cmake anywhere and nothing outside this build
     directory touched. Synced every codegen: created/refreshed when enabled (stamped with
-    the IDF version so an IDF switch re-copies), removed when disabled — a stale copy would
+    the IDF version so an IDF switch re-copies), removed when disabled -- a stale copy would
     keep exFAT on silently."""
     import shutil
 
@@ -2794,7 +2794,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> Non
         return  # current copy is up to date
     src = _get_framework_path(idf_ver) / "components" / "fatfs"
     if not src.is_dir():
-        # First-ever build: the toolchain would install the IDF minutes from now anyway —
+        # First-ever build: the toolchain would install the IDF minutes from now anyway --
         # front-load it so the copy source exists.
         check_esp_idf_install(idf_ver, targets=[variant])
     if not src.is_dir():
@@ -2813,18 +2813,18 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> Non
         )
         if n != 1:
             raise cv.Invalid(
-                f"enable_exfat: patching {key} in the IDF's ffconf.h failed — "
+                f"enable_exfat: patching {key} in the IDF's ffconf.h failed -- "
                 f"unexpected FatFs layout in IDF {idf_ver}"
             )
     # Kconfig bool symbols that are disabled produce no #define, yet ff.c uses several of
-    # them in plain C expressions (e.g. `if (FF_USE_LABEL && vol)`) — inside the original
+    # them in plain C expressions (e.g. `if (FF_USE_LABEL && vol)`) -- inside the original
     # IDF component that resolves, in a project-component copy it surfaced as 'undeclared
     # identifier'. Default every CONFIG_ symbol the header references to 0 when undefined:
     # a no-op for anything sdkconfig.h defines, and exactly the value a disabled bool means
     # otherwise. Scanned generically so new symbols in future IDF versions are covered.
     # Only symbols used in *value* contexts and probed nowhere: defining a symbol that any
     # compiled source probes with #ifdef/defined() makes the probe true and silently
-    # enables the guarded code — vfs_fat.c does exactly that with USE_FASTSEEK (its
+    # enables the guarded code -- vfs_fat.c does exactly that with USE_FASTSEEK (its
     # fastseek block then references FIL::cltbl, which the ffconf side correctly compiled
     # out). So the probe scan covers the whole copied component, not just ffconf.h;
     # test_apps/host_test/fatfs_utils are excluded because they are never built and their
@@ -2844,7 +2844,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> Non
     include_line = '#include "sdkconfig.h"\n'
     if include_line not in text:
         raise cv.Invalid(
-            "enable_exfat: unexpected ffconf.h layout — no sdkconfig.h include to anchor on"
+            "enable_exfat: unexpected ffconf.h layout -- no sdkconfig.h include to anchor on"
         )
     text = text.replace(
         include_line,
