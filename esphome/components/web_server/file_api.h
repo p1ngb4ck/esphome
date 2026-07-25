@@ -195,7 +195,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool has_range{false};
     uint64_t range_start{0};
     uint64_t range_end{0};
-    char content_range[64]{};
+    // "bytes " + three uint64 (20 each) + '-' + '/' + NUL = 69 worst case; 72 for 8-byte alignment.
+    char content_range[72]{};
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
   void pump_download_(DownloadJob *job);
