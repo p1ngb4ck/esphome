@@ -3,11 +3,13 @@
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 
-#ifdef USE_ESP32
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_TCP)
 
 #include "esphome/components/storage/storage.h"
+#include "esphome/components/socket/socket.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace esphome {
@@ -16,6 +18,9 @@ namespace ftp_client {
 // A minimal FTP client exposed to ESPHome as a network storage device, analogous to nfs_client:
 // it registers a mount point and serves the generic storage actions / file browser through the
 // current storage interface (chunked read/write, stat, list_dir, ...). Passive mode only.
+//
+// Sockets go through ESPHome's socket abstraction (esphome::socket::Socket), same as api/ota;
+// only hostname resolution still uses getaddrinfo (the abstraction has no resolver).
 //
 // Scope of this (quick-test) implementation:
 //   - reads are chunked via REST + RETR (a fresh passive data connection per chunk).
@@ -70,14 +75,15 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   bool ensure_connected_();
   storage::StorageError do_connect_();
   void do_disconnect_();
-  int connect_tcp_(const std::string &host, uint16_t port);
+  // Resolves host (getaddrinfo) and returns a connected, blocking socket, or nullptr.
+  std::unique_ptr<socket::Socket> open_tcp_(const std::string &host, uint16_t port);
   void control_close_();
 
-  // FTP control protocol
+  // FTP control protocol (operates on control_)
   int send_cmd_(const std::string &cmd, std::string *reply_text = nullptr);  // returns 3-digit code, or -1
   int read_reply_(std::string *text);                                        // returns 3-digit code, or -1
-  int open_pasv_data_();                                                     // returns data fd, or -1
-  bool send_all_(int fd, const uint8_t *data, size_t len);
+  std::unique_ptr<socket::Socket> open_pasv_data_();                         // PASV + connect, or nullptr
+  bool send_all_(socket::Socket *sock, const uint8_t *data, size_t len);
 
   // Maps a full VFS path (mount point + rest) to a server-side path.
   std::string remote_path_(const char *vfs_path) const;
@@ -93,10 +99,10 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   bool mount_requested_{false};
   uint32_t last_inline_mount_ms_{0};
 
-  int control_fd_{-1};
+  std::unique_ptr<socket::Socket> control_;
 };
 
 }  // namespace ftp_client
 }  // namespace esphome
 
-#endif  // USE_ESP32
+#endif  // socket impl available

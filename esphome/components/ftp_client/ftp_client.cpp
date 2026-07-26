@@ -1,12 +1,24 @@
 #include "ftp_client.h"
 
-#ifdef USE_ESP32
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_TCP)
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
 
-#include "lwip/sockets.h"
+// DNS: ESPHome has no portable resolver, so use each socket backend's own facility (same choice
+// the other network components make). bsd_sockets and lwip_sockets provide getaddrinfo; lwip_tcp
+// (esp8266 / rp2) has no socket layer, so it uses lwip's raw resolver dns_gethostbyname_addrtype,
+// exactly like mqtt.
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS)
+#include <netdb.h>
+#elif defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
 #include "lwip/netdb.h"
+#elif defined(USE_SOCKET_IMPL_LWIP_TCP)
+#include "esphome/components/network/ip_address.h"
+#include "lwip/dns.h"
+#endif
+
 #include <sys/time.h>
 #include <cctype>
 #include <cerrno>
@@ -24,14 +36,6 @@ static constexpr uint32_t FTP_INLINE_MOUNT_MIN_INTERVAL_MS = 3000;
 // Small helpers
 // ---------------------------------------------------------------------------
 
-static void set_socket_timeouts(int fd) {
-  struct timeval tv;
-  tv.tv_sec = FTP_TIMEOUT_MS / 1000;
-  tv.tv_usec = (FTP_TIMEOUT_MS % 1000) * 1000;
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
 static const char *basename_of(const std::string &path) {
   size_t slash = path.find_last_of('/');
   return slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1;
@@ -41,6 +45,39 @@ static void fill_name(storage::FileStat *out, const char *name) {
   strncpy(out->name, name, storage::STORAGE_NAME_MAX);
   out->name[storage::STORAGE_NAME_MAX] = '\0';
 }
+
+static void configure_socket(socket::Socket *sock) {
+  struct timeval tv;
+  tv.tv_sec = FTP_TIMEOUT_MS / 1000;
+  tv.tv_usec = (FTP_TIMEOUT_MS % 1000) * 1000;
+  sock->setsockopt(SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  sock->setsockopt(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  sock->setblocking(true);
+}
+
+#if defined(USE_SOCKET_IMPL_LWIP_TCP)
+namespace {
+struct FtpDnsResult {
+  volatile bool done{false};
+  volatile bool ok{false};
+  ip_addr_t addr{};
+};
+// The lwip DNS callback prototype gained a const on the ip_addr_t across lwip versions.
+#if defined(USE_ESP8266) && LWIP_VERSION_MAJOR == 1
+void ftp_dns_found(const char *name, ip_addr_t *ipaddr, void *arg) {
+#else
+void ftp_dns_found(const char *name, const ip_addr_t *ipaddr, void *arg) {
+#endif
+  (void) name;
+  auto *r = (FtpDnsResult *) arg;
+  if (ipaddr != nullptr) {
+    r->addr = *ipaddr;
+    r->ok = true;
+  }
+  r->done = true;
+}
+}  // namespace
+#endif  // USE_SOCKET_IMPL_LWIP_TCP
 
 // ---------------------------------------------------------------------------
 // Component lifecycle
@@ -63,8 +100,8 @@ void FTPClient::setup() {
 }
 
 void FTPClient::loop() {
-  // Auto-connect on each rising edge of network connectivity (wifi/eth/modem/openthread),
-  // same event-edge pattern as nfs_client -- no periodic retry.
+  // Auto-connect on each rising edge of network connectivity, same event-edge pattern as
+  // nfs_client -- no periodic retry.
   const bool net_connected = network::is_connected();
   if (this->auto_connect_ && net_connected && !this->network_was_connected_ && !this->connected_) {
     this->mount_requested_ = true;
@@ -103,14 +140,89 @@ bool FTPClient::ensure_connected_() {
   return this->do_connect_() == storage::StorageError::OK;
 }
 
+std::unique_ptr<socket::Socket> FTPClient::open_tcp_(const std::string &host, uint16_t port) {
+#if defined(USE_SOCKET_IMPL_BSD_SOCKETS) || defined(USE_SOCKET_IMPL_LWIP_SOCKETS)
+  // getaddrinfo path (bsd_sockets / lwip_sockets). Resolves hostnames and numeric IPs alike,
+  // so it also connects the PASV data address.
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;  // IPv4 only for now
+  hints.ai_socktype = SOCK_STREAM;
+
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%u", port);
+
+  struct addrinfo *res = nullptr;
+  if (getaddrinfo(host.c_str(), port_str, &hints, &res) != 0 || res == nullptr) {
+    ESP_LOGW(TAG, "DNS/resolve failed for %s", host.c_str());
+    return nullptr;
+  }
+
+  std::unique_ptr<socket::Socket> sock = socket::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  if (sock == nullptr) {
+    freeaddrinfo(res);
+    return nullptr;
+  }
+  configure_socket(sock.get());
+  int rc = sock->connect(res->ai_addr, res->ai_addrlen);
+  freeaddrinfo(res);
+  return rc == 0 ? std::move(sock) : nullptr;
+
+#elif defined(USE_SOCKET_IMPL_LWIP_TCP)
+  // lwip raw resolver path (esp8266 / rp2): no getaddrinfo, so resolve with lwip's own DNS.
+  FtpDnsResult dns;
+  err_t err;
+  {
+    LwIPLock lock;
+#if USE_NETWORK_IPV6
+    err = dns_gethostbyname_addrtype(host.c_str(), &dns.addr, ftp_dns_found, &dns, LWIP_DNS_ADDRTYPE_IPV6_IPV4);
+#else
+    err = dns_gethostbyname_addrtype(host.c_str(), &dns.addr, ftp_dns_found, &dns, LWIP_DNS_ADDRTYPE_IPV4);
+#endif
+  }
+  if (err == ERR_OK) {
+    dns.ok = true;
+    dns.done = true;
+  } else if (err == ERR_INPROGRESS) {
+    uint32_t start = millis();
+    while (!dns.done && millis() - start < FTP_TIMEOUT_MS) {
+      delay(1);
+      App.feed_wdt();
+    }
+  } else {
+    ESP_LOGW(TAG, "DNS/resolve failed for %s", host.c_str());
+    return nullptr;
+  }
+  if (!dns.ok) {
+    ESP_LOGW(TAG, "DNS/resolve failed for %s", host.c_str());
+    return nullptr;
+  }
+
+  network::IPAddress ip(&dns.addr);
+  char ip_buf[network::IP_ADDRESS_BUFFER_SIZE];
+  ip.str_to(ip_buf);
+
+  struct sockaddr_storage ss;
+  socklen_t sl = socket::set_sockaddr((struct sockaddr *) &ss, sizeof(ss), ip_buf, port);
+  std::unique_ptr<socket::Socket> sock = socket::socket_ip(SOCK_STREAM, 0);
+  if (sock == nullptr)
+    return nullptr;
+  configure_socket(sock.get());
+  return sock->connect((struct sockaddr *) &ss, sl) == 0 ? std::move(sock) : nullptr;
+
+#else
+  return nullptr;
+#endif
+}
+
 storage::StorageError FTPClient::do_connect_() {
   if (this->connected_)
     return storage::StorageError::OK;
   if (!network::is_connected())
     return storage::StorageError::NOT_READY;
 
-  this->control_fd_ = this->connect_tcp_(this->server_, this->port_);
-  if (this->control_fd_ < 0) {
+  this->control_ = this->open_tcp_(this->server_, this->port_);
+  if (this->control_ == nullptr) {
     ESP_LOGW(TAG, "Control connection to %s:%u failed", this->server_.c_str(), this->port_);
     return storage::StorageError::NOT_READY;
   }
@@ -141,55 +253,22 @@ storage::StorageError FTPClient::do_connect_() {
 }
 
 void FTPClient::do_disconnect_() {
-  if (this->control_fd_ >= 0) {
+  if (this->control_ != nullptr) {
     this->send_cmd_("QUIT");
     this->control_close_();
   }
   this->connected_ = false;
 }
 
-void FTPClient::control_close_() {
-  if (this->control_fd_ >= 0) {
-    ::close(this->control_fd_);
-    this->control_fd_ = -1;
-  }
-}
-
-int FTPClient::connect_tcp_(const std::string &host, uint16_t port) {
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-
-  char port_str[8];
-  snprintf(port_str, sizeof(port_str), "%u", port);
-
-  struct addrinfo *res = nullptr;
-  if (getaddrinfo(host.c_str(), port_str, &hints, &res) != 0 || res == nullptr) {
-    ESP_LOGW(TAG, "DNS/resolve failed for %s", host.c_str());
-    return -1;
-  }
-
-  int fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-  if (fd < 0) {
-    freeaddrinfo(res);
-    return -1;
-  }
-  set_socket_timeouts(fd);
-  if (::connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
-    ::close(fd);
-    freeaddrinfo(res);
-    return -1;
-  }
-  freeaddrinfo(res);
-  return fd;
-}
+void FTPClient::control_close_() { this->control_.reset(); }
 
 // ---------------------------------------------------------------------------
 // FTP control protocol
 // ---------------------------------------------------------------------------
 
 int FTPClient::read_reply_(std::string *text) {
+  if (this->control_ == nullptr)
+    return -1;
   int code = -1;
   bool have_code = false;
   uint32_t start = millis();
@@ -199,7 +278,7 @@ int FTPClient::read_reply_(std::string *text) {
     // Read one CRLF-terminated line.
     while (true) {
       char ch;
-      int n = ::recv(this->control_fd_, &ch, 1, 0);
+      ssize_t n = this->control_->read(&ch, 1);
       if (n == 1) {
         if (ch == '\n')
           break;
@@ -213,6 +292,7 @@ int FTPClient::read_reply_(std::string *text) {
         return -1;
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         delay(1);
+        App.feed_wdt();
         continue;
       }
       return -1;
@@ -242,19 +322,21 @@ int FTPClient::read_reply_(std::string *text) {
 }
 
 int FTPClient::send_cmd_(const std::string &cmd, std::string *reply_text) {
-  if (this->control_fd_ < 0)
+  if (this->control_ == nullptr)
     return -1;
   std::string line = cmd + "\r\n";
-  if (!this->send_all_(this->control_fd_, reinterpret_cast<const uint8_t *>(line.data()), line.size()))
+  if (!this->send_all_(this->control_.get(), reinterpret_cast<const uint8_t *>(line.data()), line.size()))
     return -1;
   return this->read_reply_(reply_text);
 }
 
-bool FTPClient::send_all_(int fd, const uint8_t *data, size_t len) {
+bool FTPClient::send_all_(socket::Socket *sock, const uint8_t *data, size_t len) {
+  if (sock == nullptr)
+    return false;
   size_t sent = 0;
   uint32_t start = millis();
   while (sent < len) {
-    int n = ::send(fd, data + sent, len - sent, 0);
+    ssize_t n = sock->write(data + sent, len - sent);
     if (n > 0) {
       sent += (size_t) n;
       continue;
@@ -263,6 +345,7 @@ bool FTPClient::send_all_(int fd, const uint8_t *data, size_t len) {
       return false;
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       delay(1);
+      App.feed_wdt();
       continue;
     }
     return false;
@@ -270,24 +353,24 @@ bool FTPClient::send_all_(int fd, const uint8_t *data, size_t len) {
   return true;
 }
 
-int FTPClient::open_pasv_data_() {
+std::unique_ptr<socket::Socket> FTPClient::open_pasv_data_() {
   std::string text;
   if (this->send_cmd_("PASV", &text) != 227)
-    return -1;
+    return nullptr;
 
   // "227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)"
   size_t open = text.find('(');
-  size_t close = text.find(')', open);
-  if (open == std::string::npos || close == std::string::npos)
-    return -1;
+  if (open == std::string::npos)
+    return nullptr;
   int v[6] = {0};
   if (sscanf(text.c_str() + open + 1, "%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6)
-    return -1;
+    return nullptr;
 
   char ip[16];
   snprintf(ip, sizeof(ip), "%d.%d.%d.%d", v[0], v[1], v[2], v[3]);
   uint16_t port = (uint16_t) ((v[4] << 8) | v[5]);
-  return this->connect_tcp_(ip, port);
+  // open_tcp_ resolves the dotted-quad numerically, so it doubles as the data connector.
+  return this->open_tcp_(ip, port);
 }
 
 std::string FTPClient::remote_path_(const char *vfs_path) const {
@@ -340,27 +423,23 @@ storage::StorageError FTPClient::read_chunk(const char *path, uint8_t *buf, uint
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  int data_fd = this->open_pasv_data_();
-  if (data_fd < 0)
+  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  if (data == nullptr)
     return storage::StorageError::READ_ERROR;
 
   if (offset > 0) {
-    if (this->send_cmd_("REST " + std::to_string((unsigned long long) offset)) != 350) {
-      ::close(data_fd);
+    if (this->send_cmd_("REST " + std::to_string((unsigned long long) offset)) != 350)
       return storage::StorageError::READ_ERROR;
-    }
   }
 
   int c = this->send_cmd_("RETR " + remote);
-  if (c != 150 && c != 125) {
-    ::close(data_fd);
+  if (c != 150 && c != 125)
     return c == 550 ? storage::StorageError::NOT_FOUND : storage::StorageError::READ_ERROR;
-  }
 
   size_t total = 0;
   uint32_t start = millis();
   while (total < len) {
-    int n = ::recv(data_fd, buf + total, len - total, 0);
+    ssize_t n = data->read(buf + total, len - total);
     if (n > 0) {
       total += (size_t) n;
       continue;
@@ -371,11 +450,12 @@ storage::StorageError FTPClient::read_chunk(const char *path, uint8_t *buf, uint
       break;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       delay(1);
+      App.feed_wdt();
       continue;
     }
     break;
   }
-  ::close(data_fd);
+  data.reset();                // close the data connection
   this->read_reply_(nullptr);  // 226/426
 
   *bytes_transferred = total;  // partial (< len) means EOF, per the read contract
@@ -389,20 +469,18 @@ storage::StorageError FTPClient::write_chunk(const char *path, const uint8_t *bu
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  int data_fd = this->open_pasv_data_();
-  if (data_fd < 0)
+  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  if (data == nullptr)
     return storage::StorageError::WRITE_ERROR;
 
   // Full-file only: the first chunk stores (truncating), later contiguous chunks append.
   const char *verb = offset == 0 ? "STOR " : "APPE ";
   int c = this->send_cmd_(std::string(verb) + remote);
-  if (c != 150 && c != 125) {
-    ::close(data_fd);
+  if (c != 150 && c != 125)
     return storage::StorageError::WRITE_ERROR;
-  }
 
-  bool ok = this->send_all_(data_fd, buf, len);
-  ::close(data_fd);
+  bool ok = this->send_all_(data.get(), buf, len);
+  data.reset();
   int rc = this->read_reply_(nullptr);
   if (!ok || (rc != 226 && rc != 250))
     return storage::StorageError::WRITE_ERROR;
@@ -421,15 +499,13 @@ storage::StorageError FTPClient::truncate(const char *path, uint64_t size) {
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  int data_fd = this->open_pasv_data_();
-  if (data_fd < 0)
+  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  if (data == nullptr)
     return storage::StorageError::WRITE_ERROR;
   int c = this->send_cmd_("STOR " + remote);
-  if (c != 150 && c != 125) {
-    ::close(data_fd);
+  if (c != 150 && c != 125)
     return storage::StorageError::WRITE_ERROR;
-  }
-  ::close(data_fd);  // close with nothing written -> empty file
+  data.reset();  // close with nothing written -> empty file
   int rc = this->read_reply_(nullptr);
   return (rc == 226 || rc == 250) ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
 }
@@ -465,24 +541,21 @@ storage::StorageError FTPClient::list_dir(const char *path,
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  int data_fd = this->open_pasv_data_();
-  if (data_fd < 0)
+  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  if (data == nullptr)
     return storage::StorageError::READ_ERROR;
 
   // Prefer MLSD (machine-readable). Fall back to LIST on servers that reject it.
   bool mlsd = true;
   int c = this->send_cmd_("MLSD " + remote);
   if (c != 150 && c != 125) {
-    ::close(data_fd);
     mlsd = false;
-    data_fd = this->open_pasv_data_();
-    if (data_fd < 0)
+    data = this->open_pasv_data_();
+    if (data == nullptr)
       return storage::StorageError::READ_ERROR;
     c = this->send_cmd_("LIST " + remote);
-    if (c != 150 && c != 125) {
-      ::close(data_fd);
+    if (c != 150 && c != 125)
       return c == 550 ? storage::StorageError::NOT_FOUND : storage::StorageError::READ_ERROR;
-    }
   }
 
   // Slurp the listing.
@@ -490,7 +563,7 @@ storage::StorageError FTPClient::list_dir(const char *path,
   char buf[512];
   uint32_t start = millis();
   while (true) {
-    int n = ::recv(data_fd, buf, sizeof(buf), 0);
+    ssize_t n = data->read(buf, sizeof(buf));
     if (n > 0) {
       listing.append(buf, (size_t) n);
       continue;
@@ -501,11 +574,12 @@ storage::StorageError FTPClient::list_dir(const char *path,
       break;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       delay(1);
+      App.feed_wdt();
       continue;
     }
     break;
   }
-  ::close(data_fd);
+  data.reset();
   this->read_reply_(nullptr);  // 226
 
   size_t pos = 0;
@@ -615,4 +689,4 @@ storage::StorageError FTPClient::rename(const char *old_path, const char *new_pa
 }  // namespace ftp_client
 }  // namespace esphome
 
-#endif  // USE_ESP32
+#endif  // socket impl available

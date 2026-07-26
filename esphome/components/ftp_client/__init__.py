@@ -13,12 +13,18 @@ from esphome.const import (
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
+    PLATFORM_BK72XX,
     PLATFORM_ESP32,
+    PLATFORM_ESP8266,
+    PLATFORM_HOST,
+    PLATFORM_LN882X,
+    PLATFORM_RP2040,
+    PLATFORM_RTL87XX,
 )
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["network"]
-AUTO_LOAD = ["storage"]
+AUTO_LOAD = ["storage", "socket"]
 
 CONF_SERVER = "server"
 CONF_MOUNT_PATH = "mount_path"
@@ -32,7 +38,9 @@ FTPClient = ftp_client_ns.class_("FTPClient", cg.Component, MountableStorage)
 DEFAULT_PORT = 21
 
 # username / password accept !secret exactly like the wifi password (resolved at YAML load;
-# the C++ never logs the password). ESP32 only for now -- the client uses lwip sockets.
+# the C++ never logs the password). Supported on every platform the socket component supports;
+# the DNS path is selected in C++ by the socket backend define (getaddrinfo on bsd/lwip_sockets,
+# lwip dns_gethostbyname on lwip_tcp).
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -47,7 +55,17 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    cv.only_on([PLATFORM_ESP32]),
+    cv.only_on(
+        [
+            PLATFORM_BK72XX,
+            PLATFORM_ESP32,
+            PLATFORM_ESP8266,
+            PLATFORM_HOST,
+            PLATFORM_LN882X,
+            PLATFORM_RP2040,
+            PLATFORM_RTL87XX,
+        ]
+    ),
 )
 
 
