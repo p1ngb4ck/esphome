@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_BINARY_STORAGE_NVS
+#if defined(USE_BINARY_STORAGE_NVS) || defined(USE_ESP32_PREFERENCES_STORAGE)
 
 #include "esphome/core/component.h"
 #include "esphome/components/storage/storage.h"
@@ -30,6 +30,16 @@ class NVSStore : public storage::KeyValueStorage {
   void set_storage_id(const char *id) { this->storage_id_ = id; }
   void set_storage_name(const char *name) { this->storage_name_ = name; }
 
+  // Adopt an already-open NVS handle instead of opening one. The store then skips its own init/open
+  // and issues get/set/erase against the caller's handle. Used by the esp32 preferences path, which
+  // must open the system "esphome" namespace itself very early (before the logger) and only wants
+  // this class as the KeyValueStorage view over that handle.
+  void adopt_handle(nvs_handle_t handle) {
+    this->handle_ = handle;
+    this->opened_ = true;
+    this->initialized_ = true;
+  }
+
   storage::StorageError get_info(storage::StorageInfo *info) override;
 
   storage::StorageError get(uint32_t key, uint8_t *buf, size_t len, size_t *got) override;
@@ -56,4 +66,4 @@ class NVSStore : public storage::KeyValueStorage {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_NVS
+#endif  // USE_BINARY_STORAGE_NVS || USE_ESP32_PREFERENCES_STORAGE
