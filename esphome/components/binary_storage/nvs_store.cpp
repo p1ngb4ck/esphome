@@ -16,6 +16,17 @@ static const char *const TAG = "binary_storage.nvs";
 // preferences adoption can share this namespace. An NVS key is at most 15 chars; a uint32 is <= 10.
 static void key_to_str(uint32_t key, char *out, size_t len) { snprintf(out, len, "%u", (unsigned int) key); }
 
+// A null partition_label means the system default NVS partition (nvs_flash_init / nvs_open); a label
+// selects a dedicated one (..._partition variants). This lets one class serve both a YAML-configured
+// dedicated store and, from C++, the system "nvs" partition (e.g. for preferences).
+static esp_err_t nvs_init_for(const char *label) {
+  return label != nullptr ? nvs_flash_init_partition(label) : nvs_flash_init();
+}
+static esp_err_t nvs_erase_for(const char *label) {
+  return label != nullptr ? nvs_flash_erase_partition(label) : nvs_flash_erase();
+}
+static const char *label_str(const char *label) { return label != nullptr ? label : "nvs"; }
+
 void NVSStore::setup() {
   if (this->ensure_initialized() != storage::StorageError::OK) {
     ESP_LOGE(TAG, "NVS init failed for partition '%s'", this->partition_label_);
@@ -33,17 +44,17 @@ void NVSStore::setup() {
 storage::StorageError NVSStore::ensure_initialized() {
   if (this->initialized_)
     return storage::StorageError::OK;
-  esp_err_t err = nvs_flash_init_partition(this->partition_label_);
+  esp_err_t err = nvs_init_for(this->partition_label_);
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     // Empty or version-bumped medium: erase and re-init. This is the detect-and-format path an
     // external device hits on first boot; an internal partition already laid out is the fast case.
-    ESP_LOGW(TAG, "NVS partition '%s' empty/outdated, formatting", this->partition_label_);
-    err = nvs_flash_erase_partition(this->partition_label_);
+    ESP_LOGW(TAG, "NVS partition '%s' empty/outdated, formatting", label_str(this->partition_label_));
+    err = nvs_erase_for(this->partition_label_);
     if (err == ESP_OK)
-      err = nvs_flash_init_partition(this->partition_label_);
+      err = nvs_init_for(this->partition_label_);
   }
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_flash_init_partition('%s'): %s", this->partition_label_, esp_err_to_name(err));
+    ESP_LOGE(TAG, "nvs init('%s'): %s", label_str(this->partition_label_), esp_err_to_name(err));
     return storage::StorageError::NOT_READY;
   }
   this->initialized_ = true;
@@ -55,9 +66,11 @@ bool NVSStore::open_() {
     return true;
   if (!this->initialized_ && this->ensure_initialized() != storage::StorageError::OK)
     return false;
-  esp_err_t err = nvs_open_from_partition(this->partition_label_, this->namespace_, NVS_READWRITE, &this->handle_);
+  esp_err_t err = this->partition_label_ != nullptr
+                      ? nvs_open_from_partition(this->partition_label_, this->namespace_, NVS_READWRITE, &this->handle_)
+                      : nvs_open(this->namespace_, NVS_READWRITE, &this->handle_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "nvs_open_from_partition('%s','%s'): %s", this->partition_label_, this->namespace_,
+    ESP_LOGE(TAG, "nvs_open('%s','%s'): %s", label_str(this->partition_label_), this->namespace_,
              esp_err_to_name(err));
     return false;
   }
@@ -142,11 +155,11 @@ storage::StorageError NVSStore::format() {
     this->opened_ = false;
   }
   this->initialized_ = false;
-  esp_err_t err = nvs_flash_erase_partition(this->partition_label_);
+  esp_err_t err = nvs_erase_for(this->partition_label_);
   if (err == ESP_OK)
-    err = nvs_flash_init_partition(this->partition_label_);
+    err = nvs_init_for(this->partition_label_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "format('%s'): %s", this->partition_label_, esp_err_to_name(err));
+    ESP_LOGE(TAG, "format('%s'): %s", label_str(this->partition_label_), esp_err_to_name(err));
     return storage::StorageError::WRITE_ERROR;
   }
   this->initialized_ = true;
@@ -155,7 +168,7 @@ storage::StorageError NVSStore::format() {
 
 storage::StorageError NVSStore::get_info(storage::StorageInfo *info) {
   info->id = this->storage_id_;
-  info->name = this->storage_name_ != nullptr ? this->storage_name_ : this->partition_label_;
+  info->name = this->storage_name_ != nullptr ? this->storage_name_ : label_str(this->partition_label_);
   info->kind = "nvs";
   info->total_bytes = 0;  // NVS does not expose a simple byte total
   info->free_bytes = 0;
@@ -168,7 +181,7 @@ storage::StorageError NVSStore::get_info(storage::StorageInfo *info) {
 
 void NVSStore::dump_config() {
   ESP_LOGCONFIG(TAG, "NVS key-value store:");
-  ESP_LOGCONFIG(TAG, "  Partition: %s", this->partition_label_);
+  ESP_LOGCONFIG(TAG, "  Partition: %s", label_str(this->partition_label_));
   ESP_LOGCONFIG(TAG, "  Namespace: %s", this->namespace_);
 }
 
