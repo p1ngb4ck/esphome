@@ -514,6 +514,7 @@ DEVICE_SOURCE_FILES = {
     "spi_mram": ["spi_mram.cpp"],
     "onewire_eeprom": ["onewire_eeprom.cpp"],
     "flash_partition": ["flash_partition.cpp"],
+    "nvs": ["nvs_store.cpp"],
 }
 
 # Raw media only: flash_partition is a filesystem and shows up as a mount point, not a node.
@@ -540,6 +541,7 @@ TYPE_TO_DEVICE = {
     "ONEWIRE": "onewire_eeprom",
     "FLASH_PARTITION": "flash_partition",
     "PARTITION": "flash_partition",
+    "NVS": "nvs",
 }
 
 
