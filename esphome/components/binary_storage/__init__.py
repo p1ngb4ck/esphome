@@ -51,6 +51,7 @@ storage_ns = cg.esphome_ns.namespace("storage")
 # Base classes (from storage component)
 RawStorage = storage_ns.class_("RawStorage", cg.Component)
 FilesystemStorage = storage_ns.class_("FilesystemStorage", cg.Component)
+KeyValueStorage = storage_ns.class_("KeyValueStorage", cg.Component)
 
 # binary_storage device classes -- extend RawStorage
 BinaryStorage = binary_storage_ns.class_("BinaryStorage", RawStorage)
@@ -78,6 +79,9 @@ OneWireEEPROM = binary_storage_ns.class_("OneWireEEPROM", BinaryStorage)
 
 # Filesystem storage classes -- extend FilesystemStorage
 FlashPartition = binary_storage_ns.class_("FlashPartition", FilesystemStorage)
+
+# Key-value storage classes -- extend KeyValueStorage
+NVSStore = binary_storage_ns.class_("NVSStore", KeyValueStorage)
 LittleFSMount = binary_storage_ns.class_("LittleFSMount", FilesystemStorage)
 
 # Automation classes
@@ -104,6 +108,7 @@ CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
 CONF_MOUNT_ID = "mount_id"
 CONF_STORAGE_NAME = "storage_name"
+CONF_NAMESPACE = "namespace"
 CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
 CONF_DEVICE_NODE = "device_node"
 CONF_DEVICE_NODE_NAME = "device_node_name"
@@ -436,6 +441,30 @@ FLASH_PARTITION_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 
+# A dedicated NVS partition exposed as a KeyValueStorage. esp32 only (NVS is an ESP-IDF facility).
+# It uses its OWN partition label, never the system "nvs" partition, so it cannot collide with the
+# preferences store.
+NVS_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(NVSStore),
+            cv.Required(CONF_PARTITION_LABEL): cv.string,
+            # NVS needs at least three 4KB sectors. 4KB aligned; casing per validate_bytes.
+            cv.Optional(CONF_PARTITION_SIZE, default="64kB"): cv.All(
+                cv.validate_bytes, cv.Range(min=0x3000)
+            ),
+            # NVS namespace (max 15 chars). Defaults to a component-specific namespace so it is
+            # isolated from anything else on the same partition.
+            cv.Optional(CONF_NAMESPACE, default="binary_storage"): cv.All(
+                cv.string, cv.Length(max=15)
+            ),
+            cv.Optional(CONF_STORAGE_NAME): cv.string,
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+    cv.only_on_esp32,
+)
+
+
 # Typed schema for device selection
 def _fill_derived_mount_path(config):
     """Write the id-derived mount point into the config when the user left it out.
@@ -469,6 +498,7 @@ CONFIG_SCHEMA = cv.typed_schema(
         "ONEWIRE": ONEWIRE_EEPROM_SCHEMA,
         "FLASH_PARTITION": FLASH_PARTITION_SCHEMA,
         "PARTITION": FLASH_PARTITION_SCHEMA,
+        "NVS": NVS_SCHEMA,
     },
     key=CONF_TYPE,
     upper=True,
@@ -807,6 +837,36 @@ async def to_code(config):
         # and esp_partition flash I/O is task-safe in IDF for every instance of this driver
         # (see FlashPartition::get_capabilities()).
         request_storage_worker(task_safe=True)
+        return
+
+    if device_type == "NVS":
+        cg.add_define("USE_BINARY_STORAGE_NVS")
+        var = cg.new_Pvariable(config[CONF_ID])
+        await cg.register_component(var, config)
+
+        # Append a dedicated NVS data partition so the label exists at runtime. This is the store's
+        # own space -- never the system "nvs" partition the preferences use.
+        from esphome.components.esp32 import add_partition
+
+        size = config[CONF_PARTITION_SIZE]
+        if size % 0x1000 != 0:
+            size = (size + 0xFFF) & ~0xFFF
+        try:
+            add_partition(config[CONF_PARTITION_LABEL], "data", "nvs", size)
+        except ValueError as err:
+            raise cv.Invalid(str(err)) from err
+
+        cg.add(var.set_partition_label(config[CONF_PARTITION_LABEL]))
+        cg.add(var.set_namespace(config[CONF_NAMESPACE]))
+
+        storage_id = str(config[CONF_ID])
+        storage_name = config.get(CONF_STORAGE_NAME, config[CONF_PARTITION_LABEL])
+        cg.add(var.set_storage_id(storage_id))
+        cg.add(var.set_storage_name(storage_name))
+
+        # Key-value device -> registers with the runtime registry. No mount path (not path-based)
+        # and no worker (NVS access is fast and synchronous).
+        request_storage_device()
         return
 
     # External memory devices (FRAM, EEPROM, SPI Flash, MRAM, OneWire)
