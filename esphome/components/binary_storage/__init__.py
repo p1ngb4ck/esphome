@@ -111,6 +111,7 @@ CONF_ERASE_SIZE = "erase_size"
 CONF_JEDEC_ID = "jedec_id"
 CONF_QUAD_MODE = "quad_mode"
 CONF_MOUNT_ID = "mount_id"
+CONF_PARTITION_ID = "partition_id"
 CONF_STORAGE_NAME = "storage_name"
 CONF_NAMESPACE = "namespace"
 CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
@@ -250,6 +251,9 @@ _RAW_REGION_SCHEMA = cv.Schema(
 _LITTLEFS_REGION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_MOUNT_ID): cv.declare_id(LittleFSMount),
+        # esp_partition mode mounts the region via esp_vfs_littlefs (FlashPartition) instead of the
+        # block-callback LittleFSMount; give it its own declared id.
+        cv.GenerateID(CONF_PARTITION_ID): cv.declare_id(FlashPartition),
         cv.Optional(CONF_SIZE, default=REGION_REMAINING): region_size,
         cv.Optional(CONF_MOUNT_PATH): validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
@@ -1065,8 +1069,6 @@ async def to_code(config):
 
     # Lay out the regions on the device. Offsets/sizes were resolved in FINAL_VALIDATE
     # (_validate_regions); size 0 here means "to the end of the device" (bare whole-device raw).
-    from esphome.core import ID
-
     has_raw = any(r[CONF_FORMAT] == FORMAT_RAW for r in regions)
     if not has_raw:
         # No raw region: the device is a backing only, it does not register as raw storage.
@@ -1091,9 +1093,7 @@ async def to_code(config):
                 request_storage_device()
             elif fmt == FORMAT_LITTLEFS:
                 cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_LITTLEFS))
-                fp = cg.new_Pvariable(
-                    ID(f"{config[CONF_ID]}_{label}", is_declaration=True, type=FlashPartition)
-                )
+                fp = cg.new_Pvariable(region[CONF_PARTITION_ID])
                 await cg.register_component(fp, {})
                 cg.add(fp.set_partition_label(label))
                 mount_path = region.get(CONF_MOUNT_PATH) or f"/{config[CONF_ID]}"
