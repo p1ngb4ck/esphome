@@ -1,8 +1,9 @@
 from esphome import preferences
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_STORAGE
 from esphome.core import CORE, coroutine_with_priority
+import esphome.final_validate as fv
 from esphome.coroutine import CoroPriority
 from esphome.types import ConfigType
 
@@ -64,6 +65,27 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
+
+
+def _final_validate(config):
+    # With external_nvs, flash-backed preferences route to the external esp_partition NVS. The
+    # safe_mode boot-loop counter defaults to flash: if it lands on the external store and that
+    # store is unavailable at boot (SPI/chip fault, not yet mounted), the counter can never be
+    # reset -> boot loop, defeating the very protection safe_mode provides. Force it onto RTC.
+    if config.get(CONF_EXTERNAL_NVS) is None:
+        return config
+    safe_mode = fv.full_config.get().get("safe_mode")
+    if safe_mode is not None and safe_mode.get(CONF_STORAGE, "flash") == "flash":
+        raise cv.Invalid(
+            "with 'external_nvs' the safe_mode boot-loop counter would be stored on the external "
+            "NVS; if that store is unavailable at boot the counter cannot be reset, causing a boot "
+            "loop. Set 'safe_mode: storage: rtc' (or remove 'external_nvs').",
+            path=[CONF_EXTERNAL_NVS],
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 @coroutine_with_priority(CoroPriority.PREFERENCES)
