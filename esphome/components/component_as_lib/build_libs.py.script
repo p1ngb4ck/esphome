@@ -28,7 +28,8 @@ logging.basicConfig(level=logging.INFO)
 PROJECT_DIR = Path(env.subst("$PROJECT_DIR"))  # noqa: F821
 BUILD_DIR = Path(env.subst("$BUILD_DIR"))  # noqa: F821
 SRC_DIR = PROJECT_DIR / "src"
-GLUE_DIR = SRC_DIR / "esphome" / "component_libs"
+# Glue lives OUTSIDE src/ (see __init__.py) so it is not compiled into the firmware.
+GLUE_DIR = PROJECT_DIR / "component_libs"  # == CORE.relative_build_path(...) in __init__.py
 MANIFEST = GLUE_DIR / "manifest.json"
 
 

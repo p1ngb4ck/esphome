@@ -20,6 +20,7 @@ first `esphome compile` show the ground truth so the slice logic can be tightene
 """
 
 import logging
+import re
 from pathlib import Path
 
 import esphome.codegen as cg
@@ -113,7 +114,9 @@ async def to_code(config):
     targets = list(config[CONF_COMPONENTS])
     _LOGGER.info("component_as_lib: targets = %s", targets)
 
-    glue_dir = Path(CORE.relative_src_path("esphome", GLUE_SUBDIR))
+    # IMPORTANT: NOT under src/ -- anything under src/ is globbed into the FIRMWARE build. The glue
+    # is for the .so only, so it goes to a sibling build dir the post-build script reads.
+    glue_dir = Path(CORE.relative_build_path(GLUE_SUBDIR))
 
     # Capture, per target, EVERY slice whose component marker matches it (all entities of that
     # component). Collect index ranges first, delete tail-first so earlier indices stay valid.
@@ -154,6 +157,15 @@ async def to_code(config):
     glue_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for target, marker_name, lines in captured:
+        text = "\n".join(lines)
+        # "own" globals: declared in this slice via placement-new `new(<name>)`
+        own = set(re.findall(r"new\((\w+)\)", text))
+        # referenced identifiers that look like entity vars (heuristic, for diagnostics)
+        referenced = set(re.findall(r"\b([a-z]\w*_id\w*|[a-z]\w*_bus_\w+|\w+_id)\b", text))
+        external = sorted(r for r in referenced if r not in own)
+        _LOGGER.info("component_as_lib: '%s' own globals: %s", target, sorted(own))
+        _LOGGER.info("component_as_lib: '%s' external refs (need pass-in, static in firmware): %s",
+                     target, external)
         safe = target.replace(":", "_").replace(".", "_")
         # lines are already full rendered statements (their terminators included); just indent.
         body = "\n".join(f"  {ln}" for ln in lines)
