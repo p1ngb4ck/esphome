@@ -54,11 +54,20 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 def _marker_matches_target(marker_name: str, target: str) -> bool:
-    """A marker like 'sensor.dht' matches target 'dht' (platform) or 'sensor.dht' (qualified)."""
+    """Match a component NAME against a codegen marker.
+
+    A component's code can appear under several markers: its own domain ('mcp4461'), a sub-platform
+    of it ('mcp4461.xxx'), or it as a platform under another domain ('output.mcp4461'). So a target
+    matches when it equals the marker, the marker's domain part, or the marker's platform part.
+
+    Note: template-based platform entities (e.g. 'cover.template' -> template_::TemplateCover) are the
+    exception -- their class lives in the shared 'template' component, not in 'cover'. Those are best
+    targeted as 'template' (which pulls the whole shared component), not as 'cover'.
+    """
     if marker_name == target:
         return True
-    # platform-only target matches the '<domain>.<platform>' marker
-    return marker_name.split(".")[-1] == target
+    parts = marker_name.split(".")
+    return parts[0] == target or parts[-1] == target
 
 
 def _marker_name(stmt) -> str | None:
