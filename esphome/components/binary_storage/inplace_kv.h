@@ -12,21 +12,21 @@ namespace binary_storage {
 
 // A KeyValueStorage for byte-addressable, erase-free non-volatile memory (FRAM, MRAM). It writes
 // values in place -- no erase, no wear leveling, no flash-style garbage collection -- and is chosen
-// purely by capability: the backing device must NOT advertise RAW_WRITE_NEEDS_ERASE. Flash and
-// EEPROM are handled elsewhere.
+// purely by capability: the backing device must NOT advertise RAW_WRITE_NEEDS_ERASE.
 //
-// Layout on the medium is a header followed by variable-length entries packed in sequence. An entry
-// is only considered valid once its trailing commit marker is written, so a torn write (power loss
-// mid-write) leaves the entry ignored rather than corrupt. Updates append a new committed entry and
-// then clear the previous one; a reader takes the LAST committed+live entry for a key, so even an
-// update interrupted after commit but before the old entry is cleared still reads correctly.
+// The window is split into two equal halves. One half is active and holds a log of variable-length
+// entries [committed|live|key|len|value]; the commit marker is written last, so a torn write leaves
+// an entry ignored rather than corrupt, and readers take the last committed+live entry for a key
+// (last-wins). When the active half fills, the live entries are rebuilt into the other half and that
+// half is activated by writing its generation counter last. At the switch BOTH halves hold a
+// complete, correct view of the live data, so an interrupted compaction is always recoverable
+// regardless of write atomicity: whichever half is selected on the next boot is consistent.
 class InplaceKVStore : public storage::KeyValueStorage {
  public:
   void setup() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  // The backing byte device and the window [offset, offset+size) within it the store may use.
   void set_device(storage::RawStorage *device) { this->device_ = device; }
   void set_window(uint64_t offset, uint64_t size) {
     this->offset_ = offset;
@@ -51,20 +51,26 @@ class InplaceKVStore : public storage::KeyValueStorage {
   bool write_(uint64_t rel_offset, const uint8_t *buf, size_t len);
   bool zero_(uint64_t rel_offset, uint64_t len);
 
-  bool header_valid_();
-  bool write_header_();
+  uint64_t half_size_() const { return this->size_ / 2; }
+  uint64_t inactive_half_() const { return this->active_off_ == 0 ? this->half_size_() : 0; }
+  uint32_t half_generation_(uint64_t half_off);  // 0 when the half header is absent/invalid
+  bool write_half_header_(uint64_t half_off, uint32_t generation);
 
-  // Locate the last committed+live entry for key. Returns true and fills *entry_offset / *value_len
-  // when found. entries_end (first free offset) is filled whenever provided.
-  bool find_(uint32_t key, uint64_t *entry_offset, uint16_t *value_len, uint64_t *entries_end);
+  // Within the half at `half_off`, find the last committed+live entry for key. Fills entries_end
+  // (first free offset within the half) whenever provided.
+  bool find_in_(uint64_t half_off, uint32_t key, uint64_t *entry_offset, uint16_t *value_len,
+                uint64_t *entries_end);
+  void clear_live_before_(uint64_t half_off, uint32_t key, uint64_t keep_offset);
   storage::StorageError append_(uint32_t key, const uint8_t *data, size_t len);
-  void clear_live_before_(uint32_t key, uint64_t keep_offset);
+  storage::StorageError compact_();  // rebuild live entries into the inactive half, then activate it
 
   storage::RawStorage *device_{nullptr};
   uint64_t offset_{0};
   uint64_t size_{0};
   const char *storage_id_{nullptr};
   const char *storage_name_{nullptr};
+  uint64_t active_off_{0};
+  uint32_t active_gen_{0};
   bool initialized_{false};
 };
 
