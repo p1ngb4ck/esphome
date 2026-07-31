@@ -1104,6 +1104,7 @@ async def to_code(config):
                 request_storage_device()
                 request_path_length(256)
             elif fmt == FORMAT_NVS:
+                cg.add_define("USE_BINARY_STORAGE_NVS")
                 cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_NVS))
                 nvs_var = cg.new_Pvariable(region[CONF_ID])
                 await cg.register_component(nvs_var, {})
