@@ -2,8 +2,11 @@
 binary_storage:
   - type: FRAM
     id: fram_kv
-    address: 0x52
+    address: 0x53
     model: MB85RC256
-    mode: kv
     capacity: 32kB
     storage_name: "FRAM KV"
+    regions:
+      - format: kv
+        size: remaining
+        id: fram_kv_store
