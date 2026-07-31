@@ -359,6 +359,14 @@ static ESP32Preferences s_preferences;  // NOLINT(cppcoreguidelines-avoid-non-co
 
 ESP32Preferences *get_preferences() { return &s_preferences; }
 
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+// Rebind the flash-preference KeyValueStorage to an external store (e.g. an esp_partition NVS on
+// external flash). All flash-backed preferences created AFTER this call read/write through the new
+// store; earlier ones keep their store. Called once the external store is initialised (storage
+// stage). RTC-backed preferences (in_flash=false) are unaffected.
+void set_external_preferences_store(storage::KeyValueStorage *kv) { s_kv = kv; }
+#endif
+
 void setup_preferences() {
   s_preferences.open();
   global_preferences = &s_preferences;
