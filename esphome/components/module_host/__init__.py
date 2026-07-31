@@ -21,7 +21,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     # elf_loader dlopen path + PSRAM execution: ESP-IDF + S3/P4 only.
-    cv.only_with_esp_idf,
+    cv.only_with_framework("esp-idf")
 )
 
 
