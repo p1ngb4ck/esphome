@@ -15,6 +15,7 @@ from esphome.components.esp32 import (
 from esphome.components.storage import (
     CONF_MOUNT_PATH,
     FILE_SYSTEM_SCHEMA_ENTRY,
+    FilesystemStorage,
     MountableStorage,
     file_system_to_code,
     final_validate_file_system,
@@ -46,7 +47,7 @@ USBStorageClient = usb_storage_ns.class_(
 )
 USBStorageDevice = usb_storage_ns.class_(
     "USBStorageDevice",
-    cg.Component,
+    FilesystemStorage,
     MountableStorage,
 )
 

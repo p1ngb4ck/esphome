@@ -12,6 +12,7 @@ from esphome.components.esp32 import (
     require_vfs_dir,
 )
 from esphome.components.storage import (
+    FilesystemStorage,
     register_mount_path,
     request_path_length,
     request_storage_device,
@@ -53,7 +54,6 @@ storage_ns = cg.esphome_ns.namespace("storage")
 
 # Base classes (from storage component)
 RawStorage = storage_ns.class_("RawStorage", cg.Component)
-FilesystemStorage = storage_ns.class_("FilesystemStorage", cg.Component)
 KeyValueStorage = storage_ns.class_("KeyValueStorage", cg.Component)
 
 # binary_storage device classes -- extend RawStorage

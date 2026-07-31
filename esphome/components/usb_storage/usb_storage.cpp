@@ -661,8 +661,30 @@ void USBStorageDevice::loop() {
 }
 
 storage::StorageError USBStorageDevice::format() {
-  ESP_LOGW(TAG, "Format not implemented for USB storage");
-  return storage::StorageError::NOT_SUPPORTED;
+  if (this->fatfs_drive_ < 0) {
+    ESP_LOGE(TAG, "Cannot format: no FATFS drive (device not mounted)");
+    return storage::StorageError::NOT_FOUND;
+  }
+  char drive_path[8];
+  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
+  const bool want_exfat = this->requested_file_system_ == storage::FS_SELECT_EXFAT;
+  // Detach the mounted FATFS volume but keep the diskio drive registered so f_mkfs can reach the
+  // medium; then re-register the VFS via mount() to expose the fresh, empty filesystem.
+  f_mount(nullptr, drive_path, 0);
+  auto work = std::make_unique<uint8_t[]>(FF_MAX_SS);
+  MKFS_PARM parm{};
+  parm.fmt = want_exfat ? FM_EXFAT : (FM_FAT | FM_FAT32);
+  ESP_LOGI(TAG, "Formatting '%s' as %s...", drive_path, want_exfat ? "exFAT" : "FAT");
+  FRESULT res = f_mkfs(drive_path, &parm, work.get(), FF_MAX_SS);
+  if (res != FR_OK) {
+    ESP_LOGE(TAG, "f_mkfs failed (%d)", static_cast<int>(res));
+    this->unmount();
+    this->mount();
+    return storage::StorageError::WRITE_ERROR;
+  }
+  this->unmount();
+  this->mount();
+  return storage::StorageError::OK;
 }
 
 storage::StorageError USBStorageDevice::sync() {
