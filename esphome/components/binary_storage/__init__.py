@@ -29,12 +29,16 @@ from esphome.const import (
     CONF_MODEL,
     CONF_PIN,
     CONF_SOURCE,
+    CONF_CS_PIN,
+    CONF_DATA_RATE,
+    CONF_NUMBER,
     CONF_SPI_ID,
     CONF_TARGET,
     CONF_TYPE,
     CONF_VALUE,
 )
 from esphome.core import CORE
+import logging
 import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
@@ -114,12 +118,20 @@ CONF_DEVICE_NODE = "device_node"
 CONF_DEVICE_NODE_NAME = "device_node_name"
 
 # Storage modes (for external devices)
+_LOGGER = logging.getLogger(__name__)
+
 CONF_REGIONS = "regions"
 CONF_FORMAT = "format"
 CONF_SIZE = "size"
 FORMAT_RAW = "raw"
 FORMAT_LITTLEFS = "littlefs"
 FORMAT_KV = "kv"
+FORMAT_NVS = "nvs"
+CONF_LABEL = "label"
+SUBTYPE_DATA_NVS = 0x02
+SUBTYPE_DATA_LITTLEFS = 0x83
+SUBTYPE_DATA_UNDEFINED = 0x06
+MAX_PARTITION_LABEL = 16
 REGION_REMAINING = "remaining"
 CONF_PRE_FILL = "pre_fill"
 
@@ -231,6 +243,7 @@ _RAW_REGION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(RawStorage),
         cv.Optional(CONF_SIZE, default=REGION_REMAINING): region_size,
+        cv.Optional(CONF_LABEL): cv.string,
         cv.Optional(CONF_STORAGE_NAME): cv.string,
     }
 )
@@ -240,6 +253,18 @@ _LITTLEFS_REGION_SCHEMA = cv.Schema(
         cv.Optional(CONF_SIZE, default=REGION_REMAINING): region_size,
         cv.Optional(CONF_MOUNT_PATH): validate_mount_path,
         cv.Optional(CONF_AUTO_FORMAT, default=True): cv.boolean,
+        cv.Optional(CONF_LABEL): cv.string,
+        cv.Optional(CONF_STORAGE_NAME): cv.string,
+    }
+)
+# NVS region: only valid on esp32/esp-idf SPI flash with an exclusive bus (esp_partition mode),
+# where it becomes a real NVS partition with wear leveling.
+_NVS_REGION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(NVSStore),
+        cv.Optional(CONF_SIZE, default=REGION_REMAINING): region_size,
+        cv.Optional(CONF_LABEL): cv.string,
+        cv.Optional(CONF_NAMESPACE, default="binary_storage"): cv.string,
         cv.Optional(CONF_STORAGE_NAME): cv.string,
     }
 )
@@ -255,6 +280,7 @@ REGION_SCHEMA = cv.typed_schema(
         FORMAT_RAW: _RAW_REGION_SCHEMA,
         FORMAT_LITTLEFS: _LITTLEFS_REGION_SCHEMA,
         FORMAT_KV: _KV_REGION_SCHEMA,
+        FORMAT_NVS: _NVS_REGION_SCHEMA,
     },
     key=CONF_FORMAT,
     lower=True,
@@ -560,6 +586,27 @@ def _node_name_of(device: dict) -> str | None:
     return device.get(CONF_DEVICE_NODE_NAME) or internal
 
 
+def _esp_partition_active(config):
+    """True when a SPI flash uses the esp32/ESP-IDF esp_partition path: regions become real
+    esp_partitions driven by esp_flash on an exclusive bus. Purely internal -- derived from the
+    exclusive-bus opt-in, no separate config field."""
+    return (
+        CORE.is_esp32
+        and not CORE.using_arduino
+        and config[CONF_TYPE].upper() in ("SPI_FLASH", "FLASH")
+        and bool(config.get(CONF_ASSUME_EXCLUSIVE_BUS))
+    )
+
+
+def _region_id(region):
+    return region.get(CONF_ID) or region.get(CONF_MOUNT_ID)
+
+
+def _derive_partition_label(region):
+    rid = _region_id(region)
+    return str(rid) if rid is not None else None
+
+
 def _validate_regions(config):
     """Lay out and validate the regions on a byte device. Regions are placed sequentially in list
     order; at most one may use size: remaining (= capacity minus the explicit sizes). The resolved
@@ -583,10 +630,36 @@ def _validate_regions(config):
             f"'{CONF_SIZE}: {REGION_REMAINING}' leaves no room after the explicit sizes"
         )
     erase = config.get(CONF_ERASE_SIZE)
+    esp_part = _esp_partition_active(config)
+    sector = erase or 4096
+    seen_labels = set()
     offset = 0
     for region in regions:
         fmt = region[CONF_FORMAT]
         size = rem_size if region[CONF_SIZE] == REGION_REMAINING else region[CONF_SIZE]
+        if fmt == FORMAT_NVS and not esp_part:
+            raise cv.Invalid(
+                "format: nvs needs esp32 with ESP-IDF, a SPI flash device, and an exclusive bus "
+                "(assume_exclusive_bus: true)."
+            )
+        if esp_part:
+            if offset % sector != 0 or size % sector != 0:
+                raise cv.Invalid(
+                    f"in esp_partition mode every region must be aligned to the erase sector "
+                    f"({sector} bytes); the region at offset {offset} of size {size} is not"
+                )
+            label = region.get(CONF_LABEL) or _derive_partition_label(region)
+            if label is None:
+                raise cv.Invalid("this region needs an explicit 'label' (none could be derived)")
+            if len(label) > MAX_PARTITION_LABEL:
+                raise cv.Invalid(
+                    f"partition label '{label}' exceeds {MAX_PARTITION_LABEL} characters; set a "
+                    f"shorter explicit 'label'"
+                )
+            if label in seen_labels:
+                raise cv.Invalid(f"duplicate partition label '{label}'; set an explicit 'label'")
+            seen_labels.add(label)
+            region["_label"] = label
         if fmt == FORMAT_KV:
             if internal_type not in ("i2c_fram", "spi_fram", "spi_mram"):
                 raise cv.Invalid(
@@ -738,6 +811,18 @@ def _final_validate(config):
     regions = config.get(CONF_REGIONS) or []
     if any(r[CONF_FORMAT] == FORMAT_KV for r in regions):
         CORE.data.setdefault("binary_storage_device_types", set()).add("inplace_kv")
+    if _esp_partition_active(config):
+        # Resolve which hardware SPI host the (exclusive) bus is, for esp_flash. The bus was already
+        # validated as hardware SPI on esp32 by _validate_assume_exclusive_bus.
+        bus_id = config.get(CONF_SPI_ID)
+        fconf = fv.full_config.get()
+        bus_conf = fconf.get_config_for_path(fconf.get_path_for_id(bus_id)[:-1])
+        config["_esp_flash_host_index"] = bus_conf.get("interface_index", 0)
+        # nvs and littlefs regions still pull in their partition consumers.
+        if any(r[CONF_FORMAT] == FORMAT_NVS for r in regions):
+            CORE.data.setdefault("binary_storage_device_types", set()).add("nvs")
+        if any(r[CONF_FORMAT] == FORMAT_LITTLEFS for r in regions):
+            CORE.data.setdefault("binary_storage_device_types", set()).add("flash_partition")
     needs_littlefs = any(
         r[CONF_FORMAT] == FORMAT_LITTLEFS for r in regions
     ) or device_type in [
@@ -909,7 +994,20 @@ async def to_code(config):
 
     if is_spi:
         cg.add_define("USE_BINARY_STORAGE_SPI")
-        await spi.register_spi_device(var, config)
+        if _esp_partition_active(config):
+            # esp_partition mode: esp_flash owns the exclusive bus, so the flash is NOT registered
+            # as an ESPHome spi_device (esp_flash and spi_device cannot share a bus).
+            _LOGGER.warning(
+                "binary_storage '%s': esp_partition mode is experimental (testing stage). A wiring "
+                "or hardware fault on the flash can crash or bootloop the device at runtime.",
+                config[CONF_ID],
+            )
+            host = spi.get_spi_interface(config["_esp_flash_host_index"])
+            cs_num = config[CONF_CS_PIN][CONF_NUMBER]
+            freq_mhz = int(config.get(CONF_DATA_RATE, 40_000_000) // 1_000_000) or 40
+            cg.add(var.enable_esp_partition_mode(cg.RawExpression(host), cs_num, freq_mhz))
+        else:
+            await spi.register_spi_device(var, config)
         if device_type in ["SPI_FLASH", "FLASH"]:
             cg.add_define("USE_BINARY_STORAGE_SPI_FLASH")
         elif device_type == "SPI_FRAM":
@@ -974,11 +1072,45 @@ async def to_code(config):
         # No raw region: the device is a backing only, it does not register as raw storage.
         cg.add(var.set_raw_enabled(False))
 
+    esp_part = _esp_partition_active(config)
+
     for region in regions:
         fmt = region[CONF_FORMAT]
         offset = region.get("_offset", 0)
         size = region.get(CONF_SIZE, 0)
         size = 0 if size == REGION_REMAINING else size
+
+        if esp_part:
+            # Register the region as a real esp_partition; consumers use it by label.
+            label = region["_label"]
+            if fmt == FORMAT_RAW:
+                cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_UNDEFINED))
+                cg.add(var.set_raw_window(offset, size))
+                if (rname := region.get(CONF_STORAGE_NAME)) is not None:
+                    cg.add(var.set_storage_name(rname))
+                request_storage_device()
+            elif fmt == FORMAT_LITTLEFS:
+                cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_LITTLEFS))
+                fp = cg.new_Pvariable(
+                    ID(f"{config[CONF_ID]}_{label}", is_declaration=True, type=FlashPartition)
+                )
+                await cg.register_component(fp, {})
+                cg.add(fp.set_partition_label(label))
+                mount_path = region.get(CONF_MOUNT_PATH) or f"/{config[CONF_ID]}"
+                cg.add(fp.set_mount_path(mount_path))
+                register_mount_path(mount_path)
+                if (af := region.get(CONF_AUTO_FORMAT)) is not None:
+                    cg.add(fp.set_auto_format(af))
+                request_storage_device()
+                request_path_length(256)
+            elif fmt == FORMAT_NVS:
+                cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_NVS))
+                nvs_var = cg.new_Pvariable(region[CONF_ID])
+                await cg.register_component(nvs_var, {})
+                cg.add(nvs_var.set_partition_label(label))
+                cg.add(nvs_var.set_namespace(region[CONF_NAMESPACE]))
+                request_storage_device()
+            continue
 
         if fmt == FORMAT_RAW:
             # The device itself is the raw storage for this window (addressed by the device id).
