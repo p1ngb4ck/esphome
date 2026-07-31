@@ -41,3 +41,11 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_ELF_LOADER", True)
     add_idf_sdkconfig_option("CONFIG_ELF_DYNAMIC_LOAD_SHARED_OBJECT", True)
     add_idf_sdkconfig_option("CONFIG_ELF_LOADER_LOAD_PSRAM", True)
+    # Executing dynamically-loaded code requires the loaded region to be instruction-fetchable.
+    # Two memory-protection settings otherwise mark data/heap (where the module lands) non-executable,
+    # which faults on the first call into the module (RISC-V instruction access fault, MCAUSE=1):
+    #   ESP_SYSTEM_MEMPROT_FEATURE   -- the generic memory-protection feature
+    #   ESP_SYSTEM_PMP_IDRAM_SPLIT   -- P4/RISC-V PMP split that makes DRAM non-executable
+    # The elf_loader examples disable both; a code loader inherently needs this.
+    add_idf_sdkconfig_option("CONFIG_ESP_SYSTEM_MEMPROT_FEATURE", False)
+    add_idf_sdkconfig_option("CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT", False)
