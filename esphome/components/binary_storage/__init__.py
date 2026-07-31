@@ -82,6 +82,7 @@ FlashPartition = binary_storage_ns.class_("FlashPartition", FilesystemStorage)
 
 # Key-value storage classes -- extend KeyValueStorage
 NVSStore = binary_storage_ns.class_("NVSStore", KeyValueStorage)
+InplaceKVStore = binary_storage_ns.class_("InplaceKVStore", KeyValueStorage)
 LittleFSMount = binary_storage_ns.class_("LittleFSMount", FilesystemStorage)
 
 # Automation classes
@@ -117,6 +118,7 @@ CONF_DEVICE_NODE_NAME = "device_node_name"
 MODE_RAW = "raw"
 MODE_LITTLEFS = "littlefs"
 MODE_BOTH = "both"
+MODE_KV = "kv"
 CONF_FS_SIZE = "fs_size"
 CONF_PRE_FILL = "pre_fill"
 
@@ -224,7 +226,7 @@ EEPROM_SCHEMA = (
             cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=8, max=128),
             cv.Optional(CONF_ADDRESSING_BITS): cv.one_of(8, 9, 10, 11, 16, int=True),
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
             ),
             # mode: both only -- the split contract: LittleFS owns [0, fs_size), raw the rest
             # (rebased, so raw address 0 sits right above the filesystem). Required there,
@@ -258,7 +260,7 @@ FRAM_SCHEMA = (
             cv.Optional(CONF_CAPACITY): validate_bytes,
             cv.Optional(CONF_ADDRESSING_BITS): cv.one_of(9, 11, 16, 32, int=True),
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
             ),
             # mode: both only -- the split contract: LittleFS owns [0, fs_size), raw the rest
             # (rebased, so raw address 0 sits right above the filesystem). Required there,
@@ -295,7 +297,7 @@ SPI_FLASH_SCHEMA = (
             cv.Optional(CONF_JEDEC_ID): cv.hex_uint32_t,
             cv.Optional(CONF_QUAD_MODE, default=False): cv.boolean,
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
             ),
             # mode: both only -- the split contract: LittleFS owns [0, fs_size), raw the rest
             # (rebased, so raw address 0 sits right above the filesystem). Required there,
@@ -329,7 +331,7 @@ SPI_FRAM_SCHEMA = (
             cv.Optional(CONF_CAPACITY): validate_bytes,
             cv.Optional(CONF_ADDRESSING_BITS): cv.one_of(16, 24, int=True),
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
             ),
             # mode: both only -- the split contract: LittleFS owns [0, fs_size), raw the rest
             # (rebased, so raw address 0 sits right above the filesystem). Required there,
@@ -363,7 +365,7 @@ SPI_MRAM_SCHEMA = (
             cv.Optional(CONF_CAPACITY): validate_bytes,
             cv.Optional(CONF_ADDRESSING_BITS): cv.one_of(16, 24, int=True),
             cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+                MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
             ),
             # mode: both only -- the split contract: LittleFS owns [0, fs_size), raw the rest
             # (rebased, so raw address 0 sits right above the filesystem). Required there,
@@ -398,7 +400,7 @@ ONEWIRE_EEPROM_SCHEMA = cv.Schema(
         cv.Optional(CONF_PAGE_SIZE): cv.int_range(min=8, max=32),
         cv.Optional(CONF_ADDRESS): cv.hex_uint64_t,
         cv.Optional(CONF_MODE, default=MODE_RAW): cv.one_of(
-            MODE_RAW, MODE_LITTLEFS, MODE_BOTH, lower=True
+            MODE_RAW, MODE_LITTLEFS, MODE_BOTH, MODE_KV, lower=True
         ),
         # mode: both only -- see the sibling schemas above.
         cv.Optional(CONF_FS_SIZE): validate_bytes,
@@ -515,6 +517,7 @@ DEVICE_SOURCE_FILES = {
     "onewire_eeprom": ["onewire_eeprom.cpp"],
     "flash_partition": ["flash_partition.cpp"],
     "nvs": ["nvs_store.cpp"],
+    "inplace_kv": ["inplace_kv.cpp"],
 }
 
 # Raw media only: flash_partition is a filesystem and shows up as a mount point, not a node.
@@ -719,6 +722,15 @@ def _final_validate(config):
     if (internal_type := TYPE_TO_DEVICE.get(device_type)) is not None:
         CORE.data.setdefault("binary_storage_device_types", set()).add(internal_type)
     mode = config.get(CONF_MODE, MODE_RAW)
+    if mode == MODE_KV:
+        if internal_type not in ("i2c_fram", "spi_fram", "spi_mram"):
+            raise cv.Invalid(
+                "mode: kv (in-place key-value store) is only supported on erase-free byte "
+                "devices (FRAM/MRAM)."
+            )
+        if config.get(CONF_CAPACITY) is None:
+            raise cv.Invalid("mode: kv requires an explicit capacity (the key-value window size).")
+        CORE.data.setdefault("binary_storage_device_types", set()).add("inplace_kv")
     needs_littlefs = mode in [MODE_LITTLEFS, MODE_BOTH] or device_type in [
         "FLASH_PARTITION",
         "PARTITION",
@@ -954,6 +966,23 @@ async def to_code(config):
         # Filesystem backing only: never registers as raw storage -- no raw API presence,
         # no device node, and raw automations against it answer INVALID_ARGS.
         cg.add(var.set_raw_enabled(False))
+
+    elif mode == MODE_KV:
+        # In-place key-value store over the (erase-free) device. The device is not registered as
+        # raw storage here; the KV store is the registered storage instead.
+        cg.add_define("USE_BINARY_STORAGE_INPLACE_KV")
+        cg.add(var.set_raw_enabled(False))
+        from esphome.core import ID
+
+        kv_var = cg.new_Pvariable(
+            ID(str(config[CONF_ID]) + "_kv", is_declaration=True, type=InplaceKVStore)
+        )
+        await cg.register_component(kv_var, {})
+        cg.add(kv_var.set_device(var))
+        cg.add(kv_var.set_window(0, config[CONF_CAPACITY]))
+        cg.add(kv_var.set_storage_id(storage_id))
+        cg.add(kv_var.set_storage_name(storage_name))
+        request_storage_device()
 
     # Create LittleFSMount if mode requires filesystem access
     if mode in [MODE_LITTLEFS, MODE_BOTH]:

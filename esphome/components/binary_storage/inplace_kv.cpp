@@ -367,17 +367,16 @@ storage::StorageError InplaceKVStore::get_info(storage::StorageInfo *info) {
 }
 
 void InplaceKVStore::setup() {
-  if (this->ensure_initialized() != storage::StorageError::OK) {
-    ESP_LOGE(TAG, "In-place KV init failed");
-    this->mark_failed();
-    return;
-  }
   if (storage::global_storage_registry != nullptr) {
     if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
       ESP_LOGE(TAG, "Storage registration failed");
       this->mark_failed();
+      return;
     }
   }
+  // Best-effort: the backing bus device may not be ready yet at setup time. If so, initialization
+  // is retried lazily on the first access (ensure_initialized() runs before every operation).
+  this->ensure_initialized();
 }
 
 void InplaceKVStore::dump_config() {

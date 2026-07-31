@@ -11,3 +11,4 @@ packages:
   common: !include common.yaml
   common_littlefs: !include common.littlefs.yaml
   common_nvs: !include common.nvs.yaml
+  common_kv: !include common.kv.yaml
