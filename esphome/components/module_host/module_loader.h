@@ -1,27 +1,32 @@
 #pragma once
 #ifdef USE_ESP_IDF
 
+#include "esp_elf.h"  // esp_elf_t, esp_elf_init/relocate/deinit (pulls the symtab struct in)
+
 namespace esphome {
 namespace module_host {
 
-// A loaded module handle plus symbol resolution. Thin wrapper so nothing outside this file includes
-// esp_dlfcn.h. All use is control-plane (main task) only.
+// A module loaded from a buffer via esp_elf_relocate(). Symbol resolution walks the ELF's own
+// dynamic symbol table (esp_elf_t.symtab), the same table dlsym uses internally -- no dlopen, so no
+// loader-owned VFS access and no CONFIG_ELF_FILE_SYSTEM_BASE_PATH prefix.
 class LoadedModule {
  public:
-  bool ok() const { return this->handle_ != nullptr; }
-  // dlsym by name against the module's symbol table; nullptr if absent. Entry points are exported
-  // extern "C" so the plain names resolve.
+  bool ok() const { return this->loaded_; }
+  // Resolve an exported symbol by name (entry points are MODULE_EXPORT / visibility default).
   void *symbol(const char *name) const;
 
-  void *handle_{nullptr};  // opaque dlopen() handle
+  esp_elf_t elf_{};           // the relocated ELF
+  uint8_t *buffer_{nullptr};  // the .so bytes, kept alive while loaded (symtab may point into it)
+  bool loaded_{false};
 };
 
 class ModuleLoader {
  public:
-  // dlopen(path, RTLD_NOW). RTLD_NOW resolves every symbol at load, so a missing host export shows
-  // up here (with a captured dlerror()) instead of crashing on first call. Returns a LoadedModule
-  // whose ok() is false on failure; last_error() then holds the reason.
-  LoadedModule load(const char *path);
+  // Read the .so THROUGH the ESPHome storage interface: resolve the VFS path to its
+  // FilesystemStorage (global_storage_registry->resolve_path -> PathStorage::as_filesystem), read
+  // the whole file into a PSRAM buffer with the storage read() API, then esp_elf_relocate() from
+  // that buffer. Works with any FilesystemStorage backend, not just VFS-mounted filesystems.
+  LoadedModule load(const char *vfs_path);
   void unload(LoadedModule &mod);
   const char *last_error() const { return this->last_error_; }
 
