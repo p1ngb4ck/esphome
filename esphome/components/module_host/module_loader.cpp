@@ -88,14 +88,27 @@ LoadedModule ModuleLoader::load(const char *vfs_path) {
   if (buf == nullptr)
     return mod;
 
+  // Allocate the ELF handle on the heap so it stays put for the module's lifetime (the loader keeps
+  // pointers into it; a value copy of the handle would dangle). This mirrors dlmod's elf_dl.
+  mod.elf_ = static_cast<esp_elf_t *>(heap_caps_calloc(1, sizeof(esp_elf_t), MALLOC_CAP_8BIT));
+  if (mod.elf_ == nullptr) {
+    heap_caps_free(buf);
+    this->last_error_ = "out of memory for ELF handle";
+    return mod;
+  }
+
   // Relocate from the buffer -- no dlopen, no base-path prefix.
-  if (esp_elf_init(&mod.elf_) != 0) {
+  if (esp_elf_init(mod.elf_) != 0) {
+    heap_caps_free(mod.elf_);
+    mod.elf_ = nullptr;
     heap_caps_free(buf);
     this->last_error_ = "esp_elf_init failed";
     return mod;
   }
-  if (esp_elf_relocate(&mod.elf_, buf) != 0) {
-    esp_elf_deinit(&mod.elf_);
+  if (esp_elf_relocate(mod.elf_, buf) != 0) {
+    esp_elf_deinit(mod.elf_);
+    heap_caps_free(mod.elf_);
+    mod.elf_ = nullptr;
     heap_caps_free(buf);
     this->last_error_ = "esp_elf_relocate failed";
     return mod;
@@ -104,15 +117,18 @@ LoadedModule ModuleLoader::load(const char *vfs_path) {
   mod.buffer_ = buf;  // keep alive: the dynamic symtab may reference strings in the buffer
   mod.loaded_ = true;
   ESP_LOGD(TAG, "loaded module '%s' (%u bytes, %u symbols)", vfs_path, static_cast<unsigned>(size),
-           static_cast<unsigned>(mod.elf_.num));
+           static_cast<unsigned>(mod.elf_->num));
   return mod;
 }
 
 void ModuleLoader::unload(LoadedModule &mod) {
-  if (mod.loaded_) {
-    esp_elf_deinit(&mod.elf_);
-    mod.loaded_ = false;
+  if (mod.elf_ != nullptr) {
+    if (mod.loaded_)
+      esp_elf_deinit(mod.elf_);
+    heap_caps_free(mod.elf_);
+    mod.elf_ = nullptr;
   }
+  mod.loaded_ = false;
   if (mod.buffer_ != nullptr) {
     heap_caps_free(mod.buffer_);
     mod.buffer_ = nullptr;
@@ -120,12 +136,12 @@ void ModuleLoader::unload(LoadedModule &mod) {
 }
 
 void *LoadedModule::symbol(const char *name) const {
-  if (!this->loaded_ || this->elf_.symtab == nullptr || name == nullptr)
+  if (!this->loaded_ || this->elf_ == nullptr || this->elf_->symtab == nullptr || name == nullptr)
     return nullptr;
   // Same lookup dlsym performs internally: linear scan of the module's dynamic symbol table.
-  for (uint16_t i = 0; i < this->elf_.num; i++) {
-    if (this->elf_.symtab[i].name != nullptr && std::strcmp(this->elf_.symtab[i].name, name) == 0)
-      return this->elf_.symtab[i].addr;
+  for (uint16_t i = 0; i < this->elf_->num; i++) {
+    if (this->elf_->symtab[i].name != nullptr && std::strcmp(this->elf_->symtab[i].name, name) == 0)
+      return this->elf_->symtab[i].addr;
   }
   return nullptr;
 }
