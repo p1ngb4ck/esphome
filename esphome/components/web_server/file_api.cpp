@@ -130,6 +130,8 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
       return this->enable_mount_ ? this->handle_mount_(request, true) : this->send_forbidden_(request, "mount");
     if (url == "/files/unmount")
       return this->enable_unmount_ ? this->handle_mount_(request, false) : this->send_forbidden_(request, "unmount");
+    if (url == "/files/format")
+      return this->enable_format_ ? this->handle_format_(request) : this->send_forbidden_(request, "format");
     if (url == "/files/upload")
       return this->enable_write_ ? this->handle_upload_response_(request) : this->send_forbidden_(request, "write");
   }
@@ -286,6 +288,8 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
     json += this->enable_mount_ ? "true" : "false";
     json += ",\"unmount\":";
     json += this->enable_unmount_ ? "true" : "false";
+    json += ",\"format\":";
+    json += this->enable_format_ ? "true" : "false";
     json += "},\"storages\":[";
     struct Ctx {
       std::string *out;
@@ -320,6 +324,8 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           // struct covers any other failure, so the flag is always safe to emit.
           *ctx->out += ",\"mounted\":";
           *ctx->out += info.is_mounted ? "true" : "false";
+          *ctx->out += ",\"can_format\":";
+          *ctx->out += s->as_filesystem() != nullptr ? "true" : "false";
           if (info_err == storage::StorageError::OK) {
             *ctx->out += ",\"name\":\"";
             append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
@@ -598,6 +604,59 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
   }
   if (found_not_mountable) {
     request->send(400, "application/json", "{\"error\":\"operation not supported by this storage\"}");
+    return;
+  }
+  if (err != storage::StorageError::OK) {
+    send_error_(request, err);
+    return;
+  }
+  request->send(200, "application/json", "{}");
+}
+
+void WebServerFileApi::handle_format_(AsyncWebServerRequest *request) {
+  auto *param = request->getParam("path");
+  if (param == nullptr) {
+    request->send(400);
+    return;
+  }
+  std::string path = param->value();
+  normalize_vfs_path(path);
+  storage::StorageError err = storage::StorageError::OK;
+  bool not_formattable = false;
+  bool still_mounted = false;
+  bool ok = this->run_on_loop_([this, &path, &err, &not_formattable, &still_mounted]() {
+    const char *rel = nullptr;
+    storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
+    if (ps == nullptr || rel[0] != '\0') {  // must target a mount path exactly, not a file
+      err = storage::StorageError::NOT_FOUND;
+      return;
+    }
+    storage::FilesystemStorage *fs = ps->as_filesystem();
+    if (fs == nullptr) {
+      not_formattable = true;
+      return;
+    }
+    // Format is destructive and operates on the raw volume: require the filesystem to be unmounted
+    // first (the UI unmounts, then formats). Refuse while mounted rather than silently unmounting.
+    storage::StorageInfo info{};
+    if (fs->get_info(&info) == storage::StorageError::OK && info.is_mounted) {
+      still_mounted = true;
+      return;
+    }
+    err = fs->format();
+    if (err == storage::StorageError::OK)
+      storage::global_storage_registry->note_dir_changed("");  // the roots level: state changed
+  });
+  if (!ok) {
+    request->send(504);
+    return;
+  }
+  if (not_formattable) {
+    request->send(400, "application/json", "{\"error\":\"operation not supported by this storage\"}");
+    return;
+  }
+  if (still_mounted) {
+    request->send(409, "application/json", "{\"error\":\"unmount before formatting\"}");
     return;
   }
   if (err != storage::StorageError::OK) {

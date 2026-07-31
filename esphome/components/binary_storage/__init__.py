@@ -1095,6 +1095,9 @@ async def to_code(config):
                 cg.add(var.add_partition_region(offset, size, label, SUBTYPE_DATA_LITTLEFS))
                 fp = cg.new_Pvariable(region[CONF_PARTITION_ID])
                 await cg.register_component(fp, {})
+                # External esp_partition regions may be unmounted (e.g. to format); internal
+                # FLASH_PARTITION devices stay statically mounted.
+                cg.add(fp.set_mountable(True))
                 cg.add(fp.set_partition_label(label))
                 mount_path = region.get(CONF_MOUNT_PATH) or f"/{config[CONF_ID]}"
                 cg.add(fp.set_mount_path(mount_path))

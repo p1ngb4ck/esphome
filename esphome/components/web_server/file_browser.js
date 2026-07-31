@@ -31,7 +31,7 @@
   // Per-operation access advertised by /files/storages. Defaults are permissive so a button is
   // only ever hidden once the server has said the operation is disabled. Server-side each
   // disabled operation is still enforced with 403 — this only keeps the UI honest.
-  const ACCESS = { list: true, read: true, write: true, delete: true, mount: true, unmount: true };
+  const ACCESS = { list: true, read: true, write: true, delete: true, mount: true, unmount: true, format: false };
   // /files/storages now returns { access, storages }; capture access and return the array so the
   // two call sites can keep iterating storages as before.
   const loadStorages = async () => {
@@ -745,6 +745,11 @@
         }
         if (ACCESS.unmount && s.can_unmount && s.mounted) {
           extras.push(btn("unmount", "Unmount", () => api(`/files/unmount?path=${enc(s.mount_path)}`, { method: "POST" }), renderRoots));
+        }
+        if (ACCESS.format && s.can_format && !s.mounted) {
+          extras.push(btn("format", "Format", () => confirm(`Format ${s.mount_path}? Everything on it will be lost.`)
+            ? api(`/files/format?path=${enc(s.mount_path)}`, { method: "POST" }) : Promise.resolve(),
+            renderRoots, "efb-danger"));
         }
         const node = dirNode(s.mount_path, s.mount_path, 0, { extras, canExpand: !!s.mounted });
         const row = node.firstChild;

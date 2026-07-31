@@ -64,6 +64,7 @@ FILE_API_DEFAULTS = {
     "enable_delete": True,
     "enable_mount": True,
     "enable_unmount": True,
+    "enable_format": False,
 }
 CONF_FILE_BROWSER = "file_browser"
 CONF_ACTIONS_AS_ICONS = "actions_as_icons"
@@ -129,6 +130,7 @@ CONF_ENABLE_WRITE = "enable_write"  # /files/upload, /files/mkdir (shared with r
 CONF_ENABLE_DELETE = "enable_delete"  # /files/delete, /files/move (move deletes source)
 CONF_ENABLE_MOUNT = "enable_mount"  # /files/mount
 CONF_ENABLE_UNMOUNT = "enable_unmount"  # /files/unmount
+CONF_ENABLE_FORMAT = "enable_format"  # /files/format (destructive; default off)
 CONF_RAW_API = "raw_api"
 CONF_DEVICE_ID = "device_id"
 
@@ -451,6 +453,7 @@ CONFIG_SCHEMA = cv.All(
                     cv.Optional(CONF_ENABLE_DELETE, default=True): cv.boolean,
                     cv.Optional(CONF_ENABLE_MOUNT, default=True): cv.boolean,
                     cv.Optional(CONF_ENABLE_UNMOUNT, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_FORMAT, default=False): cv.boolean,
                 }
             ),
             # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
@@ -794,6 +797,7 @@ async def to_code(config):
         cg.add(api_var.set_enable_delete(file_api_config[CONF_ENABLE_DELETE]))
         cg.add(api_var.set_enable_mount(file_api_config[CONF_ENABLE_MOUNT]))
         cg.add(api_var.set_enable_unmount(file_api_config[CONF_ENABLE_UNMOUNT]))
+        cg.add(api_var.set_enable_format(file_api_config[CONF_ENABLE_FORMAT]))
         if storage_id := file_api_config.get(CONF_STORAGE_ID):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
         if file_browser and config[CONF_FILE_BROWSER][CONF_VARIANT] == BROWSER_ADVANCED:

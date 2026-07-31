@@ -351,6 +351,8 @@ class MountableStorage {
   virtual StorageError unmount() = 0;
 };
 
+class FilesystemStorage;  // forward -- PathStorage::as_filesystem() below
+
 class PathStorage : public Storage {
  public:
   // No-RTTI downcast hook: consumers holding a PathStorage* (e.g. from resolve_path() or
@@ -358,6 +360,9 @@ class PathStorage : public Storage {
   // dynamic_cast is unavailable (ESPHome builds with -fno-rtti). Drivers that inherit
   // MountableStorage override this with `return this;`.
   virtual MountableStorage *as_mountable() { return nullptr; }
+  // No-RTTI downcast to the filesystem interface (format/sync/open...). nullptr for
+  // path-based storages that are not filesystems.
+  virtual FilesystemStorage *as_filesystem() { return nullptr; }
 
   // The VFS mount point this storage is reachable under (e.g. "/sdcard", "/usb"). Set once by
   // the driver (typically from YAML) and treated as invariant for the lifetime of the instance --
@@ -398,6 +403,7 @@ class PathStorage : public Storage {
 class FilesystemStorage : public PathStorage {
  public:
   StorageType get_storage_type() const override { return StorageType::FILESYSTEM; }
+  FilesystemStorage *as_filesystem() override { return this; }
 
   virtual StorageError mount() = 0;
   virtual StorageError unmount() = 0;

@@ -77,6 +77,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   void set_enable_write(bool enable) { this->enable_write_ = enable; }
   void set_enable_delete(bool enable) { this->enable_delete_ = enable; }
   void set_enable_mount(bool enable) { this->enable_mount_ = enable; }
+  void set_enable_format(bool enable) { this->enable_format_ = enable; }
   void set_enable_unmount(bool enable) { this->enable_unmount_ = enable; }
 
   bool canHandle(AsyncWebServerRequest *request) const override;
@@ -115,6 +116,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 #endif
   void handle_job_(AsyncWebServerRequest *request);
   void handle_mount_(AsyncWebServerRequest *request, bool mount);
+  void handle_format_(AsyncWebServerRequest *request);
   // Sends a 403 with a small JSON body; `what` names the disallowed operation group for the log.
   void send_forbidden_(AsyncWebServerRequest *request, const char *what);
   void handle_upload_response_(AsyncWebServerRequest *request);
@@ -135,6 +137,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   bool enable_write_{true};
   bool enable_delete_{true};
   bool enable_mount_{true};
+  bool enable_format_{false};
   bool enable_unmount_{true};
   SemaphoreHandle_t op_done_{nullptr};
 
