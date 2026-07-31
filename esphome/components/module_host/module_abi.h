@@ -18,6 +18,11 @@ extern "C" {
 
 #define ESPHOME_MODULE_ABI_VERSION 1u
 
+// project_so links the module with -fvisibility=hidden and --strip-all, so every symbol the host
+// resolves with dlsym MUST be explicitly exported with default visibility. Mark each entry point
+// with MODULE_EXPORT.
+#define MODULE_EXPORT __attribute__((visibility("default")))
+
 // Functions the host exposes to the module. Keep this small and stable -- every entry is an ABI
 // commitment. For L1 it is just enough to prove the host<-module call direction works.
 typedef struct {
