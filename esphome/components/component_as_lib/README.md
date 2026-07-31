@@ -1,6 +1,8 @@
 # component_as_lib (first iteration -- diagnostic-first)
 
-Builds selected EXISTING components as loadable .so libraries, with no per-component changes and no
+Builds selected EXISTING components (by name -- a component is the shared code unit; its entities
+hold the ids, so targeting is by component/platform name, capturing all its entities) as loadable .so
+libraries, with no per-component changes and no
 esphome core edits. Runs at FINAL codegen priority, captures each target's construct+configure+
 register statements out of CORE.main_statements, redirects them into a generated .so entry
 (__lib_construct_<target>), and registers a post-build step to build the .so + targeted host-symbol
@@ -21,11 +23,12 @@ real ESPHome build. So this first version LOGS the ground truth on the first `es
 ## Config
 
     component_as_lib:
-      components: [my_component_id]     # instance ids to provide as .so
+      components: [dht]                  # component/platform NAMES (not entity ids); all entities
+                                        # of that component are captured together into one dht.so
       # dump_statements: true           # (default) log the main_statements structure
 
     module_host:                        # load the produced .so (validation pairing comes later)
-      - path: /flash/my_component_id.so
+      - path: /flash/dht.so
 
 ## What to send back after the first run
 

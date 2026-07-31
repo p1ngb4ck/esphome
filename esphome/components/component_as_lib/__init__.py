@@ -42,13 +42,23 @@ GLUE_SUBDIR = "component_libs"
 
 CONFIG_SCHEMA = cv.Schema(
     {
-        # List of component INSTANCE ids to provide as .so libraries. These must resolve to real
-        # component ids elsewhere in the YAML.
-        cv.Required(CONF_COMPONENTS): cv.ensure_list(cv.use_id(cg.Component)),
+        # List of component / platform NAMES to provide as .so libraries -- e.g. "dht" or the fully
+        # qualified marker "sensor.dht". A component is the shared code unit (one source dir under
+        # components/<name>/); ALL entities using it are captured together into one <name>.so.
+        # Components do not have ids -- their entities do -- so targeting is by name, not id.
+        cv.Required(CONF_COMPONENTS): cv.ensure_list(cv.string_strict),
         # First-iteration aid: dump the FINAL main_statements structure to the log.
         cv.Optional(CONF_DUMP_STATEMENTS, default=True): cv.boolean,
     }
 )
+
+
+def _marker_matches_target(marker_name: str, target: str) -> bool:
+    """A marker like 'sensor.dht' matches target 'dht' (platform) or 'sensor.dht' (qualified)."""
+    if marker_name == target:
+        return True
+    # platform-only target matches the '<domain>.<platform>' marker
+    return marker_name.split(".")[-1] == target
 
 
 def _marker_name(stmt) -> str | None:
@@ -91,44 +101,42 @@ async def to_code(config):
             rendered = str(s).replace("\n", " \\n ")
             _LOGGER.info("  [%3d] %-22s %s", i, type(s).__name__, rendered[:100])
 
-    # Resolve the target ids to their rendered variable-name strings so we can find their slice.
-    target_id_names = set()
-    for var in config[CONF_COMPONENTS]:
-        # cv.use_id yields the id object; its variable name is what new_Pvariable emitted.
-        target_id_names.add(str(var))
-    _LOGGER.info("component_as_lib: targets = %s", sorted(target_id_names))
+    targets = list(config[CONF_COMPONENTS])
+    _LOGGER.info("component_as_lib: targets = %s", targets)
 
     glue_dir = Path(CORE.relative_src_path("esphome", GLUE_SUBDIR))
-    captured = []  # (target_name, [rendered_lines]) preserved for the post-build glue emission
 
-    # Walk slices; a slice belongs to a target if the target's id name appears in its rendered text.
-    # Collect the exact index ranges first, then delete from the tail so earlier indices stay valid.
+    # Capture, per target, EVERY slice whose component marker matches it (all entities of that
+    # component). Collect index ranges first, delete tail-first so earlier indices stay valid.
+    per_target_lines = {t: [] for t in targets}
+    per_target_marker = {}
     to_delete = []
     for start, end, marker_name in _slice_bounds(statements):
-        slice_stmts = statements[start:end]
-        slice_text = "\n".join(str(s) for s in slice_stmts)
-        matched = [t for t in target_id_names if t in slice_text]
+        matched = [t for t in targets if _marker_matches_target(marker_name, t)]
         if not matched:
             continue
         if len(matched) > 1:
-            _LOGGER.warning(
-                "component_as_lib: slice '%s' matched multiple targets %s; needs tighter matching",
-                marker_name,
-                matched,
-            )
+            _LOGGER.warning("component_as_lib: marker '%s' matched multiple targets %s; using first",
+                            marker_name, matched)
         target = matched[0]
-        captured.append((target, marker_name, [str(s) for s in slice_stmts]))
+        slice_stmts = statements[start:end]
+        # separate each entity's slice with a blank line inside the shared __lib_construct
+        if per_target_lines[target]:
+            per_target_lines[target].append("")
+        per_target_lines[target].extend(str(s) for s in slice_stmts)
+        per_target_marker.setdefault(target, marker_name)
         to_delete.append((start, end))
 
-    # Remove captured slices from the firmware main() (tail-first to keep indices valid).
     for start, end in sorted(to_delete, reverse=True):
         del statements[start:end]
 
+    captured = [(t, per_target_marker[t], per_target_lines[t])
+                for t in targets if per_target_lines[t]]
+    missing = [t for t in targets if not per_target_lines[t]]
+    if missing:
+        _LOGGER.warning("component_as_lib: no slices captured for %s -- check the marker names in the "
+                        "dump above", missing)
     if not captured:
-        _LOGGER.warning(
-            "component_as_lib: no target slices captured -- check ids and the marker format in the "
-            "dump above before the .so build is meaningful"
-        )
         return
 
     # Emit one glue file per captured target. The post-build script compiles these together with the
@@ -137,9 +145,9 @@ async def to_code(config):
     glue_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for target, marker_name, lines in captured:
-        safe = target.replace(":", "_")
-        body = "\n".join(f"  {ln};" if not ln.rstrip().endswith((";", "{", "}")) else f"  {ln}"
-                         for ln in lines)
+        safe = target.replace(":", "_").replace(".", "_")
+        # lines are already full rendered statements (their terminators included); just indent.
+        body = "\n".join(f"  {ln}" for ln in lines)
         glue = (
             "// Generated by component_as_lib. Runs the captured construct+configure+register\n"
             f"// sequence for '{marker_name}' inside the .so; wires into the firmware App via the\n"

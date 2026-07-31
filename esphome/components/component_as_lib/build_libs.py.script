@@ -151,13 +151,13 @@ def main():
     for item in manifest:
         target = item["target"]
         glue = item["glue"]
-        # ITERATE: map the target id -> its component directory. For a platform instance the marker
-        # is "<domain>.<platform>"; the sources live under components/<platform>/ (and the base
-        # <domain>/). The first run's dump confirms the exact directory set to include.
-        comp_guess = SRC_DIR / "esphome" / "components" / item["marker"].split(".")[-1]
+        # target is the component/platform NAME -> its source dir components/<target>/. The base
+        # domain dir (e.g. sensor/) stays in the firmware and is resolved via the symbol table, so it
+        # is NOT compiled into the .so. ITERATE: confirm no other dirs are needed on the first run.
+        comp_guess = SRC_DIR / "esphome" / "components" / target
         _LOGGER.info("component_as_lib: target '%s' comp_dir guess = %s (exists=%s)",
                      target, comp_guess, comp_guess.is_dir())
-        out_so = GLUE_DIR / f"{target.replace(':', '_')}.so"
+        out_so = GLUE_DIR / f"{target.replace(':', '_').replace('.', '_')}.so"
         built = _build_so(target, glue, comp_guess, cc, out_so) if comp_guess.is_dir() else None
         if built:
             all_undefined |= set(_undefined_symbols(built))
