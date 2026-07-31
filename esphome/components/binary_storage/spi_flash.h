@@ -40,7 +40,17 @@ class SPIFlash : public BinaryStorage,
   // Component lifecycle
   void setup() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  float get_setup_priority() const override {
+#ifdef USE_ESP_IDF
+    // In esp_partition mode the regions become real partitions that later consumers (e.g. an
+    // external NVS backing preferences) resolve by label. Register them at IO -- before the
+    // DATA-priority default where most preference-reading components set up -- so the partitions
+    // exist by the time those components first touch them.
+    if (this->esp_partition_mode_)
+      return setup_priority::IO;
+#endif
+    return setup_priority::DATA;
+  }
 
   //========================================================================
   // Configuration

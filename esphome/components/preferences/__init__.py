@@ -19,6 +19,7 @@ CONF_RTC_STORAGE = "rtc_storage"
 CONF_STORAGE_BACKEND = "storage_backend"
 CONF_EXTERNAL_NVS = "external_nvs"
 CONF_KEEP_EARLY = "keep_early"
+CONF_USE_INTERNAL_NVS = "use_internal_nvs"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
@@ -54,6 +55,13 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_KEEP_EARLY): cv.All(
             cv.ensure_list(cv.use_id(cg.Component)), cv.only_on_esp32
         ),
+        # esp32 only: keep the internal system "esphome" NVS as a preferences backend. Set false
+        # only with external_nvs and when every pre-storage reader uses RTC (keep_early) -- the
+        # internal namespace is then not opened and preferences read before the external store is
+        # bound return defaults. nvs_flash_init() still runs (IDF wifi/BT may need it).
+        cv.Optional(CONF_USE_INTERNAL_NVS, default=True): cv.All(
+            cv.boolean, cv.only_on_esp32
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -73,6 +81,20 @@ async def to_code(config):
         # FILTER_SOURCE_FILES in binary_storage is exclude-based: keep nvs_store.cpp
         # compiled even though no `type: nvs` device is configured.
         CORE.data.setdefault("binary_storage_device_types", set()).add("nvs")
+    if config.get(CONF_KEEP_EARLY) and config.get(CONF_EXTERNAL_NVS) is None:
+        raise cv.Invalid(
+            f"'{CONF_KEEP_EARLY}' only applies together with '{CONF_EXTERNAL_NVS}': it marks the "
+            f"components that must NOT use the external store (they read before it is available). "
+            f"Those components route their preferences to RTC via their own in_flash/store option; "
+            f"this list is the validated intent, not an automatic router."
+        )
+    if not config.get(CONF_USE_INTERNAL_NVS, True):
+        if config.get(CONF_EXTERNAL_NVS) is None:
+            raise cv.Invalid(
+                f"'{CONF_USE_INTERNAL_NVS}: false' needs '{CONF_EXTERNAL_NVS}' -- without an "
+                f"external store there is no flash preferences backend left"
+            )
+        cg.add_define("USE_ESP32_PREFERENCES_NO_INTERNAL")
     if (external := config.get(CONF_EXTERNAL_NVS)) is not None:
         # Route flash preferences through the external esp_partition NVS store. Reuses the same
         # KeyValueStorage seam as storage_backend, so save/load/sync are unchanged.

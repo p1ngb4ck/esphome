@@ -160,6 +160,15 @@ void ESP32Preferences::open() {
   // Runs from app_main() before the logger is initialized; any logging here
   // must be deferred. See s_open_err and make_preference() below.
   nvs_flash_init();
+#ifdef USE_ESP32_PREFERENCES_NO_INTERNAL
+  // Preferences are backed by an external store bound later (set_external_preferences_store);
+  // do not open the internal "esphome" namespace or fall back to it. nvs_flash_init() above is
+  // kept because other IDF subsystems (wifi/BT calibration) may need the default partition. s_kv
+  // stays null until the external store is bound, so any preference read before then returns the
+  // default -- pre-storage readers must therefore use RTC (keep_early).
+  this->nvs_handle = 0;
+  return;
+#endif
   esp_err_t err = nvs_open("esphome", NVS_READWRITE, &this->nvs_handle);
   if (err == 0) {
 #ifdef USE_ESP32_PREFERENCES_STORAGE
