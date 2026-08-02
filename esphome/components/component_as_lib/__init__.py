@@ -224,11 +224,13 @@ async def to_code(config):
         # them with App itself (App.setup() has already run by load time, and they would take extra
         # StaticVector slots). So collect them, drop the register_component_ statements from the body,
         # and hand the pointers back through __lib_construct for the stub to drive.
-        reals = []
+        reals = []  # (name, source_index) from App.register_component_(name, index)
         for ln in code:
-            for nm in re.findall(r"App\.register_component_\((\w+)", ln):
-                if nm not in reals:
-                    reals.append(nm)
+            for m in re.finditer(r"App\.register_component_\((\w+)\s*(?:,\s*(\d+))?\)", ln):
+                name, idx = m.group(1), int(m.group(2)) if m.group(2) else 0
+                if name not in [r[0] for r in reals]:
+                    reals.append((name, idx))
+        real_names = [r[0] for r in reals]
 
         # rewrite each own global's placement-new into heap-new (`new(x) T(a)` -> `x = new T(a)`) and
         # drop the App.register_component_ calls (the stub drives these components instead).
@@ -238,9 +240,14 @@ async def to_code(config):
                 continue
             ln2 = re.sub(r"\bnew\((\w+)\)\s+", r"\1 = new ", ln)
             body_lines.append(f"  {ln2}")
+        # Set the component source index that register_component_ would have set, so the loaded
+        # component logs under its real name (e.g. "mcp4461") instead of "<unknown>". The source name
+        # is still in the firmware's PROGMEM source table (registered at to_code time).
+        for name, idx in reals:
+            body_lines.append(f"  {name}->set_component_source_({idx});")
         # publish the real components for the stub (see __lib_construct return)
-        for i, r in enumerate(reals):
-            body_lines.append(f"  g_reals_{target.replace(':', '_').replace('.', '_')}[{i}] = {r};")
+        for i, name in enumerate(real_names):
+            body_lines.append(f"  g_reals_{target.replace(':', '_').replace('.', '_')}[{i}] = {name};")
         body = "\n".join(body_lines)
 
         # own-global pointer declarations (type from the placement-new)
