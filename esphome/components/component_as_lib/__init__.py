@@ -162,10 +162,14 @@ async def to_code(config):
     # from the first on-device run; esphome.h pulls in all component types + the extern App.
     glue_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build a name -> constructed-type map from EVERY placement-new in main_statements, so both the
-    # target's own globals and any external dependency it references can be declared/cast with the
-    # right type. e.g. "i2c_bus_a" -> "i2c::IDFI2CBus", "mcp4461_output" -> "mcp4461::Mcp4461Component".
+    # Build a name -> constructed-type map from EVERY placement-new, so both the target's own globals
+    # and any external dependency it references can be declared/cast with the right type. e.g.
+    # "i2c_bus_a" -> "i2c::IDFI2CBus", "mcp4461_output" -> "mcp4461::Mcp4461Component". The captured
+    # slices were already removed from `statements`, so union the remaining statements (external deps)
+    # with the captured lines (own globals) -- otherwise own-global types resolve to void.
     all_text = "\n".join(str(st) for st in statements)
+    for _t, _m, _lines in captured:
+        all_text += "\n" + "\n".join(_lines)
     type_of = {}
     for m in re.finditer(r"new\((\w+)\)\s+([A-Za-z_][\w:]*(?:<[^;]*?>)?)", all_text):
         type_of.setdefault(m.group(1), m.group(2))
@@ -197,6 +201,10 @@ async def to_code(config):
         body = "\n".join(body_lines)
 
         # own-global pointer declarations (type from the placement-new)
+        missing_types = [n for n in own if n not in type_of]
+        if missing_types:
+            _LOGGER.error("component_as_lib: '%s' could not resolve types for %s -- glue will be "
+                          "wrong; check the placement-new rendering", target, missing_types)
         decls = "\n".join(
             f"static {type_of.get(n, 'void')} *{n};" for n in own
         )
