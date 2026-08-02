@@ -26,6 +26,13 @@ class LibComponentStub : public Component {
     for (uint32_t i = 0; i < this->real_count_; i++)
       this->reals_[i]->call();
   }
+  // Forward config dump to the real component(s). App drives the stub's dump_config (it is in
+  // components_); the reals are not, so without this their config would never be printed. The stub is
+  // registered late, so its dump turn comes after the .so has loaded and attach() ran.
+  void dump_config() override {
+    for (uint32_t i = 0; i < this->real_count_; i++)
+      this->reals_[i]->dump_config();
+  }
   float get_setup_priority() const override { return setup_priority::LATE; }
 
   // Called by module_host (main-loop context) after the .so is loaded and __lib_construct produced
