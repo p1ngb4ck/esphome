@@ -58,7 +58,7 @@ bool ModuleHost::try_load_() {
   // module_init runs the module's own .init_array (the loader does not) and validates the ABI.
   uint32_t v = init(&HOST_API);
   if (v != ESPHOME_MODULE_ABI_VERSION) {
-    ESP_LOGE(TAG, "module ABI mismatch (module=%u host=%u)", v, ESPHOME_MODULE_ABI_VERSION);
+    ESP_LOGE(TAG, "module ABI mismatch (module=%u host=%u)", (unsigned) v, (unsigned) ESPHOME_MODULE_ABI_VERSION);
     this->loader_.unload(this->module_);
     return false;
   }
