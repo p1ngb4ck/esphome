@@ -25,12 +25,18 @@ from pathlib import Path
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
+from esphome.const import CONF_ID, CONF_NAME
 from esphome.core import CORE
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.cpp_generator import LineComment
 
 _LOGGER = logging.getLogger(__name__)
+
+module_host_ns = cg.esphome_ns.namespace("module_host")
+LibComponentStub = module_host_ns.class_("LibComponentStub", cg.Component)
+
+# component_as_lib emits a firmware-side stub per target; module_host is the loader.
+DEPENDENCIES = ["module_host"]
 
 CODEOWNERS = ["@p1ngb4ck"]
 
@@ -47,13 +53,27 @@ LIB_BUILDER_NAME = "p1ngb4ck/esphome_component_as_lib"
 LIB_BUILDER_REPO = "https://github.com/p1ngb4ck/esphome_component_as_lib.git"
 LIB_BUILDER_REF = "main"
 
+def _target_schema(value):
+    # Accept a bare component NAME (string) or a dict; always attach a declared stub id so the stub
+    # reserves a Component/looping slot at validation time (config.py adds Component-typed ids to
+    # CORE.component_ids). register_component() later consumes that id count-safely.
+    if isinstance(value, str):
+        value = {CONF_NAME: value}
+    return cv.Schema(
+        {
+            cv.Required(CONF_NAME): cv.string_strict,
+            cv.GenerateID(CONF_ID): cv.declare_id(LibComponentStub),
+        }
+    )(value)
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         # List of component / platform NAMES to provide as .so libraries -- e.g. "dht" or the fully
         # qualified marker "sensor.dht". A component is the shared code unit (one source dir under
         # components/<name>/); ALL entities using it are captured together into one <name>.so.
         # Components do not have ids -- their entities do -- so targeting is by name, not id.
-        cv.Required(CONF_COMPONENTS): cv.ensure_list(cv.string_strict),
+        cv.Required(CONF_COMPONENTS): cv.ensure_list(_target_schema),
         # First-iteration aid: dump the FINAL main_statements structure to the log.
         cv.Optional(CONF_DUMP_STATEMENTS, default=True): cv.boolean,
     }
@@ -111,13 +131,18 @@ def _slice_bounds(statements):
 async def to_code(config):
     statements = CORE.main_statements
 
+    # Signals module_host to compile its LibComponentStub + lib-construct path (guarded in C++).
+    cg.add_define("USE_COMPONENT_AS_LIB")
+
+    stub_ids = {c[CONF_NAME]: c[CONF_ID] for c in config[CONF_COMPONENTS]}
+
     if config[CONF_DUMP_STATEMENTS]:
         _LOGGER.info("component_as_lib: main_statements dump (%d entries)", len(statements))
         for i, s in enumerate(statements):
             rendered = str(s).replace("\n", " \\n ")
             _LOGGER.info("  [%3d] %-22s %s", i, type(s).__name__, rendered[:100])
 
-    targets = list(config[CONF_COMPONENTS])
+    targets = [c[CONF_NAME] for c in config[CONF_COMPONENTS]]
     _LOGGER.info("component_as_lib: targets = %s", targets)
 
     # IMPORTANT: NOT under src/ -- anything under src/ is globbed into the FIRMWARE build. The glue
@@ -193,11 +218,28 @@ async def to_code(config):
 
         _LOGGER.info("component_as_lib: '%s' own=%s external=%s", target, own, external)
 
-        # rewrite each own global's placement-new into heap-new: `new(x) T(a)` -> `x = new T(a)`
+        # The components that App would normally register (App.register_component_(x, N)) are the
+        # "real" components the firmware-side stub will drive via call(). The .so must NOT register
+        # them with App itself (App.setup() has already run by load time, and they would take extra
+        # StaticVector slots). So collect them, drop the register_component_ statements from the body,
+        # and hand the pointers back through __lib_construct for the stub to drive.
+        reals = []
+        for ln in code:
+            for nm in re.findall(r"App\.register_component_\((\w+)", ln):
+                if nm not in reals:
+                    reals.append(nm)
+
+        # rewrite each own global's placement-new into heap-new (`new(x) T(a)` -> `x = new T(a)`) and
+        # drop the App.register_component_ calls (the stub drives these components instead).
         body_lines = []
         for ln in code:
+            if re.match(r"\s*App\.register_component_\(", ln):
+                continue
             ln2 = re.sub(r"\bnew\((\w+)\)\s+", r"\1 = new ", ln)
             body_lines.append(f"  {ln2}")
+        # publish the real components for the stub (see __lib_construct return)
+        for i, r in enumerate(reals):
+            body_lines.append(f"  g_reals_{target.replace(':', '_').replace('.', '_')}[{i}] = {r};")
         body = "\n".join(body_lines)
 
         # own-global pointer declarations (type from the placement-new)
@@ -220,23 +262,30 @@ async def to_code(config):
             "// here) and receives external firmware dependencies via deps[] (they are 'static' in\n"
             "// main.cpp and cannot be linked by name). Wires into the firmware App via exported symbols.\n"
             "//\n"
-            "// The construction runs inside original_setup(), which esphome::Application declares as a\n"
-            "// friend (core/application.h), so it may call the protected register_component_ exactly as\n"
-            "// the codegen-generated main.cpp setup() does. It is hidden (-fvisibility=hidden), so it is\n"
-            "// independent of the firmware's own original_setup.\n"
+            "// The construction runs inside original_setup(), which esphome::Application AND\n"
+            "// esphome::Component declare as a friend (core/application.h, core/component.h). It builds\n"
+            "// and configures the component(s) but does NOT register them with App; the firmware-side\n"
+            "// module_host::LibComponentStub drives each returned component through its normal state\n"
+            "// machine via call(). original_setup is hidden (-fvisibility=hidden), independent of the\n"
+            "// firmware's own. __lib_construct is exported (default visibility) so module_host can dlsym\n"
+            "// it, and returns the real components + count for the stub.\n"
             '#include "esphome.h"\n\n'
             "using namespace esphome;  // NOLINT\n\n"
             f"{decls}\n"
-            f"static void **__lib_deps_{safe};\n\n"
+            f"static void **__lib_deps_{safe};\n"
+            f"static Component *g_reals_{safe}[{max(len(reals), 1)}];\n\n"
             "void original_setup() {\n"
             f"  void **deps = __lib_deps_{safe};\n"
             "  (void) deps;\n"
             f"{dep_casts}\n"
             f"{body}\n"
             "}\n\n"
-            f'extern "C" void __lib_construct_{safe}(void **deps) {{\n'
+            "extern \"C\" __attribute__((visibility(\"default\")))\n"
+            f"Component **__lib_construct_{safe}(void **deps, uint32_t *count) {{\n"
             f"  __lib_deps_{safe} = deps;\n"
             "  original_setup();\n"
+            f"  *count = {len(reals)};\n"
+            f"  return g_reals_{safe};\n"
             "}\n"
         )
         out = glue_dir / f"{safe}.lib.cpp"
@@ -247,6 +296,20 @@ async def to_code(config):
             "external_types": [type_of[d] for d in external],
         })
         _LOGGER.info("component_as_lib: wrote glue for '%s' -> %s (deps=%s)", marker_name, out, external)
+
+        # Firmware side (stays in main.cpp, where the entity statics are visible): the generic stub
+        # occupies the reserved slot and stays dormant (disable_loop) until module_host attaches the
+        # real component(s). Where the .so needs external deps, build the void* array here from the
+        # visible statics. module_host connects stub + deps to __lib_construct by basename == safe.
+        stub = cg.new_Pvariable(stub_ids[target])
+        await cg.register_component(stub, {})
+        if external:
+            arr = ", ".join(f"(void *) {d}" for d in external)
+            cg.add(cg.RawStatement(f"static void *__lib_deps_{safe}[] = {{{arr}}};"))
+            cg.add(module_host_ns.register_lib(safe, stub, cg.RawExpression(f"__lib_deps_{safe}"),
+                                               len(external)))
+        else:
+            cg.add(module_host_ns.register_lib(safe, stub, cg.RawExpression("nullptr"), 0))
 
     (glue_dir / "manifest.json").write_text(
         __import__("json").dumps(manifest, indent=2), encoding="utf-8"
