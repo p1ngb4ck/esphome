@@ -32,7 +32,6 @@ class ModuleHost : public Component {
 #ifdef USE_COMPONENT_AS_LIB
   bool try_lib_construct_();  // component_as_lib path: __lib_construct_<name>(deps) -> attach stub
 #endif
-  bool try_lib_construct_();  // component_as_lib path: __lib_construct_<name>(deps) -> attach stub
 
   const char *module_path_{nullptr};
   ModuleState state_{ModuleState::WAITING_STORAGE};

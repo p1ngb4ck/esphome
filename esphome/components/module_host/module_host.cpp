@@ -6,9 +6,6 @@
 #include <cstring>
 #include <cstdio>
 #endif
-#include "lib_stub.h"
-#include <cstring>
-#include <cstdio>
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"  // millis()
 
@@ -35,21 +32,6 @@ static bool lib_basename_(const char *path, char *out, size_t out_len) {
   return true;
 }
 #endif
-
-// Derive the .so basename with no directory and no extension: /flash/mcp4461.so -> "mcp4461".
-static bool lib_basename_(const char *path, char *out, size_t out_len) {
-  if (path == nullptr)
-    return false;
-  const char *slash = std::strrchr(path, '/');
-  const char *b = slash ? slash + 1 : path;
-  const char *dot = std::strrchr(b, '.');
-  size_t len = dot ? static_cast<size_t>(dot - b) : std::strlen(b);
-  if (len == 0 || len >= out_len)
-    return false;
-  std::memcpy(out, b, len);
-  out[len] = '\0';
-  return true;
-}
 static const uint32_t RETRY_INTERVAL_MS = 2000;
 static const uint8_t MAX_ATTEMPTS = 5;
 
@@ -93,10 +75,12 @@ bool ModuleHost::try_load_() {
   this->loop_fn_ = reinterpret_cast<module_loop_fn>(this->module_.symbol(MODULE_SYM_LOOP));  // optional
 
   if (init == nullptr || add == nullptr) {
-    // Not an L1 module. Try the component_as_lib path: a .so whose real component(s) are constructed
-    // by __lib_construct_<name>(deps) and driven by a firmware-side stub (see lib_stub.h).
+#ifdef USE_COMPONENT_AS_LIB
+    // Not an L1 module. Try the component_as_lib path: real component(s) built by
+    // __lib_construct_<name>(deps) and driven by a firmware-side LibComponentStub.
     if (this->try_lib_construct_())
       return true;
+#endif
     ESP_LOGE(TAG, "module '%s' has neither L1 (%s/%s) nor a component_as_lib entry", this->module_path_,
              MODULE_SYM_INIT, MODULE_SYM_ADD);
     this->loader_.unload(this->module_);
@@ -172,28 +156,6 @@ void ModuleHost::dump_config() {
   ESP_LOGCONFIG(TAG, "Module host:");
   ESP_LOGCONFIG(TAG, "  path: %s", this->module_path_ != nullptr ? this->module_path_ : "(none)");
   ESP_LOGCONFIG(TAG, "  state: %s", s);
-}
-
-bool ModuleHost::try_lib_construct_() {
-  char base[64];
-  if (!lib_basename_(this->module_path_, base, sizeof(base)))
-    return false;
-  const LibEntry *entry = find_lib(base);
-  if (entry == nullptr)
-    return false;  // not a component_as_lib .so we were told about
-  char sym[96];
-  std::snprintf(sym, sizeof(sym), "__lib_construct_%s", base);
-  using construct_fn = Component **(*) (void **, uint32_t *);
-  auto construct = reinterpret_cast<construct_fn>(this->module_.symbol(sym));
-  if (construct == nullptr) {
-    ESP_LOGE(TAG, "lib '%s': entry symbol %s not found in module", base, sym);
-    return false;
-  }
-  uint32_t count = 0;
-  Component **reals = construct(entry->deps, &count);
-  entry->stub->attach(reals, count);
-  ESP_LOGI(TAG, "lib '%s': constructed %u component(s), attached to stub", base, (unsigned) count);
-  return true;
 }
 
 #ifdef USE_COMPONENT_AS_LIB
