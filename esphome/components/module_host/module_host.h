@@ -29,6 +29,10 @@ class ModuleHost : public Component {
  protected:
   bool storage_ready_();  // is module_path_ reachable (its filesystem mounted)?
   bool try_load_();       // dlopen + resolve required symbols + module_init + L1 proofs
+#ifdef USE_COMPONENT_AS_LIB
+  bool try_lib_construct_();  // component_as_lib path: __lib_construct_<name>(deps) -> attach stub
+#endif
+  bool try_lib_construct_();  // component_as_lib path: __lib_construct_<name>(deps) -> attach stub
 
   const char *module_path_{nullptr};
   ModuleState state_{ModuleState::WAITING_STORAGE};
