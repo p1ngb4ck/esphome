@@ -15,7 +15,8 @@ The exact content of CORE.main_statements (marker text, slice boundaries) and th
 tree (compile_commands.json location, ELF name, per-component source set) can only be confirmed on a
 real ESPHome build. So this first version LOGS the ground truth on the first `esphome compile`:
 - __init__.py dumps the FINAL main_statements structure and which target slices it captured.
-- build_libs.py.script logs the discovered build dir / compile_commands.json / ELF / per-target
+- the helper IDF component's tools/build_libs.py logs the discovered compile_commands.json + builds
+  each .so + reports its undefined symbols (run in-build after the firmware binary).
   source dir, builds the .so's, and reports each .so's undefined symbols -- but deliberately does NOT
   yet generate the symbol table or relink the firmware (that is the next iteration, once the
   discovery output confirms the paths).

@@ -12,7 +12,7 @@ statements to CORE.main_statements. For each configured target it:
   3. renders the slice into a generated .so entry `extern "C" void __lib_construct_<n>()` written to
      a glue file the post-build script compiles into <target>.so,
   4. registers the post-build script that builds the .so's, generates the targeted host-symbol table,
-     and relinks the firmware (see build_libs.py.script).
+     and relinks the firmware (done in the helper IDF component, next iteration).
 
 NOTE (first iteration): this file also DUMPS the real main_statements structure at FINAL, because the
 exact marker text and slice boundaries can only be confirmed on a real ESPHome run. The dump lets the
@@ -40,6 +40,12 @@ CONF_DUMP_STATEMENTS = "dump_statements"
 # The generated glue + the .so build output live under the build src tree so the post-build script
 # and the copied-source tree see them.
 GLUE_SUBDIR = "component_libs"
+
+# Helper IDF component (separate repo) that ships the project_include.cmake driving the in-build .so
+# build. Adjust these if the repo is renamed/moved.
+LIB_BUILDER_NAME = "p1ngb4ck/esphome_component_as_lib"
+LIB_BUILDER_REPO = "https://github.com/p1ngb4ck/esphome_component_as_lib.git"
+LIB_BUILDER_REF = "main"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -223,11 +229,15 @@ async def to_code(config):
         })
         _LOGGER.info("component_as_lib: wrote glue for '%s' -> %s (deps=%s)", marker_name, out, external)
 
-    # Register the post-build step (build .so's, targeted symbol export, relink). esp32-only hook.
-    from esphome.components.esp32 import add_extra_script
-
-    add_extra_script(
-        "post",
-        "component_as_lib_build.py",
-        Path(__file__).parent / "build_libs.py.script",
+    (glue_dir / "manifest.json").write_text(
+        __import__("json").dumps(manifest, indent=2), encoding="utf-8"
     )
+
+    # Native ESP-IDF hook (no PlatformIO, no core edits): pull in the helper IDF component, whose
+    # project_include.cmake compiles the emitted glue + component sources into <target>.so as a
+    # project-scope custom target after the firmware binary is built. Gated on the manifest existing.
+    from esphome.components.esp32 import add_idf_component
+
+    add_idf_component(name=LIB_BUILDER_NAME, repo=LIB_BUILDER_REPO, ref=LIB_BUILDER_REF)
+    _LOGGER.info("component_as_lib: .so build runs in-build via %s (%s@%s)",
+                 LIB_BUILDER_NAME, LIB_BUILDER_REPO, LIB_BUILDER_REF)
