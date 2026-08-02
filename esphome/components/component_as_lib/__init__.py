@@ -74,8 +74,9 @@ CONFIG_SCHEMA = cv.Schema(
         # components/<name>/); ALL entities using it are captured together into one <name>.so.
         # Components do not have ids -- their entities do -- so targeting is by name, not id.
         cv.Required(CONF_COMPONENTS): cv.ensure_list(_target_schema),
-        # First-iteration aid: dump the FINAL main_statements structure to the log.
-        cv.Optional(CONF_DUMP_STATEMENTS, default=True): cv.boolean,
+        # Diagnostic aid: dump the FINAL main_statements structure to the log. Off by default (it is
+        # very large); set true only when investigating what the slicer captured.
+        cv.Optional(CONF_DUMP_STATEMENTS, default=False): cv.boolean,
     }
 )
 
