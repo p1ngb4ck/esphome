@@ -41,8 +41,11 @@ bool ModuleHost::storage_ready_() {
 
 bool ModuleHost::try_load_() {
   this->module_ = this->loader_.load(this->module_path_);
-  if (!this->module_.ok())
+  if (!this->module_.ok()) {
+    const char *e = this->loader_.last_error();
+    ESP_LOGE(TAG, "load failed for '%s': %s", this->module_path_, e ? e : "unknown");
     return false;
+  }
 
   auto init = reinterpret_cast<module_init_fn>(this->module_.symbol(MODULE_SYM_INIT));
   auto add = reinterpret_cast<module_add_fn>(this->module_.symbol(MODULE_SYM_ADD));
