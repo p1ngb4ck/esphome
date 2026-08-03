@@ -65,8 +65,8 @@
   function pathOf(folder) {
     var parts = folder.GetPath();
     if (parts.length <= 1) return '';
-    var p = parts[1].id;
-    for (var i = 2; i < parts.length; i++) p += '/' + parts[i].name;
+    var p = parts[1][0];
+    for (var i = 2; i < parts.length; i++) p += '/' + parts[i][1];
     return p;
   }
 
@@ -352,7 +352,7 @@
     function pathFromParts(parts) {
       var p = '';
       for (var i = 1; i < parts.length; i++) {
-        p = i === 1 ? parts[i].id : p + '/' + parts[i].name;
+        p = i === 1 ? parts[i][0] : p + '/' + parts[i][1];
       }
       return p;
     }
