@@ -118,6 +118,11 @@
       type: isDir ? 'folder' : 'file',
       size: isDir ? undefined : size,
       hash: String(mtime || 0),
+      // Folders carry attrs.canmodify so the widget enables its modify tools (delete, rename,
+      // new folder/file) inside a storage. The synthetic root stays canmodify:false via
+      // initpath, so the storages themselves are not deletable. Without attrs the widget reads
+      // canmodify off an undefined path segment and its tool handlers throw.
+      attrs: { canmodify: true },
     };
   }
 
@@ -463,6 +468,8 @@
         var pending = entries.length;
         var failure = null;
         if (!pending) return deleted(true);
+        var what = entries.length === 1 ? '"' + entries[0].name + '"' : entries.length + ' items';
+        if (!window.confirm('Delete ' + what + '? This cannot be undone.')) return deleted(false);
         entries.forEach(function (entry) {
           var url = API + '/delete' + q({ path: childPath(folder, entry.name), recursive: '1' });
           request('POST', url, function (ok, body, status) {
