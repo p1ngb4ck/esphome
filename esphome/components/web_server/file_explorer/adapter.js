@@ -133,6 +133,8 @@
         var s = body.storages[i];
         var e = entryFor(s.mounted ? s.mount_path : s.mount_path + '  (not mounted)', true, 0, 0, s.mount_path);
         e.esphMounted = s.mounted;
+        e.esphCanMount = !!s.can_mount;
+        e.esphCanUnmount = !!s.can_unmount;
         entries.push(e);
       }
       cb(null, entries);
@@ -347,6 +349,8 @@
   function build(parent, access) {
     var canWrite = !!access.write;
     var canRead = !!access.read;
+    var canMount = !!access.mount;
+    var canUnmount = !!access.unmount;
 
     // Rebuilds a node-side path from the widget's source-path model.
     function pathFromParts(parts) {
@@ -402,6 +406,12 @@
         if (isImage(entry.name)) return showImage(path, entry.name);
         if (isText(entry.name)) return showEditor(path, entry.name, canWrite);
         window.location = API + '/download' + q({ path: path });
+      },
+
+      // Mount/unmount are per-storage, so they are toolbar tools that only light up when a
+      // single root storage advertising the capability is selected -- see build() below.
+      onselchanged: function () {
+        updateStorageTools();
       },
     };
 
@@ -486,13 +496,52 @@
     }
 
     var fe = new FileExplorer(parent, opts);
-    addTools(fe, parent, canWrite);
+
+    // Per-storage mount/unmount: a toolbar button added only when the node permits the
+    // operation at all (server still enforces it with 403). updateStorageTools() then shows
+    // it only while a single root storage that supports the operation is selected, and it
+    // acts on that storage's mount path.
+    function makeStorageTool(cls, title, endpoint) {
+      var btn = fe.AddToolbarButton(cls, title);
+      btn.classList.add('fe_fileexplorer_hidden');
+      btn.addEventListener('click', function () {
+        if (btn.classList.contains('fe_fileexplorer_disabled')) return;
+        var sel = fe.GetSelectedFolderEntries();
+        if (sel.length !== 1) return;
+        var path = sel[0].id;
+        request('POST', API + endpoint + q({ path: path }), function (ok, body, status) {
+          if (!ok) window.alert(title.toLowerCase() + ' failed: ' + errorText(body, status));
+          fe.RefreshFolders(true);
+        });
+      });
+      return btn;
+    }
+
+    function toggleTool(btn, show) {
+      if (!btn) return;
+      btn.classList.toggle('fe_fileexplorer_hidden', !show);
+      btn.classList.toggle('fe_fileexplorer_disabled', !show);
+    }
+
+    function updateStorageTools() {
+      var atRoot = pathOf(fe.GetCurrentFolder()) === '';
+      var sel = atRoot && fe.GetNumSelectedItems() === 1 ? fe.GetSelectedFolderEntries() : [];
+      var e = sel.length === 1 ? sel[0] : null;
+      toggleTool(mountTool, !!(e && e.esphCanMount && !e.esphMounted));
+      toggleTool(unmountTool, !!(e && e.esphCanUnmount && e.esphMounted));
+      fe.ToolStateUpdated();
+    }
+
+    var mountTool = canMount ? makeStorageTool('esph-fe-tool-mount', 'Mount storage', '/mount') : null;
+    var unmountTool = canUnmount ? makeStorageTool('esph-fe-tool-unmount', 'Unmount storage', '/unmount') : null;
+
+    addTools(fe, parent);
     return fe;
   }
 
-  // The storage actions and the log follower live in a strip above the widget rather than
-  // inside its toolbar, so a newer upstream file-explorer.js needs no adjustment here.
-  function addTools(fe, parent, canWrite) {
+  // The log follower lives in a strip above the widget; mount/unmount moved into the widget
+  // toolbar as per-storage tools (see build()).
+  function addTools(fe, parent) {
     var bar = document.createElement('div');
     bar.className = 'esph-fe-bar';
 
@@ -501,25 +550,6 @@
       b.textContent = label;
       b.onclick = fn;
       bar.appendChild(b);
-    }
-
-    if (canWrite) {
-      tool('Mount', function () {
-        var path = window.prompt('Storage to mount (e.g. /sdcard)');
-        if (!path) return;
-        request('POST', API + '/mount' + q({ path: path }), function (ok, body, status) {
-          if (!ok) window.alert('mount failed: ' + errorText(body, status));
-          fe.Refresh();
-        });
-      });
-      tool('Unmount', function () {
-        var path = window.prompt('Storage to unmount (e.g. /sdcard)');
-        if (!path) return;
-        request('POST', API + '/unmount' + q({ path: path }), function (ok, body, status) {
-          if (!ok) window.alert('unmount failed: ' + errorText(body, status));
-          fe.Refresh();
-        });
-      });
     }
 
     tool('Follow file', function () {

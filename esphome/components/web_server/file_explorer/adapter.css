@@ -188,3 +188,18 @@
   font-size: 0.85em;
   opacity: 0.6;
 }
+
+/* Per-storage mount/unmount live in the widget toolbar and are shown by adapter.js only while
+   a single root storage that supports the operation is selected. The 34x34 button and its
+   24x24 ::before come from file-explorer.css; only the icon is set here. */
+#esp-file-explorer .esph-fe-tool-mount::before,
+#esp-file-explorer .esph-fe-tool-unmount::before {
+  background-size: 24px 24px;
+  image-rendering: auto;
+}
+#esp-file-explorer .esph-fe-tool-mount::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v10'/%3E%3Cpolyline points='8 9 12 13 16 9'/%3E%3Cpath d='M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3'/%3E%3C/svg%3E");
+}
+#esp-file-explorer .esph-fe-tool-unmount::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4l7 9H5z'/%3E%3Cline x1='5' y1='18' x2='19' y2='18'/%3E%3C/svg%3E");
+}
