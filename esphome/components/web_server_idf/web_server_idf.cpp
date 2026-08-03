@@ -1225,6 +1225,15 @@ esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &bou
       handler->handleUpload(&req, filename, index, nullptr, 0, true);  // End
       filename.clear();
       index = 0;
+    } else if (allow_empty && reader->has_file()) {
+      // Explicitly-requested empty file: the part named a file but carried no data. Drive
+      // the markers here, while current_part_ is still valid -- on_part_data_end resets it
+      // immediately after this callback returns.
+      const std::string &empty_name = reader->get_current_part().filename;
+      if (!empty_name.empty()) {
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, false);  // Start
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, true);   // End
+      }
     }
   });
 
@@ -1253,16 +1262,6 @@ esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &bou
     if (bytes_since_yield > YIELD_INTERVAL_BYTES) {
       vTaskDelay(1);
       bytes_since_yield = 0;
-    }
-  }
-
-  // Explicitly-requested empty file: no data reached handleUpload (filename is still unset),
-  // so drive the start/end markers here with the name from the part header.
-  if (allow_empty && reader->has_file() && filename.empty()) {
-    const std::string &empty_name = reader->get_current_part().filename;
-    if (!empty_name.empty()) {
-      handler->handleUpload(&req, empty_name, 0, nullptr, 0, false);  // Start
-      handler->handleUpload(&req, empty_name, 0, nullptr, 0, true);   // End
     }
   }
 
