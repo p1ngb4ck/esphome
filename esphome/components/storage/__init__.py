@@ -352,7 +352,7 @@ def request_storage_worker(task_safe: bool = False) -> None:
         data.worker_task_safe = True
 
 
-def _transfer_buffer_final_validate(config):
+def _transfer_buffer_final_validate(config: ConfigType) -> ConfigType:
     has_psram = "psram" in fv.full_config.get()
     if "enable_psram_transfer_buffer" in config and not has_psram:
         raise cv.Invalid(
@@ -1294,7 +1294,7 @@ _SENSOR_PREF_KINDS = {
 _COMPONENT_PREF_KEYS = (("safe_mode", "safe_mode::RTC_KEY", "safe_mode", "U32"),)
 
 
-async def _register_component_prefs():
+async def _register_component_prefs() -> None:
     """Names the component-owned preferences whose owners are part of this build."""
     for component, symbol, name, kind in _COMPONENT_PREF_KEYS:
         if component not in CORE.config:
@@ -1307,7 +1307,7 @@ async def _register_component_prefs():
         )
 
 
-async def _register_typed_sensors():
+async def _register_typed_sensors() -> None:
     """Emits one register_entity_pref() per sensor whose restore type is known.
 
     FINAL priority: every sensor platform's own to_code() must have registered its variable
@@ -1380,7 +1380,7 @@ _PREFERENCES_ACTION_BASE = {
 }
 
 
-def _validate_preferences_target(config):
+def _validate_preferences_target(config: ConfigType) -> ConfigType:
     has_path = CONF_PATH in config
     has_device = CONF_DEVICE in config
     if has_path == has_device:
@@ -1454,7 +1454,7 @@ def _raw_pref_size(entries: list[tuple[str, int]]) -> int:
     return total
 
 
-async def _resolve_raw_pref_regions():
+async def _resolve_raw_pref_regions() -> None:
     """Hands every raw preferences action the room it actually has, and rejects regions that
     would run into each other.
 
@@ -1496,7 +1496,9 @@ async def _resolve_raw_pref_regions():
                 cg.add(action["var"].set_raw_target(action["device"], address, window))
 
 
-def _register_raw_pref_region(device_id, device_var, address, size, var):
+def _register_raw_pref_region(
+    device_id: ID, device_var: cg.MockObj, address: int, size: int, var: cg.MockObj
+) -> None:
     data = _get_data()
     data.raw_pref_regions.setdefault(str(device_id), []).append(
         {"address": address, "size": size, "var": var, "device": device_var}
@@ -1509,7 +1511,9 @@ def _register_raw_pref_region(device_id, device_var, address, size, var):
         )
 
 
-async def _build_preferences_action(config, action_id, template_arg, args):
+async def _build_preferences_action(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_STORAGE_PREFERENCES")
     # Once per build, not per action: naming is a property of the node, not of the action.
@@ -1614,7 +1618,9 @@ async def _build_preferences_action(config, action_id, template_arg, args):
     _EXPORT_PREFERENCES_SCHEMA,
     synchronous=True,
 )
-async def export_preferences_to_code(config, action_id, template_arg, args):
+async def export_preferences_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_preferences_action(config, action_id, template_arg, args)
 
 
@@ -1624,7 +1630,9 @@ async def export_preferences_to_code(config, action_id, template_arg, args):
     _IMPORT_PREFERENCES_SCHEMA,
     synchronous=True,
 )
-async def import_preferences_to_code(config, action_id, template_arg, args):
+async def import_preferences_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     var = await _build_preferences_action(config, action_id, template_arg, args)
     cg.add(var.set_reboot(config[CONF_REBOOT]))
     return var
@@ -1663,7 +1671,7 @@ def _esp32_exfat_enabled(fconf) -> bool:
     )
 
 
-def final_validate_file_system(config) -> None:
+def final_validate_file_system(config: ConfigType) -> None:
     """Reject the option outright when exFAT is not compiled in."""
     if CONF_FILE_SYSTEM not in config:
         return
@@ -1675,7 +1683,7 @@ def final_validate_file_system(config) -> None:
         )
 
 
-async def file_system_to_code(var, config) -> None:
+async def file_system_to_code(var: cg.MockObj, config: ConfigType) -> None:
     """Emit the selection define + setter -- only when the option may exist at all."""
     if not _esp32_exfat_enabled(CORE.config):
         return  # not even the auto path is compiled in
