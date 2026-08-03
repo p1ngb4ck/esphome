@@ -14,6 +14,7 @@
   'use strict';
 
   var API = '/files';
+  var RAW = '/raw';
   var POLL_MS = 250;
   var POLL_MAX = 2400; // ten minutes — a large copy onto a slow card
 
@@ -58,6 +59,206 @@
     if (status === 507) return 'not enough space';
     if (status === 0) return 'no response from the node';
     return 'failed (HTTP ' + status + ')';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Raw device nodes (block media): /raw/devices + read/write/verify/erase, all
+  // long ops as worker jobs polled on /raw/job. Ported from the simple browser.
+  // ---------------------------------------------------------------------------
+
+  function fmtSize(n) {
+    n = Number(n) || 0;
+    var u = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    while (n >= 1024 && i < u.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    return (i ? n.toFixed(1) : n) + ' ' + u[i];
+  }
+
+  function fmtHex(n) {
+    return '0x' + (Number(n) || 0).toString(16).toUpperCase();
+  }
+
+  var rawStatusNode = null;
+  function rawStatus(text, sticky) {
+    if (!rawStatusNode) {
+      rawStatusNode = document.createElement('div');
+      rawStatusNode.setAttribute('style',
+        'position:fixed;left:16px;bottom:16px;max-width:60vw;z-index:2147483000;padding:8px 12px;' +
+        'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
+        'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
+      document.body.appendChild(rawStatusNode);
+    }
+    rawStatusNode.textContent = text;
+    if (!sticky) {
+      setTimeout(function () {
+        if (rawStatusNode && rawStatusNode.textContent === text) {
+          document.body.removeChild(rawStatusNode);
+          rawStatusNode = null;
+        }
+      }, 5000);
+    }
+  }
+
+  function pollRawJob(job, label, done) {
+    var iv = setInterval(function () {
+      request('GET', RAW + '/job' + q({ id: job }), function (ok, s) {
+        // A job that 404s between polls finished and had its slot recycled -- treat as done.
+        if (!ok || !s || s.state === undefined) {
+          clearInterval(iv);
+          rawStatus(label + ' -- done');
+          if (done) done();
+          return;
+        }
+        if (s.state === 'done') {
+          clearInterval(iv);
+          rawStatus(s.result && s.result !== 'OK' ? label + ' failed: ' + s.result : label + ' -- done');
+          if (done) done();
+          return;
+        }
+        var phase = s.phase === 'erase' ? 'erasing '
+          : s.phase === 'verify'
+            ? 'verifying' + (s.verify_passes > 1 ? ' (pass ' + s.verify_pass + '/' + s.verify_passes + ')' : '') + ' '
+            : '';
+        if (s.bytes_total > 0) rawStatus(label + '... ' + phase + fmtSize(s.bytes_done) + ' / ' + fmtSize(s.bytes_total), true);
+        else if (s.bytes_done > 0) rawStatus(label + '... ' + phase + fmtSize(s.bytes_done), true);
+        else if (phase) rawStatus(label + '... ' + phase, true);
+      });
+    }, 500);
+  }
+
+  // A small labelled-field dialog on top of overlay(). fields: {key,label,value,hint,type}.
+  function formDialog(title, fields, onRun) {
+    var content = document.createElement('div');
+    content.style.padding = '12px';
+    content.style.minWidth = '320px';
+    var inputs = {};
+    fields.forEach(function (f) {
+      var wrap = document.createElement('div');
+      wrap.style.margin = '6px 0';
+      var input = document.createElement('input');
+      if (f.type === 'check') {
+        input.type = 'checkbox';
+        input.checked = !!f.value;
+        var l = document.createElement('label');
+        l.style.fontSize = '13px';
+        l.appendChild(input);
+        l.appendChild(document.createTextNode(' ' + f.label));
+        wrap.appendChild(l);
+      } else {
+        input.type = 'text';
+        input.value = f.value !== undefined && f.value !== null ? String(f.value) : '';
+        if (f.hint) input.placeholder = f.hint;
+        input.style.width = '100%';
+        input.style.boxSizing = 'border-box';
+        var lab = document.createElement('div');
+        lab.style.fontSize = '12px';
+        lab.style.marginBottom = '2px';
+        lab.textContent = f.label;
+        wrap.appendChild(lab);
+        wrap.appendChild(input);
+      }
+      inputs[f.key] = input;
+      content.appendChild(wrap);
+    });
+    var run = document.createElement('button');
+    run.textContent = 'Run';
+    var cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    var dlg = overlay(title, content, [cancel, run]);
+    cancel.onclick = dlg.close;
+    run.onclick = function () {
+      var v = {};
+      fields.forEach(function (f) {
+        v[f.key] = f.type === 'check' ? inputs[f.key].checked : inputs[f.key].value;
+      });
+      onRun(v, dlg);
+    };
+    return dlg;
+  }
+
+  function rawRead(dev, fe) {
+    formDialog('Read ' + (dev.node_name || dev.id), [
+      { key: 'whole', label: 'Read the whole device', type: 'check', value: false },
+      { key: 'address', label: 'Address', value: '0x0' },
+      { key: 'size', label: 'Size (bytes)', value: 256 },
+      { key: 'to_path', label: 'To file on device (empty = download)', hint: '/sdcard/dump.bin' },
+    ], function (v, dlg) {
+      var base = 'device=' + encodeURIComponent(dev.id) +
+        (v.whole ? '&all=1' : '&address=' + encodeURIComponent(v.address) + '&size=' + encodeURIComponent(v.size));
+      dlg.close();
+      if (!v.to_path) {
+        window.location = RAW + '/read?' + base;
+        return;
+      }
+      request('GET', RAW + '/read?' + base + '&to_path=' + encodeURIComponent(v.to_path), function (ok, body, status) {
+        if (!ok || !body || !body.job) return rawStatus('read failed: ' + errorText(body, status));
+        pollRawJob(body.job, 'reading ' + (dev.node_name || dev.id) + ' -> ' + v.to_path, function () { fe.RefreshFolders(true); });
+      });
+    });
+  }
+
+  function rawWrite(dev, fe) {
+    var fields = [
+      { key: 'address', label: 'Address', value: '0x0' },
+      { key: 'from_path', label: 'File on device', hint: '/sdcard/fw.bin' },
+    ];
+    if (dev.write_needs_erase) fields.push({ key: 'erase', label: 'Erase first (' + fmtSize(dev.erase_sector) + ' sectors)', type: 'check', value: true });
+    fields.push({ key: 'verify', label: 'Verify after write', type: 'check', value: true });
+    fields.push({ key: 'verify_passes', label: 'Verify passes', value: 1 });
+    formDialog('Write to ' + (dev.node_name || dev.id), fields, function (v, dlg) {
+      if (!v.from_path) return window.alert('no file given');
+      var passes = v.verify ? Math.max(1, parseInt(v.verify_passes, 10) || 1) : 0;
+      var url = RAW + '/write?device=' + encodeURIComponent(dev.id) + '&address=' + encodeURIComponent(v.address) +
+        '&from_path=' + encodeURIComponent(v.from_path) + '&verify=' + passes + (v.erase ? '&erase=1' : '');
+      dlg.close();
+      request('POST', url, function (ok, body, status) {
+        if (!ok || !body || !body.job) return rawStatus('write failed: ' + errorText(body, status));
+        pollRawJob(body.job, 'writing ' + v.from_path + ' -> ' + (dev.node_name || dev.id), function () { fe.RefreshFolders(true); });
+      });
+    });
+  }
+
+  function rawVerify(dev, fe) {
+    formDialog('Verify ' + (dev.node_name || dev.id) + ' against a file', [
+      { key: 'address', label: 'Address', value: '0x0' },
+      { key: 'from_path', label: 'File on device', hint: '/sdcard/fw.bin' },
+      { key: 'passes', label: 'Verify passes', value: 1 },
+    ], function (v, dlg) {
+      if (!v.from_path) return window.alert('no file given');
+      var passes = Math.max(1, parseInt(v.passes, 10) || 1);
+      var url = RAW + '/verify?device=' + encodeURIComponent(dev.id) + '&address=' + encodeURIComponent(v.address) +
+        '&from_path=' + encodeURIComponent(v.from_path) + '&passes=' + passes;
+      dlg.close();
+      request('POST', url, function (ok, body, status) {
+        if (!ok || !body || !body.job) return rawStatus('verify failed: ' + errorText(body, status));
+        pollRawJob(body.job, 'verifying ' + (dev.node_name || dev.id) + ' against ' + v.from_path, null);
+      });
+    });
+  }
+
+  function rawErase(dev, fe) {
+    var sect = dev.pseudo_erase ? '' : ' (multiple of ' + fmtHex(dev.erase_sector) + ')';
+    var fields = [
+      { key: 'address', label: 'Address' + sect, value: '0x0' },
+      { key: 'size', label: 'Size (bytes)' + sect, value: dev.pseudo_erase ? 256 : dev.erase_sector },
+      { key: 'all', label: 'Erase the whole device', type: 'check', value: false },
+    ];
+    if (dev.can_erase_chip) fields.push({ key: 'sliced', label: 'Erase sector-by-sector (skip fast chip erase)', type: 'check', value: false });
+    formDialog('Erase ' + (dev.node_name || dev.id), fields, function (v, dlg) {
+      if (v.all && !window.confirm('Erase all of ' + (dev.node_name || dev.id) + '? Everything on it is gone.')) return;
+      var base = v.all
+        ? 'device=' + encodeURIComponent(dev.id) + '&all=1'
+        : 'device=' + encodeURIComponent(dev.id) + '&address=' + encodeURIComponent(v.address) + '&size=' + encodeURIComponent(v.size);
+      if (v.sliced) base += '&sliced=1';
+      dlg.close();
+      request('POST', RAW + '/erase?' + base, function (ok, body, status) {
+        if (!ok || !body || !body.job) return rawStatus('erase failed: ' + errorText(body, status));
+        pollRawJob(body.job, 'erasing ' + (dev.node_name || dev.id), function () { fe.RefreshFolders(true); });
+      });
+    });
   }
 
   // Upload and download go straight to /files/* the way the simple browser does, instead of
@@ -288,7 +489,21 @@
         e.esphCanFormat = !!s.can_format;
         entries.push(e);
       }
-      cb(null, entries);
+      // Raw device nodes, if this build has the raw API. A 404 just means it is not
+      // configured -- carry on with the storages alone.
+      request('GET', RAW + '/devices', function (dok, devs) {
+        if (dok && devs && devs.length) {
+          for (var j = 0; j < devs.length; j++) {
+            var d = devs[j];
+            if (!d.node) continue;
+            var de = entryFor(d.node_name || d.id, false, d.capacity, 0, 'dev:' + d.id);
+            de.esphDevice = d;
+            de.attrs = { canmodify: false };
+            entries.push(de);
+          }
+        }
+        cb(null, entries);
+      });
     });
   }
 
@@ -573,6 +788,7 @@
 
       onopenfile: function (folder, entry) {
         if (entry.type === 'folder') return;
+        if (entry.esphDevice) return rawRead(entry.esphDevice, fe);
         var path = childPath(folder, entry.name);
         if (isImage(entry.name)) return showImage(path, entry.name);
         if (isText(entry.name)) return showEditor(path, entry.name, canWrite);
@@ -722,6 +938,11 @@
       toggleTool(mountTool, !!(atRoot && e && e.esphCanMount && !e.esphMounted));
       toggleTool(unmountTool, !!(atRoot && e && e.esphCanUnmount && e.esphMounted));
       toggleTool(formatTool, !!(atRoot && e && e.esphCanFormat && !e.esphMounted));
+      var dev = e && e.esphDevice ? e.esphDevice : null;
+      toggleTool(readTool, !!dev);
+      toggleTool(writeTool, !!(dev && dev.writable));
+      toggleTool(verifyTool, !!(dev && dev.writable));
+      toggleTool(eraseTool, !!(dev && dev.erasable));
       // Monitor (tail) is a per-file action: shown while a single text file (per
       // text_file_formats) is selected, in any folder.
       if (monitorBtn) monitorBtn.style.display = e && e.type !== 'folder' && isText(e.name) ? '' : 'none';
@@ -733,6 +954,22 @@
     var formatTool = canFormat
       ? makeStorageTool('esph-fe-tool-format', 'Format storage', '/format', 'Format %s? Everything on it will be lost.')
       : null;
+
+    // Raw device actions open a dialog rather than firing a single POST.
+    function makeRawTool(cls, title, fn) {
+      var btn = fe.AddToolbarButton(cls, title);
+      btn.classList.add('fe_fileexplorer_hidden');
+      btn.addEventListener('click', function () {
+        if (btn.classList.contains('fe_fileexplorer_disabled')) return;
+        var sel = fe.GetSelectedFolderEntries();
+        if (sel.length === 1 && sel[0].esphDevice) fn(sel[0].esphDevice, fe);
+      });
+      return btn;
+    }
+    var readTool = makeRawTool('esph-fe-tool-read', 'Read device', rawRead);
+    var writeTool = makeRawTool('esph-fe-tool-write', 'Write device', rawWrite);
+    var verifyTool = makeRawTool('esph-fe-tool-verify', 'Verify device', rawVerify);
+    var eraseTool = makeRawTool('esph-fe-tool-erase', 'Erase device', rawErase);
 
     var monitorBtn = addTools(fe, parent);
     if (CHANGE_POLL_MS > 0) startChangePoll(fe);
