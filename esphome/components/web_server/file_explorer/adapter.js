@@ -457,7 +457,9 @@
         var form = new FormData();
         form.append('file', new Blob([''], { type: 'text/plain' }), name);
         var xhr = new XMLHttpRequest();
-        xhr.open('POST', API + '/upload' + q({ path: childPath(folder, name), dir: pathOf(folder) }), true);
+        // create=1 tells the node this is a new, possibly empty file, so an empty upload body
+        // still creates it (see web_server_idf multipart handling).
+        xhr.open('POST', API + '/upload' + q({ path: childPath(folder, name), dir: pathOf(folder), create: '1' }), true);
         xhr.onload = function () {
           var ok = xhr.status >= 200 && xhr.status < 300;
           created(ok ? entryFor(name, false, 0, 0) : 'could not create the file (HTTP ' + xhr.status + ')');
