@@ -1337,14 +1337,15 @@ void WebServerFileApi::handle_upload_response_(AsyncWebServerRequest *request) {
   }
 #ifdef USE_STORAGE_TRANSFER_BUFFER
   if (this->flush_.active && !this->flush_.finished) {
-    char jbuf[80];
-    snprintf(jbuf, sizeof(jbuf), "{\"bytes\":%" PRIu64 ",\"job\":%" PRIu32 "}", this->upload_.offset, this->flush_.job);
+    char jbuf[96];
+    snprintf(jbuf, sizeof(jbuf), "{\"success\":true,\"bytes\":%" PRIu64 ",\"job\":%" PRIu32 "}", this->upload_.offset,
+             this->flush_.job);
     request->send(200, "application/json", jbuf);
     return;
   }
 #endif
-  char buf[48];
-  snprintf(buf, sizeof(buf), "{\"bytes\":%" PRIu64 "}", this->upload_.offset);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"success\":true,\"bytes\":%" PRIu64 "}", this->upload_.offset);
   request->send(200, "application/json", buf);
 }
 
