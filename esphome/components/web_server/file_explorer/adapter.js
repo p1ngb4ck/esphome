@@ -96,6 +96,7 @@
 
   var IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
   var TEXT_EXT = (window.ESPHFE && window.ESPHFE.textFormats) || ['.txt', '.log'];
+  var CHANGE_POLL_MS = (window.ESPHFE && window.ESPHFE.changePollMs) || 5000;
 
   function hasExt(name, list) {
     var lower = name.toLowerCase();
@@ -352,6 +353,25 @@
   // Widget
   // ---------------------------------------------------------------------------
 
+  // Auto-refresh: poll /files/changes and re-list the current folder when it (or the roots
+  // level, while at the root) is reported changed -- including changes from other clients or
+  // plain API calls, matching the simple browser.
+  function startChangePoll(fe) {
+    var cursor = 0;
+    setInterval(function () {
+      if (document.hidden) return;
+      request('GET', API + '/changes' + q({ since: cursor }), function (ok, body) {
+        if (!ok || !body) return;
+        cursor = body.seq || cursor;
+        var cur = pathOf(fe.GetCurrentFolder());
+        var dirs = body.dirs || [];
+        if (body.reset || (cur === '' && dirs.indexOf('') !== -1) || dirs.indexOf(cur) !== -1) {
+          fe.RefreshFolders(true);
+        }
+      });
+    }, CHANGE_POLL_MS);
+  }
+
   function build(parent, access) {
     var canWrite = !!access.write;
     var canRead = !!access.read;
@@ -556,6 +576,7 @@
       : null;
 
     var monitorBtn = addTools(fe, parent);
+    if (CHANGE_POLL_MS > 0) startChangePoll(fe);
     return fe;
   }
 

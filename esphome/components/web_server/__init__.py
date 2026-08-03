@@ -597,6 +597,8 @@ def build_index_html(config) -> str:
             html += (
                 "<script>window.ESPHFE={textFormats:"
                 + json.dumps(browser[CONF_TEXT_FILE_FORMATS])
+                + ",changePollMs:"
+                + str(int(browser[CONF_CHANGE_POLL_INTERVAL].total_milliseconds))
                 + "}</script>"
             )
             html += '<script src="/file-explorer/file-explorer.js"></script>'
