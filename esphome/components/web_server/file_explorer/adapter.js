@@ -74,12 +74,100 @@
     }, 500);
   }
 
-  function uploadFile(fe, folder, file, overwrite) {
-    var url = API + '/upload' + q({ path: childPath(folder, file.name), overwrite: overwrite ? '1' : undefined });
+  // Sequential upload queue with a small progress panel. The node accepts one upload at a time,
+  // so queued files run one after another, each showing its own progress. The panel is plain
+  // inline-styled DOM in document.body so it does not depend on the shadow-scoped stylesheets.
+  var uploadQueue = [];
+  var uploadBusy = false;
+  var uploadPanel = null;
+  var uploadListNode = null;
+
+  function ensureUploadPanel() {
+    if (uploadPanel) return;
+    uploadPanel = document.createElement('div');
+    uploadPanel.setAttribute('style',
+      'position:fixed;right:16px;bottom:16px;width:320px;max-height:50vh;overflow:auto;z-index:2147483000;' +
+      'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
+    var head = document.createElement('div');
+    head.setAttribute('style',
+      'padding:8px 12px;font-weight:600;border-bottom:1px solid rgba(127,127,127,0.3);');
+    head.textContent = 'Uploads';
+    uploadListNode = document.createElement('div');
+    uploadListNode.setAttribute('style', 'padding:4px 0;');
+    uploadPanel.appendChild(head);
+    uploadPanel.appendChild(uploadListNode);
+    document.body.appendChild(uploadPanel);
+  }
+
+  function addUploadRow(item) {
+    var row = document.createElement('div');
+    row.setAttribute('style', 'padding:6px 12px;');
+    var name = document.createElement('div');
+    name.setAttribute('style', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
+    name.textContent = item.file.name;
+    var track = document.createElement('div');
+    track.setAttribute('style',
+      'height:6px;margin-top:4px;border-radius:3px;background:rgba(127,127,127,0.25);overflow:hidden;');
+    var fill = document.createElement('div');
+    fill.setAttribute('style', 'height:100%;width:0%;background:#03a9f4;transition:width 0.15s;');
+    track.appendChild(fill);
+    var stat = document.createElement('div');
+    stat.setAttribute('style', 'margin-top:2px;font-size:11px;opacity:0.7;');
+    stat.textContent = 'queued';
+    row.appendChild(name);
+    row.appendChild(track);
+    row.appendChild(stat);
+    uploadListNode.appendChild(row);
+    item.fill = fill;
+    item.stat = stat;
+  }
+
+  function setUploadRow(item, pct, text, color) {
+    if (item.fill) {
+      item.fill.style.width = pct + '%';
+      if (color) item.fill.style.background = color;
+    }
+    if (item.stat) item.stat.textContent = text;
+  }
+
+  function enqueueUpload(fe, folder, file) {
+    var item = { fe: fe, folder: folder, file: file };
+    uploadQueue.push(item);
+    ensureUploadPanel();
+    addUploadRow(item);
+    if (!uploadBusy) processUploadQueue();
+  }
+
+  function processUploadQueue() {
+    if (!uploadQueue.length) {
+      uploadBusy = false;
+      // Clear the panel a few seconds after the batch is done, unless a new upload arrived.
+      setTimeout(function () {
+        if (!uploadBusy && !uploadQueue.length && uploadPanel) {
+          document.body.removeChild(uploadPanel);
+          uploadPanel = null;
+          uploadListNode = null;
+        }
+      }, 4000);
+      return;
+    }
+    uploadBusy = true;
+    doUpload(uploadQueue.shift(), false, processUploadQueue);
+  }
+
+  function doUpload(item, overwrite, done) {
+    var url = API + '/upload' + q({ path: childPath(item.folder, item.file.name), overwrite: overwrite ? '1' : undefined });
     var fd = new FormData();
-    fd.append('file', file);
+    fd.append('file', item.file);
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable) {
+        var pct = Math.round((100 * e.loaded) / e.total);
+        setUploadRow(item, pct, pct + '%');
+      }
+    };
     xhr.onload = function () {
       var body = null;
       try {
@@ -88,18 +176,31 @@
         body = null;
       }
       if (xhr.status === 409) {
-        if (window.confirm('"' + file.name + '" already exists. Overwrite?')) uploadFile(fe, folder, file, true);
-        return;
+        if (window.confirm('"' + item.file.name + '" already exists. Overwrite?')) return doUpload(item, true, done);
+        setUploadRow(item, 100, 'skipped', '#9e9e9e');
+        return done();
       }
       if (xhr.status < 200 || xhr.status >= 300) {
-        window.alert('upload failed: ' + errorText(body, xhr.status));
-        return;
+        setUploadRow(item, 100, 'failed: ' + errorText(body, xhr.status), '#e53935');
+        return done();
       }
+      var finish = function () {
+        setUploadRow(item, 100, 'done', '#43a047');
+        if (item.fe) item.fe.RefreshFolders(true);
+        done();
+      };
       // Staged upload: the node flushes the PSRAM buffer to storage as a background job.
-      if (body && body.job) pollFlush(body.job, function () { fe.RefreshFolders(true); });
-      else fe.RefreshFolders(true);
+      if (body && body.job) {
+        setUploadRow(item, 100, 'flushing...');
+        pollFlush(body.job, finish);
+      } else {
+        finish();
+      }
     };
-    xhr.onerror = function () { window.alert('upload failed: no response from the node'); };
+    xhr.onerror = function () {
+      setUploadRow(item, 100, 'failed: no response from the node', '#e53935');
+      done();
+    };
     xhr.send(fd);
   }
 
@@ -557,9 +658,9 @@
       };
 
       opts.oninitupload = function (startupload, fileinfo) {
-        // Upload the simple browser's way: our own POST /files/upload?path=<full> with the
-        // file as multipart, then poll the flush job. Cancel the widget's own chunked upload.
-        uploadFile(fe, fileinfo.folder, fileinfo.file, false);
+        // The widget calls this once per selected file. Queue it (the node uploads one at a
+        // time) with its own progress, and cancel the widget's own chunked upload.
+        enqueueUpload(fe, fileinfo.folder, fileinfo.file);
         startupload(false);
       };
     }
