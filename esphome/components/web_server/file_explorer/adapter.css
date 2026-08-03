@@ -203,3 +203,8 @@
 #esp-file-explorer .esph-fe-tool-unmount::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4l7 9H5z'/%3E%3Cline x1='5' y1='18' x2='19' y2='18'/%3E%3C/svg%3E");
 }
+#esp-file-explorer .esph-fe-tool-format::before {
+  background-size: 24px 24px;
+  image-rendering: auto;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 1 1-2.64-6.36'/%3E%3Cpolyline points='21 3 21 9 15 9'/%3E%3C/svg%3E");
+}

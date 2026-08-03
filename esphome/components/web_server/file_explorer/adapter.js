@@ -140,6 +140,7 @@
         e.esphMounted = s.mounted;
         e.esphCanMount = !!s.can_mount;
         e.esphCanUnmount = !!s.can_unmount;
+        e.esphCanFormat = !!s.can_format;
         entries.push(e);
       }
       cb(null, entries);
@@ -356,6 +357,7 @@
     var canRead = !!access.read;
     var canMount = !!access.mount;
     var canUnmount = !!access.unmount;
+    var canFormat = !!access.format;
 
     // Rebuilds a node-side path from the widget's source-path model.
     function pathFromParts(parts) {
@@ -508,7 +510,7 @@
     // operation at all (server still enforces it with 403). updateStorageTools() then shows
     // it only while a single root storage that supports the operation is selected, and it
     // acts on that storage's mount path.
-    function makeStorageTool(cls, title, endpoint) {
+    function makeStorageTool(cls, title, endpoint, confirmMsg) {
       var btn = fe.AddToolbarButton(cls, title);
       btn.classList.add('fe_fileexplorer_hidden');
       btn.addEventListener('click', function () {
@@ -516,6 +518,7 @@
         var sel = fe.GetSelectedFolderEntries();
         if (sel.length !== 1) return;
         var path = sel[0].id;
+        if (confirmMsg && !window.confirm(confirmMsg.replace('%s', path))) return;
         request('POST', API + endpoint + q({ path: path }), function (ok, body, status) {
           if (!ok) window.alert(title.toLowerCase() + ' failed: ' + errorText(body, status));
           fe.RefreshFolders(true);
@@ -539,6 +542,7 @@
       var e = sel.length === 1 ? sel[0] : null;
       toggleTool(mountTool, !!(atRoot && e && e.esphCanMount && !e.esphMounted));
       toggleTool(unmountTool, !!(atRoot && e && e.esphCanUnmount && e.esphMounted));
+      toggleTool(formatTool, !!(atRoot && e && e.esphCanFormat && !e.esphMounted));
       // Monitor (tail) is a per-file action: shown while a single text file (per
       // text_file_formats) is selected, in any folder.
       if (monitorBtn) monitorBtn.style.display = e && e.type !== 'folder' && isText(e.name) ? '' : 'none';
@@ -547,6 +551,9 @@
 
     var mountTool = canMount ? makeStorageTool('esph-fe-tool-mount', 'Mount storage', '/mount') : null;
     var unmountTool = canUnmount ? makeStorageTool('esph-fe-tool-unmount', 'Unmount storage', '/unmount') : null;
+    var formatTool = canFormat
+      ? makeStorageTool('esph-fe-tool-format', 'Format storage', '/format', 'Format %s? Everything on it will be lost.')
+      : null;
 
     var monitorBtn = addTools(fe, parent);
     return fe;
