@@ -131,7 +131,7 @@
       var entries = [];
       for (var i = 0; i < body.storages.length; i++) {
         var s = body.storages[i];
-        var e = entryFor(s.mounted ? s.path : s.path + '  (not mounted)', true, 0, 0, s.path);
+        var e = entryFor(s.mounted ? s.mount_path : s.mount_path + '  (not mounted)', true, 0, 0, s.mount_path);
         e.esphMounted = s.mounted;
         entries.push(e);
       }
