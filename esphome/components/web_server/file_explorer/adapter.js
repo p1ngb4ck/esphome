@@ -513,7 +513,8 @@
 
       opts.oninitupload = function (startupload, fileinfo) {
         fileinfo.uploadurl = API + '/upload' + q({ dir: pathOf(fileinfo.folder) });
-        startupload(fileinfo, true);
+        // startupload() proceeds only on a strict true; fileinfo was modified in place above.
+        startupload(true);
       };
     }
 
