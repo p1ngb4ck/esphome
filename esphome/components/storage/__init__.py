@@ -52,10 +52,18 @@ CONF_ON_COMPLETE = "on_complete"
 CONF_ON_REGISTERED = "on_registered"
 CONF_ON_UNREGISTERED = "on_unregistered"
 
-# json is header-only (ArduinoJson): auto-loading it costs nothing when unused
-# and lets the json extract step and the preferences json format work without
-# an explicit `json:` block in the config.
-AUTO_LOAD = ["json"]
+
+def AUTO_LOAD(config) -> list[str]:
+    # json (ArduinoJson) is only needed by the extract step's json: pointer and a
+    # preferences action's format: json. Both are action options that live outside the
+    # storage: block, so they set StorageData.json_required during their own validation
+    # (same mechanism as api's capture_response) and this deferred, config-taking
+    # AUTO_LOAD reads it -- json enters the build only when an action configures it.
+    data = CORE.data.get(DOMAIN)
+    if data is not None and data.json_required:
+        return ["json"]
+    return []
+
 
 storage_ns = cg.esphome_ns.namespace("storage")
 Storage = storage_ns.class_("Storage", cg.Component)
@@ -220,6 +228,9 @@ class StorageData:
     raw_pref_regions: dict = field(default_factory=dict)
     raw_pref_job_queued: bool = False
     sensor_pref_job_queued: bool = False
+    # Set by an action that needs the json component (extract step json:, preferences
+    # format: json) so the config-taking AUTO_LOAD pulls json in only when it is used.
+    json_required: bool = False
 
 
 def _get_data() -> StorageData:
@@ -635,6 +646,9 @@ def _exactly_one_step_kind(config):
         raise cv.Invalid("'separator' is only valid with 'key'")
     if CONF_GROUP in config and CONF_REGEX not in config:
         raise cv.Invalid("'group' is only valid with 'regex'")
+    if CONF_JSON in config:
+        # Tell the config-taking AUTO_LOAD that the json component is needed.
+        _get_data().json_required = True
     return config
 
 
@@ -1283,6 +1297,9 @@ def _validate_preferences_target(config):
             raise cv.Invalid("'address' is required when the target is a raw device")
     elif CONF_ADDRESS in config:
         raise cv.Invalid("'address' only applies to a raw device target ('device:')")
+    if config.get(CONF_FORMAT) == "json":
+        # Tell the config-taking AUTO_LOAD that the json component is needed.
+        _get_data().json_required = True
     return config
 
 
