@@ -493,7 +493,10 @@
         var what = entries.length === 1 ? '"' + entries[0].name + '"' : entries.length + ' items';
         if (!window.confirm('Delete ' + what + '? This cannot be undone.')) return deleted(false);
         entries.forEach(function (entry) {
-          var url = API + '/delete' + q({ path: childPath(folder, entry.name), recursive: '1' });
+          // recursive only for directories; on a file remove_recursive() would list_dir() a
+          // non-directory and fail NOT_FOUND (the simple browser sends it the same way).
+          var recursive = entry.type === 'folder' ? '1' : undefined;
+          var url = API + '/delete' + q({ path: childPath(folder, entry.name), recursive: recursive });
           request('POST', url, function (ok, body, status) {
             if (!ok && failure === null) failure = errorText(body, status);
             if (--pending === 0) deleted(failure === null ? true : failure);
