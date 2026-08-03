@@ -95,7 +95,7 @@
   // ---------------------------------------------------------------------------
 
   var IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
-  var TEXT_EXT = ['.txt', '.log', '.yaml', '.yml', '.conf', '.cfg', '.ini', '.csv', '.md', '.json'];
+  var TEXT_EXT = (window.ESPHFE && window.ESPHFE.textFormats) || ['.txt', '.log'];
 
   function hasExt(name, list) {
     var lower = name.toLowerCase();
@@ -525,39 +525,42 @@
 
     function updateStorageTools() {
       var atRoot = pathOf(fe.GetCurrentFolder()) === '';
-      var sel = atRoot && fe.GetNumSelectedItems() === 1 ? fe.GetSelectedFolderEntries() : [];
+      var sel = fe.GetNumSelectedItems() === 1 ? fe.GetSelectedFolderEntries() : [];
       var e = sel.length === 1 ? sel[0] : null;
-      toggleTool(mountTool, !!(e && e.esphCanMount && !e.esphMounted));
-      toggleTool(unmountTool, !!(e && e.esphCanUnmount && e.esphMounted));
+      toggleTool(mountTool, !!(atRoot && e && e.esphCanMount && !e.esphMounted));
+      toggleTool(unmountTool, !!(atRoot && e && e.esphCanUnmount && e.esphMounted));
+      // Monitor (tail) is a per-file action: shown while a single text file (per
+      // text_file_formats) is selected, in any folder.
+      if (monitorBtn) monitorBtn.style.display = e && e.type !== 'folder' && isText(e.name) ? '' : 'none';
       fe.ToolStateUpdated();
     }
 
     var mountTool = canMount ? makeStorageTool('esph-fe-tool-mount', 'Mount storage', '/mount') : null;
     var unmountTool = canUnmount ? makeStorageTool('esph-fe-tool-unmount', 'Unmount storage', '/unmount') : null;
 
-    addTools(fe, parent);
+    var monitorBtn = addTools(fe, parent);
     return fe;
   }
 
-  // The log follower lives in a strip above the widget; mount/unmount moved into the widget
-  // toolbar as per-storage tools (see build()).
+  // The header strip holds the monitor (tail -f) button, shown by updateStorageTools() only
+  // while a single text file (per text_file_formats) is selected; it follows that file.
+  // Returned so build() can toggle it. mount/unmount moved into the widget toolbar.
   function addTools(fe, parent) {
     var bar = document.createElement('div');
     bar.className = 'esph-fe-bar';
 
-    function tool(label, fn) {
-      var b = document.createElement('button');
-      b.textContent = label;
-      b.onclick = fn;
-      bar.appendChild(b);
-    }
-
-    tool('Follow file', function () {
-      var path = window.prompt('File to follow (e.g. /sdcard/logs/test.log)');
-      if (path) showTail(path, path);
-    });
+    var monitor = document.createElement('button');
+    monitor.textContent = 'monitor';
+    monitor.style.display = 'none';
+    monitor.onclick = function () {
+      var sel = fe.GetSelectedFolderEntries();
+      if (sel.length !== 1 || sel[0].type === 'folder') return;
+      showTail(childPath(fe.GetCurrentFolder(), sel[0].name), sel[0].name);
+    };
+    bar.appendChild(monitor);
 
     parent.insertBefore(bar, parent.firstChild);
+    return monitor;
   }
 
   // ---------------------------------------------------------------------------

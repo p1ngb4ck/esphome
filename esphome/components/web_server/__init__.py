@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 from pathlib import Path
 import re
@@ -72,6 +73,7 @@ CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
 CONF_VARIANT = "variant"
 CONF_ASSET_SOURCE = "asset_source"
 CONF_ASSET_PATH = "asset_path"
+CONF_TEXT_FILE_FORMATS = "text_file_formats"
 
 BROWSER_SIMPLE = "simple"
 BROWSER_ADVANCED = "advanced"
@@ -372,6 +374,25 @@ WEBSERVER_SORTING_SCHEMA = cv.Schema(
 )
 
 
+def _text_file_format(value):
+    value = cv.string(value).strip().lower()
+    return value if value.startswith(".") else "." + value
+
+
+def _validate_file_browser(config):
+    # text_file_formats decides which files the advanced widget treats as text (its editor
+    # and the "monitor" tail button). It has no effect on the simple browser, so it is
+    # advanced-only.
+    if config[CONF_VARIANT] == BROWSER_ADVANCED:
+        config.setdefault(CONF_TEXT_FILE_FORMATS, [".txt", ".log"])
+    elif CONF_TEXT_FILE_FORMATS in config:
+        raise cv.Invalid(
+            f"'{CONF_TEXT_FILE_FORMATS}' only applies to '{CONF_VARIANT}: {BROWSER_ADVANCED}'",
+            path=[CONF_TEXT_FILE_FORMATS],
+        )
+    return config
+
+
 def _validate_file_api(config):
     """file_api/file_browser are ESP-IDF + web_server version 3 only: the REST handlers use
     the IDF httpd backend directly (chunked responses, multipart upload), and the browser
@@ -496,8 +517,15 @@ CONFIG_SCHEMA = cv.All(
                         cv.Optional(
                             CONF_ASSET_PATH, default="/sdcard/file-explorer"
                         ): cv.string_strict,
+                        # Which files the advanced widget opens in its text editor and
+                        # offers the "monitor" (tail) button for. advanced-only; the
+                        # default is applied in _validate_file_browser().
+                        cv.Optional(CONF_TEXT_FILE_FORMATS): cv.ensure_list(
+                            _text_file_format
+                        ),
                     }
                 ),
+                _validate_file_browser,
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -565,6 +593,12 @@ def build_index_html(config) -> str:
             # Only the scripts go here. The adapter builds the card and mounts it into the v3
             # app's shadow root, so both stylesheets have to be linked from INSIDE that card --
             # document-level <link>s do not cross a shadow boundary. The adapter does that.
+            # text_file_formats is handed to the adapter as a global it reads before running.
+            html += (
+                "<script>window.ESPHFE={textFormats:"
+                + json.dumps(browser[CONF_TEXT_FILE_FORMATS])
+                + "}</script>"
+            )
             html += '<script src="/file-explorer/file-explorer.js"></script>'
             html += '<script src="/file-explorer/adapter.js"></script>'
         else:
@@ -626,7 +660,7 @@ def _flash_row(here: Path, rel: str, url: str, ctype: str, compress: bool) -> st
     return (
         f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
         f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, "
-        f'{"true" if compress else "false"}, nullptr, 0}}'
+        f"{'true' if compress else 'false'}, nullptr, 0}}"
     )
 
 
@@ -676,7 +710,9 @@ async def _add_file_explorer(config, var, api_var) -> None:
             # already gzipped so the bytes served match the flash path exactly.
             disk = f"{base_dir}/{name}.gz" if compress else f"{base_dir}/{name}"
             gz = "true" if compress else "false"
-            rows.append(f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", {gz}, nullptr, 0}}')
+            rows.append(
+                f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", {gz}, nullptr, 0}}'
+            )
 
     if missing:
         raise cv.Invalid(
