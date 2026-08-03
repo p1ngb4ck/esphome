@@ -60,6 +60,49 @@
     return 'failed (HTTP ' + status + ')';
   }
 
+  // Upload and download go straight to /files/* the way the simple browser does, instead of
+  // through the widget's own machinery (its chunked ?dir= multipart upload and its iframe POST
+  // download form), which dropped the storage mount path and tripped the node's multipart path.
+  function pollFlush(job, done) {
+    var iv = setInterval(function () {
+      request('GET', API + '/job' + q({ id: job }), function (ok, body) {
+        if (ok && body && body.state === 'done') {
+          clearInterval(iv);
+          done();
+        }
+      });
+    }, 500);
+  }
+
+  function uploadFile(fe, folder, file, overwrite) {
+    var url = API + '/upload' + q({ path: childPath(folder, file.name), overwrite: overwrite ? '1' : undefined });
+    var fd = new FormData();
+    fd.append('file', file);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.onload = function () {
+      var body = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch (e) {
+        body = null;
+      }
+      if (xhr.status === 409) {
+        if (window.confirm('"' + file.name + '" already exists. Overwrite?')) uploadFile(fe, folder, file, true);
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        window.alert('upload failed: ' + errorText(body, xhr.status));
+        return;
+      }
+      // Staged upload: the node flushes the PSRAM buffer to storage as a background job.
+      if (body && body.job) pollFlush(body.job, function () { fe.RefreshFolders(true); });
+      else fe.RefreshFolders(true);
+    };
+    xhr.onerror = function () { window.alert('upload failed: no response from the node'); };
+    xhr.send(fd);
+  }
+
   // The widget models a location as an array of {id, name} from the root down. Element 0 is
   // the synthetic root; element 1 is the storage, whose id is its mount path.
   function pathOf(folder) {
@@ -514,9 +557,10 @@
       };
 
       opts.oninitupload = function (startupload, fileinfo) {
-        fileinfo.uploadurl = API + '/upload' + q({ dir: pathOf(fileinfo.folder) });
-        // startupload() proceeds only on a strict true; fileinfo was modified in place above.
-        startupload(true);
+        // Upload the simple browser's way: our own POST /files/upload?path=<full> with the
+        // file as multipart, then poll the flush job. Cancel the widget's own chunked upload.
+        uploadFile(fe, fileinfo.folder, fileinfo.file, false);
+        startupload(false);
       };
     }
 
@@ -526,10 +570,15 @@
           // No archive endpoint on the node, so a multi-selection cannot become one file.
           return startdownload('select a single file to download');
         }
-        // GET download: the widget otherwise submits a multipart/form-data POST form (its
-        // default), which the node's httpd tries to parse as an upload and rejects. method:
-        // 'GET' makes it a plain form navigation to the download URL.
-        startdownload({ url: API + '/download' + q({ path: childPath(folder, entries[0].name) }), method: 'GET' });
+        // Download the simple browser's way: a plain GET link to /files/download. Do not call
+        // startdownload() -- that builds the widget's iframe POST form, which dropped the query
+        // (the storage mount path) and aborted the transfer.
+        var a = document.createElement('a');
+        a.href = API + '/download' + q({ path: childPath(folder, entries[0].name) });
+        a.download = entries[0].name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
       };
     }
 
