@@ -120,6 +120,10 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // Sends a 403 with a small JSON body; `what` names the disallowed operation group for the log.
   void send_forbidden_(AsyncWebServerRequest *request, const char *what);
   void handle_upload_response_(AsyncWebServerRequest *request);
+  // Atomically publish a finished upload: rename the temp sibling to its final name (a
+  // same-directory rename is atomic); overwrite is remove-then-rename. Main-loop-only.
+  static storage::StorageError publish_upload_(storage::PathStorage *ps, const char *temp, const char *final_path,
+                                               bool overwrite);
 
   static void send_error_(AsyncWebServerRequest *request, storage::StorageError err);
   static int http_status_for_(storage::StorageError err);
@@ -217,7 +221,12 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     storage::FileHandle *handle{nullptr};
     bool handle_open{false};
     bool dst_is_fs{false};
+    // The upload streams into rel_path (a temp sibling) and is atomically rename()d to
+    // final_path at completion, so a watcher (e.g. the module loader) never observes a
+    // half-written file.
     char rel_path[256]{};
+    char final_path[256]{};
+    bool overwrite{false};
     uint64_t offset{0};
     storage::StorageError error{storage::StorageError::OK};
     // True once a staged upload handed its bytes to flush_: completion (and the directory-
@@ -244,6 +253,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     storage::FileHandle *handle{nullptr};
     bool dst_is_fs{false};
     char rel_path[256]{};
+    char final_path[256]{};
+    bool overwrite{false};
     const uint8_t *data{nullptr};
     size_t total{0};
     size_t done{0};

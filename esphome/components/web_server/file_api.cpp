@@ -798,11 +798,20 @@ void WebServerFileApi::loop() {
         this->flush_.handle = nullptr;
       }
       storage::global_transfer_buffer->release();
+      if (err == storage::StorageError::OK) {
+        // Publish the staged upload atomically (rename temp -> final).
+        err = this->publish_upload_(this->flush_.storage, this->flush_.rel_path, this->flush_.final_path,
+                                    this->flush_.overwrite);
+      }
+      if (err != storage::StorageError::OK && this->flush_.storage != nullptr) {
+        // Drop the temp so a failed publish does not leave it behind.
+        this->flush_.storage->remove(this->flush_.rel_path);
+      }
       this->flush_.result = err;
       this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
       if (err == storage::StorageError::OK && this->flush_.storage != nullptr) {
         storage::global_storage_registry->note_parent_changed(std::string(this->flush_.storage->get_mount_path()) +
-                                                              "/" + this->flush_.rel_path);
+                                                              "/" + this->flush_.final_path);
       }
       this->loop_requester_.stop();
       ESP_LOGD(TAG, "staged upload flushed: %u/%u bytes (%s)", (unsigned) this->flush_.done,
@@ -1152,6 +1161,19 @@ void WebServerFileApi::download_task_() {
 // Upload (multipart; one main-loop hop per received chunk)
 // ---------------------------------------------------------------------------
 
+storage::StorageError WebServerFileApi::publish_upload_(storage::PathStorage *ps, const char *temp,
+                                                        const char *final_path, bool overwrite) {
+  // Main-loop-only. rename() cannot replace, so an overwrite is remove-then-rename -- a tiny
+  // window in which the old file is gone, but never a half-written one. A same-directory
+  // rename is atomic: the final path flips from absent/old to complete in one step.
+  if (overwrite) {
+    storage::StorageError rerr = ps->remove(final_path);
+    if (rerr != storage::StorageError::OK && rerr != storage::StorageError::NOT_FOUND)
+      return rerr;
+  }
+  return ps->rename(temp, final_path);
+}
+
 void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::string &filename, size_t index,
                                     uint8_t *data, size_t len, bool final) {
   if (index == 0 && data == nullptr) {
@@ -1195,13 +1217,20 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         return;
       }
       this->upload_.storage = ps;
-      strncpy(this->upload_.rel_path, rel, sizeof(this->upload_.rel_path) - 1);
+      // Stream into a temp sibling and publish atomically at the end (see publish_upload_).
+      strncpy(this->upload_.final_path, rel, sizeof(this->upload_.final_path) - 1);
+      int tn = snprintf(this->upload_.rel_path, sizeof(this->upload_.rel_path), "%s.uploading", rel);
+      if (tn < 0 || (size_t) tn >= sizeof(this->upload_.rel_path)) {
+        err = storage::StorageError::INVALID_ARGS;  // path + suffix would not fit
+        return;
+      }
+      this->upload_.overwrite = overwrite;
       this->upload_.dst_is_fs = ps->get_storage_type() == storage::StorageType::FILESYSTEM;
       if (!overwrite) {
-        // Refuse a silent overwrite: if the destination already exists, answer ALREADY_EXISTS.
-        // stat() OK means it exists; NOT_FOUND is the wanted case; any other error is surfaced.
+        // Refuse a silent overwrite: if the final destination already exists, answer
+        // ALREADY_EXISTS. stat() OK means it exists; NOT_FOUND is the wanted case.
         storage::FileStat st{};
-        storage::StorageError serr = ps->stat(this->upload_.rel_path, &st);
+        storage::StorageError serr = ps->stat(this->upload_.final_path, &st);
         if (serr == storage::StorageError::OK) {
           err = storage::StorageError::ALREADY_EXISTS;
           return;
@@ -1211,6 +1240,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
           return;
         }
       }
+      // Drop any leftover temp from an earlier aborted upload before opening.
+      ps->remove(this->upload_.rel_path);
       if (this->upload_.dst_is_fs) {
         err = static_cast<storage::FilesystemStorage *>(ps)->open(this->upload_.rel_path, this->upload_.handle,
                                                                   storage::OpenMode::WRITE);
@@ -1281,6 +1312,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         this->flush_.handle = this->upload_.handle;
         this->flush_.dst_is_fs = this->upload_.dst_is_fs;
         memcpy(this->flush_.rel_path, this->upload_.rel_path, sizeof(this->flush_.rel_path));
+        memcpy(this->flush_.final_path, this->upload_.final_path, sizeof(this->flush_.final_path));
+        this->flush_.overwrite = this->upload_.overwrite;
         this->flush_.data = this->upload_.staged;
         this->flush_.total = this->upload_.offset;
         this->upload_.handle_open = false;    // the flush owns and closes the handle now
@@ -1305,10 +1338,20 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       this->upload_.error = close_err;
     if (this->upload_.error == storage::StorageError::OK && this->upload_.storage != nullptr &&
         !this->upload_.staged_handoff) {
-      // The file is fully on storage: its directory gained an entry. Rebuild the absolute
-      // path the client used (resolve_() split it) -- the note itself is main-loop-only.
-      std::string abs = std::string(this->upload_.storage->get_mount_path()) + "/" + this->upload_.rel_path;
-      this->run_on_loop_([&abs]() { storage::global_storage_registry->note_parent_changed(abs); });
+      // Publish atomically (rename temp -> final), then note the final path's directory.
+      // Both the rename and the note are main-loop-only.
+      std::string abs = std::string(this->upload_.storage->get_mount_path()) + "/" + this->upload_.final_path;
+      this->run_on_loop_([this, &abs]() {
+        this->upload_.error = this->publish_upload_(this->upload_.storage, this->upload_.rel_path,
+                                                    this->upload_.final_path, this->upload_.overwrite);
+        if (this->upload_.error == storage::StorageError::OK)
+          storage::global_storage_registry->note_parent_changed(abs);
+      });
+    }
+    if (this->upload_.error != storage::StorageError::OK && this->upload_.storage != nullptr &&
+        !this->upload_.staged_handoff && this->upload_.rel_path[0] != '\0') {
+      // Failed before (or during) publish -- drop the partial temp so it does not linger.
+      this->run_on_loop_([this]() { this->upload_.storage->remove(this->upload_.rel_path); });
     }
   }
 }
