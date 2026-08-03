@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import hashlib
 import logging
 import re
+from typing import Any
 
 from esphome import automation, core
 import esphome.codegen as cg
@@ -27,6 +28,7 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
+from esphome.types import ConfigType
 
 CODEOWNERS = ["@p1ngb4ck"]
 
@@ -78,7 +80,7 @@ StorageRegistry = storage_ns.class_("StorageRegistry", cg.Component)
 StorageWorker = storage_ns.class_("StorageWorker", cg.PollingComponent)
 
 
-def validate_sector_multiple(value):
+def validate_sector_multiple(value: int) -> int:
     """Require a multiple of 512 (the common sector size).
 
     Anything else loses the FATFS direct-sector-read path that motivated picking a
@@ -162,7 +164,7 @@ CONFIG_SCHEMA = cv.Schema(
 )
 
 
-def _collect_mount_paths(fragment, where, out):
+def _collect_mount_paths(fragment: Any, where: str, out: list) -> None:
     """Walk a validated config fragment, collecting every (mount point, location) it declares."""
     if isinstance(fragment, dict):
         for key, value in fragment.items():
@@ -175,7 +177,7 @@ def _collect_mount_paths(fragment, where, out):
             _collect_mount_paths(item, where, out)
 
 
-def _final_validate(config):
+def _final_validate(config: ConfigType) -> ConfigType:
     """Reject two storage devices claiming the same mount point.
 
     This lives here and not in the drivers because no driver can see the others' configuration.
@@ -271,7 +273,7 @@ def request_fatfs_path_length() -> None:
     _get_data().fatfs_path_bound = True
 
 
-def validate_mount_path(value):
+def validate_mount_path(value: str) -> str:
     """Validate a storage device's mount point. Drivers use this in place of cv.string.
 
     The interface treats the mount path as an invariant: set once at construction time and
@@ -421,7 +423,7 @@ _FATFS_MAX_LFN_DEFAULT = 255
 _FATFS_SHORT_NAME_MAX = 13
 
 
-def _resolve_path_max(config) -> int:
+def _resolve_path_max(config: ConfigType) -> int:
     """The API's path bound, resolved once every contributor has had its say.
 
     An explicit `path_max:` wins. Otherwise it is the largest bound any configured driver
@@ -481,7 +483,7 @@ def _default_copy_chunk_size() -> int:
 # reads them. Consumers awaiting the registry/worker variables (e.g. via cg.get_variable())
 # are unaffected either way, since that call already suspends until the variable exists.
 @coroutine_with_priority(CoroPriority.LATE)
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     tb_enabled = config.get("enable_psram_transfer_buffer", "psram" in CORE.config)
     if tb_enabled:
         cg.add_define("USE_STORAGE_TRANSFER_BUFFER")
@@ -594,7 +596,7 @@ RawEraseAction = storage_ns.class_("RawEraseAction", automation.Action)
 ExtractStepType = storage_ns.enum("ExtractStepType", is_class=True)
 
 
-def _validate_write_content(config):
+def _validate_write_content(config: ConfigType) -> ConfigType:
     has_content = CONF_CONTENT in config
     has_format = CONF_FORMAT in config
     if has_content == has_format:
@@ -624,7 +626,7 @@ def _file_write_schema(newline_default):
     )
 
 
-def _validate_regex(value):
+def _validate_regex(value: str) -> str:
     value = cv.string(value)
     try:
         # Python's re syntax is a close superset of std::regex ECMAScript for the
@@ -659,7 +661,7 @@ def _validate_regex(value):
     return value
 
 
-def _exactly_one_step_kind(config):
+def _exactly_one_step_kind(config: ConfigType) -> ConfigType:
     kinds = [
         k
         for k in (CONF_LINE, CONF_SPLIT, CONF_KEY, CONF_REGEX, CONF_TRIM, CONF_JSON)
@@ -703,7 +705,7 @@ _EXTRACT_STEP_SCHEMA = cv.All(
 )
 
 
-def _validate_read(config):
+def _validate_read(config: ConfigType) -> ConfigType:
     if CONF_TO_GLOBAL not in config and CONF_ON_VALUE not in config:
         raise cv.Invalid("At least one of 'to_global' or 'on_value' is required")
     return config
@@ -722,12 +724,18 @@ _FILE_READ_SCHEMA = cv.All(
 )
 
 
-async def _build_write_action(config, action_id, template_arg, args, append):
+async def _build_write_action(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list,
+    append: bool,
+):
     var = cg.new_Pvariable(action_id, template_arg, append)
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
-    if CONF_CONTENT in config:
-        template_ = await cg.templatable(config[CONF_CONTENT], args, cg.std_string)
+    if (content := config.get(CONF_CONTENT)) is not None:
+        template_ = await cg.templatable(content, args, cg.std_string)
         cg.add(var.set_content(template_))
     else:
         # Render printf-style format + args into the content string, logger.log-style:
@@ -754,7 +762,9 @@ async def _build_write_action(config, action_id, template_arg, args, append):
     _file_write_schema(newline_default=False),
     synchronous=True,
 )
-async def file_write_action_to_code(config, action_id, template_arg, args):
+async def file_write_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_write_action(config, action_id, template_arg, args, False)
 
 
@@ -764,7 +774,9 @@ async def file_write_action_to_code(config, action_id, template_arg, args):
     _file_write_schema(newline_default=True),
     synchronous=True,
 )
-async def file_append_action_to_code(config, action_id, template_arg, args):
+async def file_append_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_write_action(config, action_id, template_arg, args, True)
 
 
@@ -774,7 +786,9 @@ async def file_append_action_to_code(config, action_id, template_arg, args):
     _FILE_READ_SCHEMA,
     synchronous=True,
 )
-async def file_read_action_to_code(config, action_id, template_arg, args):
+async def file_read_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     var = cg.new_Pvariable(action_id, template_arg)
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
@@ -817,8 +831,8 @@ async def file_read_action_to_code(config, action_id, template_arg, args):
         elif CONF_TRIM in step and step[CONF_TRIM]:
             cg.add(var.add_step(ExtractStepType.TRIM, "", "", 0))
 
-    if CONF_TO_GLOBAL in config:
-        glob = await cg.get_variable(config[CONF_TO_GLOBAL])
+    if (to_global := config.get(CONF_TO_GLOBAL)) is not None:
+        glob = await cg.get_variable(to_global)
         cg.add(
             var.set_global_setter(
                 cg.RawExpression(
@@ -826,9 +840,9 @@ async def file_read_action_to_code(config, action_id, template_arg, args):
                 )
             )
         )
-    if CONF_ON_VALUE in config:
+    if (on_value := config.get(CONF_ON_VALUE)) is not None:
         await automation.build_automation(
-            var.get_value_trigger(), [(cg.std_string, "x")], config[CONF_ON_VALUE]
+            var.get_value_trigger(), [(cg.std_string, "x")], on_value
         )
     return var
 
@@ -851,7 +865,13 @@ _FILE_COPY_SCHEMA = cv.Schema(
 )
 
 
-async def _build_copy_action(config, action_id, template_arg, args, is_move):
+async def _build_copy_action(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list,
+    is_move: bool,
+):
     # file_copy/move prefer the async worker (see perform_file_copy_async). We deliberately do
     # NOT request_storage_worker() here: action codegen can run after the storage to_code has
     # already snapshotted the worker count (LATE), so a late request would compile the action
@@ -861,9 +881,9 @@ async def _build_copy_action(config, action_id, template_arg, args, is_move):
     var = cg.new_Pvariable(action_id, template_arg, is_move)
     cg.add(var.set_from(await cg.templatable(config[CONF_FROM], args, cg.std_string)))
     cg.add(var.set_to(await cg.templatable(config[CONF_TO], args, cg.std_string)))
-    if CONF_ON_COMPLETE in config:
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
         await automation.build_automation(
-            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
         )
     return var
 
@@ -871,7 +891,9 @@ async def _build_copy_action(config, action_id, template_arg, args, is_move):
 @automation.register_action(
     "storage.file_copy", FileCopyAction, _FILE_COPY_SCHEMA, synchronous=True
 )
-async def file_copy_action_to_code(config, action_id, template_arg, args):
+async def file_copy_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_copy_action(config, action_id, template_arg, args, False)
 
 
@@ -879,7 +901,9 @@ async def file_copy_action_to_code(config, action_id, template_arg, args):
 @automation.register_action(
     "storage.file_move", FileCopyAction, _FILE_COPY_SCHEMA, synchronous=True
 )
-async def file_move_action_to_code(config, action_id, template_arg, args):
+async def file_move_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_copy_action(config, action_id, template_arg, args, True)
 
 
@@ -894,7 +918,9 @@ async def file_move_action_to_code(config, action_id, template_arg, args):
     ),
     synchronous=True,
 )
-async def file_delete_action_to_code(config, action_id, template_arg, args):
+async def file_delete_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
     cg.add(var.set_recursive(config[CONF_RECURSIVE]))
@@ -908,7 +934,9 @@ async def file_delete_action_to_code(config, action_id, template_arg, args):
         {cv.Required(CONF_PATH): cv.templatable(cv.string)}, key=CONF_PATH
     ),
 )
-async def file_exists_condition_to_code(config, condition_id, template_arg, args):
+async def file_exists_condition_to_code(
+    config: ConfigType, condition_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     var = cg.new_Pvariable(condition_id, template_arg)
     cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
     return var
@@ -921,7 +949,13 @@ _MOUNT_SCHEMA = cv.maybe_simple_value(
 )
 
 
-async def _build_mount_action(config, action_id, template_arg, args, mount):
+async def _build_mount_action(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: list,
+    mount: bool,
+):
     # cv.use_id(MountableStorage) already rejected non-removable targets at YAML time.
     target = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, target, mount)
@@ -930,14 +964,18 @@ async def _build_mount_action(config, action_id, template_arg, args, mount):
 @automation.register_action(
     "storage.mount", MountAction, _MOUNT_SCHEMA, synchronous=True
 )
-async def mount_action_to_code(config, action_id, template_arg, args):
+async def mount_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_mount_action(config, action_id, template_arg, args, True)
 
 
 @automation.register_action(
     "storage.unmount", MountAction, _MOUNT_SCHEMA, synchronous=True
 )
-async def unmount_action_to_code(config, action_id, template_arg, args):
+async def unmount_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     return await _build_mount_action(config, action_id, template_arg, args, False)
 
 
@@ -956,14 +994,16 @@ _FORMAT_SCHEMA = cv.maybe_simple_value(
 @automation.register_action(
     "storage.format", FormatAction, _FORMAT_SCHEMA, synchronous=True
 )
-async def format_action_to_code(config, action_id, template_arg, args):
+async def format_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     # Any FilesystemStorage may be a target; the driver's format() reports NOT_SUPPORTED at
     # runtime if its backend cannot format.
     target = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, target)
-    if CONF_ON_COMPLETE in config:
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
         await automation.build_automation(
-            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
         )
     return var
 
@@ -981,7 +1021,7 @@ CONF_ERASE_FIRST = "erase_first"
 CONF_FORCE_SLICED_ERASE = "force_sliced_erase"
 
 
-def _validate_raw_data(value):
+def _validate_raw_data(value: str | list) -> bytes | list:
     if isinstance(value, str):
         return value.encode("utf-8")
     if isinstance(value, list):
@@ -991,7 +1031,7 @@ def _validate_raw_data(value):
     )
 
 
-def _validate_raw_read(config):
+def _validate_raw_read(config: ConfigType) -> ConfigType:
     if CONF_TO_FILE not in config and CONF_ON_VALUE not in config:
         raise cv.Invalid("At least one of 'to_file' or 'on_value' is required")
     if CONF_TO_FILE in config and CONF_ON_VALUE in config:
@@ -1010,7 +1050,7 @@ def _validate_raw_read(config):
     return config
 
 
-def _validate_raw_write(config):
+def _validate_raw_write(config: ConfigType) -> ConfigType:
     if (CONF_DATA in config) == (CONF_FROM_FILE in config):
         raise cv.Invalid("Exactly one of 'data' or 'from_file' is required")
     if CONF_ON_COMPLETE in config and CONF_FROM_FILE not in config:
@@ -1022,7 +1062,7 @@ def _validate_raw_write(config):
     return config
 
 
-def _validate_raw_erase(config):
+def _validate_raw_erase(config: ConfigType) -> ConfigType:
     if config[CONF_ALL]:
         if CONF_ADDRESS in config or CONF_SIZE in config:
             raise cv.Invalid("'all' erases the whole device -- remove 'address'/'size'")
@@ -1088,7 +1128,9 @@ _RAW_ERASE_SCHEMA = cv.All(
 @automation.register_action(
     "storage.raw_read", RawReadAction, _RAW_READ_SCHEMA, synchronous=True
 )
-async def raw_read_action_to_code(config, action_id, template_arg, args):
+async def raw_read_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     cg.add_define("USE_STORAGE_RAW_ACTIONS")
     device = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, device)
@@ -1100,22 +1142,18 @@ async def raw_read_action_to_code(config, action_id, template_arg, args):
     cg.add(
         var.set_size(await cg.templatable(config.get(CONF_SIZE, 0), args, cg.uint32))
     )
-    if CONF_TO_FILE in config:
-        cg.add(
-            var.set_to_file(
-                await cg.templatable(config[CONF_TO_FILE], args, cg.std_string)
-            )
-        )
+    if (to_file := config.get(CONF_TO_FILE)) is not None:
+        cg.add(var.set_to_file(await cg.templatable(to_file, args, cg.std_string)))
         cg.add(var.set_has_to_file(True))
-    if CONF_ON_VALUE in config:
+    if (on_value := config.get(CONF_ON_VALUE)) is not None:
         await automation.build_automation(
             var.get_value_trigger(),
             [(cg.std_vector.template(cg.uint8), "x")],
-            config[CONF_ON_VALUE],
+            on_value,
         )
-    if CONF_ON_COMPLETE in config:
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
         await automation.build_automation(
-            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
         )
     return var
 
@@ -1123,7 +1161,9 @@ async def raw_read_action_to_code(config, action_id, template_arg, args):
 @automation.register_action(
     "storage.raw_write", RawWriteAction, _RAW_WRITE_SCHEMA, synchronous=True
 )
-async def raw_write_action_to_code(config, action_id, template_arg, args):
+async def raw_write_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     cg.add_define("USE_STORAGE_RAW_ACTIONS")
     device = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, device)
@@ -1133,12 +1173,8 @@ async def raw_write_action_to_code(config, action_id, template_arg, args):
         )
     )
     cg.add(var.set_erase_first(config[CONF_ERASE_FIRST]))
-    if CONF_FROM_FILE in config:
-        cg.add(
-            var.set_from_file(
-                await cg.templatable(config[CONF_FROM_FILE], args, cg.std_string)
-            )
-        )
+    if (from_file := config.get(CONF_FROM_FILE)) is not None:
+        cg.add(var.set_from_file(await cg.templatable(from_file, args, cg.std_string)))
         cg.add(var.set_has_from_file(True))
     else:
         # _validate_raw_write guarantees exactly one of data/from_file, so this
@@ -1154,9 +1190,9 @@ async def raw_write_action_to_code(config, action_id, template_arg, args):
             arr_id = ID(f"{action_id}_data", is_declaration=True, type=cg.uint8)
             arr = cg.static_const_array(arr_id, cg.ArrayInitializer(*data))
             cg.add(var.set_data_static(arr, len(data)))
-    if CONF_ON_COMPLETE in config:
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
         await automation.build_automation(
-            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
         )
     return var
 
@@ -1164,7 +1200,9 @@ async def raw_write_action_to_code(config, action_id, template_arg, args):
 @automation.register_action(
     "storage.raw_erase", RawEraseAction, _RAW_ERASE_SCHEMA, synchronous=True
 )
-async def raw_erase_action_to_code(config, action_id, template_arg, args):
+async def raw_erase_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
     cg.add_define("USE_STORAGE_RAW_ACTIONS")
     device = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, device)
@@ -1178,9 +1216,9 @@ async def raw_erase_action_to_code(config, action_id, template_arg, args):
     )
     cg.add(var.set_all(config[CONF_ALL]))
     cg.add(var.set_force_sliced_erase(config[CONF_FORCE_SLICED_ERASE]))
-    if CONF_ON_COMPLETE in config:
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
         await automation.build_automation(
-            var.get_complete_trigger(), [(cg.std_string, "x")], config[CONF_ON_COMPLETE]
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
         )
     return var
 
