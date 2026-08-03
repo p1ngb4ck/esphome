@@ -523,7 +523,10 @@
           // No archive endpoint on the node, so a multi-selection cannot become one file.
           return startdownload('select a single file to download');
         }
-        startdownload({ url: API + '/download' + q({ path: childPath(folder, entries[0].name) }) });
+        // GET download: the widget otherwise submits a multipart/form-data POST form (its
+        // default), which the node's httpd tries to parse as an upload and rejects. method:
+        // 'GET' makes it a plain form navigation to the download URL.
+        startdownload({ url: API + '/download' + q({ path: childPath(folder, entries[0].name) }), method: 'GET' });
       };
     }
 
