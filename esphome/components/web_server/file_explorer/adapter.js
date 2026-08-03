@@ -524,6 +524,9 @@
     }
 
     function updateStorageTools() {
+      // The widget fires selection_changed from inside its constructor (SetPath), before
+      // `fe` is assigned here; skip that call -- the initial state is nothing selected.
+      if (!fe) return;
       var atRoot = pathOf(fe.GetCurrentFolder()) === '';
       var sel = fe.GetNumSelectedItems() === 1 ? fe.GetSelectedFolderEntries() : [];
       var e = sel.length === 1 ? sel[0] : null;
