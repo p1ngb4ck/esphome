@@ -854,7 +854,8 @@
           var curPath = pathOf(folder);
           setCurStorage(curPath);
           updateStorageTools();
-          if (curPath === '') requestAnimationFrame(applyRootTypeIcons);
+          // Synchronous (not rAF) so the type glyph is set before paint -- no folder-then-type flash.
+          if (curPath === '') applyRootTypeIcons(0);
         });
       },
 
