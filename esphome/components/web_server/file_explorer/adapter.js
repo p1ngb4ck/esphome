@@ -497,6 +497,23 @@
   // sets from the entry id.
   var rootKindById = {};
 
+  // Reflect the current storage's type on the card so the breadcrumb folder icon can match it
+  // (the storages carry it; device nodes are never navigated into). Cleared at the root.
+  function setCurStorage(path) {
+    if (!card) return;
+    ['sd', 'usb', 'net', 'mem', 'disk'].forEach(function (x) {
+      card.classList.remove('esph-cur-' + x);
+    });
+    if (!path) return;
+    for (var k in rootKindById) {
+      if (k.indexOf('dev:') === 0) continue;
+      if (path === k || path.indexOf(k + '/') === 0) {
+        card.classList.add('esph-cur-' + rootKindById[k]);
+        return;
+      }
+    }
+  }
+
   function applyRootTypeIcons(tries) {
     // The card lives inside the esp-app shadow root, so document.getElementById cannot reach
     // it -- use the card element directly, the reference the rest of the adapter already uses.
@@ -594,29 +611,19 @@
       foot.appendChild(el);
     });
 
-    if (fill) {
-      // Media dialogs skip the title bar; the close floats over the content (images are usually
-      // narrower than the frame, so there is room beside them) and the footer only appears when a
-      // viewer actually has controls (editor save, monitor follow toggle).
-      close.classList.add('esph-fe-close--float');
-      box.appendChild(close);
-      box.appendChild(contentElem);
-      if (footerElems && footerElems.length) box.appendChild(foot);
-    } else {
-      var head = document.createElement('div');
-      head.className = 'esph-fe-dialog-head';
-      var label = document.createElement('span');
-      label.textContent = title;
-      head.appendChild(label);
-      head.appendChild(close);
-      box.appendChild(head);
-      box.appendChild(contentElem);
-      box.appendChild(foot);
-    }
+    var head = document.createElement('div');
+    head.className = 'esph-fe-dialog-head';
+    var label = document.createElement('span');
+    label.textContent = title;
+    head.appendChild(label);
+    head.appendChild(close);
+    box.appendChild(head);
+    box.appendChild(contentElem);
+    box.appendChild(foot);
     back.appendChild(box);
     // Into the card, not document.body: the card sits in the v3 app's shadow root, and a
     // dialog parked outside it would get none of this sheet's rules.
-    (card || document.body).appendChild(back);
+    (frameEl || card || document.body).appendChild(back);
 
     var closed = false;
     function shut() {
@@ -844,7 +851,9 @@
           // The widget renders the item icons itself; paint our type icons once those
           // nodes exist. Only the root carries storages/devices -- everything below is
           // ordinary files and folders that keep the widget's own icons.
-          if (pathOf(folder) === '') requestAnimationFrame(applyRootTypeIcons);
+          var curPath = pathOf(folder);
+          setCurStorage(curPath);
+          if (curPath === '') requestAnimationFrame(applyRootTypeIcons);
         });
       },
 
@@ -1058,6 +1067,7 @@
 
   // Built in start(), read by overlay() — the dialogs go inside it.
   var card = null;
+  var frameEl = null;
   var feInstance = null;
 
   // The v3 page frames each section as a tab header over a rounded container. The browser is
@@ -1194,6 +1204,7 @@
   function start() {
     var built = buildCard();
     card = built.card;
+    frameEl = built.frame;
     attach(card, built);
     // The access rights decide which callbacks are defined at all — the widget only shows a
     // rename affordance when onrename exists, so a read-only node gets a read-only browser
