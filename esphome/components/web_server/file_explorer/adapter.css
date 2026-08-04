@@ -20,18 +20,31 @@
 }
 
 /* tab header + frame: verbatim v3 tab-header / tab-container */
+#esp-file-explorer .esph-fe-tabbar {
+  display: flex;
+  gap: 4px;
+  margin-top: 1em;
+}
+
 #esp-file-explorer .esph-fe-tab {
   display: inline-flex;
-  max-width: 90%;
+  max-width: 45%;
   font-weight: 400;
   padding-inline: 1.5em;
   padding-top: 0.5em;
   padding-bottom: 0.5em;
   align-items: center;
   border-radius: 12px 12px 0 0;
-  background-color: rgba(127, 127, 127, 0.3);
-  margin-top: 1em;
+  background-color: rgba(127, 127, 127, 0.15);
+  cursor: pointer;
   user-select: none;
+  opacity: 0.65;
+  transition: background-color 150ms, opacity 150ms;
+}
+
+#esp-file-explorer .esph-fe-tab--active {
+  background-color: rgba(127, 127, 127, 0.3);
+  opacity: 1;
 }
 
 #esp-file-explorer .esph-fe-frame {

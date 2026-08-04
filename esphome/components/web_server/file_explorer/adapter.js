@@ -949,6 +949,7 @@
     }
 
     var fe = new FileExplorer(parent, opts);
+    feInstance = fe;
 
     // Per-storage mount/unmount: a toolbar button added only when the node permits the
     // operation at all (server still enforces it with 403). updateStorageTools() then shows
@@ -1057,6 +1058,7 @@
 
   // Built in start(), read by overlay() — the dialogs go inside it.
   var card = null;
+  var feInstance = null;
 
   // The v3 page frames each section as a tab header over a rounded container. The browser is
   // another such section, so it builds the same two elements rather than sitting in the page
@@ -1076,18 +1078,29 @@
       el.appendChild(link);
     });
 
-    var tab = document.createElement('div');
-    tab.className = 'esph-fe-tab';
-    tab.textContent = 'Files';
-    // Double-click widens the browser exactly like the log's own tab header: the v3 app
-    // listens for this event and toggles the log column (which now holds the browser) to full
-    // width. Reusing the log's event means one shared wide state, not a competing one.
-    tab.addEventListener('dblclick', function () {
-      tab.dispatchEvent(new CustomEvent('log-tab-header-double-clicked', { bubbles: true, composed: true }));
-    });
+    // A [ Log | Files ] tab bar. Only one panel is visible at a time, so the growing log can
+    // be hidden outright and whichever panel is active gets the full column height.
+    var tabbar = document.createElement('div');
+    tabbar.className = 'esph-fe-tabbar';
+    var logTab = document.createElement('div');
+    logTab.className = 'esph-fe-tab';
+    logTab.textContent = 'Log';
+    var filesTab = document.createElement('div');
+    filesTab.className = 'esph-fe-tab';
+    filesTab.textContent = 'Files';
+    // Double-click either tab widens the log column, exactly like the log's own tab header:
+    // the v3 app listens for this event and toggles the column to full width.
+    function widen() {
+      tabbar.dispatchEvent(new CustomEvent('log-tab-header-double-clicked', { bubbles: true, composed: true }));
+    }
+    logTab.addEventListener('dblclick', widen);
+    filesTab.addEventListener('dblclick', widen);
+    tabbar.appendChild(logTab);
+    tabbar.appendChild(filesTab);
 
     var frame = document.createElement('div');
     frame.className = 'esph-fe-frame';
+    frame.style.display = 'none';  // Log is the default panel
 
     // The widget's own container. Kept as a separate element so file-explorer.js owns its
     // subtree outright and the frame's padding is not something it has to reason about.
@@ -1095,35 +1108,73 @@
     host.id = 'file-explorer';
     frame.appendChild(host);
 
-    el.appendChild(tab);
+    el.appendChild(tabbar);
     el.appendChild(frame);
-    return { card: el, host: host };
+    return { card: el, host: host, logTab: logTab, filesTab: filesTab, frame: frame };
   }
 
   // Places the card directly below the entity table — above the log, which grows. The v3 app
   // renders into an open shadow root; if it has not rendered yet, retry once shortly after,
   // and fall back to appending next to <esp-app> so the browser is reachable either way.
-  function attach(el) {
+  function attach(el, tabs) {
     var app = document.querySelector('esp-app');
 
     function mount() {
-      // Live in the log column, below the log, so the browser shares the log's width and its
-      // double-click-to-widen (see the tab handler in buildCard). Fall back to below the entity
-      // table, then to appending after the app, so it stays reachable on any layout.
+      // Sit in the log column, above the log, and switch between the two via the tab bar so
+      // the growing log never pushes the browser down -- only one panel is visible at a time.
+      // Fall back to the entity table, then to appending after the app, so it stays reachable.
       var root = app && app.shadowRoot;
-      var anchor = root && (root.querySelector('esp-log') || root.querySelector('esp-entity-table'));
-      if (anchor && anchor.parentNode) {
-        anchor.parentNode.insertBefore(el, anchor.nextSibling);
-        return true;
-      }
-      return false;
+      var log = root && root.querySelector('esp-log');
+      var anchor = log || (root && root.querySelector('esp-entity-table'));
+      if (!anchor || !anchor.parentNode) return false;
+      anchor.parentNode.insertBefore(el, anchor);
+      wireTabs(tabs, log);
+      return true;
     }
 
     if (!mount()) {
       setTimeout(function () {
-        if (!mount()) (app ? app.parentNode : document.body).appendChild(el);
+        if (!mount()) {
+          (app ? app.parentNode : document.body).appendChild(el);
+          wireTabs(tabs, null);
+        }
       }, 300);
     }
+  }
+
+  // Switch between the log and the browser. Files hides esp-log entirely (so its growth cannot
+  // push anything), Log hides the browser frame. With no log present the browser is always on.
+  function wireTabs(tabs, log) {
+    if (!log) {
+      tabs.frame.style.display = '';
+      tabs.logTab.style.display = 'none';
+      tabs.filesTab.classList.add('esph-fe-tab--active');
+      return;
+    }
+    // Our tab bar replaces the log's own "Debug Log" header; suppress it in the log's open
+    // shadow root. Reversible -- a single injected style element.
+    if (log.shadowRoot && !log.shadowRoot.getElementById('esph-fe-loghdr')) {
+      var st = document.createElement('style');
+      st.id = 'esph-fe-loghdr';
+      st.textContent = '.tab-header{display:none}';
+      log.shadowRoot.appendChild(st);
+    }
+    function select(files) {
+      tabs.frame.style.display = files ? '' : 'none';
+      log.style.display = files ? 'none' : '';
+      tabs.filesTab.classList.toggle('esph-fe-tab--active', files);
+      tabs.logTab.classList.toggle('esph-fe-tab--active', !files);
+      // The widget may have first rendered while hidden; refresh on show so the listing is
+      // current and laid out against the now-visible frame.
+      if (files && feInstance) feInstance.RefreshFolders(true);
+    }
+    tabs.logTab.addEventListener('click', function () {
+      select(false);
+    });
+    tabs.filesTab.addEventListener('click', function () {
+      select(true);
+    });
+    select(false);  // default: Log
   }
 
   // ---------------------------------------------------------------------------
@@ -1133,7 +1184,7 @@
   function start() {
     var built = buildCard();
     card = built.card;
-    attach(card);
+    attach(card, built);
     // The access rights decide which callbacks are defined at all — the widget only shows a
     // rename affordance when onrename exists, so a read-only node gets a read-only browser
     // rather than buttons that fail.
