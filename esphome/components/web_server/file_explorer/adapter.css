@@ -54,9 +54,12 @@
 }
 
 /* js-fileexplorer lays itself out inside the element it is handed, so that element needs a
-   height of its own or the frame collapses. min-height rather than height, to leave the
-   widget free to grow. */
+   height of its own or the frame collapses -- and a fixed one, not just a minimum: with only
+   min-height the body tracks its own left toolbar and jumps when tools appear or disappear (the
+   raw-device toolbar is shorter). A viewport height keeps it stable and gives the media overlays
+   real room, especially when widened. */
 #esp-file-explorer #file-explorer {
+  height: 70vh;
   min-height: 24em;
 }
 

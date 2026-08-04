@@ -503,7 +503,9 @@
     // The widget renders its items after SetEntries returns, so retry a few frames while they
     // are not in the DOM yet.
     if (!card) return;
-    var items = card.querySelectorAll('[data-itemid]');
+    // The widget tags item nodes with data-feid in its list view and data-itemid in its tile
+    // view; both carry the entry id. Match either so the icons appear in whichever view is on.
+    var items = card.querySelectorAll('[data-feid], [data-itemid]');
     if (!items.length && (tries || 0) < 5) {
       requestAnimationFrame(function () {
         applyRootTypeIcons((tries || 0) + 1);
@@ -511,7 +513,8 @@
       return;
     }
     for (var i = 0; i < items.length; i++) {
-      var cat = rootKindById[items[i].dataset.itemid];
+      var id = items[i].dataset.feid || items[i].dataset.itemid;
+      var cat = rootKindById[id];
       if (!cat) continue;
       var icon = items[i].querySelector('.fe_fileexplorer_item_icon');
       if (icon) icon.classList.add('esph-fe-type-' + cat);
@@ -1142,6 +1145,23 @@
     }
   }
 
+  // Hide exactly the log's own "Debug Log" header -- the .tab-header inside esp-log's own shadow
+  // root -- with an inline style. Inline beats the component's own .tab-header rule, and scoping
+  // to the log's shadow root leaves the entity table's same-named header (a separate shadow root)
+  // untouched. The log renders it asynchronously, so retry a few frames.
+  function hideLogHeader(log, tries) {
+    var hdr = log.shadowRoot && log.shadowRoot.querySelector('.tab-header');
+    if (hdr) {
+      hdr.style.display = 'none';
+      return;
+    }
+    if ((tries || 0) < 20) {
+      requestAnimationFrame(function () {
+        hideLogHeader(log, (tries || 0) + 1);
+      });
+    }
+  }
+
   // Switch between the log and the browser. Files hides esp-log entirely (so its growth cannot
   // push anything), Log hides the browser frame. With no log present the browser is always on.
   function wireTabs(tabs, log) {
@@ -1151,14 +1171,7 @@
       tabs.filesTab.classList.add('esph-fe-tab--active');
       return;
     }
-    // Our tab bar replaces the log's own "Debug Log" header; suppress it in the log's open
-    // shadow root. Reversible -- a single injected style element.
-    if (log.shadowRoot && !log.shadowRoot.getElementById('esph-fe-loghdr')) {
-      var st = document.createElement('style');
-      st.id = 'esph-fe-loghdr';
-      st.textContent = '.tab-header{display:none}';
-      log.shadowRoot.appendChild(st);
-    }
+    hideLogHeader(log, 0);
     function select(files) {
       tabs.frame.style.display = files ? '' : 'none';
       log.style.display = files ? 'none' : '';
