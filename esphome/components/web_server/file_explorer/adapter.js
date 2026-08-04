@@ -546,7 +546,7 @@
             var de = entryFor(d.node_name || d.id, false, d.capacity, 0, 'dev:' + d.id);
             de.esphDevice = d;
             de.attrs = { canmodify: false };
-            rootKindById['dev:' + d.id] = typeIcon(d.kind);
+            rootKindById['dev:' + d.id] = 'devnode';
             entries.push(de);
           }
         }
@@ -584,15 +584,9 @@
     var box = document.createElement('div');
     box.className = fill ? 'esph-fe-dialog esph-fe-dialog--fill' : 'esph-fe-dialog';
 
-    var head = document.createElement('div');
-    head.className = 'esph-fe-dialog-head';
-    var label = document.createElement('span');
-    label.textContent = title;
     var close = document.createElement('button');
     close.className = 'esph-fe-close';
     close.textContent = '\u00d7';
-    head.appendChild(label);
-    head.appendChild(close);
 
     var foot = document.createElement('div');
     foot.className = 'esph-fe-dialog-foot';
@@ -600,9 +594,25 @@
       foot.appendChild(el);
     });
 
-    box.appendChild(head);
-    box.appendChild(contentElem);
-    box.appendChild(foot);
+    if (fill) {
+      // Media dialogs skip the title bar; the close floats over the content (images are usually
+      // narrower than the frame, so there is room beside them) and the footer only appears when a
+      // viewer actually has controls (editor save, monitor follow toggle).
+      close.classList.add('esph-fe-close--float');
+      box.appendChild(close);
+      box.appendChild(contentElem);
+      if (footerElems && footerElems.length) box.appendChild(foot);
+    } else {
+      var head = document.createElement('div');
+      head.className = 'esph-fe-dialog-head';
+      var label = document.createElement('span');
+      label.textContent = title;
+      head.appendChild(label);
+      head.appendChild(close);
+      box.appendChild(head);
+      box.appendChild(contentElem);
+      box.appendChild(foot);
+    }
     back.appendChild(box);
     // Into the card, not document.body: the card sits in the v3 app's shadow root, and a
     // dialog parked outside it would get none of this sheet's rules.
@@ -1003,7 +1013,7 @@
       toggleTool(eraseTool, !!(dev && dev.erasable));
       // Monitor (tail) is a per-file action: shown while a single text file (per
       // text_file_formats) is selected, in any folder.
-      if (monitorBtn) monitorBtn.style.display = e && e.type !== 'folder' && isText(e.name) ? '' : 'none';
+      toggleTool(monitorTool, !!(e && e.type !== 'folder' && isText(e.name)));
       fe.ToolStateUpdated();
     }
 
@@ -1029,30 +1039,15 @@
     var verifyTool = makeRawTool('esph-fe-tool-verify', 'Verify device', rawVerify);
     var eraseTool = makeRawTool('esph-fe-tool-erase', 'Erase device', rawErase);
 
-    var monitorBtn = addTools(fe, parent);
-    if (CHANGE_POLL_MS > 0) startChangePoll(fe);
-    return fe;
-  }
-
-  // The header strip holds the monitor (tail -f) button, shown by updateStorageTools() only
-  // while a single text file (per text_file_formats) is selected; it follows that file.
-  // Returned so build() can toggle it. mount/unmount moved into the widget toolbar.
-  function addTools(fe, parent) {
-    var bar = document.createElement('div');
-    bar.className = 'esph-fe-bar';
-
-    var monitor = document.createElement('button');
-    monitor.textContent = 'monitor';
-    monitor.style.display = 'none';
-    monitor.onclick = function () {
+    var monitorTool = fe.AddToolbarButton('esph-fe-tool-monitor', 'Monitor');
+    monitorTool.classList.add('fe_fileexplorer_hidden');
+    monitorTool.addEventListener('click', function () {
       var sel = fe.GetSelectedFolderEntries();
       if (sel.length !== 1 || sel[0].type === 'folder') return;
       showTail(childPath(fe.GetCurrentFolder(), sel[0].name), sel[0].name);
-    };
-    bar.appendChild(monitor);
-
-    parent.insertBefore(bar, parent.firstChild);
-    return monitor;
+    });
+    if (CHANGE_POLL_MS > 0) startChangePoll(fe);
+    return fe;
   }
 
   // ---------------------------------------------------------------------------
