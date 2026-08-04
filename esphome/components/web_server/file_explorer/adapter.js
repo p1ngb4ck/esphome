@@ -476,10 +476,44 @@
   // Listing
   // ---------------------------------------------------------------------------
 
+  // Medium -> icon category for the root entries. Same coarse buckets the simple browser
+  // uses (sd/usb/net/mem/disk), matched by substring so bus-prefixed kinds fall in place
+  // (spi_flash -> flash -> mem, onewire_eeprom -> eeprom -> mem). ftp is a network share
+  // and mram is a memory IC, so they join net/mem rather than the generic disk fallback.
+  function typeIcon(kind) {
+    var k = String(kind || '').toLowerCase();
+    if (k.indexOf('sd') !== -1) return 'sd';
+    if (k.indexOf('usb') !== -1) return 'usb';
+    if (k.indexOf('nfs') !== -1 || k.indexOf('ftp') !== -1 || k.indexOf('net') !== -1) return 'net';
+    if (k.indexOf('flash') !== -1 || k.indexOf('eeprom') !== -1 || k.indexOf('fram') !== -1 ||
+        k.indexOf('mram') !== -1 || k.indexOf('littlefs') !== -1 || k.indexOf('part') !== -1)
+      return 'mem';
+    return 'disk';
+  }
+
+  // itemid -> icon category, rebuilt on every root refresh. The widget renders item icons
+  // itself (fixed folder/file classes), so applyRootTypeIcons() adds our category class to
+  // the rendered icon node once the DOM exists -- keyed by data-itemid, which the widget
+  // sets from the entry id.
+  var rootKindById = {};
+
+  function applyRootTypeIcons() {
+    var host = document.getElementById('esp-file-explorer');
+    if (!host) return;
+    var items = host.querySelectorAll('[data-itemid]');
+    for (var i = 0; i < items.length; i++) {
+      var cat = rootKindById[items[i].dataset.itemid];
+      if (!cat) continue;
+      var icon = items[i].querySelector('.fe_fileexplorer_item_icon');
+      if (icon) icon.classList.add('esph-fe-type-' + cat);
+    }
+  }
+
   function refreshRoot(cb) {
     request('GET', API + '/storages', function (ok, body, status) {
       if (!ok || !body || !body.storages) return cb(errorText(body, status));
       var entries = [];
+      rootKindById = {};
       for (var i = 0; i < body.storages.length; i++) {
         var s = body.storages[i];
         var e = entryFor(s.mounted ? s.mount_path : s.mount_path + '  (not mounted)', true, 0, 0, s.mount_path);
@@ -487,6 +521,7 @@
         e.esphCanMount = !!s.can_mount;
         e.esphCanUnmount = !!s.can_unmount;
         e.esphCanFormat = !!s.can_format;
+        rootKindById[s.mount_path] = typeIcon(s.kind || s.type);
         entries.push(e);
       }
       // Raw device nodes, if this build has the raw API. A 404 just means it is not
@@ -499,6 +534,7 @@
             var de = entryFor(d.node_name || d.id, false, d.capacity, 0, 'dev:' + d.id);
             de.esphDevice = d;
             de.attrs = { canmodify: false };
+            rootKindById['dev:' + d.id] = typeIcon(d.kind);
             entries.push(de);
           }
         }
@@ -783,6 +819,10 @@
           folder.SetBusyRef(-1);
           if (err) return folder.SetEntries([], { error: err });
           folder.SetEntries(entries);
+          // The widget renders the item icons itself; paint our type icons once those
+          // nodes exist. Only the root carries storages/devices -- everything below is
+          // ordinary files and folders that keep the widget's own icons.
+          if (pathOf(folder) === '') requestAnimationFrame(applyRootTypeIcons);
         });
       },
 
@@ -939,6 +979,12 @@
       toggleTool(unmountTool, !!(atRoot && e && e.esphCanUnmount && e.esphMounted));
       toggleTool(formatTool, !!(atRoot && e && e.esphCanFormat && !e.esphMounted));
       var dev = e && e.esphDevice ? e.esphDevice : null;
+      var host = document.getElementById('esp-file-explorer');
+      if (host) {
+        var fileOps = host.querySelectorAll('[class*="fe_fileexplorer_folder_tool_"]');
+        for (var i = 0; i < fileOps.length; i++)
+          fileOps[i].classList.toggle('fe_fileexplorer_hidden', !!dev);
+      }
       toggleTool(readTool, !!dev);
       toggleTool(writeTool, !!(dev && dev.writable));
       toggleTool(verifyTool, !!(dev && dev.writable));

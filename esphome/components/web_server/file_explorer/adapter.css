@@ -227,3 +227,32 @@
 #esp-file-explorer .esph-fe-tool-erase::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h18'/%3E%3Cpath d='M8 6V4h8v2'/%3E%3Cpath d='M6 6l1 14h10l1-14'/%3E%3C/svg%3E");
 }
+
+/* Storage-type icons for the root entries (storages + raw device nodes). Original colored
+   line/fill glyphs chosen to sit next to the library's folder/file art rather than the
+   monochrome toolbar tools. The #id + two classes outranks the sprite rule they override. */
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-sd,
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-usb,
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-net,
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-mem,
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-disk {
+  background-position: center;
+  background-size: 40px 40px;
+  background-repeat: no-repeat;
+  image-rendering: auto;
+}
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-sd {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M14 6h12l8 8v28a2.5 2.5 0 0 1-2.5 2.5H14a2.5 2.5 0 0 1-2.5-2.5V8.5A2.5 2.5 0 0 1 14 6z' fill='%234a86d8'/%3E%3Cpath d='M26 6l8 8h-8z' fill='%232f5f9e'/%3E%3Crect x='11.5' y='22' width='2.2' height='4' fill='%232f5f9e'/%3E%3Cg fill='%23f4d06a'%3E%3Crect x='16' y='10' width='2.4' height='6.5' rx='1'/%3E%3Crect x='19.8' y='10' width='2.4' height='6.5' rx='1'/%3E%3Crect x='23.6' y='10' width='2.4' height='6.5' rx='1'/%3E%3Crect x='27.4' y='10' width='2.4' height='6.5' rx='1'/%3E%3C/g%3E%3C/svg%3E");
+}
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-usb {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='19.5' y='5' width='9' height='10' rx='1.4' fill='%23c7ccd1'/%3E%3Crect x='21.4' y='7.2' width='5.2' height='5.6' rx='0.8' fill='%236b7280'/%3E%3Crect x='20.8' y='14' width='6.4' height='3' fill='%239aa2ae'/%3E%3Crect x='15' y='16' width='18' height='27' rx='3' fill='%234a86d8'/%3E%3Cg fill='none' stroke='%23eaf1fb' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='24' y1='21' x2='24' y2='38'/%3E%3Ccircle cx='24' cy='21' r='1.6' fill='%23eaf1fb' stroke='none'/%3E%3Cpath d='M24 30l-3.5-3.5'/%3E%3Crect x='18.4' y='24.4' width='3.4' height='3.4' fill='%23eaf1fb' stroke='none'/%3E%3Cpath d='M24 27l3.5-3.5'/%3E%3Cpath d='M27.5 23.5l2.2 .3-.3-2.2z' fill='%23eaf1fb' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
+}
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-net {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M35 35H14a8.5 8.5 0 0 1-1.2-16.9A11.5 11.5 0 0 1 36 20.5 7.5 7.5 0 0 1 35 35z' fill='%235aa0e6'/%3E%3Cpath d='M35 35H14a8.5 8.5 0 0 1-1.2-16.9A11.5 11.5 0 0 1 36 20.5 7.5 7.5 0 0 1 35 35z' fill='none' stroke='%233d7ec2' stroke-width='1.5'/%3E%3C/svg%3E");
+}
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-mem {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cg fill='%233c4150'%3E%3Crect x='18' y='9' width='2.4' height='6'/%3E%3Crect x='23' y='9' width='2.4' height='6'/%3E%3Crect x='28' y='9' width='2.4' height='6'/%3E%3Crect x='18' y='33' width='2.4' height='6'/%3E%3Crect x='23' y='33' width='2.4' height='6'/%3E%3Crect x='28' y='33' width='2.4' height='6'/%3E%3Crect x='9' y='18' width='6' height='2.4'/%3E%3Crect x='9' y='23' width='6' height='2.4'/%3E%3Crect x='9' y='28' width='6' height='2.4'/%3E%3Crect x='33' y='18' width='6' height='2.4'/%3E%3Crect x='33' y='23' width='6' height='2.4'/%3E%3Crect x='33' y='28' width='6' height='2.4'/%3E%3C/g%3E%3Crect x='14' y='14' width='20' height='20' rx='2.5' fill='%234a5060'/%3E%3Crect x='19' y='19' width='10' height='10' rx='1.5' fill='%23767d90'/%3E%3C/svg%3E");
+}
+#esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-disk {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='8' y='16' width='32' height='16' rx='2' fill='%233f9d78'/%3E%3Crect x='8' y='16' width='32' height='16' rx='2' fill='none' stroke='%232f7d5f' stroke-width='1.2'/%3E%3Crect x='14' y='19' width='14' height='10' rx='1.5' fill='%232b3038'/%3E%3Crect x='16.5' y='21.5' width='9' height='5' rx='0.8' fill='%234a515e'/%3E%3Cg fill='%23f4d06a'%3E%3Crect x='31' y='20' width='6' height='2' rx='1'/%3E%3Crect x='31' y='24' width='6' height='2' rx='1'/%3E%3Crect x='31' y='28' width='6' height='1.6' rx='.8'/%3E%3C/g%3E%3C/svg%3E");
+}
