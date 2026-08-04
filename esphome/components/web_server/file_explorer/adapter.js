@@ -1005,7 +1005,9 @@
       if (card) {
         var fileOps = card.querySelectorAll('[class*="fe_fileexplorer_folder_tool_"]');
         for (var i = 0; i < fileOps.length; i++)
-          fileOps[i].classList.toggle('fe_fileexplorer_hidden', !!dev);
+          // At the root there are only storages and device nodes -- file operations never
+          // apply, so drop them and leave only the contextual mount/format or raw tools.
+          fileOps[i].classList.toggle('fe_fileexplorer_hidden', atRoot);
       }
       toggleTool(readTool, !!dev);
       toggleTool(writeTool, !!(dev && dev.writable));

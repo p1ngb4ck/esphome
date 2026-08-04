@@ -49,7 +49,8 @@
 #esp-file-explorer .esph-fe-frame {
   border: 2px solid rgba(127, 127, 127, 0.3);
   border-radius: 0 12px 12px 12px;
-  padding: 4px;
+  padding: 0;
+  overflow: hidden;
 }
 
 /* js-fileexplorer lays itself out inside the element it is handed, so that element needs a
@@ -298,7 +299,7 @@
 #esp-file-explorer .fe_fileexplorer_inner_wrap {
   background-color: Canvas;
   color: CanvasText;
-  border-color: rgba(127, 127, 127, 0.4);
+  border: none;
 }
 #esp-file-explorer .fe_fileexplorer_path_wrap,
 #esp-file-explorer .fe_fileexplorer_folder_tools_scroll_wrap {
@@ -384,4 +385,21 @@
   background-repeat: no-repeat;
   image-rendering: auto;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M24 4l16.5 9.2v19.6L24 42 7.5 32.8V13.2z' fill='%236b5bd0'/%3E%3Cpath d='M24 4l16.5 9.2v19.6L24 42 7.5 32.8V13.2z' fill='none' stroke='%235346a8' stroke-width='1.4'/%3E%3Crect x='17' y='17' width='14' height='14' rx='2' fill='%23b3a7f2'/%3E%3Crect x='20.7' y='20.7' width='6.6' height='6.6' rx='1' fill='%236b5bd0'/%3E%3C/svg%3E");
+}
+
+/* Status bar: a little taller and a hair larger, still subtle -- and its hardcoded dark-blue
+   text broke the dark theme, so inherit instead. */
+#esp-file-explorer .fe_fileexplorer_statusbar_wrap {
+  font-size: 0.82em;
+  color: inherit;
+}
+#esp-file-explorer .fe_fileexplorer_statusbar_text_wrap {
+  padding-top: 0.5em;
+  padding-bottom: 0.5em;
+}
+
+/* Left tool column: a touch wider so the icons breathe. */
+#esp-file-explorer .fe_fileexplorer_folder_tools_scroll_wrap {
+  padding-left: 14px;
+  padding-right: 14px;
 }
