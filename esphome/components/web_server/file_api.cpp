@@ -1176,7 +1176,12 @@ storage::StorageError WebServerFileApi::publish_upload_(storage::PathStorage *ps
 
 void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::string &filename, size_t index,
                                     uint8_t *data, size_t len, bool final) {
-  if (index == 0 && data == nullptr) {
+  // Start marker: index 0, no data -- and not final. An explicitly-created empty file
+  // (?create=1) drives its End marker as (index 0, no data, final=true) as well, so without
+  // the !final guard that End would be misread as a second Start, hit the one-upload-at-a-time
+  // refusal below and return before the final block ever closes and publishes the .uploading
+  // temp -- the file would be left as a stray .uploading and never appear.
+  if (index == 0 && data == nullptr && !final) {
     ESP_LOGD(TAG, "upload start: '%s'", filename.c_str());
     // Start marker. Target path comes from the query (?path=/sdcard/dir/file.bin); the
     // multipart filename is only a fallback appended to ?dir=.
