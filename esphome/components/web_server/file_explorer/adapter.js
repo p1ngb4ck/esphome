@@ -491,10 +491,9 @@
     return 'disk';
   }
 
-  // itemid -> icon category, rebuilt on every root refresh. The widget renders item icons
-  // itself (fixed folder/file classes), so applyRootTypeIcons() adds our category class to
-  // the rendered icon node once the DOM exists -- keyed by data-itemid, which the widget
-  // sets from the entry id.
+  // entry id -> icon category, rebuilt on every root refresh. setRootTypeStyles() turns this
+  // into per-entry style rules (keyed by data-feid/data-itemid) before the widget renders, so
+  // the type glyph is correct from the first paint rather than swapped in afterwards.
   var rootKindById = {};
 
   // Reflect the current storage's type on the card so the breadcrumb folder icon can match it
@@ -514,28 +513,30 @@
     }
   }
 
-  function applyRootTypeIcons(tries) {
-    // The card lives inside the esp-app shadow root, so document.getElementById cannot reach
-    // it -- use the card element directly, the reference the rest of the adapter already uses.
-    // The widget renders its items after SetEntries returns, so retry a few frames while they
-    // are not in the DOM yet.
+  // Emit one style rule per root entry, keyed by its data-feid/data-itemid, so the widget
+  // renders the correct type glyph from the first paint. No post-render DOM change, no
+  // folder-then-type flash. Rules reference the per-type mask/colour custom properties in
+  // adapter.css. Must be called before the entries are handed to the widget.
+  function setRootTypeStyles() {
     if (!card) return;
-    // The widget tags item nodes with data-feid in its list view and data-itemid in its tile
-    // view; both carry the entry id. Match either so the icons appear in whichever view is on.
-    var items = card.querySelectorAll('[data-feid], [data-itemid]');
-    if (!items.length && (tries || 0) < 5) {
-      requestAnimationFrame(function () {
-        applyRootTypeIcons((tries || 0) + 1);
-      });
-      return;
-    }
-    for (var i = 0; i < items.length; i++) {
-      var id = items[i].dataset.feid || items[i].dataset.itemid;
+    var css = '';
+    for (var id in rootKindById) {
       var cat = rootKindById[id];
-      if (!cat) continue;
-      var icon = items[i].querySelector('.fe_fileexplorer_item_icon');
-      if (icon) icon.classList.add('esph-fe-type-' + cat);
+      var q = '"' + String(id).replace(/[\\"]/g, '\\$&') + '"';
+      css += '#esp-file-explorer [data-feid=' + q + '] .fe_fileexplorer_item_icon::before,\n' +
+             '#esp-file-explorer [data-itemid=' + q + '] .fe_fileexplorer_item_icon::before {\n' +
+             '  mask-image: var(--fe-t-' + cat + ');\n' +
+             '  -webkit-mask-image: var(--fe-t-' + cat + ');\n' +
+             '  background-color: var(--fe-c-' + cat + ');\n' +
+             '  opacity: 1;\n}\n';
     }
+    var st = card.querySelector('#esph-fe-typestyles');
+    if (!st) {
+      st = document.createElement('style');
+      st.id = 'esph-fe-typestyles';
+      card.appendChild(st);
+    }
+    st.textContent = css;
   }
 
   function refreshRoot(cb) {
@@ -567,6 +568,7 @@
             entries.push(de);
           }
         }
+        setRootTypeStyles();
         cb(null, entries);
       });
     });
@@ -854,8 +856,6 @@
           var curPath = pathOf(folder);
           setCurStorage(curPath);
           updateStorageTools();
-          // Synchronous (not rAF) so the type glyph is set before paint -- no folder-then-type flash.
-          if (curPath === '') applyRootTypeIcons(0);
         });
       },
 
