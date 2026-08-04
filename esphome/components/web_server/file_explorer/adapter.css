@@ -35,11 +35,10 @@
   padding-bottom: 0.5em;
   align-items: center;
   border-radius: 12px 12px 0 0;
-  background-color: rgba(127, 127, 127, 0.15);
+  background-color: rgba(127, 127, 127, 0.12);
   cursor: pointer;
   user-select: none;
-  opacity: 0.65;
-  transition: background-color 150ms, opacity 150ms;
+  transition: background-color 150ms;
 }
 
 #esp-file-explorer .esph-fe-tab--active {
@@ -285,4 +284,66 @@
 }
 #esp-file-explorer .fe_fileexplorer_item_icon.esph-fe-type-disk {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='8' y='16' width='32' height='16' rx='2' fill='%233f9d78'/%3E%3Crect x='8' y='16' width='32' height='16' rx='2' fill='none' stroke='%232f7d5f' stroke-width='1.2'/%3E%3Crect x='14' y='19' width='14' height='10' rx='1.5' fill='%232b3038'/%3E%3Crect x='16.5' y='21.5' width='9' height='5' rx='0.8' fill='%234a515e'/%3E%3Cg fill='%23f4d06a'%3E%3Crect x='31' y='20' width='6' height='2' rx='1'/%3E%3Crect x='31' y='24' width='6' height='2' rx='1'/%3E%3Crect x='31' y='28' width='6' height='1.6' rx='.8'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* --- Theme fit: the vendored widget hardcodes a white ground and Windows-blue selection, which
+   breaks the dark theme. Re-point the structural colours at the system Canvas/CanvasText (they
+   follow the page color-scheme) and neutralise the blue highlights to a theme-agnostic grey. The
+   #id prefix outranks the widget's own .fe_fileexplorer_wrap rules. --- */
+#esp-file-explorer .fe_fileexplorer_inner_wrap {
+  background-color: Canvas;
+  color: CanvasText;
+  border-color: rgba(127, 127, 127, 0.4);
+}
+#esp-file-explorer .fe_fileexplorer_path_wrap,
+#esp-file-explorer .fe_fileexplorer_folder_tools_scroll_wrap {
+  border-color: rgba(127, 127, 127, 0.3);
+}
+#esp-file-explorer .fe_fileexplorer_statusbar_text_segment_wrap,
+#esp-file-explorer .fe_fileexplorer_action_progress_msg_wrap {
+  border-color: rgba(127, 127, 127, 0.2);
+}
+#esp-file-explorer .fe_fileexplorer_item_wrap_inner:hover,
+#esp-file-explorer .fe_fileexplorer_path_segment_wrap:hover,
+#esp-file-explorer .fe_fileexplorer_folder_tools button:not(.fe_fileexplorer_disabled):hover,
+#esp-file-explorer .fe_fileexplorer_folder_tools button:not(.fe_fileexplorer_disabled):focus {
+  background-color: rgba(127, 127, 127, 0.14);
+  border-color: rgba(127, 127, 127, 0.35);
+}
+#esp-file-explorer .fe_fileexplorer_item_selected .fe_fileexplorer_item_wrap_inner {
+  background-color: rgba(127, 127, 127, 0.28);
+  border-color: rgba(127, 127, 127, 0.4);
+}
+#esp-file-explorer .fe_fileexplorer_popup_wrap {
+  background-color: Canvas;
+  color: CanvasText;
+  border-color: rgba(127, 127, 127, 0.4);
+}
+#esp-file-explorer .fe_fileexplorer_popup_wrap .fe_fileexplorer_popup_item_wrap:focus,
+#esp-file-explorer .fe_fileexplorer_popup_wrap .fe_fileexplorer_popup_item_disabled:focus {
+  background-color: rgba(127, 127, 127, 0.18);
+}
+#esp-file-explorer .fe_fileexplorer_textarea {
+  background-color: Canvas;
+  color: CanvasText;
+  border-color: rgba(127, 127, 127, 0.5);
+}
+
+/* --- Replace the two pixelated sprite glyphs (folder, file) with colored vector icons that read
+   on both themes and match the storage-type icons. Per-extension icons have no sprite of their
+   own and fall back to the file glyph, so these two cover the listing. --- */
+#esp-file-explorer .fe_fileexplorer_item_icon_folder,
+#esp-file-explorer .fe_fileexplorer_item_icon_file,
+#esp-file-explorer .fe_fileexplorer_item_icon_file_no_ext {
+  background-position: center;
+  background-size: 40px 40px;
+  background-repeat: no-repeat;
+  image-rendering: auto;
+}
+#esp-file-explorer .fe_fileexplorer_item_icon_folder {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M6 12h12l4 4h20a2.5 2.5 0 0 1 2.5 2.5V38a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 38V14.5A2.5 2.5 0 0 1 6 12z' fill='%23e0a021'/%3E%3Cpath d='M6 18h36a2.5 2.5 0 0 1 2.5 2.5V38a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 38V20.5A2.5 2.5 0 0 1 6 18z' fill='%23f4c14e'/%3E%3C/svg%3E");
+}
+#esp-file-explorer .fe_fileexplorer_item_icon_file,
+#esp-file-explorer .fe_fileexplorer_item_icon_file_no_ext {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath d='M12 4h16l8 8v30a2.5 2.5 0 0 1-2.5 2.5H12A2.5 2.5 0 0 1 9.5 42V6.5A2.5 2.5 0 0 1 12 4z' fill='%23e9ecef'/%3E%3Cpath d='M28 4l8 8h-6a2 2 0 0 1-2-2z' fill='%23b6bcc4'/%3E%3Cg stroke='%239aa1aa' stroke-width='1.7' stroke-linecap='round'%3E%3Cline x1='16' y1='23' x2='31' y2='23'/%3E%3Cline x1='16' y1='28' x2='31' y2='28'/%3E%3Cline x1='16' y1='33' x2='26' y2='33'/%3E%3C/g%3E%3C/svg%3E");
 }

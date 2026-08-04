@@ -1087,10 +1087,10 @@
     tabbar.className = 'esph-fe-tabbar';
     var logTab = document.createElement('div');
     logTab.className = 'esph-fe-tab';
-    logTab.textContent = 'Log';
+    logTab.textContent = 'Debug Log';
     var filesTab = document.createElement('div');
     filesTab.className = 'esph-fe-tab';
-    filesTab.textContent = 'Files';
+    filesTab.textContent = 'File-Explorer';
     // Double-click either tab widens the log column, exactly like the log's own tab header:
     // the v3 app listens for this event and toggles the column to full width.
     function widen() {
