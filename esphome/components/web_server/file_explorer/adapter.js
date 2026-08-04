@@ -843,6 +843,9 @@
     var opts = {
       group: 'esphome',
       initpath: [['', '/', { canmodify: false }]],
+      // Capture browser back/forward (incl. mouse side buttons) and navigate the explorer
+      // instead of the page, rather than letting them be swallowed with no effect.
+      capturebrowser: true,
 
       onrefresh: function (folder) {
         folder.SetBusyRef(1);

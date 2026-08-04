@@ -5,6 +5,16 @@
 	// Prevent multiple instances.
 	if (window.hasOwnProperty('FileExplorer'))  return;
 
+	// Resolve the active element across open shadow-root boundaries. This widget is mounted
+	// inside the esp-app shadow root, where document.activeElement returns the shadow host, not
+	// the focused inner element -- which breaks focus-based logic such as popup-menu selection.
+	// (MIT-licensed vendored widget, patched locally for shadow-DOM hosting.)
+	var DeepActiveElement = function() {
+		var a = document.activeElement;
+		while (a && a.shadowRoot && a.shadowRoot.activeElement)  a = a.shadowRoot.activeElement;
+		return a;
+	};
+
 	var EscapeHTML = function(text) {
 		var map = {
 			'&': '&amp;',
@@ -994,7 +1004,7 @@
 			var node = e.target;
 			while (node && node.parentNode !== elems.innerwrap)  node = node.parentNode;
 
-			if (node && (lastitem !== node || lastitem !== document.activeElement))
+			if (node && (lastitem !== node || lastitem !== DeepActiveElement()))
 			{
 				if (node.classList.contains('fe_fileexplorer_popup_item_wrap'))
 				{
@@ -1007,7 +1017,7 @@
 
 					lastitem = node;
 				}
-				else if (elems.popupwrap !== document.activeElement)
+				else if (elems.popupwrap !== DeepActiveElement())
 				{
 					elems.popupwrap.focus();
 				}
@@ -1025,7 +1035,7 @@
 		elems.innerwrap.addEventListener('mouseleave', InnerWrapLeaveHandler);
 
 		// Notify listeners that the last item was selected.
-		var lastactiveelem = document.activeElement;
+		var lastactiveelem = DeepActiveElement();
 		var NotifySelected = function(etype) {
 			allowcancel = false;
 
@@ -1038,7 +1048,7 @@
 
 			e.preventDefault();
 
-			if (e.button == 0 && lastitem !== false && lastitem === document.activeElement && !lastitem.classList.contains('fe_fileexplorer_popup_item_disabled'))  NotifySelected('mouse');
+			if (e.button == 0 && lastitem !== false && lastitem === DeepActiveElement() && !lastitem.classList.contains('fe_fileexplorer_popup_item_disabled'))  NotifySelected('mouse');
 		};
 
 		elems.innerwrap.addEventListener('mouseup', MainClickHandler);
@@ -1127,7 +1137,7 @@
 				// Enter.  Select item or cancel the popup if the item is disabled.
 				e.preventDefault();
 
-				if (lastitem === false || lastitem !== document.activeElement || lastitem.classList.contains('fe_fileexplorer_popup_item_disabled'))  $this.Cancel('key');
+				if (lastitem === false || lastitem !== DeepActiveElement() || lastitem.classList.contains('fe_fileexplorer_popup_item_disabled'))  $this.Cancel('key');
 				else  NotifySelected('key');
 			}
 			else if (e.keyCode == 27 || e.keyCode == 9 || e.altKey)
@@ -1345,7 +1355,7 @@
 
 		window.addEventListener('blur', MainWindowBlurHander, true);
 
-		var lastactiveelem = document.activeElement;
+		var lastactiveelem = DeepActiveElement();
 
 		// Handle keyboard navigation.
 		var MainKeyHandler = function(e) {
@@ -1941,7 +1951,7 @@
 		var MainWrapFocusMouseHandler = function(e) {
 			elems.innerwrap.classList.add('fe_fileexplorer_inner_wrap_focused');
 
-			var node = document.activeElement;
+			var node = DeepActiveElement();
 			while (node && node !== elems.mainwrap)  node = node.parentNode;
 
 			if (node !== elems.mainwrap)  elems.itemsscrollwrap.focus();
@@ -1986,7 +1996,7 @@
 			// Handle window-level focus events specially.  There will be another focus event if actually focused.
 			if (e.target === window || e.target === document)
 			{
-				var node = document.activeElement;
+				var node = DeepActiveElement();
 				while (node && node !== elems.mainwrap)  node = node.parentNode;
 
 				if (node === elems.mainwrap)  elems.innerwrap.classList.add('fe_fileexplorer_inner_wrap_focused');
@@ -2122,7 +2132,7 @@
 								if (!elems.bodytools[x2 - 1].classList.contains('fe_fileexplorer_disabled'))
 								{
 									elems.bodytools[x2 - 1].tabIndex = 0;
-									if (document.activeElement === elems.bodytools[x])  elems.bodytools[x2 - 1].focus();
+									if (DeepActiveElement() === elems.bodytools[x])  elems.bodytools[x2 - 1].focus();
 
 									found = true;
 
@@ -2139,14 +2149,14 @@
 										found = true;
 
 										elems.bodytools[x2].tabIndex = 0;
-										if (document.activeElement === elems.bodytools[x])  elems.bodytools[x2].focus();
+										if (DeepActiveElement() === elems.bodytools[x])  elems.bodytools[x2].focus();
 
 										break;
 									}
 								}
 							}
 
-							if (!found && document.activeElement === elems.bodytools[x])  $this.Focus(true);
+							if (!found && DeepActiveElement() === elems.bodytools[x])  $this.Focus(true);
 							elems.bodytools[x].tabIndex = -1;
 						}
 
@@ -2957,7 +2967,7 @@
 			// Back button.
 			if (currhistory <= 0)
 			{
-				if (document.activeElement === elems.navtool_back)
+				if (DeepActiveElement() === elems.navtool_back)
 				{
 					if (currhistory >= historystack.length - 1)  elems.navtool_history.focus();
 					else
@@ -2985,7 +2995,7 @@
 			// Forward button.
 			if (currhistory >= historystack.length - 1)
 			{
-				if (document.activeElement === elems.navtool_forward)
+				if (DeepActiveElement() === elems.navtool_forward)
 				{
 					if (currhistory <= 0)  elems.navtool_history.focus();
 					else  elems.navtool_back.focus();
@@ -3011,7 +3021,7 @@
 
 			if (currpath.length <= 1)
 			{
-				if (document.activeElement === elems.navtool_up)  elems.navtool_history.focus();
+				if (DeepActiveElement() === elems.navtool_up)  elems.navtool_history.focus();
 
 				elems.navtool_up.classList.add('fe_fileexplorer_disabled');
 				elems.navtool_up.tabIndex = -1;
@@ -3040,9 +3050,9 @@
 				// Left Arrow.  Move to previous nav tool.
 				e.preventDefault();
 
-				if (document.activeElement && document.activeElement.parentNode === elems.navtools)
+				if (DeepActiveElement() && DeepActiveElement().parentNode === elems.navtools)
 				{
-					var node = document.activeElement.previousSibling;
+					var node = DeepActiveElement().previousSibling;
 					while (node && node.classList.contains('fe_fileexplorer_disabled'))  node = node.previousSibling;
 
 					if (node)  node.focus();
@@ -3053,9 +3063,9 @@
 				// Right Arrow.  Move to next nav tool.
 				e.preventDefault();
 
-				if (document.activeElement && document.activeElement.parentNode === elems.navtools)
+				if (DeepActiveElement() && DeepActiveElement().parentNode === elems.navtools)
 				{
-					var node = document.activeElement.nextSibling;
+					var node = DeepActiveElement().nextSibling;
 					while (node && node.classList.contains('fe_fileexplorer_disabled'))  node = node.nextSibling;
 
 					if (node)  node.focus();
@@ -3201,7 +3211,7 @@
 			{
 				while (elems.itemswrap.firstChild)
 				{
-					if (document.activeElement === elems.itemswrap.lastChild.firstChild)  elems.itemsscrollwrap.focus();
+					if (DeepActiveElement() === elems.itemswrap.lastChild.firstChild)  elems.itemsscrollwrap.focus();
 
 					elems.itemswrap.removeChild(elems.itemswrap.lastChild);
 				}
@@ -5587,7 +5597,7 @@ console.log(selectanchorpos);
 				if (blockpopup)  elems.navtool_history.classList.remove('fe_fileexplorer_block_popup');
 
 				if (!$this.HasFocus())  $this.Focus(true, true);
-				else if (document.activeElement === elems.navtool_history)
+				else if (DeepActiveElement() === elems.navtool_history)
 				{
 					// Keep the popup closed if it was open.
 					$this.Focus(true, true);
@@ -6430,7 +6440,7 @@ console.log(selectanchorpos);
 
 		// Checks to see if the active element is part of the main UI.
 		$this.HasFocus = function(itemsonly) {
-			var node = document.activeElement;
+			var node = DeepActiveElement();
 
 			if (itemsonly)
 			{
@@ -6448,7 +6458,7 @@ console.log(selectanchorpos);
 
 		// Triggers focusing of the main UI.  Useful for popups.
 		$this.Focus = function(itemsonly, alwaysfocus) {
-			var node = document.activeElement;
+			var node = DeepActiveElement();
 
 			if (alwaysfocus)
 			{
@@ -6475,7 +6485,7 @@ console.log(selectanchorpos);
 
 		// Checks to see if the active element is an item.
 		$this.HasItemFocus = function() {
-			var node = document.activeElement;
+			var node = DeepActiveElement();
 
 			return (focuseditem !== false && node && node.parentNode === focuseditem);
 		};
