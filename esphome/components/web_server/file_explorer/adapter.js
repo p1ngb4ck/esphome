@@ -853,6 +853,7 @@
           // ordinary files and folders that keep the widget's own icons.
           var curPath = pathOf(folder);
           setCurStorage(curPath);
+          updateStorageTools();
           if (curPath === '') requestAnimationFrame(applyRootTypeIcons);
         });
       },
