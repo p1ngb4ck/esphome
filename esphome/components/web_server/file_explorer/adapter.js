@@ -497,10 +497,19 @@
   // sets from the entry id.
   var rootKindById = {};
 
-  function applyRootTypeIcons() {
-    var host = document.getElementById('esp-file-explorer');
-    if (!host) return;
-    var items = host.querySelectorAll('[data-itemid]');
+  function applyRootTypeIcons(tries) {
+    // The card lives inside the esp-app shadow root, so document.getElementById cannot reach
+    // it -- use the card element directly, the reference the rest of the adapter already uses.
+    // The widget renders its items after SetEntries returns, so retry a few frames while they
+    // are not in the DOM yet.
+    if (!card) return;
+    var items = card.querySelectorAll('[data-itemid]');
+    if (!items.length && (tries || 0) < 5) {
+      requestAnimationFrame(function () {
+        applyRootTypeIcons((tries || 0) + 1);
+      });
+      return;
+    }
     for (var i = 0; i < items.length; i++) {
       var cat = rootKindById[items[i].dataset.itemid];
       if (!cat) continue;
@@ -979,9 +988,8 @@
       toggleTool(unmountTool, !!(atRoot && e && e.esphCanUnmount && e.esphMounted));
       toggleTool(formatTool, !!(atRoot && e && e.esphCanFormat && !e.esphMounted));
       var dev = e && e.esphDevice ? e.esphDevice : null;
-      var host = document.getElementById('esp-file-explorer');
-      if (host) {
-        var fileOps = host.querySelectorAll('[class*="fe_fileexplorer_folder_tool_"]');
+      if (card) {
+        var fileOps = card.querySelectorAll('[class*="fe_fileexplorer_folder_tool_"]');
         for (var i = 0; i < fileOps.length; i++)
           fileOps[i].classList.toggle('fe_fileexplorer_hidden', !!dev);
       }
