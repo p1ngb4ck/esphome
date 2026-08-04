@@ -3731,7 +3731,10 @@
 		};
 
 		var ClipboardPasteBoxMouseHandler = function(e) {
-			if (e.target !== elems.itemsclipboardoverlay)  ClipboardOverlayExitContextMenuHandler(e);
+			// Composed path so clicks inside the box count even across the shadow boundary (e.target is
+			// retargeted to the host there) -- otherwise the box closed on the very first click.
+			var p = (e.composedPath ? e.composedPath() : [e.target]);
+			if (p.indexOf(elems.itemsclipboardoverlay) === -1 && p.indexOf(elems.itemsclipboardoverlaypastewrap) === -1)  ClipboardOverlayExitContextMenuHandler(e);
 		};
 
 		$this.ShowClipboardPasteBox = function() {
@@ -5953,6 +5956,10 @@ console.log(selectanchorpos);
 				e.clipboardData.setData('application/file-explorer-clipboard', JSON.stringify({ type: dropeffect, source: main_id, group: main_group, path: currfolder.GetPath(), ids: ids }));
 				e.clipboardData.setData('text/plain', JSON.stringify({ 'application/file-explorer-clipboard' : { type: dropeffect, source: main_id, group: main_group, path: currfolder.GetPath(), ids: ids } }));
 
+				// Also keep an in-explorer copy so a plain Paste button/menu click can act at once,
+				// without a system-clipboard round-trip (which needs a real paste event / secure context).
+				$this.__feclip = { type: dropeffect, source: main_id, group: main_group, path: currfolder.GetPath(), ids: ids };
+
 				// Chromium DownloadURL support.
 				if (e.type === 'copy' && $this.hasEventListener('get_download_url'))
 				{
@@ -6051,6 +6058,19 @@ console.log(selectanchorpos);
 		elems.itemsclipboardoverlay.addEventListener('cut', ClipboardCutCopyHandler);
 		elems.itemsclipboardoverlay.addEventListener('copy', ClipboardCutCopyHandler);
 		elems.itemsclipboardoverlay.addEventListener('paste', ClipboardPasteHandler);
+
+		// Immediate paste of an in-explorer copy/cut -- no system-clipboard round-trip and no paste
+		// box. Returns false when there is nothing internal to paste, so the caller can offer the
+		// paste box for a real Ctrl+V (external files / other tabs still work that way).
+		$this.PasteInternal = function() {
+			var d = $this.__feclip;
+			if (!d || !Array.isArray(d.ids) || !d.ids.length)  return false;
+			if (!((d.type === 'copy' && $this.hasEventListener('copy')) || (d.type === 'move' && $this.hasEventListener('move'))))  return false;
+			currfolder.SetBusyRef(1);
+			PerformFinalMoveCopy((d.source === main_id), 'currfolder', null, d.type, d);
+			if (d.type === 'move')  $this.__feclip = null;
+			return true;
+		};
 
 		// Item selection keyboard handler.
 		var lasttypingts = 0, lasttypingstr = '';
@@ -7868,7 +7888,7 @@ console.log(selectanchorpos);
 		var ClickHandler = function(e) {
 			if (!e.isTrusted || !enabled)  return;
 
-			fe.ShowClipboardPasteBox();
+			if (!fe.PasteInternal())  fe.ShowClipboardPasteBox();
 		};
 
 		var ToolKeyHandler = function(e) {
@@ -7876,6 +7896,8 @@ console.log(selectanchorpos);
 
 			if (e.keyCode == 13 || e.keyCode == 32)
 			{
+				if (fe.PasteInternal())  return;
+
 				fe.ShowClipboardPasteBox();
 
 				fe.GetElements().itemsclipboardoverlay.focus();

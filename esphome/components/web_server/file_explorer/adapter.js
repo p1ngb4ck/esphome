@@ -283,30 +283,46 @@
   var uploadPanel = null;
   var uploadListNode = null;
 
+  function closeUploadPanel() {
+    if (uploadPanel && uploadPanel.parentNode) uploadPanel.parentNode.removeChild(uploadPanel);
+    uploadPanel = null;
+    uploadListNode = null;
+  }
+
   function ensureUploadPanel() {
     if (uploadPanel) return;
     uploadPanel = document.createElement('div');
     uploadPanel.setAttribute('style',
-      'position:absolute;right:12px;bottom:12px;width:300px;max-width:70%;max-height:60%;overflow:auto;z-index:8;' +
-      'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
-      'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
+      'position:absolute;left:0;right:0;bottom:0;height:65%;display:flex;flex-direction:column;z-index:8;' +
+      'background:Canvas;color:CanvasText;border-top:1px solid rgba(127,127,127,0.4);' +
+      'box-shadow:0 -4px 16px rgba(0,0,0,0.25);font:13px system-ui,-apple-system,sans-serif;');
     var head = document.createElement('div');
     head.setAttribute('style',
-      'padding:8px 12px;font-weight:600;border-bottom:1px solid rgba(127,127,127,0.3);');
-    head.textContent = 'Uploads';
+      'padding:8px 12px;font-weight:600;border-bottom:1px solid rgba(127,127,127,0.3);' +
+      'display:flex;align-items:center;justify-content:space-between;');
+    var headText = document.createElement('span');
+    headText.textContent = 'Transfers';
+    var headClose = document.createElement('button');
+    headClose.textContent = '\u00d7';
+    headClose.setAttribute('style', 'border:none;background:none;font-size:18px;line-height:1;cursor:pointer;color:inherit;');
+    headClose.onclick = closeUploadPanel;
+    head.appendChild(headText);
+    head.appendChild(headClose);
     uploadListNode = document.createElement('div');
-    uploadListNode.setAttribute('style', 'padding:4px 0;');
+    uploadListNode.setAttribute('style', 'padding:4px 0;overflow:auto;flex:1 1 auto;');
     uploadPanel.appendChild(head);
     uploadPanel.appendChild(uploadListNode);
-    (card || document.body).appendChild(uploadPanel);
+    (frameEl || card || document.body).appendChild(uploadPanel);
   }
 
-  function addUploadRow(item) {
+  function addJobRow(label) {
+    ensureUploadPanel();
+    var item = {};
     var row = document.createElement('div');
     row.setAttribute('style', 'padding:6px 12px;');
     var name = document.createElement('div');
     name.setAttribute('style', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
-    name.textContent = item.file.name;
+    name.textContent = label;
     var track = document.createElement('div');
     track.setAttribute('style',
       'height:6px;margin-top:4px;border-radius:3px;background:rgba(127,127,127,0.25);overflow:hidden;');
@@ -322,6 +338,7 @@
     uploadListNode.appendChild(row);
     item.fill = fill;
     item.stat = stat;
+    return item;
   }
 
   function setUploadRow(item, pct, text, color) {
@@ -334,9 +351,10 @@
 
   function enqueueUpload(fe, folder, file) {
     var item = { fe: fe, folder: folder, file: file };
+    var row = addJobRow(file.name);
+    item.fill = row.fill;
+    item.stat = row.stat;
     uploadQueue.push(item);
-    ensureUploadPanel();
-    addUploadRow(item);
     if (!uploadBusy) processUploadQueue();
   }
 
@@ -345,11 +363,7 @@
       uploadBusy = false;
       // Clear the panel a few seconds after the batch is done, unless a new upload arrived.
       setTimeout(function () {
-        if (!uploadBusy && !uploadQueue.length && uploadPanel) {
-          document.body.removeChild(uploadPanel);
-          uploadPanel = null;
-          uploadListNode = null;
-        }
+        if (!uploadBusy && !uploadQueue.length) closeUploadPanel();
       }, 4000);
       return;
     }
@@ -825,11 +839,17 @@
       srcids.forEach(function (id) {
         var from = src === '' ? id : src + '/' + id;
         var to = dest === '' ? id : dest + '/' + id;
+        var row = addJobRow((kind === 'copy' ? 'Copying ' : 'Moving ') + id);
+        setUploadRow(row, 30, 'working...');
         request('POST', API + '/' + kind + q({ from: from, to: to }), function (ok, body, status) {
           function finish(good, msg, entry) {
+            setUploadRow(row, 100, good ? 'done' : ('failed: ' + (msg || 'error')), good ? '#4caf50' : '#e53935');
             if (good && entry) moved.push(entry);
             if (!good && failure === null) failure = msg;
-            if (--pending === 0) done(failure === null ? true : failure, moved);
+            if (--pending === 0) {
+              done(failure === null ? true : failure, moved);
+              setTimeout(function () { if (!uploadBusy && !uploadQueue.length) closeUploadPanel(); }, 4000);
+            }
           }
           if (!ok || !body) return finish(false, errorText(body, status));
           if (body.job === undefined) return finish(true, null, entryFor(id, false, 0, 0));
