@@ -86,10 +86,10 @@
     if (!rawStatusNode) {
       rawStatusNode = document.createElement('div');
       rawStatusNode.setAttribute('style',
-        'position:fixed;left:16px;bottom:16px;max-width:60vw;z-index:2147483000;padding:8px 12px;' +
+        'position:absolute;left:12px;bottom:12px;max-width:70%;z-index:8;padding:8px 12px;' +
         'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
         'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
-      document.body.appendChild(rawStatusNode);
+      (card || document.body).appendChild(rawStatusNode);
     }
     rawStatusNode.textContent = text;
     if (!sticky) {
@@ -287,7 +287,7 @@
     if (uploadPanel) return;
     uploadPanel = document.createElement('div');
     uploadPanel.setAttribute('style',
-      'position:fixed;right:16px;bottom:16px;width:320px;max-height:50vh;overflow:auto;z-index:2147483000;' +
+      'position:absolute;right:12px;bottom:12px;width:300px;max-width:70%;max-height:60%;overflow:auto;z-index:8;' +
       'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
       'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
     var head = document.createElement('div');
@@ -298,7 +298,7 @@
     uploadListNode.setAttribute('style', 'padding:4px 0;');
     uploadPanel.appendChild(head);
     uploadPanel.appendChild(uploadListNode);
-    document.body.appendChild(uploadPanel);
+    (card || document.body).appendChild(uploadPanel);
   }
 
   function addUploadRow(item) {
@@ -566,11 +566,11 @@
   // Overlays: image preview, text editor, log follower
   // ---------------------------------------------------------------------------
 
-  function overlay(title, contentElem, footerElems) {
+  function overlay(title, contentElem, footerElems, fill) {
     var back = document.createElement('div');
     back.className = 'esph-fe-overlay';
     var box = document.createElement('div');
-    box.className = 'esph-fe-dialog';
+    box.className = fill ? 'esph-fe-dialog esph-fe-dialog--fill' : 'esph-fe-dialog';
 
     var head = document.createElement('div');
     head.className = 'esph-fe-dialog-head';
@@ -619,7 +619,7 @@
     var img = document.createElement('img');
     img.className = 'esph-fe-image';
     img.src = API + '/download' + q({ path: path, inline: '1' });
-    overlay(name, img, []);
+    overlay(name, img, [], true);
   }
 
   // Deliberately a plain textarea. This edits config and log files on a microcontroller; a
@@ -636,7 +636,7 @@
     save.textContent = 'Save';
     save.disabled = true;
 
-    overlay(name, area, writable ? [status, save] : [status]);
+    overlay(name, area, writable ? [status, save] : [status], true);
 
     var xhr = new XMLHttpRequest();
     xhr.open('GET', API + '/download' + q({ path: path, inline: '1' }), true);
@@ -691,7 +691,7 @@
     var toggle = document.createElement('button');
     toggle.textContent = 'Pause';
 
-    var dlg = overlay(name + ' \u2014 following', pre, [status, toggle]);
+    var dlg = overlay(name + ' \u2014 following', pre, [status, toggle], true);
 
     var have = 0;
     var running = true;
@@ -1071,6 +1071,12 @@
     var tab = document.createElement('div');
     tab.className = 'esph-fe-tab';
     tab.textContent = 'Files';
+    // Double-click widens the browser exactly like the log's own tab header: the v3 app
+    // listens for this event and toggles the log column (which now holds the browser) to full
+    // width. Reusing the log's event means one shared wide state, not a competing one.
+    tab.addEventListener('dblclick', function () {
+      tab.dispatchEvent(new CustomEvent('log-tab-header-double-clicked', { bubbles: true, composed: true }));
+    });
 
     var frame = document.createElement('div');
     frame.className = 'esph-fe-frame';
@@ -1093,9 +1099,13 @@
     var app = document.querySelector('esp-app');
 
     function mount() {
-      var table = app && app.shadowRoot && app.shadowRoot.querySelector('esp-entity-table');
-      if (table && table.parentNode) {
-        table.parentNode.insertBefore(el, table.nextSibling);
+      // Live in the log column, below the log, so the browser shares the log's width and its
+      // double-click-to-widen (see the tab handler in buildCard). Fall back to below the entity
+      // table, then to appending after the app, so it stays reachable on any layout.
+      var root = app && app.shadowRoot;
+      var anchor = root && (root.querySelector('esp-log') || root.querySelector('esp-entity-table'));
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(el, anchor.nextSibling);
         return true;
       }
       return false;
