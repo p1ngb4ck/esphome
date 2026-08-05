@@ -338,6 +338,7 @@
     uploadListNode.appendChild(row);
     item.fill = fill;
     item.stat = stat;
+    item.row = row;
     return item;
   }
 
@@ -347,6 +348,25 @@
       if (color) item.fill.style.background = color;
     }
     if (item.stat) item.stat.textContent = text;
+  }
+
+  // Append the file currently in flight to a job's scrolling sub-list (created on first use),
+  // right under its always-visible summary row. Returns true when it was a new file.
+  function pushSubFile(item, name) {
+    if (!name || name === item.lastSub) return false;
+    item.lastSub = name;
+    if (!item.sub) {
+      item.sub = document.createElement('div');
+      item.sub.setAttribute('style',
+        'max-height:88px;overflow:auto;margin:2px 0 2px 22px;font-size:11px;opacity:0.75;');
+      item.row.appendChild(item.sub);
+    }
+    var line = document.createElement('div');
+    line.setAttribute('style', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
+    line.textContent = name;
+    item.sub.appendChild(line);
+    item.sub.scrollTop = item.sub.scrollHeight;
+    return true;
   }
 
   function enqueueUpload(fe, folder, file) {
@@ -434,7 +454,7 @@
     return base === '' ? name : base + '/' + name;
   }
 
-  function awaitJob(id, done) {
+  function awaitJob(id, done, onprogress) {
     var tries = 0;
     (function tick() {
       request('GET', API + '/job' + q({ id: id }), function (ok, body) {
@@ -443,6 +463,7 @@
           var good = !body.result || body.result === 'OK';
           return done(good, good ? null : body.result);
         }
+        if (onprogress) onprogress(body);
         if (++tries > POLL_MAX) return done(false, 'transfer timed out');
         setTimeout(tick, POLL_MS);
       });
@@ -853,8 +874,13 @@
           }
           if (!ok || !body) return finish(false, errorText(body, status));
           if (body.job === undefined) return finish(true, null, entryFor(id, false, 0, 0));
+          var nfiles = 0;
           awaitJob(body.job, function (jok, msg) {
             finish(jok, msg, jok ? entryFor(id, false, 0, 0) : null);
+          }, function (b) {
+            if (pushSubFile(row, b.file)) nfiles++;
+            var pct = b.file_total ? Math.round((100 * b.file_done) / b.file_total) : 30;
+            setUploadRow(row, pct, nfiles + (nfiles === 1 ? ' file' : ' files') + (b.file ? ' - ' + b.file : ''));
           });
         });
       });
