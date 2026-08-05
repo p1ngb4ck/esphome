@@ -7,6 +7,7 @@ from esphome.components.storage import (
     request_storage_worker,
     validate_mount_path,
 )
+from esphome.components import cert_store
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
@@ -24,7 +25,11 @@ from esphome.const import (
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["network"]
-AUTO_LOAD = ["storage", "socket"]
+def AUTO_LOAD(config):
+    base = ["storage", "socket"]
+    if config.get(CONF_SECURITY):
+        base.append("cert_store")
+    return base
 
 CONF_SERVER = "server"
 CONF_MOUNT_PATH = "mount_path"
@@ -34,6 +39,40 @@ ftp_client_ns = cg.esphome_ns.namespace("ftp_client")
 # MountableStorage parent makes the ftp id a valid target for the generic storage.mount /
 # storage.unmount actions (cv.use_id(MountableStorage) checks declared Python parents).
 FTPClient = ftp_client_ns.class_("FTPClient", cg.Component, MountableStorage)
+Security = ftp_client_ns.enum("Security", is_class=True)
+
+CONF_SECURITY = "security"
+CONF_MODE = "mode"
+CONF_CA = "ca"
+CONF_VERIFY = "verify"
+
+SECURITY_MODES = {
+    "explicit": Security.EXPLICIT,  # AUTH TLS on the plain control port
+    "implicit": Security.IMPLICIT,  # TLS from the first byte (port 990)
+}
+
+
+def _validate_security(conf):
+    # FTPS is mbedTLS, which the client only compiles on esp-idf.
+    from esphome.core import CORE
+
+    if not CORE.using_esp_idf:
+        raise cv.Invalid("ftp_client 'security:' (FTPS) requires the esp-idf framework")
+    return conf
+
+
+SECURITY_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_MODE): cv.enum(SECURITY_MODES, lower=True),
+            # cert_store entry id of the CA used to verify the server. The single cert_store is
+            # resolved automatically -- it is not named here.
+            cv.Optional(CONF_CA): cv.string,
+            cv.Optional(CONF_VERIFY, default=True): cv.boolean,
+        }
+    ),
+    _validate_security,
+)
 
 DEFAULT_PORT = 21
 
@@ -53,6 +92,7 @@ CONFIG_SCHEMA = cv.All(
             # Fire one mount attempt on each rising edge of network connectivity; no periodic
             # retry (schedule your own via interval:/automations calling storage.mount).
             cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
+            cv.Optional(CONF_SECURITY): SECURITY_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on(
@@ -78,6 +118,12 @@ async def to_code(config):
     cg.add(var.set_username(config[CONF_USERNAME]))
     cg.add(var.set_password(config[CONF_PASSWORD]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
+
+    if security := config.get(CONF_SECURITY):
+        cg.add(var.set_security(security[CONF_MODE]))
+        if ca := security.get(CONF_CA):
+            cg.add(var.set_ca_entry(ca))
+        cg.add(var.set_verify(security[CONF_VERIFY]))
 
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
     # Full VFS paths carry the mount point; the storage component sizes its buffers from the

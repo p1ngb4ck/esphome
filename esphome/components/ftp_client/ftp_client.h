@@ -7,6 +7,13 @@
 
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/socket/socket.h"
+#ifdef USE_ESP_IDF
+#include "esphome/components/cert_store/cert_store.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509_crt.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#endif
 
 #include <cstdint>
 #include <memory>
@@ -14,6 +21,47 @@
 
 namespace esphome {
 namespace ftp_client {
+
+// FTP-over-TLS mode. NONE keeps the plain client unchanged.
+enum class Security : uint8_t { NONE, EXPLICIT, IMPLICIT };
+
+// A control/data connection: an ESPHome socket, optionally wrapped in TLS. read()/write() go raw
+// or through mbedTLS depending on start_tls(), so the FTP protocol code above is oblivious. The
+// mbedTLS bits only exist on ESP-IDF; plain FTP works on every socket platform.
+class FtpStream {
+ public:
+  FtpStream() = default;
+  ~FtpStream() { this->close(); }
+  FtpStream(const FtpStream &) = delete;
+  FtpStream &operator=(const FtpStream &) = delete;
+
+  void set_socket(std::unique_ptr<socket::Socket> sock) {
+    this->close();
+    this->sock_ = std::move(sock);
+  }
+  bool valid() const { return this->sock_ != nullptr; }
+
+  ssize_t read(void *buf, size_t len);
+  ssize_t write(const void *buf, size_t len);
+  void close();
+
+#ifdef USE_ESP_IDF
+  // Hands the current socket to mbedTLS and runs the handshake using the caller-owned config.
+  // hostname is used for SNI and (when the config verifies) certificate hostname checking.
+  bool start_tls(mbedtls_ssl_config *conf, const char *hostname);
+  bool is_tls() const { return this->tls_; }
+#endif
+
+ protected:
+  std::unique_ptr<socket::Socket> sock_;
+#ifdef USE_ESP_IDF
+  bool tls_{false};
+  mbedtls_ssl_context ssl_{};
+  static int bio_send_(void *ctx, const unsigned char *buf, size_t len);
+  static int bio_recv_(void *ctx, unsigned char *buf, size_t len);
+#endif
+};
+
 
 // A minimal FTP client exposed to ESPHome as a network storage device, analogous to nfs_client:
 // it registers a mount point and serves the generic storage actions / file browser through the
@@ -41,6 +89,13 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // Feeds the inherited PathStorage mount path (resolve_path()/consumers read it from there).
   void set_mount_path(const char *mount_path) { this->set_mount_path_(mount_path); }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
+#ifdef USE_ESP_IDF
+  // FTPS configuration. When security is NONE (the default) none of the rest is used. The CA is
+  // looked up in the single cert_store (cert_store::global_cert_store) by entry id.
+  void set_security(Security security) { this->security_ = security; }
+  void set_ca_entry(const char *ca_entry) { this->ca_entry_ = ca_entry; }
+  void set_verify(bool verify) { this->verify_ = verify; }
+#endif
 
   bool is_mounted() const { return this->connected_; }
 
@@ -82,8 +137,8 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // FTP control protocol (operates on control_)
   int send_cmd_(const std::string &cmd, std::string *reply_text = nullptr);  // returns 3-digit code, or -1
   int read_reply_(std::string *text);                                        // returns 3-digit code, or -1
-  std::unique_ptr<socket::Socket> open_pasv_data_();                         // PASV + connect, or nullptr
-  bool send_all_(socket::Socket *sock, const uint8_t *data, size_t len);
+  std::unique_ptr<FtpStream> open_pasv_data_();                             // PASV + connect (+TLS), or nullptr
+  bool send_all_(FtpStream *stream, const uint8_t *data, size_t len);
 
   // Maps a full VFS path (mount point + rest) to a server-side path.
   std::string remote_path_(const char *vfs_path) const;
@@ -99,7 +154,21 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   bool mount_requested_{false};
   uint32_t last_inline_mount_ms_{0};
 
-  std::unique_ptr<socket::Socket> control_;
+  std::unique_ptr<FtpStream> control_;
+
+#ifdef USE_ESP_IDF
+  // FTPS. The mbedTLS config is built once (setup_tls_) and shared by the control connection and
+  // every data connection; the CA comes from the single cert_store by entry id.
+  bool setup_tls_();
+  Security security_{Security::NONE};
+  const char *ca_entry_{nullptr};
+  bool verify_{true};
+  bool tls_ready_{false};
+  mbedtls_ssl_config conf_{};
+  mbedtls_x509_crt cacert_{};
+  mbedtls_ctr_drbg_context drbg_{};
+  mbedtls_entropy_context entropy_{};
+#endif
 };
 
 }  // namespace ftp_client

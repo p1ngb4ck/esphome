@@ -215,17 +215,193 @@ std::unique_ptr<socket::Socket> FTPClient::open_tcp_(const std::string &host, ui
 #endif
 }
 
+// Wraps an ESPHome socket so the FTP protocol code reads/writes the same way whether or not the
+// connection is TLS. TLS is mbedTLS and only exists on ESP-IDF.
+ssize_t FtpStream::read(void *buf, size_t len) {
+#ifdef USE_ESP_IDF
+  if (this->tls_) {
+    int ret = mbedtls_ssl_read(&this->ssl_, static_cast<unsigned char *>(buf), len);
+    if (ret > 0)
+      return ret;
+    if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+      return 0;  // clean EOF
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+      errno = EAGAIN;
+      return -1;
+    }
+    return -1;
+  }
+#endif
+  if (this->sock_ == nullptr)
+    return -1;
+  return this->sock_->read(buf, len);
+}
+
+ssize_t FtpStream::write(const void *buf, size_t len) {
+#ifdef USE_ESP_IDF
+  if (this->tls_) {
+    int ret = mbedtls_ssl_write(&this->ssl_, static_cast<const unsigned char *>(buf), len);
+    if (ret >= 0)
+      return ret;
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+      errno = EAGAIN;
+      return -1;
+    }
+    return -1;
+  }
+#endif
+  if (this->sock_ == nullptr)
+    return -1;
+  return this->sock_->write(buf, len);
+}
+
+void FtpStream::close() {
+#ifdef USE_ESP_IDF
+  if (this->tls_) {
+    mbedtls_ssl_close_notify(&this->ssl_);
+    mbedtls_ssl_free(&this->ssl_);
+    this->tls_ = false;
+  }
+#endif
+  this->sock_.reset();
+}
+
+#ifdef USE_ESP_IDF
+int FtpStream::bio_send_(void *ctx, const unsigned char *buf, size_t len) {
+  auto *sock = static_cast<socket::Socket *>(ctx);
+  ssize_t n = sock->write(buf, len);
+  if (n > 0)
+    return static_cast<int>(n);
+  if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    return MBEDTLS_ERR_SSL_WANT_WRITE;
+  return -1;
+}
+
+int FtpStream::bio_recv_(void *ctx, unsigned char *buf, size_t len) {
+  auto *sock = static_cast<socket::Socket *>(ctx);
+  ssize_t n = sock->read(buf, len);
+  if (n > 0)
+    return static_cast<int>(n);
+  if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    return MBEDTLS_ERR_SSL_WANT_READ;
+  return -1;
+}
+
+bool FtpStream::start_tls(mbedtls_ssl_config *conf, const char *hostname) {
+  if (this->sock_ == nullptr)
+    return false;
+  mbedtls_ssl_init(&this->ssl_);
+  if (mbedtls_ssl_setup(&this->ssl_, conf) != 0) {
+    mbedtls_ssl_free(&this->ssl_);
+    return false;
+  }
+  mbedtls_ssl_set_hostname(&this->ssl_, hostname);
+  mbedtls_ssl_set_bio(&this->ssl_, this->sock_.get(), &FtpStream::bio_send_, &FtpStream::bio_recv_, nullptr);
+  const uint32_t start = millis();
+  while (true) {
+    int ret = mbedtls_ssl_handshake(&this->ssl_);
+    if (ret == 0)
+      break;
+    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+      mbedtls_ssl_free(&this->ssl_);
+      return false;
+    }
+    if (millis() - start > FTP_TIMEOUT_MS) {
+      mbedtls_ssl_free(&this->ssl_);
+      return false;
+    }
+    delay(1);
+    App.feed_wdt();
+  }
+  this->tls_ = true;
+  return true;
+}
+#endif  // USE_ESP_IDF
+
+// Wraps a freshly connected socket in a stream (or nullptr if the connect failed).
+static std::unique_ptr<FtpStream> make_ftp_stream(std::unique_ptr<socket::Socket> sock) {
+  if (sock == nullptr)
+    return nullptr;
+  auto stream = std::unique_ptr<FtpStream>(new FtpStream());  // NOLINT(cppcoreguidelines-owning-memory)
+  stream->set_socket(std::move(sock));
+  return stream;
+}
+
+#ifdef USE_ESP_IDF
+bool FTPClient::setup_tls_() {
+  if (this->tls_ready_)
+    return true;
+  // If a CA is configured, fetch it from the single cert_store before allocating anything -- so
+  // waiting for it to load from storage is a cheap no-op retry, not a leak.
+  const char *ca_pem = nullptr;
+  if (this->ca_entry_ != nullptr) {
+    if (cert_store::global_cert_store == nullptr) {
+      ESP_LOGW(TAG, "security.ca set but no cert_store configured");
+      return false;
+    }
+    ca_pem = cert_store::global_cert_store->str(this->ca_entry_);
+    if (ca_pem == nullptr)
+      return false;  // not loaded yet -- ensure_connected_ comes back
+  }
+
+  mbedtls_ssl_config_init(&this->conf_);
+  mbedtls_x509_crt_init(&this->cacert_);
+  mbedtls_ctr_drbg_init(&this->drbg_);
+  mbedtls_entropy_init(&this->entropy_);
+
+  if (mbedtls_ctr_drbg_seed(&this->drbg_, mbedtls_entropy_func, &this->entropy_, nullptr, 0) != 0) {
+    ESP_LOGE(TAG, "RNG seed failed");
+    return false;
+  }
+  if (mbedtls_ssl_config_defaults(&this->conf_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                  MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
+    ESP_LOGE(TAG, "TLS config failed");
+    return false;
+  }
+  mbedtls_ssl_conf_rng(&this->conf_, mbedtls_ctr_drbg_random, &this->drbg_);
+
+  bool verify = false;
+  if (ca_pem != nullptr) {
+    if (mbedtls_x509_crt_parse(&this->cacert_, reinterpret_cast<const unsigned char *>(ca_pem),
+                               strlen(ca_pem) + 1) != 0) {
+      ESP_LOGE(TAG, "CA '%s' does not parse", this->ca_entry_);
+      return false;
+    }
+    mbedtls_ssl_conf_ca_chain(&this->conf_, &this->cacert_, nullptr);
+    verify = this->verify_;
+  }
+  mbedtls_ssl_conf_authmode(&this->conf_, verify ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
+  this->tls_ready_ = true;
+  return true;
+}
+#endif  // USE_ESP_IDF
+
 storage::StorageError FTPClient::do_connect_() {
   if (this->connected_)
     return storage::StorageError::OK;
   if (!network::is_connected())
     return storage::StorageError::NOT_READY;
 
-  this->control_ = this->open_tcp_(this->server_, this->port_);
+#ifdef USE_ESP_IDF
+  if (this->security_ != Security::NONE && !this->setup_tls_())
+    return storage::StorageError::NOT_READY;  // e.g. the CA is not loaded from storage yet
+#endif
+
+  this->control_ = make_ftp_stream(this->open_tcp_(this->server_, this->port_));
   if (this->control_ == nullptr) {
     ESP_LOGW(TAG, "Control connection to %s:%u failed", this->server_.c_str(), this->port_);
     return storage::StorageError::NOT_READY;
   }
+
+#ifdef USE_ESP_IDF
+  // Implicit FTPS: the control channel is TLS from the first byte.
+  if (this->security_ == Security::IMPLICIT &&
+      !this->control_->start_tls(&this->conf_, this->server_.c_str())) {
+    ESP_LOGW(TAG, "Implicit TLS handshake failed");
+    this->control_close_();
+    return storage::StorageError::NOT_READY;
+  }
+#endif
 
   // Greeting
   if (this->read_reply_(nullptr) != 220) {
@@ -233,6 +409,22 @@ storage::StorageError FTPClient::do_connect_() {
     this->control_close_();
     return storage::StorageError::NOT_READY;
   }
+
+#ifdef USE_ESP_IDF
+  // Explicit FTPS (AUTH TLS): upgrade the already-open control channel before logging in.
+  if (this->security_ == Security::EXPLICIT) {
+    if (this->send_cmd_("AUTH TLS") != 234) {
+      ESP_LOGW(TAG, "AUTH TLS refused");
+      this->control_close_();
+      return storage::StorageError::NOT_READY;
+    }
+    if (!this->control_->start_tls(&this->conf_, this->server_.c_str())) {
+      ESP_LOGW(TAG, "Control TLS handshake failed");
+      this->control_close_();
+      return storage::StorageError::NOT_READY;
+    }
+  }
+#endif
 
   int c = this->send_cmd_("USER " + this->username_);
   if (c == 331) {
@@ -243,6 +435,18 @@ storage::StorageError FTPClient::do_connect_() {
     this->control_close_();
     return storage::StorageError::PERMISSION_DENIED;
   }
+
+#ifdef USE_ESP_IDF
+  // Protect the data channel too: PBSZ 0 then PROT P, so every PASV transfer is TLS.
+  if (this->security_ != Security::NONE) {
+    this->send_cmd_("PBSZ 0");
+    if (this->send_cmd_("PROT P") != 200) {
+      ESP_LOGW(TAG, "PROT P refused -- refusing a cleartext data channel");
+      this->control_close_();
+      return storage::StorageError::NOT_READY;
+    }
+  }
+#endif
 
   // Binary transfers.
   this->send_cmd_("TYPE I");
@@ -330,13 +534,13 @@ int FTPClient::send_cmd_(const std::string &cmd, std::string *reply_text) {
   return this->read_reply_(reply_text);
 }
 
-bool FTPClient::send_all_(socket::Socket *sock, const uint8_t *data, size_t len) {
-  if (sock == nullptr)
+bool FTPClient::send_all_(FtpStream *stream, const uint8_t *data, size_t len) {
+  if (stream == nullptr)
     return false;
   size_t sent = 0;
   uint32_t start = millis();
   while (sent < len) {
-    ssize_t n = sock->write(data + sent, len - sent);
+    ssize_t n = stream->write(data + sent, len - sent);
     if (n > 0) {
       sent += (size_t) n;
       continue;
@@ -353,7 +557,7 @@ bool FTPClient::send_all_(socket::Socket *sock, const uint8_t *data, size_t len)
   return true;
 }
 
-std::unique_ptr<socket::Socket> FTPClient::open_pasv_data_() {
+std::unique_ptr<FtpStream> FTPClient::open_pasv_data_() {
   std::string text;
   if (this->send_cmd_("PASV", &text) != 227)
     return nullptr;
@@ -370,7 +574,16 @@ std::unique_ptr<socket::Socket> FTPClient::open_pasv_data_() {
   snprintf(ip, sizeof(ip), "%d.%d.%d.%d", v[0], v[1], v[2], v[3]);
   uint16_t port = (uint16_t) ((v[4] << 8) | v[5]);
   // open_tcp_ resolves the dotted-quad numerically, so it doubles as the data connector.
-  return this->open_tcp_(ip, port);
+  auto stream = make_ftp_stream(this->open_tcp_(ip, port));
+#ifdef USE_ESP_IDF
+  // After PROT P the data channel is TLS too; verify against the server name, not the PASV IP.
+  if (stream != nullptr && this->security_ != Security::NONE &&
+      !stream->start_tls(&this->conf_, this->server_.c_str())) {
+    ESP_LOGW(TAG, "Data TLS handshake failed");
+    return nullptr;
+  }
+#endif
+  return stream;
 }
 
 std::string FTPClient::remote_path_(const char *vfs_path) const {
@@ -423,7 +636,7 @@ storage::StorageError FTPClient::read_chunk(const char *path, uint8_t *buf, uint
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
     return storage::StorageError::READ_ERROR;
 
@@ -469,7 +682,7 @@ storage::StorageError FTPClient::write_chunk(const char *path, const uint8_t *bu
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
     return storage::StorageError::WRITE_ERROR;
 
@@ -499,7 +712,7 @@ storage::StorageError FTPClient::truncate(const char *path, uint64_t size) {
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
     return storage::StorageError::WRITE_ERROR;
   int c = this->send_cmd_("STOR " + remote);
@@ -541,7 +754,7 @@ storage::StorageError FTPClient::list_dir(const char *path,
     return storage::StorageError::NOT_READY;
   std::string remote = this->remote_path_(path);
 
-  std::unique_ptr<socket::Socket> data = this->open_pasv_data_();
+  std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
     return storage::StorageError::READ_ERROR;
 
