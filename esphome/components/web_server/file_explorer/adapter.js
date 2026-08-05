@@ -508,6 +508,9 @@
   function isText(name) {
     return hasExt(name, TEXT_EXT);
   }
+  function isLog(name) {
+    return hasExt(name, ['.log']);
+  }
 
   function entryFor(name, isDir, size, mtime, id) {
     var e = {
@@ -711,6 +714,7 @@
   // Deliberately a plain textarea. This edits config and log files on a microcontroller; a
   // highlighting editor would cost more flash than everything else here put together.
   function showEditor(path, name, writable) {
+    var originalContent = null;
     var area = document.createElement('textarea');
     area.className = 'esph-fe-editor';
     area.readOnly = true;
@@ -722,13 +726,14 @@
     save.textContent = 'Save';
     save.disabled = true;
 
-    overlay(name, area, writable ? [status, save] : [status], true);
+    overlay('Editing ' + name, area, writable ? [status, save] : [status], true);
 
     var xhr = new XMLHttpRequest();
     xhr.open('GET', API + '/download' + q({ path: path, inline: '1' }), true);
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         area.value = xhr.responseText;
+        originalContent = xhr.responseText;
         area.readOnly = !writable;
         save.disabled = !writable;
         status.textContent = area.value.length + ' bytes';
@@ -743,25 +748,60 @@
     };
     xhr.send();
 
-    save.onclick = function () {
-      save.disabled = true;
+    function writeFile() {
       status.textContent = 'saving\u2026';
       var slash = path.lastIndexOf('/');
-      var dir = slash > 0 ? path.slice(0, slash) : path;
       var base = slash >= 0 ? path.slice(slash + 1) : path;
       var form = new FormData();
       form.append('file', new Blob([area.value], { type: 'text/plain' }), base);
       var up = new XMLHttpRequest();
-      up.open('POST', API + '/upload' + q({ path: path, dir: dir }), true);
+      up.open('POST', API + '/upload' + q({ path: path, overwrite: '1' }), true);
       up.onload = function () {
-        status.textContent = up.status >= 200 && up.status < 300 ? 'saved' : 'save failed (HTTP ' + up.status + ')';
-        save.disabled = false;
+        if (up.status < 200 || up.status >= 300) {
+          status.textContent = 'save failed (HTTP ' + up.status + ')';
+          save.disabled = false;
+          return;
+        }
+        var body = null;
+        try { body = JSON.parse(up.responseText); } catch (e) { body = null; }
+        if (body && body.job !== undefined) {
+          awaitJob(body.job, function (good, msg) {
+            status.textContent = good ? 'saved' : 'save failed: ' + (msg || 'error');
+            if (good) originalContent = area.value;
+            save.disabled = false;
+          });
+        } else {
+          originalContent = area.value;
+          status.textContent = 'saved';
+          save.disabled = false;
+        }
       };
       up.onerror = function () {
         status.textContent = 'save failed';
         save.disabled = false;
       };
       up.send(form);
+    }
+
+    save.onclick = function () {
+      save.disabled = true;
+      status.textContent = 'checking\u2026';
+      // Optimistic concurrency: re-read the file and refuse to clobber it silently if it changed
+      // on disk since it was opened (e.g. a log still being written).
+      var chk = new XMLHttpRequest();
+      chk.open('GET', API + '/download' + q({ path: path, inline: '1' }), true);
+      chk.onload = function () {
+        if (chk.status >= 200 && chk.status < 300 && originalContent !== null &&
+            chk.responseText !== originalContent &&
+            !window.confirm('"' + name + '" changed on disk since you opened it. Overwrite it with your version?')) {
+          status.textContent = 'not saved -- the file changed on disk';
+          save.disabled = false;
+          return;
+        }
+        writeFile();
+      };
+      chk.onerror = writeFile;
+      chk.send();
     };
   }
 
@@ -777,7 +817,7 @@
     var toggle = document.createElement('button');
     toggle.textContent = 'Pause';
 
-    var dlg = overlay(name + ' \u2014 following', pre, [status, toggle], true);
+    var dlg = overlay('Monitoring ' + name, pre, [status, toggle], true);
 
     var have = 0;
     var running = true;
@@ -932,6 +972,7 @@
         if (entry.esphDevice) return rawRead(entry.esphDevice, fe);
         var path = childPath(folder, entry.name);
         if (isImage(entry.name)) return showImage(path, entry.name);
+        if (isLog(entry.name)) return showTail(path, entry.name);
         if (isText(entry.name)) return showEditor(path, entry.name, canWrite);
         window.location = API + '/download' + q({ path: path });
       },
@@ -1095,6 +1136,7 @@
       // Monitor (tail) is a per-file action: shown while a single text file (per
       // text_file_formats) is selected, in any folder.
       toggleTool(monitorTool, !!(e && e.type !== 'folder' && isText(e.name)));
+      toggleTool(editTool, !!(e && e.type !== 'folder' && isText(e.name)));
       fe.ToolStateUpdated();
     }
 
@@ -1126,6 +1168,13 @@
       var sel = fe.GetSelectedFolderEntries();
       if (sel.length !== 1 || sel[0].type === 'folder') return;
       showTail(childPath(fe.GetCurrentFolder(), sel[0].name), sel[0].name);
+    });
+    var editTool = fe.AddToolbarButton('esph-fe-tool-edit', 'Edit');
+    editTool.classList.add('fe_fileexplorer_hidden');
+    editTool.addEventListener('click', function () {
+      var sel = fe.GetSelectedFolderEntries();
+      if (sel.length !== 1 || sel[0].type === 'folder') return;
+      showEditor(childPath(fe.GetCurrentFolder(), sel[0].name), sel[0].name, canWrite);
     });
     if (CHANGE_POLL_MS > 0) startChangePoll(fe);
     return fe;

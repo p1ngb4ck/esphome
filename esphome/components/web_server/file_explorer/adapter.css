@@ -336,6 +336,7 @@
 #esp-file-explorer .esph-fe-tool-verify::before,
 #esp-file-explorer .esph-fe-tool-erase::before,
 #esp-file-explorer .esph-fe-tool-monitor::before,
+#esp-file-explorer .esph-fe-tool-edit::before,
 #esp-file-explorer .esph-fe-tool-mount::before,
 #esp-file-explorer .esph-fe-tool-unmount::before,
 #esp-file-explorer .esph-fe-tool-format::before,
@@ -378,6 +379,10 @@
 #esp-file-explorer .esph-fe-tool-erase::before {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6%2019a2%202%200%200%200%202%202h8a2%202%200%200%200%202-2V7H6zM8%209h8v10H8zm7.5-5l-1-1h-5l-1%201H5v2h14V4z%22%2F%3E%3C%2Fsvg%3E");
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6%2019a2%202%200%200%200%202%202h8a2%202%200%200%200%202-2V7H6zM8%209h8v10H8zm7.5-5l-1-1h-5l-1%201H5v2h14V4z%22%2F%3E%3C%2Fsvg%3E");
+}
+#esp-file-explorer .esph-fe-tool-edit::before {
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M8%2012h8v2H8zm2%208H6V4h7v5h5v3.1l2-2V8l-6-6H6a2%202%200%200%200-2%202v16a2%202%200%200%200%202%202h4zm-2-2h4.1l.9-.9V16H8zm12.2-5c.1%200%20.3.1.4.2l1.3%201.3c.2.2.2.6%200%20.8l-1%201l-2.1-2.1l1-1c.1-.1.2-.2.4-.2m0%203.9L14.1%2023H12v-2.1l6.1-6.1z%22%2F%3E%3C%2Fsvg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M8%2012h8v2H8zm2%208H6V4h7v5h5v3.1l2-2V8l-6-6H6a2%202%200%200%200-2%202v16a2%202%200%200%200%202%202h4zm-2-2h4.1l.9-.9V16H8zm12.2-5c.1%200%20.3.1.4.2l1.3%201.3c.2.2.2.6%200%20.8l-1%201l-2.1-2.1l1-1c.1-.1.2-.2.4-.2m0%203.9L14.1%2023H12v-2.1l6.1-6.1z%22%2F%3E%3C%2Fsvg%3E");
 }
 #esp-file-explorer .esph-fe-tool-monitor::before {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M13%2019v-3h8v3zm-4.5-6L2.47%207h4.24l4.96%204.95c.58.59.58%201.55%200%202.12L6.74%2019H2.5z%22%2F%3E%3C%2Fsvg%3E");
