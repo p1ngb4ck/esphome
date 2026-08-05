@@ -100,28 +100,14 @@ void FileExplorerAssets::start_load_(size_t index) {
   if (ps == nullptr)
     return;  // not mounted yet -- loop() comes back
 
-  // One stat for the size. Metadata only, so it is not the bulk read the ceiling guards
-  // against, and the buffer has to be sized before the first chunk lands in it.
-  storage::FileStat st{};
-  if (ps->stat(rel, &st) != storage::StorageError::OK || st.is_dir)
-    return;
-  if (st.size == 0 || st.size > SIZE_MAX)
-    return;
-
-  RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
-  auto want = static_cast<size_t>(st.size);
-  uint8_t *buf = allocator.allocate(want);
-  if (buf == nullptr) {
-    if (!this->warned_pending_) {
-      ESP_LOGE(TAG, "no PSRAM for '%s' (%u bytes)", asset.url, (unsigned) want);
-      this->warned_pending_ = true;
-    }
-    return;
-  }
-
+  // No stat and no pre-sizing: the file's size never enters this component through a direct
+  // data-plane call. The read runs entirely through the worker -- begin_read()/read_chunk()/
+  // end_read(), which the worker runs on its task for task-safe media and loop-sliced otherwise,
+  // serialized against everything else touching the storage -- and continues until read_chunk()
+  // reports EOF, growing the PSRAM buffer as chunks arrive.
   this->loading_ = index;
-  this->pending_buf_ = buf;
-  this->pending_len_ = want;
+  this->pending_buf_ = nullptr;
+  this->pending_len_ = 0;
   this->pending_off_ = 0;
   this->last_read_ = 0;
   this->stream_open_ = false;
@@ -141,7 +127,38 @@ void FileExplorerAssets::on_open_(storage::StorageError err) {
     return;
   }
   this->stream_open_ = true;
-  this->on_read_(storage::StorageError::OK);  // issues the first chunk
+  this->issue_read_();  // issues the first chunk
+}
+
+void FileExplorerAssets::issue_read_() {
+  // Grow the buffer (doubling) so it can hold one more chunk, then ask the worker for it.
+  if (this->pending_len_ < this->pending_off_ + READ_CHUNK) {
+    size_t cap = this->pending_len_ == 0 ? READ_CHUNK : this->pending_len_;
+    while (cap < this->pending_off_ + READ_CHUNK)
+      cap *= 2;
+    RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+    uint8_t *bigger = allocator.allocate(cap);
+    if (bigger == nullptr) {
+      if (!this->warned_pending_) {
+        ESP_LOGE(TAG, "no PSRAM for '%s' (%u bytes)", this->assets_[this->loading_].url, (unsigned) cap);
+        this->warned_pending_ = true;
+      }
+      this->abandon_load_("no psram", storage::StorageError::READ_ERROR);
+      return;
+    }
+    if (this->pending_buf_ != nullptr) {
+      std::memcpy(bigger, this->pending_buf_, this->pending_off_);
+      allocator.deallocate(this->pending_buf_, this->pending_len_);
+    }
+    this->pending_buf_ = bigger;
+    this->pending_len_ = cap;
+  }
+  this->last_read_ = 0;
+  storage::StorageError e = storage::global_storage_worker->read_chunk(
+      this->stream_, this->pending_buf_ + this->pending_off_, READ_CHUNK, &this->last_read_,
+      [this](storage::StorageError re) { this->on_read_(re); });
+  if (e != storage::StorageError::OK)
+    this->abandon_load_("read rejected", e);
 }
 
 void FileExplorerAssets::on_read_(storage::StorageError err) {
@@ -151,30 +168,16 @@ void FileExplorerAssets::on_read_(storage::StorageError err) {
     this->abandon_load_("read failed", err);
     return;
   }
-  // last_read_ is 0 both before the first chunk and at EOF; pending_off_ tells the two apart.
   this->pending_off_ += this->last_read_;
-  if (this->pending_off_ > 0 && this->last_read_ == 0) {
-    // EOF before the size stat promised: the file changed under us. Treat as a failure and
-    // let loop() start over rather than serve a truncated asset.
-    this->abandon_load_("short read", storage::StorageError::READ_ERROR);
-    return;
-  }
-  if (this->pending_off_ >= this->pending_len_) {
+  if (this->last_read_ == 0) {
+    // read_chunk() reported EOF -- the whole file is in the buffer now. Close and publish it.
     storage::StorageError e = storage::global_storage_worker->end_read(
         this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
     if (e != storage::StorageError::OK)
       this->abandon_load_("close rejected", e);
     return;
   }
-
-  const size_t remaining = this->pending_len_ - this->pending_off_;
-  const size_t want = remaining < READ_CHUNK ? remaining : READ_CHUNK;
-  this->last_read_ = 0;
-  storage::StorageError e = storage::global_storage_worker->read_chunk(
-      this->stream_, this->pending_buf_ + this->pending_off_, want, &this->last_read_,
-      [this](storage::StorageError re) { this->on_read_(re); });
-  if (e != storage::StorageError::OK)
-    this->abandon_load_("read rejected", e);
+  this->issue_read_();  // next chunk
 }
 
 void FileExplorerAssets::on_closed_(storage::StorageError err) {

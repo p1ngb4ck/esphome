@@ -81,6 +81,7 @@ class FileExplorerAssets : public Component {
   // most a handful, they are read once at startup, and a single stream slot keeps this from
   // competing with the file API for the worker's pool.
   void start_load_(size_t index);
+  void issue_read_();
   void on_open_(storage::StorageError err);
   void on_read_(storage::StorageError err);
   void on_closed_(storage::StorageError err);
@@ -108,6 +109,8 @@ class FileExplorerAssets : public Component {
   // to stay valid until its callback fires, and a failed read must free it rather than publish
   // a half-filled asset.
   uint8_t *pending_buf_{nullptr};
+  // Allocated capacity of pending_buf_; it grows (doubling) as chunks arrive, since the size
+  // is never known up front -- the read runs until read_chunk() reports EOF.
   size_t pending_len_{0};
   size_t pending_off_{0};
   // read_chunk() fills this before invoking the callback, so it has to outlive the call.
