@@ -975,10 +975,12 @@
 		var MainFocusHandler = function(e) {
 			if (!e.isTrusted)  return;
 
-			var node = e.target;
-			while (node && node !== elems.popupwrap)  node = node.parentNode;
+			// Composed path so a click inside the popup is recognised across the shadow boundary
+			// (e.target is retargeted to the host there) -- otherwise the popup cancelled on the very
+			// click that was selecting an item, so history/path-segment selections never navigated.
+			var path = (e.composedPath ? e.composedPath() : [e.target]);
 
-			if (node !== elems.popupwrap && allowcancel)
+			if (path.indexOf(elems.popupwrap) === -1 && allowcancel)
 			{
 				lastactiveelem = e.target;
 
@@ -1335,10 +1337,10 @@
 		var MainFocusHandler = function(e) {
 			if (!e.isTrusted)  return;
 
-			var node = e.target;
-			while (node && node !== elems.maintext)  node = node.parentNode;
+			// Composed path so a click inside the inline editor is recognised across the shadow boundary.
+			var path = (e.composedPath ? e.composedPath() : [e.target]);
 
-			if (node !== elems.maintext && allowcanceldone)
+			if (path.indexOf(elems.maintext) === -1 && allowcanceldone)
 			{
 				lastactiveelem = e.target;
 
