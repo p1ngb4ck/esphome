@@ -81,6 +81,28 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
   if (is_get && this->file_explorer_ != nullptr) {
     const auto *asset = this->file_explorer_->find(url);
     if (asset != nullptr) {
+      if (asset->flash == nullptr) {
+        // Storage-backed asset: it is just a file on the medium, and /files/download already
+        // serves any storage file to the browser (resolve, open, chunked, async). Point the URL
+        // straight at that proven path -- no bespoke loader or serve. Flash assets (below) keep
+        // their own in-PSRAM serve untouched.
+        std::string loc = "/files/download?inline=1&path=";
+        for (const char *p = asset->storage_path; *p != '\0'; p++) {
+          const unsigned char ch = static_cast<unsigned char>(*p);
+          const bool safe = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                            (ch >= '0' && ch <= '9') || ch == '/' || ch == '.' || ch == '-' || ch == '_';
+          if (safe) {
+            loc += static_cast<char>(ch);
+          } else {
+            static const char HEX[] = "0123456789ABCDEF";
+            loc += '%';
+            loc += HEX[ch >> 4];
+            loc += HEX[ch & 0x0F];
+          }
+        }
+        request->redirect(loc);
+        return;
+      }
       if (asset->psram == nullptr) {
         // Storage-backed and not there yet. 503 with Retry-After rather than 404: the asset
         // is configured, it is simply not loaded, and a reloading browser should try again.
