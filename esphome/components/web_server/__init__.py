@@ -512,8 +512,8 @@ CONFIG_SCHEMA = cv.All(
                             ASSETS_FLASH, ASSETS_STORAGE, lower=True
                         ),
                         # Directory the widget files are read from with
-                        # asset_source: storage. The compressible ones are expected there
-                        # already gzipped, so the bytes served are the same in both modes.
+                        # asset_source: storage. The widget files live on the medium RAW
+                        # (no gzip, no .gz suffix) and are served as-is; flash compresses.
                         cv.Optional(
                             CONF_ASSET_PATH, default="/sdcard/file-explorer"
                         ): cv.string_strict,
@@ -670,8 +670,9 @@ async def _add_file_explorer(config, var, api_var) -> None:
     """Emits the advanced browser: an asset table plus the component that serves it.
 
     Serving is always out of PSRAM. asset_source only decides how the widget's bytes get
-    there -- compiled in and copied at setup(), or read off a PathStorage once it mounts --
-    and the response is identical either way. The adapter is always compiled in.
+    there -- compiled in gzipped and copied at setup(), or read off a PathStorage RAW once
+    it mounts. Either way the browser receives the same widget. The adapter is always
+    compiled in.
     """
     browser = config[CONF_FILE_BROWSER]
     source = browser[CONF_ASSET_SOURCE]
@@ -708,12 +709,13 @@ async def _add_file_explorer(config, var, api_var) -> None:
                 continue
             rows.append(_flash_row(here, rel, url, ctype, compress))
         else:
-            # Not read here: the file is on the medium. Compressible ones are expected there
-            # already gzipped so the bytes served match the flash path exactly.
-            disk = f"{base_dir}/{name}.gz" if compress else f"{base_dir}/{name}"
-            gz = "true" if compress else "false"
+            # External storage has room to spare, so the widget files live there RAW -- no
+            # gzip and no .gz suffix -- and are served as-is out of PSRAM. Flash still
+            # compresses itself in, where the KB matter; storage does not bother. The URL, the
+            # on-disk name and the served bytes are all the same plain file.
+            disk = f"{base_dir}/{name}"
             rows.append(
-                f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", {gz}, nullptr, 0}}'
+                f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", false, nullptr, 0}}'
             )
 
     if missing:

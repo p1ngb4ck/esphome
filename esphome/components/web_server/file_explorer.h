@@ -24,14 +24,15 @@ namespace web_server {
 // internal RAM and the response path. What differs is where the bytes come from before they
 // get there:
 //
-//   FLASH   -- a gzipped copy is compiled in as PROGMEM and copied to PSRAM once at setup().
-//             Always available, costs the flash.
-//   STORAGE -- the files sit on a PathStorage and are read into PSRAM as soon as that storage
-//             is mounted, which may be seconds after boot or never. Costs no flash; the
-//             browser answers 503 until the read succeeds.
+//   FLASH   -- a gzipped copy is compiled in as PROGMEM and copied to PSRAM once at setup(),
+//             then served with Content-Encoding: gzip. Always available, costs the flash.
+//   STORAGE -- the RAW files sit on a PathStorage and are read into PSRAM as soon as that
+//             storage is mounted, which may be seconds after boot or never, then served as-is.
+//             Costs no flash; the browser answers 503 until the read succeeds. External storage
+//             has room to spare, so nothing is compressed there.
 //
-// Either way the served bytes are the same gzipped blob and the response is identical, so the
-// choice is a deployment question and not a functional one.
+// Flash trades a gzip response for less flash; storage serves raw. Either way the browser ends
+// up with the same widget, so the choice is a deployment question and not a functional one.
 class FileExplorerAssets : public Component {
  public:
   // One asset: a URL, its type, and where its bytes come from.
@@ -40,7 +41,7 @@ class FileExplorerAssets : public Component {
     const char *content_type;     // "text/javascript"
     const uint8_t *flash;         // gzipped bytes in PROGMEM, or nullptr for STORAGE
     size_t flash_len;             // valid when flash != nullptr
-    const char *storage_path;     // "/sdcard/fe/file-explorer.js.gz", or nullptr for FLASH
+    const char *storage_path;     // "/sdcard/fe/file-explorer.js" (raw), or nullptr for FLASH
     bool gzipped;                 // sets Content-Encoding: gzip
     uint8_t *psram;               // where it is served from; null until loaded
     size_t len;                   // bytes at psram
