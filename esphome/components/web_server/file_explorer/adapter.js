@@ -553,6 +553,9 @@
   // into per-entry style rules (keyed by data-feid/data-itemid) before the widget renders, so
   // the type glyph is correct from the first paint rather than swapped in afterwards.
   var rootKindById = {};
+  // Whether each root entry's icon should read as filled: mountable storages when mounted,
+  // non-mountable storages (and device nodes) whenever they are present/loaded.
+  var rootFilledById = {};
 
   // Reflect the current storage's type on the card so the breadcrumb folder icon can match it
   // (the storages carry it; device nodes are never navigated into). Cleared at the root.
@@ -586,7 +589,7 @@
              '  mask-image: var(--fe-t-' + cat + ');\n' +
              '  -webkit-mask-image: var(--fe-t-' + cat + ');\n' +
              '  background-color: var(--fe-c-' + cat + ');\n' +
-             '  opacity: 1;\n}\n';
+             '  opacity: ' + (rootFilledById[id] === false ? '0.4' : '1') + ';\n}\n';
     }
     var st = card.querySelector('#esph-fe-typestyles');
     if (!st) {
@@ -602,6 +605,7 @@
       if (!ok || !body || !body.storages) return cb(errorText(body, status));
       var entries = [];
       rootKindById = {};
+      rootFilledById = {};
       for (var i = 0; i < body.storages.length; i++) {
         var s = body.storages[i];
         var e = entryFor(s.mounted ? s.mount_path : s.mount_path + '  (not mounted)', true, 0, 0, s.mount_path);
@@ -610,6 +614,7 @@
         e.esphCanUnmount = !!s.can_unmount;
         e.esphCanFormat = !!s.can_format;
         rootKindById[s.mount_path] = typeIcon(s.kind || s.type);
+        rootFilledById[s.mount_path] = (s.can_mount || s.can_unmount) ? !!s.mounted : true;
         entries.push(e);
       }
       // Raw device nodes, if this build has the raw API. A 404 just means it is not
@@ -623,6 +628,7 @@
             de.esphDevice = d;
             de.attrs = { canmodify: false };
             rootKindById['dev:' + d.id] = 'devnode';
+            rootFilledById['dev:' + d.id] = true;
             entries.push(de);
           }
         }
