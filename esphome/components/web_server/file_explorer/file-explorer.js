@@ -5869,7 +5869,8 @@ console.log(selectanchorpos);
 						// Root storages carry esphType/esphCanMount (set by the adapter): show only the
 						// available ones (skip unmounted-mountable) and with their storage-type icon rather
 						// than the generic folder glyph. Ordinary folders keep the folder icon.
-						if (entries[x].esphType && !entries[x].esphMounted)  continue;
+						var navavail = (entries[x].esphCanMount || entries[x].esphCanUnmount) ? entries[x].esphMounted : true;
+						if (entries[x].esphType && !navavail)  continue;
 						var navicon = entries[x].esphType ? ('esph_navtype_' + entries[x].esphType) : 'fe_fileexplorer_popup_item_icon_folder';
 						var item = { id: options.items.length, name: EscapeHTML(entries[x].name), icon: navicon, info: entries[x] };
 

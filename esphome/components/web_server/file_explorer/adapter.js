@@ -198,7 +198,7 @@
           var items = [];
           roots = [];
           if (ok && body && body.storages) body.storages.forEach(function (s) {
-            var avail = !!s.mounted;
+            var avail = (s.can_mount || s.can_unmount) ? !!s.mounted : true;
             if (avail) { roots.push(s.mount_path); items.push({ name: s.mount_path, isDir: true, path: s.mount_path }); }
           });
           render(items, true);
@@ -728,10 +728,9 @@
         var cat = typeIcon(s.kind || s.type);
         e.esphType = cat;
         rootKindById[s.mount_path] = cat;
-        // Filled = actually mounted/loaded. Every storage advertises mount caps (the default is
-        // both; usb is unmount-only), so can_mount cannot signal state -- is_mounted (reported by
-        // every driver) is the real signal.
-        rootFilledById[s.mount_path] = !!s.mounted;
+        // Mountable storages (any mount cap) are filled only when mounted; non-mountable storages
+        // are always filled (they only appear at all when loaded).
+        rootFilledById[s.mount_path] = (s.can_mount || s.can_unmount) ? !!s.mounted : true;
         entries.push(e);
       }
       // Raw device nodes, if this build has the raw API. A 404 just means it is not
