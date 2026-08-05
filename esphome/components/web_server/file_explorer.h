@@ -7,13 +7,6 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/string_ref.h"
-// The storage-backed path reads through the worker's stream API. asset_source: flash needs no
-// storage at all, and storage_worker.h is itself behind this define, so the whole half is
-// conditional. Codegen requests the worker whenever asset_source: storage is configured.
-#ifdef USE_STORAGE_WORKER
-#include "esphome/components/storage/storage_worker.h"
-#endif
-
 namespace esphome {
 namespace web_server {
 
@@ -26,10 +19,10 @@ namespace web_server {
 //
 //   FLASH   -- a gzipped copy is compiled in as PROGMEM and copied to PSRAM once at setup(),
 //             then served with Content-Encoding: gzip. Always available, costs the flash.
-//   STORAGE -- the RAW files sit on a PathStorage and are read into PSRAM as soon as that
-//             storage is mounted, which may be seconds after boot or never, then served as-is.
-//             Costs no flash; the browser answers 503 until the read succeeds. External storage
-//             has room to spare, so nothing is compressed there.
+//   STORAGE -- the RAW files sit on a PathStorage and are pulled into PSRAM with storage::
+//             read_file() as soon as that storage is mounted, which may be seconds after boot
+//             or never, then served as-is. Costs no flash; the browser answers 503 until the
+//             read succeeds. External storage has room to spare, so nothing is compressed there.
 //
 // Flash trades a gzip response for less flash; storage serves raw. Either way the browser ends
 // up with the same widget, so the choice is a deployment question and not a functional one.
@@ -71,26 +64,13 @@ class FileExplorerAssets : public Component {
   // Copies a PROGMEM asset into PSRAM. Returns false when PSRAM could not be had.
   bool load_from_flash_(Asset &asset);
 
-#ifdef USE_STORAGE_WORKER
-  // Storage-backed assets are read through the worker's stream API, so the read is chunked,
-  // runs off the main loop where the storage allows it, and is not subject to the blocking
-  // helpers' max_blocking_transfer_size ceiling -- which is what rejected these files before:
-  // the ceiling exists precisely to route bulk reads here (see storage.h).
-  //
-  // One asset is in flight at a time. Not a limitation worth engineering around: there are at
-  // most a handful, they are read once at startup, and a single stream slot keeps this from
-  // competing with the file API for the worker's pool.
+  // Loads one storage-backed asset into PSRAM with storage::read_file(), which does the whole
+  // read through the storage interface (stat, size, buffer, read loop, EOF, watchdog) and hands
+  // back a RamBuffer -- no hand-rolled chunk loop and no data-plane calls of our own. One per
+  // loop() pass; the assets are read once at startup and there are only a handful.
   void start_load_(size_t index);
-  void issue_read_();
-  void on_open_(storage::StorageError err);
-  void on_read_(storage::StorageError err);
-  void on_closed_(storage::StorageError err);
-  // Releases the in-flight buffer and clears the slot, so loop() can try again later.
-  void abandon_load_(const char *reason, storage::StorageError err);
   // Called once the last storage-backed asset has landed.
   void finish_if_complete_();
-
-#endif
 
   Asset *assets_{nullptr};
   size_t asset_count_{0};
@@ -99,23 +79,6 @@ class FileExplorerAssets : public Component {
   bool warned_pending_{false};
   uint32_t last_try_ms_{0};
 
-#ifdef USE_STORAGE_WORKER
-  // In-flight read. loading_ is the index into assets_, or NO_LOAD when nothing is open.
-  static constexpr size_t NO_LOAD = SIZE_MAX;
-  size_t loading_{NO_LOAD};
-  storage::StreamHandle stream_{};
-  bool stream_open_{false};
-  // The destination buffer stays owned here until the asset is complete: read_chunk() needs it
-  // to stay valid until its callback fires, and a failed read must free it rather than publish
-  // a half-filled asset.
-  uint8_t *pending_buf_{nullptr};
-  // Allocated capacity of pending_buf_; it grows (doubling) as chunks arrive, since the size
-  // is never known up front -- the read runs until read_chunk() reports EOF.
-  size_t pending_len_{0};
-  size_t pending_off_{0};
-  // read_chunk() fills this before invoking the callback, so it has to outlive the call.
-  size_t last_read_{0};
-#endif
 };
 
 }  // namespace web_server
