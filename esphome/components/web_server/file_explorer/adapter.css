@@ -29,6 +29,10 @@
   --fe-c-disk: #57a463;
   --fe-t-devnode: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6%204h12v1h3v2h-3v2h3v2h-3v2h3v2h-3v2h3v2h-3v1H6v-1H3v-2h3v-2H3v-2h3v-2H3V9h3V7H3V5h3zm5%2011v3h1v-3zm2%200v3h1v-3zm2%200v3h1v-3z%22%2F%3E%3C%2Fsvg%3E");
   --fe-c-devnode: #7a6be0;
+  --fe-t-usb-o: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M8%2013c1.66%200%203%201.34%203%203s-1.34%203-3%203s-3-1.34-3-3s1.34-3%203-3m0%202c-.55%200-1%20.45-1%201s.45%201%201%201s1-.45%201-1s-.45-1-1-1M9.77%204.33l.73.75l3.79-3.79c.18-.18.43-.29.71-.29s.53.11.71.29l7.07%207.07v.01a1.02%201.02%200%200%201-.12%201.39l-3.73%203.74l.74.73l-6.72%206.72A6.98%206.98%200%200%201%208%2023c-3.87%200-7-3.13-7-7c0-1.93.78-3.68%202.05-4.95zm1.77%2015.21l5.3-5.31l-7.07-7.07l-5.31%205.3C3.56%2013.37%203%2014.62%203%2016c0%202.76%202.24%205%205%205c1.38%200%202.63-.56%203.54-1.46m3.53-14.85L16.5%206.1l-1.43%201.4l-1.41-1.4zM17.9%207.5l1.41%201.43l-1.41%201.41l-1.4-1.41zM20.59%209L15%203.41L11.93%206.5l5.57%205.58z%22%2F%3E%3C%2Fsvg%3E");
+  --fe-t-net-o: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22currentColor%22%20d%3D%22M15%2020c0-.55-.45-1-1-1h-1v-2h6c1.11%200%202-.89%202-2V7a2%202%200%200%200-2-2h-6l-2-2H5c-1.1%200-2%20.9-2%202v10a2%202%200%200%200%202%202h6v2h-1c-.55%200-1%20.45-1%201H2v2h7c0%20.55.45%201%201%201h4c.55%200%201-.45%201-1h7v-2zM5%2015V7h14v8z%22%2F%3E%3C%2Fsvg%3E");
+  --fe-blue: #4a90d9;
+  --fe-grey: #9e9e9e;
 }
 
 /* tab header + frame: verbatim v3 tab-header / tab-container */
@@ -547,27 +551,27 @@
 #esp-file-explorer.esph-cur-sd .fe_fileexplorer_path_icon_inner {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M18%208h-2V4h2m-3%204h-2V4h2m-3%204h-2V4h2m6-2h-8L4%208v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2V4a2%202%200%200%200-2-2%22%2F%3E%3C%2Fsvg%3E");
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M18%208h-2V4h2m-3%204h-2V4h2m-3%204h-2V4h2m6-2h-8L4%208v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2V4a2%202%200%200%200-2-2%22%2F%3E%3C%2Fsvg%3E");
-  background-color: #4a90d9;
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer.esph-cur-usb .fe_fileexplorer_path_icon_inner {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M8%2015c.55%200%201%20.45%201%201s-.45%201-1%201s-1-.45-1-1s.45-1%201-1m7.07-10.31L16.5%206.1l-1.43%201.4l-1.41-1.4zM17.9%207.5l1.41%201.43l-1.41%201.41l-1.4-1.41zM8%2013c-1.66%200-3%201.34-3%203s1.34%203%203%203s3-1.34%203-3s-1.34-3-3-3m1.77-8.67l.73.75l3.79-3.79c.18-.18.43-.29.71-.29s.53.11.71.29l7.07%207.07v.01a1.02%201.02%200%200%201-.12%201.39l-3.73%203.74l.74.73l-6.72%206.72A6.98%206.98%200%200%201%208%2023c-3.87%200-7-3.13-7-7c0-1.93.78-3.68%202.05-4.95zM20.59%209L15%203.41L11.93%206.5l5.57%205.58z%22%2F%3E%3C%2Fsvg%3E");
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M8%2015c.55%200%201%20.45%201%201s-.45%201-1%201s-1-.45-1-1s.45-1%201-1m7.07-10.31L16.5%206.1l-1.43%201.4l-1.41-1.4zM17.9%207.5l1.41%201.43l-1.41%201.41l-1.4-1.41zM8%2013c-1.66%200-3%201.34-3%203s1.34%203%203%203s3-1.34%203-3s-1.34-3-3-3m1.77-8.67l.73.75l3.79-3.79c.18-.18.43-.29.71-.29s.53.11.71.29l7.07%207.07v.01a1.02%201.02%200%200%201-.12%201.39l-3.73%203.74l.74.73l-6.72%206.72A6.98%206.98%200%200%201%208%2023c-3.87%200-7-3.13-7-7c0-1.93.78-3.68%202.05-4.95zM20.59%209L15%203.41L11.93%206.5l5.57%205.58z%22%2F%3E%3C%2Fsvg%3E");
-  background-color: #ab47bc;
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer.esph-cur-net .fe_fileexplorer_path_icon_inner {
-  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6.5%2020q-2.28%200-3.89-1.57Q1%2016.85%201%2014.58q0-1.95%201.17-3.48q1.18-1.53%203.08-1.95q.63-2.3%202.5-3.72Q9.63%204%2012%204q2.93%200%204.96%202.04Q19%208.07%2019%2011q1.73.2%202.86%201.5q1.14%201.28%201.14%203q0%201.88-1.31%203.19T18.5%2020m-12-2h12q1.05%200%201.77-.73q.73-.72.73-1.77t-.73-1.77Q19.55%2013%2018.5%2013H17v-2q0-2.07-1.46-3.54Q14.08%206%2012%206Q9.93%206%208.46%207.46Q7%208.93%207%2011h-.5q-1.45%200-2.47%201.03Q3%2013.05%203%2014.5T4.03%2017q1.02%201%202.47%201m5.5-6%22%2F%3E%3C%2Fsvg%3E");
-  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6.5%2020q-2.28%200-3.89-1.57Q1%2016.85%201%2014.58q0-1.95%201.17-3.48q1.18-1.53%203.08-1.95q.63-2.3%202.5-3.72Q9.63%204%2012%204q2.93%200%204.96%202.04Q19%208.07%2019%2011q1.73.2%202.86%201.5q1.14%201.28%201.14%203q0%201.88-1.31%203.19T18.5%2020m-12-2h12q1.05%200%201.77-.73q.73-.72.73-1.77t-.73-1.77Q19.55%2013%2018.5%2013H17v-2q0-2.07-1.46-3.54Q14.08%206%2012%206Q9.93%206%208.46%207.46Q7%208.93%207%2011h-.5q-1.45%200-2.47%201.03Q3%2013.05%203%2014.5T4.03%2017q1.02%201%202.47%201m5.5-6%22%2F%3E%3C%2Fsvg%3E");
-  background-color: #26a69a;
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M3%2015V5a2%202%200%200%201%202-2h6l2%202h6a2%202%200%200%201%202%202v8a2%202%200%200%201-2%202h-6v2h1a1%201%200%200%201%201%201h7v2h-7a1%201%200%200%201-1%201h-4a1%201%200%200%201-1-1H2v-2h7a1%201%200%200%201%201-1h1v-2H5a2%202%200%200%201-2-2%22%2F%3E%3C%2Fsvg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M3%2015V5a2%202%200%200%201%202-2h6l2%202h6a2%202%200%200%201%202%202v8a2%202%200%200%201-2%202h-6v2h1a1%201%200%200%201%201%201h7v2h-7a1%201%200%200%201-1%201h-4a1%201%200%200%201-1-1H2v-2h7a1%201%200%200%201%201-1h1v-2H5a2%202%200%200%201-2-2%22%2F%3E%3C%2Fsvg%3E");
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer.esph-cur-mem .fe_fileexplorer_path_icon_inner {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M17%2017H7V7h10m4%204V9h-2V7a2%202%200%200%200-2-2h-2V3h-2v2h-2V3H9v2H7c-1.11%200-2%20.89-2%202v2H3v2h2v2H3v2h2v2a2%202%200%200%200%202%202h2v2h2v-2h2v2h2v-2h2a2%202%200%200%200%202-2v-2h2v-2h-2v-2m-6%202h-2v-2h2m2-2H9v6h6z%22%2F%3E%3C%2Fsvg%3E");
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M17%2017H7V7h10m4%204V9h-2V7a2%202%200%200%200-2-2h-2V3h-2v2h-2V3H9v2H7c-1.11%200-2%20.89-2%202v2H3v2h2v2H3v2h2v2a2%202%200%200%200%202%202h2v2h2v-2h2v2h2v-2h2a2%202%200%200%200%202-2v-2h2v-2h-2v-2m-6%202h-2v-2h2m2-2H9v6h6z%22%2F%3E%3C%2Fsvg%3E");
-  background-color: #78859a;
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer.esph-cur-disk .fe_fileexplorer_path_icon_inner {
   mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6%202h12a2%202%200%200%201%202%202v16a2%202%200%200%201-2%202H6a2%202%200%200%201-2-2V4a2%202%200%200%201%202-2m6%202a6%206%200%200%200-6%206c0%203.31%202.69%206%206.1%206l-.88-2.23a1.01%201.01%200%200%201%20.37-1.37l.86-.5a1.01%201.01%200%200%201%201.37.37l1.92%202.42A5.98%205.98%200%200%200%2018%2010a6%206%200%200%200-6-6m0%205a1%201%200%200%201%201%201a1%201%200%200%201-1%201a1%201%200%200%201-1-1a1%201%200%200%201%201-1m-5%209a1%201%200%200%200-1%201a1%201%200%200%200%201%201a1%201%200%200%200%201-1a1%201%200%200%200-1-1m5.09-4.73l2.49%206.31l2.59-1.5l-4.22-5.31z%22%2F%3E%3C%2Fsvg%3E");
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M6%202h12a2%202%200%200%201%202%202v16a2%202%200%200%201-2%202H6a2%202%200%200%201-2-2V4a2%202%200%200%201%202-2m6%202a6%206%200%200%200-6%206c0%203.31%202.69%206%206.1%206l-.88-2.23a1.01%201.01%200%200%201%20.37-1.37l.86-.5a1.01%201.01%200%200%201%201.37.37l1.92%202.42A5.98%205.98%200%200%200%2018%2010a6%206%200%200%200-6-6m0%205a1%201%200%200%201%201%201a1%201%200%200%201-1%201a1%201%200%200%201-1-1a1%201%200%200%201%201-1m-5%209a1%201%200%200%200-1%201a1%201%200%200%200%201%201a1%201%200%200%200%201-1a1%201%200%200%200-1-1m5.09-4.73l2.49%206.31l2.59-1.5l-4.22-5.31z%22%2F%3E%3C%2Fsvg%3E");
-  background-color: #57a463;
+  background-color: var(--fe-blue);
 }
 
 /* Indent the status text past the left tool column so it reads under the file listing,
@@ -652,25 +656,25 @@
 #esp-file-explorer .esph_navtype_sd {
   mask-image: var(--fe-t-sd);
   -webkit-mask-image: var(--fe-t-sd);
-  background-color: var(--fe-c-sd);
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer .esph_navtype_usb {
   mask-image: var(--fe-t-usb);
   -webkit-mask-image: var(--fe-t-usb);
-  background-color: var(--fe-c-usb);
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer .esph_navtype_net {
   mask-image: var(--fe-t-net);
   -webkit-mask-image: var(--fe-t-net);
-  background-color: var(--fe-c-net);
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer .esph_navtype_mem {
   mask-image: var(--fe-t-mem);
   -webkit-mask-image: var(--fe-t-mem);
-  background-color: var(--fe-c-mem);
+  background-color: var(--fe-blue);
 }
 #esp-file-explorer .esph_navtype_disk {
   mask-image: var(--fe-t-disk);
   -webkit-mask-image: var(--fe-t-disk);
-  background-color: var(--fe-c-disk);
+  background-color: var(--fe-blue);
 }

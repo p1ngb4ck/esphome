@@ -696,12 +696,18 @@
     for (var id in rootKindById) {
       var cat = rootKindById[id];
       var q = '"' + String(id).replace(/[\\"]/g, '\\$&') + '"';
+      // Colour encodes state (blue = filled/mounted, grey = not), glyph shape encodes type.
+      // usb/net have real mdi outline variants for the not-filled look; the others fall back
+      // to their filled glyph in grey, which still reads as the unavailable state.
+      var filled = rootFilledById[id] !== false;
+      var glyph = (!filled && (cat === 'usb' || cat === 'net')) ? ('var(--fe-t-' + cat + '-o)') : ('var(--fe-t-' + cat + ')');
+      var fill = filled ? 'var(--fe-blue)' : 'var(--fe-grey)';
       css += '#esp-file-explorer [data-feid=' + q + '] .fe_fileexplorer_item_icon::before,\n' +
              '#esp-file-explorer [data-itemid=' + q + '] .fe_fileexplorer_item_icon::before {\n' +
-             '  mask-image: var(--fe-t-' + cat + ');\n' +
-             '  -webkit-mask-image: var(--fe-t-' + cat + ');\n' +
-             '  background-color: var(--fe-c-' + cat + ');\n' +
-             '  opacity: ' + (rootFilledById[id] === false ? '0.4' : '1') + ';\n}\n';
+             '  mask-image: ' + glyph + ';\n' +
+             '  -webkit-mask-image: ' + glyph + ';\n' +
+             '  background-color: ' + fill + ';\n' +
+             '  opacity: 1;\n}\n';
     }
     var st = card.querySelector('#esph-fe-typestyles');
     if (!st) {
