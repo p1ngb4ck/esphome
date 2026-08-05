@@ -130,6 +130,92 @@
   }
 
   // A small labelled-field dialog on top of overlay(). fields: {key,label,value,hint,type}.
+  // Lightweight file/dir picker: navigate available storages -> dirs -> files and hand a path
+  // back. mode 'file' picks a file, mode 'dir' picks the folder currently shown. Only mounted
+  // storages (and non-mountable ones that are loaded) are offered.
+  function browsePath(mode, onpick) {
+    var cur = '';
+    var roots = [];
+    var chosenFile = null;
+    var box = document.createElement('div');
+    box.className = 'esph-fe-browser';
+    var pathbar = document.createElement('div');
+    pathbar.className = 'esph-fe-browser-path';
+    var list = document.createElement('div');
+    list.className = 'esph-fe-browser-list';
+    box.appendChild(pathbar);
+    box.appendChild(list);
+    var pick = document.createElement('button');
+    pick.textContent = mode === 'dir' ? 'Select this folder' : 'Select file';
+    var cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    var dlg = overlay(mode === 'dir' ? 'Choose a folder' : 'Choose a file', box, [cancel, pick]);
+    cancel.onclick = dlg.close;
+    pick.onclick = function () {
+      if (mode === 'dir') { dlg.close(); onpick(cur); }
+      else if (chosenFile !== null) { dlg.close(); onpick(chosenFile); }
+    };
+    function parentOf(p) {
+      if (roots.indexOf(p) !== -1) return '';
+      var i = p.lastIndexOf('/');
+      return i > 0 ? p.slice(0, i) : '';
+    }
+    function addRow(label, cls, onclick) {
+      var r = document.createElement('div');
+      r.className = 'esph-fe-browser-row' + (cls ? ' ' + cls : '');
+      r.textContent = label;
+      r.onclick = onclick;
+      list.appendChild(r);
+      return r;
+    }
+    function render(items, isRoot) {
+      list.textContent = '';
+      pathbar.textContent = cur || '/';
+      chosenFile = null;
+      pick.disabled = mode === 'file';
+      if (!isRoot) addRow('.. (up)', 'esph-fe-browser-up', function () { navigate(parentOf(cur)); });
+      items.forEach(function (it) {
+        if (it.isDir) {
+          addRow(it.name + '/', 'esph-fe-browser-dir', function () {
+            navigate(cur === '' ? it.path : (cur.replace(/\/$/, '') + '/' + it.name));
+          });
+        } else if (mode === 'file') {
+          var full = cur.replace(/\/$/, '') + '/' + it.name;
+          var row = addRow(it.name, 'esph-fe-browser-file', function () {
+            chosenFile = full;
+            pick.disabled = false;
+            var sel = list.querySelector('.esph-fe-browser-sel');
+            if (sel) sel.classList.remove('esph-fe-browser-sel');
+            row.classList.add('esph-fe-browser-sel');
+          });
+        }
+      });
+    }
+    function navigate(path) {
+      cur = path;
+      if (path === '') {
+        request('GET', API + '/storages', function (ok, body) {
+          var items = [];
+          roots = [];
+          if (ok && body && body.storages) body.storages.forEach(function (s) {
+            var avail = (s.can_mount || s.can_unmount) ? s.mounted : true;
+            if (avail) { roots.push(s.mount_path); items.push({ name: s.mount_path, isDir: true, path: s.mount_path }); }
+          });
+          render(items, true);
+        });
+      } else {
+        request('GET', API + '/list' + q({ path: path }), function (ok, body) {
+          var items = [];
+          if (ok && body && body.entries) body.entries.forEach(function (it) {
+            items.push({ name: it.name, isDir: !!it.is_dir });
+          });
+          render(items, false);
+        });
+      }
+    }
+    navigate('');
+  }
+
   function formDialog(title, fields, onRun) {
     var content = document.createElement('div');
     content.style.padding = '12px';
@@ -147,6 +233,30 @@
         l.appendChild(input);
         l.appendChild(document.createTextNode(' ' + f.label));
         wrap.appendChild(l);
+      } else if (f.type === 'dirpick' || f.type === 'filepick') {
+        input.type = 'text';
+        input.value = f.value ? String(f.value) : '';
+        input.readOnly = true;
+        if (f.hint) input.placeholder = f.hint;
+        input.style.flex = '1 1 auto';
+        input.style.boxSizing = 'border-box';
+        var labp = document.createElement('div');
+        labp.style.fontSize = '12px';
+        labp.style.marginBottom = '2px';
+        labp.textContent = f.label;
+        var browse = document.createElement('button');
+        browse.type = 'button';
+        browse.textContent = 'Browse\u2026';
+        browse.onclick = function () {
+          browsePath(f.type === 'dirpick' ? 'dir' : 'file', function (p) { input.value = p; });
+        };
+        var prow = document.createElement('div');
+        prow.style.display = 'flex';
+        prow.style.gap = '6px';
+        prow.appendChild(input);
+        prow.appendChild(browse);
+        wrap.appendChild(labp);
+        wrap.appendChild(prow);
       } else {
         input.type = 'text';
         input.value = f.value !== undefined && f.value !== null ? String(f.value) : '';
@@ -184,18 +294,20 @@
       { key: 'whole', label: 'Read the whole device', type: 'check', value: false },
       { key: 'address', label: 'Address', value: '0x0' },
       { key: 'size', label: 'Size (bytes)', value: 256 },
-      { key: 'to_path', label: 'To file on device (empty = download)', hint: '/sdcard/dump.bin' },
+      { key: 'to_dir', type: 'dirpick', label: 'Target folder (empty = download to browser)', hint: '/sdcard' },
+      { key: 'to_name', label: 'Target filename', hint: 'dump.bin' },
     ], function (v, dlg) {
       var base = 'device=' + encodeURIComponent(dev.id) +
         (v.whole ? '&all=1' : '&address=' + encodeURIComponent(v.address) + '&size=' + encodeURIComponent(v.size));
       dlg.close();
-      if (!v.to_path) {
+      var to_path = v.to_dir ? (v.to_dir.replace(/\/+$/, '') + '/' + (v.to_name || 'dump.bin')) : '';
+      if (!to_path) {
         window.location = RAW + '/read?' + base;
         return;
       }
-      request('GET', RAW + '/read?' + base + '&to_path=' + encodeURIComponent(v.to_path), function (ok, body, status) {
+      request('GET', RAW + '/read?' + base + '&to_path=' + encodeURIComponent(to_path), function (ok, body, status) {
         if (!ok || !body || !body.job) return rawStatus('read failed: ' + errorText(body, status));
-        pollRawJob(body.job, 'reading ' + (dev.node_name || dev.id) + ' -> ' + v.to_path, function () { fe.RefreshFolders(true); });
+        pollRawJob(body.job, 'reading ' + (dev.node_name || dev.id) + ' -> ' + to_path, function () { fe.RefreshFolders(true); });
       });
     });
   }
@@ -203,7 +315,7 @@
   function rawWrite(dev, fe) {
     var fields = [
       { key: 'address', label: 'Address', value: '0x0' },
-      { key: 'from_path', label: 'File on device', hint: '/sdcard/fw.bin' },
+      { key: 'from_path', type: 'filepick', label: 'Source file', hint: '/sdcard/fw.bin' },
     ];
     if (dev.write_needs_erase) fields.push({ key: 'erase', label: 'Erase first (' + fmtSize(dev.erase_sector) + ' sectors)', type: 'check', value: true });
     fields.push({ key: 'verify', label: 'Verify after write', type: 'check', value: true });
@@ -224,7 +336,7 @@
   function rawVerify(dev, fe) {
     formDialog('Verify ' + (dev.node_name || dev.id) + ' against a file', [
       { key: 'address', label: 'Address', value: '0x0' },
-      { key: 'from_path', label: 'File on device', hint: '/sdcard/fw.bin' },
+      { key: 'from_path', type: 'filepick', label: 'Source file', hint: '/sdcard/fw.bin' },
       { key: 'passes', label: 'Verify passes', value: 1 },
     ], function (v, dlg) {
       if (!v.from_path) return window.alert('no file given');

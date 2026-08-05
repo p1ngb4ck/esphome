@@ -595,3 +595,40 @@
   flex: 1 1 auto;
   word-break: break-all;
 }
+
+/* File/dir picker used by the raw-device actions. */
+#esp-file-explorer .esph-fe-browser {
+  width: 360px;
+  max-width: 80vw;
+}
+#esp-file-explorer .esph-fe-browser-path {
+  padding: 6px 10px;
+  font-size: 12px;
+  opacity: 0.75;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#esp-file-explorer .esph-fe-browser-list {
+  height: 320px;
+  max-height: 55vh;
+  overflow: auto;
+}
+#esp-file-explorer .esph-fe-browser-row {
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#esp-file-explorer .esph-fe-browser-row:hover {
+  background-color: rgba(127, 127, 127, 0.18);
+}
+#esp-file-explorer .esph-fe-browser-dir {
+  font-weight: 600;
+}
+#esp-file-explorer .esph-fe-browser-sel {
+  background-color: rgba(3, 169, 244, 0.25);
+}
