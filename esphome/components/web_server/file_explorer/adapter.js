@@ -293,9 +293,10 @@
     if (uploadPanel) return;
     uploadPanel = document.createElement('div');
     uploadPanel.setAttribute('style',
-      'position:absolute;left:0;right:0;bottom:0;height:65%;display:flex;flex-direction:column;z-index:8;' +
-      'background:Canvas;color:CanvasText;border-top:1px solid rgba(127,127,127,0.4);' +
-      'box-shadow:0 -4px 16px rgba(0,0,0,0.25);font:13px system-ui,-apple-system,sans-serif;');
+      'position:absolute;right:12px;bottom:12px;width:300px;max-width:70%;max-height:60%;display:flex;' +
+      'flex-direction:column;overflow:hidden;z-index:8;background:Canvas;color:CanvasText;' +
+      'border:1px solid rgba(127,127,127,0.4);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.3);' +
+      'font:13px system-ui,-apple-system,sans-serif;');
     var head = document.createElement('div');
     head.setAttribute('style',
       'padding:8px 12px;font-weight:600;border-bottom:1px solid rgba(127,127,127,0.3);' +
