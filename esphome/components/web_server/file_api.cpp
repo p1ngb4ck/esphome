@@ -770,6 +770,17 @@ void WebServerFileApi::cache_job_result_(storage::TransferJob job, storage::Stor
 }
 #endif
 
+#ifdef USE_STORAGE_TRANSFER_BUFFER
+void WebServerFileApi::cache_flush_result_(uint32_t job, storage::StorageError result, uint32_t done, uint32_t total) {
+  FlushCacheEntry &e = this->flush_cache_[this->flush_cache_next_];
+  this->flush_cache_next_ = (this->flush_cache_next_ + 1) % FLUSH_CACHE_SIZE;
+  e.job = job;
+  e.result = result;
+  e.done = done;
+  e.total = total;
+}
+#endif
+
 void WebServerFileApi::loop() {
 #ifdef USE_STORAGE_TRANSFER_BUFFER
   if (this->flush_.active && !this->flush_.finished) {
@@ -809,6 +820,8 @@ void WebServerFileApi::loop() {
       }
       this->flush_.result = err;
       this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
+      this->cache_flush_result_(this->flush_.job, this->flush_.result, (uint32_t) this->flush_.done,
+                                (uint32_t) this->flush_.total);
       if (err == storage::StorageError::OK && this->flush_.storage != nullptr) {
         storage::global_storage_registry->note_parent_changed(std::string(this->flush_.storage->get_mount_path()) +
                                                               "/" + this->flush_.final_path);
@@ -827,20 +840,29 @@ void WebServerFileApi::handle_job_(AsyncWebServerRequest *request) {
     auto *p = request->getParam("id");
     uint32_t fid = p != nullptr ? (uint32_t) strtoul(p->value().c_str(), nullptr, 10) : 0;
     if ((fid & JOB_SPACE_MASK) == FLUSH_JOB_FLAG) {
-      if (!this->flush_.active || this->flush_.job != fid) {
-        request->send(404);
+      char jbuf[128];
+      if (this->flush_.active && this->flush_.job == fid) {
+        if (this->flush_.finished) {
+          snprintf(jbuf, sizeof(jbuf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":%u,\"bytes_total\":%u}",
+                   storage::error_to_string(this->flush_.result), (unsigned) this->flush_.done,
+                   (unsigned) this->flush_.total);
+        } else {
+          snprintf(jbuf, sizeof(jbuf), "{\"state\":\"running\",\"bytes_done\":%u,\"bytes_total\":%u}",
+                   (unsigned) this->flush_.done, (unsigned) this->flush_.total);
+        }
+        request->send(200, "application/json", jbuf);
         return;
       }
-      char jbuf[128];
-      if (this->flush_.finished) {
-        snprintf(jbuf, sizeof(jbuf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":%u,\"bytes_total\":%u}",
-                 storage::error_to_string(this->flush_.result), (unsigned) this->flush_.done,
-                 (unsigned) this->flush_.total);
-      } else {
-        snprintf(jbuf, sizeof(jbuf), "{\"state\":\"running\",\"bytes_done\":%u,\"bytes_total\":%u}",
-                 (unsigned) this->flush_.done, (unsigned) this->flush_.total);
+      // flush_ has already been reused by a newer upload -- resolve this finished job from the cache.
+      for (const auto &e : this->flush_cache_) {
+        if (e.job == fid) {
+          snprintf(jbuf, sizeof(jbuf), "{\"state\":\"done\",\"result\":\"%s\",\"bytes_done\":%u,\"bytes_total\":%u}",
+                   storage::error_to_string(e.result), (unsigned) e.done, (unsigned) e.total);
+          request->send(200, "application/json", jbuf);
+          return;
+        }
       }
-      request->send(200, "application/json", jbuf);
+      request->send(404);
       return;
     }
   }

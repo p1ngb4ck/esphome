@@ -261,6 +261,20 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     storage::StorageError result{storage::StorageError::OK};
   } flush_{};
   uint32_t flush_job_counter_{0};
+  // A finished staged-upload flush lives only in the single flush_ slot, which the next upload
+  // overwrites. Keep the last few results here so a late /files/job poll still resolves a
+  // finished job instead of 404-ing -- otherwise out-of-order or rapid uploads appear stuck
+  // flushing once flush_ has moved on.
+  struct FlushCacheEntry {
+    uint32_t job{0};
+    storage::StorageError result{storage::StorageError::OK};
+    uint32_t done{0};
+    uint32_t total{0};
+  };
+  static constexpr size_t FLUSH_CACHE_SIZE = 8;
+  FlushCacheEntry flush_cache_[FLUSH_CACHE_SIZE]{};
+  size_t flush_cache_next_{0};
+  void cache_flush_result_(uint32_t job, storage::StorageError result, uint32_t done, uint32_t total);
 #endif
 };
 
