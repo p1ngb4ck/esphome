@@ -1065,6 +1065,11 @@
 
 			e.preventDefault();
 
+			// The right-click landed on the clipboard overlay the widget shows for the native menu on
+			// button 2 (it lives in bodywrapouter, not innerwrap). Hide it and show our own menu.
+			elems.itemsclipboardoverlaypastewrap.classList.add('fe_fileexplorer_hidden');
+			elems.itemsclipboardoverlaypastewrap.classList.remove('fe_fileexplorer_items_clipboard_contextmenu');
+
 			if (ctxmenu)  ctxmenu.Cancel();
 
 			var entries = $this.GetSelectedFolderEntries();
@@ -1118,7 +1123,7 @@
 			});
 		};
 
-		elems.innerwrap.addEventListener('contextmenu', ShowContextMenu);
+		elems.bodywrapouter.addEventListener('contextmenu', ShowContextMenu);
 
 		// Handle keyboard navigation.
 		var MainKeyHandler = function(e) {
@@ -1273,7 +1278,7 @@
 			elems.innerwrap.removeEventListener('mousemove', InnerWrapMoveHandler);
 			elems.innerwrap.removeEventListener('mouseleave', InnerWrapLeaveHandler);
 			elems.innerwrap.removeEventListener('mouseup', MainClickHandler);
-			elems.innerwrap.removeEventListener('contextmenu', StopContextMenu);
+			elems.bodywrapouter.removeEventListener('contextmenu', ShowContextMenu);
 
 			elems.popupwrap.removeEventListener('keydown', MainKeyHandler);
 			elems.popupwrap.removeEventListener('keyup', IgnoreKeyHandler);
@@ -5864,7 +5869,7 @@ console.log(selectanchorpos);
 						// Root storages carry esphType/esphCanMount (set by the adapter): show only the
 						// available ones (skip unmounted-mountable) and with their storage-type icon rather
 						// than the generic folder glyph. Ordinary folders keep the folder icon.
-						if (entries[x].esphType && entries[x].esphCanMount)  continue;
+						if (entries[x].esphType && !entries[x].esphMounted)  continue;
 						var navicon = entries[x].esphType ? ('esph_navtype_' + entries[x].esphType) : 'fe_fileexplorer_popup_item_icon_folder';
 						var item = { id: options.items.length, name: EscapeHTML(entries[x].name), icon: navicon, info: entries[x] };
 

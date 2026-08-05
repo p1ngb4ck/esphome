@@ -198,7 +198,7 @@
           var items = [];
           roots = [];
           if (ok && body && body.storages) body.storages.forEach(function (s) {
-            var avail = !s.can_mount;
+            var avail = !!s.mounted;
             if (avail) { roots.push(s.mount_path); items.push({ name: s.mount_path, isDir: true, path: s.mount_path }); }
           });
           render(items, true);
@@ -728,10 +728,10 @@
         var cat = typeIcon(s.kind || s.type);
         e.esphType = cat;
         rootKindById[s.mount_path] = cat;
-        // Filled = not currently unmounted-and-mountable. can_mount is true exactly when a
-        // storage can still be mounted (i.e. it is unmounted); mounted ones and non-mountable
-        // loaded ones report can_mount false. More reliable than the drivers' is_mounted flag.
-        rootFilledById[s.mount_path] = !s.can_mount;
+        // Filled = actually mounted/loaded. Every storage advertises mount caps (the default is
+        // both; usb is unmount-only), so can_mount cannot signal state -- is_mounted (reported by
+        // every driver) is the real signal.
+        rootFilledById[s.mount_path] = !!s.mounted;
         entries.push(e);
       }
       // Raw device nodes, if this build has the raw API. A 404 just means it is not
