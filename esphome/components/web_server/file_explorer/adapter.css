@@ -632,3 +632,45 @@
 #esp-file-explorer .esph-fe-browser-sel {
   background-color: rgba(3, 169, 244, 0.25);
 }
+
+/* Nav-select (path dropdown) storage-type icons: coloured mdi masks instead of the folder glyph. */
+#esp-file-explorer .esph_navtype_sd,
+#esp-file-explorer .esph_navtype_usb,
+#esp-file-explorer .esph_navtype_net,
+#esp-file-explorer .esph_navtype_mem,
+#esp-file-explorer .esph_navtype_disk {
+  background-image: none;
+  filter: none;
+  opacity: 1;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: 20px 20px;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: 20px 20px;
+}
+#esp-file-explorer .esph_navtype_sd {
+  mask-image: var(--fe-t-sd);
+  -webkit-mask-image: var(--fe-t-sd);
+  background-color: var(--fe-c-sd);
+}
+#esp-file-explorer .esph_navtype_usb {
+  mask-image: var(--fe-t-usb);
+  -webkit-mask-image: var(--fe-t-usb);
+  background-color: var(--fe-c-usb);
+}
+#esp-file-explorer .esph_navtype_net {
+  mask-image: var(--fe-t-net);
+  -webkit-mask-image: var(--fe-t-net);
+  background-color: var(--fe-c-net);
+}
+#esp-file-explorer .esph_navtype_mem {
+  mask-image: var(--fe-t-mem);
+  -webkit-mask-image: var(--fe-t-mem);
+  background-color: var(--fe-c-mem);
+}
+#esp-file-explorer .esph_navtype_disk {
+  mask-image: var(--fe-t-disk);
+  -webkit-mask-image: var(--fe-t-disk);
+  background-color: var(--fe-c-disk);
+}

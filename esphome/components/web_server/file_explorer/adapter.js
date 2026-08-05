@@ -198,7 +198,7 @@
           var items = [];
           roots = [];
           if (ok && body && body.storages) body.storages.forEach(function (s) {
-            var avail = (s.can_mount || s.can_unmount) ? s.mounted : true;
+            var avail = !s.can_mount;
             if (avail) { roots.push(s.mount_path); items.push({ name: s.mount_path, isDir: true, path: s.mount_path }); }
           });
           render(items, true);
@@ -725,8 +725,13 @@
         e.esphCanMount = !!s.can_mount;
         e.esphCanUnmount = !!s.can_unmount;
         e.esphCanFormat = !!s.can_format;
-        rootKindById[s.mount_path] = typeIcon(s.kind || s.type);
-        rootFilledById[s.mount_path] = (s.can_mount || s.can_unmount) ? !!s.mounted : true;
+        var cat = typeIcon(s.kind || s.type);
+        e.esphType = cat;
+        rootKindById[s.mount_path] = cat;
+        // Filled = not currently unmounted-and-mountable. can_mount is true exactly when a
+        // storage can still be mounted (i.e. it is unmounted); mounted ones and non-mountable
+        // loaded ones report can_mount false. More reliable than the drivers' is_mounted flag.
+        rootFilledById[s.mount_path] = !s.can_mount;
         entries.push(e);
       }
       // Raw device nodes, if this build has the raw API. A 404 just means it is not
