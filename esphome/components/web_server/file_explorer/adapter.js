@@ -353,21 +353,37 @@
 
   // Append the file currently in flight to a job's scrolling sub-list (created on first use),
   // right under its always-visible summary row. Returns true when it was a new file.
-  function pushSubFile(item, name) {
-    if (!name || name === item.lastSub) return false;
-    item.lastSub = name;
+  function fmtBytes(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '';
+    var u = ['B', 'KB', 'MB', 'GB'], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+  }
+
+  // Append (on a new file) or live-update the current file's sub-line under a job's summary
+  // row, with its byte progress. Returns true when a new file started.
+  function pushSubFile(item, name, doneB, totalB) {
+    if (!name) return false;
     if (!item.sub) {
       item.sub = document.createElement('div');
       item.sub.setAttribute('style',
         'max-height:88px;overflow:auto;margin:2px 0 2px 22px;font-size:11px;opacity:0.75;');
       item.row.appendChild(item.sub);
     }
-    var line = document.createElement('div');
-    line.setAttribute('style', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
-    line.textContent = name;
-    item.sub.appendChild(line);
-    item.sub.scrollTop = item.sub.scrollHeight;
-    return true;
+    var isNew = name !== item.lastSub;
+    if (isNew) {
+      item.lastSub = name;
+      item.curSub = document.createElement('div');
+      item.curSub.setAttribute('style', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
+      item.sub.appendChild(item.curSub);
+      item.sub.scrollTop = item.sub.scrollHeight;
+    }
+    var tail = '';
+    if (typeof totalB === 'number' && totalB > 0) {
+      tail = '  ' + fmtBytes(doneB) + ' / ' + fmtBytes(totalB) + ' (' + Math.round((100 * doneB) / totalB) + '%)';
+    }
+    item.curSub.textContent = name + tail;
+    return isNew;
   }
 
   function enqueueUpload(fe, folder, file) {
@@ -494,11 +510,10 @@
   }
 
   function entryFor(name, isDir, size, mtime, id) {
-    return {
+    var e = {
       id: id !== undefined ? id : name,
       name: name,
       type: isDir ? 'folder' : 'file',
-      size: isDir ? undefined : size,
       hash: String(mtime || 0),
       // Folders carry attrs.canmodify so the widget enables its modify tools (delete, rename,
       // new folder/file) inside a storage. The synthetic root stays canmodify:false via
@@ -506,6 +521,10 @@
       // canmodify off an undefined path segment and its tool handlers throw.
       attrs: { canmodify: true },
     };
+    // Only files carry a size. Folders leave the key absent so the widget's selection-size
+    // sum skips them instead of adding undefined and showing NaN.
+    if (!isDir) e.size = size;
+    return e;
   }
 
   // ---------------------------------------------------------------------------
@@ -866,7 +885,6 @@
         request('POST', API + '/' + kind + q({ from: from, to: to }), function (ok, body, status) {
           function finish(good, msg, entry) {
             setUploadRow(row, 100, good ? 'done' : ('failed: ' + (msg || 'error')), good ? '#4caf50' : '#e53935');
-            if (good && entry) moved.push(entry);
             if (!good && failure === null) failure = msg;
             if (--pending === 0) {
               done(failure === null ? true : failure, moved);
@@ -874,12 +892,12 @@
             }
           }
           if (!ok || !body) return finish(false, errorText(body, status));
-          if (body.job === undefined) return finish(true, null, entryFor(id, false, 0, 0));
+          if (body.job === undefined) return finish(true, null);
           var nfiles = 0;
           awaitJob(body.job, function (jok, msg) {
-            finish(jok, msg, jok ? entryFor(id, false, 0, 0) : null);
+            finish(jok, msg);
           }, function (b) {
-            if (pushSubFile(row, b.file)) nfiles++;
+            if (pushSubFile(row, b.file, b.file_done, b.file_total)) nfiles++;
             var pct = b.file_total ? Math.round((100 * b.file_done) / b.file_total) : 30;
             setUploadRow(row, pct, nfiles + (nfiles === 1 ? ' file' : ' files') + (b.file ? ' - ' + b.file : ''));
           });
