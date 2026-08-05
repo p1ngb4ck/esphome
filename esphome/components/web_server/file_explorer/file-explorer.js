@@ -1055,13 +1055,70 @@
 
 		elems.innerwrap.addEventListener('mouseup', MainClickHandler);
 
-		var StopContextMenu = function(e) {
+		// Custom context menu: the widget otherwise only suppresses the native menu here. Build a
+		// PopupMenu with the actions valid for the current selection. Clipboard ops go through the
+		// existing paths (execCommand / PasteInternal), delete/edit/monitor/properties through the
+		// public API and adapter callbacks.
+		var ctxmenu = null;
+		var ShowContextMenu = function(e) {
 			if (!e.isTrusted)  return;
 
 			e.preventDefault();
+
+			if (ctxmenu)  ctxmenu.Cancel();
+
+			var entries = $this.GetSelectedFolderEntries();
+			var num = entries.length;
+			var items = [];
+
+			if (num && $this.hasEventListener('copy'))  items.push({ id: 'ctx_copy', name: EscapeHTML($this.Translate('Copy')) });
+			if (num && $this.hasEventListener('move'))  items.push({ id: 'ctx_cut', name: EscapeHTML($this.Translate('Cut')) });
+			items.push({ id: 'ctx_paste', name: EscapeHTML($this.Translate('Paste')) });
+			if (num && $this.hasEventListener('delete'))  items.push({ id: 'ctx_delete', name: EscapeHTML($this.Translate('Delete')) });
+
+			if (num === 1 && entries[0].type !== 'folder' && $this.settings.istextfile && $this.settings.istextfile(entries[0].name))
+			{
+				if ($this.settings.onmonitor)  items.push({ id: 'ctx_monitor', name: EscapeHTML($this.Translate('Monitor')) });
+				if ($this.settings.onedit)  items.push({ id: 'ctx_edit', name: EscapeHTML($this.Translate('Edit')) });
+			}
+
+			if (num === 1 && $this.settings.onproperties)  items.push({ id: 'ctx_properties', name: EscapeHTML($this.Translate('Properties')) });
+
+			if (!items.length)  return;
+
+			var mx = e.clientX, my = e.clientY;
+
+			ctxmenu = new PopupMenu(elems.mainwrap, {
+				items: items,
+
+				onposition: function(popupelem) {
+					var r = elems.mainwrap.getBoundingClientRect();
+					popupelem.style.left = Math.max(0, mx - r.left) + 'px';
+					popupelem.style.top = Math.max(0, my - r.top) + 'px';
+				},
+
+				onselected: function(id, item, lastelem, etype) {
+					ctxmenu = null;
+					this.Destroy();
+					$this.Focus(true);
+
+					if (id === 'ctx_copy')  { elems.itemsclipboardoverlay.focus(); document.execCommand('copy'); }
+					else if (id === 'ctx_cut')  { elems.itemsclipboardoverlay.focus(); document.execCommand('cut'); }
+					else if (id === 'ctx_paste')  { if (!$this.PasteInternal())  $this.ShowClipboardPasteBox(); }
+					else if (id === 'ctx_delete')  $this.DeleteSelectedItems(true);
+					else if (id === 'ctx_edit' && $this.settings.onedit)  $this.settings.onedit(entries[0]);
+					else if (id === 'ctx_monitor' && $this.settings.onmonitor)  $this.settings.onmonitor(entries[0]);
+					else if (id === 'ctx_properties' && $this.settings.onproperties)  $this.settings.onproperties(entries[0]);
+				},
+
+				oncancel: function(lastelem, etype) {
+					ctxmenu = null;
+					this.Destroy();
+				}
+			});
 		};
 
-		elems.innerwrap.addEventListener('contextmenu', StopContextMenu);
+		elems.innerwrap.addEventListener('contextmenu', ShowContextMenu);
 
 		// Handle keyboard navigation.
 		var MainKeyHandler = function(e) {

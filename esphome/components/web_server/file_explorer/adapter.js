@@ -1060,6 +1060,16 @@
       opts.onmove = function (moved, srcpath, srcids, destfolder) {
         transfer('move', moved, srcpath, srcids, destfolder);
       };
+      opts.istextfile = isText;
+      opts.onedit = function (entry) {
+        showEditor(childPath(fe.GetCurrentFolder(), entry.name), entry.name, canWrite);
+      };
+      opts.onmonitor = function (entry) {
+        showTail(childPath(fe.GetCurrentFolder(), entry.name), entry.name);
+      };
+      opts.onproperties = function (entry) {
+        showProperties(entry);
+      };
 
       opts.oninitupload = function (startupload, fileinfo) {
         // The widget calls this once per selected file. Queue it (the node uploads one at a
@@ -1143,6 +1153,7 @@
       // text_file_formats) is selected, in any folder.
       toggleTool(monitorTool, !!(e && e.type !== 'folder' && isText(e.name)));
       toggleTool(editTool, !!(e && e.type !== 'folder' && isText(e.name)));
+      toggleTool(infoTool, !!e);
       fe.ToolStateUpdated();
     }
 
@@ -1168,6 +1179,64 @@
     var verifyTool = makeRawTool('esph-fe-tool-verify', 'Verify device', rawVerify);
     var eraseTool = makeRawTool('esph-fe-tool-erase', 'Erase device', rawErase);
 
+    function showProperties(entry) {
+      var isDir = entry.type === 'folder';
+      var path = childPath(fe.GetCurrentFolder(), entry.name);
+      var box = document.createElement('div');
+      box.className = 'esph-fe-props';
+      function row(k) {
+        var r = document.createElement('div');
+        r.className = 'esph-fe-prop';
+        var kk = document.createElement('span');
+        kk.className = 'esph-fe-prop-k';
+        kk.textContent = k;
+        var vv = document.createElement('span');
+        vv.className = 'esph-fe-prop-v';
+        r.appendChild(kk);
+        r.appendChild(vv);
+        box.appendChild(r);
+        return vv;
+      }
+      row('Name').textContent = entry.name;
+      row('Type').textContent = isDir ? 'Folder' : 'File';
+      row('Path').textContent = path;
+      if (!isDir) row('Size').textContent = fmtBytes(entry.size) + ' (' + (entry.size || 0) + ' bytes)';
+      var dlg = overlay('Properties: ' + entry.name, box, [], false);
+      if (isDir) {
+        var v = row('Total size');
+        v.textContent = 'computing\u2026';
+        var queue = [path], total = 0, files = 0;
+        function update(done) {
+          v.textContent = fmtBytes(total) + ' (' + total + ' bytes, ' + files + ' files)' + (done ? '' : ' \u2026');
+        }
+        // Serial walk (one listing at a time) so we do not flood the node; stops if closed.
+        function step() {
+          if (dlg.isClosed()) return;
+          if (!queue.length) return update(true);
+          var p = queue.shift();
+          request('GET', API + '/list' + q({ path: p }), function (ok, body) {
+            if (dlg.isClosed()) return;
+            if (ok && body && body.entries) {
+              body.entries.forEach(function (it) {
+                if (it.is_dir) queue.push(p === '' ? it.name : p + '/' + it.name);
+                else { total += it.size || 0; files++; }
+              });
+              update(false);
+            }
+            step();
+          });
+        }
+        step();
+      }
+    }
+
+    var infoTool = fe.AddToolbarButton('esph-fe-tool-info', 'Properties');
+    infoTool.classList.add('fe_fileexplorer_hidden');
+    infoTool.addEventListener('click', function () {
+      var sel = fe.GetSelectedFolderEntries();
+      if (sel.length !== 1) return;
+      showProperties(sel[0]);
+    });
     var monitorTool = fe.AddToolbarButton('esph-fe-tool-monitor', 'Monitor');
     monitorTool.classList.add('fe_fileexplorer_hidden');
     monitorTool.addEventListener('click', function () {
