@@ -81,11 +81,41 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
   if (is_get && this->file_explorer_ != nullptr) {
     const auto *asset = this->file_explorer_->find(url);
     if (asset != nullptr) {
+      if (asset->psram != nullptr) {
+        // Already resident in PSRAM: loaded ONCE -- compiled in for flash, preloaded via
+        // storage::read_file() for storage -- and served straight from that buffer on every
+        // request, no per-request storage read. The bytes go out through the same async transfer
+        // task the file downloads use (a single blocking send of a big buffer returns 500,
+        // chunked async does not), as a memory-source job.
+        auto *job = new DownloadJob{};  // NOLINT(cppcoreguidelines-owning-memory)
+        job->mem = asset->psram;
+        job->mem_len = asset->len;
+        job->type = asset->content_type;
+        job->gzip = asset->gzipped;
+
+        httpd_req_t *areq = *request;
+        httpd_req_t *async_req = nullptr;
+        if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
+          // No async slot -- degrade to a synchronous chunked pump (still not a single-shot send).
+          job->req = areq;
+          this->pump_download_(job);
+          delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+          return;
+        }
+        job->req = async_req;
+        if (xQueueSend(this->dl_queue_, &job, 0) != pdTRUE) {
+          httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "transfer queue full");
+          httpd_req_async_handler_complete(async_req);
+          delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+          return;
+        }
+        return;
+      }
       if (asset->flash == nullptr) {
-        // Storage-backed asset: it is just a file on the medium, and /files/download already
-        // serves any storage file to the browser (resolve, open, chunked, async). Point the URL
-        // straight at that proven path -- no bespoke loader or serve. Flash assets (below) keep
-        // their own in-PSRAM serve untouched.
+        // Storage-backed and NOT preloaded (no PSRAM to preload into, or it is not mounted yet):
+        // fall back to serving it straight from the medium through /files/download, which streams
+        // any storage file to the browser. This reads per request -- the slow path -- and only
+        // runs when the PSRAM preload could not.
         std::string loc = "/files/download?inline=1&path=";
         for (const char *p = asset->storage_path; *p != '\0'; p++) {
           const unsigned char ch = static_cast<unsigned char>(*p);
@@ -103,39 +133,11 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
         request->redirect(loc);
         return;
       }
-      if (asset->psram == nullptr) {
-        // Storage-backed and not there yet. 503 with Retry-After rather than 404: the asset
-        // is configured, it is simply not loaded, and a reloading browser should try again.
-        auto *pending = request->beginResponse(503, "text/plain", "assets not loaded yet");
-        pending->addHeader("Retry-After", "5");
-        request->send(pending);
-        return;
-      }
-      // Serve the (possibly large, raw) asset through the same async transfer task the file
-      // downloads use: a single blocking send of a big buffer returns 500, chunked async does
-      // not. The bytes already live in PSRAM, so this is a memory-source job -- no storage read.
-      auto *job = new DownloadJob{};  // NOLINT(cppcoreguidelines-owning-memory)
-      job->mem = asset->psram;
-      job->mem_len = asset->len;
-      job->type = asset->content_type;
-      job->gzip = asset->gzipped;
-
-      httpd_req_t *areq = *request;
-      httpd_req_t *async_req = nullptr;
-      if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
-        // No async slot -- degrade to a synchronous chunked pump (still not a single-shot send).
-        job->req = areq;
-        this->pump_download_(job);
-        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
-        return;
-      }
-      job->req = async_req;
-      if (xQueueSend(this->dl_queue_, &job, 0) != pdTRUE) {
-        httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "transfer queue full");
-        httpd_req_async_handler_complete(async_req);
-        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
-        return;
-      }
+      // Flash asset whose PSRAM copy is not up yet (only during early setup) -- ask the browser
+      // to retry.
+      auto *pending = request->beginResponse(503, "text/plain", "assets not loaded yet");
+      pending->addHeader("Retry-After", "5");
+      request->send(pending);
       return;
     }
   }
