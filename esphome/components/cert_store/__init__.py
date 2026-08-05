@@ -1,6 +1,6 @@
 import esphome.codegen as cg
+from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
-from esphome.components import storage
 from esphome.const import CONF_ID, CONF_PATH, CONF_TYPE
 
 CODEOWNERS = ["@p1ngb4ck"]
@@ -22,16 +22,14 @@ KINDS = {
 }
 
 CONF_ENTRIES = "entries"
-CONF_STORAGE_ID = "storage_id"
 
 ENTRY_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.string_strict,
         cv.Required(CONF_TYPE): cv.enum(KINDS, lower=True),
-        # Relative to the effective storage (per-entry storage_id, else the top-level one) when a
-        # storage is set; otherwise a full VFS path resolved through the storage registry.
+        # A full VFS path (e.g. /sdcard/certs/ca.pem). The storage registry resolves which storage
+        # it lives on -- there is exactly one of each, so no storage is named here.
         cv.Required(CONF_PATH): cv.string,
-        cv.Optional(CONF_STORAGE_ID): cv.use_id(storage.PathStorage),
     }
 )
 
@@ -49,8 +47,6 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CertStore),
-            # Default storage for entries that give a relative path and no own storage_id.
-            cv.Optional(CONF_STORAGE_ID): cv.use_id(storage.PathStorage),
             cv.Required(CONF_ENTRIES): cv.ensure_list(ENTRY_SCHEMA),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -62,14 +58,9 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    default_storage = None
-    if storage_id := config.get(CONF_STORAGE_ID):
-        default_storage = await cg.get_variable(storage_id)
+    # Reads go through the storage worker (the async part of the storage interface), never a
+    # blocking main-loop read.
+    request_storage_worker()
 
     for entry in config[CONF_ENTRIES]:
-        st = cg.nullptr
-        if entry_storage_id := entry.get(CONF_STORAGE_ID):
-            st = await cg.get_variable(entry_storage_id)
-        elif default_storage is not None:
-            st = default_storage
-        cg.add(var.add_entry(entry[CONF_ID], entry[CONF_TYPE], entry[CONF_PATH], st))
+        cg.add(var.add_entry(entry[CONF_ID], entry[CONF_TYPE], entry[CONF_PATH]))
