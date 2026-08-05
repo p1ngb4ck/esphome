@@ -333,16 +333,13 @@ bool FTPClient::setup_tls_() {
     return true;
   // If a CA is configured, fetch it from the single cert_store before allocating anything -- so
   // waiting for it to load from storage is a cheap no-op retry, not a leak.
-  const char *ca_pem = nullptr;
-  if (this->ca_entry_ != nullptr) {
-    if (cert_store::global_cert_store == nullptr) {
-      ESP_LOGW(TAG, "security.ca set but no cert_store configured");
-      return false;
-    }
-    ca_pem = cert_store::global_cert_store->str(this->ca_entry_);
-    if (ca_pem == nullptr)
-      return false;  // not loaded yet -- ensure_connected_ comes back
+  if (cert_store::global_cert_store == nullptr) {
+    ESP_LOGW(TAG, "auth_tls needs a cert_store, none is configured");
+    return false;
   }
+  const char *ca_pem = cert_store::global_cert_store->str(this->ca_entry_);
+  if (ca_pem == nullptr)
+    return false;  // CA not loaded from storage yet -- ensure_connected_ comes back
 
   mbedtls_ssl_config_init(&this->conf_);
   mbedtls_x509_crt_init(&this->cacert_);
@@ -360,17 +357,13 @@ bool FTPClient::setup_tls_() {
   }
   mbedtls_ssl_conf_rng(&this->conf_, mbedtls_ctr_drbg_random, &this->drbg_);
 
-  bool verify = false;
-  if (ca_pem != nullptr) {
-    if (mbedtls_x509_crt_parse(&this->cacert_, reinterpret_cast<const unsigned char *>(ca_pem),
-                               strlen(ca_pem) + 1) != 0) {
-      ESP_LOGE(TAG, "CA '%s' does not parse", this->ca_entry_);
-      return false;
-    }
-    mbedtls_ssl_conf_ca_chain(&this->conf_, &this->cacert_, nullptr);
-    verify = this->verify_;
+  if (mbedtls_x509_crt_parse(&this->cacert_, reinterpret_cast<const unsigned char *>(ca_pem),
+                             strlen(ca_pem) + 1) != 0) {
+    ESP_LOGE(TAG, "CA '%s' does not parse", this->ca_entry_);
+    return false;
   }
-  mbedtls_ssl_conf_authmode(&this->conf_, verify ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
+  mbedtls_ssl_conf_ca_chain(&this->conf_, &this->cacert_, nullptr);
+  mbedtls_ssl_conf_authmode(&this->conf_, MBEDTLS_SSL_VERIFY_REQUIRED);
   this->tls_ready_ = true;
   return true;
 }
@@ -383,7 +376,7 @@ storage::StorageError FTPClient::do_connect_() {
     return storage::StorageError::NOT_READY;
 
 #ifdef USE_ESP_IDF
-  if (this->security_ != Security::NONE && !this->setup_tls_())
+  if (this->auth_tls_ && !this->setup_tls_())
     return storage::StorageError::NOT_READY;  // e.g. the CA is not loaded from storage yet
 #endif
 
@@ -393,16 +386,6 @@ storage::StorageError FTPClient::do_connect_() {
     return storage::StorageError::NOT_READY;
   }
 
-#ifdef USE_ESP_IDF
-  // Implicit FTPS: the control channel is TLS from the first byte.
-  if (this->security_ == Security::IMPLICIT &&
-      !this->control_->start_tls(&this->conf_, this->server_.c_str())) {
-    ESP_LOGW(TAG, "Implicit TLS handshake failed");
-    this->control_close_();
-    return storage::StorageError::NOT_READY;
-  }
-#endif
-
   // Greeting
   if (this->read_reply_(nullptr) != 220) {
     ESP_LOGW(TAG, "No 220 greeting");
@@ -411,8 +394,8 @@ storage::StorageError FTPClient::do_connect_() {
   }
 
 #ifdef USE_ESP_IDF
-  // Explicit FTPS (AUTH TLS): upgrade the already-open control channel before logging in.
-  if (this->security_ == Security::EXPLICIT) {
+  // FTPS (AUTH TLS): upgrade the already-open control channel before logging in.
+  if (this->auth_tls_) {
     if (this->send_cmd_("AUTH TLS") != 234) {
       ESP_LOGW(TAG, "AUTH TLS refused");
       this->control_close_();
@@ -438,7 +421,7 @@ storage::StorageError FTPClient::do_connect_() {
 
 #ifdef USE_ESP_IDF
   // Protect the data channel too: PBSZ 0 then PROT P, so every PASV transfer is TLS.
-  if (this->security_ != Security::NONE) {
+  if (this->auth_tls_) {
     this->send_cmd_("PBSZ 0");
     if (this->send_cmd_("PROT P") != 200) {
       ESP_LOGW(TAG, "PROT P refused -- refusing a cleartext data channel");
@@ -577,7 +560,7 @@ std::unique_ptr<FtpStream> FTPClient::open_pasv_data_() {
   auto stream = make_ftp_stream(this->open_tcp_(ip, port));
 #ifdef USE_ESP_IDF
   // After PROT P the data channel is TLS too; verify against the server name, not the PASV IP.
-  if (stream != nullptr && this->security_ != Security::NONE &&
+  if (stream != nullptr && this->auth_tls_ &&
       !stream->start_tls(&this->conf_, this->server_.c_str())) {
     ESP_LOGW(TAG, "Data TLS handshake failed");
     return nullptr;

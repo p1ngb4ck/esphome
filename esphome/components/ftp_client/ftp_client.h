@@ -22,9 +22,6 @@
 namespace esphome {
 namespace ftp_client {
 
-// FTP-over-TLS mode. NONE keeps the plain client unchanged.
-enum class Security : uint8_t { NONE, EXPLICIT, IMPLICIT };
-
 // A control/data connection: an ESPHome socket, optionally wrapped in TLS. read()/write() go raw
 // or through mbedTLS depending on start_tls(), so the FTP protocol code above is oblivious. The
 // mbedTLS bits only exist on ESP-IDF; plain FTP works on every socket platform.
@@ -90,11 +87,11 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   void set_mount_path(const char *mount_path) { this->set_mount_path_(mount_path); }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
 #ifdef USE_ESP_IDF
-  // FTPS configuration. When security is NONE (the default) none of the rest is used. The CA is
-  // looked up in the single cert_store (cert_store::global_cert_store) by entry id.
-  void set_security(Security security) { this->security_ = security; }
+  // FTPS (AUTH TLS). Off by default. The CA is looked up in the single cert_store
+  // (cert_store::global_cert_store) by entry id and is required when auth_tls is on -- the server
+  // is always verified against it.
+  void set_auth_tls(bool auth_tls) { this->auth_tls_ = auth_tls; }
   void set_ca_entry(const char *ca_entry) { this->ca_entry_ = ca_entry; }
-  void set_verify(bool verify) { this->verify_ = verify; }
 #endif
 
   bool is_mounted() const { return this->connected_; }
@@ -160,9 +157,8 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // FTPS. The mbedTLS config is built once (setup_tls_) and shared by the control connection and
   // every data connection; the CA comes from the single cert_store by entry id.
   bool setup_tls_();
-  Security security_{Security::NONE};
+  bool auth_tls_{false};
   const char *ca_entry_{nullptr};
-  bool verify_{true};
   bool tls_ready_{false};
   mbedtls_ssl_config conf_{};
   mbedtls_x509_crt cacert_{};
