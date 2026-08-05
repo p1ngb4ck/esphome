@@ -2660,7 +2660,7 @@
 		// Update the selected items status bar and notify selection change listeners.
 		var UpdateSelectionsChanged = function() {
 			// Calculate the total size for all selected items.  Set the last selected item as well.
-			var totalsize = 0, numfound = 0, sizestr, entries = currfolder.GetEntries();
+			var totalsize = 0, numfound = 0, hasunknown = false, sizestr, entries = currfolder.GetEntries();
 			historystack[currhistory].lastselected = false;
 			for (var x in selecteditemsmap)
 			{
@@ -2673,21 +2673,25 @@
 						totalsize += entries[selecteditemsmap[x]].size;
 						numfound++;
 					}
+					else  hasunknown = true;
 				}
 			}
 
-			if (numfound)  sizestr = GetDisplayFilesize(totalsize, $this.settings.adjustprecision, $this.settings.displayunits);
+			// A directory in the selection makes the total unknowable without walking it, so say so
+			// rather than reporting only the sum of the co-selected files.
+			if (hasunknown)  sizestr = EscapeHTML($this.Translate('(size unknown)'));
+			else if (numfound)  sizestr = GetDisplayFilesize(totalsize, $this.settings.adjustprecision, $this.settings.displayunits);
 
 			// Update the status bar.
 			if (numselecteditems == 0)  $this.SetNamedStatusBarText('selected', '');
 			else if (numselecteditems > 1)
 			{
-				if (numfound)  $this.SetNamedStatusBarText('selected', EscapeHTML(FormatStr($this.Translate('{0} items selected {1}'), numselecteditems, sizestr)));
+				if (numfound || hasunknown)  $this.SetNamedStatusBarText('selected', EscapeHTML(FormatStr($this.Translate('{0} items selected {1}'), numselecteditems, sizestr)));
 				else  $this.SetNamedStatusBarText('selected', EscapeHTML(FormatStr($this.Translate('{0} items selected'), numselecteditems)));
 			}
 			else
 			{
-				if (numfound)  $this.SetNamedStatusBarText('selected', EscapeHTML(FormatStr($this.Translate('1 item selected {0}'), sizestr)));
+				if (numfound || hasunknown)  $this.SetNamedStatusBarText('selected', EscapeHTML(FormatStr($this.Translate('1 item selected {0}'), sizestr)));
 				else  $this.SetNamedStatusBarText('selected', EscapeHTML($this.Translate('1 item selected')));
 			}
 
