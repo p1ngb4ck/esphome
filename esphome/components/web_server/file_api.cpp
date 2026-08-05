@@ -89,13 +89,31 @@ void WebServerFileApi::handleRequest(AsyncWebServerRequest *request) {
         request->send(pending);
         return;
       }
-      auto *response = request->beginResponse(200, asset->content_type, asset->psram, asset->len);
-      if (asset->gzipped)
-        response->addHeader("Content-Encoding", "gzip");
-      // These change only with the firmware or the files on the card; letting the browser keep
-      // them saves re-sending ~300 kB on every page load.
-      response->addHeader("Cache-Control", "public, max-age=86400");
-      request->send(response);
+      // Serve the (possibly large, raw) asset through the same async transfer task the file
+      // downloads use: a single blocking send of a big buffer returns 500, chunked async does
+      // not. The bytes already live in PSRAM, so this is a memory-source job -- no storage read.
+      auto *job = new DownloadJob{};  // NOLINT(cppcoreguidelines-owning-memory)
+      job->mem = asset->psram;
+      job->mem_len = asset->len;
+      job->type = asset->content_type;
+      job->gzip = asset->gzipped;
+
+      httpd_req_t *areq = *request;
+      httpd_req_t *async_req = nullptr;
+      if (this->dl_task_ == nullptr || httpd_req_async_handler_begin(areq, &async_req) != ESP_OK) {
+        // No async slot -- degrade to a synchronous chunked pump (still not a single-shot send).
+        job->req = areq;
+        this->pump_download_(job);
+        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+        return;
+      }
+      job->req = async_req;
+      if (xQueueSend(this->dl_queue_, &job, 0) != pdTRUE) {
+        httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "transfer queue full");
+        httpd_req_async_handler_complete(async_req);
+        delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+        return;
+      }
       return;
     }
   }
@@ -1087,6 +1105,24 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 void WebServerFileApi::pump_download_(DownloadJob *job) {
   httpd_req_t *req = job->req;
   httpd_resp_set_type(req, job->type);
+
+  if (job->mem != nullptr) {
+    // Asset already in PSRAM: no storage read and no disposition -- just stream the buffer in
+    // chunks so a large raw file goes out without a single blocking send (which is what 500'd).
+    if (job->gzip)
+      httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    size_t off = 0;
+    while (off < job->mem_len) {
+      const size_t n = (job->mem_len - off) < FILE_API_CHUNK ? (job->mem_len - off) : FILE_API_CHUNK;
+      if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(job->mem + off), n) != ESP_OK)
+        break;
+      off += n;
+    }
+    httpd_resp_send_chunk(req, nullptr, 0);
+    return;
+  }
+
   httpd_resp_set_hdr(req, "Content-Disposition", job->disposition);
   // Advertised unconditionally: a client that knows it may ask for a range can poll the tail
   // of a growing file instead of fetching all of it again.

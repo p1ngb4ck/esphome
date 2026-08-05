@@ -204,6 +204,12 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     uint64_t range_end{0};
     // "bytes " + three uint64 (20 each) + '-' + '/' + NUL = 69 worst case; 72 for 8-byte alignment.
     char content_range[72]{};
+    // Memory source: when mem != nullptr the job serves these bytes straight from PSRAM (a
+    // file-explorer asset already resident there) rather than reading a storage file -- no ps,
+    // handle, rel, disposition or run_on_loop_ marshalling. gzip adds Content-Encoding: gzip.
+    const uint8_t *mem{nullptr};
+    size_t mem_len{0};
+    bool gzip{false};
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
   void pump_download_(DownloadJob *job);
