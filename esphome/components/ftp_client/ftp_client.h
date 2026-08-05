@@ -7,7 +7,7 @@
 
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/socket/socket.h"
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
 #include "esphome/components/cert_store/cert_store.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
@@ -42,7 +42,7 @@ class FtpStream {
   ssize_t write(const void *buf, size_t len);
   void close();
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // Hands the current socket to mbedTLS and runs the handshake using the caller-owned config.
   // hostname is used for SNI and (when the config verifies) certificate hostname checking.
   bool start_tls(mbedtls_ssl_config *conf, const char *hostname);
@@ -51,7 +51,7 @@ class FtpStream {
 
  protected:
   std::unique_ptr<socket::Socket> sock_;
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   bool tls_{false};
   mbedtls_ssl_context ssl_{};
   static int bio_send_(void *ctx, const unsigned char *buf, size_t len);
@@ -86,7 +86,7 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
   // Feeds the inherited PathStorage mount path (resolve_path()/consumers read it from there).
   void set_mount_path(const char *mount_path) { this->set_mount_path_(mount_path); }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // FTPS (AUTH TLS). Off by default. The CA is looked up in the single cert_store
   // (cert_store::global_cert_store) by entry id and is required when auth_tls is on -- the server
   // is always verified against it.
@@ -153,7 +153,7 @@ class FTPClient final : public storage::NetworkStorage, public storage::Mountabl
 
   std::unique_ptr<FtpStream> control_;
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // FTPS. The mbedTLS config is built once (setup_tls_) and shared by the control connection and
   // every data connection; the CA comes from the single cert_store by entry id.
   bool setup_tls_();

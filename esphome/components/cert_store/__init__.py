@@ -2,6 +2,7 @@ import esphome.codegen as cg
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PATH, CONF_TYPE
+from esphome.core import CORE
 
 CODEOWNERS = ["@p1ngb4ck"]
 
@@ -61,6 +62,11 @@ async def to_code(config):
     # Reads go through the storage worker (the async part of the storage interface), never a
     # blocking main-loop read.
     request_storage_worker()
+
+    # Consumers guard their cert_store use with this. Only on esp-idf, where the store (mbedTLS)
+    # actually compiles.
+    if CORE.using_esp_idf:
+        cg.add_define("USE_CERT_STORE")
 
     for entry in config[CONF_ENTRIES]:
         cg.add(var.add_entry(entry[CONF_ID], entry[CONF_TYPE], entry[CONF_PATH]))

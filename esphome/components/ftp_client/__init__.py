@@ -7,7 +7,6 @@ from esphome.components.storage import (
     request_storage_worker,
     validate_mount_path,
 )
-from esphome.components import cert_store
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,

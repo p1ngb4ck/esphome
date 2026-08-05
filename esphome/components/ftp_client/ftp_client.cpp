@@ -218,7 +218,7 @@ std::unique_ptr<socket::Socket> FTPClient::open_tcp_(const std::string &host, ui
 // Wraps an ESPHome socket so the FTP protocol code reads/writes the same way whether or not the
 // connection is TLS. TLS is mbedTLS and only exists on ESP-IDF.
 ssize_t FtpStream::read(void *buf, size_t len) {
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   if (this->tls_) {
     int ret = mbedtls_ssl_read(&this->ssl_, static_cast<unsigned char *>(buf), len);
     if (ret > 0)
@@ -238,7 +238,7 @@ ssize_t FtpStream::read(void *buf, size_t len) {
 }
 
 ssize_t FtpStream::write(const void *buf, size_t len) {
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   if (this->tls_) {
     int ret = mbedtls_ssl_write(&this->ssl_, static_cast<const unsigned char *>(buf), len);
     if (ret >= 0)
@@ -256,7 +256,7 @@ ssize_t FtpStream::write(const void *buf, size_t len) {
 }
 
 void FtpStream::close() {
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   if (this->tls_) {
     mbedtls_ssl_close_notify(&this->ssl_);
     mbedtls_ssl_free(&this->ssl_);
@@ -266,7 +266,7 @@ void FtpStream::close() {
   this->sock_.reset();
 }
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
 int FtpStream::bio_send_(void *ctx, const unsigned char *buf, size_t len) {
   auto *sock = static_cast<socket::Socket *>(ctx);
   ssize_t n = sock->write(buf, len);
@@ -316,7 +316,7 @@ bool FtpStream::start_tls(mbedtls_ssl_config *conf, const char *hostname) {
   this->tls_ = true;
   return true;
 }
-#endif  // USE_ESP_IDF
+#endif  // USE_CERT_STORE
 
 // Wraps a freshly connected socket in a stream (or nullptr if the connect failed).
 static std::unique_ptr<FtpStream> make_ftp_stream(std::unique_ptr<socket::Socket> sock) {
@@ -327,7 +327,7 @@ static std::unique_ptr<FtpStream> make_ftp_stream(std::unique_ptr<socket::Socket
   return stream;
 }
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
 bool FTPClient::setup_tls_() {
   if (this->tls_ready_)
     return true;
@@ -367,7 +367,7 @@ bool FTPClient::setup_tls_() {
   this->tls_ready_ = true;
   return true;
 }
-#endif  // USE_ESP_IDF
+#endif  // USE_CERT_STORE
 
 storage::StorageError FTPClient::do_connect_() {
   if (this->connected_)
@@ -375,7 +375,7 @@ storage::StorageError FTPClient::do_connect_() {
   if (!network::is_connected())
     return storage::StorageError::NOT_READY;
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   if (this->auth_tls_ && !this->setup_tls_())
     return storage::StorageError::NOT_READY;  // e.g. the CA is not loaded from storage yet
 #endif
@@ -393,7 +393,7 @@ storage::StorageError FTPClient::do_connect_() {
     return storage::StorageError::NOT_READY;
   }
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // FTPS (AUTH TLS): upgrade the already-open control channel before logging in.
   if (this->auth_tls_) {
     if (this->send_cmd_("AUTH TLS") != 234) {
@@ -419,7 +419,7 @@ storage::StorageError FTPClient::do_connect_() {
     return storage::StorageError::PERMISSION_DENIED;
   }
 
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // Protect the data channel too: PBSZ 0 then PROT P, so every PASV transfer is TLS.
   if (this->auth_tls_) {
     this->send_cmd_("PBSZ 0");
@@ -558,7 +558,7 @@ std::unique_ptr<FtpStream> FTPClient::open_pasv_data_() {
   uint16_t port = (uint16_t) ((v[4] << 8) | v[5]);
   // open_tcp_ resolves the dotted-quad numerically, so it doubles as the data connector.
   auto stream = make_ftp_stream(this->open_tcp_(ip, port));
-#ifdef USE_ESP_IDF
+#ifdef USE_CERT_STORE
   // After PROT P the data channel is TLS too; verify against the server name, not the PASV IP.
   if (stream != nullptr && this->auth_tls_ &&
       !stream->start_tls(&this->conf_, this->server_.c_str())) {
