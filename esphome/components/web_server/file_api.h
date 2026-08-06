@@ -228,8 +228,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   struct UploadState {
     bool active{false};
     storage::PathStorage *storage{nullptr};
-    storage::FileHandle *handle{nullptr};
-    bool handle_open{false};
+    storage::StreamHandle stream{};
+    bool stream_open{false};
     bool dst_is_fs{false};
     // The upload streams into rel_path (a temp sibling) and is atomically rename()d to
     // final_path at completion, so a watcher (e.g. the module loader) never observes a
@@ -260,7 +260,10 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool finished{false};
     uint32_t job{0};
     storage::PathStorage *storage{nullptr};
-    storage::FileHandle *handle{nullptr};
+    storage::StreamHandle stream{};
+    bool stream_open{false};
+    bool writing{false};   // a worker write_chunk is in flight
+    bool closing{false};   // a worker end_write is in flight
     bool dst_is_fs{false};
     char rel_path[256]{};
     char final_path[256]{};
@@ -285,6 +288,9 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   FlushCacheEntry flush_cache_[FLUSH_CACHE_SIZE]{};
   size_t flush_cache_next_{0};
   void cache_flush_result_(uint32_t job, storage::StorageError result, uint32_t done, uint32_t total);
+  // Publishes a drained staged upload (rename temp -> final, change note, cache) once the worker
+  // end_write has completed. Runs on the main loop (from the flush completion callback).
+  void finalize_flush_();
 #endif
 };
 
