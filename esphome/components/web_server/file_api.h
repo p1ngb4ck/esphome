@@ -213,6 +213,10 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
   void pump_download_(DownloadJob *job);
+  // Issues one worker stream call (begin_read/read_chunk/end_read) on the main loop and blocks the
+  // transfer task until its completion callback fires. All download file I/O goes through the
+  // worker this way -- never a direct storage call.
+  storage::StorageError worker_await_(std::function<storage::StorageError(storage::CompletionCallback)> call);
   // MIME type for a file name, by extension. Returns a literal, never null: anything not
   // listed is application/octet-stream, which is what every download was before.
   static const char *content_type_for(const char *name);

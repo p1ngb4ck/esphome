@@ -1004,13 +1004,13 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   normalize_vfs_path(path);
 
   storage::PathStorage *ps = nullptr;
-  storage::FileHandle *handle = nullptr;
-  bool is_fs = false;
   uint64_t size = 0;
   char rel_buf[256]{};
   storage::StorageError err = storage::StorageError::OK;
 
-  bool ok = this->run_on_loop_([this, &path, &ps, &handle, &is_fs, &size, &rel_buf, &err]() {
+  // Control plane only: resolve + stat are synchronous and polymorphic (any storage type). The
+  // data read is the worker's job, so no handle is opened here.
+  bool ok = this->run_on_loop_([this, &path, &ps, &size, &rel_buf, &err]() {
     const char *rel = nullptr;
     ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
@@ -1027,10 +1027,6 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
       return;
     }
     size = st.size;
-    is_fs = ps->get_storage_type() == storage::StorageType::FILESYSTEM;
-    if (is_fs) {
-      err = static_cast<storage::FilesystemStorage *>(ps)->open(rel, handle, storage::OpenMode::READ);
-    }
   });
   if (!ok || err != storage::StorageError::OK) {
     if (!ok) {
@@ -1080,8 +1076,6 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     }
   }
   job->ps = ps;
-  job->handle = handle;
-  job->is_fs = is_fs;
   job->size = size;
   strncpy(job->rel, rel_buf, sizeof(job->rel) - 1);
   {
@@ -1110,11 +1104,6 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   if (xQueueSend(this->dl_queue_, &job, 0) != pdTRUE) {
     // Pipeline full: report on the async copy, then release socket and handle.
     httpd_resp_send_err(async_req, HTTPD_500_INTERNAL_SERVER_ERROR, "transfer queue full");
-    if (job->is_fs && job->handle != nullptr) {
-      auto *ps_c = job->ps;
-      auto *handle_c = job->handle;
-      this->run_on_loop_([ps_c, handle_c]() { static_cast<storage::FilesystemStorage *>(ps_c)->close(handle_c); });
-    }
     httpd_req_async_handler_complete(async_req);
     delete job;  // NOLINT(cppcoreguidelines-owning-memory)
     return;
@@ -1126,6 +1115,32 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 // Streams one download job to its request: headers, chunk loop (one main-loop hop per
 // chunk), storage-handle close and the terminating zero chunk. Does NOT call
 // httpd_req_async_handler_complete() -- only the task path owns an async copy.
+storage::StorageError WebServerFileApi::worker_await_(
+    std::function<storage::StorageError(storage::CompletionCallback)> call) {
+  // The worker stream pool is main-loop-only and its completion callbacks fire on the main loop,
+  // so defer the call there and block this transfer task on a private semaphore until the callback
+  // (or an immediate rejection) releases it -- the same main-loop bridge run_on_loop_() uses, but
+  // for the worker's async streams.
+  SemaphoreHandle_t done = xSemaphoreCreateBinary();
+  if (done == nullptr)
+    return storage::StorageError::NOT_READY;
+  storage::StorageError result = storage::StorageError::OK;
+  this->defer([call = std::move(call), done, &result]() {
+    storage::StorageError rej = call([done, &result](storage::StorageError e) {
+      result = e;
+      xSemaphoreGive(done);
+    });
+    if (rej != storage::StorageError::OK) {
+      result = rej;  // rejected synchronously -- no callback will fire
+      xSemaphoreGive(done);
+    }
+  });
+  while (xSemaphoreTake(done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+  }
+  vSemaphoreDelete(done);
+  return result;
+}
+
 void WebServerFileApi::pump_download_(DownloadJob *job) {
   httpd_req_t *req = job->req;
   httpd_resp_set_type(req, job->type);
@@ -1148,78 +1163,68 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
   }
 
   httpd_resp_set_hdr(req, "Content-Disposition", job->disposition);
-  // Advertised unconditionally: a client that knows it may ask for a range can poll the tail
-  // of a growing file instead of fetching all of it again.
   httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
 
-  uint64_t offset = 0;
+  uint64_t to_skip = 0;
   uint64_t remaining = job->size;
-  if (job->has_range) {
+  const bool ranged = job->has_range;
+  if (ranged) {
     httpd_resp_set_status(req, "206 Partial Content");
     httpd_resp_set_hdr(req, "Content-Range", job->content_range);
-    offset = job->range_start;
+    to_skip = job->range_start;
     remaining = job->range_end - job->range_start + 1;
-    if (job->is_fs && job->handle != nullptr) {
-      auto *ps_c = job->ps;
-      auto *handle_c = job->handle;
-      const int64_t start = static_cast<int64_t>(offset);
-      storage::StorageError serr = storage::StorageError::OK;
-      this->run_on_loop_([ps_c, handle_c, start, &serr]() {
-        serr = static_cast<storage::FilesystemStorage *>(ps_c)->seek(handle_c, start, storage::SeekMode::SET);
+  }
+
+  // Open + stream the file through the worker's stream API (file -> HTTP download). Polymorphic:
+  // the worker does the right thing for a filesystem or a network storage. No direct file access.
+  storage::StreamHandle stream{};
+  storage::StorageError err = this->worker_await_([job, &stream](storage::CompletionCallback cb) {
+    return storage::global_storage_worker->begin_read(job->ps, job->rel, &stream, std::move(cb));
+  });
+  bool stream_open = err == storage::StorageError::OK;
+  bool failed = !stream_open;
+
+  if (stream_open) {
+    auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
+    while (true) {
+      size_t got = 0;
+      err = this->worker_await_([&stream, buf, &got](storage::CompletionCallback cb) {
+        return storage::global_storage_worker->read_chunk(stream, buf, FILE_API_CHUNK, &got, std::move(cb));
       });
-      if (serr != storage::StorageError::OK) {
-        ESP_LOGW(TAG, "download '%s': seek to %lld failed (%s)", job->rel, (long long) start,
-                 storage::error_to_string(serr));
-        httpd_resp_send_chunk(req, nullptr, 0);
-        return;
-      }
-    }
-  }
-
-  auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
-  bool failed = false;
-  storage::StorageError err = storage::StorageError::OK;
-  while (true) {
-    size_t got = 0;
-    const size_t want = job->has_range && remaining < FILE_API_CHUNK ? static_cast<size_t>(remaining) : FILE_API_CHUNK;
-    if (want == 0)
-      break;
-    bool loop_ok = this->run_on_loop_([this, job, &offset, buf, &got, &err, want]() {
-      if (job->is_fs) {
-        err = static_cast<storage::FilesystemStorage *>(job->ps)->read(job->handle, buf, want, &got);
-      } else {
-        err = static_cast<storage::NetworkStorage *>(job->ps)->read_chunk(job->rel, buf, offset, want, &got);
-      }
-    });
-    if (!loop_ok || err != storage::StorageError::OK) {
-      failed = true;
-      break;
-    }
-    if (got == 0)
-      break;  // EOF
-    offset += got;
-    if (remaining >= got)
-      remaining -= got;
-    else
-      remaining = 0;
-    if (httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), got) != ESP_OK) {
-      failed = true;  // client went away -- still close the handle below
-      break;
-    }
-    if (job->has_range) {
-      if (remaining == 0)
+      if (err != storage::StorageError::OK) {
+        failed = true;
         break;
-    } else if (offset >= job->size && job->size != 0) {
-      break;
+      }
+      if (got == 0)
+        break;  // EOF
+      size_t off = 0;
+      if (to_skip > 0) {  // range: advance to range_start through the stream
+        const size_t drop = to_skip < got ? static_cast<size_t>(to_skip) : got;
+        off += drop;
+        to_skip -= drop;
+      }
+      if (off < got) {
+        size_t send_n = got - off;
+        if (ranged && send_n > remaining)
+          send_n = static_cast<size_t>(remaining);
+        if (send_n > 0 &&
+            httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf + off), send_n) != ESP_OK) {
+          failed = true;  // client went away
+          break;
+        }
+        if (ranged) {
+          remaining -= send_n;
+          if (remaining == 0)
+            break;
+        }
+      }
     }
+    delete[] buf;  // NOLINT(cppcoreguidelines-owning-memory)
+    this->worker_await_([&stream](storage::CompletionCallback cb) {
+      return storage::global_storage_worker->end_read(stream, std::move(cb));
+    });
   }
-  delete[] buf;  // NOLINT(cppcoreguidelines-owning-memory)
 
-  if (job->is_fs && job->handle != nullptr) {
-    auto *ps_c = job->ps;
-    auto *handle_c = job->handle;
-    this->run_on_loop_([ps_c, handle_c]() { static_cast<storage::FilesystemStorage *>(ps_c)->close(handle_c); });
-  }
   if (failed) {
     ESP_LOGW(TAG, "download '%s' aborted (%s)", job->rel, storage::error_to_string(err));
   }
