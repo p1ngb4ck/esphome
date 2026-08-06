@@ -1335,7 +1335,6 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         return;
       }
       this->upload_.overwrite = overwrite;
-      this->upload_.dst_is_fs = ps->get_storage_type() == storage::StorageType::FILESYSTEM;
       if (!overwrite) {
         // Refuse a silent overwrite: if the final destination already exists, answer
         // ALREADY_EXISTS. stat() OK means it exists; NOT_FOUND is the wanted case.
@@ -1420,7 +1419,6 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         this->flush_.storage = this->upload_.storage;
         this->flush_.stream = this->upload_.stream;
         this->flush_.stream_open = this->upload_.stream_open;
-        this->flush_.dst_is_fs = this->upload_.dst_is_fs;
         memcpy(this->flush_.rel_path, this->upload_.rel_path, sizeof(this->flush_.rel_path));
         memcpy(this->flush_.final_path, this->upload_.final_path, sizeof(this->flush_.final_path));
         this->flush_.overwrite = this->upload_.overwrite;

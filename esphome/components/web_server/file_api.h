@@ -230,7 +230,6 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     storage::PathStorage *storage{nullptr};
     storage::StreamHandle stream{};
     bool stream_open{false};
-    bool dst_is_fs{false};
     // The upload streams into rel_path (a temp sibling) and is atomically rename()d to
     // final_path at completion, so a watcher (e.g. the module loader) never observes a
     // half-written file.
@@ -264,7 +263,6 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool stream_open{false};
     bool writing{false};   // a worker write_chunk is in flight
     bool closing{false};   // a worker end_write is in flight
-    bool dst_is_fs{false};
     char rel_path[256]{};
     char final_path[256]{};
     bool overwrite{false};
