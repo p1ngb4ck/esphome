@@ -378,6 +378,15 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
               append_json_escaped(*ctx->out, info.kind);
               *ctx->out += "\"";
             }
+            // Medium capacity for the browser's storage properties (used = total - free). Drivers
+            // that cannot report sizes leave the zero-initialized struct; suppressed then so the
+            // UI shows nothing instead of "0 B".
+            if (info.total_bytes > 0) {
+              char sz[72];
+              snprintf(sz, sizeof(sz), ",\"total_bytes\":%llu,\"free_bytes\":%llu",
+                       (unsigned long long) info.total_bytes, (unsigned long long) info.free_bytes);
+              *ctx->out += sz;
+            }
           }
           *ctx->out += '}';
         },

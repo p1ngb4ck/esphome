@@ -81,40 +81,30 @@
     return '0x' + (Number(n) || 0).toString(16).toUpperCase();
   }
 
-  var rawStatusNode = null;
-  function rawStatus(text, sticky) {
-    if (!rawStatusNode) {
-      rawStatusNode = document.createElement('div');
-      rawStatusNode.setAttribute('style',
-        'position:absolute;left:12px;bottom:12px;max-width:70%;z-index:8;padding:8px 12px;' +
-        'background:Canvas;color:CanvasText;border:1px solid rgba(127,127,127,0.4);border-radius:8px;' +
-        'box-shadow:0 4px 16px rgba(0,0,0,0.3);font:13px system-ui,-apple-system,sans-serif;');
-      (card || document.body).appendChild(rawStatusNode);
-    }
-    rawStatusNode.textContent = text;
-    if (!sticky) {
-      setTimeout(function () {
-        if (rawStatusNode && rawStatusNode.textContent === text) {
-          document.body.removeChild(rawStatusNode);
-          rawStatusNode = null;
-        }
-      }, 5000);
-    }
+
+  // Raw jobs render as rows in the same Transfers panel the file operations use, instead of the
+  // old floating status line -- one place, one look for everything long-running.
+  function rawFail(label, msg) {
+    var item = addJobRow(label);
+    setUploadRow(item, 100, 'failed: ' + msg, '#e53935');
   }
 
   function pollRawJob(job, label, done) {
+    var item = addJobRow(label);
+    setUploadRow(item, 0, 'queued');
     var iv = setInterval(function () {
       request('GET', RAW + '/job' + q({ id: job }), function (ok, s) {
         // A job that 404s between polls finished and had its slot recycled -- treat as done.
         if (!ok || !s || s.state === undefined) {
           clearInterval(iv);
-          rawStatus(label + ' -- done');
+          setUploadRow(item, 100, 'done', '#43a047');
           if (done) done();
           return;
         }
         if (s.state === 'done') {
           clearInterval(iv);
-          rawStatus(s.result && s.result !== 'OK' ? label + ' failed: ' + s.result : label + ' -- done');
+          var bad = s.result && s.result !== 'OK';
+          setUploadRow(item, 100, bad ? 'failed: ' + s.result : 'done', bad ? '#e53935' : '#43a047');
           if (done) done();
           return;
         }
@@ -122,9 +112,11 @@
           : s.phase === 'verify'
             ? 'verifying' + (s.verify_passes > 1 ? ' (pass ' + s.verify_pass + '/' + s.verify_passes + ')' : '') + ' '
             : '';
-        if (s.bytes_total > 0) rawStatus(label + '... ' + phase + fmtSize(s.bytes_done) + ' / ' + fmtSize(s.bytes_total), true);
-        else if (s.bytes_done > 0) rawStatus(label + '... ' + phase + fmtSize(s.bytes_done), true);
-        else if (phase) rawStatus(label + '... ' + phase, true);
+        var pct = s.bytes_total > 0 ? Math.round((100 * s.bytes_done) / s.bytes_total) : 0;
+        var text = phase;
+        if (s.bytes_total > 0) text += fmtSize(s.bytes_done) + ' / ' + fmtSize(s.bytes_total);
+        else if (s.bytes_done > 0) text += fmtSize(s.bytes_done);
+        setUploadRow(item, pct, text || 'running');
       });
     }, 500);
   }
@@ -296,6 +288,7 @@
       { key: 'size', label: 'Size (bytes)', value: 256 },
       { key: 'to_dir', type: 'dirpick', label: 'Target folder (empty = download to browser)', hint: '/sdcard' },
       { key: 'to_name', label: 'Target filename', hint: 'dump.bin' },
+      { key: 'overwrite', label: 'Overwrite the target file if it exists', type: 'check', value: false },
     ], function (v, dlg) {
       var base = 'device=' + encodeURIComponent(dev.id) +
         (v.whole ? '&all=1' : '&address=' + encodeURIComponent(v.address) + '&size=' + encodeURIComponent(v.size));
@@ -305,8 +298,9 @@
         window.location = RAW + '/read?' + base;
         return;
       }
-      request('GET', RAW + '/read?' + base + '&to_path=' + encodeURIComponent(to_path), function (ok, body, status) {
-        if (!ok || !body || !body.job) return rawStatus('read failed: ' + errorText(body, status));
+      request('GET', RAW + '/read?' + base + '&to_path=' + encodeURIComponent(to_path) +
+        (v.overwrite ? '&overwrite=1' : ''), function (ok, body, status) {
+        if (!ok || !body || !body.job) return rawFail('read ' + (dev.node_name || dev.id), errorText(body, status));
         pollRawJob(body.job, 'reading ' + (dev.node_name || dev.id) + ' -> ' + to_path, function () { fe.RefreshFolders(true); });
       });
     });
@@ -327,7 +321,7 @@
         '&from_path=' + encodeURIComponent(v.from_path) + '&verify=' + passes + (v.erase ? '&erase=1' : '');
       dlg.close();
       request('POST', url, function (ok, body, status) {
-        if (!ok || !body || !body.job) return rawStatus('write failed: ' + errorText(body, status));
+        if (!ok || !body || !body.job) return rawFail('write ' + (dev.node_name || dev.id), errorText(body, status));
         pollRawJob(body.job, 'writing ' + v.from_path + ' -> ' + (dev.node_name || dev.id), function () { fe.RefreshFolders(true); });
       });
     });
@@ -345,7 +339,7 @@
         '&from_path=' + encodeURIComponent(v.from_path) + '&passes=' + passes;
       dlg.close();
       request('POST', url, function (ok, body, status) {
-        if (!ok || !body || !body.job) return rawStatus('verify failed: ' + errorText(body, status));
+        if (!ok || !body || !body.job) return rawFail('verify ' + (dev.node_name || dev.id), errorText(body, status));
         pollRawJob(body.job, 'verifying ' + (dev.node_name || dev.id) + ' against ' + v.from_path, null);
       });
     });
@@ -367,7 +361,7 @@
       if (v.sliced) base += '&sliced=1';
       dlg.close();
       request('POST', RAW + '/erase?' + base, function (ok, body, status) {
-        if (!ok || !body || !body.job) return rawStatus('erase failed: ' + errorText(body, status));
+        if (!ok || !body || !body.job) return rawFail('erase ' + (dev.node_name || dev.id), errorText(body, status));
         pollRawJob(body.job, 'erasing ' + (dev.node_name || dev.id), function () { fe.RefreshFolders(true); });
       });
     });
@@ -731,6 +725,10 @@
         e.esphCanMount = !!s.can_mount;
         e.esphCanUnmount = !!s.can_unmount;
         e.esphCanFormat = !!s.can_format;
+        if (typeof s.total_bytes === 'number' && s.total_bytes > 0) {
+          e.esphTotal = s.total_bytes;
+          e.esphFree = typeof s.free_bytes === 'number' ? s.free_bytes : 0;
+        }
         var cat = typeIcon(s.kind || s.type);
         e.esphType = cat;
         rootKindById[s.mount_path] = cat;
@@ -1323,6 +1321,13 @@
       row('Type').textContent = isDir ? 'Folder' : 'File';
       row('Path').textContent = path;
       if (!isDir) row('Size').textContent = fmtBytes(entry.size) + ' (' + (entry.size || 0) + ' bytes)';
+      // Root storages: medium capacity from /storages. The walk below still counts the files, so
+      // the dialog shows both -- what the medium holds and what the files in it add up to.
+      if (typeof entry.esphTotal === 'number' && entry.esphTotal > 0) {
+        var freeB = entry.esphFree || 0;
+        row('Capacity').textContent = fmtBytes(entry.esphTotal) + ' (' + entry.esphTotal + ' bytes)';
+        row('Used').textContent = fmtBytes(entry.esphTotal - freeB) + ' (' + fmtBytes(freeB) + ' free)';
+      }
       var dlg = overlay('Properties: ' + entry.name, box, [], false);
       if (isDir) {
         var v = row('Total size');

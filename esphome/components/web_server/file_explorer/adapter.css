@@ -308,6 +308,23 @@
 }
 #esp-file-explorer .fe_fileexplorer_folder_tools {
   align-items: center;
+  width: 100%;
+}
+/* Center the icons for real: make each button a flex box that centers its glyph and center the
+   button itself in the column, independent of the base sheet's width/padding/border arithmetic
+   (whose leftover padding kept the glyphs slightly off-center). The group separators collapsed
+   to 0 px as empty blocks in a centered flex column -- give them a real width. */
+#esp-file-explorer .fe_fileexplorer_folder_tools button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin-left: auto;
+  margin-right: auto;
+}
+#esp-file-explorer .fe_fileexplorer_folder_tool_separator {
+  width: 60%;
+  margin: 0 auto 0.3em;
 }
 
 
