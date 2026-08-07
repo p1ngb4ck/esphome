@@ -167,6 +167,20 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
 }
 
 // NOTE: `json:` extraction is opt-in; it is only compiled when USE_STORAGE_JSON_EXTRACT is set by codegen.
+// True while the background worker task may be doing I/O on this storage concurrently. The
+// synchronous paths below run blocking helpers on the main loop; doing that against a medium a
+// task transfer is streaming would put two threads into one volume -- the corruption class the
+// worker's cross-engine serialization exists to prevent -- so they refuse instead. Loop-sliced
+// worker jobs, PENDING jobs and idle-open streams do not count (same thread / no I/O in flight).
+static bool worker_task_busy(const Storage *s) {
+#ifdef USE_STORAGE_WORKER
+  return global_storage_worker != nullptr && global_storage_worker->has_active_task_io(s);
+#else
+  (void) s;
+  return false;
+#endif
+}
+
 void perform_file_write(const std::string &path, std::string content, bool append, bool newline) {
   const char *op = append ? "append" : "write";
   if (newline)
@@ -180,6 +194,10 @@ void perform_file_write(const std::string &path, std::string content, bool appen
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, path.c_str());
+    return;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "file_%s: '%s' is busy with a background transfer -- refusing blocking I/O", op, path.c_str());
     return;
   }
 
@@ -261,6 +279,10 @@ bool perform_file_read(const std::string &path, const FixedVector<ExtractStep> &
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "file_read: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "file_read: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
 
@@ -365,6 +387,10 @@ bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::ve
   RawGeometry geo;
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_read: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   // std::vector::resize() has no way to report a failed allocation in an exceptions-free
   // build -- it aborts. Ask the nothrow allocator first, which answers with a null pointer, and
   // hand the block straight back: nothing else allocates between here and the resize below, so
@@ -398,6 +424,10 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
            path.c_str());
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_read: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "raw_read: no storage registry");
     return false;
@@ -406,6 +436,10 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "raw_read: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "raw_read: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
 
@@ -436,6 +470,10 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
   RawGeometry geo;
   if (!raw_preflight(device, "write", address, len, &geo) || !raw_size_allowed("write", len))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_write: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   if (erase_first && !raw_erase_for_write(device, geo, address, len))
     return false;
 
@@ -458,6 +496,10 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
 }
 
 bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first) {
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_write: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "raw_write: no storage registry");
@@ -467,6 +509,10 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "raw_write: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "raw_write: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
   RamBuffer buf;
@@ -493,6 +539,10 @@ StorageError perform_raw_erase(RawStorage *device, uint64_t address, uint64_t si
   }
   if (!raw_preflight(device, "erase", address, size, &geo))
     return StorageError::INVALID_ARGS;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_erase: device is busy with a background transfer -- refusing blocking I/O");
+    return StorageError::NOT_READY;
+  }
   // No alignment massaging here: erase() rejects an unaligned range on purpose (it would take
   // the neighbouring data with it), and silently rounding would defeat that.
   StorageError err = device->erase(address, static_cast<size_t>(size));
