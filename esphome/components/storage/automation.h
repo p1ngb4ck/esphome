@@ -1,9 +1,14 @@
 #pragma once
 
-// defines.h MUST be seen before the guard below is evaluated: the preferences
-// action classes are define-gated, and main.cpp placement-news them into
-// sizeof()-sized static buffers -- any TU seeing this header with a different
-// define state gets a different class size (ODR violation, boot crash).
+// WARNING: This component is EXPERIMENTAL. The API may change at any time
+// without following the normal breaking changes policy. Use at your own risk.
+
+// defines.h MUST be the first include: define-gated action classes exist in
+// this header, and main.cpp placement-news them into sizeof()-sized static
+// buffers -- any TU parsing these class declarations with a different define
+// state gets a different class size (ODR violation, boot crash). Including
+// defines.h before everything else guarantees the gates are resolved from the
+// generated defines, never from whatever an earlier include happened to set.
 #include "esphome/core/defines.h"
 
 #include "storage.h"
@@ -19,6 +24,9 @@
 
 #include <string>
 #include <vector>
+#ifdef USE_STORAGE_REGEX_EXTRACT
+#include <regex>  // ExtractStep::compiled_re -- REGEX patterns are compiled once, at construction
+#endif
 
 namespace esphome::storage {
 
@@ -55,6 +63,9 @@ template<typename GlobT> void assign_from_string(GlobT *g, const std::string &s)
       warn_invalid_bool(s);
     }
   } else if constexpr (std::is_arithmetic_v<T>) {
+    static_assert(std::is_integral_v<T> || std::is_same_v<T, float>,
+                  "storage.file_read to_global supports integer and float globals; double is not "
+                  "supported (parse_number has no double overload)");
     auto v = parse_number<T>(s);
     if (v.has_value()) {
       g->value() = *v;
@@ -80,10 +91,22 @@ enum class ExtractStepType : uint8_t {
 };
 
 struct ExtractStep {
+  ExtractStep(ExtractStepType type, std::string arg, std::string sep, int index)
+      : type(type), arg(std::move(arg)), sep(std::move(sep)), index(index) {
+#ifdef USE_STORAGE_REGEX_EXTRACT
+    // Config-time validation already guaranteed a std::regex-parseable ECMAScript pattern, so
+    // compile it once here -- apply_extract_step() then never recompiles per play().
+    if (this->type == ExtractStepType::REGEX)
+      this->compiled_re = std::regex(this->arg);
+#endif
+  }
   ExtractStepType type;
   std::string arg;  // SPLIT: separator, KEY: key, REGEX: pattern
   std::string sep;  // KEY: separator
   int index{0};     // LINE: line number, SPLIT: element index, REGEX: capture group
+#ifdef USE_STORAGE_REGEX_EXTRACT
+  std::regex compiled_re;  // REGEX: pattern compiled once at construction (see the constructor)
+#endif
 };
 
 // Whitespace trim (no equivalent in core helpers).
@@ -128,10 +151,25 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 //   step is a directory-entry unlink/rmdir, short even over NFS), AND synchronous is the safer
 //   semantics for a destructive op -- the path is provably gone before the next action runs, so
 //   a "delete then recreate at the same path" sequence can't race its own delete.
+//
+//   CONTROL-PLANE (moves no bulk data, but a single driver call whose duration the AUTHOR does
+//   not bound -- the driver/medium does):
+//     - format          ASYNC. format() (f_mkfs and the like) is one blocking call that can run
+//                       for seconds on a large card. Routed through the worker precisely because
+//                       its bound is the medium's, not the author's: a task-safe medium formats
+//                       on the worker task (main loop free, watchdog-safe); otherwise a loop()
+//                       step runs the one blocking call and the loop waits it out. Fires
+//                       on_complete like the streaming actions.
+//     - mount / unmount SYNCHRONOUS. One connect()/disconnect(); bounded by the driver, not the
+//                       author -- an NFS connect() to a dead server blocks for the socket
+//                       timeout. Kept synchronous on purpose: a mount must be in place before
+//                       the next action runs, and the blocking is a short control round-trip on
+//                       a live medium.
 // ===========================================================================
 
 // Non-template workers for the actions below -- all error logging lives in the .cpp.
 void perform_mount(MountableStorage *target, bool mount);
+void perform_format_async(FilesystemStorage *target, Trigger<std::string> *on_complete);
 // Returns the error so the no-worker fallback in perform_file_copy_async() can report it --
 // on_complete's contract is "error text, empty = success", which a void return cannot honour.
 // The raw helpers below already work this way.
@@ -144,7 +182,7 @@ void perform_file_copy_async(const std::string &from, const std::string &to, boo
 void perform_file_delete(const std::string &path, bool recursive);
 bool check_file_exists(const std::string &path);
 void perform_file_write(const std::string &path, std::string content, bool append, bool newline);
-bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &steps, std::string &out);
+bool perform_file_read(const std::string &path, const FixedVector<ExtractStep> &steps, std::string &out);
 
 // ---------------------------------------------------------------------------
 // storage.file_write / storage.file_append
@@ -178,10 +216,13 @@ template<typename... Ts> class FileReadAction : public Action<Ts...> {
  public:
   TEMPLATABLE_VALUE(std::string, path)
 
+  // Capacity is known at codegen (the number of extract steps); steps_ is a FixedVector, so
+  // this init() must run before the add_step() calls.
+  void reserve_steps(size_t n) { this->steps_.init(n); }
   void add_step(ExtractStepType type, const std::string &arg, const std::string &sep, int index) {
     this->steps_.push_back(ExtractStep{type, arg, sep, index});
   }
-  void set_global_setter(std::function<void(const std::string &)> setter) { this->setter_ = std::move(setter); }
+  void set_global_setter(void (*setter)(const std::string &)) { this->setter_ = setter; }
   Trigger<std::string> *get_value_trigger() { return &this->value_trigger_; }
 
   void play(const Ts &...x) override {
@@ -194,8 +235,8 @@ template<typename... Ts> class FileReadAction : public Action<Ts...> {
   }
 
  protected:
-  std::vector<ExtractStep> steps_;
-  std::function<void(const std::string &)> setter_;
+  FixedVector<ExtractStep> steps_;
+  void (*setter_)(const std::string &){nullptr};
   Trigger<std::string> value_trigger_;
 };
 
@@ -250,8 +291,9 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
 // media reporting RAW_WRITE_NEEDS_ERASE, and destructive to anything else sharing those sectors.
 bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data, size_t len, bool erase_first);
 bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first);
-// Erases [address, address+size), or the whole device when `all` is set.
-void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all);
+// Erases [address, address+size), or the whole device when `all` is set. Returns the result so
+// the async wrapper's no-worker fallback can propagate a failure to on_complete.
+StorageError perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all);
 
 // Async variants used by the actions: submit to the worker (streaming, no whole-image RAM
 // buffer) and fire `on_complete` (error text, empty = success) from the completion callback.
@@ -420,6 +462,23 @@ template<typename... Ts> class MountAction : public Action<Ts...> {
  protected:
   MountableStorage *target_;
   bool mount_;
+};
+
+// storage.format -- (re)create an empty filesystem on the target. Each FilesystemStorage
+// implements format() self-contained (it handles its own unmount/reformat/remount as the backend
+// needs). Destructive: everything on the volume is lost.
+template<typename... Ts> class FormatAction : public Action<Ts...> {
+ public:
+  explicit FormatAction(FilesystemStorage *target) : target_(target) {}
+  Trigger<std::string> *get_complete_trigger() { return &this->complete_trigger_; }
+
+  // Fire-and-forget like the streaming actions: play() submits the worker job and returns;
+  // the on_complete trigger fires (error text, empty = success) when the format finishes.
+  void play(const Ts &...x) override { perform_format_async(this->target_, &this->complete_trigger_); }
+
+ protected:
+  FilesystemStorage *target_;
+  Trigger<std::string> complete_trigger_;
 };
 
 #if defined(USE_STORAGE_PREFERENCES) && defined(USE_ESP32)

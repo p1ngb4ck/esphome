@@ -1,5 +1,8 @@
 #pragma once
 
+// WARNING: This component is EXPERIMENTAL. The API may change at any time
+// without following the normal breaking changes policy. Use at your own risk.
+
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
@@ -58,6 +61,10 @@ enum class RequestOp : uint8_t {
   // it is not the caller's business, and nothing asks the main loop to run on their behalf.
   COPY_TREE,
   MOVE_TREE,
+  // Filesystem format: a single blocking control-plane call (f_mkfs and the like). Run as a
+  // one-shot on the worker task for task-safe media (main loop free, watchdog-safe) or from a
+  // loop() step otherwise. Moves no bytes and opens no handles.
+  FORMAT,
 };
 
 // Where a request currently stands. Transitions:
@@ -263,7 +270,7 @@ struct TransferRequest {
   // no second full buffer is allocated.
   uint8_t verify_passes{0};
   uint8_t verify_pass_done{0};
-  bool verifying{false};
+  std::atomic<bool> verifying{false};
   // Set by the worker task right before a blocking whole-chip erase(0, capacity) and cleared
   // right after. A chip erase busy-waits for its full duration (tens of seconds) without
   // advancing bytes_done, so the stall watchdog (check_stalled_, main loop) would otherwise
@@ -274,6 +281,10 @@ struct TransferRequest {
   // it needs no conditional-atomic dance; the flag is written on the task and read on the
   // main loop.
   std::atomic<bool> blocking_erase_active{false};
+  // Set by wait_for_network_ready_() when a chunk stayed RUNNING waiting for a network
+  // storage to come up; the worker-task loop paces its retry on it (loop-sliced paces
+  // naturally via update()). Reset at the top of each run_chunk_().
+  bool network_waiting{false};
 
   // Externally observable progress (see get_transfer_status()): bytes_done is advanced by
   // run_chunk_() on whichever engine runs the transfer (possibly the worker task) while the
@@ -328,6 +339,9 @@ enum class StreamState : uint8_t {
   CLOSING,
   CANCELLED,
   DONE,
+  // Cursor control between chunks -- IDLE-only single steps, like READING.
+  SEEKING,
+  TELLING,
 };
 
 // Opaque handle returned to the caller -- valid for the stream's lifetime (begin_* through
@@ -369,6 +383,11 @@ struct StreamRequest {
   size_t pending_len{0};
   uint8_t *pending_read_buf{nullptr};
   size_t *bytes_transferred_out{nullptr};  // read_chunk() writes the actual count here
+
+  // seek()/tell(): target + mode for a SEEKING step; tell() writes the position here.
+  int64_t seek_target{0};
+  storage::SeekMode seek_mode{storage::SeekMode::SET};
+  uint64_t *tell_out{nullptr};
 
   // Bumped on every slot claim so a StreamHandle from a finished stream stops matching once
   // the slot is reused (never 0 -- that is the unclaimed value). Main-loop-only.
@@ -468,6 +487,12 @@ class StorageWorker : public PollingComponent {
                                         const char *dst_path, CompletionCallback &&on_done,
                                         TransferJob *job_out = nullptr);
 
+  // Filesystem format -- a single blocking control-plane call, routed through the engine so
+  // it runs on the worker task for task-safe media (main loop free, watchdog-safe) instead of
+  // blocking the caller. on_done fires once with the driver's result, like any transfer.
+  storage::StorageError async_format(storage::FilesystemStorage *target, CompletionCallback &&on_done,
+                                     TransferJob *job_out = nullptr);
+
   // Raw-device transfers -- the storage-interface home of what the raw HTTP API used to
   // hand-roll. async_raw_read streams device bytes [address, address+size) into a file
   // (overwrite semantics as async_copy); async_raw_write streams a file onto the device at
@@ -518,8 +543,11 @@ class StorageWorker : public PollingComponent {
                                     CompletionCallback &&on_open);
   // Pushes exactly one chunk. `data` must remain valid until on_written fires -- the worker
   // does not copy it (streams are expected to be large/frequent; copying would defeat the
-  // point). Returns StorageError::OK once queued or an immediate error (handle unknown/not
-  // IDLE) in which case on_written is NOT invoked.
+  // point). Returns StorageError::OK once queued or an immediate error (handle unknown, not
+  // IDLE, or the previous step's completion has not been delivered yet) in which case
+  // on_written is NOT invoked. This applies to every per-chunk call below (read_chunk, end_*,
+  // seek, tell): stream calls are sequenced by their completions -- wait for the callback
+  // before issuing the next call, or NOT_READY is returned.
   storage::StorageError write_chunk(const StreamHandle &handle, const uint8_t *data, size_t len,
                                     CompletionCallback &&on_written);
   // Closes the handle (closes the underlying FileHandle for FilesystemStorage; a no-op data-
@@ -536,6 +564,17 @@ class StorageWorker : public PollingComponent {
   storage::StorageError read_chunk(const StreamHandle &handle, uint8_t *buf, size_t len, size_t *bytes_read,
                                    CompletionCallback &&on_read);
   storage::StorageError end_read(const StreamHandle &handle, CompletionCallback &&on_closed);
+
+  // Repositions the stream's cursor (SeekMode as in storage.h: SET/CUR/END). For a filesystem
+  // stream this seeks the open handle; for a network stream it is arithmetic on the read/write
+  // offset (END consults file_size()). on_seeked fires once, later, on the main loop; the stream
+  // must be IDLE (between chunks). NOT_READY if a step is in flight or its completion is still
+  // undelivered, INVALID_ARGS on an unknown handle or a resulting negative position.
+  storage::StorageError seek(const StreamHandle &handle, int64_t offset, storage::SeekMode mode,
+                             CompletionCallback &&on_seeked);
+  // Reports the current cursor position into *position before on_told fires. Same IDLE-only,
+  // main-loop-callback contract as the rest of the stream API.
+  storage::StorageError tell(const StreamHandle &handle, uint64_t *position, CompletionCallback &&on_told);
 
  protected:
   storage::StorageError submit_(RequestOp op, storage::PathStorage *src, const char *src_path,

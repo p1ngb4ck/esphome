@@ -19,10 +19,10 @@ namespace esphome::storage {
 static const char *const TAG = "storage.automation";
 
 void warn_invalid_bool(const std::string &s) {
-  ESP_LOGV(TAG, "file_read: '%s' is not a valid bool; global unchanged", s.c_str());
+  ESP_LOGW(TAG, "file_read: '%s' is not a valid bool; global unchanged", s.c_str());
 }
 void warn_invalid_number(const std::string &s) {
-  ESP_LOGV(TAG, "file_read: '%s' is not a valid number; global unchanged", s.c_str());
+  ESP_LOGW(TAG, "file_read: '%s' is not a valid number; global unchanged", s.c_str());
 }
 
 std::string extract_trim(const std::string &s) {
@@ -143,10 +143,10 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
     }
     case ExtractStepType::REGEX: {
 #ifdef USE_STORAGE_REGEX_EXTRACT
-      // Pattern syntax was validated at config time (ECMAScript grammar, std::regex default).
-      std::regex re(step.arg);
+      // Pattern was compiled once at step construction (see the ExtractStep constructor); this
+      // path never recompiles per play().
       std::smatch m;
-      if (!std::regex_search(buf, m, re)) {
+      if (!std::regex_search(buf, m, step.compiled_re)) {
         ESP_LOGV(TAG, "file_read: regex '%s' did not match", step.arg.c_str());
         return false;
       }
@@ -166,8 +166,20 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf) {
   return false;
 }
 
-// NOTE: A `json:` extraction step (JSON-pointer based) is planned as a separate follow-up PR --
-// it pulls in the json component as a dependency, so it stays out of this baseline set.
+// NOTE: `json:` extraction is opt-in; it is only compiled when USE_STORAGE_JSON_EXTRACT is set by codegen.
+// True while the background worker task may be doing I/O on this storage concurrently. The
+// synchronous paths below run blocking helpers on the main loop; doing that against a medium a
+// task transfer is streaming would put two threads into one volume -- the corruption class the
+// worker's cross-engine serialization exists to prevent -- so they refuse instead. Loop-sliced
+// worker jobs, PENDING jobs and idle-open streams do not count (same thread / no I/O in flight).
+static bool worker_task_busy(const Storage *s) {
+#ifdef USE_STORAGE_WORKER
+  return global_storage_worker != nullptr && global_storage_worker->has_active_task_io(s);
+#else
+  (void) s;
+  return false;
+#endif
+}
 
 void perform_file_write(const std::string &path, std::string content, bool append, bool newline) {
   const char *op = append ? "append" : "write";
@@ -184,48 +196,19 @@ void perform_file_write(const std::string &path, std::string content, bool appen
     ESP_LOGE(TAG, "file_%s: no storage mounted for '%s'", op, path.c_str());
     return;
   }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "file_%s: '%s' is busy with a background transfer -- refusing blocking I/O", op, path.c_str());
+    return;
+  }
 
   StorageError err;
   if (!append) {
     // PathStorage-level helper -- works on FILESYSTEM and NETWORK storages alike.
     err = write_file(ps, rel, reinterpret_cast<const uint8_t *>(content.data()), content.size());
-  } else if (ps->get_storage_type() == StorageType::FILESYSTEM) {
-    // Filesystem append: native handle-based APPEND open.
-    auto *fs = static_cast<FilesystemStorage *>(ps);
-    FileHandle *handle = nullptr;
-    err = fs->open(rel, handle, OpenMode::APPEND);
-    if (err != StorageError::OK) {
-      ESP_LOGE(TAG, "file_append: open '%s' failed (%s)", path.c_str(), error_to_string(err));
-      return;
-    }
-    size_t written = 0;
-    err = fs->write(handle, reinterpret_cast<const uint8_t *>(content.data()), content.size(), &written);
-    // Close errors must surface: FATFS-backed drivers flush on close (see copy() contract).
-    StorageError close_err = fs->close(handle);
-    if (err == StorageError::OK)
-      err = close_err;
-    if (err == StorageError::OK && written != content.size())
-      err = StorageError::WRITE_ERROR;
   } else {
-    // Network append: the chunk API takes an explicit offset (NFS supports offset writes
-    // natively), so appending is stat-for-size + one write_chunk at EOF -- O(1) RAM, no
-    // read-modify-write. A missing file starts at offset 0 (created by the write). The
-    // stat->write window is not atomic against other writers; acceptable for a single node
-    // appending its own logs/values.
-    auto *ns = static_cast<NetworkStorage *>(ps);
-    uint64_t offset = 0;
-    FileStat st{};
-    err = ns->stat(rel, &st);
-    if (err == StorageError::OK) {
-      offset = st.size;
-    } else if (err != StorageError::NOT_FOUND) {
-      ESP_LOGE(TAG, "file_append: stat '%s' failed (%s)", path.c_str(), error_to_string(err));
-      return;
-    }
-    size_t written = 0;
-    err = ns->write_chunk(rel, reinterpret_cast<const uint8_t *>(content.data()), offset, content.size(), &written);
-    if (err == StorageError::OK && written != content.size())
-      err = StorageError::WRITE_ERROR;
+    // Same, via the interface's append helper (filesystem: native APPEND open; network:
+    // stat-for-size + offset write_chunk). The blocking-size limit now covers append too.
+    err = append_file(ps, rel, reinterpret_cast<const uint8_t *>(content.data()), content.size());
   }
 
   if (err != StorageError::OK) {
@@ -233,7 +216,7 @@ void perform_file_write(const std::string &path, std::string content, bool appen
   }
 }
 
-bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &steps, std::string &out) {
+bool perform_file_read(const std::string &path, const FixedVector<ExtractStep> &steps, std::string &out) {
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "file_read: no storage registry");
     return false;
@@ -242,6 +225,10 @@ bool perform_file_read(const std::string &path, const std::vector<ExtractStep> &
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "file_read: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "file_read: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
 
@@ -346,6 +333,10 @@ bool perform_raw_read(RawStorage *device, uint64_t address, size_t size, std::ve
   RawGeometry geo;
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_read: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   // std::vector::resize() has no way to report a failed allocation in an exceptions-free
   // build -- it aborts. Ask the nothrow allocator first, which answers with a null pointer, and
   // hand the block straight back: nothing else allocates between here and the resize below, so
@@ -379,6 +370,10 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
            path.c_str());
   if (!raw_preflight(device, "read", address, size, &geo) || !raw_size_allowed("read", size))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_read: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "raw_read: no storage registry");
     return false;
@@ -387,6 +382,10 @@ bool perform_raw_read_to_file(RawStorage *device, uint64_t address, uint64_t siz
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "raw_read: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "raw_read: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
 
@@ -417,6 +416,10 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
   RawGeometry geo;
   if (!raw_preflight(device, "write", address, len, &geo) || !raw_size_allowed("write", len))
     return false;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_write: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   if (erase_first && !raw_erase_for_write(device, geo, address, len))
     return false;
 
@@ -439,6 +442,10 @@ bool perform_raw_write(RawStorage *device, uint64_t address, const uint8_t *data
 }
 
 bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std::string &path, bool erase_first) {
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_write: device is busy with a background transfer -- refusing blocking I/O");
+    return false;
+  }
   ESP_LOGI(TAG, "Transfer started: write '%s' -> 0x%08" PRIX32, path.c_str(), (uint32_t) address);
   if (global_storage_registry == nullptr) {
     ESP_LOGE(TAG, "raw_write: no storage registry");
@@ -448,6 +455,10 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
   if (ps == nullptr) {
     ESP_LOGE(TAG, "raw_write: no storage mounted for '%s'", path.c_str());
+    return false;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "raw_write: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
     return false;
   }
   RamBuffer buf;
@@ -465,7 +476,7 @@ bool perform_raw_write_from_file(RawStorage *device, uint64_t address, const std
   return ok;
 }
 
-void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all) {
+StorageError perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool all) {
   RawGeometry geo;
   device->get_raw_geometry(&geo);
   if (all) {
@@ -473,16 +484,21 @@ void perform_raw_erase(RawStorage *device, uint64_t address, uint64_t size, bool
     size = geo.capacity;
   }
   if (!raw_preflight(device, "erase", address, size, &geo))
-    return;
+    return StorageError::INVALID_ARGS;
+  if (worker_task_busy(device)) {
+    ESP_LOGE(TAG, "raw_erase: device is busy with a background transfer -- refusing blocking I/O");
+    return StorageError::NOT_READY;
+  }
   // No alignment massaging here: erase() rejects an unaligned range on purpose (it would take
   // the neighbouring data with it), and silently rounding would defeat that.
   StorageError err = device->erase(address, static_cast<size_t>(size));
   if (err != StorageError::OK) {
     ESP_LOGE(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " failed (%s)", (uint32_t) address, (uint32_t) size,
              error_to_string(err));
-    return;
+    return err;
   }
   ESP_LOGD(TAG, "raw_erase: 0x%08" PRIX32 " + %" PRIu32 " done", (uint32_t) address, (uint32_t) size);
+  return StorageError::OK;
 }
 
 // --- async raw helpers: submit to the worker, stream, fire on_complete (error text) ---------
@@ -584,9 +600,9 @@ void perform_raw_erase_async(RawStorage *device, uint64_t address, uint64_t size
     return;
   }
 #endif
-  perform_raw_erase(device, address, size, /*all=*/false);  // address/size already resolved above
+  StorageError err = perform_raw_erase(device, address, size, /*all=*/false);  // address/size already resolved above
   if (on_complete != nullptr)
-    on_complete->trigger(std::string());  // best-effort: the sync helper only logs on failure
+    on_complete->trigger(err == StorageError::OK ? std::string() : std::string(error_to_string(err)));
 }
 #endif  // USE_STORAGE_RAW_ACTIONS
 
@@ -698,12 +714,18 @@ void perform_file_delete(const std::string &path, bool recursive) {
 }
 
 bool check_file_exists(const std::string &path) {
-  if (global_storage_registry == nullptr)
+  if (global_storage_registry == nullptr) {
+    ESP_LOGW(TAG, "file_exists: no storage registry; reporting '%s' as absent", path.c_str());
     return false;
+  }
   const char *rel = nullptr;
   PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
-  if (ps == nullptr)
+  if (ps == nullptr) {
+    // Almost always a typo'd mount point in the config -- without this log the condition
+    // just reads as a permanent "no".
+    ESP_LOGW(TAG, "file_exists: no storage mounted for '%s'; reporting it as absent", path.c_str());
     return false;
+  }
   StorageError err = StorageError::OK;
   bool found = exists(ps, rel, &err);
   // Only NOT_FOUND is a clean "no" -- surface anything else (unmounted/faulted medium) so a
@@ -719,6 +741,34 @@ void perform_mount(MountableStorage *target, bool mount) {
   if (err != StorageError::OK) {
     ESP_LOGE(TAG, "%s failed (%s)", mount ? "mount" : "unmount", error_to_string(err));
   }
+}
+
+static void format_fire(Trigger<std::string> *on_complete, StorageError result) {
+  if (result == StorageError::NOT_SUPPORTED) {
+    ESP_LOGE(TAG, "format is not supported by this filesystem");
+  } else if (result != StorageError::OK) {
+    ESP_LOGE(TAG, "format failed (%s)", error_to_string(result));
+  } else {
+    ESP_LOGI(TAG, "filesystem formatted");
+  }
+  if (on_complete != nullptr)
+    on_complete->trigger(result == StorageError::OK ? std::string() : std::string(error_to_string(result)));
+}
+
+void perform_format_async(FilesystemStorage *target, Trigger<std::string> *on_complete) {
+#ifdef USE_STORAGE_WORKER
+  if (global_storage_worker != nullptr) {
+    ESP_LOGI(TAG, "Formatting filesystem...");
+    StorageError err = global_storage_worker->async_format(
+        target, [on_complete](StorageError r) { format_fire(on_complete, r); }, nullptr);
+    if (err != StorageError::OK)
+      format_fire(on_complete, err);  // could not queue -- report inline
+    return;
+  }
+#endif
+  // No worker in this build: the one blocking call runs on the main loop, bounded by the
+  // driver's format() (see the blocking contract in automation.h), not by the automation.
+  format_fire(on_complete, target->format());
 }
 
 }  // namespace esphome::storage

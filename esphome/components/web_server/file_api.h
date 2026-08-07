@@ -11,6 +11,9 @@
 #include "esphome/components/storage/storage_worker.h"
 #include "esphome/components/web_server_base/web_server_base.h"
 #include "esphome/core/component.h"
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+#include "file_explorer.h"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -55,6 +58,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   float get_setup_priority() const override { return setup_priority::WIFI - 1.0f; }
 
   void set_web_server_base(web_server_base::WebServerBase *base) { this->base_ = base; }
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  // The advanced browser's assets are served from this handler rather than from one of their
+  // own: the URLs sit next to /files/*, the dependency is guaranteed by codegen (the explorer
+  // is only ever emitted inside the file_api block), and it keeps the handler chain -- walked
+  // by every request -- one entry shorter. Same shape as the simple browser's
+  // /file_browser.js above.
+  void set_file_explorer(FileExplorerAssets *fe) { this->file_explorer_ = fe; }
+#endif
   void set_max_dir_entries(uint16_t n) { this->max_dir_entries_ = n; }
   // Optional single-storage scoping (mirrors http_file_api's storage_id option): when set,
   // only paths under this storage's mount path are served.
@@ -66,6 +77,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   void set_enable_write(bool enable) { this->enable_write_ = enable; }
   void set_enable_delete(bool enable) { this->enable_delete_ = enable; }
   void set_enable_mount(bool enable) { this->enable_mount_ = enable; }
+  void set_enable_format(bool enable) { this->enable_format_ = enable; }
   void set_enable_unmount(bool enable) { this->enable_unmount_ = enable; }
 
   bool canHandle(AsyncWebServerRequest *request) const override;
@@ -104,14 +116,22 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
 #endif
   void handle_job_(AsyncWebServerRequest *request);
   void handle_mount_(AsyncWebServerRequest *request, bool mount);
+  void handle_format_(AsyncWebServerRequest *request);
   // Sends a 403 with a small JSON body; `what` names the disallowed operation group for the log.
   void send_forbidden_(AsyncWebServerRequest *request, const char *what);
   void handle_upload_response_(AsyncWebServerRequest *request);
+  // Atomically publish a finished upload: rename the temp sibling to its final name (a
+  // same-directory rename is atomic); overwrite is remove-then-rename. Main-loop-only.
+  static storage::StorageError publish_upload_(storage::PathStorage *ps, const char *temp, const char *final_path,
+                                               bool overwrite);
 
   static void send_error_(AsyncWebServerRequest *request, storage::StorageError err);
   static int http_status_for_(storage::StorageError err);
 
   web_server_base::WebServerBase *base_{nullptr};
+#ifdef USE_WEBSERVER_FILE_EXPLORER
+  FileExplorerAssets *file_explorer_{nullptr};
+#endif
   storage::PathStorage *scoped_storage_{nullptr};
   uint16_t max_dir_entries_{64};
   // All default true: an instance constructed without explicit setters (shouldn't happen via
@@ -121,6 +141,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   bool enable_write_{true};
   bool enable_delete_{true};
   bool enable_mount_{true};
+  bool enable_format_{false};
   bool enable_unmount_{true};
   SemaphoreHandle_t op_done_{nullptr};
 
@@ -174,9 +195,31 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     char rel[256]{};
     // httpd_resp_set_hdr() stores the pointer (no copy) -- must outlive every send.
     char disposition[300]{};
+    // Likewise for the type: always a string literal from content_type_for().
+    const char *type{"application/octet-stream"};
+    // Byte range the client asked for. end is inclusive, as in the HTTP header. When
+    // has_range is false the whole file is sent and these are ignored.
+    bool has_range{false};
+    uint64_t range_start{0};
+    uint64_t range_end{0};
+    // "bytes " + three uint64 (20 each) + '-' + '/' + NUL = 69 worst case; 72 for 8-byte alignment.
+    char content_range[72]{};
+    // Memory source: when mem != nullptr the job serves these bytes straight from PSRAM (a
+    // file-explorer asset already resident there) rather than reading a storage file -- no ps,
+    // handle, rel, disposition or run_on_loop_ marshalling. gzip adds Content-Encoding: gzip.
+    const uint8_t *mem{nullptr};
+    size_t mem_len{0};
+    bool gzip{false};
   };
   static constexpr size_t DL_QUEUE_DEPTH = 4;
   void pump_download_(DownloadJob *job);
+  // Issues one worker stream call (begin_read/read_chunk/end_read) on the main loop and blocks the
+  // transfer task until its completion callback fires. All download file I/O goes through the
+  // worker this way -- never a direct storage call.
+  storage::StorageError worker_await_(std::function<storage::StorageError(storage::CompletionCallback)> call);
+  // MIME type for a file name, by extension. Returns a literal, never null: anything not
+  // listed is application/octet-stream, which is what every download was before.
+  static const char *content_type_for(const char *name);
   static void download_task_trampoline_(void *arg);
   void download_task_();
   QueueHandle_t dl_queue_{nullptr};
@@ -185,10 +228,14 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   struct UploadState {
     bool active{false};
     storage::PathStorage *storage{nullptr};
-    storage::FileHandle *handle{nullptr};
-    bool handle_open{false};
-    bool dst_is_fs{false};
+    storage::StreamHandle stream{};
+    bool stream_open{false};
+    // The upload streams into rel_path (a temp sibling) and is atomically rename()d to
+    // final_path at completion, so a watcher (e.g. the module loader) never observes a
+    // half-written file.
     char rel_path[256]{};
+    char final_path[256]{};
+    bool overwrite{false};
     uint64_t offset{0};
     storage::StorageError error{storage::StorageError::OK};
     // True once a staged upload handed its bytes to flush_: completion (and the directory-
@@ -212,15 +259,36 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool finished{false};
     uint32_t job{0};
     storage::PathStorage *storage{nullptr};
-    storage::FileHandle *handle{nullptr};
-    bool dst_is_fs{false};
+    storage::StreamHandle stream{};
+    bool stream_open{false};
+    bool writing{false};   // a worker write_chunk is in flight
+    bool closing{false};   // a worker end_write is in flight
     char rel_path[256]{};
+    char final_path[256]{};
+    bool overwrite{false};
     const uint8_t *data{nullptr};
     size_t total{0};
     size_t done{0};
     storage::StorageError result{storage::StorageError::OK};
   } flush_{};
   uint32_t flush_job_counter_{0};
+  // A finished staged-upload flush lives only in the single flush_ slot, which the next upload
+  // overwrites. Keep the last few results here so a late /files/job poll still resolves a
+  // finished job instead of 404-ing -- otherwise out-of-order or rapid uploads appear stuck
+  // flushing once flush_ has moved on.
+  struct FlushCacheEntry {
+    uint32_t job{0};
+    storage::StorageError result{storage::StorageError::OK};
+    uint32_t done{0};
+    uint32_t total{0};
+  };
+  static constexpr size_t FLUSH_CACHE_SIZE = 8;
+  FlushCacheEntry flush_cache_[FLUSH_CACHE_SIZE]{};
+  size_t flush_cache_next_{0};
+  void cache_flush_result_(uint32_t job, storage::StorageError result, uint32_t done, uint32_t total);
+  // Publishes a drained staged upload (rename temp -> final, change note, cache) once the worker
+  // end_write has completed. Runs on the main loop (from the flush completion callback).
+  void finalize_flush_();
 #endif
 };
 

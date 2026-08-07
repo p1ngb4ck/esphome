@@ -1198,6 +1198,13 @@ esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &bou
   // Create reader on heap to reduce stack usage
   auto reader = std::make_unique<MultipartReader>("--" + boundary);
 
+  // An empty file part carries no data: it produces no on_part_data callback, and the parser
+  // leaves the trailing epilogue after the final boundary unconsumed. Only when the client
+  // explicitly asks (?create=1) do we accept that and create the empty file; a normal upload
+  // that produced no data stays an error, so existing behaviour is unchanged.
+  auto *create_param = req.getParam("create");
+  const bool allow_empty = create_param != nullptr && create_param->value() == "1";
+
   // Configure callbacks
   reader->set_data_callback([&](const uint8_t *data, size_t len) {
     if (!reader->has_file() || !len)
@@ -1218,6 +1225,15 @@ esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &bou
       handler->handleUpload(&req, filename, index, nullptr, 0, true);  // End
       filename.clear();
       index = 0;
+    } else if (allow_empty && reader->has_file()) {
+      // Explicitly-requested empty file: the part named a file but carried no data. Drive
+      // the markers here, while current_part_ is still valid -- on_part_data_end resets it
+      // immediately after this callback returns.
+      const std::string &empty_name = reader->get_current_part().filename;
+      if (!empty_name.empty()) {
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, false);  // Start
+        handler->handleUpload(&req, empty_name, 0, nullptr, 0, true);   // End
+      }
     }
   });
 
@@ -1233,7 +1249,8 @@ esp_err_t AsyncWebServer::multipart_pump_(httpd_req_t *r, const std::string &bou
       return recv_len == HTTPD_SOCK_ERR_TIMEOUT ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
 
-    if (reader->parse(buffer.get(), recv_len) != static_cast<size_t>(recv_len)) {
+    if (reader->parse(buffer.get(), recv_len) != static_cast<size_t>(recv_len) &&
+        !(allow_empty && remaining == static_cast<size_t>(recv_len))) {
       ESP_LOGW(TAG, "Multipart parser error");
       httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, nullptr);
       return ESP_FAIL;

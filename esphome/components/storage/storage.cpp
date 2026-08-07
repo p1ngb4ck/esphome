@@ -232,6 +232,15 @@ void StorageRegistry::for_each_raw(void (*cb)(RawStorage *s, void *ctx), void *c
   }
 }
 
+void StorageRegistry::for_each_kv(void (*cb)(KeyValueStorage *s, void *ctx), void *ctx) {
+  Storage *entries[STORAGE_MAX_DEVICES];
+  size_t n = this->snapshot_(entries);
+  for (size_t i = 0; i < n; i++) {
+    if (entries[i]->get_storage_type() == StorageType::KEY_VALUE)
+      cb(static_cast<KeyValueStorage *>(entries[i]), ctx);
+  }
+}
+
 void StorageRegistry::for_each_network(void (*cb)(NetworkStorage *s, void *ctx), void *ctx) {
   Storage *entries[STORAGE_MAX_DEVICES];
   size_t n = this->snapshot_(entries);
@@ -610,6 +619,75 @@ StorageError write_file(PathStorage *storage, const char *path, const uint8_t *d
       return write_file(static_cast<FilesystemStorage *>(storage), path, data, size);
     case StorageType::NETWORK:
       return write_file(static_cast<NetworkStorage *>(storage), path, data, size);
+    default:
+      return StorageError::NOT_SUPPORTED;
+  }
+}
+
+StorageError append_file(FilesystemStorage *storage, const char *path, const uint8_t *data, size_t size) {
+  StorageError err = check_blocking_transfer_size(size);
+  if (err != StorageError::OK)
+    return err;
+
+  FileHandle *handle = nullptr;
+  err = storage->open(path, handle, OpenMode::APPEND);
+  if (err != StorageError::OK)
+    return err;
+
+  size_t total_written = 0;
+  while (total_written < size) {
+    size_t bytes_transferred = 0;
+    err = storage->write(handle, data + total_written, size - total_written, &bytes_transferred);
+    if (err != StorageError::OK) {
+      storage->close(handle);
+      return err;
+    }
+    if (bytes_transferred == 0) {
+      storage->close(handle);
+      return StorageError::WRITE_ERROR;
+    }
+    total_written += bytes_transferred;
+    App.feed_wdt();
+  }
+  // Close errors must surface: FATFS-backed drivers flush on close (see copy()'s contract).
+  return storage->close(handle);
+}
+StorageError append_file(NetworkStorage *storage, const char *path, const uint8_t *data, size_t size) {
+  StorageError size_check = check_blocking_transfer_size(size);
+  if (size_check != StorageError::OK)
+    return size_check;
+
+  // write_chunk() addresses by explicit offset, so appending is stat-for-size + writing at EOF.
+  // A missing file starts at offset 0 (created by the write).
+  uint64_t offset = 0;
+  FileStat st{};
+  StorageError err = storage->stat(path, &st);
+  if (err == StorageError::OK) {
+    offset = st.size;
+  } else if (err != StorageError::NOT_FOUND) {
+    return err;
+  }
+
+  size_t total_written = 0;
+  while (total_written < size) {
+    size_t bytes_transferred = 0;
+    err = storage->write_chunk(path, data + total_written, offset + total_written, size - total_written,
+                               &bytes_transferred);
+    if (err != StorageError::OK)
+      return err;
+    if (bytes_transferred == 0)
+      return StorageError::WRITE_ERROR;
+    total_written += bytes_transferred;
+    App.feed_wdt();
+  }
+  return StorageError::OK;
+}
+StorageError append_file(PathStorage *storage, const char *path, const uint8_t *data, size_t size) {
+  switch (storage->get_storage_type()) {
+    case StorageType::FILESYSTEM:
+      return append_file(static_cast<FilesystemStorage *>(storage), path, data, size);
+    case StorageType::NETWORK:
+      return append_file(static_cast<NetworkStorage *>(storage), path, data, size);
     default:
       return StorageError::NOT_SUPPORTED;
   }

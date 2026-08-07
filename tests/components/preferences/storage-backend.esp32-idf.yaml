@@ -1,0 +1,5 @@
+# Exercises the esp32 opt-in that routes the flash preference path through the storage
+# KeyValueStorage interface + NVS backend. This pulls storage + binary_storage into the build and
+# compiles the delegation (USE_ESP32_PREFERENCES_STORAGE).
+preferences:
+  storage_backend: true

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 from pathlib import Path
 import re
@@ -16,7 +17,6 @@ from esphome.const import (
     CONF_COMPRESSION,
     CONF_CSS_INCLUDE,
     CONF_CSS_URL,
-    CONF_DEVICE_ID,
     CONF_ENABLE_PRIVATE_NETWORK_ACCESS,
     CONF_ID,
     CONF_INCLUDE_INTERNAL,
@@ -65,10 +65,62 @@ FILE_API_DEFAULTS = {
     "enable_delete": True,
     "enable_mount": True,
     "enable_unmount": True,
+    "enable_format": False,
 }
 CONF_FILE_BROWSER = "file_browser"
 CONF_ACTIONS_AS_ICONS = "actions_as_icons"
 CONF_CHANGE_POLL_INTERVAL = "change_poll_interval"
+CONF_VARIANT = "variant"
+CONF_ASSET_SOURCE = "asset_source"
+CONF_ASSET_PATH = "asset_path"
+CONF_TEXT_FILE_FORMATS = "text_file_formats"
+
+BROWSER_SIMPLE = "simple"
+BROWSER_ADVANCED = "advanced"
+ASSETS_FLASH = "flash"
+ASSETS_STORAGE = "storage"
+
+# The adapter is ours and versioned with the component: it talks to whatever /files/* this
+# firmware exposes. Putting it on removable media would let a firmware update move the API
+# while the adapter stayed behind, so it is always compiled in -- roughly 4 kB gzipped.
+# (file in this directory, URL, content type, compress)
+_ADAPTER_ASSETS = (
+    ("file_explorer/adapter.js", "/file-explorer/adapter.js", "text/javascript", True),
+    ("file_explorer/adapter.css", "/file-explorer/adapter.css", "text/css", True),
+)
+
+# The widget itself (cubiclesoft/js-fileexplorer, unmodified) is what asset_source decides
+# about. With asset_source: storage these files are not read at codegen time at all -- they
+# live on the medium and the paths below are just strings -- so a user who does not want ~56 kB
+# of third-party code in the repository does not need it there. Either way the widget is MIT,
+# and its terms are in file_explorer/LICENSE.txt -- upstream ships no LICENSE file, so that
+# copy is the one that travels with the code.
+_WIDGET_ASSETS = (
+    (
+        "file_explorer/file-explorer.js",
+        "/file-explorer/file-explorer.js",
+        "text/javascript",
+        True,
+    ),
+    (
+        "file_explorer/file-explorer.css",
+        "/file-explorer/file-explorer.css",
+        "text/css",
+        True,
+    ),
+    (
+        "file_explorer/fileexplorer_sprites.png",
+        "/file-explorer/fileexplorer_sprites.png",
+        "image/png",
+        False,
+    ),
+    (
+        "file_explorer/fileexplorer_actions.woff",
+        "/file-explorer/fileexplorer_actions.woff",
+        "font/woff",
+        False,
+    ),
+)
 CONF_MAX_DIR_ENTRIES = "max_dir_entries"
 CONF_STORAGE_ID = "storage_id"
 # file_api per-operation access options. Each gates a group of endpoints server-side (a
@@ -80,7 +132,9 @@ CONF_ENABLE_WRITE = "enable_write"  # /files/upload, /files/mkdir (shared with r
 CONF_ENABLE_DELETE = "enable_delete"  # /files/delete, /files/move (move deletes source)
 CONF_ENABLE_MOUNT = "enable_mount"  # /files/mount
 CONF_ENABLE_UNMOUNT = "enable_unmount"  # /files/unmount
+CONF_ENABLE_FORMAT = "enable_format"  # /files/format (destructive; default off)
 CONF_RAW_API = "raw_api"
+CONF_DEVICE_ID = "device_id"
 
 
 def AUTO_LOAD(config: ConfigType) -> list[str]:
@@ -100,6 +154,7 @@ WebServer = web_server_ns.class_("WebServer", cg.Component, cg.Controller)
 
 WebServerFileApi = web_server_ns.class_("WebServerFileApi", cg.Component)
 WebServerRawApi = web_server_ns.class_("WebServerRawApi", cg.Component)
+FileExplorerAssets = web_server_ns.class_("FileExplorerAssets", cg.Component)
 
 sorting_groups = {}
 
@@ -247,7 +302,37 @@ def _final_validate_sorting(config: ConfigType) -> ConfigType:
     return config
 
 
-FINAL_VALIDATE_SCHEMA = _final_validate_sorting
+def _final_validate_file_explorer(config: ConfigType) -> ConfigType:
+    """The advanced browser serves its assets out of external RAM in both modes.
+
+    There is no variant that trades PSRAM away -- flash and storage differ in where the bytes
+    come from, not in where they are served from -- so psram is required either way. Same shape
+    of check as storage's transfer_buffer, and for the same reason: the option promises
+    something only the hardware can deliver.
+    """
+    browser = config.get(CONF_FILE_BROWSER)
+    if browser is None or browser.get(CONF_VARIANT) != BROWSER_ADVANCED:
+        return config
+    full = fv.full_config.get()
+    if "psram" not in full:
+        raise cv.Invalid(
+            f"'{CONF_FILE_BROWSER}: {CONF_VARIANT}: {BROWSER_ADVANCED}' serves its assets from "
+            f"external RAM and needs the 'psram' component configured",
+            path=[CONF_FILE_BROWSER, CONF_VARIANT],
+        )
+    if browser.get(CONF_ASSET_SOURCE) == ASSETS_STORAGE and "storage" not in full:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' needs the 'storage' component to read the "
+            f"assets from",
+            path=[CONF_FILE_BROWSER, CONF_ASSET_SOURCE],
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = cv.All(
+    _final_validate_sorting,
+    _final_validate_file_explorer,
+)
 
 
 def _consume_web_server_sockets(config: ConfigType) -> ConfigType:
@@ -287,6 +372,25 @@ WEBSERVER_SORTING_SCHEMA = cv.Schema(
         )
     }
 )
+
+
+def _text_file_format(value):
+    value = cv.string(value).strip().lower()
+    return value if value.startswith(".") else "." + value
+
+
+def _validate_file_browser(config):
+    # text_file_formats decides which files the advanced widget treats as text (its editor
+    # and the "monitor" tail button). It has no effect on the simple browser, so it is
+    # advanced-only.
+    if config[CONF_VARIANT] == BROWSER_ADVANCED:
+        config.setdefault(CONF_TEXT_FILE_FORMATS, [".txt", ".log"])
+    elif CONF_TEXT_FILE_FORMATS in config:
+        raise cv.Invalid(
+            f"'{CONF_TEXT_FILE_FORMATS}' only applies to '{CONF_VARIANT}: {BROWSER_ADVANCED}'",
+            path=[CONF_TEXT_FILE_FORMATS],
+        )
+    return config
 
 
 def _validate_file_api(config):
@@ -370,6 +474,7 @@ CONFIG_SCHEMA = cv.All(
                     cv.Optional(CONF_ENABLE_DELETE, default=True): cv.boolean,
                     cv.Optional(CONF_ENABLE_MOUNT, default=True): cv.boolean,
                     cv.Optional(CONF_ENABLE_UNMOUNT, default=True): cv.boolean,
+                    cv.Optional(CONF_ENABLE_FORMAT, default=False): cv.boolean,
                 }
             ),
             # The browser is a module INSIDE the existing v3 page (a card next to <esp-app>),
@@ -389,8 +494,38 @@ CONFIG_SCHEMA = cv.All(
                         cv.Optional(
                             CONF_CHANGE_POLL_INTERVAL, default="5s"
                         ): cv.positive_time_period_milliseconds,
+                        # simple   the browser embedded in this component, ~13 kB
+                        # advanced the vendored js-fileexplorer widget with an image
+                        #          preview, a plain-textarea editor and a tail -f style
+                        #          follower, ~60 kB. Needs psram either way; see
+                        #          _final_validate_file_explorer().
+                        cv.Optional(CONF_VARIANT, default=BROWSER_SIMPLE): cv.one_of(
+                            BROWSER_SIMPLE, BROWSER_ADVANCED, lower=True
+                        ),
+                        # Where the widget's assets come from before they are copied into
+                        # PSRAM. flash compiles them in (~56 kB) and they are there from the
+                        # first boot; storage reads them off the medium instead, costs no
+                        # flash, and answers 503 until that storage is mounted. The adapter
+                        # is compiled in either way. With storage the widget files are not
+                        # needed in the repository at all.
+                        cv.Optional(CONF_ASSET_SOURCE, default=ASSETS_FLASH): cv.one_of(
+                            ASSETS_FLASH, ASSETS_STORAGE, lower=True
+                        ),
+                        # Directory the widget files are read from with
+                        # asset_source: storage. The widget files live on the medium RAW
+                        # (no gzip, no .gz suffix) and are served as-is; flash compresses.
+                        cv.Optional(
+                            CONF_ASSET_PATH, default="/sdcard/file-explorer"
+                        ): cv.string_strict,
+                        # Which files the advanced widget opens in its text editor and
+                        # offers the "monitor" (tail) button for. advanced-only; the
+                        # default is applied in _validate_file_browser().
+                        cv.Optional(CONF_TEXT_FILE_FORMATS): cv.ensure_list(
+                            _text_file_format
+                        ),
                     }
                 ),
+                _validate_file_browser,
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -453,9 +588,25 @@ def build_index_html(config) -> str:
     if js_include:
         html += "<script type=module src=/0.js></script>"
     html += "<esp-app></esp-app>"
-    if config.get(CONF_FILE_BROWSER) is not None:
-        # Injected module renders a "Files" card inside this same page (next to <esp-app>).
-        html += "<script src=/file_browser.js></script>"
+    if (browser := config.get(CONF_FILE_BROWSER)) is not None:
+        if browser.get(CONF_VARIANT) == BROWSER_ADVANCED:
+            # Only the scripts go here. The adapter builds the card and mounts it into the v3
+            # app's shadow root, so both stylesheets have to be linked from INSIDE that card --
+            # document-level <link>s do not cross a shadow boundary. The adapter does that.
+            # text_file_formats is handed to the adapter as a global it reads before running.
+            html += (
+                "<script>window.ESPHFE={textFormats:"
+                + json.dumps(browser[CONF_TEXT_FILE_FORMATS])
+                + ",changePollMs:"
+                + str(int(browser[CONF_CHANGE_POLL_INTERVAL].total_milliseconds))
+                + "}</script>"
+            )
+            html += '<script src="/file-explorer/file-explorer.js"></script>'
+            html += '<script src="/file-explorer/adapter.js"></script>'
+        else:
+            # Injected module renders a "Files" card inside this same page (next to
+            # <esp-app>).
+            html += "<script src=/file_browser.js></script>"
     if config[CONF_JS_URL]:
         html += f'<script src="{config[CONF_JS_URL]}"></script>'
     html += "</body></html>"
@@ -475,6 +626,118 @@ def add_resource_as_progmem(
     size_t = f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {content_encoded_size}"
     cg.add_global(cg.RawExpression(uint8_t))
     cg.add_global(cg.RawExpression(size_t))
+
+
+def add_bytes_as_progmem(resource_name: str, data: bytes) -> None:
+    """Like add_resource_as_progmem(), for content that is already bytes.
+
+    The widget's sprite sheet and icon font are binary and must not go through a utf-8 encode,
+    and the gzipping is decided per asset rather than for all of them.
+    """
+    bytes_as_int = ", ".join(str(x) for x in data)
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr uint8_t ESPHOME_WEBSERVER_{resource_name}[{len(data)}] "
+            f"PROGMEM = {{{bytes_as_int}}}"
+        )
+    )
+    cg.add_global(
+        cg.RawExpression(
+            f"constexpr size_t ESPHOME_WEBSERVER_{resource_name}_SIZE = {len(data)}"
+        )
+    )
+
+
+def _asset_symbol(name: str) -> str:
+    return "FE_" + name.replace(".", "_").replace("-", "_").upper()
+
+
+def _flash_row(here: Path, rel: str, url: str, ctype: str, compress: bool) -> str:
+    """Compiles one asset in and returns its table row."""
+    data = (here / rel).read_bytes()
+    if compress:
+        data = gzip.compress(data, 9)
+    symbol = _asset_symbol(Path(rel).name)
+    add_bytes_as_progmem(symbol, data)
+    return (
+        f'{{"{url}", "{ctype}", ESPHOME_WEBSERVER_{symbol}, '
+        f"ESPHOME_WEBSERVER_{symbol}_SIZE, nullptr, "
+        f"{'true' if compress else 'false'}, nullptr, 0}}"
+    )
+
+
+async def _add_file_explorer(config, var, api_var) -> None:
+    """Emits the advanced browser: an asset table plus the component that serves it.
+
+    Serving is always out of PSRAM. asset_source only decides how the widget's bytes get
+    there -- compiled in gzipped and copied at setup(), or read off a PathStorage RAW once
+    it mounts. Either way the browser receives the same widget. The adapter is always
+    compiled in.
+    """
+    browser = config[CONF_FILE_BROWSER]
+    source = browser[CONF_ASSET_SOURCE]
+    base_dir = browser[CONF_ASSET_PATH].rstrip("/")
+    here = Path(__file__).parent
+
+    cg.add_define("USE_WEBSERVER_FILE_EXPLORER")
+
+    if source == ASSETS_STORAGE:
+        # Reading the assets off the medium goes through the worker's stream API (chunked, no
+        # max_blocking_transfer_size ceiling), so the worker has to be compiled in. A path-based
+        # driver normally requests it; asking here as well makes it independent of which driver
+        # the user happened to configure.
+        from esphome.components.storage import request_storage_worker
+
+        request_storage_worker()
+
+    assets_id = ID(f"{var}_file_explorer", is_declaration=True, type=FileExplorerAssets)
+    CORE.component_ids.add(str(assets_id))
+    assets_var = cg.new_Pvariable(assets_id)
+    await cg.register_component(assets_var, {})
+    # The assets are served by the file_api handler, not by a handler of their own -- see
+    # WebServerFileApi::set_file_explorer(). This is the only wire between the two.
+    cg.add(api_var.set_file_explorer(assets_var))
+
+    rows = [_flash_row(here, *entry) for entry in _ADAPTER_ASSETS]
+
+    missing = []
+    for rel, url, ctype, compress in _WIDGET_ASSETS:
+        name = Path(rel).name
+        if source == ASSETS_FLASH:
+            if not (here / rel).is_file():
+                missing.append(name)
+                continue
+            rows.append(_flash_row(here, rel, url, ctype, compress))
+        else:
+            # External storage has room to spare, so the widget files live there RAW -- no
+            # gzip and no .gz suffix -- and are served as-is out of PSRAM. Flash still
+            # compresses itself in, where the KB matter; storage does not bother. The URL, the
+            # on-disk name and the served bytes are all the same plain file.
+            disk = f"{base_dir}/{name}"
+            rows.append(
+                f'{{"{url}", "{ctype}", nullptr, 0, "{disk}", false, nullptr, 0}}'
+            )
+
+    if missing:
+        raise cv.Invalid(
+            f"'{CONF_ASSET_SOURCE}: {ASSETS_FLASH}' compiles the file explorer widget in, but "
+            f"{', '.join(missing)} is not in {here / 'file_explorer'}. Either place the "
+            f"widget files there, or use '{CONF_ASSET_SOURCE}: {ASSETS_STORAGE}' and put them "
+            f"on the medium instead."
+        )
+
+    table = ",\n    ".join(rows)
+    cg.add_global(
+        cg.RawExpression(
+            "static esphome::web_server::FileExplorerAssets::Asset "
+            f"ESPHOME_WEBSERVER_FE_ASSETS[] = {{\n    {table}\n}}"
+        )
+    )
+    cg.add(
+        assets_var.set_assets(
+            cg.RawExpression("ESPHOME_WEBSERVER_FE_ASSETS"), len(rows)
+        )
+    )
 
 
 @coroutine_with_priority(CoroPriority.WEB)
@@ -574,9 +837,12 @@ async def to_code(config):
         cg.add(api_var.set_enable_delete(file_api_config[CONF_ENABLE_DELETE]))
         cg.add(api_var.set_enable_mount(file_api_config[CONF_ENABLE_MOUNT]))
         cg.add(api_var.set_enable_unmount(file_api_config[CONF_ENABLE_UNMOUNT]))
+        cg.add(api_var.set_enable_format(file_api_config[CONF_ENABLE_FORMAT]))
         if storage_id := file_api_config.get(CONF_STORAGE_ID):
             cg.add(api_var.set_scoped_storage(await cg.get_variable(storage_id)))
-        if file_browser:
+        if file_browser and config[CONF_FILE_BROWSER][CONF_VARIANT] == BROWSER_ADVANCED:
+            await _add_file_explorer(config, var, api_var)
+        elif file_browser:
             cg.add_define("USE_WEBSERVER_FILE_BROWSER")
             # Two prebuilt variants differing only in action-button rendering; the option
             # decides at codegen which one is embedded — the other never reaches the build.
