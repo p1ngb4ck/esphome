@@ -13,6 +13,7 @@
 #include "mbedtls/sha256.h"
 
 #include <cinttypes>
+#include <lwip/netdb.h>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -34,21 +35,22 @@ static constexpr const char *UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD";
 
 bool S3Connection::open(const char *host, uint16_t port, uint32_t timeout_ms) {
   this->timeout_ms_ = timeout_ms;
-  this->sock_ = esphome::socket::socket_ip_loop_monitored(SOCK_STREAM, 0);
-  if (this->sock_ == nullptr)
+  // DNS + numeric addresses alike via getaddrinfo (bsd_sockets on ESP-IDF) -- the same client
+  // pattern ftp_client documents; ESPHome has no portable resolver of its own.
+  struct addrinfo hints {};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%u", port);
+  struct addrinfo *res = nullptr;
+  if (getaddrinfo(host, port_str, &hints, &res) != 0 || res == nullptr) {
+    ESP_LOGW(TAG, "DNS/resolve failed for %s", host);
     return false;
-  struct sockaddr_storage addr {};
-  socklen_t addr_len = esphome::socket::set_sockaddr(reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr),
-                                                     std::string(host), port);
-  if (addr_len == 0) {
-    // Not a literal IP: resolve the hostname.
-    auto addrs = esphome::network::get_ip_addresses_from_hostname(host);
-    if (addrs.empty())
-      return false;
-    addr_len = esphome::socket::set_sockaddr(reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr),
-                                             addrs[0].str(), port);
-    if (addr_len == 0)
-      return false;
+  }
+  this->sock_ = esphome::socket::socket_ip(SOCK_STREAM, 0);
+  if (this->sock_ == nullptr) {
+    freeaddrinfo(res);
+    return false;
   }
   this->sock_->setblocking(true);
   struct timeval tv {};
@@ -56,7 +58,9 @@ bool S3Connection::open(const char *host, uint16_t port, uint32_t timeout_ms) {
   tv.tv_usec = (timeout_ms % 1000) * 1000;
   this->sock_->setsockopt(SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   this->sock_->setsockopt(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-  return this->sock_->connect(reinterpret_cast<struct sockaddr *>(&addr), addr_len) == 0;
+  int rc = this->sock_->connect(res->ai_addr, res->ai_addrlen);
+  freeaddrinfo(res);
+  return rc == 0;
 }
 
 #ifdef USE_CERT_STORE
@@ -353,7 +357,7 @@ storage::StorageError S3Client::map_status_(int status) const {
     case 409:
       return storage::StorageError::ALREADY_EXISTS;
     default:
-      return status >= 500 ? storage::StorageError::IO_ERROR : storage::StorageError::NOT_SUPPORTED;
+      return status >= 500 ? storage::StorageError::READ_ERROR : storage::StorageError::NOT_SUPPORTED;
   }
 }
 
@@ -402,13 +406,13 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       return storage::StorageError::NOT_READY;
     }
     if (!conn.start_tls(host.c_str(), ca_pem))
-      return storage::StorageError::IO_ERROR;
+      return storage::StorageError::NOT_READY;
   }
 #endif
   if (!conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()))
-    return storage::StorageError::IO_ERROR;
+    return storage::StorageError::WRITE_ERROR;
   if (body_len > 0 && !conn.send_all(body, body_len))
-    return storage::StorageError::IO_ERROR;
+    return storage::StorageError::WRITE_ERROR;
 
   // ---- response: status line + headers ----
   std::string head;
@@ -418,14 +422,14 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   while (head.size() < 4096) {
     int n = conn.recv_some(&ch, 1);
     if (n <= 0)
-      return storage::StorageError::IO_ERROR;
+      return storage::StorageError::READ_ERROR;
     head += static_cast<char>(ch);
     if (head.size() >= 4 && head.compare(head.size() - 4, 4, "\r\n\r\n") == 0)
       break;
   }
   HttpResponse r{};
   if (sscanf(head.c_str(), "HTTP/%*d.%*d %d", &r.status) != 1)
-    return storage::StorageError::IO_ERROR;
+    return storage::StorageError::READ_ERROR;
   // Header lines of interest (case per S3/MinIO practice; fall back to lowercase probes).
   auto header_val = [&head](const char *name) -> std::string {
     size_t pos = 0;
@@ -481,7 +485,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       while (line.size() < 32) {
         int n = conn.recv_some(&ch, 1);
         if (n <= 0)
-          return storage::StorageError::IO_ERROR;
+          return storage::StorageError::READ_ERROR;
         line += static_cast<char>(ch);
         if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0)
           break;
@@ -495,21 +499,21 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       while (chunk > 0) {
         int n = conn.recv_some(buf, std::min(chunk, sizeof(buf)));
         if (n <= 0)
-          return storage::StorageError::IO_ERROR;
+          return storage::StorageError::READ_ERROR;
         if (!consume(buf, static_cast<size_t>(n)))
           return storage::StorageError::NO_SPACE;
         chunk -= static_cast<size_t>(n);
       }
       uint8_t crlf[2];
       if (conn.recv_some(crlf, 2) <= 0)
-        return storage::StorageError::IO_ERROR;
+        return storage::StorageError::READ_ERROR;
     }
   } else {
     uint64_t remaining = r.has_content_length ? r.content_length : UINT64_MAX;
     while (remaining > 0) {
       int n = conn.recv_some(buf, static_cast<size_t>(std::min<uint64_t>(remaining, sizeof(buf))));
       if (n < 0)
-        return storage::StorageError::IO_ERROR;
+        return storage::StorageError::READ_ERROR;
       if (n == 0)
         break;  // Connection: close delimits the body when no length was sent
       if (!consume(buf, static_cast<size_t>(n)))
@@ -602,7 +606,7 @@ storage::StorageError S3Client::truncate(const char *path, uint64_t size) {
   }
   this->drop_episode_();
   if (key.size() >= sizeof(this->episode_.key))
-    return storage::StorageError::PATH_TOO_LONG;
+    return storage::StorageError::INVALID_ARGS;
   strncpy(this->episode_.key, key.c_str(), sizeof(this->episode_.key) - 1);
   this->episode_.active = true;
   this->episode_.size = 0;
@@ -913,6 +917,23 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
 // lifecycle
 // ---------------------------------------------------------------------------
 
+storage::StorageError S3Client::get_info(storage::StorageInfo *info) {
+  if (info == nullptr)
+    return storage::StorageError::INVALID_ARGS;
+  // Storage contract: get_info() must succeed even while registered-but-unmounted and report
+  // that via is_mounted -- never via a non-OK error, never with a server round-trip.
+  info->id = this->get_mount_path();
+  info->name = "S3";
+  info->kind = "s3";
+  info->block_size = 0;
+  info->is_removable = false;
+  info->is_read_only = false;
+  info->is_mounted = this->mounted_;
+  info->total_bytes = 0;  // S3 reports no medium capacity; the browser suppresses zero sizes
+  info->free_bytes = 0;
+  return storage::StorageError::OK;
+}
+
 storage::StorageError S3Client::mount() {
   if (this->mounted_)
     return storage::StorageError::OK;
@@ -934,7 +955,7 @@ storage::StorageError S3Client::mount() {
 #endif
   std::string req = "GET / HTTP/1.1\r\nHost: " + this->host_() + "\r\nConnection: close\r\n\r\n";
   if (!conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()))
-    return storage::StorageError::IO_ERROR;
+    return storage::StorageError::WRITE_ERROR;
   std::string head;
   uint8_t ch;
   while (head.size() < 2048) {
