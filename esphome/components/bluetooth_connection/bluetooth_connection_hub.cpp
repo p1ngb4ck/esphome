@@ -74,6 +74,16 @@ void BluetoothConnection::check_disconnect_timeout_() {
   }
 }
 
+void BluetoothConnection::on_pairing_result(int status) {
+  if (this->address_ == 0) {
+    // A drop before completion already answered: reset_connection_slot_ sends
+    // the connection response, which the client's pair watcher raises on.
+    return;
+  }
+  this->paired_ = status == 0;
+  this->proxy_->send_device_pairing(this->address_, status == 0, status);
+}
+
 void BluetoothConnection::reset_connection_(conn_err_t reason) {
   if (this->pending_error_ != 0) {
     reason = this->pending_error_;
@@ -81,11 +91,12 @@ void BluetoothConnection::reset_connection_(conn_err_t reason) {
   }
   this->state_ = ClientState::IDLE;
   this->services_discovered_ = false;
+  this->paired_ = false;
   this->backend_->release_services();
   this->proxy_->reset_connection_slot_(this, reason);
 }
 
-// ---- GattClientEventListener ----
+// ---- backend event sink ----
 
 void BluetoothConnection::on_connection_state(bool connected, uint16_t mtu, int error) {
   if (connected && this->address_ == 0) {
@@ -117,8 +128,18 @@ void BluetoothConnection::on_connection_state(bool connected, uint16_t mtu, int 
   if (connected) {
     this->mtu_ = mtu;
     if (this->connection_type_ == ConnectionType::V3_WITH_CACHE) {
-      // The API client has the services cached; never discover them.
+      // The API client has the services cached; never discover them. No
+      // discovery phase needs the fast interval, so settle straight into the
+      // shared steady-state parameters (same lifecycle place as esp32).
       this->state_ = ClientState::ESTABLISHED;
+      int param_err = this->backend_->update_connection_params(ble_device_base::MEDIUM_MIN_CONN_INTERVAL,
+                                                               ble_device_base::MEDIUM_MAX_CONN_INTERVAL, 0,
+                                                               ble_device_base::MEDIUM_CONN_TIMEOUT);
+      if (param_err != 0) {
+        // Survivable: the link just stays on the fast interval.
+        ESP_LOGW(TAG, "[%d] [%s] conn param update failed, err=%d", this->connection_index_, this->address_str_,
+                 param_err);
+      }
       this->proxy_->send_device_connection(this->address_, true, mtu);
       this->proxy_->send_connections_free();
       return;
