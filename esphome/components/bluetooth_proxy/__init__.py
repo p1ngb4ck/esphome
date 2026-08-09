@@ -2,7 +2,7 @@ import functools
 import logging
 
 import esphome.codegen as cg
-from esphome.components import ble_device_base
+from esphome.components import ble_device_base, bluetooth_connection
 import esphome.config_validation as cv
 from esphome.const import CONF_ACTIVE, CONF_ID, PLATFORM_LN882X, PLATFORM_RP2
 from esphome.core import CORE
@@ -27,13 +27,18 @@ def AUTO_LOAD(config: ConfigType | None = None) -> list[str]:
     target platform set, so it takes one of the concrete branches.
     """
     if CORE.is_esp32:
-        return ["esp32_ble_client", "esp32_ble_tracker"]
+        return ["bluetooth_connection", "esp32_ble_client", "esp32_ble_tracker"]
     if CORE.target_platform in _HUB_PLATFORMS:
-        return ["ble_device_base"]
+        return ["ble_device_base", "bluetooth_connection"]
     # No target platform, or one this component does not support: tooling
     # resolving the manifest (including the host-pinned dependency resolver) —
     # expose every arm so the closure keeps the esp32 BLE stack.
-    return ["ble_device_base", "esp32_ble_client", "esp32_ble_tracker"]
+    return [
+        "ble_device_base",
+        "bluetooth_connection",
+        "esp32_ble_client",
+        "esp32_ble_tracker",
+    ]
 
 
 # Platforms with an in-tree ble_device_base BLE tracker hub whose controller
@@ -42,6 +47,8 @@ def AUTO_LOAD(config: ConfigType | None = None) -> list[str]:
 # Assistant) assumes an ESPHome proxy can scan actively, so a passive-only
 # proxy would be misdriven — bk72xx follows once the API carries a feature
 # flag clients can trust (FEATURE_ACTIVE_SCAN + a version flag, separate PRs).
+# Coupled to bluetooth_connection: platforms with a GATT backend are also
+# listed in its FILTER_SOURCE_FILES hub entry.
 _HUB_PLATFORMS = (PLATFORM_LN882X, PLATFORM_RP2)
 
 DEPENDENCIES = ["api"]
@@ -67,7 +74,7 @@ _IDF_MAX_CONNECTIONS = 9
 @functools.cache
 def _esp32_config_schema() -> cv.All:
     """Build the esp32 schema, importing the esp32 BLE stack only when used."""
-    from esphome.components import esp32_ble, esp32_ble_client, esp32_ble_tracker
+    from esphome.components import esp32_ble, esp32_ble_tracker
 
     if esp32_ble.IDF_MAX_CONNECTIONS != _IDF_MAX_CONNECTIONS:
         raise cv.Invalid(
@@ -77,9 +84,7 @@ def _esp32_config_schema() -> cv.All:
             f"update _IDF_MAX_CONNECTIONS in bluetooth_proxy/__init__.py"
         )
 
-    BluetoothConnection = bluetooth_proxy_ns.class_(
-        "BluetoothConnection", esp32_ble_client.BLEClientBase
-    )
+    BluetoothConnection = bluetooth_connection.esp32_connection_class()
     CONNECTION_SCHEMA = esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(BluetoothConnection),
@@ -157,16 +162,14 @@ _BLE_HUB_CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             **_COMMON_SCHEMA_KEYS,
-            # Declared directly (BLE_DEVICE_SCHEMA-style): appending a validator
-            # after a strict schema rejects an explicit `ble_hub_id` before it
-            # runs, and that key is the documented way to disambiguate once a
-            # platform has two trackers.
-            cv.GenerateID(ble_device_base.CONF_BLE_HUB_ID): cv.use_id(
-                ble_device_base.BLEHub
-            ),
             cv.Optional(CONF_ACTIVE, default=False): cv.boolean,
         }
-    ).extend(cv.COMPONENT_SCHEMA),
+    )
+    .extend(
+        # ble_hub_id with the friendly no-tracker-configured guard.
+        ble_device_base.BLE_DEVICE_SCHEMA
+    )
+    .extend(cv.COMPONENT_SCHEMA),
     _validate_no_active,
 )
 
