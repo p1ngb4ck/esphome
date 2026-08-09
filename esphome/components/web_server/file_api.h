@@ -192,9 +192,10 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     storage::FileHandle *handle{nullptr};  // FILESYSTEM only
     bool is_fs{false};
     uint64_t size{0};
-    char rel[256]{};
+    char rel[storage::STORAGE_PATH_MAX]{};
     // httpd_resp_set_hdr() stores the pointer (no copy) -- must outlive every send.
-    char disposition[300]{};
+    // "attachment; filename=\"...\"" wrapper around a rel path -- sized from the interface.
+    char disposition[storage::STORAGE_PATH_MAX + 44]{};
     // Likewise for the type: always a string literal from content_type_for().
     const char *type{"application/octet-stream"};
     // Byte range the client asked for. end is inclusive, as in the HTTP header. When
@@ -233,8 +234,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     // The upload streams into rel_path (a temp sibling) and is atomically rename()d to
     // final_path at completion, so a watcher (e.g. the module loader) never observes a
     // half-written file.
-    char rel_path[256]{};
-    char final_path[256]{};
+    char rel_path[storage::STORAGE_PATH_MAX]{};
+    char final_path[storage::STORAGE_PATH_MAX]{};
     bool overwrite{false};
     uint64_t offset{0};
     storage::StorageError error{storage::StorageError::OK};
@@ -263,8 +264,8 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     bool stream_open{false};
     bool writing{false};   // a worker write_chunk is in flight
     bool closing{false};   // a worker end_write is in flight
-    char rel_path[256]{};
-    char final_path[256]{};
+    char rel_path[storage::STORAGE_PATH_MAX]{};
+    char final_path[storage::STORAGE_PATH_MAX]{};
     bool overwrite{false};
     const uint8_t *data{nullptr};
     size_t total{0};

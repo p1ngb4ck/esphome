@@ -1033,7 +1033,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
 
   storage::PathStorage *ps = nullptr;
   uint64_t size = 0;
-  char rel_buf[256]{};
+  char rel_buf[storage::STORAGE_PATH_MAX]{};
   storage::StorageError err = storage::StorageError::OK;
 
   // Control plane only: resolve + stat are synchronous and polymorphic (any storage type). The
