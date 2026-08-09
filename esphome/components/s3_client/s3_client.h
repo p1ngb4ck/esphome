@@ -89,16 +89,22 @@ class S3Client final : public Component, public storage::NetworkStorage, public 
   void set_ca_entry(const std::string &id) { this->ca_entry_ = id; }
 #endif
 
+  // Feeds the inherited PathStorage mount path -- resolve_path()/consumers read it from there.
+  void set_mount_path(const char *mount_path) { this->set_mount_path_(mount_path); }
+  bool is_mounted() const { return this->mounted_; }
+  // No-RTTI downcast hook -- see PathStorage::as_mountable().
+  storage::MountableStorage *as_mountable() override { return this; }
+
   // ---- MountableStorage ----
   uint8_t get_mount_caps() const override { return MOUNT_CAP_MOUNT | MOUNT_CAP_UNMOUNT; }
   storage::StorageError mount() override;
   storage::StorageError unmount() override;
-  bool is_mounted() const override { return this->mounted_; }
 
   // ---- NetworkStorage / PathStorage ----
   storage::StorageError connect() override { return this->mount(); }
   storage::StorageError disconnect() override { return this->unmount(); }
-  storage::StorageCaps get_caps() const override { return storage::STORAGE_CAP_IO_TASK_SAFE; }
+  storage::StorageError get_info(storage::StorageInfo *info) override;
+  uint8_t get_capabilities() const override { return storage::STORAGE_CAP_IO_TASK_SAFE; }
   storage::StorageError stat(const char *path, storage::FileStat *st) override;
   storage::StorageError list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
                                  void *ctx) override;
