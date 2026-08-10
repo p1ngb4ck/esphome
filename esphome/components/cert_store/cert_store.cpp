@@ -4,10 +4,11 @@
 #include <cstring>
 
 #include "esphome/core/hal.h"
-#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#include "mbedtls/x509_crt.h"
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+#include "esp_crt_bundle.h"
+#endif
 
 namespace esphome {
 namespace cert_store {
@@ -16,10 +17,11 @@ static const char *const TAG = "cert_store";
 
 CertStore *global_cert_store = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
-// How often an entry is retried while its storage is not mounted yet.
-static constexpr uint32_t RETRY_INTERVAL_MS = 2000;
-// Bytes requested per worker read_chunk() call.
-static constexpr size_t READ_CHUNK = 4096;
+// Bytes requested per worker read_chunk() call for the STORAGE path.
+static constexpr size_t READ_CHUNK = 2048;
+// A CA/chain far larger than this is not a device trust anchor -- refuse rather than grow without
+// bound (the whole point of the interface is no runaway RAM on an MCU).
+static constexpr size_t MAX_CERT_BYTES = 10240;
 
 const char *cert_kind_to_string(CertKind kind) {
   switch (kind) {
@@ -40,76 +42,123 @@ const char *cert_kind_to_string(CertKind kind) {
   }
 }
 
+static const char *source_to_string(CertSource s) { return s == CertSource::EMBEDDED ? "embedded" : "storage"; }
+
 void CertStore::setup() {
-  // Publish the single instance so consumers can reach it without naming it.
+  // Publish the single instance so consumers can reach it without naming it. Nothing is loaded
+  // here -- entries are materialised on demand when a consumer applies them.
   global_cert_store = this;
-  // Files live on storages that may mount seconds after boot (or never), so loop() drives the loads.
-  if (this->entries_.empty())
-    this->ready_ = true;
 }
 
-void CertStore::loop() {
-  if (this->ready_)
-    return;
-#ifdef USE_STORAGE_WORKER
-  // A read is already in flight; its stream callbacks carry it forward.
-  if (this->loading_ != NO_LOAD)
-    return;
-#endif
-  const uint32_t now = millis();
-  if (now - this->last_try_ms_ < RETRY_INTERVAL_MS)
-    return;
-  this->last_try_ms_ = now;
-
-#ifdef USE_STORAGE_WORKER
-  for (size_t i = 0; i < this->entries_.size(); i++) {
-    if (!this->entries_[i].loaded) {
-      this->start_load_(i);
-      return;  // one entry in flight at a time
-    }
+const CertStore::Entry *CertStore::find(StringRef id) const {
+  for (const auto &entry : this->entries_) {
+    if (id == entry.id)
+      return &entry;
   }
-#endif
-  this->finish_if_complete_();
+  return nullptr;
 }
 
-void CertStore::finish_if_complete_() {
-  for (auto &entry : this->entries_) {
-    if (!entry.loaded)
-      return;
+storage::StorageError CertStore::attach_parsed_(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out,
+                                                const uint8_t *data, size_t len) {
+  mbedtls_x509_crt_init(ca_out);
+  // PEM parsing requires the terminating NUL to be counted in the length.
+  if (mbedtls_x509_crt_parse(ca_out, data, len + 1) != 0) {
+    ESP_LOGE(TAG, "CA parse failed");
+    return storage::StorageError::READ_ERROR;
   }
-  this->ready_ = true;
-  ESP_LOGI(TAG, "all entries loaded");
-  this->disable_loop();
+  mbedtls_ssl_conf_ca_chain(conf, ca_out, nullptr);
+  return storage::StorageError::OK;
 }
 
-#ifdef USE_STORAGE_WORKER
+storage::StorageError CertStore::attach_bundle_(mbedtls_ssl_config *conf) {
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+  // The Mozilla root bundle ESP-IDF ships lives in flash and is attached directly to the config --
+  // no per-cert RAM, no storage read. This is the default trust anchor for public endpoints.
+  if (esp_crt_bundle_attach(conf) != 0) {
+    ESP_LOGE(TAG, "attaching the built-in CA bundle failed");
+    return storage::StorageError::READ_ERROR;
+  }
+  return storage::StorageError::OK;
+#else
+  ESP_LOGE(TAG, "no CA entry given and the built-in bundle is not compiled in");
+  return storage::StorageError::NOT_SUPPORTED;
+#endif
+}
 
-void CertStore::start_load_(size_t index) {
-  Entry &entry = this->entries_[index];
-  if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr)
+void CertStore::apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out, StringRef id,
+                               ApplyCallback &&on_done) {
+  const Entry *entry = id.size() == 0 ? nullptr : this->find(id);
+
+  // No entry named (or unknown id) -> the built-in bundle. Immediate, no RAM, no worker.
+  if (entry == nullptr) {
+    if (id.size() != 0)
+      ESP_LOGW(TAG, "CA entry '%.*s' unknown -- falling back to the built-in bundle", (int) id.size(), id.c_str());
+    on_done(this->attach_bundle_(conf));
     return;
-  // The registry resolves which storage this path lives on -- no manual storage selection.
+  }
+
+  if (entry->kind != CertKind::CA) {
+    ESP_LOGE(TAG, "'%s' is a %s entry, not a CA", entry->id, cert_kind_to_string(entry->kind));
+    on_done(storage::StorageError::INVALID_ARGS);
+    return;
+  }
+
+  // EMBEDDED -> parse straight out of flash, no RAM buffer at all.
+  if (entry->source == CertSource::EMBEDDED) {
+    on_done(this->attach_parsed_(conf, ca_out, reinterpret_cast<const uint8_t *>(entry->embedded_data),
+                                 entry->embedded_len));
+    return;
+  }
+
+  // STORAGE -> stream the file on demand through the worker, parse, then free the buffer.
+#ifdef USE_STORAGE_WORKER
+  if (this->applying_) {
+    on_done(storage::StorageError::NOT_READY);  // one apply in flight; caller retries
+    return;
+  }
+  if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr) {
+    on_done(storage::StorageError::NOT_READY);
+    return;
+  }
   const char *rel = nullptr;
-  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(entry.path, &rel);
-  if (ps == nullptr)
-    return;  // not mounted yet -- loop() comes back
-
-  this->loading_ = index;
-  this->pending_buf_ = nullptr;
-  this->pending_len_ = 0;
-  this->pending_off_ = 0;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(entry->path, &rel);
+  if (ps == nullptr) {
+    ESP_LOGW(TAG, "'%s': storage for '%s' not mounted yet", entry->id, entry->path);
+    on_done(storage::StorageError::NOT_READY);
+    return;
+  }
+  this->applying_ = true;
+  this->apply_conf_ = conf;
+  this->apply_ca_ = ca_out;
+  this->apply_cb_ = std::move(on_done);
+  this->buf_ = nullptr;
+  this->buf_cap_ = 0;
+  this->buf_off_ = 0;
   this->last_read_ = 0;
   this->stream_open_ = false;
-
   storage::StorageError err = storage::global_storage_worker->begin_read(
       ps, rel, &this->stream_, [this](storage::StorageError e) { this->on_open_(e); });
   if (err != storage::StorageError::OK)
-    this->abandon_load_("open rejected", err);
+    this->finish_storage_(err);
+#else
+  on_done(storage::StorageError::NOT_SUPPORTED);
+#endif
+}
+
+#ifdef USE_STORAGE_WORKER
+
+void CertStore::release_buffer_() {
+  if (this->buf_ != nullptr) {
+    this->alloc_.deallocate(this->buf_, this->buf_cap_);
+    this->buf_ = nullptr;
+  }
+  this->buf_cap_ = 0;
+  this->buf_off_ = 0;
 }
 
 void CertStore::on_open_(storage::StorageError err) {
   if (err != storage::StorageError::OK) {
-    this->abandon_load_("open failed", err);
+    this->finish_storage_(err);
     return;
   }
   this->stream_open_ = true;
@@ -118,137 +167,91 @@ void CertStore::on_open_(storage::StorageError err) {
 
 void CertStore::issue_read_() {
   // Grow (doubling) to hold one more chunk plus a byte of slack for the terminating NUL.
-  if (this->pending_len_ < this->pending_off_ + READ_CHUNK + 1) {
-    size_t cap = this->pending_len_ == 0 ? READ_CHUNK + 1 : this->pending_len_;
-    while (cap < this->pending_off_ + READ_CHUNK + 1)
+  if (this->buf_cap_ < this->buf_off_ + READ_CHUNK + 1) {
+    size_t cap = this->buf_cap_ == 0 ? READ_CHUNK + 1 : this->buf_cap_;
+    while (cap < this->buf_off_ + READ_CHUNK + 1)
       cap *= 2;
-    RAMAllocator<uint8_t> allocator;
-    uint8_t *bigger = allocator.allocate(cap);
-    if (bigger == nullptr) {
-      ESP_LOGE(TAG, "'%s': out of memory (%u bytes)", this->entries_[this->loading_].id, (unsigned) cap);
-      this->abandon_load_("no memory", storage::StorageError::READ_ERROR);
+    if (cap > MAX_CERT_BYTES + 1) {
+      ESP_LOGE(TAG, "certificate exceeds %u bytes -- refusing", (unsigned) MAX_CERT_BYTES);
+      this->finish_storage_(storage::StorageError::NO_SPACE);
       return;
     }
-    if (this->pending_buf_ != nullptr) {
-      std::memcpy(bigger, this->pending_buf_, this->pending_off_);
-      allocator.deallocate(this->pending_buf_, this->pending_len_);
+    uint8_t *bigger = this->alloc_.allocate(cap);
+    if (bigger == nullptr) {
+      ESP_LOGE(TAG, "out of memory (%u bytes)", (unsigned) cap);
+      this->finish_storage_(storage::StorageError::READ_ERROR);
+      return;
     }
-    this->pending_buf_ = bigger;
-    this->pending_len_ = cap;
+    if (this->buf_ != nullptr) {
+      std::memcpy(bigger, this->buf_, this->buf_off_);
+      this->alloc_.deallocate(this->buf_, this->buf_cap_);
+    }
+    this->buf_ = bigger;
+    this->buf_cap_ = cap;
   }
   this->last_read_ = 0;
   storage::StorageError e = storage::global_storage_worker->read_chunk(
-      this->stream_, this->pending_buf_ + this->pending_off_, READ_CHUNK, &this->last_read_,
+      this->stream_, this->buf_ + this->buf_off_, READ_CHUNK, &this->last_read_,
       [this](storage::StorageError re) { this->on_read_(re); });
   if (e != storage::StorageError::OK)
-    this->abandon_load_("read rejected", e);
+    this->finish_storage_(e);
 }
 
 void CertStore::on_read_(storage::StorageError err) {
-  if (this->loading_ == NO_LOAD)
+  if (!this->applying_)
     return;
   if (err != storage::StorageError::OK) {
-    this->abandon_load_("read failed", err);
+    this->finish_storage_(err);
     return;
   }
-  this->pending_off_ += this->last_read_;
+  this->buf_off_ += this->last_read_;
   if (this->last_read_ == 0) {
     storage::StorageError e = storage::global_storage_worker->end_read(
         this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
     if (e != storage::StorageError::OK)
-      this->abandon_load_("close rejected", e);
+      this->finish_storage_(e);
     return;
   }
   this->issue_read_();
 }
 
 void CertStore::on_closed_(storage::StorageError err) {
-  if (this->loading_ == NO_LOAD)
+  if (!this->applying_)
     return;
   this->stream_open_ = false;
   if (err != storage::StorageError::OK) {
-    this->abandon_load_("close failed", err);
+    this->finish_storage_(err);
     return;
   }
-  Entry &entry = this->entries_[this->loading_];
-  // The buffer always has slack for the NUL (see issue_read_), so PEM consumers get a C-string and
-  // mbedTLS PEM parsing has its terminator.
-  this->pending_buf_[this->pending_off_] = 0;
-  entry.data = this->pending_buf_;
-  entry.len = this->pending_off_;
-  entry.loaded = true;
-  entry.valid = validate_(entry);
-  ESP_LOGD(TAG, "'%s' (%s): %u bytes from '%s'%s", entry.id, cert_kind_to_string(entry.kind),
-           (unsigned) entry.len, entry.path, entry.valid ? "" : " -- INVALID");
-  if (!entry.valid)
-    ESP_LOGW(TAG, "'%s': does not parse as a valid certificate", entry.id);
-
-  this->pending_buf_ = nullptr;
-  this->pending_len_ = 0;
-  this->pending_off_ = 0;
-  this->loading_ = NO_LOAD;
-  this->finish_if_complete_();
+  // Terminate so mbedTLS PEM parsing has its NUL, parse into the consumer's ca_out, attach.
+  this->buf_[this->buf_off_] = 0;
+  storage::StorageError perr = attach_parsed_(this->apply_conf_, this->apply_ca_, this->buf_, this->buf_off_);
+  this->finish_storage_(perr);
 }
 
-void CertStore::abandon_load_(const char *reason, storage::StorageError err) {
-  if (this->loading_ != NO_LOAD) {
-    Entry &entry = this->entries_[this->loading_];
-    if (!entry.warned) {
-      ESP_LOGW(TAG, "'%s': %s (%s)", entry.path, reason, storage::error_to_string(err));
-      entry.warned = true;
-    }
-  }
-  if (this->stream_open_) {
+void CertStore::finish_storage_(storage::StorageError err) {
+  // Single exit for the STORAGE path: close a still-open stream, free the buffer NOW (the parse,
+  // if any, is already done), then fire the consumer callback and clear all in-flight state.
+  if (this->stream_open_ && storage::global_storage_worker != nullptr) {
     storage::global_storage_worker->end_read(this->stream_, [](storage::StorageError) {});
     this->stream_open_ = false;
   }
-  if (this->pending_buf_ != nullptr) {
-    RAMAllocator<uint8_t> allocator;
-    allocator.deallocate(this->pending_buf_, this->pending_len_);
-    this->pending_buf_ = nullptr;
-  }
-  this->pending_len_ = 0;
-  this->pending_off_ = 0;
-  this->loading_ = NO_LOAD;
+  this->release_buffer_();
+  ApplyCallback cb = std::move(this->apply_cb_);
+  this->apply_cb_ = nullptr;
+  this->apply_conf_ = nullptr;
+  this->apply_ca_ = nullptr;
+  this->applying_ = false;
+  if (cb)
+    cb(err);
 }
 
 #endif  // USE_STORAGE_WORKER
 
-bool CertStore::validate_(const Entry &entry) {
-  // Only certificates are structurally checked. Private keys and SSH material come in formats
-  // mbedTLS x509 does not cover (PKCS#8, OpenSSH, raw); they are handed to their consumers as-is.
-  if (entry.kind != CertKind::CA && entry.kind != CertKind::CLIENT_CERT)
-    return true;
-  mbedtls_x509_crt crt;
-  mbedtls_x509_crt_init(&crt);
-  // +1 so the terminating NUL is included, as PEM parsing requires.
-  const int ret = mbedtls_x509_crt_parse(&crt, entry.data, entry.len + 1);
-  mbedtls_x509_crt_free(&crt);
-  return ret == 0;
-}
-
-const CertStore::Entry *CertStore::find(StringRef id) const {
-  for (const auto &entry : this->entries_) {
-    if (entry.loaded && id == entry.id)
-      return &entry;
-  }
-  return nullptr;
-}
-
-const uint8_t *CertStore::get(StringRef id, size_t *len_out) const {
-  const Entry *entry = this->find(id);
-  if (entry == nullptr)
-    return nullptr;
-  if (len_out != nullptr)
-    *len_out = entry->len;
-  return entry->data;
-}
-
 void CertStore::dump_config() {
   ESP_LOGCONFIG(TAG, "Cert store:");
   for (const auto &entry : this->entries_) {
-    ESP_LOGCONFIG(TAG, "  %s (%s): %s%s", entry.id, cert_kind_to_string(entry.kind),
-                  entry.loaded ? "loaded" : "pending", entry.loaded && !entry.valid ? ", INVALID" : "");
+    ESP_LOGCONFIG(TAG, "  %s (%s, %s)", entry.id, cert_kind_to_string(entry.kind), source_to_string(entry.source));
   }
 }
 
