@@ -1037,6 +1037,23 @@ storage::StorageError S3Client::mount() {
   }
   this->mounted_ = true;
   this->signing_day_[0] = '\0';  // re-derive against the corrected clock
+
+  // The unauthenticated probe only proves reachability and syncs the clock -- a share with
+  // wrong credentials or a missing bucket would still "mount" and every later operation would
+  // fail. Verify real access with one signed ListObjectsV2 before reporting success.
+  // mounted_ was set provisionally above because request_() gates on it; reverted on failure.
+  std::string probe_xml;
+  HttpResponse vr{};
+  storage::StorageError verr = this->request_("GET", std::string(""), "list-type=2&max-keys=1", nullptr, 0, nullptr,
+                                              nullptr, 0, nullptr, &probe_xml, XML_ACCUM_LIMIT, &vr);
+  if (verr == storage::StorageError::OK)
+    verr = this->map_status_(vr.status);
+  if (verr != storage::StorageError::OK) {
+    this->mounted_ = false;
+    ESP_LOGW(TAG, "S3 mount rejected: bucket '%s' not accessible (%s)", this->bucket_.c_str(),
+             storage::error_to_string(verr));
+    return verr;
+  }
   ESP_LOGI(TAG, "mounted s3://%s at %s", this->bucket_.c_str(), this->get_mount_path());
   return storage::StorageError::OK;
 }
