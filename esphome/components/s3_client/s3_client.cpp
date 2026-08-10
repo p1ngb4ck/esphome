@@ -144,12 +144,16 @@ bool S3Connection::send_all(const uint8_t *data, size_t len) {
 int S3Connection::recv_some(uint8_t *buf, size_t len) {
 #ifdef USE_CERT_STORE
   if (this->tls_active_) {
-    int n = mbedtls_ssl_read(&this->ssl_, buf, len);
-    if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE)
-      return this->recv_some(buf, len);
-    if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
-      return 0;
-    return n;  // >0 data, <0 error
+    // Bounded retry loop -- recursing here overflows the stack on a stalled connection.
+    for (int attempt = 0; attempt < 64; attempt++) {
+      int n = mbedtls_ssl_read(&this->ssl_, buf, len);
+      if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE)
+        continue;
+      if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
+        return 0;
+      return n;  // >0 data, <0 error
+    }
+    return -1;
   }
 #endif
   ssize_t n = this->sock_->read(buf, len);
@@ -981,12 +985,6 @@ storage::StorageError S3Client::mount() {
   }
   this->mounted_ = true;
   this->signing_day_[0] = '\0';  // re-derive against the corrected clock
-  if (storage::global_storage_registry != nullptr) {
-    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
-      this->mounted_ = false;
-      return storage::StorageError::NOT_READY;
-    }
-  }
   ESP_LOGI(TAG, "mounted s3://%s at %s", this->bucket_.c_str(), this->get_mount_path());
   return storage::StorageError::OK;
 }
@@ -996,17 +994,28 @@ storage::StorageError S3Client::unmount() {
     return storage::StorageError::OK;
   // Quiesce first: the drain guarantees no in-flight worker call remains, which makes this the
   // safe place to flush a pending write episode.
+  // Quiesce (drain guarantee: no in-flight worker call remains), flush the pending episode,
+  // then simply mark unmounted -- the device STAYS registered (see setup()).
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->quiesce_storage(this);
   storage::StorageError err = this->flush_episode_();
-  if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->unregister_storage(this);
   this->mounted_ = false;
   ESP_LOGI(TAG, "unmounted s3://%s", this->bucket_.c_str());
   return err;
 }
 
-void S3Client::setup() {}
+void S3Client::setup() {
+  // Register with the storage registry now: registered-but-unmounted is the normal state
+  // for a mountable device (see nfs_client/sd_storage). The registry entry, the codegen
+  // mount-path table and every consumer stay consistent from boot on; mount()/unmount()
+  // only toggle the connection state.
+  if (storage::global_storage_registry != nullptr) {
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
+  }
+}
 
 void S3Client::loop() {
   // auto_connect: one mount attempt on each rising edge of network connectivity (NFS pattern).
