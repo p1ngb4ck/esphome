@@ -50,8 +50,8 @@ def _validate_ftps(config):
     if config.get(CONF_AUTH_TLS):
         if not CORE.using_esp_idf:
             raise cv.Invalid("auth_tls (FTPS) requires the esp-idf framework")
-        if CONF_CA not in config:
-            raise cv.Invalid("auth_tls: true requires 'ca' (a cert_store entry id)")
+        # ca is optional: without it, cert_store uses the built-in Mozilla bundle (covers public
+        # CAs). A named ca selects a specific cert_store entry (embedded or storage).
     elif CONF_CA in config:
         raise cv.Invalid("'ca' is only used with auth_tls: true")
     return config
@@ -107,7 +107,10 @@ async def to_code(config):
 
     if config[CONF_AUTH_TLS]:
         cg.add(var.set_auth_tls(True))
-        cg.add(var.set_ca_entry(config[CONF_CA]))
+        # Optional: an explicit cert_store entry. Absent -> ca_entry stays null -> cert_store uses
+        # the built-in bundle.
+        if CONF_CA in config:
+            cg.add(var.set_ca_entry(config[CONF_CA]))
 
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
     # Full VFS paths carry the mount point; the storage component sizes its buffers from the

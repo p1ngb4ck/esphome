@@ -4,6 +4,7 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/string_ref.h"
 #include "esphome/components/network/util.h"
 
 // DNS: ESPHome has no portable resolver, so use each socket backend's own facility (same choice
@@ -337,10 +338,6 @@ bool FTPClient::setup_tls_() {
     ESP_LOGW(TAG, "auth_tls needs a cert_store, none is configured");
     return false;
   }
-  const char *ca_pem = cert_store::global_cert_store->str(this->ca_entry_);
-  if (ca_pem == nullptr)
-    return false;  // CA not loaded from storage yet -- ensure_connected_ comes back
-
   mbedtls_ssl_config_init(&this->conf_);
   mbedtls_x509_crt_init(&this->cacert_);
   mbedtls_ctr_drbg_init(&this->drbg_);
@@ -357,12 +354,31 @@ bool FTPClient::setup_tls_() {
   }
   mbedtls_ssl_conf_rng(&this->conf_, mbedtls_ctr_drbg_random, &this->drbg_);
 
-  if (mbedtls_x509_crt_parse(&this->cacert_, reinterpret_cast<const unsigned char *>(ca_pem),
-                             strlen(ca_pem) + 1) != 0) {
-    ESP_LOGE(TAG, "CA '%s' does not parse", this->ca_entry_);
+  // The CA comes from cert_store, which owns the source (embedded flash / storage / built-in
+  // bundle) and streams it through the worker if needed -- no PEM held or parsed here. A null/empty
+  // ca_entry means "use the built-in bundle". apply_ca_async is async; setup_tls_() is retry-driven
+  // from ensure_connected_, but for a storage-sourced CA the load runs to completion here (the
+  // stream callbacks are pumped by loop()), so we wait for the one-shot result before proceeding.
+  const char *entry = this->ca_entry_ != nullptr ? this->ca_entry_ : "";
+  volatile bool ca_done = false;
+  volatile bool ca_ok = false;
+  cert_store::global_cert_store->apply_ca_async(&this->conf_, &this->cacert_, esphome::StringRef(entry),
+                                                [&ca_done, &ca_ok](storage::StorageError e) {
+                                                  ca_ok = (e == storage::StorageError::OK);
+                                                  ca_done = true;
+                                                });
+  uint32_t start = millis();
+  while (!ca_done) {
+    if (millis() - start > 10000) {
+      ESP_LOGE(TAG, "CA application timed out");
+      return false;
+    }
+    App.feed_wdt();
+  }
+  if (!ca_ok) {
+    ESP_LOGE(TAG, "CA application failed");
     return false;
   }
-  mbedtls_ssl_conf_ca_chain(&this->conf_, &this->cacert_, nullptr);
   mbedtls_ssl_conf_authmode(&this->conf_, MBEDTLS_SSL_VERIFY_REQUIRED);
   this->tls_ready_ = true;
   return true;
