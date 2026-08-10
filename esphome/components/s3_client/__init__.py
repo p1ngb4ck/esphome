@@ -118,11 +118,12 @@ async def to_code(config):
         cg.add(var.set_secret_key(share[CONF_SECRET_KEY]))
         cg.add(var.set_path_style(share[CONF_PATH_STYLE]))
         cg.add(var.set_auto_connect(share[CONF_AUTO_CONNECT]))
+        # The gateway gates the setter: set_tls()/set_ca_entry() exist only under
+        # USE_CERT_STORE, which is present exactly when some share enables TLS -- so the
+        # calls are emitted only for TLS shares; plain-http shares rely on the C++ default.
         if share[CONF_TLS]:
             cg.add(var.set_tls(True))
             cg.add(var.set_ca_entry(share[CONF_CA]))
-        else:
-            cg.add(var.set_tls(False))
 
         cg.add(var.set_mount_path(share[CONF_MOUNT_PATH]))
         # Full VFS paths carry the mount point; the storage component sizes its buffers from
