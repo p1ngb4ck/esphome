@@ -34,16 +34,31 @@ SOURCES = (SOURCE_EMBEDDED, SOURCE_STORAGE)
 
 
 def _validate_entry(entry):
-    # embedded needs a real local file at compile time; storage needs a VFS (absolute) path that is
-    # resolved on the device, so it must NOT be required to exist on the build host.
-    source = entry[CONF_SOURCE]
+    # source is normally inferred from the path so the user never sets it:
+    #   absolute path (/sd/certs/ca.pem) -> storage: a VFS path resolved on the DEVICE at runtime,
+    #                                       so it is never checked on the build host.
+    #   relative path (certs/ca.pem)     -> embedded: a local file baked into flash at compile time.
+    # An explicit 'source:' overrides the inference (and is then validated for consistency).
     path = entry[CONF_PATH]
+    source = entry.get(CONF_SOURCE)
+    if source is None:
+        source = SOURCE_STORAGE if path.startswith("/") else SOURCE_EMBEDDED
+        entry[CONF_SOURCE] = source
+
     if source == SOURCE_EMBEDDED:
+        # Compile-time file, checked on the host.
+        if path.startswith("/"):
+            raise cv.Invalid(
+                f"embedded cert '{entry[CONF_ID]}': '{path}' is an absolute path, which is a device "
+                "VFS path -- use 'source: storage', or give a path relative to the config for an "
+                "embedded cert"
+            )
         if not Path(CORE.relative_config_path(path)).is_file():
             raise cv.Invalid(
                 f"embedded cert '{entry[CONF_ID]}': file '{path}' not found relative to the config"
             )
     elif not path.startswith("/"):
+        # storage: a device VFS path -- must be absolute, never touched on the host.
         raise cv.Invalid(
             f"storage cert '{entry[CONF_ID]}': path '{path}' must be an absolute VFS path "
             "(e.g. /sd/certs/ca.pem)"
@@ -56,9 +71,11 @@ ENTRY_SCHEMA = cv.All(
         {
             cv.Required(CONF_ID): cv.string_strict,
             cv.Required(CONF_TYPE): cv.enum(KINDS, lower=True),
-            # Default: a local file baked into flash at compile time (the classic embedded path).
-            # Set 'source: storage' to stream the cert from a mounted storage at runtime instead.
-            cv.Optional(CONF_SOURCE, default=SOURCE_EMBEDDED): cv.one_of(*SOURCES, lower=True),
+
+
+            # Inferred from the path when unset (absolute -> storage, relative -> embedded);
+            # set explicitly only to override that inference.
+            cv.Optional(CONF_SOURCE): cv.one_of(*SOURCES, lower=True),
             cv.Required(CONF_PATH): cv.string,
         }
     ),
