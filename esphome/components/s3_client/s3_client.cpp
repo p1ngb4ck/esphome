@@ -374,9 +374,11 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   time_t t = static_cast<time_t>(epoch);
   struct tm g {};
   gmtime_r(&t, &g);
-  char amz_date[20], yyyymmdd[9];
-  snprintf(amz_date, sizeof(amz_date), "%04d%02d%02dT%02d%02d%02dZ", g.tm_year + 1900, g.tm_mon + 1, g.tm_mday,
-           g.tm_hour, g.tm_min, g.tm_sec);
+  char amz_date[24], yyyymmdd[9];
+  snprintf(amz_date, sizeof(amz_date), "%04u%02u%02uT%02u%02u%02uZ", static_cast<unsigned>(g.tm_year + 1900) % 10000,
+           static_cast<unsigned>(g.tm_mon + 1) % 100, static_cast<unsigned>(g.tm_mday) % 100,
+           static_cast<unsigned>(g.tm_hour) % 100, static_cast<unsigned>(g.tm_min) % 100,
+           static_cast<unsigned>(g.tm_sec) % 100);
   memcpy(yyyymmdd, amz_date, 8);
   yyyymmdd[8] = '\0';
 
@@ -703,7 +705,7 @@ storage::StorageError S3Client::read_chunk(const char *path, uint8_t *buf, uint6
 
 storage::StorageError S3Client::stat(const char *path, storage::FileStat *st) {
   std::string key = this->key_of_(path);
-  memset(st, 0, sizeof(*st));
+  *st = storage::FileStat{};
   storage::StorageError err = this->flush_if_key_(key.c_str());
   if (err != storage::StorageError::OK)
     return err;
