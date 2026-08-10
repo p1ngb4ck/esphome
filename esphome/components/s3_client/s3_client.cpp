@@ -325,13 +325,23 @@ void S3Client::signing_key_(const char *yyyymmdd, uint8_t out[32]) {
 }
 
 std::string S3Client::authorization_(const char *method, const std::string &canonical_uri, const std::string &query,
-                                     const std::string &host, const char *amz_date, const char *yyyymmdd) {
-  // Canonical request with the fixed signed-header set host;x-amz-content-sha256;x-amz-date.
+                                     const std::string &host, const char *amz_date, const char *yyyymmdd,
+                                     const char *amz_name, const char *amz_value) {
+  // SigV4 requires EVERY x-amz-* header on the wire to be signed; an unsigned one is a
+  // guaranteed SignatureDoesNotMatch (bit us with x-amz-copy-source on rename). The optional
+  // extra header slots alphabetically between x-amz-content-sha256 and x-amz-date -- true for
+  // x-amz-copy-source, asserted implicitly by keeping the set fixed otherwise.
   std::string canonical = std::string(method) + "\n" + canonical_uri + "\n" + query + "\n" +
                           "host:" + host + "\n" +
-                          "x-amz-content-sha256:" + UNSIGNED_PAYLOAD + "\n" +
-                          "x-amz-date:" + amz_date + "\n\n" +
-                          "host;x-amz-content-sha256;x-amz-date\n" + UNSIGNED_PAYLOAD;
+                          "x-amz-content-sha256:" + UNSIGNED_PAYLOAD + "\n";
+  std::string signed_headers = "host;x-amz-content-sha256;";
+  if (amz_name != nullptr) {
+    canonical += std::string(amz_name) + ":" + amz_value + "\n";
+    signed_headers += std::string(amz_name) + ";";
+  }
+  canonical += std::string("x-amz-date:") + amz_date + "\n\n";
+  signed_headers += "x-amz-date";
+  canonical += signed_headers + "\n" + UNSIGNED_PAYLOAD;
   char creq_hash[65];
   sha256_hex(reinterpret_cast<const uint8_t *>(canonical.data()), canonical.size(), creq_hash);
   std::string scope = std::string(yyyymmdd) + "/" + this->region_ + "/s3/aws4_request";
@@ -389,7 +399,24 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   memcpy(yyyymmdd, amz_date, 8);
   yyyymmdd[8] = '\0';
 
-  std::string auth = this->authorization_(method, uri, query, host, amz_date, yyyymmdd);
+  // An extra header starting with x-amz- must participate in the signature (SigV4 rule);
+  // anything else (Range) stays unsigned. extra_header arrives as "Name: value".
+  std::string amz_name, amz_value;
+  if (extra_header != nullptr && strncasecmp(extra_header, "x-amz-", 6) == 0) {
+    const char *colon = strchr(extra_header, ':');
+    if (colon != nullptr) {
+      amz_name.assign(extra_header, colon - extra_header);
+      for (auto &ch2 : amz_name)
+        ch2 = static_cast<char>(tolower(static_cast<unsigned char>(ch2)));
+      const char *v = colon + 1;
+      while (*v == ' ')
+        v++;
+      amz_value = v;
+    }
+  }
+  std::string auth = this->authorization_(method, uri, query, host, amz_date, yyyymmdd,
+                                          amz_name.empty() ? nullptr : amz_name.c_str(),
+                                          amz_name.empty() ? nullptr : amz_value.c_str());
 
   std::string req = std::string(method) + " " + uri + (query.empty() ? "" : "?" + query) + " HTTP/1.1\r\n" +
                     "Host: " + host + "\r\n" + "x-amz-date: " + std::string(amz_date) + "\r\n" +
