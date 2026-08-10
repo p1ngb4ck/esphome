@@ -324,12 +324,14 @@ std::string S3Client::host_() const {
 }
 
 std::string S3Client::uri_for_(const std::string &key_enc) const {
-  // The request path is S3 protocol data, independent of the endpoint: base_path (the proxy
-  // location the endpoint sits behind, empty when none) + the bucket, addressed path-style, + the
-  // key. This exact string is both sent on the wire and signed as the canonical URI, so the
-  // signature always matches what is sent. base_path_ is normalised (leading '/', no trailing '/'),
-  // so parts join with single slashes and never become "//".
-  return this->base_path_ + "/" + this->bucket_ + "/" + key_enc;
+  // Transport and protocol are separate. The URL the client builds is the transport path:
+  // base_path + key. base_path is how this bucket is reached over the endpoint (a reverse-proxy
+  // location, an AWS-style /<bucket> prefix -- opaque here). The bucket NAME is S3 protocol
+  // metadata and is NOT put in the URL: the endpoint URL and the bucket name are different things.
+  // This exact string is both sent and signed (a passthrough proxy makes the server see what is
+  // sent), so the signature matches. base_path_ is normalised (leading '/', no trailing '/'), so
+  // parts join with single slashes and never become "//".
+  return this->base_path_ + "/" + key_enc;
 }
 
 uint32_t S3Client::now_epoch_() const {
