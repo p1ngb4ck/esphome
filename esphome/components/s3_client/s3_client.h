@@ -45,7 +45,9 @@ class S3Connection {
   bool open(const char *host, uint16_t port, uint32_t timeout_ms);
 #ifdef USE_CERT_STORE
   // TLS over the open socket; `ca_pem` must stay valid for the handshake (cert_store owns it).
-  bool start_tls(const char *host, const char *ca_pem);
+  // Applies the CA named by `ca_entry` (empty -> the built-in bundle) via cert_store, then
+  // completes the handshake. cert_store owns the source selection (embedded/storage/bundle).
+  bool start_tls(const char *host, const char *ca_entry);
 #endif
   // Fully sends `len` bytes; false on any socket/TLS error.
   bool send_all(const uint8_t *data, size_t len);

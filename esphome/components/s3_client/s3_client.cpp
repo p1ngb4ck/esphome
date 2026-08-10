@@ -7,6 +7,7 @@
 #endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/string_ref.h"
 
 #ifdef USE_CERT_STORE
 #include "esphome/components/cert_store/cert_store.h"
@@ -84,7 +85,7 @@ int S3Connection::tls_recv_(void *ctx, unsigned char *buf, size_t len) {
   return static_cast<int>(n);
 }
 
-bool S3Connection::start_tls(const char *host, const char *ca_pem) {
+bool S3Connection::start_tls(const char *host, const char *ca_entry) {
   mbedtls_ssl_init(&this->ssl_);
   mbedtls_ssl_config_init(&this->conf_);
   mbedtls_x509_crt_init(&this->cacert_);
@@ -97,13 +98,37 @@ bool S3Connection::start_tls(const char *host, const char *ca_pem) {
   if (mbedtls_ssl_config_defaults(&this->conf_, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                   MBEDTLS_SSL_PRESET_DEFAULT) != 0)
     return false;
-  // PEM parser needs the terminating NUL included in the length.
-  if (mbedtls_x509_crt_parse(&this->cacert_, reinterpret_cast<const unsigned char *>(ca_pem),
-                             strlen(ca_pem) + 1) != 0) {
-    ESP_LOGE(TAG, "CA certificate parse failed");
+
+  // The CA comes from cert_store, which owns the source (embedded flash / storage / built-in
+  // bundle) and streams it through the worker if needed -- we never hold or parse the PEM here.
+  // apply_ca_async is async; we run on the worker task (start_tls is reached only via the
+  // worker-routed mount / data path), so waiting for its one-shot completion here does not block
+  // the main loop. cacert_ lives as long as this connection, which is what mbedTLS needs.
+  if (cert_store::global_cert_store == nullptr) {
+    ESP_LOGE(TAG, "TLS requested but no cert_store configured");
     return false;
   }
-  mbedtls_ssl_conf_ca_chain(&this->conf_, &this->cacert_, nullptr);
+  volatile bool ca_done = false;
+  volatile bool ca_ok = false;
+  cert_store::global_cert_store->apply_ca_async(&this->conf_, &this->cacert_, esphome::StringRef(ca_entry),
+                                                [&ca_done, &ca_ok](storage::StorageError e) {
+                                                  ca_ok = (e == storage::StorageError::OK);
+                                                  ca_done = true;
+                                                });
+  // The storage path completes from the worker's stream callbacks, which are pumped by the
+  // component loop; embedded/bundle complete inline (ca_done already true here).
+  uint32_t start = millis();
+  while (!ca_done) {
+    if (millis() - start > 10000) {
+      ESP_LOGE(TAG, "CA application timed out");
+      return false;
+    }
+    App.feed_wdt();
+  }
+  if (!ca_ok) {
+    ESP_LOGE(TAG, "CA application failed");
+    return false;
+  }
   mbedtls_ssl_conf_authmode(&this->conf_, MBEDTLS_SSL_VERIFY_REQUIRED);
   mbedtls_ssl_conf_rng(&this->conf_, mbedtls_ctr_drbg_random, &this->ctr_drbg_);
   if (mbedtls_ssl_setup(&this->ssl_, &this->conf_) != 0)
@@ -434,14 +459,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     return storage::StorageError::NOT_READY;
 #ifdef USE_CERT_STORE
   if (this->tls_) {
-    const char *ca_pem = cert_store::global_cert_store != nullptr
-                             ? cert_store::global_cert_store->str(this->ca_entry_)
-                             : nullptr;
-    if (ca_pem == nullptr) {
-      ESP_LOGE(TAG, "CA entry '%s' not found in cert_store", this->ca_entry_.c_str());
-      return storage::StorageError::NOT_READY;
-    }
-    if (!conn.start_tls(host.c_str(), ca_pem))
+    if (!conn.start_tls(host.c_str(), this->ca_entry_.c_str()))
       return storage::StorageError::NOT_READY;
   }
 #endif
@@ -1072,9 +1090,7 @@ storage::StorageError S3Client::mount() {
   }
 #ifdef USE_CERT_STORE
   if (this->tls_) {
-    const char *ca_pem =
-        cert_store::global_cert_store != nullptr ? cert_store::global_cert_store->str(this->ca_entry_) : nullptr;
-    if (ca_pem == nullptr || !conn.start_tls(this->host_().c_str(), ca_pem))
+    if (!conn.start_tls(this->host_().c_str(), this->ca_entry_.c_str()))
       return storage::StorageError::NOT_READY;
   }
 #endif
