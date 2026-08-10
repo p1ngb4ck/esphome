@@ -471,11 +471,24 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     r.last_modified_epoch = parse_http_date(v.c_str());
 
   // ---- response body ----
+  // 4xx/5xx bodies carry the S3 error XML (<Code>AccessDenied|SignatureDoesNotMatch|...) --
+  // exactly the information a bench log needs; capture a bounded slice and log it below.
+  std::string err_body;
+  if (r.status >= 400 && accum == nullptr) {
+    accum = &err_body;
+    accum_limit = 300;
+    out = nullptr;
+  }
   size_t written_out = 0;
   auto consume = [&](const uint8_t *data, size_t len) -> bool {
     if (accum != nullptr) {
-      if (accum->size() + len > accum_limit)
-        return false;
+      if (accum->size() + len > accum_limit) {
+        // Bounded capture: for error bodies keep the head and drain the rest instead of
+        // failing the whole request over a diagnostics buffer.
+        if (accum->size() < accum_limit)
+          accum->append(reinterpret_cast<const char *>(data), accum_limit - accum->size());
+        return true;
+      }
       accum->append(reinterpret_cast<const char *>(data), len);
       return true;
     }
@@ -531,6 +544,8 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       App.feed_wdt();
     }
   }
+  if (r.status >= 400 && !err_body.empty())
+    ESP_LOGW(TAG, "%s %s -> %d: %.200s", method, uri.c_str(), r.status, err_body.c_str());
   if (out_len != nullptr)
     *out_len = written_out;
   if (resp != nullptr)
