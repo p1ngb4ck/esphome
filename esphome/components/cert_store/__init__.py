@@ -79,7 +79,10 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CertStore),
-            cv.Required(CONF_ENTRIES): cv.ensure_list(ENTRY_SCHEMA),
+            # Optional: a cert_store with no entries still provides the built-in Mozilla CA
+            # bundle as the default trust anchor, so AUTO_LOAD (e.g. from an s3_client using
+            # tls without a named ca) can pull in a bundle-only store with no YAML section.
+            cv.Optional(CONF_ENTRIES, default=list): cv.ensure_list(ENTRY_SCHEMA),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _unique_ids,
