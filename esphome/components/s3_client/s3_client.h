@@ -186,6 +186,7 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   // async_mount() (the async_format shape), so resolve/connect/TLS/probe happen on the worker
   // task. A direct call remains only as the no-worker fallback.
   bool ensure_mounted_();
+  void request_async_mount_();
 
   bool mount_pending_{false};  // an async_mount submission is in flight
   bool mounted_{false};

@@ -946,10 +946,31 @@ storage::StorageError S3Client::get_info(storage::StorageInfo *info) {
 bool S3Client::ensure_mounted_() {
   if (this->mounted_)
     return true;
-  // Data-plane calls already execute on the worker (task or loop engine), so a direct blocking
-  // mount() here runs in that same context -- never as a surprise stall on the main loop. The
-  // caller wanted this share now; one bounded inline attempt is the nfs_client contract.
-  return this->mount() == storage::StorageError::OK;
+  // Never block here: control-plane calls (list/stat from the browser) run on the MAIN LOOP,
+  // so an inline probe would freeze it -- the exact failure the async-mount routing exists to
+  // prevent. Kick off one deduplicated background attempt and report not-ready; the caller's
+  // operation returns NOT_READY now, the change feed / next poll sees the share once the mount
+  // lands. Registered-but-unmounted is a normal, queryable state.
+  this->request_async_mount_();
+  return false;
+}
+
+
+void S3Client::request_async_mount_() {
+  if (this->mounted_ || this->mount_pending_)
+    return;
+#ifdef USE_STORAGE_WORKER
+  if (storage::global_storage_worker != nullptr) {
+    this->mount_pending_ = true;
+    storage::StorageError sub = storage::global_storage_worker->async_mount(
+        this, [this](storage::StorageError /*err*/) { this->mount_pending_ = false; });
+    if (sub != storage::StorageError::OK)
+      this->mount_pending_ = false;
+    return;
+  }
+#endif
+  // No worker in this build: one bounded blocking attempt is the only option (nfs_client-style).
+  this->mount();
 }
 
 storage::StorageError S3Client::mount() {
@@ -1038,21 +1059,8 @@ void S3Client::loop() {
   // The attempt goes through the worker's async_mount(), so resolve/connect/TLS/probe run on
   // the worker task -- the loop only submits. Direct call only without a worker in the build.
   bool connected = esphome::network::is_connected();
-  if (this->auto_connect_ && connected && !this->was_connected_ && !this->mounted_ && !this->mount_pending_) {
-#ifdef USE_STORAGE_WORKER
-    if (storage::global_storage_worker != nullptr) {
-      this->mount_pending_ = true;
-      storage::StorageError sub = storage::global_storage_worker->async_mount(
-          this, [this](storage::StorageError /*err*/) { this->mount_pending_ = false; });
-      if (sub != storage::StorageError::OK)
-        this->mount_pending_ = false;
-    } else {
-      this->mount();
-    }
-#else
-    this->mount();
-#endif
-  }
+  if (this->auto_connect_ && connected && !this->was_connected_ && !this->mounted_)
+    this->request_async_mount_();
   this->was_connected_ = connected;
   // Idle safety net: an episode nobody ended (e.g. a caller that never reads back) uploads after
   // a quiet period, so data cannot sit in RAM indefinitely.
