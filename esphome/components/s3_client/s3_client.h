@@ -34,12 +34,14 @@ struct HttpResponse {
   bool chunked{false};
   uint32_t date_epoch{0};  // Date: header, parsed; 0 if absent/unparsable
   uint64_t last_modified_epoch{0};
+  bool close_requested{false};  // server sent Connection: close -> do not reuse the socket
 };
 
-// One TCP (optionally TLS) connection for exactly one request/response pair. S3 operations are
-// stateless per request (Connection: close), which keeps the client free of keep-alive and
-// session bookkeeping -- the price is one handshake per operation, documented in the component
-// docs. All blocking I/O runs under the storage worker's serialization (task-safe).
+// One TCP (optionally TLS) connection to the endpoint. It is kept open across requests
+// (keep-alive) and reused by S3Client; a full TLS handshake happens only on the first request or
+// after the server closes the connection, and a saved TLS session lets even a reconnect resume
+// with an abbreviated handshake. All blocking I/O runs under the storage worker's serialization
+// (task-safe), so the single shared connection is only ever touched from one context at a time.
 class S3Connection {
  public:
   bool open(const char *host, uint16_t port, uint32_t timeout_ms);
@@ -56,9 +58,27 @@ class S3Connection {
   void close();
   ~S3Connection() { this->close(); }
 
+  // True while the socket (and TLS session, if any) is open and usable for another request. A
+  // request that reads a keep-alive response leaves this true; a Connection: close, an error, or a
+  // dead socket clears it so the caller reconnects.
+  bool is_open() const { return this->sock_ != nullptr; }
+  bool is_tls() const {
+#ifdef USE_CERT_STORE
+    return this->tls_active_;
+#else
+    return false;
+#endif
+  }
+  // Endpoint identity this connection was opened for, so the client can tell a reusable connection
+  // from one that must be torn down because the target changed.
+  const std::string &opened_host() const { return this->opened_host_; }
+  uint16_t opened_port() const { return this->opened_port_; }
+
  private:
   std::unique_ptr<esphome::socket::Socket> sock_;
   uint32_t timeout_ms_{10000};
+  std::string opened_host_;
+  uint16_t opened_port_{0};
 #ifdef USE_CERT_STORE
   bool tls_active_{false};
   mbedtls_ssl_context ssl_{};
@@ -68,6 +88,17 @@ class S3Connection {
   mbedtls_entropy_context entropy_{};
   static int tls_send_(void *ctx, const unsigned char *buf, size_t len);
   static int tls_recv_(void *ctx, unsigned char *buf, size_t len);
+
+ public:
+  // Save this connection's TLS session (after a full handshake) into `out`, and seed the next
+  // handshake from a previously saved session for an abbreviated (resumed) handshake -- the
+  // expensive asymmetric step is skipped when the server honours the ticket/id. Ownership of the
+  // mbedtls_ssl_session stays with the caller (the S3Client, which persists it across reconnects).
+  bool save_session(mbedtls_ssl_session *out) const;
+  void set_resume_session(mbedtls_ssl_session *sess) { this->resume_session_ = sess; }
+
+ private:
+  mbedtls_ssl_session *resume_session_{nullptr};
 #endif
 };
 
@@ -198,6 +229,20 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
 
   bool mount_pending_{false};  // an async_mount submission is in flight
   bool mounted_{false};
+
+  // Persistent connection reused across requests to avoid a fresh TCP+TLS handshake every call.
+  // Owned here, driven only from the worker context (all S3 ops are serialised through the worker),
+  // torn down and rebuilt transparently when the server closes it or it goes stale. conn_valid_
+  // tracks whether conn_ currently holds a usable open connection.
+  S3Connection conn_;
+  bool conn_valid_{false};
+#ifdef USE_CERT_STORE
+  // Saved TLS session for resumption: after the first full handshake we keep the session so a
+  // later reconnect can resume it (abbreviated handshake) instead of paying the full asymmetric
+  // cost again. Valid only while have_session_ is true.
+  mbedtls_ssl_session saved_session_{};
+  bool have_session_{false};
+#endif
   bool was_connected_{false};  // rising-edge tracking for auto_connect (NFS pattern)
   int32_t clock_offset_{0};    // server Date minus local time(), learned at mount()
   char signing_day_[9]{};      // cached key derivation, one HMAC chain per UTC day

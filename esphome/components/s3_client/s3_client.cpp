@@ -64,7 +64,11 @@ bool S3Connection::open(const char *host, uint16_t port, uint32_t timeout_ms) {
   this->sock_->setsockopt(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   int rc = this->sock_->connect(res->ai_addr, res->ai_addrlen);
   freeaddrinfo(res);
-  return rc == 0;
+  if (rc != 0)
+    return false;
+  this->opened_host_ = host;
+  this->opened_port_ = port;
+  return true;
 }
 
 #ifdef USE_CERT_STORE
@@ -136,6 +140,11 @@ bool S3Connection::start_tls(const char *host, const char *ca_entry) {
   if (mbedtls_ssl_set_hostname(&this->ssl_, host) != 0)
     return false;
   mbedtls_ssl_set_bio(&this->ssl_, this, tls_send_, tls_recv_, nullptr);
+  // Seed from a saved session for an abbreviated (resumed) handshake when the client has one from
+  // an earlier full handshake to this endpoint. Harmless if the server declines -- it just falls
+  // back to a full handshake.
+  if (this->resume_session_ != nullptr)
+    mbedtls_ssl_set_session(&this->ssl_, this->resume_session_);
   int ret;
   while ((ret = mbedtls_ssl_handshake(&this->ssl_)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -144,6 +153,18 @@ bool S3Connection::start_tls(const char *host, const char *ca_entry) {
     }
   }
   return true;
+}
+
+bool S3Connection::save_session(mbedtls_ssl_session *out) const {
+#ifdef USE_CERT_STORE
+  if (!this->tls_active_)
+    return false;
+  // Copies the negotiated session (ticket/id + params) into caller-owned storage for later resume.
+  return mbedtls_ssl_get_session(&this->ssl_, out) == 0;
+#else
+  (void) out;
+  return false;
+#endif
 }
 #endif  // USE_CERT_STORE
 
@@ -452,7 +473,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   std::string req = std::string(method) + " " + uri + (query.empty() ? "" : "?" + query) + " HTTP/1.1\r\n" +
                     "Host: " + host + "\r\n" + "x-amz-date: " + std::string(amz_date) + "\r\n" +
                     "x-amz-content-sha256: " + UNSIGNED_PAYLOAD + "\r\n" + "Authorization: " + auth + "\r\n" +
-                    "Connection: close\r\n";
+                    "Connection: keep-alive\r\n";
   if (extra_header != nullptr && extra_header[0] != '\0')
     req += std::string(extra_header) + "\r\n";
   char clen[48];
@@ -460,19 +481,52 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   req += clen;
   req += "\r\n";
 
-  S3Connection conn;
-  if (!conn.open(this->endpoint_.c_str(), this->port_, IO_TIMEOUT_MS))
-    return storage::StorageError::NOT_READY;
+  // Reuse the persistent connection when it is already open to this endpoint; otherwise (first
+  // request, or the previous one closed / errored) open a fresh one. All S3 ops are serialised
+  // through the worker, so conn_ is touched from one context at a time. send failures below mark
+  // the connection invalid so the NEXT request reconnects; a send failure on a REUSED connection
+  // is almost always a server-side idle close, so we transparently reconnect once and retry here.
+  S3Connection &conn = this->conn_;
+  bool reused = this->conn_valid_ && conn.is_open() && conn.opened_host() == this->endpoint_ &&
+                conn.opened_port() == this->port_;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (!reused) {
+      conn.close();
+      this->conn_valid_ = false;
+      if (!conn.open(this->endpoint_.c_str(), this->port_, IO_TIMEOUT_MS))
+        return storage::StorageError::NOT_READY;
 #ifdef USE_CERT_STORE
-  if (this->tls_) {
-    if (!conn.start_tls(host.c_str(), this->ca_entry_.c_str()))
-      return storage::StorageError::NOT_READY;
-  }
+      if (this->tls_) {
+        // Resume a saved TLS session when we have one, for an abbreviated handshake.
+        if (this->have_session_)
+          conn.set_resume_session(&this->saved_session_);
+        if (!conn.start_tls(host.c_str(), this->ca_entry_.c_str())) {
+          conn.close();
+          return storage::StorageError::NOT_READY;
+        }
+        // Keep the negotiated session for the next reconnect.
+        if (this->have_session_) {
+          mbedtls_ssl_session_free(&this->saved_session_);
+          this->have_session_ = false;
+        }
+        mbedtls_ssl_session_init(&this->saved_session_);
+        if (conn.save_session(&this->saved_session_))
+          this->have_session_ = true;
+      }
 #endif
-  if (!conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()))
-    return storage::StorageError::WRITE_ERROR;
-  if (body_len > 0 && !conn.send_all(body, body_len))
-    return storage::StorageError::WRITE_ERROR;
+      this->conn_valid_ = true;
+    }
+    if (conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()) &&
+        (body_len == 0 || conn.send_all(body, body_len)))
+      break;  // sent; proceed to read the response
+    // Send failed. If this was a reused connection, the server likely idle-closed it -- drop it and
+    // retry once with a fresh connection. If it was already fresh, give up.
+    conn.close();
+    this->conn_valid_ = false;
+    if (!reused)
+      return storage::StorageError::WRITE_ERROR;
+    reused = false;  // force a fresh open on the retry pass
+  }
 
   // ---- response: status line + headers ----
   std::string head;
@@ -510,6 +564,14 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   if (!v.empty()) {
     r.has_content_length = true;
     r.content_length = strtoull(v.c_str(), nullptr, 10);
+  }
+  v = header_val("Connection");
+  if (!v.empty()) {
+    std::string lower = v;
+    for (auto &cc : lower)
+      cc = static_cast<char>(tolower(static_cast<unsigned char>(cc)));
+    if (lower.find("close") != std::string::npos)
+      r.close_requested = true;
   }
   v = header_val("Transfer-Encoding");
   if (v.find("chunked") != std::string::npos)
@@ -592,8 +654,11 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     uint64_t remaining = r.has_content_length ? r.content_length : UINT64_MAX;
     while (remaining > 0) {
       int n = conn.recv_some(buf, static_cast<size_t>(std::min<uint64_t>(remaining, sizeof(buf))));
-      if (n < 0)
+      if (n < 0) {
+        conn.close();
+        this->conn_valid_ = false;
         return storage::StorageError::READ_ERROR;
+      }
       if (n == 0)
         break;  // Connection: close delimits the body when no length was sent
       if (!consume(buf, static_cast<size_t>(n)))
@@ -602,6 +667,12 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       App.feed_wdt();
     }
   }
+  // The full response has been read. Keep the connection open for the next request unless the
+  // server asked to close it; mid-response read errors drop the connection at their own return
+  // points, so here only the clean Connection: close case remains to handle.
+  if (r.close_requested)
+    this->conn_valid_ = false;
+
   if (r.status == 403 && !retrying_skew && err_body.find("RequestTimeTooSkewed") != std::string::npos &&
       r.date_epoch != 0) {
     // The offset was already refreshed above from this response's Date; sign again with it once.
@@ -1160,6 +1231,15 @@ storage::StorageError S3Client::unmount() {
   if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->quiesce_storage(this);
   storage::StorageError err = this->flush_episode_();
+  // Drop the persistent connection and any saved TLS session -- a later mount reconnects fresh.
+  this->conn_.close();
+  this->conn_valid_ = false;
+#ifdef USE_CERT_STORE
+  if (this->have_session_) {
+    mbedtls_ssl_session_free(&this->saved_session_);
+    this->have_session_ = false;
+  }
+#endif
   this->mounted_ = false;
   ESP_LOGI(TAG, "unmounted s3://%s", this->bucket_.c_str());
   return err;
