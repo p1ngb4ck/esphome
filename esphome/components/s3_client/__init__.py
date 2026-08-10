@@ -31,6 +31,7 @@ CONF_ACCESS_KEY = "access_key"
 CONF_SECRET_KEY = "secret_key"
 CONF_MOUNT_PATH = "mount_path"
 CONF_PATH_STYLE = "path_style"
+CONF_BASE_PATH = "base_path"
 CONF_AUTO_CONNECT = "auto_connect"
 CONF_TLS = "tls"
 CONF_CA = "ca"
@@ -53,6 +54,34 @@ def _default_port(config):
     return config
 
 
+def _validate_endpoint(endpoint):
+    # endpoint must be a bare host (optionally with a port handled separately); a scheme or a path
+    # here is the classic mistake that made getaddrinfo see "host/prefix/". Point the user at
+    # base_path for the prefix.
+    e = cv.string(endpoint)
+    if "://" in e:
+        raise cv.Invalid("endpoint must be a bare host without a scheme (no http:// or https://)")
+    if "/" in e:
+        raise cv.Invalid(
+            "endpoint must be a bare host without a path -- put a reverse-proxy prefix in "
+            "'base_path' instead (e.g. base_path: /shop-files)"
+        )
+    return e
+
+
+def _normalise_base_path(value):
+    # Default and canonical form: leading '/', no trailing '/'. "/" (or "") means no prefix and is
+    # stored as "" so the C++ side joins parts with single slashes (never "//").
+    s = cv.string(value).strip()
+    if s in ("", "/"):
+        return ""
+    if not s.startswith("/"):
+        s = "/" + s
+    while s.endswith("/"):
+        s = s[:-1]
+    return s
+
+
 def _validate_tls(config):
     # A CA entry is optional: with tls and no ca, cert_store falls back to the built-in Mozilla
     # bundle, which covers public CAs like Let's Encrypt. A named ca selects a specific cert_store
@@ -65,7 +94,7 @@ def _validate_tls(config):
 S3_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(S3Client),
-        cv.Required(CONF_ENDPOINT): cv.string,
+        cv.Required(CONF_ENDPOINT): _validate_endpoint,
         cv.Optional(CONF_PORT): cv.port,
         cv.Required(CONF_BUCKET): cv.string,
         cv.Optional(CONF_REGION, default="us-east-1"): cv.string,
@@ -74,6 +103,9 @@ S3_SCHEMA = cv.Schema(
         cv.Required(CONF_MOUNT_PATH): validate_mount_path,
         # MinIO and most self-hosted S3 servers require path-style addressing; AWS accepts it.
         cv.Optional(CONF_PATH_STYLE, default=True): cv.boolean,
+        # Path prefix the endpoint sits behind on a reverse proxy (e.g. /shop-files).
+        # Default "/" means the bucket is at the server root.
+        cv.Optional(CONF_BASE_PATH, default="/"): _normalise_base_path,
         cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
         cv.Optional(CONF_TLS, default=True): cv.boolean,
         cv.Optional(CONF_CA): cv.string,
@@ -113,6 +145,7 @@ async def to_code(config):
         cg.add(var.set_access_key(share[CONF_ACCESS_KEY]))
         cg.add(var.set_secret_key(share[CONF_SECRET_KEY]))
         cg.add(var.set_path_style(share[CONF_PATH_STYLE]))
+        cg.add(var.set_base_path(share[CONF_BASE_PATH]))
         cg.add(var.set_auto_connect(share[CONF_AUTO_CONNECT]))
         # The gateway gates the setter: set_tls()/set_ca_entry() exist only under
         # USE_CERT_STORE, which is present exactly when some share enables TLS -- so the
