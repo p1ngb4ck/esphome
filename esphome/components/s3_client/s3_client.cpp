@@ -2,6 +2,9 @@
 #ifdef USE_ESP_IDF
 
 #include "esphome/components/storage/storage.h"
+#ifdef USE_STORAGE_WORKER
+#include "esphome/components/storage/storage_worker.h"
+#endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
@@ -369,7 +372,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
                                          const uint8_t *body, size_t body_len, const char *extra_header, uint8_t *out,
                                          size_t out_cap, size_t *out_len, std::string *accum, size_t accum_limit,
                                          HttpResponse *resp) {
-  if (!this->mounted_)
+  if (!this->ensure_mounted_())
     return storage::StorageError::NOT_READY;
   std::string host = this->host_();
   std::string uri = this->uri_for_(key_enc);
@@ -940,9 +943,22 @@ storage::StorageError S3Client::get_info(storage::StorageInfo *info) {
   return storage::StorageError::OK;
 }
 
+bool S3Client::ensure_mounted_() {
+  if (this->mounted_)
+    return true;
+  // Data-plane calls already execute on the worker (task or loop engine), so a direct blocking
+  // mount() here runs in that same context -- never as a surprise stall on the main loop. The
+  // caller wanted this share now; one bounded inline attempt is the nfs_client contract.
+  return this->mount() == storage::StorageError::OK;
+}
+
 storage::StorageError S3Client::mount() {
   if (this->mounted_)
     return storage::StorageError::OK;
+  // One synchronous blocking probe. Callers route this through the worker's async_mount()
+  // (see loop()/ensure_mounted_()), so on a worker build this body executes on the WORKER
+  // TASK -- the main loop stays free no matter how long resolve/connect/TLS take. Without a
+  // worker the direct call remains one bounded attempt, nfs_client-style.
   // Probe the endpoint and learn the server clock: SigV4 tolerates only ~15 minutes of skew and
   // a node without an SNTP source has no idea what time it is. The unauthenticated probe's 403
   // still carries a Date: header -- that is all we need.
@@ -1018,10 +1034,25 @@ void S3Client::setup() {
 }
 
 void S3Client::loop() {
-  // auto_connect: one mount attempt on each rising edge of network connectivity (NFS pattern).
+  // auto_connect: ONE mount attempt per rising edge of network connectivity (NFS pattern).
+  // The attempt goes through the worker's async_mount(), so resolve/connect/TLS/probe run on
+  // the worker task -- the loop only submits. Direct call only without a worker in the build.
   bool connected = esphome::network::is_connected();
-  if (this->auto_connect_ && connected && !this->was_connected_ && !this->mounted_)
+  if (this->auto_connect_ && connected && !this->was_connected_ && !this->mounted_ && !this->mount_pending_) {
+#ifdef USE_STORAGE_WORKER
+    if (storage::global_storage_worker != nullptr) {
+      this->mount_pending_ = true;
+      storage::StorageError sub = storage::global_storage_worker->async_mount(
+          this, [this](storage::StorageError /*err*/) { this->mount_pending_ = false; });
+      if (sub != storage::StorageError::OK)
+        this->mount_pending_ = false;
+    } else {
+      this->mount();
+    }
+#else
     this->mount();
+#endif
+  }
   this->was_connected_ = connected;
   // Idle safety net: an episode nobody ended (e.g. a caller that never reads back) uploads after
   // a quiet period, so data cannot sit in RAM indefinitely.

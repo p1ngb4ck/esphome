@@ -181,6 +181,13 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   std::string ca_entry_;
 #endif
 
+  // mount() is one synchronous blocking probe -- and it never runs on the main loop when a
+  // worker exists: loop()'s auto-connect and ensure_mounted_() route it through the worker's
+  // async_mount() (the async_format shape), so resolve/connect/TLS/probe happen on the worker
+  // task. A direct call remains only as the no-worker fallback.
+  bool ensure_mounted_();
+
+  bool mount_pending_{false};  // an async_mount submission is in flight
   bool mounted_{false};
   bool was_connected_{false};  // rising-edge tracking for auto_connect (NFS pattern)
   int32_t clock_offset_{0};    // server Date minus local time(), learned at mount()
