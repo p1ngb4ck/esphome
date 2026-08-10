@@ -431,7 +431,7 @@ StorageError StorageWorker::async_raw_erase(RawStorage *device, uint64_t address
                            job_out, force_sliced);
 }
 
-StorageError StorageWorker::submit_control_op_(RequestOp op, Storage *target, CompletionCallback &&on_done,
+StorageError StorageWorker::submit_control_op_(RequestOp op, PathStorage *target, CompletionCallback &&on_done,
                                                TransferJob *job_out) {
   this->ensure_started_();
   TransferRequest *slot = nullptr;
