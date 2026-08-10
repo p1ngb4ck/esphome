@@ -163,7 +163,8 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   // ---- SigV4 ----
   void signing_key_(const char *yyyymmdd, uint8_t out[32]);
   std::string authorization_(const char *method, const std::string &canonical_uri, const std::string &query,
-                             const std::string &host, const char *amz_date, const char *yyyymmdd);
+                             const std::string &host, const char *amz_date, const char *yyyymmdd,
+                             const char *amz_name = nullptr, const char *amz_value = nullptr);
   uint32_t now_epoch_() const;
 
   std::string endpoint_;
