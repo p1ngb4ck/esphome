@@ -6,9 +6,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/string_ref.h"
 #include "esphome/components/storage/storage.h"
 // Reads run through the storage worker's async stream API (part of the storage interface). Codegen
@@ -17,12 +19,14 @@
 #include "esphome/components/storage/storage_worker.h"
 #endif
 
+#include "mbedtls/ssl.h"
+#include "mbedtls/x509_crt.h"
+
 namespace esphome {
 namespace cert_store {
 
-// What a stored blob is, so consumers and validation can treat it correctly. The bytes are always
-// available raw; the kind only decides what (if anything) is validated and how it is meant to be
-// used.
+// What a stored blob is, so consumers and validation can treat it correctly. The kind decides what
+// (if anything) is validated and how the bytes are meant to be used.
 enum class CertKind : uint8_t {
   CA,              // trust anchor(s), PEM/DER -- x509-validated
   CLIENT_CERT,     // own certificate for mutual TLS, PEM/DER -- x509-validated
@@ -33,85 +37,105 @@ enum class CertKind : uint8_t {
   RAW,             // anything else -- just bytes
 };
 
+// Where an entry's bytes come from.
+enum class CertSource : uint8_t {
+  EMBEDDED,  // compile-time PEM literal in flash (.rodata) -- parsed in place, never held in RAM
+  STORAGE,   // a file on a mounted storage, read on demand through the worker stream API
+};
+
 const char *cert_kind_to_string(CertKind kind);
 
-// A central, storage-backed cert/key store. Every entry names a file by its full VFS path; the store
-// loads it ONCE through the storage worker (the registry resolves which storage the path lives on --
-// no manual storage selection), caches it in RAM NUL-terminated (so PEM consumers get a ready
-// C-string), validates certificates with mbedTLS, and hands it out by id. It never re-implements any
-// storage operation -- resolution, mounting and the read all belong to the storage component.
+// A central cert/key store built entirely on the storage interface. Nothing is cached: an entry is
+// materialised only for the moment it is used, then released. There are three ways an entry's bytes
+// reach mbedTLS, all handled transparently for the consumer:
+//   - EMBEDDED: the PEM is a flash string literal; mbedTLS parses it straight out of .rodata.
+//   - STORAGE:  the bytes are streamed on demand through the storage worker into one short-lived
+//               RAMAllocator buffer that is freed the instant the parse finishes.
+//   - the built-in esp_crt_bundle (the Mozilla roots ESP-IDF ships): the default trust anchor when
+//     a CA is requested without naming an entry.
+// It never re-implements any storage operation -- resolution, mounting and the read all belong to
+// the storage component and its worker.
 //
 // Single instance: consumers reach it through global_cert_store (below), so they never name it.
 class CertStore : public Component {
  public:
+  // Fired when apply_ca_async() has finished (or failed): OK means the ssl config now trusts the
+  // requested anchor and the handshake may proceed.
+  using ApplyCallback = std::function<void(storage::StorageError)>;
+
   struct Entry {
-    const char *id;    // handle used by find()/consumers
+    const char *id;
     CertKind kind;
-    const char *path;  // full VFS path; the registry resolves which storage it lives on
-    // Runtime state, filled once the file is read:
-    uint8_t *data{nullptr};  // NUL-terminated cache (data[len] == 0); owned for the run
-    size_t len{0};           // content length, excluding the terminating NUL
-    bool loaded{false};
-    bool valid{false};   // x509-parsed OK for CA/CLIENT_CERT; true for kinds that are not validated
-    bool warned{false};  // so a missing file does not log every retry
+    CertSource source;
+    // EMBEDDED: NUL-terminated PEM literal in flash; len excludes the NUL. STORAGE: unused.
+    const char *embedded_data;
+    size_t embedded_len;
+    // STORAGE: full VFS path; the registry resolves which storage it lives on. EMBEDDED: unused.
+    const char *path;
   };
 
   void setup() override;
-  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::LATE; }
 
-  // Codegen emits one call per configured entry. The id/path are string literals in the generated
-  // code, so the store never owns them.
-  void add_entry(const char *id, CertKind kind, const char *path) {
-    this->entries_.push_back(Entry{id, kind, path});
+  // Codegen emits one call per configured entry. All strings are literals in the generated code,
+  // so the store never owns them.
+  void add_embedded(const char *id, CertKind kind, const char *data, size_t len) {
+    this->entries_.push_back(Entry{id, kind, CertSource::EMBEDDED, data, len, nullptr});
+  }
+  void add_storage(const char *id, CertKind kind, const char *path) {
+    this->entries_.push_back(Entry{id, kind, CertSource::STORAGE, nullptr, 0, path});
   }
 
-  // Handle lookup. Returns nullptr when the id is unknown or the entry is not loaded yet.
   const Entry *find(StringRef id) const;
-  // NUL-terminated bytes of a loaded entry (or nullptr); *len_out gets the content length.
-  const uint8_t *get(StringRef id, size_t *len_out = nullptr) const;
-  // PEM/text convenience: the NUL-terminated bytes as a C-string (mbedTLS / esp-tls / libssh2 all
-  // take const char *), or nullptr when the id is unknown or not loaded yet.
-  const char *str(StringRef id) const {
-    const Entry *entry = this->find(id);
-    return entry != nullptr ? reinterpret_cast<const char *>(entry->data) : nullptr;
-  }
 
-  // True once every configured entry is loaded.
-  bool ready() const { return this->ready_; }
+  // Configure `conf` to trust the CA named by `id`, then invoke on_done. Everything is handled
+  // here so no consumer re-implements it:
+  //   - id empty or unknown  -> the built-in esp_crt_bundle (immediate)
+  //   - EMBEDDED entry       -> parse from flash into `ca_out` (immediate)
+  //   - STORAGE entry        -> stream through the worker into a short-lived buffer, parse into
+  //                             `ca_out`, free the buffer; on_done fires from the stream
+  //                             completion (never blocks the loop)
+  // `ca_out` is owned by the consumer (its S3Connection etc.) and freed with the rest of its TLS
+  // context; the cert_store keeps nothing. For the bundle path `ca_out` is left untouched.
+  void apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out, StringRef id, ApplyCallback &&on_done);
 
  protected:
-  // Marks ready_ + stops polling once every entry has landed.
-  void finish_if_complete_();
-  // mbedTLS x509 parse-check for CA/CLIENT_CERT; other kinds are accepted as-is.
-  static bool validate_(const Entry &entry);
+  // Parse a complete PEM/DER (NUL-terminated, len excludes the NUL) into ca_out and attach it to
+  // conf as the trust chain. Shared by the EMBEDDED and STORAGE paths.
+  static storage::StorageError attach_parsed_(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_out,
+                                              const uint8_t *data, size_t len);
+  // Attach the built-in Mozilla bundle to conf (the default trust anchor).
+  static storage::StorageError attach_bundle_(mbedtls_ssl_config *conf);
 
 #ifdef USE_STORAGE_WORKER
-  // One entry is read at a time through the worker's async stream API (begin_read/read_chunk/
-  // end_read): the worker runs it on its task for task-safe media, loop-sliced otherwise, and never
-  // touches the storage directly from here. Read runs until EOF into a growing buffer.
-  void start_load_(size_t index);
+  // One STORAGE apply at a time: the worker stream is a single shared resource. A second request
+  // while one is in flight is rejected NOT_READY (TLS setup is serialised per connection, so this
+  // does not happen in practice).
   void issue_read_();
   void on_open_(storage::StorageError err);
   void on_read_(storage::StorageError err);
   void on_closed_(storage::StorageError err);
-  void abandon_load_(const char *reason, storage::StorageError err);
+  void finish_storage_(storage::StorageError err);
+  void release_buffer_();
 #endif
 
   std::vector<Entry> entries_;
-  bool ready_{false};
-  uint32_t last_try_ms_{0};
 
 #ifdef USE_STORAGE_WORKER
-  static constexpr size_t NO_LOAD = SIZE_MAX;
-  size_t loading_{NO_LOAD};
+  // In-flight STORAGE apply state. Buffer and stream exist only between apply_ca_async() and its
+  // on_done; release_buffer_() returns the RAM the moment the parse (or a failure) is done.
+  bool applying_{false};
+  mbedtls_ssl_config *apply_conf_{nullptr};
+  mbedtls_x509_crt *apply_ca_{nullptr};
+  ApplyCallback apply_cb_;
   storage::StreamHandle stream_{};
   bool stream_open_{false};
-  uint8_t *pending_buf_{nullptr};  // grows (doubling) as chunks arrive; +1 slack for the NUL
-  size_t pending_len_{0};          // allocated capacity of pending_buf_
-  size_t pending_off_{0};          // bytes read so far
-  size_t last_read_{0};            // read_chunk() writes the last chunk size here
+  RAMAllocator<uint8_t> alloc_{};
+  uint8_t *buf_{nullptr};
+  size_t buf_cap_{0};
+  size_t buf_off_{0};
+  size_t last_read_{0};
 #endif
 };
 
