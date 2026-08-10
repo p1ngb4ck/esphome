@@ -961,17 +961,43 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
     // handle that generically, so a flat rename() keeps to single objects.
     return storage::StorageError::NOT_SUPPORTED;
   }
-  // Server-side copy, then delete the source -- no data through the device.
-  std::string src_hdr = "x-amz-copy-source: /" + this->bucket_ + "/" + uri_encode_(old_key.c_str(), true);
-  std::string new_enc = uri_encode_(new_key.c_str(), true);
-  HttpResponse r{};
-  err = this->request_("PUT", new_enc, "", nullptr, 0, src_hdr.c_str(), nullptr, 0, nullptr, nullptr, 0, &r);
+  // Copy the object through the interface primitives (GET the source, PUT it under the new
+  // key via a write episode) and delete the source -- the same read_chunk/write_chunk/remove
+  // path the worker's cross-device copy uses, which is proven to work against the server.
+  // A server-side CopyObject (x-amz-copy-source) would be cheaper but is deliberately avoided:
+  // it is the only operation that needs an extra signed header, and the object here is small
+  // (this backs the staged-upload finalize rename, a handful of bytes to a few KB). st.size is
+  // known from the stat above.
+  err = this->truncate(new_path, 0);  // opens a write episode for the new key
   if (err != storage::StorageError::OK)
     return err;
-  err = this->map_status_(r.status);
+  uint64_t copied = 0;
+  while (copied < st.size) {
+    uint8_t buf[2048];
+    size_t want = static_cast<size_t>(st.size - copied < sizeof(buf) ? st.size - copied : sizeof(buf));
+    size_t got = 0;
+    err = this->read_chunk(old_path, buf, copied, want, &got);
+    if (err != storage::StorageError::OK) {
+      this->drop_episode_();
+      return err;
+    }
+    if (got == 0)
+      break;
+    if (!this->episode_reserve_(this->episode_.size + got)) {
+      this->drop_episode_();
+      return storage::StorageError::NO_SPACE;
+    }
+    memcpy(this->episode_.data + this->episode_.size, buf, got);
+    this->episode_.size += got;
+    copied += got;
+    App.feed_wdt();
+  }
+  err = this->flush_episode_();  // one PUT of the new object -- the path copy already exercises
   if (err != storage::StorageError::OK)
     return err;
+  // Source gone only after the destination is safely written.
   std::string old_enc = uri_encode_(old_key.c_str(), true);
+  HttpResponse r{};
   err = this->request_("DELETE", old_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
   if (err != storage::StorageError::OK)
     return err;
