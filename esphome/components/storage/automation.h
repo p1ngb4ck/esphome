@@ -168,7 +168,7 @@ bool apply_extract_step(const ExtractStep &step, std::string &buf);
 // ===========================================================================
 
 // Non-template workers for the actions below -- all error logging lives in the .cpp.
-void perform_mount(MountableStorage *target, bool mount);
+void perform_mount(PathStorage *target, bool mount);
 void perform_format_async(FilesystemStorage *target, Trigger<std::string> *on_complete);
 // Returns the error so the no-worker fallback in perform_file_copy_async() can report it --
 // on_complete's contract is "error text, empty = success", which a void return cannot honour.
@@ -455,12 +455,15 @@ template<typename... Ts> class FileExistsCondition : public Condition<Ts...> {
 
 template<typename... Ts> class MountAction : public Action<Ts...> {
  public:
-  explicit MountAction(MountableStorage *target, bool mount) : target_(target), mount_(mount) {}
+  // Takes the PathStorage side (codegen passes the concrete driver, which is both): the worker
+  // routing needs it, and perform_mount() derives MountableStorage via as_mountable() -- the
+  // Python schema guarantees the parent, so the hook is never null for configured targets.
+  explicit MountAction(PathStorage *target, bool mount) : target_(target), mount_(mount) {}
 
   void play(const Ts &...x) override { perform_mount(this->target_, this->mount_); }
 
  protected:
-  MountableStorage *target_;
+  PathStorage *target_;
   bool mount_;
 };
 

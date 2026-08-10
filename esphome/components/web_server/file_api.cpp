@@ -645,7 +645,27 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
       found_not_mountable = true;
       return;
     }
-    err = mount ? m->mount() : m->unmount();
+    if (mount) {
+#ifdef USE_STORAGE_WORKER
+      // Async-first: the worker routes the blocking mount work per driver capability (task for
+      // task-safe media, loop-sliced otherwise). The HTTP reply only acknowledges the request;
+      // the storages poll and the change feed pick up the state flip when the mount completes.
+      if (storage::global_storage_worker != nullptr) {
+        err = storage::global_storage_worker->async_mount(
+            ps,
+            [](storage::StorageError r) {
+              if (r == storage::StorageError::OK && storage::global_storage_registry != nullptr)
+                storage::global_storage_registry->note_dir_changed("");  // roots level: a mount arrived
+            },
+            nullptr);
+        return;
+      }
+#endif
+      err = m->mount();
+    } else {
+      // Unmount stays synchronous: the driver's quiesce drain is owned by the main loop.
+      err = m->unmount();
+    }
     if (err == storage::StorageError::OK)
       storage::global_storage_registry->note_dir_changed("");  // the roots level: a mount came or went
   });
