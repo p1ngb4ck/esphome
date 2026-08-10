@@ -317,17 +317,19 @@ std::string S3Client::uri_encode_(const char *s, bool keep_slash) {
 }
 
 std::string S3Client::host_() const {
-  if (this->path_style_)
-    return this->endpoint_;
-  return this->bucket_ + "." + this->endpoint_;
+  // The host is the endpoint, full stop -- where the client connects and what goes in the Host
+  // header and TLS SNI. For a reverse proxy that is the proxy address. The bucket is S3 protocol
+  // data and has nothing to do with the endpoint.
+  return this->endpoint_;
 }
 
 std::string S3Client::uri_for_(const std::string &key_enc) const {
-  // base_path_ is already normalised (starts with '/', no trailing '/', empty means none), so the
-  // parts join with single slashes -- never "//", which some proxies and SigV4 verifiers reject.
-  if (this->path_style_)
-    return this->base_path_ + "/" + this->bucket_ + "/" + key_enc;
-  return this->base_path_ + "/" + key_enc;
+  // The request path is S3 protocol data, independent of the endpoint: base_path (the proxy
+  // location the endpoint sits behind, empty when none) + the bucket, addressed path-style, + the
+  // key. This exact string is both sent on the wire and signed as the canonical URI, so the
+  // signature always matches what is sent. base_path_ is normalised (leading '/', no trailing '/'),
+  // so parts join with single slashes and never become "//".
+  return this->base_path_ + "/" + this->bucket_ + "/" + key_enc;
 }
 
 uint32_t S3Client::now_epoch_() const {
