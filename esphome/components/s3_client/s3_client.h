@@ -69,7 +69,9 @@ class S3Connection {
 #endif
 };
 
-class S3Client final : public Component, public storage::NetworkStorage, public storage::MountableStorage {
+// NetworkStorage already derives from Component via storage::Storage -- adding Component
+// directly again would create an ambiguous (diamond) base.
+class S3Client final : public storage::NetworkStorage, public storage::MountableStorage {
  public:
   void setup() override;
   void loop() override;
@@ -173,7 +175,9 @@ class S3Client final : public Component, public storage::NetworkStorage, public 
   bool path_style_{true};
   bool auto_connect_{true};
 #ifdef USE_CERT_STORE
-  bool tls_{true};
+  // Default off: the codegen gateway emits set_tls(true) only for shares with tls enabled
+  // (cert_store and this define exist exactly then); plain-http shares get no call.
+  bool tls_{false};
   std::string ca_entry_;
 #endif
 
