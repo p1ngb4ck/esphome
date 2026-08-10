@@ -81,6 +81,10 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_endpoint(const std::string &endpoint) { this->endpoint_ = endpoint; }
+  // Optional path prefix the endpoint sits behind (a reverse proxy exposing the bucket under a
+  // location, e.g. "/shop-files"). Normalised to start with '/' and not end with one; "/" means
+  // no prefix. The endpoint stays a bare host.
+  void set_base_path(const std::string &base_path) { this->base_path_ = base_path; }
   void set_port(uint16_t port) { this->port_ = port; }
   void set_bucket(const std::string &bucket) { this->bucket_ = bucket; }
   void set_region(const std::string &region) { this->region_ = region; }
@@ -170,6 +174,7 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   uint32_t now_epoch_() const;
 
   std::string endpoint_;
+  std::string base_path_;  // normalised prefix, empty for "/" (no prefix)
   uint16_t port_{443};
   std::string bucket_;
   std::string region_{"us-east-1"};

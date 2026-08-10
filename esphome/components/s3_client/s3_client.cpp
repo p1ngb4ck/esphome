@@ -323,9 +323,11 @@ std::string S3Client::host_() const {
 }
 
 std::string S3Client::uri_for_(const std::string &key_enc) const {
+  // base_path_ is already normalised (starts with '/', no trailing '/', empty means none), so the
+  // parts join with single slashes -- never "//", which some proxies and SigV4 verifiers reject.
   if (this->path_style_)
-    return "/" + this->bucket_ + "/" + key_enc;
-  return "/" + key_enc;
+    return this->base_path_ + "/" + this->bucket_ + "/" + key_enc;
+  return this->base_path_ + "/" + key_enc;
 }
 
 uint32_t S3Client::now_epoch_() const {
@@ -1094,7 +1096,10 @@ storage::StorageError S3Client::mount() {
       return storage::StorageError::NOT_READY;
   }
 #endif
-  std::string req = "GET / HTTP/1.1\r\nHost: " + this->host_() + "\r\nConnection: close\r\n\r\n";
+  // Probe the proxied prefix, not "/": behind a reverse proxy "/" is the front site, not the
+  // bucket endpoint. base_path_ empty -> "/". This request is unsigned (reachability + clock only).
+  std::string probe_path = this->base_path_.empty() ? "/" : this->base_path_ + "/";
+  std::string req = "GET " + probe_path + " HTTP/1.1\r\nHost: " + this->host_() + "\r\nConnection: close\r\n\r\n";
   if (!conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()))
     return storage::StorageError::WRITE_ERROR;
   std::string head;
