@@ -535,15 +535,21 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   // Read byte-wise until the blank line; header sections are tiny compared to any payload.
   while (head.size() < 4096) {
     int n = conn.recv_some(&ch, 1);
-    if (n <= 0)
+    if (n <= 0) {
+      conn.close();
+      this->conn_valid_ = false;
       return storage::StorageError::READ_ERROR;
+    }
     head += static_cast<char>(ch);
     if (head.size() >= 4 && head.compare(head.size() - 4, 4, "\r\n\r\n") == 0)
       break;
   }
   HttpResponse r{};
-  if (sscanf(head.c_str(), "HTTP/%*d.%*d %d", &r.status) != 1)
+  if (sscanf(head.c_str(), "HTTP/%*d.%*d %d", &r.status) != 1) {
+    conn.close();
+    this->conn_valid_ = false;
     return storage::StorageError::READ_ERROR;
+  }
   // Header lines of interest (case per S3/MinIO practice; fall back to lowercase probes).
   auto header_val = [&head](const char *name) -> std::string {
     size_t pos = 0;
@@ -620,14 +626,25 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     return true;  // beyond out_cap: drain silently
   };
   uint8_t buf[512];
-  if (r.chunked) {
+  // Responses that carry no body per HTTP, regardless of any Content-Length header: HEAD requests,
+  // 204 No Content, 304 Not Modified, and 1xx. Reading a body here would block forever on a
+  // keep-alive connection the server holds open after the (empty) response. stat()'s HEAD sends
+  // Content-Length equal to the object size with NO body -- exactly this case.
+  bool no_body = (strcmp(method, "HEAD") == 0) || r.status == 204 || r.status == 304 ||
+                 (r.status >= 100 && r.status < 200);
+  if (no_body) {
+    // nothing to read; connection stays reusable (unless close_requested, handled below)
+  } else if (r.chunked) {
     // HTTP/1.1 chunked decoding: size line (hex), payload, CRLF, repeated; 0-chunk terminates.
     for (;;) {
       std::string line;
       while (line.size() < 32) {
         int n = conn.recv_some(&ch, 1);
-        if (n <= 0)
+        if (n <= 0) {
+          conn.close();
+          this->conn_valid_ = false;
           return storage::StorageError::READ_ERROR;
+        }
         line += static_cast<char>(ch);
         if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0)
           break;
@@ -640,18 +657,25 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       }
       while (chunk > 0) {
         int n = conn.recv_some(buf, std::min(chunk, sizeof(buf)));
-        if (n <= 0)
+        if (n <= 0) {
+          conn.close();
+          this->conn_valid_ = false;
           return storage::StorageError::READ_ERROR;
+        }
         if (!consume(buf, static_cast<size_t>(n)))
           return storage::StorageError::NO_SPACE;
         chunk -= static_cast<size_t>(n);
       }
       uint8_t crlf[2];
-      if (conn.recv_some(crlf, 2) <= 0)
+      if (conn.recv_some(crlf, 2) <= 0) {
+        conn.close();
+        this->conn_valid_ = false;
         return storage::StorageError::READ_ERROR;
+      }
     }
-  } else {
-    uint64_t remaining = r.has_content_length ? r.content_length : UINT64_MAX;
+  } else if (r.has_content_length) {
+    // Known length: read exactly that many bytes; the connection stays reusable.
+    uint64_t remaining = r.content_length;
     while (remaining > 0) {
       int n = conn.recv_some(buf, static_cast<size_t>(std::min<uint64_t>(remaining, sizeof(buf))));
       if (n < 0) {
@@ -659,13 +683,37 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
         this->conn_valid_ = false;
         return storage::StorageError::READ_ERROR;
       }
-      if (n == 0)
-        break;  // Connection: close delimits the body when no length was sent
+      if (n == 0) {
+        // Peer closed before the full body arrived -- truncated. Drop the connection.
+        conn.close();
+        this->conn_valid_ = false;
+        break;
+      }
       if (!consume(buf, static_cast<size_t>(n)))
         return storage::StorageError::NO_SPACE;
       remaining -= static_cast<uint64_t>(n);
       App.feed_wdt();
     }
+  } else {
+    // Neither Content-Length nor chunked: the body is delimited only by the server closing the
+    // connection, which is incompatible with keep-alive (a read would block forever on a connection
+    // the server holds open). Read until close, then force the connection shut so it is never
+    // reused. Defensive -- S3/SeaweedFS always sends a length or chunked for bodies.
+    for (;;) {
+      int n = conn.recv_some(buf, sizeof(buf));
+      if (n < 0) {
+        conn.close();
+        this->conn_valid_ = false;
+        return storage::StorageError::READ_ERROR;
+      }
+      if (n == 0)
+        break;
+      if (!consume(buf, static_cast<size_t>(n)))
+        return storage::StorageError::NO_SPACE;
+      App.feed_wdt();
+    }
+    conn.close();
+    this->conn_valid_ = false;
   }
   // The full response has been read. Keep the connection open for the next request unless the
   // server asked to close it; mid-response read errors drop the connection at their own return
