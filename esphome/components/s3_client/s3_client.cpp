@@ -381,7 +381,7 @@ storage::StorageError S3Client::map_status_(int status) const {
 storage::StorageError S3Client::request_(const char *method, const std::string &key_enc, const std::string &query,
                                          const uint8_t *body, size_t body_len, const char *extra_header, uint8_t *out,
                                          size_t out_cap, size_t *out_len, std::string *accum, size_t accum_limit,
-                                         HttpResponse *resp) {
+                                         HttpResponse *resp, bool retrying_skew) {
   if (!this->ensure_mounted_())
     return storage::StorageError::NOT_READY;
   std::string host = this->host_();
@@ -491,8 +491,15 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   if (v.find("chunked") != std::string::npos)
     r.chunked = true;
   v = header_val("Date");
-  if (!v.empty())
+  if (!v.empty()) {
     r.date_epoch = parse_http_date(v.c_str());
+    // Keep the clock offset fresh from every response: a node without SNTP has no real time,
+    // and if SNTP later steps the clock the offset learned at mount would drift. Cheap and
+    // self-correcting -- the next request always signs against the server's own clock.
+    if (r.date_epoch != 0)
+      this->clock_offset_ = static_cast<int32_t>(static_cast<int64_t>(r.date_epoch) -
+                                                 static_cast<int64_t>(::time(nullptr)));
+  }
   v = header_val("Last-Modified");
   if (!v.empty())
     r.last_modified_epoch = parse_http_date(v.c_str());
@@ -570,6 +577,13 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       remaining -= static_cast<uint64_t>(n);
       App.feed_wdt();
     }
+  }
+  if (r.status == 403 && !retrying_skew && err_body.find("RequestTimeTooSkewed") != std::string::npos &&
+      r.date_epoch != 0) {
+    // The offset was already refreshed above from this response's Date; sign again with it once.
+    ESP_LOGD(TAG, "retrying after clock-skew correction (offset now %" PRId32 " s)", this->clock_offset_);
+    return this->request_(method, key_enc, query, body, body_len, extra_header, out, out_cap, out_len, accum,
+                          accum_limit, resp, true);
   }
   if (r.status >= 400 && !err_body.empty())
     ESP_LOGW(TAG, "%s %s -> %d: %.200s", method, uri.c_str(), r.status, err_body.c_str());
