@@ -87,7 +87,9 @@ S3_SCHEMA = cv.Schema(
 
 CONFIG_SCHEMA = cv.All(
     cv.ensure_list(S3_SCHEMA, _default_port, _validate_tls),
-    cv.only_with_esp_idf,
+    # only_with_esp_idf does not exist as a prebuilt alias (only only_with_arduino does);
+    # the generic form takes the Framework enum.
+    cv.only_with_framework(cv.Framework.ESP_IDF),
 )
 
 
