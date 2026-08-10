@@ -153,7 +153,7 @@ class S3Client final : public storage::NetworkStorage, public storage::Mountable
   storage::StorageError request_(const char *method, const std::string &key_enc, const std::string &query,
                                  const uint8_t *body, size_t body_len, const char *extra_header, uint8_t *out,
                                  size_t out_cap, size_t *out_len, std::string *accum, size_t accum_limit,
-                                 HttpResponse *resp);
+                                 HttpResponse *resp, bool retrying_skew = false);
   storage::StorageError map_status_(int status) const;
   std::string host_() const;
   std::string uri_for_(const std::string &key_enc) const;
