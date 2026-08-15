@@ -51,6 +51,12 @@ void setup_preferences();
 void set_external_preferences_store(storage::KeyValueStorage *kv);
 #endif
 
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
+// The active flash-preference store as a KeyValueStorage view, for whole-namespace enumeration
+// (preferences backup). Null before open() or if the NVS handle never opened.
+storage::KeyValueStorage *get_preferences_store();
+#endif
+
 }  // namespace esphome::esp32
 
 DECLARE_PREFERENCE_ALIASES(esphome::esp32::ESP32Preferences)

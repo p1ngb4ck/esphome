@@ -4,7 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/preferences_rtc.h"
-#ifdef USE_ESP32_PREFERENCES_STORAGE
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/binary_storage/nvs_store.h"
 #endif
@@ -18,12 +18,17 @@ namespace esphome::esp32 {
 
 static const char *const TAG = "preferences";
 
-#ifdef USE_ESP32_PREFERENCES_STORAGE
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
 // The esp32 flash preference path routed through the KeyValueStorage interface. The store adopts the
 // "esphome" NVS handle that open() establishes very early (before the logger), so this is
 // format-identical to raw NVS -- it is the interface seam a future storage-backed override hooks
-// into. The RTC path is untouched and never goes through here.
+// into. The RTC path is untouched and never goes through here. Preferences backup enumerates the
+// live namespace through this same view even when the storage-backed get/set redirect is off.
 static binary_storage::NVSStore s_pref_store;
+static bool s_pref_store_ready = false;
+#endif
+
+#ifdef USE_ESP32_PREFERENCES_STORAGE
 static storage::KeyValueStorage *s_kv = nullptr;
 
 // True iff a value of exactly len bytes exists for key; fills data on success.
@@ -171,8 +176,12 @@ void ESP32Preferences::open() {
 #endif
   esp_err_t err = nvs_open("esphome", NVS_READWRITE, &this->nvs_handle);
   if (err == 0) {
-#ifdef USE_ESP32_PREFERENCES_STORAGE
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
+    s_pref_store.set_namespace("esphome");
     s_pref_store.adopt_handle(this->nvs_handle);
+    s_pref_store_ready = true;
+#endif
+#ifdef USE_ESP32_PREFERENCES_STORAGE
     s_kv = &s_pref_store;
 #endif
     return;
@@ -187,10 +196,14 @@ void ESP32Preferences::open() {
   if (err != 0) {
     this->nvs_handle = 0;
   }
-#ifdef USE_ESP32_PREFERENCES_STORAGE
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
   else {
+    s_pref_store.set_namespace("esphome");
     s_pref_store.adopt_handle(this->nvs_handle);
+    s_pref_store_ready = true;
+#ifdef USE_ESP32_PREFERENCES_STORAGE
     s_kv = &s_pref_store;
+#endif
   }
 #endif
 }
@@ -383,6 +396,22 @@ ESP32Preferences *get_preferences() { return &s_preferences; }
 // store; earlier ones keep their store. Called once the external store is initialised (storage
 // stage). RTC-backed preferences (in_flash=false) are unaffected.
 void set_external_preferences_store(storage::KeyValueStorage *kv) { s_kv = kv; }
+#endif
+
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
+// The active flash-preference store as a KeyValueStorage view, for whole-namespace enumeration
+// (preferences backup/restore). external/storage_backend -> the bound store; plain internal ->
+// s_pref_store adopting the "esphome" handle open() established. Null before open(), or if the
+// handle never opened. This does NOT redirect the normal make_preference() get/set path -- on a
+// plain (non-storage) build that stays on the legacy nvs_handle; this view is read/written only by
+// the backup engine.
+storage::KeyValueStorage *get_preferences_store() {
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+  if (s_kv != nullptr)
+    return s_kv;
+#endif
+  return s_pref_store_ready ? &s_pref_store : nullptr;
+}
 #endif
 
 void setup_preferences() {
