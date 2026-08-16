@@ -11,7 +11,6 @@ Once the API is considered stable, this warning will be removed.
 from dataclasses import dataclass
 import logging
 import re
-from typing import Any
 
 from esphome import automation, core
 import esphome.codegen as cg
@@ -23,19 +22,19 @@ from esphome.const import (
     CONF_ALL,
     CONF_ARGS,
     CONF_DATA,
-    CONF_DEVICE,
     CONF_FORMAT,
     CONF_FROM,
     CONF_GROUP,
     CONF_ID,
     CONF_INDEX,
     CONF_KEY,
+    CONF_ON_ERROR,
     CONF_ON_VALUE,
     CONF_PATH,
     CONF_SIZE,
     CONF_TO,
 )
-from esphome.core import CORE, ID, CoroPriority, coroutine_with_priority
+from esphome.core import CORE, ID, CoroPriority, EsphomeError, coroutine_with_priority
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
@@ -58,27 +57,22 @@ CONF_TASK_PRIORITY = "task_priority"
 CONF_MAX_PENDING = "max_pending"
 CONF_MAX_STREAMS = "max_streams"
 CONF_WORKER_UPDATE_INTERVAL = "worker_update_interval"
+CONF_WORKER_ID = "worker_id"
 
 # Not yet in esphome/const.py
 CONF_ON_REGISTERED = "on_registered"
 CONF_ON_COMPLETE = "on_complete"
 CONF_ON_UNREGISTERED = "on_unregistered"
+CONF_ON_EXISTS = "on_exists"
+CONF_ON_MISSING = "on_missing"
 
-
-def AUTO_LOAD(config) -> list[str]:
-    # json (ArduinoJson) is only needed by the extract step's json: pointer, an action option
-    # that lives outside the storage: block, so it sets StorageData.json_required during its own
-    # validation (same mechanism as api's capture_response) and this deferred, config-taking
-    # AUTO_LOAD reads it -- json enters the build only when an action configures it.
-    data = CORE.data.get(DOMAIN)
-    if data is not None and data.json_required:
-        return ["json"]
-    return []
-
+# No AUTO_LOAD of json: ArduinoJson is gated behind USE_STORAGE_JSON_EXTRACT, so the json component
+# enters the build only when a config uses a `json:` extract step -- enforced by
+# cv.requires_component("json") on the step (the user adds an explicit `json:` block, like other
+# opt-in json consumers).
 
 storage_ns = cg.esphome_ns.namespace("storage")
 Storage = storage_ns.class_("Storage", cg.Component)
-TransferBuffer = storage_ns.class_("TransferBuffer", cg.Component)
 StoragePtr = Storage.operator("ptr")
 PathStorage = storage_ns.class_("PathStorage", Storage)
 FilesystemStorage = storage_ns.class_("FilesystemStorage", PathStorage)
@@ -99,46 +93,44 @@ def validate_sector_multiple(value: int) -> int:
     return value
 
 
-# Default kept in sync with the STORAGE_COPY_CHUNK_SIZE fallback in storage.h.
-# Lower bound matches copy()'s allocation fallback floor (4096, see storage.cpp); upper bound
-# is a sanity cap so a typo can't request an unreasonable single allocation (e.g. 16777216).
+# Default kept in sync with the STORAGE_COPY_CHUNK_SIZE fallback in storage.h. Lower bound matches
+# copy()'s allocation floor (4096, storage.cpp); upper bound is a sanity cap against a typo
+# requesting an unreasonable single allocation.
 #
-# The task_*/max_pending keys only take effect when the async worker (storage_worker.h/.cpp,
-# compiled in as USE_STORAGE_WORKER) is actually pulled in by a path-based driver, via that
-# driver's own request_storage_worker() call in its to_code() (mirrors how sd_storage already
-# calls request_storage_device()). If no such driver is configured, these keys are simply
-# unused, same as any other config key with no effect in a given configuration.
+# The task_*/max_pending keys take effect only when the async worker (USE_STORAGE_WORKER) is pulled
+# in by a path-based driver via its own request_storage_worker() in to_code() (mirrors sd_storage's
+# request_storage_device()). With no such driver they are simply unused.
 CONFIG_SCHEMA = cv.Schema(
     {
-        cv.Optional("enable_psram_transfer_buffer"): cv.boolean,
-        cv.Optional("psram_transfer_buffer_size"): cv.All(
-            cv.validate_bytes, cv.Range(min=64 * 1024)
-        ),
-        cv.Optional("psram_transfer_buffer_override_limit", default=False): cv.boolean,
         cv.GenerateID(): cv.declare_id(StorageRegistry),
+        # The async worker is a second component minted from this same storage: block. Declaring its
+        # id here lets validation register it like any component, so the component count includes it;
+        # it is only built (new_Pvariable) when a driver pulls the worker in via
+        # request_storage_worker().
+        cv.GenerateID(CONF_WORKER_ID): cv.declare_id(StorageWorker),
         # No static default: an absent value means "use the per-platform default"
         # (see _default_copy_chunk_size() / to_code). An explicit value overrides it and
         # is still range- and sector-checked here.
         cv.Optional(CONF_COPY_CHUNK_SIZE): cv.All(
             cv.int_range(min=4096, max=131072), validate_sector_multiple
         ),
-        # Longest relative path the API carries. No static default: absent means "the largest
-        # any configured driver asked for" (see request_path_length / to_code). Raising it also
-        # raises the tree walks' stack use -- two buffers per recursion level -- so the range
-        # is bounded and _validate_walk_budget() below checks it against task_stack_size.
+        # Longest relative path the API carries. No static default: absent means "the largest any
+        # configured driver asked for" (see request_path_length / to_code). Raising it also raises
+        # the tree walks' stack use (two buffers per level), so the range is bounded and
+        # _validate_walk_budget() below checks it against task_stack_size.
         cv.Optional(CONF_PATH_MAX): cv.int_range(min=64, max=1024),
-        # Guard-rail for the blocking copy/read/write helpers, which hold the whole payload
-        # in RAM: storage.file_read takes whatever size the file happens to be, and on a node
-        # without PSRAM that is the one storage action whose cost the automation author does
-        # not choose. Anything bigger belongs on the worker (storage.file_copy, raw_write
-        # from_file). 0 disables the check. See storage.h for the C++ side.
-        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=16384): cv.int_range(
-            min=0
+        # Guard-rail for the blocking copy/read/write helpers, which hold the whole payload in RAM.
+        # storage.file_read takes whatever size the file happens to be -- on a node without PSRAM,
+        # the one storage action whose cost the author does not choose; anything bigger belongs on
+        # the worker. It also bounds storage.preferences_export/import (same helpers); past the
+        # ceiling, narrow with the action's `preferences:` filter. 0 disables. See storage.h.
+        cv.Optional(CONF_MAX_BLOCKING_TRANSFER_SIZE, default=16384): cv.All(
+            cv.validate_bytes, cv.int_range(min=0)
         ),
-        # A same-storage move is a rename, which some backends refuse across their own
-        # internals (an NFS export can span file systems, and RENAME never crosses one).
-        # On, such a refusal is redone as copy + remove so the move still happens; off, it is
-        # reported instead of quietly turning a directory-entry update into a full copy.
+        # A same-storage move is a rename, which some backends refuse across their own internals
+        # (an NFS export can span file systems, and RENAME never crosses one). On: redo the refusal
+        # as copy + remove so the move still happens; off: report it instead of quietly turning a
+        # directory-entry update into a full copy.
         cv.Optional(CONF_MOVE_FALLBACK_COPY, default=True): cv.boolean,
         # FATFS LFN + NFS/lwIP transfers both need headroom on the worker task's stack.
         cv.Optional(CONF_TASK_STACK_SIZE, default=8192): cv.int_range(
@@ -147,7 +139,8 @@ CONFIG_SCHEMA = cv.Schema(
         # FreeRTOS priority: above idle (0), below networking tasks (typically higher).
         cv.Optional(CONF_TASK_PRIORITY, default=1): cv.int_range(min=1, max=23),
         # Fixed request pool/queue depth -- sized exactly at codegen like the storage
-        # registry's device count, no heap allocation per request at runtime.
+        # registry's device count, so the slot itself never allocates at runtime. (The
+        # completion callback is a std::function and may allocate for a large lambda capture.)
         cv.Optional(CONF_MAX_PENDING, default=4): cv.int_range(min=1, max=16),
         # Fixed stream pool depth (begin_write()/begin_read() and friends, storage_worker.h) --
         # streams are typically much longer-lived than a single copy/move (e.g. one HTTP
@@ -159,25 +152,39 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_WORKER_UPDATE_INTERVAL, default="5ms"
         ): cv.positive_time_period_milliseconds,
-        # Fired for every storage device, not just file-browser-style consumers -- any
-        # component that cares about hotplug/availability can listen here instead of
-        # each reinventing its own notion of "storage changed". See
-        # StorageRegistry::add_on_registered_callback()/add_on_unregistered_callback()
-        # in storage.h.
+        # Fired for every storage device, not just file-browser consumers -- any component that
+        # cares about hotplug/availability listens here instead of reinventing "storage changed".
+        # See StorageRegistry::add_on_registered_callback()/add_on_unregistered_callback() in
+        # storage.h.
         cv.Optional(CONF_ON_REGISTERED): automation.validate_automation({}),
         cv.Optional(CONF_ON_UNREGISTERED): automation.validate_automation({}),
     }
 )
 
 
-def _collect_mount_paths(fragment: Any, where: str, out: list) -> None:
-    """Walk a validated config fragment, collecting every (mount point, location) it declares."""
+def _collect_mount_paths(
+    fragment: object, where: str, out: list[tuple[str, str]]
+) -> None:
+    """Walk a validated config fragment, collecting the mount point of every storage device.
+
+    A storage device is identified by its own id, not by a key name: cv.declare_id gives it a type
+    that inherits from Storage. mount_path is collected only from such a node. A foreign component
+    that happens to use a key literally named 'mount_path' is not a storage device, and there is no
+    way to enumerate every external component to exclude, so we key off the device's own identity
+    rather than reserving the name 'mount_path' across the whole config.
+    """
     if isinstance(fragment, dict):
-        for key, value in fragment.items():
-            if key == CONF_MOUNT_PATH and isinstance(value, str):
-                out.append((value, where))
-            else:
-                _collect_mount_paths(value, where, out)
+        node_id = fragment.get(CONF_ID)
+        mount = fragment.get(CONF_MOUNT_PATH)
+        if (
+            isinstance(node_id, ID)
+            and node_id.type is not None
+            and node_id.type.inherits_from(Storage)
+            and isinstance(mount, str)
+        ):
+            out.append((mount, where))
+        for value in fragment.values():
+            _collect_mount_paths(value, where, out)
     elif isinstance(fragment, list):
         for item in fragment:
             _collect_mount_paths(item, where, out)
@@ -231,9 +238,6 @@ class StorageData:
     fatfs_path_bound: bool = False
     worker_count: int = 0
     worker_task_safe: bool = False
-    # Set by an action that needs the json component (extract step json:) so the config-taking
-    # AUTO_LOAD pulls json in only when it is used.
-    json_required: bool = False
 
 
 def _get_data() -> StorageData:
@@ -352,43 +356,12 @@ def request_storage_worker(task_safe: bool = False) -> None:
         data.worker_task_safe = True
 
 
-def _transfer_buffer_final_validate(config: ConfigType) -> ConfigType:
-    has_psram = "psram" in fv.full_config.get()
-    if "enable_psram_transfer_buffer" in config and not has_psram:
-        raise cv.Invalid(
-            "'enable_psram_transfer_buffer' is only available with the psram component"
-        )
-    enabled = config.get("enable_psram_transfer_buffer", has_psram)
-    if "psram_transfer_buffer_size" in config:
-        if not has_psram:
-            raise cv.Invalid(
-                "'psram_transfer_buffer_size' is only available with the psram component"
-            )
-        if not enabled:
-            raise cv.Invalid(
-                "'psram_transfer_buffer_size' requires 'enable_psram_transfer_buffer' to be true"
-            )
-    if config.get("psram_transfer_buffer_override_limit") and (
-        not has_psram or not enabled
-    ):
-        raise cv.Invalid(
-            "'psram_transfer_buffer_override_limit' requires an enabled psram transfer buffer"
-        )
-    # The 25% default and the 80% ceiling are enforced in setup(): the actual PSRAM
-    # size is detected at boot and unknowable at config time.
-    return config
-
-
-FINAL_VALIDATE_SCHEMA = _transfer_buffer_final_validate
-
-
-# Default streaming/copy chunk size. Flat 16 kB on every platform: the 20 ms loop-slice budget
-# (see the buffer-usage plan) caps a main-loop chunk near 16 kB even on the fastest S3 SD path,
-# so a larger loop chunk is unsafe. The platform distinction lives one level down, in the C++
-# allocator (alloc_dma_capable): on the worker task -- which has no 20 ms budget -- S3/P4 stage a
-# 32 kB chunk in DMA-capable PSRAM, while every loop-path buffer stays 16 kB internal. An
-# explicit copy_chunk_size still overrides this default (the user's last word). Multiple of 512
-# to keep FATFS whole-sector transfers.
+# Default streaming/copy chunk size. Flat 16 kB everywhere: the 20 ms loop-slice budget caps a
+# main-loop chunk near 16 kB even on the fastest S3 SD path, so a larger loop chunk is unsafe. The
+# platform distinction lives one level down in the C++ allocator (alloc_dma_capable): the worker
+# task (no 20 ms budget) stages a larger DMA-capable PSRAM chunk on S3/P4, loop-path buffers stay
+# 16 kB internal. An explicit copy_chunk_size overrides this. Multiple of 512 for FATFS
+# whole-sector transfers.
 _DEFAULT_COPY_CHUNK_SIZE = 16384
 
 
@@ -396,10 +369,10 @@ _DEFAULT_COPY_CHUNK_SIZE = 16384
 # Mirrors STORAGE_PATH_MAX's compile-time fallback in storage.h.
 _DEFAULT_PATH_MAX = 256
 
-# The copy walk's two path buffers are allocated once and shared by every level (see
-# append_path_segment in storage.cpp), so they are a flat cost. What scales with depth is the
-# walk's own frame plus the driver's list_dir()/remove() frames, where the FATFS LFN buffers
-# dominate. Keep 25% of the task stack free for whatever called into the walk.
+# The copy walk's two path buffers are allocated once and shared by every level (append_path_segment
+# in storage.cpp), a flat cost. What scales with depth is the walk's own frame plus the driver's
+# list_dir()/remove() frames (FATFS LFN buffers dominate). Keep 25% of the task stack free for the
+# caller.
 _WALK_DRIVER_STACK_PER_LEVEL = 830
 _WALK_STACK_HEADROOM = 0.75
 
@@ -451,7 +424,16 @@ def _resolve_path_max(config: ConfigType) -> int:
         lfn_off = opts.get("CONFIG_FATFS_LFN_NONE")
         lfn_off = getattr(lfn_off, "value", lfn_off)
         if str(lfn_off).strip().lower() in ("y", "true", "1"):
-            bounds.append(_FATFS_SHORT_NAME_MAX)
+            # 8.3 names only: STORAGE_PATH_MAX bounds the whole relative path (append_path_segment
+            # builds "/<name>" per level into one shared buffer), not a single filename. The walks
+            # descend to STORAGE_MAX_RECURSION_DEPTH and the callback appends a level's segment
+            # before the depth guard rejects the next one, so the deepest path a walk builds relative
+            # to its starting dir is _MAX_RECURSION_DEPTH + 1 segments of "/<short name>" plus the
+            # terminator. The starting dir is not added on top: it is already bounded by
+            # STORAGE_PATH_MAX, and append_path_segment returns 0 -- a clean INVALID_ARGS, not an
+            # overrun -- if base + walk ever exceeds the buffer, so this sizes for the common walk
+            # from a shallow base rather than reserving room for an arbitrarily deep one.
+            bounds.append(_FATFS_SHORT_NAME_MAX * (_MAX_RECURSION_DEPTH + 1) + 1)
             return max(bounds)
         lfn = opts.get("CONFIG_FATFS_MAX_LFN", _FATFS_MAX_LFN_DEFAULT)
         # A YAML sdkconfig_options entry arrives wrapped so it is written out verbatim; the
@@ -460,14 +442,14 @@ def _resolve_path_max(config: ConfigType) -> int:
         try:
             # A name plus its terminator is the longest single component FATFS will hand back.
             bounds.append(int(lfn) + 1)
-        except (TypeError, ValueError):
-            _LOGGER.warning(
-                "storage: CONFIG_FATFS_MAX_LFN is %r, which is not a number -- using %d for the "
-                "path bound instead",
-                lfn,
-                _DEFAULT_PATH_MAX,
-            )
-            bounds.append(_DEFAULT_PATH_MAX)
+        except (TypeError, ValueError) as exc:
+            # A non-numeric CONFIG_FATFS_MAX_LFN is a configuration error, not a value to guess a
+            # bound for: a wrong guess sizes USE_STORAGE_PATH_MAX too small and fails legitimate
+            # paths with INVALID_ARGS only at runtime on the device.
+            raise EsphomeError(
+                f"storage: CONFIG_FATFS_MAX_LFN is {lfn!r}, which is not a number -- set it to the "
+                "FatFs long-filename limit (an integer) in sdkconfig_options"
+            ) from exc
     return max(bounds) if bounds else _DEFAULT_PATH_MAX
 
 
@@ -476,31 +458,28 @@ def _default_copy_chunk_size() -> int:
     return _DEFAULT_COPY_CHUNK_SIZE
 
 
-# storage is a dependency of every driver and would otherwise run BEFORE them (default
-# priority), reading device_count/worker_count as 0 -- every driver's own to_code() is where
-# request_storage_device()/request_storage_worker() actually get called. LATE (-100) runs
-# after all default-priority driver to_code()s, so those counts are final by the time this
-# reads them. Consumers awaiting the registry/worker variables (e.g. via cg.get_variable())
-# are unaffected either way, since that call already suspends until the variable exists.
+# storage is a dependency of every driver and would otherwise run BEFORE them (default priority),
+# reading device_count/worker_count as 0 -- each driver's own to_code() is where
+# request_storage_device()/request_storage_worker() are called. LATE (-100) runs after all
+# default-priority driver to_code()s, so those counts are final here. Consumers awaiting the
+# registry/worker variables (cg.get_variable()) are unaffected -- that call already suspends until
+# the variable exists.
 @coroutine_with_priority(CoroPriority.LATE)
 async def to_code(config: ConfigType) -> None:
-    tb_enabled = config.get("enable_psram_transfer_buffer", "psram" in CORE.config)
-    if tb_enabled:
-        cg.add_define("USE_STORAGE_TRANSFER_BUFFER")
-        tb_id = ID("storage_transfer_buffer", is_declaration=True, type=TransferBuffer)
-        CORE.component_ids.add(str(tb_id))
-        tb = cg.new_Pvariable(tb_id)
-        await cg.register_component(tb, {})
-        # 0 = auto: setup() sizes the arena to 25% of the detected PSRAM
-        cg.add(tb.set_size(config.get("psram_transfer_buffer_size", 0)))
-        cg.add(tb.set_override_limit(config["psram_transfer_buffer_override_limit"]))
+    _LOGGER.warning(
+        "The storage component is experimental; its configuration and C++ API may change "
+        "without following the normal breaking-changes policy."
+    )
     var = cg.new_Pvariable(config[cv.GenerateID()])
     await cg.register_component(var, config)
 
     device_count = _get_data().device_count
     cg.add(var.set_device_count(device_count))
-    # Compile-time bound for the enumeration snapshot in StorageRegistry::for_each*.
-    cg.add_define("USE_STORAGE_MAX_DEVICES", device_count)
+    # Compile-time bound for the enumeration snapshot in StorageRegistry::for_each*. Only emit it
+    # when a driver registered a device; with none (every tests/components/storage/ config) storage.h
+    # keeps its own >0 fallback, so the header's "fallback unreachable in real builds" stays true.
+    if device_count > 0:
+        cg.add_define("USE_STORAGE_MAX_DEVICES", device_count)
 
     cg.add(cg.RawExpression(f"{storage_ns}::global_storage_registry = {var}"))
 
@@ -519,14 +498,20 @@ async def to_code(config: ConfigType) -> None:
             "USE_STORAGE_VFS_PATH_MAX", path_max + _get_data().mount_path_max + 1
         )
 
-        # The tree walks run on the worker task when one is configured; a path bound raised
-        # past what its stack can carry would overflow rather than fail cleanly.
-        if _get_data().worker_count > 0:
+        # task_stack_size sizes the worker task, which exists only when a task-safe driver pulled
+        # it in (USE_STORAGE_WORKER_TASK). With only non-task-safe drivers the walk runs on the
+        # main-loop stack and task_stack_size is inert, so budget-check it only when that task is
+        # really created -- otherwise a lowered task_stack_size hard-fails the build citing a stack
+        # that never exists.
+        if _get_data().worker_task_safe:
             needed = _walk_stack_bytes(path_max, _MAX_RECURSION_DEPTH)
             raw = config[CONF_TASK_STACK_SIZE]
             budget = int(raw * _WALK_STACK_HEADROOM)
             if needed > raw:
-                raise cv.Invalid(
+                # Runs in a codegen job (path_max can depend on a FATFS bound the esp32 component
+                # reconciles at FINAL), not validation, so cv.Invalid would escape and reach the user
+                # as a raw traceback. EsphomeError is caught by the CLI and logged cleanly.
+                raise EsphomeError(
                     f"storage: a {_MAX_RECURSION_DEPTH}-level tree walk with path_max {path_max} "
                     f"needs roughly {needed} bytes of stack, which exceeds task_stack_size ({raw}) "
                     f"and would overflow it at runtime. Raise task_stack_size."
@@ -564,9 +549,7 @@ async def to_code(config: ConfigType) -> None:
         if data.worker_task_safe:
             cg.add_define("USE_STORAGE_WORKER_TASK")
 
-        worker_id = ID(f"{var}_worker", is_declaration=True, type=StorageWorker)
-        CORE.component_ids.add(str(worker_id))
-        worker_var = cg.new_Pvariable(worker_id)
+        worker_var = cg.new_Pvariable(config[CONF_WORKER_ID])
         await cg.register_component(worker_var, {})
 
         cg.add(worker_var.set_task_stack_size(config[CONF_TASK_STACK_SIZE]))
@@ -612,8 +595,8 @@ def _validate_write_content(config: ConfigType) -> ConfigType:
         raise cv.Invalid("'args' requires 'format'")
     if has_format:
         # Same arity check logger.log uses: format specifiers must match the arg
-        # count. A mismatch passes through C varargs into str_sprintf() at
-        # runtime, which is undefined behavior, not a runtime error.
+        # count. A mismatch passes through C varargs into the generated snprintf()
+        # at runtime, which is undefined behavior, not a runtime error.
         validate_printf(config)
     return config
 
@@ -627,6 +610,11 @@ def _file_write_schema(newline_default: bool) -> cv.All:
                 cv.Optional(CONF_FORMAT): cv.string,
                 cv.Optional(CONF_ARGS, default=[]): cv.ensure_list(cv.lambda_),
                 cv.Optional(CONF_NEWLINE, default=newline_default): cv.boolean,
+                # Fires (error text, empty = success) after the write/append: a refused (busy) or
+                # failed write is otherwise invisible to the automation.
+                cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(
+                    single=True
+                ),
             }
         ),
         _validate_write_content,
@@ -642,18 +630,38 @@ def _validate_regex(value: str) -> str:
         re.compile(value)
     except re.error as e:
         raise cv.Invalid(f"Invalid regex: {e}") from e
-    # The runtime compiles the pattern with std::regex in its default ECMAScript
-    # grammar, and ESPHome builds with -fno-exceptions -- a pattern that Python
-    # accepts but std::regex rejects would abort the node instead of raising.
-    # Of the '(?...' constructs, ECMAScript supports only '(?:' (non-capturing
-    # group), '(?=' and '(?!' (lookahead); reject everything else (named groups,
-    # lookbehind, inline flags, conditionals, comments) at config time.
+    # The runtime compiles with std::regex in default ECMAScript grammar, and ESPHome builds with
+    # -fno-exceptions -- a pattern Python accepts but std::regex rejects would abort the node instead
+    # of raising. Of the '(?...' constructs ECMAScript supports only '(?:' (non-capturing), '(?=' and
+    # '(?!' (lookahead); reject everything else (named groups, lookbehind, inline flags, conditionals,
+    # comments) at config time.
     i = 0
     n = len(value)
+    in_class = False  # inside a [...] character class, where '(', '?' etc. are literals
+    prev_quant = False  # last token was a quantifier -- a following '+' is a possessive quantifier
     while i < n:
         c = value[i]
         if c == "\\":
+            # ECMAScript IdentityEscape does not define the alphanumeric anchor escapes Python takes.
+            nxt = value[i + 1] if i + 1 < n else ""
+            if nxt in ("A", "Z", "z"):
+                raise cv.Invalid(
+                    f"Invalid regex: '\\{nxt}' is not supported by std::regex ECMAScript "
+                    "(use '^'/'$') and would crash at runtime"
+                )
             i += 2
+            prev_quant = False
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            prev_quant = False
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            prev_quant = False
             continue
         if c == "(" and i + 1 < n and value[i + 1] == "?":
             if i + 2 >= n or value[i + 2] not in ":=!":
@@ -663,7 +671,14 @@ def _validate_regex(value: str) -> str:
                     "crash at runtime"
                 )
             i += 3
+            prev_quant = False
             continue
+        if c == "+" and prev_quant:
+            raise cv.Invalid(
+                "Invalid regex: possessive quantifiers ('*+', '++', '?+', '{m,n}+') are not "
+                "supported by std::regex ECMAScript and would crash at runtime"
+            )
+        prev_quant = c in "*+?}"
         i += 1
     return value
 
@@ -684,9 +699,10 @@ def _exactly_one_step_kind(config: ConfigType) -> ConfigType:
         raise cv.Invalid("'separator' is only valid with 'key'")
     if CONF_GROUP in config and CONF_REGEX not in config:
         raise cv.Invalid("'group' is only valid with 'regex'")
-    if CONF_JSON in config:
-        # Tell the config-taking AUTO_LOAD that the json component is needed.
-        _get_data().json_required = True
+    if CONF_TRIM in config and not config[CONF_TRIM]:
+        raise cv.Invalid(
+            "'trim' must be true; remove the step entirely to skip trimming"
+        )
     return config
 
 
@@ -694,8 +710,11 @@ _EXTRACT_STEP_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.Optional(CONF_LINE): cv.positive_not_null_int,
-            # '/'-separated pointer into a JSON document ("a/b/0").
-            cv.Optional(CONF_JSON): cv.string_strict,
+            # '/'-separated pointer into a JSON document ("a/b/0"). Requires an
+            # explicit `json:` block so ArduinoJson only enters the build when used.
+            cv.Optional(CONF_JSON): cv.All(
+                cv.requires_component("json"), cv.string_strict
+            ),
             # Non-empty: an empty separator makes the split loop spin without advancing and
             # hand back the whole buffer, and an empty key matches every line -- both are
             # silently useless rather than wrong, which is worse to debug than a rejection.
@@ -725,6 +744,9 @@ _FILE_READ_SCHEMA = cv.All(
             cv.Optional(CONF_EXTRACT, default=[]): cv.ensure_list(_EXTRACT_STEP_SCHEMA),
             cv.Optional(CONF_TO_GLOBAL): cv.use_id(globals_.GlobalsComponent),
             cv.Optional(CONF_ON_VALUE): automation.validate_automation(single=True),
+            # Fires the failure cause (medium error text, "extract step N did not match", or a
+            # parse-failure note) when a read yields nothing usable and on_value stays silent.
+            cv.Optional(CONF_ON_ERROR): automation.validate_automation(single=True),
         }
     ),
     _validate_read,
@@ -741,8 +763,17 @@ async def _build_write_action(
     var = cg.new_Pvariable(action_id, template_arg, append)
     template_ = await cg.templatable(config[CONF_PATH], args, cg.std_string)
     cg.add(var.set_path(template_))
+    opt_string = cg.optional.template(cg.std_string)
     if (content := config.get(CONF_CONTENT)) is not None:
-        template_ = await cg.templatable(content, args, cg.std_string)
+        # content_ is optional<std::string> so a format failure can abort the write (see play()).
+        # A static string is wrapped as std::string(...) so the stateless lambda cg.templatable
+        # emits returns it with a single conversion to optional (a bare literal would need two).
+        template_ = await cg.templatable(
+            content,
+            args,
+            opt_string,
+            to_exp=lambda v: cg.RawExpression(f"std::string({cg.safe_exp(v)})"),
+        )
         cg.add(var.set_content(template_))
     else:
         # Render printf-style format + args into the content string, logger.log-style:
@@ -753,13 +784,38 @@ async def _build_write_action(
         arg_exprs = "".join(
             f", esphome::storage::printf_arg({x})" for x in config[CONF_ARGS]
         )
+        # Render into a stack buffer with snprintf rather than the heap-allocating str_sprintf /
+        # str_snprintf (both are flagged for removal, and every migrated component -- plus
+        # logger.log, the model this copies -- formats into a fixed buffer instead). format:/args:
+        # is a bounded line: content that does not fit the buffer, or that snprintf cannot encode,
+        # returns std::nullopt so play() aborts before opening the target (OpenMode::WRITE would
+        # truncate it to empty) and reports the failure instead of a silent zero-byte success.
+        # Authors who need arbitrary length use content: with a lambda (no cap).
+        lambda_body = (
+            "char buf[256];\n"
+            f"int n = snprintf(buf, sizeof(buf), {format_literal}{arg_exprs});\n"
+            "if (n < 0) {\n"
+            '  ESP_LOGE("storage.automation", "file_write: could not format content");\n'
+            "  return std::nullopt;\n"
+            "}\n"
+            "if ((size_t) n >= sizeof(buf)) {\n"
+            '  ESP_LOGE("storage.automation", "file_write: formatted content exceeds %u bytes;'
+            ' use content: with a lambda for longer data", (unsigned) (sizeof(buf) - 1));\n'
+            "  return std::nullopt;\n"
+            "}\n"
+            "return std::string(buf, (size_t) n);"
+        )
         lambda_ = await cg.process_lambda(
-            core.Lambda(f"return str_sprintf({format_literal}{arg_exprs});"),
+            core.Lambda(lambda_body),
             args,
-            return_type=cg.std_string,
+            return_type=opt_string,
         )
         cg.add(var.set_content(lambda_))
     cg.add(var.set_newline(config[CONF_NEWLINE]))
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
+        )
     return var
 
 
@@ -843,13 +899,17 @@ async def file_read_action_to_code(
         cg.add(
             var.set_global_setter(
                 cg.RawExpression(
-                    f"[](const std::string &x) {{ {storage_ns}::assign_from_string({glob}, x); }}"
+                    f"[](const std::string &x) {{ return {storage_ns}::assign_from_string({glob}, x); }}"
                 )
             )
         )
     if (on_value := config.get(CONF_ON_VALUE)) is not None:
         await automation.build_automation(
             var.get_value_trigger(), [(cg.std_string, "x")], on_value
+        )
+    if (on_error := config.get(CONF_ON_ERROR)) is not None:
+        await automation.build_automation(
+            var.get_error_trigger(), [(cg.std_string, "x")], on_error
         )
     return var
 
@@ -879,12 +939,11 @@ async def _build_copy_action(
     args: list,
     is_move: bool,
 ):
-    # file_copy/move prefer the async worker (see perform_file_copy_async). We deliberately do
-    # NOT request_storage_worker() here: action codegen can run after the storage to_code has
-    # already snapshotted the worker count (LATE), so a late request would compile the action
-    # against a worker that was never created. Instead the C++ side degrades cleanly -- if the
-    # worker isn't compiled in (no path driver requested it), it runs the blocking helper. Any
-    # node that can actually do file ops has a path driver, which requests the worker anyway.
+    # file_copy/move prefer the async worker (perform_file_copy_async). Deliberately NO
+    # request_storage_worker() here: action codegen can run after storage to_code snapshotted the
+    # worker count (LATE), so a late request would compile the action against a worker never created.
+    # The C++ side degrades cleanly -- no worker compiled in (no path driver) means the blocking
+    # helper runs. Any node that can do file ops has a path driver, which requests the worker anyway.
     var = cg.new_Pvariable(action_id, template_arg, is_move)
     cg.add(var.set_from(await cg.templatable(config[CONF_FROM], args, cg.std_string)))
     cg.add(var.set_to(await cg.templatable(config[CONF_TO], args, cg.std_string)))
@@ -921,6 +980,9 @@ async def file_move_action_to_code(
         {
             cv.Required(CONF_PATH): cv.templatable(cv.string),
             cv.Optional(CONF_RECURSIVE, default=False): cv.boolean,
+            # Fires (error text, empty = success) after the delete: a refused (busy) or failed
+            # delete is otherwise invisible to the automation.
+            cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
         }
     ),
     synchronous=True,
@@ -931,6 +993,10 @@ async def file_delete_action_to_code(
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
     cg.add(var.set_recursive(config[CONF_RECURSIVE]))
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
+        )
     return var
 
 
@@ -949,10 +1015,65 @@ async def file_exists_condition_to_code(
     return var
 
 
+FileStatAction = storage_ns.class_("FileStatAction", automation.Action)
+
+
+def _validate_stat(config):
+    # A stat with no handler is a silent no-op; require at least one so a failure is never swallowed.
+    if not any(k in config for k in (CONF_ON_EXISTS, CONF_ON_MISSING, CONF_ON_ERROR)):
+        raise cv.Invalid(
+            "storage.stat needs at least one of on_exists, on_missing, or on_error"
+        )
+    return config
+
+
+_FILE_STAT_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_PATH): cv.templatable(cv.string),
+            cv.Optional(CONF_ON_EXISTS): automation.validate_automation(single=True),
+            cv.Optional(CONF_ON_MISSING): automation.validate_automation(single=True),
+            # Distinct from on_missing: fires the error text when the medium is not ready or faulted,
+            # so an automation never mistakes "could not check" for "the file is absent".
+            cv.Optional(CONF_ON_ERROR): automation.validate_automation(single=True),
+        }
+    ),
+    _validate_stat,
+)
+
+
+@automation.register_action(
+    "storage.stat",
+    FileStatAction,
+    _FILE_STAT_SCHEMA,
+    synchronous=True,
+)
+async def file_stat_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
+    var = cg.new_Pvariable(action_id, template_arg)
+    cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
+    if (on_exists := config.get(CONF_ON_EXISTS)) is not None:
+        await automation.build_automation(var.get_exists_trigger(), [], on_exists)
+    if (on_missing := config.get(CONF_ON_MISSING)) is not None:
+        await automation.build_automation(var.get_missing_trigger(), [], on_missing)
+    if (on_error := config.get(CONF_ON_ERROR)) is not None:
+        await automation.build_automation(
+            var.get_error_trigger(), [(cg.std_string, "x")], on_error
+        )
+    return var
+
+
 MountAction = storage_ns.class_("MountAction", automation.Action)
 
 _MOUNT_SCHEMA = cv.maybe_simple_value(
-    {cv.Required(CONF_ID): cv.use_id(MountableStorage)}, key=CONF_ID
+    {
+        cv.Required(CONF_ID): cv.use_id(MountableStorage),
+        # Fires (error text, empty = success) when the mount/unmount finishes. mount is
+        # worker-routed and async, so sequence dependent actions from here, not by ordering.
+        cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
+    },
+    key=CONF_ID,
 )
 
 
@@ -965,7 +1086,12 @@ async def _build_mount_action(
 ):
     # cv.use_id(MountableStorage) already rejected non-removable targets at YAML time.
     target = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, target, mount)
+    var = cg.new_Pvariable(action_id, template_arg, target, mount)
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.std_string, "x")], on_complete
+        )
+    return var
 
 
 @automation.register_action(
@@ -1015,7 +1141,6 @@ async def format_action_to_code(
     return var
 
 
-# ==================== PREFERENCES BACKUP/RESTORE ====================
 # ---------------------------------------------------------------------------
 # storage.raw_read / storage.raw_write / storage.raw_erase
 # ---------------------------------------------------------------------------
@@ -1030,12 +1155,18 @@ CONF_FORCE_SLICED_ERASE = "force_sliced_erase"
 
 def _validate_raw_data(value: str | list) -> bytes | list:
     if isinstance(value, str):
-        return value.encode("utf-8")
-    if isinstance(value, list):
-        return cv.Schema([cv.hex_uint8_t])(value)
-    raise cv.Invalid(
-        "data must either be a string wrapped in quotes or a list of bytes"
-    )
+        data = value.encode("utf-8")
+    elif isinstance(value, list):
+        data = cv.Schema([cv.hex_uint8_t])(value)
+    else:
+        raise cv.Invalid(
+            "data must either be a string wrapped in quotes or a list of bytes"
+        )
+    if len(data) == 0:
+        raise cv.Invalid(
+            "data must not be empty; a raw write of 0 bytes is rejected at runtime"
+        )
+    return data
 
 
 def _validate_raw_read(config: ConfigType) -> ConfigType:
@@ -1046,12 +1177,6 @@ def _validate_raw_read(config: ConfigType) -> ConfigType:
         # data in RAM, so an on_value trigger could not fire -- reject the
         # combination instead of silently dropping the trigger.
         raise cv.Invalid("'on_value' cannot be combined with 'to_file'")
-    if CONF_ON_COMPLETE in config and CONF_TO_FILE not in config:
-        # on_complete fires from the worker's completion callback, which only runs on the
-        # to_file (streamed) path; the on_value path is synchronous and fires no completion.
-        raise cv.Invalid(
-            "'on_complete' requires 'to_file' (the on_value path fires no completion)"
-        )
     if CONF_SIZE not in config and CONF_TO_FILE not in config:
         raise cv.Invalid("'size' is required unless reading into a file with 'to_file'")
     return config
@@ -1060,12 +1185,6 @@ def _validate_raw_read(config: ConfigType) -> ConfigType:
 def _validate_raw_write(config: ConfigType) -> ConfigType:
     if (CONF_DATA in config) == (CONF_FROM_FILE in config):
         raise cv.Invalid("Exactly one of 'data' or 'from_file' is required")
-    if CONF_ON_COMPLETE in config and CONF_FROM_FILE not in config:
-        # on_complete fires from the worker's completion callback, which only runs on the
-        # from_file (streamed) path; an inline data write is synchronous and fires no completion.
-        raise cv.Invalid(
-            "'on_complete' requires 'from_file' (an inline data write fires no completion)"
-        )
     return config
 
 
@@ -1086,7 +1205,7 @@ _RAW_READ_SCHEMA = cv.All(
             cv.Required(CONF_ID): cv.use_id(RawStorage),
             cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
             # Omitted with to_file: read to the end of the device (0 = rest, see the action).
-            cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
+            cv.Optional(CONF_SIZE): cv.templatable(cv.int_range(min=0, max=0xFFFFFFFF)),
             cv.Optional(CONF_TO_FILE): cv.templatable(cv.string),
             cv.Optional(CONF_ON_VALUE): automation.validate_automation(single=True),
             # Fires (error text, empty = success) when a to_file read lands on the worker.
@@ -1118,7 +1237,7 @@ _RAW_ERASE_SCHEMA = cv.All(
         {
             cv.Required(CONF_ID): cv.use_id(RawStorage),
             cv.Optional(CONF_ADDRESS): cv.templatable(cv.hex_uint32_t),
-            cv.Optional(CONF_SIZE): cv.templatable(cv.positive_int),
+            cv.Optional(CONF_SIZE): cv.templatable(cv.int_range(min=0, max=0xFFFFFFFF)),
             cv.Optional(CONF_ALL, default=False): cv.boolean,
             # Opt out of the whole-chip fast path: force the block-by-block erase even where a
             # single chip erase would be used (task-safe device, full span). Default keeps the
@@ -1263,7 +1382,7 @@ def _esp32_exfat_enabled(fconf) -> bool:
     )
 
 
-def final_validate_file_system(config: ConfigType) -> None:
+def final_validate_file_system(config) -> None:
     """Reject the option outright when exFAT is not compiled in."""
     if CONF_FILE_SYSTEM not in config:
         return
@@ -1275,7 +1394,7 @@ def final_validate_file_system(config: ConfigType) -> None:
         )
 
 
-async def file_system_to_code(var: cg.MockObj, config: ConfigType) -> None:
+async def file_system_to_code(var, config) -> None:
     """Emit the selection define + setter -- only when the option may exist at all."""
     if not _esp32_exfat_enabled(CORE.config):
         return  # not even the auto path is compiled in
