@@ -86,7 +86,7 @@ class WebServerRawApi : public Component, public AsyncWebHandler {
   static constexpr size_t JOB_CACHE_SIZE = 4;
   struct JobCacheEntry {
     storage::TransferJob job{storage::INVALID_TRANSFER_JOB};
-    storage::StorageError result{storage::StorageError::OK};
+    storage::StorageError result{storage::StorageError::STORAGE_ERROR_OK};
   };
   JobCacheEntry job_cache_[JOB_CACHE_SIZE]{};
   size_t job_cache_next_{0};

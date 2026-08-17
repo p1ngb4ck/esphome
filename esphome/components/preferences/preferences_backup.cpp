@@ -1081,10 +1081,10 @@ static bool kv_read_entry(storage::KeyValueStorage *kv, uint32_t key, NvsEntry &
   e.key = key;
   e.len = 0;
   size_t len = 0;
-  if (kv->get_size(key, &len) != storage::StorageError::OK || len == 0 || len > MAX_BLOB_LEN)
+  if (kv->get_size(key, &len) != storage::StorageError::STORAGE_ERROR_OK || len == 0 || len > MAX_BLOB_LEN)
     return false;
   size_t got = 0;
-  if (kv->get(key, e.blob, len, &got) != storage::StorageError::OK || got != len)
+  if (kv->get(key, e.blob, len, &got) != storage::StorageError::STORAGE_ERROR_OK || got != len)
     return false;
   e.len = len;
   return true;
@@ -1198,7 +1198,7 @@ static bool raw_read_exact(RawStorage *device, uint64_t address, uint8_t *buf, s
   size_t done = 0;
   while (done < len) {
     size_t got = 0;
-    if (device->read(address + done, buf + done, len - done, &got) != StorageError::OK || got == 0)
+    if (device->read(address + done, buf + done, len - done, &got) != StorageError::STORAGE_ERROR_OK || got == 0)
       return false;
     done += got;
   }
@@ -1209,7 +1209,7 @@ static bool raw_write_exact(RawStorage *device, uint64_t address, const uint8_t 
   size_t done = 0;
   while (done < len) {
     size_t written = 0;
-    if (device->write(address + done, buf + done, len - done, &written) != StorageError::OK || written == 0)
+    if (device->write(address + done, buf + done, len - done, &written) != StorageError::STORAGE_ERROR_OK || written == 0)
       return false;
     done += written;
     App.feed_wdt();
@@ -1292,7 +1292,7 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
       return false;
     }
     StorageError eerr = device->erase(address, static_cast<size_t>(erase_len));
-    if (eerr != StorageError::OK) {
+    if (eerr != StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Erase before export failed (%s)", error_to_string(eerr));
       return false;
     }
@@ -1392,7 +1392,7 @@ bool preferences_import_from_raw(RawStorage *device, uint64_t address, uint64_t 
       skipped++;
       continue;
     }
-    if (kv->set(key, blob, len) != storage::StorageError::OK) {
+    if (kv->set(key, blob, len) != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "storing key %" PRIu32 " failed", key);
       ok = false;
       break;
@@ -1522,7 +1522,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
   }
 
   StorageError werr = write_file(ps, rel, reinterpret_cast<const uint8_t *>(out.data()), out.size());
-  if (werr != StorageError::OK) {
+  if (werr != StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Writing export failed (%s)", error_to_string(werr));
     return false;
   }
@@ -1552,7 +1552,7 @@ static bool import_one(storage::KeyValueStorage *kv, const char *name, size_t na
     // typed parse first; hex: prefix (and stale-format hex) still accepted below
     if (value_len < strlen(HEX_PREFIX) || memcmp(value, HEX_PREFIX, strlen(HEX_PREFIX)) != 0) {
       if (decode_entity_value(value, value_len, *re, blob, &blob_len)) {
-        if (kv->set(key, blob, blob_len) != storage::StorageError::OK) {
+        if (kv->set(key, blob, blob_len) != storage::StorageError::STORAGE_ERROR_OK) {
           ESP_LOGE(TAG, "storing key %" PRIu32 " failed", key);
           return false;
         }
@@ -1598,7 +1598,7 @@ static bool import_one(storage::KeyValueStorage *kv, const char *name, size_t na
     return true;
   }
 
-  if (kv->set(key, blob, blob_len) != storage::StorageError::OK) {
+  if (kv->set(key, blob, blob_len) != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "storing key %" PRIu32 " failed", key);
     return false;
   }
@@ -1624,7 +1624,7 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
   RamBuffer buf;
   size_t size = 0;
   StorageError rerr = read_file(ps, rel, buf, &size);
-  if (rerr != StorageError::OK) {
+  if (rerr != StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Reading '%s' failed (%s)", path, error_to_string(rerr));
     return false;
   }

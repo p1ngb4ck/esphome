@@ -34,12 +34,12 @@ static storage::KeyValueStorage *s_kv = nullptr;
 // True iff a value of exactly len bytes exists for key; fills data on success.
 static bool pref_kv_read(uint32_t key, uint8_t *data, size_t len) {
   size_t stored = 0;
-  if (s_kv == nullptr || s_kv->get_size(key, &stored) != storage::StorageError::OK)
+  if (s_kv == nullptr || s_kv->get_size(key, &stored) != storage::StorageError::STORAGE_ERROR_OK)
     return false;
   if (stored != len)
     return false;
   size_t got = 0;
-  return s_kv->get(key, data, len, &got) == storage::StorageError::OK && got == len;
+  return s_kv->get(key, data, len, &got) == storage::StorageError::STORAGE_ERROR_OK && got == len;
 }
 #endif
 
@@ -294,7 +294,7 @@ bool ESP32Preferences::sync() {
       esp_err_t err;
 #ifdef USE_ESP32_PREFERENCES_STORAGE
       if (s_kv != nullptr)
-        err = s_kv->set(save.key, save.data.data(), save.data.size()) == storage::StorageError::OK ? ESP_OK : ESP_FAIL;
+        err = s_kv->set(save.key, save.data.data(), save.data.size()) == storage::StorageError::STORAGE_ERROR_OK ? ESP_OK : ESP_FAIL;
       else
 #endif
         err = nvs_set_blob(this->nvs_handle, key_str, save.data.data(), save.data.size());
@@ -339,13 +339,13 @@ bool ESP32Preferences::is_changed_(uint32_t nvs_handle, const NVSData &to_save, 
   size_t actual_len;
 #ifdef USE_ESP32_PREFERENCES_STORAGE
   if (s_kv != nullptr) {
-    if (s_kv->get_size(to_save.key, &actual_len) != storage::StorageError::OK)
+    if (s_kv->get_size(to_save.key, &actual_len) != storage::StorageError::STORAGE_ERROR_OK)
       return true;  // not set yet -> changed
     if (actual_len != to_save.data.size())
       return true;
     SmallBufferWithHeapFallback<256> stored_data(actual_len);
     size_t got = 0;
-    if (s_kv->get(to_save.key, stored_data.get(), actual_len, &got) != storage::StorageError::OK)
+    if (s_kv->get(to_save.key, stored_data.get(), actual_len, &got) != storage::StorageError::STORAGE_ERROR_OK)
       return true;
     return memcmp(to_save.data.data(), stored_data.get(), to_save.data.size()) != 0;
   }

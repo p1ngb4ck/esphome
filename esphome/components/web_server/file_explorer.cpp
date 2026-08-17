@@ -114,12 +114,12 @@ void FileExplorerAssets::start_load_(size_t index) {
 
   storage::StorageError err = storage::global_storage_worker->begin_read(
       ps, rel, &this->stream_, [this](storage::StorageError e) { this->on_open_(e); });
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     this->abandon_load_("open rejected", err);
 }
 
 void FileExplorerAssets::on_open_(storage::StorageError err) {
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->abandon_load_("open failed", err);
     return;
   }
@@ -140,7 +140,7 @@ void FileExplorerAssets::issue_read_() {
         ESP_LOGE(TAG, "no PSRAM for '%s' (%u bytes)", this->assets_[this->loading_].url, (unsigned) cap);
         this->warned_pending_ = true;
       }
-      this->abandon_load_("no psram", storage::StorageError::READ_ERROR);
+      this->abandon_load_("no psram", storage::StorageError::STORAGE_ERROR_READ_ERROR);
       return;
     }
     if (this->pending_buf_ != nullptr) {
@@ -154,14 +154,14 @@ void FileExplorerAssets::issue_read_() {
   storage::StorageError e = storage::global_storage_worker->read_chunk(
       this->stream_, this->pending_buf_ + this->pending_off_, READ_CHUNK, &this->last_read_,
       [this](storage::StorageError re) { this->on_read_(re); });
-  if (e != storage::StorageError::OK)
+  if (e != storage::StorageError::STORAGE_ERROR_OK)
     this->abandon_load_("read rejected", e);
 }
 
 void FileExplorerAssets::on_read_(storage::StorageError err) {
   if (this->loading_ == NO_LOAD)
     return;
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->abandon_load_("read failed", err);
     return;
   }
@@ -170,7 +170,7 @@ void FileExplorerAssets::on_read_(storage::StorageError err) {
     // read_chunk() reported EOF -- the whole file is in the buffer now. Close and publish it.
     storage::StorageError e = storage::global_storage_worker->end_read(
         this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
-    if (e != storage::StorageError::OK)
+    if (e != storage::StorageError::STORAGE_ERROR_OK)
       this->abandon_load_("close rejected", e);
     return;
   }
@@ -181,7 +181,7 @@ void FileExplorerAssets::on_closed_(storage::StorageError err) {
   if (this->loading_ == NO_LOAD)
     return;
   this->stream_open_ = false;
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->abandon_load_("close failed", err);
     return;
   }

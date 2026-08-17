@@ -64,10 +64,10 @@ storage::StorageError CertStore::attach_parsed_(mbedtls_ssl_config *conf, mbedtl
   // PEM parsing requires the terminating NUL to be counted in the length.
   if (mbedtls_x509_crt_parse(ca_out, data, len + 1) != 0) {
     ESP_LOGE(TAG, "CA parse failed");
-    return storage::StorageError::READ_ERROR;
+    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
   mbedtls_ssl_conf_ca_chain(conf, ca_out, nullptr);
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError CertStore::attach_bundle_(mbedtls_ssl_config *conf) {
@@ -76,12 +76,12 @@ storage::StorageError CertStore::attach_bundle_(mbedtls_ssl_config *conf) {
   // no per-cert RAM, no storage read. This is the default trust anchor for public endpoints.
   if (esp_crt_bundle_attach(conf) != 0) {
     ESP_LOGE(TAG, "attaching the built-in CA bundle failed");
-    return storage::StorageError::READ_ERROR;
+    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 #else
   ESP_LOGE(TAG, "no CA entry given and the built-in bundle is not compiled in");
-  return storage::StorageError::NOT_SUPPORTED;
+  return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
 #endif
 }
 
@@ -99,7 +99,7 @@ void CertStore::apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_ou
 
   if (entry->kind != CertKind::CA) {
     ESP_LOGE(TAG, "'%s' is a %s entry, not a CA", entry->id, cert_kind_to_string(entry->kind));
-    on_done(storage::StorageError::INVALID_ARGS);
+    on_done(storage::StorageError::STORAGE_ERROR_INVALID_ARGS);
     return;
   }
 
@@ -113,18 +113,18 @@ void CertStore::apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_ou
   // STORAGE -> stream the file on demand through the worker, parse, then free the buffer.
 #ifdef USE_STORAGE_WORKER
   if (this->applying_) {
-    on_done(storage::StorageError::NOT_READY);  // one apply in flight; caller retries
+    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);  // one apply in flight; caller retries
     return;
   }
   if (storage::global_storage_worker == nullptr || storage::global_storage_registry == nullptr) {
-    on_done(storage::StorageError::NOT_READY);
+    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);
     return;
   }
   const char *rel = nullptr;
   storage::PathStorage *ps = storage::global_storage_registry->resolve_path(entry->path, &rel);
   if (ps == nullptr) {
     ESP_LOGW(TAG, "'%s': storage for '%s' not mounted yet", entry->id, entry->path);
-    on_done(storage::StorageError::NOT_READY);
+    on_done(storage::StorageError::STORAGE_ERROR_NOT_READY);
     return;
   }
   this->applying_ = true;
@@ -138,10 +138,10 @@ void CertStore::apply_ca_async(mbedtls_ssl_config *conf, mbedtls_x509_crt *ca_ou
   this->stream_open_ = false;
   storage::StorageError err = storage::global_storage_worker->begin_read(
       ps, rel, &this->stream_, [this](storage::StorageError e) { this->on_open_(e); });
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     this->finish_storage_(err);
 #else
-  on_done(storage::StorageError::NOT_SUPPORTED);
+  on_done(storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED);
 #endif
 }
 
@@ -157,7 +157,7 @@ void CertStore::release_buffer_() {
 }
 
 void CertStore::on_open_(storage::StorageError err) {
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->finish_storage_(err);
     return;
   }
@@ -173,13 +173,13 @@ void CertStore::issue_read_() {
       cap *= 2;
     if (cap > MAX_CERT_BYTES + 1) {
       ESP_LOGE(TAG, "certificate exceeds %u bytes -- refusing", (unsigned) MAX_CERT_BYTES);
-      this->finish_storage_(storage::StorageError::NO_SPACE);
+      this->finish_storage_(storage::StorageError::STORAGE_ERROR_NO_SPACE);
       return;
     }
     uint8_t *bigger = this->alloc_.allocate(cap);
     if (bigger == nullptr) {
       ESP_LOGE(TAG, "out of memory (%u bytes)", (unsigned) cap);
-      this->finish_storage_(storage::StorageError::READ_ERROR);
+      this->finish_storage_(storage::StorageError::STORAGE_ERROR_READ_ERROR);
       return;
     }
     if (this->buf_ != nullptr) {
@@ -193,14 +193,14 @@ void CertStore::issue_read_() {
   storage::StorageError e = storage::global_storage_worker->read_chunk(
       this->stream_, this->buf_ + this->buf_off_, READ_CHUNK, &this->last_read_,
       [this](storage::StorageError re) { this->on_read_(re); });
-  if (e != storage::StorageError::OK)
+  if (e != storage::StorageError::STORAGE_ERROR_OK)
     this->finish_storage_(e);
 }
 
 void CertStore::on_read_(storage::StorageError err) {
   if (!this->applying_)
     return;
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->finish_storage_(err);
     return;
   }
@@ -208,7 +208,7 @@ void CertStore::on_read_(storage::StorageError err) {
   if (this->last_read_ == 0) {
     storage::StorageError e = storage::global_storage_worker->end_read(
         this->stream_, [this](storage::StorageError ce) { this->on_closed_(ce); });
-    if (e != storage::StorageError::OK)
+    if (e != storage::StorageError::STORAGE_ERROR_OK)
       this->finish_storage_(e);
     return;
   }
@@ -219,7 +219,7 @@ void CertStore::on_closed_(storage::StorageError err) {
   if (!this->applying_)
     return;
   this->stream_open_ = false;
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     this->finish_storage_(err);
     return;
   }
