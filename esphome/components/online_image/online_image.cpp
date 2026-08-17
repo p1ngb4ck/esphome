@@ -312,23 +312,23 @@ bool OnlineImage::start_storage_read_() {
   }
   storage::FileStat st;
   storage::StorageError serr = this->storage_->stat(rel, &st);
-  if (serr != storage::StorageError::OK || st.is_directory) {
+  if (serr != storage::StorageError::STORAGE_ERROR_OK || st.is_directory) {
     ESP_LOGE(TAG, "'%s' not found on storage (%s)", path, storage::error_to_string(serr));
     this->storage_ = nullptr;
     return false;
   }
   this->storage_size_ = st.size;
   this->storage_offset_ = 0;
-  if (this->storage_->get_storage_type() == storage::StorageType::FILESYSTEM) {
+  if (this->storage_->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM) {
     auto *fs = static_cast<storage::FilesystemStorage *>(this->storage_);
-    serr = fs->open(rel, this->storage_handle_, storage::OpenMode::READ);
-    if (serr != storage::StorageError::OK) {
+    serr = fs->open(rel, this->storage_handle_, storage::OpenMode::OPEN_MODE_READ);
+    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
       this->storage_ = nullptr;
       this->storage_handle_ = nullptr;
       return false;
     }
-  } else if (this->storage_->get_storage_type() == storage::StorageType::NETWORK) {
+  } else if (this->storage_->get_storage_type() == storage::StorageType::STORAGE_TYPE_NETWORK) {
     this->storage_path_ = rel;  // owned copy — rel points into resolver scratch
   } else {
     ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", path);
@@ -363,7 +363,7 @@ void OnlineImage::storage_loop_() {
                  ->read_chunk(this->storage_path_.c_str(), this->download_buffer_.append(), this->storage_offset_,
                               available, &received);
     }
-    if (serr != storage::StorageError::OK) {
+    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
       this->end_connection_();
       this->download_error_callback_.call();

@@ -90,7 +90,7 @@ storage::RawStorage *WebServerRawApi::find_device_(AsyncWebServerRequest *reques
           if (ctx->scope != nullptr && s != ctx->scope)
             return;
           storage::StorageInfo info{};
-          if (s->get_info(&info) != storage::StorageError::OK || info.id == nullptr)
+          if (s->get_info(&info) != storage::StorageError::STORAGE_ERROR_OK || info.id == nullptr)
             return;
           if (*ctx->wanted == info.id)
             ctx->found = s;
@@ -142,7 +142,7 @@ void WebServerRawApi::handle_devices_(AsyncWebServerRequest *request) {
           if (ctx->scope != nullptr && s != ctx->scope)
             return;
           storage::StorageInfo info{};
-          if (s->get_info(&info) != storage::StorageError::OK)
+          if (s->get_info(&info) != storage::StorageError::STORAGE_ERROR_OK)
             return;
           storage::RawGeometry geo;
           s->get_raw_geometry(&geo);
@@ -234,7 +234,7 @@ void WebServerRawApi::handle_job_(AsyncWebServerRequest *request) {
   storage::TransferStatus st{};
   bool found = false;
   bool done_cached = false;
-  storage::StorageError cached_result = storage::StorageError::OK;
+  storage::StorageError cached_result = storage::StorageError::STORAGE_ERROR_OK;
   this->run_on_loop_([this, job, &st, &found, &done_cached, &cached_result]() {
     // Cache first: a DONE job usually had its slot recycled already (same as /files/job).
     for (const auto &e : this->job_cache_) {
@@ -300,7 +300,7 @@ void WebServerRawApi::submit_and_answer_(
     return;
   }
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   this->run_on_loop_([this, &submit, &job, &err]() {
     // The job id only exists after submission; the completion callback reads it through a
     // small heap slot filled right below -- safe because submission and completion both run
@@ -310,13 +310,13 @@ void WebServerRawApi::submit_and_answer_(
       this->cache_job_result_(*job_slot, result);
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory)
     });
-    if (err != storage::StorageError::OK) {
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) -- callback will not fire
     } else {
       *job_slot = job;
     }
   });
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     char ebuf[96];
     snprintf(ebuf, sizeof(ebuf), "{\"error\":\"%s\"}", storage::error_to_string(err));
     request->send(400, "application/json", ebuf);
@@ -350,7 +350,7 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
                                          ? storage::global_storage_registry->resolve_path(to.c_str(), &rel)
                                          : nullptr;
           if (ps == nullptr)
-            return storage::StorageError::NOT_FOUND;
+            return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
           return storage::global_storage_worker->async_raw_read(device, address, size, ps, rel, std::move(done), job,
                                                                 overwrite);
         });
@@ -369,12 +369,12 @@ void WebServerRawApi::handle_read_(AsyncWebServerRequest *request) {
   while (offset < size) {
     size_t want = static_cast<size_t>(std::min<uint64_t>(RAW_API_CHUNK, size - offset));
     size_t got = 0;
-    storage::StorageError err = storage::StorageError::OK;
+    storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
     // One main-loop hop per chunk: the drivers are main-loop-only, and a raw read is far too
     // fast for that to matter at these sizes.
     bool loop_ok = this->run_on_loop_(
         [device, address, offset, buf, want, &got, &err]() { err = device->read(address + offset, buf, want, &got); });
-    if (!loop_ok || err != storage::StorageError::OK || got == 0) {
+    if (!loop_ok || err != storage::StorageError::STORAGE_ERROR_OK || got == 0) {
       ESP_LOGW(TAG, "read failed at 0x%08" PRIX32 " (%s)", (uint32_t) (address + offset),
                storage::error_to_string(err));
       break;  // response already started -- end it short rather than lie with a status code
@@ -469,7 +469,7 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
                                          ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
                                          : nullptr;
           if (ps == nullptr)
-            return storage::StorageError::NOT_FOUND;
+            return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
           return storage::global_storage_worker->async_raw_write(ps, rel, device, address, erase_first, std::move(done),
                                                                  job, verify_passes);
         });
@@ -512,7 +512,7 @@ void WebServerRawApi::handleRequest(AsyncWebServerRequest *request) {
                                          ? storage::global_storage_registry->resolve_path(from.c_str(), &rel)
                                          : nullptr;
           if (ps == nullptr)
-            return storage::StorageError::NOT_FOUND;
+            return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
           return storage::global_storage_worker->async_raw_verify_file(ps, rel, device, address, std::move(done), job,
                                                                        verify_passes);
         });
@@ -565,10 +565,10 @@ void WebServerRawApi::handleBody(AsyncWebServerRequest *request, uint8_t *data, 
       uint64_t erase_len = total;
       if ((erase_len % geo.erase_sector) != 0)
         erase_len += geo.erase_sector - (erase_len % geo.erase_sector);
-      storage::StorageError err = storage::StorageError::OK;
+      storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
       uint64_t addr = this->write_.address;
       this->run_on_loop_([device, addr, erase_len, &err]() { err = device->erase(addr, erase_len); }, 120000);
-      if (err != storage::StorageError::OK) {
+      if (err != storage::StorageError::STORAGE_ERROR_OK) {
         this->write_.failed = true;
         this->write_.error = storage::error_to_string(err);
         return;
@@ -584,11 +584,11 @@ void WebServerRawApi::handleBody(AsyncWebServerRequest *request, uint8_t *data, 
   size_t done = 0;
   while (done < len && !this->write_.failed) {
     size_t written = 0;
-    storage::StorageError err = storage::StorageError::OK;
+    storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
     bool loop_ok = this->run_on_loop_([device, at, data, done, len, &written, &err]() {
       err = device->write(at + done, data + done, len - done, &written);
     });
-    if (!loop_ok || err != storage::StorageError::OK || written == 0) {
+    if (!loop_ok || err != storage::StorageError::STORAGE_ERROR_OK || written == 0) {
       this->write_.failed = true;
       this->write_.error = loop_ok ? storage::error_to_string(err) : "device busy";
       return;

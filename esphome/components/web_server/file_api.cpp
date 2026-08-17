@@ -242,20 +242,20 @@ int WebServerFileApi::http_status_for_(storage::StorageError err) {
   // The exists()/stat() lesson applies HTTP-wide: a faulted/unmounted medium must never be
   // reported as absence -- NOT_READY is 503, only NOT_FOUND is 404.
   switch (err) {
-    case storage::StorageError::OK:
+    case storage::StorageError::STORAGE_ERROR_OK:
       return 200;
-    case storage::StorageError::NOT_FOUND:
+    case storage::StorageError::STORAGE_ERROR_NOT_FOUND:
       return 404;
-    case storage::StorageError::NOT_READY:
+    case storage::StorageError::STORAGE_ERROR_NOT_READY:
       return 503;
-    case storage::StorageError::PERMISSION_DENIED:
+    case storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED:
       return 403;
-    case storage::StorageError::NOT_EMPTY:
-    case storage::StorageError::ALREADY_EXISTS:
+    case storage::StorageError::STORAGE_ERROR_NOT_EMPTY:
+    case storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS:
       return 409;
-    case storage::StorageError::TRANSFER_TOO_LARGE:
+    case storage::StorageError::STORAGE_ERROR_TRANSFER_TOO_LARGE:
       return 413;
-    case storage::StorageError::INVALID_ARGS:
+    case storage::StorageError::STORAGE_ERROR_INVALID_ARGS:
       return 400;
     default:
       return 500;
@@ -349,7 +349,7 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           *ctx->out += "{\"mount_path\":\"";
           append_json_escaped(*ctx->out, s->get_mount_path());
           *ctx->out += "\",\"type\":\"";
-          *ctx->out += type == storage::StorageType::NETWORK ? "network" : "filesystem";
+          *ctx->out += type == storage::StorageType::STORAGE_TYPE_NETWORK ? "network" : "filesystem";
           // Close the type string value, then per-direction capabilities: a plain "mountable"
           // bool cannot express drivers whose medium mounts itself (USB hotplug) and only
           // supports safe-eject -- the UI must gate each button separately (see
@@ -368,7 +368,7 @@ void WebServerFileApi::handle_storages_(AsyncWebServerRequest *request) {
           *ctx->out += info.is_mounted ? "true" : "false";
           *ctx->out += ",\"can_format\":";
           *ctx->out += s->as_filesystem() != nullptr ? "true" : "false";
-          if (info_err == storage::StorageError::OK) {
+          if (info_err == storage::StorageError::STORAGE_ERROR_OK) {
             *ctx->out += ",\"name\":\"";
             append_json_escaped(*ctx->out, info.name != nullptr ? info.name : "");
             *ctx->out += "\"";
@@ -409,12 +409,12 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
   std::string path = param->value();
   normalize_vfs_path(path);
   std::string json;
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool ok = this->run_on_loop_([this, &path, &json, &err]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     struct Ctx {
@@ -453,7 +453,7 @@ void WebServerFileApi::handle_list_(AsyncWebServerRequest *request) {
     request->send(504);
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -469,12 +469,12 @@ void WebServerFileApi::handle_stat_(AsyncWebServerRequest *request) {
   std::string path = param->value();
   normalize_vfs_path(path);
   storage::FileStat st{};
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool ok = this->run_on_loop_([this, &path, &st, &err]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     err = ps->stat(rel, &st);
@@ -483,7 +483,7 @@ void WebServerFileApi::handle_stat_(AsyncWebServerRequest *request) {
     request->send(504);
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -564,23 +564,23 @@ void WebServerFileApi::handle_mkdir_(AsyncWebServerRequest *request) {
   }
   std::string path = param->value();
   normalize_vfs_path(path);
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool ok = this->run_on_loop_([this, &path, &err]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     err = ps->mkdir(rel);
-    if (err == storage::StorageError::OK)
+    if (err == storage::StorageError::STORAGE_ERROR_OK)
       storage::global_storage_registry->note_parent_changed(path);
   });
   if (!ok) {
     request->send(504);
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -597,23 +597,23 @@ void WebServerFileApi::handle_delete_(AsyncWebServerRequest *request) {
   normalize_vfs_path(path);
   auto *rec = request->getParam("recursive");
   bool recursive = rec != nullptr && rec->value() == "1";
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool ok = this->run_on_loop_([this, &path, recursive, &err]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     err = recursive ? storage::remove_recursive(ps, rel) : ps->remove(rel);
-    if (err == storage::StorageError::OK)
+    if (err == storage::StorageError::STORAGE_ERROR_OK)
       storage::global_storage_registry->note_parent_changed(path);
   });
   if (!ok) {
     request->send(504);
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -628,13 +628,13 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
   }
   std::string path = param->value();
   normalize_vfs_path(path);
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool found_not_mountable = false;
   bool ok = this->run_on_loop_([this, &path, mount, &err, &found_not_mountable]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr || rel[0] != '\0') {  // must target a mount path exactly, not a file
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     storage::MountableStorage *m = ps->as_mountable();
@@ -654,7 +654,7 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
         err = storage::global_storage_worker->async_mount(
             ps,
             [](storage::StorageError r) {
-              if (r == storage::StorageError::OK && storage::global_storage_registry != nullptr)
+              if (r == storage::StorageError::STORAGE_ERROR_OK && storage::global_storage_registry != nullptr)
                 storage::global_storage_registry->note_dir_changed("");  // roots level: a mount arrived
             },
             nullptr);
@@ -666,7 +666,7 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
       // Unmount stays synchronous: the driver's quiesce drain is owned by the main loop.
       err = m->unmount();
     }
-    if (err == storage::StorageError::OK)
+    if (err == storage::StorageError::STORAGE_ERROR_OK)
       storage::global_storage_registry->note_dir_changed("");  // the roots level: a mount came or went
   });
   if (!ok) {
@@ -677,7 +677,7 @@ void WebServerFileApi::handle_mount_(AsyncWebServerRequest *request, bool mount)
     request->send(400, "application/json", "{\"error\":\"operation not supported by this storage\"}");
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -692,14 +692,14 @@ void WebServerFileApi::handle_format_(AsyncWebServerRequest *request) {
   }
   std::string path = param->value();
   normalize_vfs_path(path);
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   bool not_formattable = false;
   bool still_mounted = false;
   bool ok = this->run_on_loop_([this, &path, &err, &not_formattable, &still_mounted]() {
     const char *rel = nullptr;
     storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr || rel[0] != '\0') {  // must target a mount path exactly, not a file
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     storage::FilesystemStorage *fs = ps->as_filesystem();
@@ -710,12 +710,12 @@ void WebServerFileApi::handle_format_(AsyncWebServerRequest *request) {
     // Format is destructive and operates on the raw volume: require the filesystem to be unmounted
     // first (the UI unmounts, then formats). Refuse while mounted rather than silently unmounting.
     storage::StorageInfo info{};
-    if (fs->get_info(&info) == storage::StorageError::OK && info.is_mounted) {
+    if (fs->get_info(&info) == storage::StorageError::STORAGE_ERROR_OK && info.is_mounted) {
       still_mounted = true;
       return;
     }
     err = fs->format();
-    if (err == storage::StorageError::OK)
+    if (err == storage::StorageError::STORAGE_ERROR_OK)
       storage::global_storage_registry->note_dir_changed("");  // the roots level: state changed
   });
   if (!ok) {
@@ -730,7 +730,7 @@ void WebServerFileApi::handle_format_(AsyncWebServerRequest *request) {
     request->send(409, "application/json", "{\"error\":\"unmount before formatting\"}");
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -766,7 +766,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     request->send(400, "application/json", "{\"error\":\"destination is inside the source\"}");
     return;
   }
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   storage::TransferJob job = storage::INVALID_TRANSFER_JOB;
   bool ok = this->run_on_loop_([this, &from_s, &to_s, is_move, overwrite, &err, &job]() {
     const char *src_rel = nullptr;
@@ -774,7 +774,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     storage::PathStorage *src = this->resolve_(from_s.c_str(), &src_rel);
     storage::PathStorage *dst = this->resolve_(to_s.c_str(), &dst_rel);
     if (src == nullptr || dst == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     // Pure translator by architecture contract: no driver I/O happens here. Existence
@@ -782,7 +782,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     // classification all run inside the worker, in the engine context that owns the
     // storages (see run_chunk_'s pre-phase). This handler resolves, submits, answers.
     if (storage::global_storage_worker == nullptr) {
-      err = storage::StorageError::NOT_SUPPORTED;
+      err = storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
       return;
     }
     // A directory that cannot be renamed into place is a tree job -- the worker walks it. This
@@ -803,7 +803,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     storage::StorageWorker *w = storage::global_storage_worker;
     err = is_move ? w->async_move(src, src_rel, dst, dst_rel, on_done, &job, overwrite)
                   : w->async_copy(src, src_rel, dst, dst_rel, on_done, &job, overwrite);
-    if (err != storage::StorageError::OK) {
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
       delete job_slot;  // NOLINT(cppcoreguidelines-owning-memory) -- callback will not fire
     } else {
       *job_slot = job;
@@ -813,7 +813,7 @@ void WebServerFileApi::handle_copy_move_(AsyncWebServerRequest *request, bool is
     request->send(504);
     return;
   }
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     send_error_(request, err);
     return;
   }
@@ -857,7 +857,7 @@ void WebServerFileApi::loop() {
   if (this->flush_.active && !this->flush_.finished) {
     if (this->flush_.writing || this->flush_.closing) {
       // A worker write/close is in flight; its callback advances the drain. Nothing to do here.
-    } else if (this->flush_.result == storage::StorageError::OK && this->flush_.done < this->flush_.total) {
+    } else if (this->flush_.result == storage::StorageError::STORAGE_ERROR_OK && this->flush_.done < this->flush_.total) {
       size_t chunk = this->flush_.total - this->flush_.done;
       if (chunk > 4 * FILE_API_CHUNK)
         chunk = 4 * FILE_API_CHUNK;
@@ -866,12 +866,12 @@ void WebServerFileApi::loop() {
           this->flush_.stream, this->flush_.data + this->flush_.done, chunk,
           [this, chunk](storage::StorageError e) {
             this->flush_.writing = false;
-            if (e == storage::StorageError::OK)
+            if (e == storage::StorageError::STORAGE_ERROR_OK)
               this->flush_.done += chunk;  // the worker writes the whole chunk or reports an error
             else
               this->flush_.result = e;
           });
-      if (rej != storage::StorageError::OK) {
+      if (rej != storage::StorageError::STORAGE_ERROR_OK) {
         this->flush_.writing = false;
         this->flush_.result = rej;
       }
@@ -883,14 +883,14 @@ void WebServerFileApi::loop() {
           storage::global_storage_worker->end_write(this->flush_.stream, [this](storage::StorageError e) {
             this->flush_.closing = false;
             this->flush_.stream_open = false;
-            if (this->flush_.result == storage::StorageError::OK)
+            if (this->flush_.result == storage::StorageError::STORAGE_ERROR_OK)
               this->flush_.result = e;  // a close error surfaces
             this->finalize_flush_();
           });
-      if (rej != storage::StorageError::OK) {
+      if (rej != storage::StorageError::STORAGE_ERROR_OK) {
         this->flush_.closing = false;
         this->flush_.stream_open = false;
-        if (this->flush_.result == storage::StorageError::OK)
+        if (this->flush_.result == storage::StorageError::STORAGE_ERROR_OK)
           this->flush_.result = rej;
         this->finalize_flush_();
       }
@@ -902,19 +902,19 @@ void WebServerFileApi::loop() {
 #ifdef USE_STORAGE_TRANSFER_BUFFER
 void WebServerFileApi::finalize_flush_() {
   storage::global_transfer_buffer->release();
-  if (this->flush_.result == storage::StorageError::OK) {
+  if (this->flush_.result == storage::StorageError::STORAGE_ERROR_OK) {
     // Publish the staged upload atomically (rename temp -> final).
     this->flush_.result = this->publish_upload_(this->flush_.storage, this->flush_.rel_path,
                                                 this->flush_.final_path, this->flush_.overwrite);
   }
-  if (this->flush_.result != storage::StorageError::OK && this->flush_.storage != nullptr) {
+  if (this->flush_.result != storage::StorageError::STORAGE_ERROR_OK && this->flush_.storage != nullptr) {
     // Drop the temp so a failed publish does not leave it behind.
     this->flush_.storage->remove(this->flush_.rel_path);
   }
   this->flush_.finished = true;  // stays queryable via /files/job until the next staged upload
   this->cache_flush_result_(this->flush_.job, this->flush_.result, (uint32_t) this->flush_.done,
                             (uint32_t) this->flush_.total);
-  if (this->flush_.result == storage::StorageError::OK && this->flush_.storage != nullptr) {
+  if (this->flush_.result == storage::StorageError::STORAGE_ERROR_OK && this->flush_.storage != nullptr) {
     storage::global_storage_registry->note_parent_changed(std::string(this->flush_.storage->get_mount_path()) +
                                                           "/" + this->flush_.final_path);
   }
@@ -1054,7 +1054,7 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
   storage::PathStorage *ps = nullptr;
   uint64_t size = 0;
   char rel_buf[storage::STORAGE_PATH_MAX]{};
-  storage::StorageError err = storage::StorageError::OK;
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
 
   // Control plane only: resolve + stat are synchronous and polymorphic (any storage type). The
   // data read is the worker's job, so no handle is opened here.
@@ -1062,21 +1062,21 @@ void WebServerFileApi::handle_download_(AsyncWebServerRequest *request) {
     const char *rel = nullptr;
     ps = this->resolve_(path.c_str(), &rel);
     if (ps == nullptr) {
-      err = storage::StorageError::NOT_FOUND;
+      err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
       return;
     }
     strncpy(rel_buf, rel, sizeof(rel_buf) - 1);
     storage::FileStat st{};
     err = ps->stat(rel, &st);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return;
     if (st.is_dir) {
-      err = storage::StorageError::INVALID_ARGS;
+      err = storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
       return;
     }
     size = st.size;
   });
-  if (!ok || err != storage::StorageError::OK) {
+  if (!ok || err != storage::StorageError::STORAGE_ERROR_OK) {
     if (!ok) {
       request->send(504);
     } else {
@@ -1171,14 +1171,14 @@ storage::StorageError WebServerFileApi::worker_await_(
   // for the worker's async streams.
   SemaphoreHandle_t done = xSemaphoreCreateBinary();
   if (done == nullptr)
-    return storage::StorageError::NOT_READY;
-  storage::StorageError result = storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
+  storage::StorageError result = storage::StorageError::STORAGE_ERROR_OK;
   this->defer([call = std::move(call), done, &result]() {
     storage::StorageError rej = call([done, &result](storage::StorageError e) {
       result = e;
       xSemaphoreGive(done);
     });
-    if (rej != storage::StorageError::OK) {
+    if (rej != storage::StorageError::STORAGE_ERROR_OK) {
       result = rej;  // rejected synchronously -- no callback will fire
       xSemaphoreGive(done);
     }
@@ -1227,7 +1227,7 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
   storage::StorageError err = this->worker_await_([job, &stream](storage::CompletionCallback cb) {
     return storage::global_storage_worker->begin_read(job->ps, job->rel, &stream, std::move(cb));
   });
-  bool stream_open = err == storage::StorageError::OK;
+  bool stream_open = err == storage::StorageError::STORAGE_ERROR_OK;
   bool failed = !stream_open;
 
   if (stream_open) {
@@ -1235,9 +1235,9 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
     if (ranged && job->range_start > 0) {
       err = this->worker_await_([&stream, job](storage::CompletionCallback cb) {
         return storage::global_storage_worker->seek(stream, static_cast<int64_t>(job->range_start),
-                                                    storage::SeekMode::SET, std::move(cb));
+                                                    storage::SeekMode::SEEK_MODE_SET, std::move(cb));
       });
-      if (err != storage::StorageError::OK)
+      if (err != storage::StorageError::STORAGE_ERROR_OK)
         failed = true;
     }
     auto *buf = new uint8_t[FILE_API_CHUNK];  // NOLINT(cppcoreguidelines-owning-memory)
@@ -1246,7 +1246,7 @@ void WebServerFileApi::pump_download_(DownloadJob *job) {
       err = this->worker_await_([&stream, buf, &got](storage::CompletionCallback cb) {
         return storage::global_storage_worker->read_chunk(stream, buf, FILE_API_CHUNK, &got, std::move(cb));
       });
-      if (err != storage::StorageError::OK) {
+      if (err != storage::StorageError::STORAGE_ERROR_OK) {
         failed = true;
         break;
       }
@@ -1302,7 +1302,7 @@ storage::StorageError WebServerFileApi::publish_upload_(storage::PathStorage *ps
   // rename is atomic: the final path flips from absent/old to complete in one step.
   if (overwrite) {
     storage::StorageError rerr = ps->remove(final_path);
-    if (rerr != storage::StorageError::OK && rerr != storage::StorageError::NOT_FOUND)
+    if (rerr != storage::StorageError::STORAGE_ERROR_OK && rerr != storage::StorageError::STORAGE_ERROR_NOT_FOUND)
       return rerr;
   }
   return ps->rename(temp, final_path);
@@ -1320,7 +1320,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     // Start marker. Target path comes from the query (?path=/sdcard/dir/file.bin); the
     // multipart filename is only a fallback appended to ?dir=.
     if (this->upload_.active) {
-      this->upload_.error = storage::StorageError::NOT_READY;  // one upload at a time
+      this->upload_.error = storage::StorageError::STORAGE_ERROR_NOT_READY;  // one upload at a time
       return;
     }
     this->upload_ = UploadState{};
@@ -1334,7 +1334,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     } else {
       auto *dir = request->getParam("dir");
       if (dir == nullptr) {
-        this->upload_.error = storage::StorageError::INVALID_ARGS;
+        this->upload_.error = storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
         return;
       }
       path = dir->value();
@@ -1342,7 +1342,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         path += '/';
       path += filename;
     }
-    storage::StorageError err = storage::StorageError::OK;
+    storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
     // Default-safe like copy/move: an existing destination is refused with ALREADY_EXISTS unless
     // ?overwrite=1 is set. (The write/append distinction is an action-level contract elsewhere;
     // an interactive upload has no such choice, so the modal offers an overwrite checkbox.)
@@ -1352,7 +1352,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       const char *rel = nullptr;
       storage::PathStorage *ps = this->resolve_(path.c_str(), &rel);
       if (ps == nullptr) {
-        err = storage::StorageError::NOT_FOUND;
+        err = storage::StorageError::STORAGE_ERROR_NOT_FOUND;
         return;
       }
       this->upload_.storage = ps;
@@ -1360,7 +1360,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       strncpy(this->upload_.final_path, rel, sizeof(this->upload_.final_path) - 1);
       int tn = snprintf(this->upload_.rel_path, sizeof(this->upload_.rel_path), "%s.uploading", rel);
       if (tn < 0 || (size_t) tn >= sizeof(this->upload_.rel_path)) {
-        err = storage::StorageError::INVALID_ARGS;  // path + suffix would not fit
+        err = storage::StorageError::STORAGE_ERROR_INVALID_ARGS;  // path + suffix would not fit
         return;
       }
       this->upload_.overwrite = overwrite;
@@ -1369,11 +1369,11 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         // ALREADY_EXISTS. stat() OK means it exists; NOT_FOUND is the wanted case.
         storage::FileStat st{};
         storage::StorageError serr = ps->stat(this->upload_.final_path, &st);
-        if (serr == storage::StorageError::OK) {
-          err = storage::StorageError::ALREADY_EXISTS;
+        if (serr == storage::StorageError::STORAGE_ERROR_OK) {
+          err = storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS;
           return;
         }
-        if (serr != storage::StorageError::NOT_FOUND) {
+        if (serr != storage::StorageError::STORAGE_ERROR_NOT_FOUND) {
           err = serr;
           return;
         }
@@ -1382,8 +1382,8 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       ps->remove(this->upload_.rel_path);
     });
     if (!ok)
-      err = storage::StorageError::NOT_READY;
-    if (err == storage::StorageError::OK) {
+      err = storage::StorageError::STORAGE_ERROR_NOT_READY;
+    if (err == storage::StorageError::STORAGE_ERROR_OK) {
       // Open the temp for writing through the worker's stream API (polymorphic: it opens/truncates
       // for filesystem and network storages alike). On the httpd task via the worker bridge -- not
       // nested in run_on_loop_, which would deadlock the main loop against its own callback.
@@ -1391,13 +1391,13 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
         return storage::global_storage_worker->begin_write(this->upload_.storage, this->upload_.rel_path,
                                                            &this->upload_.stream, std::move(cb));
       });
-      this->upload_.stream_open = err == storage::StorageError::OK;
+      this->upload_.stream_open = err == storage::StorageError::STORAGE_ERROR_OK;
     }
     this->upload_.error = err;
 #ifdef USE_STORAGE_TRANSFER_BUFFER
     // Stage into the PSRAM arena when the whole request body fits (content_len is a safe
     // upper bound for the file part). Strictly additive: nullptr keeps streaming.
-    if (this->upload_.error == storage::StorageError::OK && storage::global_transfer_buffer != nullptr &&
+    if (this->upload_.error == storage::StorageError::STORAGE_ERROR_OK && storage::global_transfer_buffer != nullptr &&
         (!this->flush_.active || this->flush_.finished)) {
       httpd_req_t *raw = *request;
       this->upload_.staged = storage::global_transfer_buffer->try_acquire(raw->content_len);
@@ -1407,17 +1407,17 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
     return;
   }
 
-  if (this->upload_.error != storage::StorageError::OK) {
+  if (this->upload_.error != storage::StorageError::STORAGE_ERROR_OK) {
     return;  // sink remaining data after a failure; response is sent in handleRequest
   }
 
   if (data != nullptr && len > 0) {
-    storage::StorageError err = storage::StorageError::OK;
+    storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
 #ifdef USE_STORAGE_TRANSFER_BUFFER
     if (this->upload_.staged != nullptr) {
       // Staged: memcpy into the PSRAM arena now; the worker write happens in the flush drain.
       if (this->upload_.offset + len > this->upload_.staged_cap) {
-        err = storage::StorageError::WRITE_ERROR;  // cannot happen: cap = content_len
+        err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;  // cannot happen: cap = content_len
       } else {
         memcpy(this->upload_.staged + this->upload_.offset, data, len);
         this->upload_.offset += len;
@@ -1430,7 +1430,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       err = this->worker_await_([this, data, len](storage::CompletionCallback cb) {
         return storage::global_storage_worker->write_chunk(this->upload_.stream, data, len, std::move(cb));
       });
-      if (err == storage::StorageError::OK)
+      if (err == storage::StorageError::STORAGE_ERROR_OK)
         this->upload_.offset += len;
     }
     this->upload_.error = err;
@@ -1439,7 +1439,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
   if (final) {
 #ifdef USE_STORAGE_TRANSFER_BUFFER
     if (this->upload_.staged != nullptr) {
-      if (this->upload_.error == storage::StorageError::OK) {
+      if (this->upload_.error == storage::StorageError::STORAGE_ERROR_OK) {
         this->flush_ = StagedFlush{};
         this->flush_.active = true;
         // Drained in loop(), so the same applies here as to the walker: ask for the phase.
@@ -1463,7 +1463,7 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
 #endif
     ESP_LOGD(TAG, "upload end: %" PRIu64 " bytes (%s)", this->upload_.offset,
              storage::error_to_string(this->upload_.error));
-    storage::StorageError close_err = storage::StorageError::OK;
+    storage::StorageError close_err = storage::StorageError::STORAGE_ERROR_OK;
     if (this->upload_.stream_open) {
       // Close through the worker (end_write); close errors must surface -- backends flush on close.
       close_err = this->worker_await_([this](storage::CompletionCallback cb) {
@@ -1471,9 +1471,9 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       });
       this->upload_.stream_open = false;
     }
-    if (this->upload_.error == storage::StorageError::OK)
+    if (this->upload_.error == storage::StorageError::STORAGE_ERROR_OK)
       this->upload_.error = close_err;
-    if (this->upload_.error == storage::StorageError::OK && this->upload_.storage != nullptr &&
+    if (this->upload_.error == storage::StorageError::STORAGE_ERROR_OK && this->upload_.storage != nullptr &&
         !this->upload_.staged_handoff) {
       // Publish atomically (rename temp -> final), then note the final path's directory.
       // Both the rename and the note are main-loop-only.
@@ -1481,11 +1481,11 @@ void WebServerFileApi::handleUpload(AsyncWebServerRequest *request, const std::s
       this->run_on_loop_([this, &abs]() {
         this->upload_.error = this->publish_upload_(this->upload_.storage, this->upload_.rel_path,
                                                     this->upload_.final_path, this->upload_.overwrite);
-        if (this->upload_.error == storage::StorageError::OK)
+        if (this->upload_.error == storage::StorageError::STORAGE_ERROR_OK)
           storage::global_storage_registry->note_parent_changed(abs);
       });
     }
-    if (this->upload_.error != storage::StorageError::OK && this->upload_.storage != nullptr &&
+    if (this->upload_.error != storage::StorageError::STORAGE_ERROR_OK && this->upload_.storage != nullptr &&
         !this->upload_.staged_handoff && this->upload_.rel_path[0] != '\0') {
       // Failed before (or during) publish -- drop the partial temp so it does not linger.
       this->run_on_loop_([this]() { this->upload_.storage->remove(this->upload_.rel_path); });
@@ -1510,7 +1510,7 @@ void WebServerFileApi::handle_upload_response_(AsyncWebServerRequest *request) {
   }
   storage::StorageError err = this->upload_.error;
   this->upload_.active = false;
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGW(TAG, "upload failed (%s)", storage::error_to_string(err));
     send_error_(request, err);
     return;

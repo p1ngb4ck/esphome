@@ -16,7 +16,7 @@ static const char *const TAG = "module_host.loader";
 static uint8_t *read_file_psram_(storage::FilesystemStorage *fs, const char *rel_path, size_t *out_size,
                                  const char **err) {
   storage::FileStat st{};
-  if (fs->stat(rel_path, &st) != storage::StorageError::OK) {
+  if (fs->stat(rel_path, &st) != storage::StorageError::STORAGE_ERROR_OK) {
     *err = "module file not found";
     return nullptr;
   }
@@ -34,7 +34,7 @@ static uint8_t *read_file_psram_(storage::FilesystemStorage *fs, const char *rel
   }
 
   storage::FileHandle *handle = nullptr;
-  if (fs->open(rel_path, handle, storage::OpenMode::READ) != storage::StorageError::OK) {
+  if (fs->open(rel_path, handle, storage::OpenMode::OPEN_MODE_READ) != storage::StorageError::STORAGE_ERROR_OK) {
     heap_caps_free(buf);
     *err = "failed to open module file";
     return nullptr;
@@ -43,7 +43,7 @@ static uint8_t *read_file_psram_(storage::FilesystemStorage *fs, const char *rel
   while (off < st.size) {
     size_t n = 0;
     storage::StorageError e = fs->read(handle, buf + off, st.size - off, &n);
-    if (e != storage::StorageError::OK) {
+    if (e != storage::StorageError::STORAGE_ERROR_OK) {
       *err = "read error while loading module";
       break;
     }

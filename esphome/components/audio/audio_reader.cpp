@@ -116,19 +116,19 @@ esp_err_t AudioReader::start(const std::string &uri, AudioFileType &file_type) {
     // The handle API lives on FilesystemStorage; NetworkStorage (NFS) is
     // stateless by design and reads chunks by path+offset. get_storage_type()
     // is the no-RTTI discrimination hook the storage API provides for this.
-    if (this->storage_->get_storage_type() == storage::StorageType::FILESYSTEM) {
+    if (this->storage_->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM) {
       auto *fs = static_cast<storage::FilesystemStorage *>(this->storage_);
-      storage::StorageError serr = fs->open(rel, this->storage_handle_, storage::OpenMode::READ);
-      if (serr != storage::StorageError::OK) {
+      storage::StorageError serr = fs->open(rel, this->storage_handle_, storage::OpenMode::OPEN_MODE_READ);
+      if (serr != storage::StorageError::STORAGE_ERROR_OK) {
         ESP_LOGE(TAG, "Opening '%s' failed (%s)", path, storage::error_to_string(serr));
         this->storage_ = nullptr;
         this->storage_handle_ = nullptr;
         return ESP_ERR_NOT_FOUND;
       }
-    } else if (this->storage_->get_storage_type() == storage::StorageType::NETWORK) {
+    } else if (this->storage_->get_storage_type() == storage::StorageType::STORAGE_TYPE_NETWORK) {
       storage::FileStat st;
       storage::StorageError serr = this->storage_->stat(rel, &st);  // early existence check
-      if (serr != storage::StorageError::OK) {
+      if (serr != storage::StorageError::STORAGE_ERROR_OK) {
         ESP_LOGE(TAG, "'%s' not found on network storage (%s)", path, storage::error_to_string(serr));
         this->storage_ = nullptr;
         return ESP_ERR_NOT_FOUND;
@@ -366,7 +366,7 @@ AudioReaderState AudioReader::storage_read_() {
                               this->storage_offset_, this->output_transfer_buffer_->free(), &received);
       this->storage_offset_ += received;
     }
-    if (serr != storage::StorageError::OK) {
+    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Storage read failed (%s)", storage::error_to_string(serr));
       this->cleanup_connection_();
       return AudioReaderState::FAILED;

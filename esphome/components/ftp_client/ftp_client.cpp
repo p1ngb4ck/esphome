@@ -93,7 +93,7 @@ void FTPClient::setup() {
   // path routing and the mount/unmount actions even while unmounted (get_info() reports the
   // mounted state).
   if (storage::global_storage_registry != nullptr) {
-    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Storage registration failed");
       this->mark_failed();
     }
@@ -138,7 +138,7 @@ bool FTPClient::ensure_connected_() {
   if (now - this->last_inline_mount_ms_ < FTP_INLINE_MOUNT_MIN_INTERVAL_MS)
     return false;
   this->last_inline_mount_ms_ = now;
-  return this->do_connect_() == storage::StorageError::OK;
+  return this->do_connect_() == storage::StorageError::STORAGE_ERROR_OK;
 }
 
 std::unique_ptr<socket::Socket> FTPClient::open_tcp_(const std::string &host, uint16_t port) {
@@ -364,7 +364,7 @@ bool FTPClient::setup_tls_() {
   volatile bool ca_ok = false;
   cert_store::global_cert_store->apply_ca_async(&this->conf_, &this->cacert_, esphome::StringRef(entry),
                                                 [&ca_done, &ca_ok](storage::StorageError e) {
-                                                  ca_ok = (e == storage::StorageError::OK);
+                                                  ca_ok = (e == storage::StorageError::STORAGE_ERROR_OK);
                                                   ca_done = true;
                                                 });
   uint32_t start = millis();
@@ -387,26 +387,26 @@ bool FTPClient::setup_tls_() {
 
 storage::StorageError FTPClient::do_connect_() {
   if (this->connected_)
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   if (!network::is_connected())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
 
 #ifdef USE_CERT_STORE
   if (this->auth_tls_ && !this->setup_tls_())
-    return storage::StorageError::NOT_READY;  // e.g. the CA is not loaded from storage yet
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;  // e.g. the CA is not loaded from storage yet
 #endif
 
   this->control_ = make_ftp_stream(this->open_tcp_(this->server_, this->port_));
   if (this->control_ == nullptr) {
     ESP_LOGW(TAG, "Control connection to %s:%u failed", this->server_.c_str(), this->port_);
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
 
   // Greeting
   if (this->read_reply_(nullptr) != 220) {
     ESP_LOGW(TAG, "No 220 greeting");
     this->control_close_();
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
 
 #ifdef USE_CERT_STORE
@@ -415,12 +415,12 @@ storage::StorageError FTPClient::do_connect_() {
     if (this->send_cmd_("AUTH TLS") != 234) {
       ESP_LOGW(TAG, "AUTH TLS refused");
       this->control_close_();
-      return storage::StorageError::NOT_READY;
+      return storage::StorageError::STORAGE_ERROR_NOT_READY;
     }
     if (!this->control_->start_tls(&this->conf_, this->server_.c_str())) {
       ESP_LOGW(TAG, "Control TLS handshake failed");
       this->control_close_();
-      return storage::StorageError::NOT_READY;
+      return storage::StorageError::STORAGE_ERROR_NOT_READY;
     }
   }
 #endif
@@ -432,7 +432,7 @@ storage::StorageError FTPClient::do_connect_() {
   if (c != 230) {
     ESP_LOGW(TAG, "Login failed (code %d)", c);
     this->control_close_();
-    return storage::StorageError::PERMISSION_DENIED;
+    return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
   }
 
 #ifdef USE_CERT_STORE
@@ -442,7 +442,7 @@ storage::StorageError FTPClient::do_connect_() {
     if (this->send_cmd_("PROT P") != 200) {
       ESP_LOGW(TAG, "PROT P refused -- refusing a cleartext data channel");
       this->control_close_();
-      return storage::StorageError::NOT_READY;
+      return storage::StorageError::STORAGE_ERROR_NOT_READY;
     }
   }
 #endif
@@ -452,7 +452,7 @@ storage::StorageError FTPClient::do_connect_() {
 
   this->connected_ = true;
   ESP_LOGI(TAG, "Connected to %s:%u as %s", this->server_.c_str(), this->port_, this->username_.c_str());
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 void FTPClient::do_disconnect_() {
@@ -608,7 +608,7 @@ storage::StorageError FTPClient::mount() { return this->do_connect_(); }
 
 storage::StorageError FTPClient::unmount() {
   this->do_disconnect_();
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,28 +625,28 @@ storage::StorageError FTPClient::get_info(storage::StorageInfo *info) {
   info->is_mounted = this->connected_;
   info->is_removable = true;
   info->is_read_only = false;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError FTPClient::read_chunk(const char *path, uint8_t *buf, uint64_t offset, size_t len,
                                             size_t *bytes_transferred) {
   *bytes_transferred = 0;
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string remote = this->remote_path_(path);
 
   std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
-    return storage::StorageError::READ_ERROR;
+    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
 
   if (offset > 0) {
     if (this->send_cmd_("REST " + std::to_string((unsigned long long) offset)) != 350)
-      return storage::StorageError::READ_ERROR;
+      return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
 
   int c = this->send_cmd_("RETR " + remote);
   if (c != 150 && c != 125)
-    return c == 550 ? storage::StorageError::NOT_FOUND : storage::StorageError::READ_ERROR;
+    return c == 550 ? storage::StorageError::STORAGE_ERROR_NOT_FOUND : storage::StorageError::STORAGE_ERROR_READ_ERROR;
 
   size_t total = 0;
   uint32_t start = millis();
@@ -671,34 +671,34 @@ storage::StorageError FTPClient::read_chunk(const char *path, uint8_t *buf, uint
   this->read_reply_(nullptr);  // 226/426
 
   *bytes_transferred = total;  // partial (< len) means EOF, per the read contract
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError FTPClient::write_chunk(const char *path, const uint8_t *buf, uint64_t offset, size_t len,
                                              size_t *bytes_transferred) {
   *bytes_transferred = 0;
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string remote = this->remote_path_(path);
 
   std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 
   // Full-file only: the first chunk stores (truncating), later contiguous chunks append.
   const char *verb = offset == 0 ? "STOR " : "APPE ";
   int c = this->send_cmd_(std::string(verb) + remote);
   if (c != 150 && c != 125)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 
   bool ok = this->send_all_(data.get(), buf, len);
   data.reset();
   int rc = this->read_reply_(nullptr);
   if (!ok || (rc != 226 && rc != 250))
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 
   *bytes_transferred = len;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError FTPClient::truncate(const char *path, uint64_t size) {
@@ -706,25 +706,25 @@ storage::StorageError FTPClient::truncate(const char *path, uint64_t size) {
   // create/empty the file, which STOR of the first chunk then overwrites. Any non-zero
   // truncation would need random-offset rewrites, which FTP here does not support.
   if (size != 0)
-    return storage::StorageError::NOT_SUPPORTED;
+    return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string remote = this->remote_path_(path);
 
   std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
   int c = this->send_cmd_("STOR " + remote);
   if (c != 150 && c != 125)
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
   data.reset();  // close with nothing written -> empty file
   int rc = this->read_reply_(nullptr);
-  return (rc == 226 || rc == 250) ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  return (rc == 226 || rc == 250) ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 storage::StorageError FTPClient::stat(const char *path, storage::FileStat *out) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string remote = this->remote_path_(path);
 
   *out = storage::FileStat{};
@@ -735,27 +735,27 @@ storage::StorageError FTPClient::stat(const char *path, storage::FileStat *out) 
   if (c == 213) {
     out->is_dir = false;
     out->size = (uint64_t) strtoull(text.c_str() + 3, nullptr, 10);
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
   // SIZE fails on directories on most servers -- probe with CWD (all our paths are absolute,
   // so a changed working directory does not affect later commands).
   if (this->send_cmd_("CWD " + remote) == 250) {
     out->is_dir = true;
     out->size = 0;
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
-  return storage::StorageError::NOT_FOUND;
+  return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
 }
 
 storage::StorageError FTPClient::list_dir(const char *path,
                                           bool (*callback)(const storage::FileStat *entry, void *ctx), void *ctx) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string remote = this->remote_path_(path);
 
   std::unique_ptr<FtpStream> data = this->open_pasv_data_();
   if (data == nullptr)
-    return storage::StorageError::READ_ERROR;
+    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
 
   // Prefer MLSD (machine-readable). Fall back to LIST on servers that reject it.
   bool mlsd = true;
@@ -764,10 +764,10 @@ storage::StorageError FTPClient::list_dir(const char *path,
     mlsd = false;
     data = this->open_pasv_data_();
     if (data == nullptr)
-      return storage::StorageError::READ_ERROR;
+      return storage::StorageError::STORAGE_ERROR_READ_ERROR;
     c = this->send_cmd_("LIST " + remote);
     if (c != 150 && c != 125)
-      return c == 550 ? storage::StorageError::NOT_FOUND : storage::StorageError::READ_ERROR;
+      return c == 550 ? storage::StorageError::STORAGE_ERROR_NOT_FOUND : storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
 
   // Slurp the listing.
@@ -863,39 +863,39 @@ storage::StorageError FTPClient::list_dir(const char *path,
       break;
   }
 
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError FTPClient::mkdir(const char *path) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   int c = this->send_cmd_("MKD " + this->remote_path_(path));
   if (c == 257)
-    return storage::StorageError::OK;
-  return c == 550 ? storage::StorageError::ALREADY_EXISTS : storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_OK;
+  return c == 550 ? storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 storage::StorageError FTPClient::rmdir(const char *path) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   int c = this->send_cmd_("RMD " + this->remote_path_(path));
-  return c == 250 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  return c == 250 ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 storage::StorageError FTPClient::remove(const char *path) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   int c = this->send_cmd_("DELE " + this->remote_path_(path));
-  return c == 250 ? storage::StorageError::OK : storage::StorageError::NOT_FOUND;
+  return c == 250 ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_NOT_FOUND;
 }
 
 storage::StorageError FTPClient::rename(const char *old_path, const char *new_path) {
   if (!this->ensure_connected_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   if (this->send_cmd_("RNFR " + this->remote_path_(old_path)) != 350)
-    return storage::StorageError::NOT_FOUND;
+    return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
   int c = this->send_cmd_("RNTO " + this->remote_path_(new_path));
-  return c == 250 ? storage::StorageError::OK : storage::StorageError::WRITE_ERROR;
+  return c == 250 ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 }  // namespace ftp_client

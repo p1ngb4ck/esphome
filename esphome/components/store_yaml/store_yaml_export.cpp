@@ -49,7 +49,7 @@ bool StoreYamlComponent::ensure_parent_dirs_(storage::PathStorage *ps, const cha
       continue;  // empty segment (consecutive slashes) — nothing to create
     buf[i] = '\0';
     storage::StorageError err = ps->mkdir(buf);
-    if (err != storage::StorageError::OK && err != storage::StorageError::ALREADY_EXISTS) {
+    if (err != storage::StorageError::STORAGE_ERROR_OK && err != storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS) {
       ESP_LOGE(TAG, "mkdir '%s' failed (%s)", buf, storage::error_to_string(err));
       return false;
     }
@@ -64,7 +64,7 @@ bool StoreYamlComponent::write_file_(storage::PathStorage *ps, const char *rel_p
     return false;
   // PathStorage-level helper — works on FILESYSTEM and NETWORK storages alike.
   storage::StorageError err = storage::write_file(ps, rel_path, data, len);
-  if (err != storage::StorageError::OK) {
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Writing '%s' failed (%s)", rel_path, storage::error_to_string(err));
     return false;
   }

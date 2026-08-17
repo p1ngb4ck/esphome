@@ -116,7 +116,7 @@ bool S3Connection::start_tls(const char *host, const char *ca_entry) {
   volatile bool ca_ok = false;
   cert_store::global_cert_store->apply_ca_async(&this->conf_, &this->cacert_, esphome::StringRef(ca_entry),
                                                 [&ca_done, &ca_ok](storage::StorageError e) {
-                                                  ca_ok = (e == storage::StorageError::OK);
+                                                  ca_ok = (e == storage::StorageError::STORAGE_ERROR_OK);
                                                   ca_done = true;
                                                 });
   // The storage path completes from the worker's stream callbacks, which are pumped by the
@@ -414,19 +414,19 @@ std::string S3Client::authorization_(const char *method, const std::string &cano
 
 storage::StorageError S3Client::map_status_(int status) const {
   if (status >= 200 && status < 300)
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   switch (status) {
     case 404:
-      return storage::StorageError::NOT_FOUND;
+      return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
     case 401:
     case 403:
-      return storage::StorageError::PERMISSION_DENIED;
+      return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
     case 416:
-      return storage::StorageError::INVALID_ARGS;
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
     case 409:
-      return storage::StorageError::ALREADY_EXISTS;
+      return storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS;
     default:
-      return status >= 500 ? storage::StorageError::READ_ERROR : storage::StorageError::NOT_SUPPORTED;
+      return status >= 500 ? storage::StorageError::STORAGE_ERROR_READ_ERROR : storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   }
 }
 
@@ -435,7 +435,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
                                          size_t out_cap, size_t *out_len, std::string *accum, size_t accum_limit,
                                          HttpResponse *resp, bool retrying_skew) {
   if (!this->ensure_mounted_())
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   std::string host = this->host_();
   std::string uri = this->uri_for_(key_enc);
 
@@ -494,7 +494,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       conn.close();
       this->conn_valid_ = false;
       if (!conn.open(this->endpoint_.c_str(), this->port_, IO_TIMEOUT_MS))
-        return storage::StorageError::NOT_READY;
+        return storage::StorageError::STORAGE_ERROR_NOT_READY;
 #ifdef USE_CERT_STORE
       if (this->tls_) {
         // Resume a saved TLS session when we have one, for an abbreviated handshake.
@@ -502,7 +502,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
           conn.set_resume_session(&this->saved_session_);
         if (!conn.start_tls(host.c_str(), this->ca_entry_.c_str())) {
           conn.close();
-          return storage::StorageError::NOT_READY;
+          return storage::StorageError::STORAGE_ERROR_NOT_READY;
         }
         // Keep the negotiated session for the next reconnect.
         if (this->have_session_) {
@@ -524,7 +524,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     conn.close();
     this->conn_valid_ = false;
     if (!reused)
-      return storage::StorageError::WRITE_ERROR;
+      return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
     reused = false;  // force a fresh open on the retry pass
   }
 
@@ -538,7 +538,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     if (n <= 0) {
       conn.close();
       this->conn_valid_ = false;
-      return storage::StorageError::READ_ERROR;
+      return storage::StorageError::STORAGE_ERROR_READ_ERROR;
     }
     head += static_cast<char>(ch);
     if (head.size() >= 4 && head.compare(head.size() - 4, 4, "\r\n\r\n") == 0)
@@ -548,7 +548,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
   if (sscanf(head.c_str(), "HTTP/%*d.%*d %d", &r.status) != 1) {
     conn.close();
     this->conn_valid_ = false;
-    return storage::StorageError::READ_ERROR;
+    return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
   // Header lines of interest (case per S3/MinIO practice; fall back to lowercase probes).
   auto header_val = [&head](const char *name) -> std::string {
@@ -643,7 +643,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
         if (n <= 0) {
           conn.close();
           this->conn_valid_ = false;
-          return storage::StorageError::READ_ERROR;
+          return storage::StorageError::STORAGE_ERROR_READ_ERROR;
         }
         line += static_cast<char>(ch);
         if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0)
@@ -660,17 +660,17 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
         if (n <= 0) {
           conn.close();
           this->conn_valid_ = false;
-          return storage::StorageError::READ_ERROR;
+          return storage::StorageError::STORAGE_ERROR_READ_ERROR;
         }
         if (!consume(buf, static_cast<size_t>(n)))
-          return storage::StorageError::NO_SPACE;
+          return storage::StorageError::STORAGE_ERROR_NO_SPACE;
         chunk -= static_cast<size_t>(n);
       }
       uint8_t crlf[2];
       if (conn.recv_some(crlf, 2) <= 0) {
         conn.close();
         this->conn_valid_ = false;
-        return storage::StorageError::READ_ERROR;
+        return storage::StorageError::STORAGE_ERROR_READ_ERROR;
       }
     }
   } else if (r.has_content_length) {
@@ -681,7 +681,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       if (n < 0) {
         conn.close();
         this->conn_valid_ = false;
-        return storage::StorageError::READ_ERROR;
+        return storage::StorageError::STORAGE_ERROR_READ_ERROR;
       }
       if (n == 0) {
         // Peer closed before the full body arrived -- truncated. Drop the connection.
@@ -690,7 +690,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
         break;
       }
       if (!consume(buf, static_cast<size_t>(n)))
-        return storage::StorageError::NO_SPACE;
+        return storage::StorageError::STORAGE_ERROR_NO_SPACE;
       remaining -= static_cast<uint64_t>(n);
       App.feed_wdt();
     }
@@ -704,12 +704,12 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
       if (n < 0) {
         conn.close();
         this->conn_valid_ = false;
-        return storage::StorageError::READ_ERROR;
+        return storage::StorageError::STORAGE_ERROR_READ_ERROR;
       }
       if (n == 0)
         break;
       if (!consume(buf, static_cast<size_t>(n)))
-        return storage::StorageError::NO_SPACE;
+        return storage::StorageError::STORAGE_ERROR_NO_SPACE;
       App.feed_wdt();
     }
     conn.close();
@@ -734,7 +734,7 @@ storage::StorageError S3Client::request_(const char *method, const std::string &
     *out_len = written_out;
   if (resp != nullptr)
     *resp = r;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -771,15 +771,15 @@ void S3Client::drop_episode_() {
 
 storage::StorageError S3Client::flush_episode_() {
   if (!this->episode_.active)
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   std::string key_enc = uri_encode_(this->episode_.key, true);
   HttpResponse r{};
   storage::StorageError err =
       this->request_("PUT", key_enc, "", this->episode_.data, this->episode_.size, nullptr, nullptr, 0, nullptr,
                      nullptr, 0, &r);
-  if (err == storage::StorageError::OK)
+  if (err == storage::StorageError::STORAGE_ERROR_OK)
     err = this->map_status_(r.status);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     ESP_LOGE(TAG, "flush of '%s' (%u bytes) failed (%s)", this->episode_.key,
              static_cast<unsigned>(this->episode_.size), storage::error_to_string(err));
   else
@@ -791,7 +791,7 @@ storage::StorageError S3Client::flush_episode_() {
 storage::StorageError S3Client::flush_if_key_(const char *key) {
   if (this->episode_matches_(key))
     return this->flush_episode_();
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,24 +802,24 @@ storage::StorageError S3Client::truncate(const char *path, uint64_t size) {
   std::string key = this->key_of_(path);
   if (size != 0) {
     // S3 cannot resize an object in place; only the interface's create/overwrite signal (0).
-    return storage::StorageError::NOT_SUPPORTED;
+    return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   }
   // Episode start: flush whatever other key is in flight, then open a fresh empty episode. The
   // upload happens on episode end -- an immediate empty PUT here would be wasted for the common
   // "truncate then write chunks" sequence the interface guarantees.
   if (this->episode_.active && !this->episode_matches_(key.c_str())) {
     storage::StorageError err = this->flush_episode_();
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
   }
   this->drop_episode_();
   if (key.size() >= sizeof(this->episode_.key))
-    return storage::StorageError::INVALID_ARGS;
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   strncpy(this->episode_.key, key.c_str(), sizeof(this->episode_.key) - 1);
   this->episode_.active = true;
   this->episode_.size = 0;
   this->episode_.last_ms = millis();
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError S3Client::write_chunk(const char *path, const uint8_t *buf, uint64_t offset, size_t len,
@@ -831,33 +831,33 @@ storage::StorageError S3Client::write_chunk(const char *path, const uint8_t *buf
       // The interface delivers episode chunks strictly sequentially; anything else is a caller bug.
       ESP_LOGE(TAG, "non-sequential write to '%s' (offset %" PRIu64 ", episode at %u)", key.c_str(), offset,
                static_cast<unsigned>(this->episode_.size));
-      return storage::StorageError::INVALID_ARGS;
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
     }
   } else if (offset == 0) {
     // write_file()-style whole-object write without a preceding truncate: start an episode.
     storage::StorageError err = this->truncate(path, 0);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
   } else {
     // Out-of-episode chunk at an arbitrary offset: the append_file() pattern (stat then write at
     // EOF). One read-modify-write: fetch the existing object into a fresh episode, then append.
     storage::StorageError err = this->flush_episode_();  // an unrelated episode may be open
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
     storage::FileStat st{};
     err = this->stat(path, &st);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
     if (st.size != offset) {
       ESP_LOGE(TAG, "offset write into '%s' unsupported (S3 objects are immutable)", key.c_str());
-      return storage::StorageError::NOT_SUPPORTED;
+      return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
     }
     err = this->truncate(path, 0);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
     if (st.size > 0) {
       if (!this->episode_reserve_(static_cast<size_t>(st.size)))
-        return storage::StorageError::NO_SPACE;
+        return storage::StorageError::STORAGE_ERROR_NO_SPACE;
       size_t got = 0;
       std::string key_enc = uri_encode_(key.c_str(), true);
       char range[64];
@@ -865,9 +865,9 @@ storage::StorageError S3Client::write_chunk(const char *path, const uint8_t *buf
       HttpResponse r{};
       err = this->request_("GET", key_enc, "", nullptr, 0, range, this->episode_.data,
                            static_cast<size_t>(st.size), &got, nullptr, 0, &r);
-      if (err == storage::StorageError::OK)
+      if (err == storage::StorageError::STORAGE_ERROR_OK)
         err = this->map_status_(r.status);
-      if (err != storage::StorageError::OK) {
+      if (err != storage::StorageError::STORAGE_ERROR_OK) {
         this->drop_episode_();
         return err;
       }
@@ -875,12 +875,12 @@ storage::StorageError S3Client::write_chunk(const char *path, const uint8_t *buf
     }
   }
   if (!this->episode_reserve_(this->episode_.size + len))
-    return storage::StorageError::NO_SPACE;
+    return storage::StorageError::STORAGE_ERROR_NO_SPACE;
   memcpy(this->episode_.data + this->episode_.size, buf, len);
   this->episode_.size += len;
   this->episode_.last_ms = millis();
   *bytes_transferred = len;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError S3Client::read_chunk(const char *path, uint8_t *buf, uint64_t offset, size_t len,
@@ -888,7 +888,7 @@ storage::StorageError S3Client::read_chunk(const char *path, uint8_t *buf, uint6
   *bytes_transferred = 0;
   std::string key = this->key_of_(path);
   storage::StorageError err = this->flush_if_key_(key.c_str());
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   std::string key_enc = uri_encode_(key.c_str(), true);
   char range[80];
@@ -896,29 +896,29 @@ storage::StorageError S3Client::read_chunk(const char *path, uint8_t *buf, uint6
   HttpResponse r{};
   size_t got = 0;
   err = this->request_("GET", key_enc, "", nullptr, 0, range, buf, len, &got, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   if (r.status == 416) {
     // Range fully past the end: EOF, not an error (mirrors read() returning 0).
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
   err = this->map_status_(r.status);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   *bytes_transferred = got;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError S3Client::stat(const char *path, storage::FileStat *st) {
   std::string key = this->key_of_(path);
   *st = storage::FileStat{};
   storage::StorageError err = this->flush_if_key_(key.c_str());
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   // The mount root is a directory by definition.
   if (key.empty()) {
     st->is_dir = true;
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
   const char *base = strrchr(key.c_str(), '/');
   strncpy(st->name, base != nullptr ? base + 1 : key.c_str(), sizeof(st->name) - 1);
@@ -926,13 +926,13 @@ storage::StorageError S3Client::stat(const char *path, storage::FileStat *st) {
   std::string key_enc = uri_encode_(key.c_str(), true);
   HttpResponse r{};
   err = this->request_("HEAD", key_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   if (r.status >= 200 && r.status < 300) {
     st->size = r.content_length;
     st->mtime = static_cast<uint32_t>(r.last_modified_epoch);
     st->is_dir = false;
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
   if (r.status != 404)
     return this->map_status_(r.status);
@@ -941,22 +941,22 @@ storage::StorageError S3Client::stat(const char *path, storage::FileStat *st) {
   std::string query = "list-type=2&max-keys=1&prefix=" + uri_encode_((key + "/").c_str(), false);
   err = this->request_("GET", std::string(""), query, nullptr, 0, nullptr, nullptr, 0, nullptr, &probe,
                        XML_ACCUM_LIMIT, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   if (r.status < 200 || r.status >= 300)
     return this->map_status_(r.status);
   if (probe.find("<Key>") != std::string::npos) {
     st->is_dir = true;
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
-  return storage::StorageError::NOT_FOUND;
+  return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
 }
 
 storage::StorageError S3Client::list_dir(const char *path, bool (*callback)(const storage::FileStat *entry, void *ctx),
                                          void *ctx) {
   std::string key = this->key_of_(path);
   storage::StorageError err = this->flush_episode_();  // anything pending becomes visible first
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   std::string prefix = key.empty() ? "" : key + "/";
   std::string token;
@@ -972,10 +972,10 @@ storage::StorageError S3Client::list_dir(const char *path, bool (*callback)(cons
     HttpResponse r{};
     err = this->request_("GET", std::string(""), query, nullptr, 0, nullptr, nullptr, 0, nullptr, &xml,
                          XML_ACCUM_LIMIT, &r);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
     err = this->map_status_(r.status);
-    if (err != storage::StorageError::OK)
+    if (err != storage::StorageError::STORAGE_ERROR_OK)
       return err;
 
     // Files: <Contents><Key>k</Key>...<Size>n</Size><LastModified>...</LastModified></Contents>
@@ -1004,7 +1004,7 @@ storage::StorageError S3Client::list_dir(const char *path, bool (*callback)(cons
       st.mtime = static_cast<uint32_t>(parse_iso8601(lm.c_str()));
       st.is_dir = false;
       if (!callback(&st, ctx))
-        return storage::StorageError::OK;
+        return storage::StorageError::STORAGE_ERROR_OK;
     }
     // Directories: <CommonPrefixes><Prefix>a/b/</Prefix></CommonPrefixes>
     pos = 0;
@@ -1024,13 +1024,13 @@ storage::StorageError S3Client::list_dir(const char *path, bool (*callback)(cons
       strncpy(st.name, sub.c_str(), sizeof(st.name) - 1);
       st.is_dir = true;
       if (!callback(&st, ctx))
-        return storage::StorageError::OK;
+        return storage::StorageError::STORAGE_ERROR_OK;
     }
     size_t tp = 0;
     if (!xml_next(xml, "NextContinuationToken", &tp, &token) || token.empty())
       break;
   }
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError S3Client::mkdir(const char *path) {
@@ -1039,7 +1039,7 @@ storage::StorageError S3Client::mkdir(const char *path) {
   HttpResponse r{};
   storage::StorageError err =
       this->request_("PUT", key_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   return this->map_status_(r.status);
 }
@@ -1047,7 +1047,7 @@ storage::StorageError S3Client::mkdir(const char *path) {
 storage::StorageError S3Client::rmdir(const char *path) {
   std::string key = this->key_of_(path);
   storage::StorageError err = this->flush_episode_();
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   // Refuse when anything but the marker lives under the prefix (mirrors POSIX ENOTEMPTY).
   std::string probe;
@@ -1055,17 +1055,17 @@ storage::StorageError S3Client::rmdir(const char *path) {
   std::string query = "list-type=2&max-keys=2&prefix=" + uri_encode_((key + "/").c_str(), false);
   err = this->request_("GET", std::string(""), query, nullptr, 0, nullptr, nullptr, 0, nullptr, &probe,
                        XML_ACCUM_LIMIT, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   size_t pos = 0;
   std::string k;
   while (xml_next(probe, "Key", &pos, &k)) {
     if (k != key + "/")
-      return storage::StorageError::NOT_EMPTY;
+      return storage::StorageError::STORAGE_ERROR_NOT_EMPTY;
   }
   std::string key_enc = uri_encode_((key + "/").c_str(), true);
   err = this->request_("DELETE", key_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   return this->map_status_(r.status);
 }
@@ -1077,14 +1077,14 @@ storage::StorageError S3Client::remove(const char *path) {
   // S3 DELETE succeeds for absent keys; stat first so NOT_FOUND is reported honestly.
   storage::FileStat st{};
   storage::StorageError err = this->stat(path, &st);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   if (st.is_dir)
-    return storage::StorageError::NOT_SUPPORTED;  // directories go through rmdir()
+    return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;  // directories go through rmdir()
   std::string key_enc = uri_encode_(key.c_str(), true);
   HttpResponse r{};
   err = this->request_("DELETE", key_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   return this->map_status_(r.status);
 }
@@ -1093,16 +1093,16 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
   std::string old_key = this->key_of_(old_path);
   std::string new_key = this->key_of_(new_path);
   storage::StorageError err = this->flush_if_key_(old_key.c_str());
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   storage::FileStat st{};
   err = this->stat(old_path, &st);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   if (st.is_dir) {
     // A server-side recursive move would be one copy+delete per object; the worker's tree ops
     // handle that generically, so a flat rename() keeps to single objects.
-    return storage::StorageError::NOT_SUPPORTED;
+    return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
   }
   // Copy the object through the interface primitives (GET the source, PUT it under the new
   // key via a write episode) and delete the source -- the same read_chunk/write_chunk/remove
@@ -1112,7 +1112,7 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
   // (this backs the staged-upload finalize rename, a handful of bytes to a few KB). st.size is
   // known from the stat above.
   err = this->truncate(new_path, 0);  // opens a write episode for the new key
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   uint64_t copied = 0;
   while (copied < st.size) {
@@ -1120,7 +1120,7 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
     size_t want = static_cast<size_t>(st.size - copied < sizeof(buf) ? st.size - copied : sizeof(buf));
     size_t got = 0;
     err = this->read_chunk(old_path, buf, copied, want, &got);
-    if (err != storage::StorageError::OK) {
+    if (err != storage::StorageError::STORAGE_ERROR_OK) {
       this->drop_episode_();
       return err;
     }
@@ -1128,7 +1128,7 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
       break;
     if (!this->episode_reserve_(this->episode_.size + got)) {
       this->drop_episode_();
-      return storage::StorageError::NO_SPACE;
+      return storage::StorageError::STORAGE_ERROR_NO_SPACE;
     }
     memcpy(this->episode_.data + this->episode_.size, buf, got);
     this->episode_.size += got;
@@ -1136,13 +1136,13 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
     App.feed_wdt();
   }
   err = this->flush_episode_();  // one PUT of the new object -- the path copy already exercises
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   // Source gone only after the destination is safely written.
   std::string old_enc = uri_encode_(old_key.c_str(), true);
   HttpResponse r{};
   err = this->request_("DELETE", old_enc, "", nullptr, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, &r);
-  if (err != storage::StorageError::OK)
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
     return err;
   return this->map_status_(r.status);
 }
@@ -1153,7 +1153,7 @@ storage::StorageError S3Client::rename(const char *old_path, const char *new_pat
 
 storage::StorageError S3Client::get_info(storage::StorageInfo *info) {
   if (info == nullptr)
-    return storage::StorageError::INVALID_ARGS;
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   // Storage contract: get_info() must succeed even while registered-but-unmounted and report
   // that via is_mounted -- never via a non-OK error, never with a server round-trip.
   info->id = this->get_mount_path();
@@ -1165,7 +1165,7 @@ storage::StorageError S3Client::get_info(storage::StorageInfo *info) {
   info->is_mounted = this->mounted_;
   info->total_bytes = 0;  // S3 reports no medium capacity; the browser suppresses zero sizes
   info->free_bytes = 0;
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 bool S3Client::ensure_mounted_() {
@@ -1189,7 +1189,7 @@ void S3Client::request_async_mount_() {
     this->mount_pending_ = true;
     storage::StorageError sub = storage::global_storage_worker->async_mount(
         this, [this](storage::StorageError /*err*/) { this->mount_pending_ = false; });
-    if (sub != storage::StorageError::OK)
+    if (sub != storage::StorageError::STORAGE_ERROR_OK)
       this->mount_pending_ = false;
     return;
   }
@@ -1200,7 +1200,7 @@ void S3Client::request_async_mount_() {
 
 storage::StorageError S3Client::mount() {
   if (this->mounted_)
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   // One synchronous blocking probe. Callers route this through the worker's async_mount()
   // (see loop()/ensure_mounted_()), so on a worker build this body executes on the WORKER
   // TASK -- the main loop stays free no matter how long resolve/connect/TLS take. Without a
@@ -1211,12 +1211,12 @@ storage::StorageError S3Client::mount() {
   S3Connection conn;
   if (!conn.open(this->endpoint_.c_str(), this->port_, IO_TIMEOUT_MS)) {
     ESP_LOGW(TAG, "endpoint %s:%u not reachable", this->endpoint_.c_str(), this->port_);
-    return storage::StorageError::NOT_READY;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
 #ifdef USE_CERT_STORE
   if (this->tls_) {
     if (!conn.start_tls(this->host_().c_str(), this->ca_entry_.c_str()))
-      return storage::StorageError::NOT_READY;
+      return storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
 #endif
   // Probe the proxied prefix, not "/": behind a reverse proxy "/" is the front site, not the
@@ -1224,7 +1224,7 @@ storage::StorageError S3Client::mount() {
   std::string probe_path = this->base_path_.empty() ? "/" : this->base_path_ + "/";
   std::string req = "GET " + probe_path + " HTTP/1.1\r\nHost: " + this->host_() + "\r\nConnection: close\r\n\r\n";
   if (!conn.send_all(reinterpret_cast<const uint8_t *>(req.data()), req.size()))
-    return storage::StorageError::WRITE_ERROR;
+    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
   std::string head;
   uint8_t ch;
   while (head.size() < 2048) {
@@ -1257,21 +1257,21 @@ storage::StorageError S3Client::mount() {
   HttpResponse vr{};
   storage::StorageError verr = this->request_("GET", std::string(""), "list-type=2&max-keys=1", nullptr, 0, nullptr,
                                               nullptr, 0, nullptr, &probe_xml, XML_ACCUM_LIMIT, &vr);
-  if (verr == storage::StorageError::OK)
+  if (verr == storage::StorageError::STORAGE_ERROR_OK)
     verr = this->map_status_(vr.status);
-  if (verr != storage::StorageError::OK) {
+  if (verr != storage::StorageError::STORAGE_ERROR_OK) {
     this->mounted_ = false;
     ESP_LOGW(TAG, "S3 mount rejected: bucket '%s' not accessible (%s)", this->bucket_.c_str(),
              storage::error_to_string(verr));
     return verr;
   }
   ESP_LOGI(TAG, "mounted s3://%s at %s", this->bucket_.c_str(), this->get_mount_path());
-  return storage::StorageError::OK;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 storage::StorageError S3Client::unmount() {
   if (!this->mounted_)
-    return storage::StorageError::OK;
+    return storage::StorageError::STORAGE_ERROR_OK;
   // Quiesce first: the drain guarantees no in-flight worker call remains, which makes this the
   // safe place to flush a pending write episode.
   // Quiesce (drain guarantee: no in-flight worker call remains), flush the pending episode,
@@ -1299,7 +1299,7 @@ void S3Client::setup() {
   // mount-path table and every consumer stay consistent from boot on; mount()/unmount()
   // only toggle the connection state.
   if (storage::global_storage_registry != nullptr) {
-    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::OK) {
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Storage registration failed");
       this->mark_failed();
     }

@@ -437,7 +437,7 @@ bool Esp32HostedUpdate::stream_firmware_from_storage_() {
   // Stat for the total size (also an early existence/type check).
   storage::FileStat st{};
   storage::StorageError serr = ps->stat(rel.c_str(), &st);
-  if (serr != storage::StorageError::OK) {
+  if (serr != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "Cannot stat '%s' (%s)", this->storage_path_.c_str(), storage::error_to_string(serr));
     this->status_set_error(LOG_STR("Firmware file not found"));
     return false;
@@ -452,16 +452,16 @@ bool Esp32HostedUpdate::stream_firmware_from_storage_() {
 
   // FILESYSTEM storages stream through a DATA-PLANE handle; NETWORK (NFS) is stateless and reads
   // by path+offset. get_storage_type() is the no-RTTI discrimination hook the API provides.
-  const bool is_fs = ps->get_storage_type() == storage::StorageType::FILESYSTEM;
+  const bool is_fs = ps->get_storage_type() == storage::StorageType::STORAGE_TYPE_FILESYSTEM;
   storage::FileHandle *handle = nullptr;
   if (is_fs) {
-    serr = static_cast<storage::FilesystemStorage *>(ps)->open(rel.c_str(), handle, storage::OpenMode::READ);
-    if (serr != storage::StorageError::OK) {
+    serr = static_cast<storage::FilesystemStorage *>(ps)->open(rel.c_str(), handle, storage::OpenMode::OPEN_MODE_READ);
+    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Opening '%s' failed (%s)", this->storage_path_.c_str(), storage::error_to_string(serr));
       this->status_set_error(LOG_STR("Cannot open firmware file"));
       return false;
     }
-  } else if (ps->get_storage_type() != storage::StorageType::NETWORK) {
+  } else if (ps->get_storage_type() != storage::StorageType::STORAGE_TYPE_NETWORK) {
     ESP_LOGE(TAG, "Storage type of '%s' does not support streaming reads", this->storage_path_.c_str());
     this->status_set_error(LOG_STR("Unsupported storage type"));
     return false;
@@ -495,7 +495,7 @@ bool Esp32HostedUpdate::stream_firmware_from_storage_() {
     }
     App.feed_wdt();
     yield();
-    if (serr != storage::StorageError::OK) {
+    if (serr != storage::StorageError::STORAGE_ERROR_OK) {
       ESP_LOGE(TAG, "Read failed at %llu (%s)", static_cast<unsigned long long>(offset),
                storage::error_to_string(serr));
       this->status_set_error(LOG_STR("Firmware read failed"));

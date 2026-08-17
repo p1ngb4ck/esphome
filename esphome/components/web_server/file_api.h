@@ -238,7 +238,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     char final_path[storage::STORAGE_PATH_MAX]{};
     bool overwrite{false};
     uint64_t offset{0};
-    storage::StorageError error{storage::StorageError::OK};
+    storage::StorageError error{storage::StorageError::STORAGE_ERROR_OK};
     // True once a staged upload handed its bytes to flush_: completion (and the directory-
     // change note) then belongs to the flush drain in loop(), not to the request's end.
     bool staged_handoff{false};
@@ -270,7 +270,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
     const uint8_t *data{nullptr};
     size_t total{0};
     size_t done{0};
-    storage::StorageError result{storage::StorageError::OK};
+    storage::StorageError result{storage::StorageError::STORAGE_ERROR_OK};
   } flush_{};
   uint32_t flush_job_counter_{0};
   // A finished staged-upload flush lives only in the single flush_ slot, which the next upload
@@ -279,7 +279,7 @@ class WebServerFileApi : public Component, public AsyncWebHandler {
   // flushing once flush_ has moved on.
   struct FlushCacheEntry {
     uint32_t job{0};
-    storage::StorageError result{storage::StorageError::OK};
+    storage::StorageError result{storage::StorageError::STORAGE_ERROR_OK};
     uint32_t done{0};
     uint32_t total{0};
   };
