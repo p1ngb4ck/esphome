@@ -6,7 +6,6 @@
 #include <cstring>
 #include <cstdio>
 #include "esphome/components/storage/storage.h"
-#include "esphome/components/storage/fatfs_select.h"
 
 namespace esphome::sd_storage {
 
@@ -89,29 +88,8 @@ storage::StorageError SdStorageBase::get_info(storage::StorageInfo *info) {
 }
 
 storage::StorageError SdStorageBase::format() {
-  if (this->fatfs_drive_[0] == '\0') {
-    ESP_LOGE(TAG_BASE, "Cannot format: card not mounted (no FATFS drive)");
-    return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
-  }
-  // Detach the mounted FATFS volume but keep the diskio drive registered so f_mkfs can reach the
-  // medium; then re-register the VFS via mount() to expose the fresh, empty filesystem. The FAT
-  // family is used (FatFs picks the width the medium allows); exFAT selection lives with the
-  // subclass config and can be threaded through later.
-  f_mount(nullptr, this->fatfs_drive_, 0);
-  auto work = std::make_unique<uint8_t[]>(FF_MAX_SS);
-  MKFS_PARM parm{};
-  parm.fmt = FM_FAT | FM_FAT32;
-  ESP_LOGI(TAG_BASE, "Formatting '%s' as FAT...", this->fatfs_drive_);
-  FRESULT res = f_mkfs(this->fatfs_drive_, &parm, work.get(), FF_MAX_SS);
-  if (res != FR_OK) {
-    ESP_LOGE(TAG_BASE, "f_mkfs failed (%d)", static_cast<int>(res));
-    this->unmount();
-    this->mount();
-    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
-  }
-  this->unmount();
-  this->mount();
-  return storage::StorageError::STORAGE_ERROR_OK;
+  ESP_LOGW(TAG_BASE, "Format not implemented for SD cards");
+  return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
 }
 
 void SdStorageBase::loop_cd_() {
@@ -342,8 +320,9 @@ storage::StorageError SdStorageBase::seek(storage::FileHandle *handle, int64_t o
     default:
       return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
-  return fseek(handle->file, static_cast<int32_t>(offset), whence) == 0 ? storage::StorageError::STORAGE_ERROR_OK
-                                                                        : storage::StorageError::STORAGE_ERROR_READ_ERROR;
+  return fseek(handle->file, static_cast<int32_t>(offset), whence) == 0
+             ? storage::StorageError::STORAGE_ERROR_OK
+             : storage::StorageError::STORAGE_ERROR_READ_ERROR;
 }
 
 storage::StorageError SdStorageBase::tell(storage::FileHandle *handle, uint64_t *position) {
@@ -492,7 +471,8 @@ storage::StorageError SdStorageBase::remove(const char *path) {
   if (!this->build_full_path_(path, full, sizeof(full)))
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
 
-  return ::remove(full) == 0 ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+  return ::remove(full) == 0 ? storage::StorageError::STORAGE_ERROR_OK
+                             : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 storage::StorageError SdStorageBase::rename(const char *old_path, const char *new_path) {
@@ -537,15 +517,15 @@ bool SdStorageBase::log_list_dir_entry(const storage::FileStat *entry, void *ctx
 
 const char *SdStorageBase::card_type_to_string(CardType type) {
   switch (type) {
-    case CardType::SDIO:
+    case CardType::CARD_TYPE_SDIO:
       return "SDIO";
-    case CardType::MMC:
+    case CardType::CARD_TYPE_MMC:
       return "MMC";
-    case CardType::SDHC:
+    case CardType::CARD_TYPE_SDHC:
       return "SDHC/SDXC";
-    case CardType::SDSC:
+    case CardType::CARD_TYPE_SDSC:
       return "SDSC";
-    case CardType::UNKNOWN:
+    case CardType::CARD_TYPE_UNKNOWN:
     default:
       return "UNKNOWN";
   }
