@@ -320,8 +320,9 @@ storage::StorageError SdStorageBase::seek(storage::FileHandle *handle, int64_t o
     default:
       return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
-  return fseek(handle->file, static_cast<int32_t>(offset), whence) == 0 ? storage::StorageError::STORAGE_ERROR_OK
-                                                                        : storage::StorageError::STORAGE_ERROR_READ_ERROR;
+  return fseek(handle->file, static_cast<int32_t>(offset), whence) == 0
+             ? storage::StorageError::STORAGE_ERROR_OK
+             : storage::StorageError::STORAGE_ERROR_READ_ERROR;
 }
 
 storage::StorageError SdStorageBase::tell(storage::FileHandle *handle, uint64_t *position) {
@@ -470,7 +471,8 @@ storage::StorageError SdStorageBase::remove(const char *path) {
   if (!this->build_full_path_(path, full, sizeof(full)))
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
 
-  return ::remove(full) == 0 ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+  return ::remove(full) == 0 ? storage::StorageError::STORAGE_ERROR_OK
+                             : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
 storage::StorageError SdStorageBase::rename(const char *old_path, const char *new_path) {
@@ -515,15 +517,15 @@ bool SdStorageBase::log_list_dir_entry(const storage::FileStat *entry, void *ctx
 
 const char *SdStorageBase::card_type_to_string(CardType type) {
   switch (type) {
-    case CardType::SDIO:
+    case CardType::CARD_TYPE_SDIO:
       return "SDIO";
-    case CardType::MMC:
+    case CardType::CARD_TYPE_MMC:
       return "MMC";
-    case CardType::SDHC:
+    case CardType::CARD_TYPE_SDHC:
       return "SDHC/SDXC";
-    case CardType::SDSC:
+    case CardType::CARD_TYPE_SDSC:
       return "SDSC";
-    case CardType::UNKNOWN:
+    case CardType::CARD_TYPE_UNKNOWN:
     default:
       return "UNKNOWN";
   }
