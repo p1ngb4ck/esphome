@@ -300,13 +300,6 @@ class KeyValueStorage : public Storage {
   // writes; a key rewritten in place is reported once, with its current length.
   virtual StorageError list_keys(bool (*callback)(uint32_t key, size_t size, void *ctx), void *ctx) = 0;
 
-  // Enumerate every stored key, invoking `callback` once per key with its value's byte length.
-  // Return false from the callback to stop the walk early (mirrors list_dir()); list_keys() itself
-  // still returns StorageError::STORAGE_ERROR_OK in that case. The value is not read here -- a consumer that wants
-  // it calls get() with the reported size. Iteration order is backend-defined and not stable across
-  // writes; a key rewritten in place is reported once, with its current length.
-  virtual StorageError list_keys(bool (*callback)(uint32_t key, size_t size, void *ctx), void *ctx) = 0;
-
   // Runtime bring-up: detect an empty/invalid medium and initialize it in place -- a fast no-op for
   // a flash-time-laid-out partition, real work for an external bus device on first boot once its bus
   // is up. Called at backend setup, never from codegen.
