@@ -157,6 +157,7 @@
 #define USE_OUTPUT
 #define USE_OUTPUT_FLOAT_POWER_SCALING
 #define USE_POWER_SUPPLY
+#define USE_PREFERENCES_BACKUP
 #define USE_PREFERENCES_SYNC_EVERY_LOOP
 // Only defined by key-lookup preference backends; the slot-based platforms
 // (esp8266, rp2040) never set it in generated builds, and their preferences
@@ -190,7 +191,6 @@
 #define USE_STORAGE_MAX_RECURSION_DEPTH 4
 #define USE_STORAGE_PATH_MAX 256
 #define USE_STORAGE_VFS_PATH_MAX 288
-#define USE_STORAGE_PREFERENCES
 #define USE_STORAGE_RAW_ACTIONS
 #define USE_STORAGE_REGEX_EXTRACT
 #define USE_STORAGE_TRANSFER_BUFFER

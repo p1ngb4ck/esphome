@@ -12,6 +12,8 @@
 #define USE_ESP32_RTC_PREFERENCES_STORAGE
 #endif
 
+namespace esphome { namespace storage { class KeyValueStorage; } }  // NOLINT
+
 namespace esphome::esp32 {
 
 struct NVSData;
@@ -43,6 +45,17 @@ class ESP32Preferences final : public PreferencesMixin<ESP32Preferences> {
 };
 
 void setup_preferences();
+
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+// Route the flash-preference path through an external KeyValueStorage (see preferences.cpp).
+void set_external_preferences_store(storage::KeyValueStorage *kv);
+#endif
+
+#if defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
+// The active flash-preference store as a KeyValueStorage view, for whole-namespace enumeration
+// (preferences backup). Null before open() or if the NVS handle never opened.
+storage::KeyValueStorage *get_preferences_store();
+#endif
 
 }  // namespace esphome::esp32
 
