@@ -21,7 +21,7 @@ static const char *const TAG_BASE = "sd_storage";
 // f_unlink() (used for rmdir -- see rmdir() below, FATFS has no dedicated f_rmdir) returns
 // FR_DENIED both for "directory not empty" and for genuine permission/read-only failures, so the
 // caller must tell us which context applies.
-static StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write) {
+StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write) {
   switch (res) {
     case FR_OK:
       return StorageError::STORAGE_ERROR_OK;
@@ -393,8 +393,14 @@ storage::StorageError SdStorageBase::list_dir(const char *path,
     return fresult_to_storage_error(res, /*for_rmdir=*/false, /*is_write=*/false);
 
   FILINFO fno;
+  storage::StorageError result = storage::StorageError::STORAGE_ERROR_OK;
   for (;;) {
-    if (f_readdir(&fat_dir, &fno) != FR_OK || fno.fname[0] == '\0')
+    FRESULT rd = f_readdir(&fat_dir, &fno);
+    if (rd != FR_OK) {
+      result = fresult_to_storage_error(rd, /*for_rmdir=*/false, /*is_write=*/false);
+      break;
+    }
+    if (fno.fname[0] == '\0')
       break;
     StringRef fname_ref(fno.fname);
     if (fname_ref == "." || fname_ref == "..")
@@ -413,8 +419,10 @@ storage::StorageError SdStorageBase::list_dir(const char *path,
       break;
   }
 
-  f_closedir(&fat_dir);
-  return storage::StorageError::STORAGE_ERROR_OK;
+  FRESULT cl = f_closedir(&fat_dir);
+  if (result == storage::StorageError::STORAGE_ERROR_OK && cl != FR_OK)
+    result = fresult_to_storage_error(cl, /*for_rmdir=*/false, /*is_write=*/false);
+  return result;
 }
 
 storage::StorageError SdStorageBase::mkdir(const char *path) {
@@ -447,7 +455,8 @@ storage::StorageError SdStorageBase::rmdir(const char *path) {
 
   bool has_entries = false;
   FILINFO fno;
-  while (f_readdir(&fat_dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+  FRESULT rd = FR_OK;
+  while ((rd = f_readdir(&fat_dir, &fno)) == FR_OK && fno.fname[0] != '\0') {
     StringRef fname_ref(fno.fname);
     if (fname_ref == "." || fname_ref == "..")
       continue;
@@ -455,6 +464,8 @@ storage::StorageError SdStorageBase::rmdir(const char *path) {
     break;
   }
   f_closedir(&fat_dir);
+  if (rd != FR_OK)
+    return fresult_to_storage_error(rd, /*for_rmdir=*/true, /*is_write=*/false);
   if (has_entries)
     return storage::StorageError::STORAGE_ERROR_NOT_EMPTY;
 
@@ -494,17 +505,29 @@ storage::StorageError SdStorageBase::rename(const char *old_path, const char *ne
   return storage::StorageError::STORAGE_ERROR_OK;
 }
 
-void SdStorageBase::log_mount_result_(bool success) const {
-  if (success) {
+void SdStorageBase::log_mount_result_(storage::StorageError err) const {
+  if (err == storage::STORAGE_ERROR_OK) {
     ESP_LOGI(TAG_BASE, "Card mounted via automation");
   } else {
-    ESP_LOGE(TAG_BASE, "Failed to mount card via automation");
+    ESP_LOGE(TAG_BASE, storage::error_from_errno(err));
   }
 }
 
-void SdStorageBase::log_unmount_() const { ESP_LOGI(TAG_BASE, "Card unmounted via automation"); }
+void SdStorageBase::log_unmount_(storage::StorageError err) const {
+  if (err == storage::STORAGE_ERROR_OK) {
+    ESP_LOGI(TAG_BASE, "Card unmounted via automation");
+  } else {
+    ESP_LOGE(TAG_BASE, storage::error_from_errno(err));
+  }
+}
 
 void SdStorageBase::log_list_dir_start_(const char *path) const { ESP_LOGD(TAG_BASE, "Listing files in: %s", path); }
+
+void SdStorageBase::log_list_dir_result_(storage::StorageError err) const {
+  if (err != storage::STORAGE_ERROR_OK) {
+    ESP_LOGW(TAG_BASE, storage::error_from_errno(err));
+  }
+}
 
 bool SdStorageBase::log_list_dir_entry(const storage::FileStat *entry, void *ctx) {
   if (entry->is_dir) {

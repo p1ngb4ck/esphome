@@ -13,6 +13,11 @@
 
 namespace esphome::sd_storage {
 
+// Map a FatFs FRESULT to a storage::StorageError, shared by the drivers so none reinvents it.
+// for_rmdir turns FR_DENIED into NOT_EMPTY (vs PERMISSION_DENIED); is_write picks WRITE_ERROR
+// vs READ_ERROR for the generic default.
+storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write);
+
 // Note: SDHC and SDXC cards cannot be distinguished by the OCR capacity bit alone (that only
 // separates SDSC from "high/extended capacity"); doing so would require checking the card's
 // actual reported capacity. No driver currently assigns SDXC, so it's omitted here rather than
@@ -133,9 +138,10 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   template<typename... Ts> friend class UnmountCardAction;
   template<typename... Ts> friend class ListFilesAction;
 
-  void log_mount_result_(bool success) const;
-  void log_unmount_() const;
+  void log_mount_result_(storage::StorageError err) const;
+  void log_unmount_(storage::StorageError err) const;
   void log_list_dir_start_(const char *path) const;
+  void log_list_dir_result_(storage::StorageError err) const;
   // Matches the list_dir() callback signature (bool return = keep enumerating).
   static bool log_list_dir_entry(const storage::FileStat *entry, void *ctx);
   static const char *card_type_to_string(CardType type);

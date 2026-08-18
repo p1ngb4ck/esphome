@@ -165,15 +165,25 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
   return ESP_OK;
 }
 
-void SdMmc::unmount_manual_() {
+storage::StorageError SdMmc::unmount_manual_() {
+  storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
   if (pdrv != FF_DRV_NOT_USED) {
     char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
-    f_mount(nullptr, drv, 0);
+    FRESULT res = f_mount(nullptr, drv, 0);
+    if (res != FR_OK) {
+      ESP_LOGW(TAG, "f_mount(unmount) failed (FRESULT %d)", res);
+      err = fresult_to_storage_error(res, /*for_rmdir=*/false, /*is_write=*/false);
+    }
     ff_diskio_register(pdrv, nullptr);
+  } else {
+    ESP_LOGW(TAG, "unmount: no diskio binding for card (pdrv lookup failed); FATFS volume not unmounted");
+    err = storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
-  esp_vfs_fat_unregister_path(this->mount_path_);
+  if (esp_vfs_fat_unregister_path(this->mount_path_) != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
+    err = storage::StorageError::STORAGE_ERROR_NOT_READY;
   delete this->card_;  // NOLINT(cppcoreguidelines-owning-memory)
+  return err;
 }
 #endif  // USE_STORAGE_FILE_SYSTEM_SELECT
 
@@ -282,13 +292,20 @@ storage::StorageError SdMmc::unmount() {
   ESP_LOGD(TAG, "Syncing filesystem before unmount");
   // Closes any handles still open from user/lambda code, while the VFS is still mounted to
   // receive the flush/close calls.
-  this->flush_open_handles_();
-  ESP_LOGD(TAG, "All data flushed");
+  storage::StorageError flush_err = this->flush_open_handles_();
+  if (flush_err == storage::StorageError::STORAGE_ERROR_OK)
+    ESP_LOGD(TAG, "All data flushed");
+  else
+    ESP_LOGW(TAG, "Flush before unmount failed: %s", storage::error_to_string(flush_err));
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
-  this->unmount_manual_();
+  storage::StorageError unmount_err = this->unmount_manual_();
 #else
-  esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
+  storage::StorageError unmount_err = storage::StorageError::STORAGE_ERROR_OK;
+  if (esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_) != ESP_OK) {
+    ESP_LOGW(TAG, "esp_vfs_fat_sdcard_unmount failed");
+    unmount_err = storage::StorageError::STORAGE_ERROR_NOT_READY;
+  }
 #endif
   this->card_ = nullptr;
   this->is_mounted_ = false;
@@ -299,8 +316,13 @@ storage::StorageError SdMmc::unmount() {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  ESP_LOGI(TAG, "SD/MMC card unmounted safely");
+  // Report the flush and teardown results so a failed unmount does not look clean.
+  if (flush_err != storage::StorageError::STORAGE_ERROR_OK)
+    return flush_err;
+  if (unmount_err != storage::StorageError::STORAGE_ERROR_OK)
+    return unmount_err;
 
+  ESP_LOGI(TAG, "SD/MMC card unmounted safely");
   return storage::StorageError::STORAGE_ERROR_OK;
 }
 
