@@ -302,7 +302,7 @@ def _final_validate_sorting(config: ConfigType) -> None:
         )
 
 
-def _final_validate_file_explorer(config: ConfigType) -> ConfigType:
+def _final_validate_file_explorer(config: ConfigType) -> None:
     """The advanced browser serves its assets out of external RAM in both modes.
 
     There is no variant that trades PSRAM away -- flash and storage differ in where the bytes
