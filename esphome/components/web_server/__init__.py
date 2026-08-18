@@ -312,7 +312,7 @@ def _final_validate_file_explorer(config: ConfigType) -> None:
     """
     browser = config.get(CONF_FILE_BROWSER)
     if browser is None or browser.get(CONF_VARIANT) != BROWSER_ADVANCED:
-        return config
+        return
     full = fv.full_config.get()
     if "psram" not in full:
         raise cv.Invalid(
@@ -326,13 +326,16 @@ def _final_validate_file_explorer(config: ConfigType) -> None:
             f"assets from",
             path=[CONF_FILE_BROWSER, CONF_ASSET_SOURCE],
         )
-    return config
 
 
-FINAL_VALIDATE_SCHEMA = cv.All(
-    _final_validate_sorting,
-    _final_validate_file_explorer,
-)
+def _final_validate(config: ConfigType) -> None:
+    # Both checks are independent and only read the config, so call them directly with the same
+    # config instead of chaining via cv.All (final-validate callables now return None).
+    _final_validate_sorting(config)
+    _final_validate_file_explorer(config)
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 def _consume_web_server_sockets(config: ConfigType) -> ConfigType:
