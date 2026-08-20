@@ -5,15 +5,9 @@ from esphome.components.const import CONF_REQUEST_HEADERS
 from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 from esphome.components.image import CONF_TRANSPARENCY, add_metadata
 import esphome.config_validation as cv
-from esphome.const import (
-    CONF_BUFFER_SIZE,
-    CONF_ID,
-    CONF_ON_ERROR,
-    CONF_PATH,
-    CONF_TYPE,
-    CONF_URL,
-)
-from esphome.core import Lambda
+from esphome.const import CONF_BUFFER_SIZE, CONF_ID, CONF_ON_ERROR, CONF_TYPE, CONF_URL
+from esphome.core import ID, Lambda
+from esphome.cpp_generator import MockObj, TemplateArgsType
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@guillempages", "@clydebarrow"]
@@ -135,7 +129,12 @@ RELEASE_IMAGE_SCHEMA = automation.maybe_simple_id(
     RELEASE_IMAGE_SCHEMA,
     synchronous=True,
 )
-async def online_image_action_to_code(config, action_id, template_arg, args):
+async def online_image_action_to_code(
+    config: ConfigType,
+    action_id: ID,
+    template_arg: cg.TemplateArguments,
+    args: TemplateArgsType,
+) -> MockObj:
     paren = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, paren)
 
