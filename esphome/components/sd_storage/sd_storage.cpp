@@ -84,7 +84,6 @@ void SdMmc::dump_config() {
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG, "  Total bytes: %" PRIu64, this->total_bytes_);
-    ESP_LOGCONFIG(TAG, "  Used bytes: %" PRIu64, this->used_bytes_);
   }
 }
 
@@ -131,7 +130,7 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
   char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
 
   // The point of this path: the requested filesystem is enforced BEFORE the mount.
-  if (!storage::ensure_requested_filesystem(TAG, pdrv, drv, this->requested_file_system_)) {
+  if (!storage::ensure_requested_filesystem(TAG, pdrv, drv, this->requested_file_system_, this->format_on_mismatch_)) {
     ff_diskio_register(pdrv, nullptr);
     delete card;  // NOLINT(cppcoreguidelines-owning-memory)
     return ESP_FAIL;
@@ -333,19 +332,28 @@ bool SdMmc::update_card_info() {
   this->total_bytes_ = (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) == ESP_OK)
-    this->used_bytes_ = total_bytes - free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return false;
+  }
+  this->used_bytes_ = total_bytes - free_bytes;
   return true;
 }
 
-uint64_t SdMmc::get_free_bytes_impl() const {
+storage::StorageError SdMmc::get_free_bytes_impl(uint64_t &free_out) const {
   if (!this->is_mounted_)
-    return 0;
+    return storage::StorageError::STORAGE_ERROR_NOT_READY;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) != ESP_OK)
-    return 0;
-  return free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return (err == ESP_ERR_INVALID_STATE) ? storage::StorageError::STORAGE_ERROR_NOT_READY
+                                          : storage::StorageError::STORAGE_ERROR_READ_ERROR;
+  }
+  free_out = free_bytes;
+  return storage::StorageError::STORAGE_ERROR_OK;
 }
 
 }  // namespace esphome::sd_storage

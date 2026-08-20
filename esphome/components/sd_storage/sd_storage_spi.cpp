@@ -92,7 +92,10 @@ void SdSpi::dump_config() {
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG_SPI, "  Total bytes: %" PRIu64, this->total_bytes_);
-    ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
+    if (this->update_card_info())
+      ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
+    else
+      ESP_LOGCONFIG(TAG_SPI, "  Used bytes: unavailable");
   }
   if (this->is_failed()) {
     ESP_LOGE(TAG_SPI, "Setup failed: %s", SdSpi::error_code_to_str(this->init_error_));
@@ -150,7 +153,8 @@ esp_err_t SdSpi::mount_manual_(sdmmc_host_t &host, sdspi_device_config_t &slot_c
   ff_diskio_register_sdmmc(pdrv, card);
   char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
 
-  if (!storage::ensure_requested_filesystem(TAG_SPI, pdrv, drv, this->requested_file_system_)) {
+  if (!storage::ensure_requested_filesystem(TAG_SPI, pdrv, drv, this->requested_file_system_,
+                                            this->format_on_mismatch_)) {
     ff_diskio_register(pdrv, nullptr);
     sdspi_host_remove_device(this->sdspi_handle_);
     this->sdspi_handle_ = -1;
@@ -367,19 +371,28 @@ bool SdSpi::update_card_info() {
   this->total_bytes_ = (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) == ESP_OK)
-    this->used_bytes_ = total_bytes - free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG_SPI, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return false;
+  }
+  this->used_bytes_ = total_bytes - free_bytes;
   return true;
 }
 
-uint64_t SdSpi::get_free_bytes_impl() const {
+StorageError SdSpi::get_free_bytes_impl(uint64_t &free_out) const {
   if (!this->is_mounted_)
-    return 0;
+    return StorageError::STORAGE_ERROR_NOT_READY;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) != ESP_OK)
-    return 0;
-  return free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG_SPI, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return (err == ESP_ERR_INVALID_STATE) ? StorageError::STORAGE_ERROR_NOT_READY
+                                          : StorageError::STORAGE_ERROR_READ_ERROR;
+  }
+  free_out = free_bytes;
+  return StorageError::STORAGE_ERROR_OK;
 }
 
 uint32_t SdSpi::get_block_size_impl() const { return (this->card_ != nullptr) ? this->card_->csd.sector_size : 512; }

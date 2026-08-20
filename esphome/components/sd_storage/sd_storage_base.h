@@ -45,6 +45,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   void set_mount_path(const char *path) { this->set_mount_path_(path); }
   void set_id(const char *id) { this->storage_id_ = id; }
   void set_cd_pin(GPIOPin *pin) { this->cd_pin_ = pin; }
+  void set_format_on_mismatch(bool *format_on_mismatch) { this->format_on_mismatch_ = format_on_mismatch; }
   bool is_mounted() const { return this->is_mounted_; }
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
@@ -86,7 +87,9 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
 
   // Subclasses provide handle pool and card capacity/space info
   virtual SdFileHandle *get_handle_pool() = 0;
-  virtual uint64_t get_free_bytes_impl() const = 0;
+  // Query free space on the mounted filesystem. Writes free_out only on success; returns the
+  // real error (never a fabricated figure) so get_info() can propagate a failed query.
+  virtual storage::StorageError get_free_bytes_impl(uint64_t &free_out) const = 0;
   virtual uint32_t get_block_size_impl() const = 0;
 
   // Build absolute VFS path from a relative path into caller-supplied buffer.
@@ -152,6 +155,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   uint64_t used_bytes_{0};
   const char *storage_id_{nullptr};
   GPIOPin *cd_pin_{nullptr};
+  bool format_on_mismatch_{false};
   char fatfs_drive_[5]{};  // "N:" -- set via set_fatfs_drive_() after a successful mount
 
   LazyCallbackManager<void(const char *)> on_mounted_;
