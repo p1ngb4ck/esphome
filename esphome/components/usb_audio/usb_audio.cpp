@@ -551,7 +551,7 @@ void USBAudioClient::close_microphone_stream_() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void USBAudioClient::on_connected() {
-  const usb_device_desc_t *dev = this->get_device_desc();
+  const usb_device_desc_t *dev = this->get_device_desc_();
   if (dev != nullptr)
     ESP_LOGI(TAG, "USB Audio device connected: VID=0x%04X PID=0x%04X", dev->idVendor, dev->idProduct);
 
