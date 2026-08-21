@@ -18,6 +18,7 @@ from esphome.const import (
 )
 from esphome.core import CORE
 from esphome.cpp_types import Component
+from esphome.types import ConfigType
 
 AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
@@ -190,7 +191,7 @@ CONFIG_SCHEMA = cv.ensure_list(
 )
 
 
-async def to_code(config):
+async def to_code(config: list[ConfigType]) -> None:
     # The output chunk pool/queue are compile-time-sized templates shared by all
     # USBUartChannel instances, so use the largest buffer_size across every channel
     # of every device. Add one extra slot because LockFreeQueue<T,N> is a ring
