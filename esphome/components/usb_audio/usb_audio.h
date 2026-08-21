@@ -49,7 +49,7 @@ class USBAudioClient : public usb_host::USBClient {
   void setup() override;
   void loop() override;
   float get_setup_priority() const override { return setup_priority::IO; }
-  uint8_t get_interface_class() const override { return USB_CLASS_AUDIO; }
+  uint8_t get_interface_class() const { return USB_CLASS_AUDIO; }
 
   // ── Configuration setters ─────────────────────────────────────────────────
   void set_microphone_buffer_size(uint32_t size) { this->mic_buf_size_ = size; }

@@ -71,7 +71,7 @@ void USBAudioClient::loop() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool USBAudioClient::find_ac_interface_() {
-  const usb_config_desc_t *cfg = this->get_config_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
 
@@ -94,7 +94,7 @@ bool USBAudioClient::find_ac_interface_() {
 }
 
 bool USBAudioClient::parse_feature_units_() {
-  const usb_config_desc_t *cfg = this->get_config_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
 
@@ -169,7 +169,7 @@ bool USBAudioClient::parse_feature_units_() {
 
 bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
                                           uint8_t &intf_out, UacAltInfo &alt_out) {
-  const usb_config_desc_t *cfg = this->get_config_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
 
@@ -454,7 +454,7 @@ bool USBAudioClient::open_speaker_stream_() {
   this->spk_stream_.interface_num  = this->spk_as_intf_;
   this->spk_stream_.alt_setting    = this->spk_alt_.alt_setting;
 
-  if (!this->stream_open_(this->spk_stream_, this)) {
+  if (!this->stream_open(this->spk_stream_, this)) {
     ESP_LOGE(TAG, "stream_open_ failed for speaker");
     return false;
   }
@@ -519,7 +519,7 @@ bool USBAudioClient::open_microphone_stream_() {
   this->mic_stream_.interface_num  = this->mic_as_intf_;
   this->mic_stream_.alt_setting    = this->mic_alt_.alt_setting;
 
-  if (!this->stream_open_(this->mic_stream_, this)) {
+  if (!this->stream_open(this->mic_stream_, this)) {
     ESP_LOGE(TAG, "stream_open_ failed for microphone");
     return false;
   }
@@ -533,7 +533,7 @@ bool USBAudioClient::open_microphone_stream_() {
 void USBAudioClient::close_speaker_stream_() {
   if (!this->spk_stream_open_)
     return;
-  this->stream_close_(this->spk_stream_);
+  this->stream_close(this->spk_stream_);
   this->spk_stream_open_ = false;
   ESP_LOGI(TAG, "Speaker stream closed");
 }
@@ -541,7 +541,7 @@ void USBAudioClient::close_speaker_stream_() {
 void USBAudioClient::close_microphone_stream_() {
   if (!this->mic_stream_open_)
     return;
-  this->stream_close_(this->mic_stream_);
+  this->stream_close(this->mic_stream_);
   this->mic_stream_open_ = false;
   ESP_LOGI(TAG, "Microphone stream closed");
 }
