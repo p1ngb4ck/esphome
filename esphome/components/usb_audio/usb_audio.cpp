@@ -177,6 +177,14 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   int offset = 0;
   const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
 
+  // Isochronous high-bandwidth transactions (the wMaxPacketSize MULT field) exist only at
+  // high speed. Resolve the device speed once so a full-speed UAC device does not get its
+  // mps inflated below (see the endpoint parse). ESP32-P4 is the first HS-capable host, so
+  // this only diverges there; older FS-only hosts always take the clamped path anyway.
+  usb_device_info_t dev_info;
+  const bool is_high_speed =
+      usb_host_device_info(this->device_handle_, &dev_info) == ESP_OK && dev_info.speed == USB_SPEED_HIGH;
+
   uint8_t cur_intf = 0;
   uint8_t cur_alt  = 0;
   bool    cur_is_as = false;
@@ -276,7 +284,14 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       if (!is_isoc)
         continue;
       cur_alt_info.ep_addr    = ep->bEndpointAddress;
-      cur_alt_info.mps        = USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1);
+      // MULT (wMaxPacketSize bits 12:11) is a high-speed-only high-bandwidth multiplier; on
+      // full speed those bits are reserved and an isochronous packet is capped at 1023 bytes.
+      // Applying MULT to a full-speed device inflates the ISO DMA buffer past what the link
+      // moves per frame and crashes the HS host controller (ESP32-P4 with a full-speed UAC
+      // device), so honour MULT only at high speed and clamp otherwise.
+      cur_alt_info.mps        = is_high_speed
+                                    ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
+                                    : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
       cur_alt_info.alt_setting = cur_alt;
       cur_alt_info.valid      = true;
       continue;
