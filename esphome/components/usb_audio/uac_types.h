@@ -81,6 +81,9 @@ static constexpr uint8_t UAC_MAX_SAMPLE_FREQS = 8;
 struct UacAltInfo {
   uint8_t  alt_setting{0};
   uint8_t  ep_addr{0};        // isochronous endpoint address (direction embedded)
+  uint8_t  ep_attr{0};        // endpoint bmAttributes (sync type in bits 3:2)
+  uint8_t  feedback_ep_addr{0};  // companion async feedback IN endpoint (0 = none)
+  uint16_t feedback_mps{0};      // feedback endpoint max packet size
   uint16_t mps{0};            // max packet size × mult
   uint8_t  channels{0};
   uint8_t  sub_frame_size{0}; // bytes per audio sample (1, 2, 3, or 4)

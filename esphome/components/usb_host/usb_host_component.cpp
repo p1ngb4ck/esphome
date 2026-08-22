@@ -199,11 +199,25 @@ void USBHost::do_isoc_free(usb_transfer_t *xfer) {
 // the fractional accumulator wraps (keeps non-integer frames-per-service-interval rates such
 // as 44.1 kHz frame-aligned). Clamped to mps as a safety net. Advances stream state.
 static uint32_t isoc_next_packet_size(IsocStream *stream) {
-  uint32_t psize = stream->packet_size;
-  stream->frac_accum += stream->packet_size_frac;
-  if (stream->frac_div != 0 && stream->frac_accum >= stream->frac_div) {
-    stream->frac_accum -= stream->frac_div;
-    psize += stream->frame_size;
+  uint32_t psize;
+  const uint32_t fb = stream->fb_value.load(std::memory_order_relaxed);
+  if (fb != 0) {
+    // Asynchronous endpoint: the device-reported feedback (samples per service interval in
+    // Q10.14 / Q16.16) drives the rate instead of the nominal sample_rate.
+    const uint32_t one = 1u << stream->fb_shift;
+    psize = (fb >> stream->fb_shift) * stream->frame_size;
+    stream->fb_accum += fb & (one - 1);
+    if (stream->fb_accum >= one) {
+      stream->fb_accum -= one;
+      psize += stream->frame_size;
+    }
+  } else {
+    psize = stream->packet_size;
+    stream->frac_accum += stream->packet_size_frac;
+    if (stream->frac_div != 0 && stream->frac_accum >= stream->frac_div) {
+      stream->frac_accum -= stream->frac_div;
+      psize += stream->frame_size;
+    }
   }
   if (psize == 0 || psize > stream->mps)
     psize = stream->mps;
@@ -226,9 +240,11 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       get_usb_host()->defer([stream, client_handle, device_handle]() {
         stream->xfers.reset();
         stream->ctxs.reset();
-        if (stream->alt_setting != 0)
-          get_usb_host()->do_set_interface(client_handle, device_handle, stream->interface_num, 0);
-        get_usb_host()->do_release_interface(client_handle, device_handle, stream->interface_num);
+        if (stream->owns_interface) {
+          if (stream->alt_setting != 0)
+            get_usb_host()->do_set_interface(client_handle, device_handle, stream->interface_num, 0);
+          get_usb_host()->do_release_interface(client_handle, device_handle, stream->interface_num);
+        }
         ESP_LOGD(TAG, "stream_close deferred: ep=0x%02X", stream->ep_addr);
       });
     }
@@ -272,13 +288,15 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
     return false;
   }
 
-  if (!this->do_claim_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting))
-    return false;
-
-  if (stream.alt_setting != 0) {
-    if (!this->do_set_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
-      this->do_release_interface(client_handle, device_handle, stream.interface_num);
+  if (stream.owns_interface) {
+    if (!this->do_claim_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting))
       return false;
+
+    if (stream.alt_setting != 0) {
+      if (!this->do_set_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
+        this->do_release_interface(client_handle, device_handle, stream.interface_num);
+        return false;
+      }
     }
   }
 

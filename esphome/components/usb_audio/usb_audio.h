@@ -57,6 +57,8 @@ class USBAudioClient : public usb_host::USBClient {
 
   void set_microphone_params(uint8_t channels, uint16_t bits, uint32_t sample_rate);
   void set_speaker_params(uint8_t channels, uint16_t bits, uint32_t sample_rate);
+  // Use an asynchronous OUT endpoint's feedback stream to pace playback (default on).
+  void set_feedback_enabled(bool enabled) { this->feedback_enabled_ = enabled; }
 
   void set_microphone(USBAudioMicrophone *mic) { this->microphone_ = mic; }
   void set_speaker(USBAudioSpeaker *spk) { this->speaker_ = spk; }
@@ -147,7 +149,10 @@ class USBAudioClient : public usb_host::USBClient {
   // ── Stream state ──────────────────────────────────────────────────────────
   usb_host::IsocStream spk_stream_{};
   usb_host::IsocStream mic_stream_{};
+  usb_host::IsocStream spk_fb_stream_{};  // async OUT feedback IN stream (shares spk interface)
   bool spk_stream_open_{false};
+  bool spk_fb_open_{false};
+  bool feedback_enabled_{true};
   bool mic_stream_open_{false};
 
   // ── Ring buffers (SPSC: USB task ↔ application task) ─────────────────────

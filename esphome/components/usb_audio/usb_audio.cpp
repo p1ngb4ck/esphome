@@ -281,20 +281,34 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
 
     if (dtype == USB_W_VALUE_DT_ENDPOINT && cur_is_as && cur_alt > 0 && desc->bLength >= sizeof(usb_ep_desc_t)) {
       const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
-      bool is_isoc = (USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_ISOC);
-      if (!is_isoc)
+      if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_ISOC)
         continue;
-      cur_alt_info.ep_addr    = ep->bEndpointAddress;
-      // MULT (wMaxPacketSize bits 12:11) is a high-speed-only high-bandwidth multiplier; on
-      // full speed those bits are reserved and an isochronous packet is capped at 1023 bytes.
-      // Applying MULT to a full-speed device inflates the ISO DMA buffer past what the link
-      // moves per frame and crashes the HS host controller (ESP32-P4 with a full-speed UAC
-      // device), so honour MULT only at high speed and clamp otherwise.
-      cur_alt_info.mps        = is_high_speed
-                                    ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
-                                    : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
-      cur_alt_info.alt_setting = cur_alt;
-      cur_alt_info.valid      = true;
+      const bool ep_is_in = (ep->bEndpointAddress & 0x80) != 0;
+      const bool want_in = !want_out;
+      if (ep_is_in == want_in) {
+        // Data endpoint for this stream's direction.
+        cur_alt_info.ep_addr = ep->bEndpointAddress;
+        cur_alt_info.ep_attr = ep->bmAttributes;
+        // MULT (wMaxPacketSize bits 12:11) is a high-speed-only high-bandwidth multiplier; on
+        // full speed those bits are reserved and an isochronous packet is capped at 1023 bytes.
+        // Applying MULT to a full-speed device inflates the ISO DMA buffer past what the link
+        // moves per frame and crashes the HS host controller (ESP32-P4 with a full-speed UAC
+        // device), so honour MULT only at high speed and clamp otherwise.
+        cur_alt_info.mps = is_high_speed
+                               ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
+                               : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
+        // UAC1 audio endpoint descriptor (bLength 9) carries bSynchAddress at offset 8: the
+        // companion feedback IN endpoint address for an asynchronous OUT endpoint.
+        if (desc->bLength >= 9 && reinterpret_cast<const uint8_t *>(ep)[8] != 0)
+          cur_alt_info.feedback_ep_addr = reinterpret_cast<const uint8_t *>(ep)[8];
+        cur_alt_info.alt_setting = cur_alt;
+        cur_alt_info.valid = true;
+      } else {
+        // Opposite-direction isochronous endpoint in the same AS interface: the explicit
+        // feedback endpoint (UAC2, or UAC1 where bSynchAddress was not used).
+        cur_alt_info.feedback_ep_addr = ep->bEndpointAddress;
+        cur_alt_info.feedback_mps = USB_EP_DESC_GET_MPS(ep);
+      }
       continue;
     }
   }
@@ -484,11 +498,40 @@ bool USBAudioClient::open_speaker_stream_() {
     this->spk_stream_.packet_size      = (this->spk_cfg_.sample_rate / frac_div) * frame_size;
     this->spk_stream_.packet_size_frac = this->spk_cfg_.sample_rate % frac_div;
     this->spk_stream_.frac_accum      = 0;
+    this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
+    this->spk_stream_.fb_accum        = 0;
   }
 
   if (!this->stream_open(this->spk_stream_, this)) {
     ESP_LOGE(TAG, "stream_open_ failed for speaker");
     return false;
+  }
+
+  // Asynchronous OUT endpoint (bmAttributes sync type 0b01) with a companion feedback IN
+  // endpoint: open it on the already-claimed AS interface so the device's own clock paces
+  // playback. Adaptive/synchronous endpoints (or when disabled) stay on nominal pacing.
+  const uint8_t sync_type = (this->spk_alt_.ep_attr >> 2) & 0x03;
+  if (this->feedback_enabled_ && sync_type == 0x01 && this->spk_alt_.feedback_ep_addr != 0) {
+    this->spk_stream_.fb_shift        = this->device_is_high_speed_ ? 16 : 14;
+    this->spk_fb_stream_.ep_addr      = this->spk_alt_.feedback_ep_addr;
+    this->spk_fb_stream_.mps          = this->spk_alt_.feedback_mps != 0
+                                            ? this->spk_alt_.feedback_mps
+                                            : (this->device_is_high_speed_ ? 4 : 3);
+    this->spk_fb_stream_.packets_per_urb = 1;
+    this->spk_fb_stream_.num_urbs        = 2;
+    this->spk_fb_stream_.interface_num   = this->spk_as_intf_;
+    this->spk_fb_stream_.alt_setting     = this->spk_alt_.alt_setting;
+    this->spk_fb_stream_.is_output       = false;
+    this->spk_fb_stream_.owns_interface  = false;  // shares the speaker OUT interface
+    if (this->stream_open(this->spk_fb_stream_, this)) {
+      this->spk_fb_open_ = true;
+      ESP_LOGI(TAG, "Speaker async feedback stream open (ep=0x%02X)", this->spk_alt_.feedback_ep_addr);
+    } else {
+      ESP_LOGW(TAG, "Speaker feedback stream open failed; using nominal pacing");
+    }
+  } else {
+    ESP_LOGD(TAG, "Speaker OUT sync type %u, feedback ep 0x%02X (feedback %s)", sync_type,
+             this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
   }
 
   // Set sampling frequency on the endpoint.
@@ -565,8 +608,13 @@ bool USBAudioClient::open_microphone_stream_() {
 void USBAudioClient::close_speaker_stream_() {
   if (!this->spk_stream_open_)
     return;
+  if (this->spk_fb_open_) {
+    this->stream_close(this->spk_fb_stream_);
+    this->spk_fb_open_ = false;
+  }
   this->stream_close(this->spk_stream_);
   this->spk_stream_open_ = false;
+  this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
   ESP_LOGI(TAG, "Speaker stream closed");
 }
 
@@ -635,6 +683,21 @@ void USBAudioClient::on_disconnected() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {
+  // Async OUT feedback endpoint: the device reports its desired rate (samples per service
+  // interval, Q10.14 at full speed / Q16.16 at high speed). Feed it into the OUT pacing.
+  if (this->spk_fb_open_ && ep_addr == this->spk_alt_.feedback_ep_addr) {
+    const size_t need = this->device_is_high_speed_ ? 4u : 3u;
+    if (!error && len >= need) {
+      uint32_t value = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                       (static_cast<uint32_t>(data[2]) << 16);
+      if (this->device_is_high_speed_)
+        value |= static_cast<uint32_t>(data[3]) << 24;
+      if (value != 0)
+        this->spk_stream_.fb_value.store(value, std::memory_order_relaxed);
+    }
+    return;
+  }
+
   if (error || len == 0)
     return;
 
