@@ -18,7 +18,7 @@ namespace esphome::usb_uart {
 class USBUartTypeCdcAcm;
 class USBUartTypeCH934X;
 class USBUartComponent;
-class USBUartChannelBase;
+class USBUartChannel;
 class USBUartChannelBase;
 class USBUartTypePL2303;
 
@@ -172,9 +172,10 @@ class USBUartChannelBase : public uart::UARTComponent, public Parented<USBUartCo
   friend class USBUartTypeCP210X;
   friend class USBUartTypeCH34X;
   friend class USBUartTypeCH934X;
-  friend class CH934XChannel;
   friend class USBUartTypeFT23XX;
   friend class USBUartTypePL2303;
+  friend class USBUartChannel;
+  friend class CH934XChannel;
 
  public:
   // Number of output chunk slots per channel, derived from buffer_size config.
