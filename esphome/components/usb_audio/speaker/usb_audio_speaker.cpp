@@ -74,11 +74,11 @@ void USBAudioSpeaker::finish() {
 }
 
 namespace {
-constexpr size_t MIN_WRITE_CHUNK = 512;
-constexpr size_t CHUNK_GROW_STEP = 512;
+constexpr size_t MIN_WRITE_CHUNK = 64;
+constexpr size_t CHUNK_GROW_STEP = 64;
 constexpr size_t MAX_TIMEOUT_RETRIES = 4;
 constexpr size_t SUCCESS_STREAK_FOR_GROWTH = 16;
-constexpr size_t HARD_CHUNK_CAP = 4096;
+constexpr size_t HARD_CHUNK_CAP = 192;
 constexpr uint32_t MAX_WORK_TIME_MS = 20;
 }  // namespace
 
@@ -138,7 +138,7 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
 
     size_t current_upper_bound = this->chunk_upper_bound_;
     if (current_upper_bound == 0) {
-      current_upper_bound = std::min(std::max(MIN_WRITE_CHUNK, max_chunk), HARD_CHUNK_CAP);
+      current_upper_bound = std::max(MIN_WRITE_CHUNK, max_chunk);
       size_t aligned_bound = align_to_frame(current_upper_bound);
       if (aligned_bound > 0) {
         current_upper_bound = aligned_bound;
