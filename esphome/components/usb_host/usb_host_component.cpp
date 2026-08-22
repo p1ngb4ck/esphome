@@ -252,7 +252,13 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       desc->num_bytes = stream->is_output ? fill : stream->mps;
       payload += stream->mps;
     }
-    usb_host_transfer_submit(xfer);
+    if (usb_host_transfer_submit(xfer) != ESP_OK) {
+      // Resubmission failed (e.g. periodic scheduler rejected it): retire this URB instead of
+      // leaving it dangling. The stream keeps running on the remaining URBs, and when the last
+      // one is retired finish_urb() tears the stream down cleanly rather than stalling silently.
+      ESP_LOGW(TAG, "isoc resubmit failed (ep=0x%02X), retiring URB", xfer->bEndpointAddress);
+      finish_urb();
+    }
   } else {
     // stream_close() set streaming=false -- free and defer cleanup when all URBs done.
     finish_urb();
