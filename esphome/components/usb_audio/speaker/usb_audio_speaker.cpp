@@ -245,7 +245,7 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     this->chunk_success_streak_ = 0;
 
     if (err == ESP_ERR_TIMEOUT) {
-      ESP_LOGW(TAG_SPK, "Chunk write timeout chunk=%u", (unsigned) chunk);
+      // ESP_LOGW(TAG_SPK, "Chunk write timeout chunk=%u", (unsigned) chunk);
 
       size_t new_upper = (chunk > CHUNK_GROW_STEP) ? (chunk - CHUNK_GROW_STEP) : chunk;
       new_upper = std::max(MIN_WRITE_CHUNK, std::min(new_upper, chunk_cap));
