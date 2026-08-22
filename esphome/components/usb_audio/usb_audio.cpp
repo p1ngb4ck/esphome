@@ -184,6 +184,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   usb_device_info_t dev_info;
   const bool is_high_speed =
       usb_host_device_info(this->device_handle_, &dev_info) == ESP_OK && dev_info.speed == USB_SPEED_HIGH;
+  this->device_is_high_speed_ = is_high_speed;
 
   uint8_t cur_intf = 0;
   uint8_t cur_alt  = 0;
@@ -469,6 +470,22 @@ bool USBAudioClient::open_speaker_stream_() {
   this->spk_stream_.interface_num  = this->spk_as_intf_;
   this->spk_stream_.alt_setting    = this->spk_alt_.alt_setting;
 
+  // Sample-clock pacing for the OUT stream. frame_size = channels * subframe; a full-speed
+  // endpoint is serviced once per 1 ms frame (1000/s), a high-speed one per 125 us
+  // microframe (8000/s). packet_size is the floor bytes per interval, packet_size_frac the
+  // per-interval frame remainder that the accumulator folds back in (e.g. 44.1 kHz).
+  {
+    const uint32_t frame_size =
+        static_cast<uint32_t>(this->spk_cfg_.channels) * (this->spk_cfg_.bits_per_sample / 8);
+    const uint32_t frac_div = this->device_is_high_speed_ ? 8000u : 1000u;
+    this->spk_stream_.is_output       = true;
+    this->spk_stream_.frame_size      = frame_size;
+    this->spk_stream_.frac_div        = frac_div;
+    this->spk_stream_.packet_size      = (this->spk_cfg_.sample_rate / frac_div) * frame_size;
+    this->spk_stream_.packet_size_frac = this->spk_cfg_.sample_rate % frac_div;
+    this->spk_stream_.frac_accum      = 0;
+  }
+
   if (!this->stream_open(this->spk_stream_, this)) {
     ESP_LOGE(TAG, "stream_open_ failed for speaker");
     return false;
@@ -631,11 +648,13 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
     // `len` = actual_num_bytes (bytes sent in the completed transfer), which
     // may be 0 for SKIPPED packets. We always fill a full mps-worth of bytes
     // so that the resubmitted packet carries real data.
+    // `len` is the sample-clock packet size the pacing layer chose for this packet; fill
+    // exactly that many bytes so the stream matches the negotiated endpoint bandwidth.
     if (this->spk_rb_ == nullptr || this->spk_suspended_) {
-      memset(const_cast<uint8_t *>(data), 0, this->spk_alt_.mps);
+      memset(const_cast<uint8_t *>(data), 0, len);
       return;
     }
-    const size_t fill_bytes = this->spk_alt_.mps;
+    const size_t fill_bytes = len;
     size_t received = 0;
     void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, fill_bytes);
     if (item != nullptr) {

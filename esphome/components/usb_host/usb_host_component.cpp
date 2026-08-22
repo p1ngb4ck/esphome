@@ -195,6 +195,21 @@ void USBHost::do_isoc_free(usb_transfer_t *xfer) {
     usb_host_transfer_free(xfer);
 }
 
+// Next OUT packet size for the sample-clock pacing: the floor plus one audio frame whenever
+// the fractional accumulator wraps (keeps non-integer frames-per-service-interval rates such
+// as 44.1 kHz frame-aligned). Clamped to mps as a safety net. Advances stream state.
+static uint32_t isoc_next_packet_size(IsocStream *stream) {
+  uint32_t psize = stream->packet_size;
+  stream->frac_accum += stream->packet_size_frac;
+  if (stream->frac_div != 0 && stream->frac_accum >= stream->frac_div) {
+    stream->frac_accum -= stream->frac_div;
+    psize += stream->frame_size;
+  }
+  if (psize == 0 || psize > stream->mps)
+    psize = stream->mps;
+  return psize;
+}
+
 // CALLBACK CONTEXT: USB task
 void USBHost::isoc_cb(usb_transfer_t *xfer) {
   auto *ctx = static_cast<IsocCbCtx *>(xfer->context);
@@ -227,13 +242,15 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
   if (stream->streaming) {
     const uint8_t *payload = xfer->data_buffer;
     for (int i = 0; i < xfer->num_isoc_packets; i++) {
-      const usb_isoc_packet_desc_t *desc = &xfer->isoc_packet_desc[i];
+      usb_isoc_packet_desc_t *desc = &xfer->isoc_packet_desc[i];
       const bool error = (desc->status != USB_TRANSFER_STATUS_COMPLETED && desc->status != USB_TRANSFER_STATUS_SKIPPED);
-      client->on_isoc_packet(xfer->bEndpointAddress, payload, desc->actual_num_bytes, error);
-      payload += desc->num_bytes;
-    }
-    for (int i = 0; i < xfer->num_isoc_packets; i++) {
-      xfer->isoc_packet_desc[i].num_bytes = stream->mps;
+      // OUT: the sample clock decides how many bytes this packet may carry and on_isoc_packet
+      // fills exactly that many. IN: report what was actually received. Packets are always
+      // allocated mps apart in the buffer, so the payload stride is mps regardless of size.
+      const uint32_t fill = stream->is_output ? isoc_next_packet_size(stream) : desc->actual_num_bytes;
+      client->on_isoc_packet(xfer->bEndpointAddress, payload, fill, error);
+      desc->num_bytes = stream->is_output ? fill : stream->mps;
+      payload += stream->mps;
     }
     usb_host_transfer_submit(xfer);
   } else {
@@ -279,6 +296,16 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
       this->do_set_interface(client_handle, device_handle, stream.interface_num, 0);
       this->do_release_interface(client_handle, device_handle, stream.interface_num);
       return false;
+    }
+  }
+
+  if (stream.is_output) {
+    // Seed the initial OUT URBs with silence sized to the sample clock, so the very first
+    // transfers already fit the negotiated bandwidth instead of a full mps.
+    for (uint8_t i = 0; i < stream.num_urbs; i++) {
+      memset(stream.xfers[i]->data_buffer, 0, static_cast<size_t>(stream.mps) * stream.packets_per_urb);
+      for (uint8_t j = 0; j < stream.packets_per_urb; j++)
+        stream.xfers[i]->isoc_packet_desc[j].num_bytes = isoc_next_packet_size(&stream);
     }
   }
 

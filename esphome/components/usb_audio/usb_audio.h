@@ -130,6 +130,9 @@ class USBAudioClient : public usb_host::USBClient {
   };
   EndpointConfig mic_cfg_{};
   EndpointConfig spk_cfg_{};
+  // True when the device enumerated at high speed (only the ESP32-P4 host can). Gates the
+  // isochronous high-bandwidth multiplier and selects the OUT pacing service interval.
+  bool device_is_high_speed_{false};
 
   // ── Descriptor parsing results ────────────────────────────────────────────
   uint8_t ac_intf_{0};             // AudioControl interface number

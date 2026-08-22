@@ -128,6 +128,16 @@ struct IsocStream {
   uint8_t interface_num{0};
   uint8_t alt_setting{0};
   bool streaming{false};
+  // UAC OUT pacing (isochronous sample clock). For an output stream each packet carries a
+  // sample-rate-derived byte count instead of a full mps: sending mps-sized packets is ~2x
+  // real time, overruns the device and, on the HS periodic scheduler (ESP32-P4), fails
+  // resubmission. Mirrors the packet-size accumulator in Espressif's usb_host_uac.
+  bool is_output{false};
+  uint32_t packet_size{0};       // floor bytes per service interval (frames_floor * frame_size)
+  uint32_t packet_size_frac{0};  // sample_rate % frac_div (remainder in frames per second)
+  uint32_t frac_div{1000};       // service intervals per second (FS frame 1000, HS uframe 8000)
+  uint32_t frac_accum{0};        // running fractional accumulator (0..frac_div-1)
+  uint32_t frame_size{0};        // bytes per audio frame (channels * subframe_size)
 };
 
 #endif  // USE_USB_ISOC_TRANSFERS
