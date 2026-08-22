@@ -139,7 +139,7 @@ size_t RingBuffer::pop(uint8_t *data, size_t len) {
   return len;
 }
 
-void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
+void USBUartChannelBaseBase::write_array(const uint8_t *data, size_t len) {
   if (!this->initialised_.load()) {
     ESP_LOGD(TAG, "Channel not initialised - write ignored");
     return;
@@ -197,14 +197,14 @@ uart::UARTFlushResult USBUartChannelBase::flush() {
   return uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS;
 }
 
-bool USBUartChannelBase::peek_byte(uint8_t *data) {
+bool USBUartChannelBaseBase::peek_byte(uint8_t *data) {
   if (this->input_buffer_.is_empty()) {
     return false;
   }
   *data = this->input_buffer_.peek();
   return true;
 }
-bool USBUartChannelBase::read_array(uint8_t *data, size_t len) {
+bool USBUartChannelBaseBase::read_array(uint8_t *data, size_t len) {
   if (!this->initialised_.load() && !this->destroying_.load()) {
     ESP_LOGV(TAG, "Channel not initialised - read ignored");
     return false;

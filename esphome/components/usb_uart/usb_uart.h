@@ -19,7 +19,7 @@ class USBUartTypeCdcAcm;
 class USBUartTypeCH934X;
 class USBUartComponent;
 class USBUartChannelBase;
-class USBUartChannel;
+class USBUartChannelBase;
 class USBUartTypePL2303;
 
 static const char *const TAG = "usb_uart";
@@ -256,7 +256,7 @@ class USBUartComponent : public usb_host::USBClient {
   void dump_config() override;
   std::vector<USBUartChannelBase *> get_channels() { return this->channels_; }
 
-  void add_channel(USBUartChannelBase *channel) { this->channels_.push_back(channel); }
+  void add_channel(USBUartChannelBaseBase *channel) { this->channels_.push_back(channel); }
 
   virtual void start_input(USBUartChannelBase *channel);
   void start_output(USBUartChannelBase *channel);
