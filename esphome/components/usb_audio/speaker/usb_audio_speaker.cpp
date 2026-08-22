@@ -23,10 +23,10 @@ void USBAudioSpeaker::setup() {
 
 void USBAudioSpeaker::dump_config() {
   ESP_LOGCONFIG(TAG_SPK, "USB Speaker:");
-  ESP_LOGCONFIG(TAG_SPK, "  Sample rate: %u Hz", this->sample_rate_);
+  ESP_LOGCONFIG(TAG_SPK, "  Sample rate: %lu Hz", this->sample_rate_);
   ESP_LOGCONFIG(TAG_SPK, "  Bits per sample: %u", this->bits_per_sample_);
   ESP_LOGCONFIG(TAG_SPK, "  Channels: %u", this->channels_);
-  ESP_LOGCONFIG(TAG_SPK, "  Write timeout: %u ms", this->write_timeout_ms_);
+  ESP_LOGCONFIG(TAG_SPK, "  Write timeout: %lu ms", this->write_timeout_ms_);
   if (this->channels_ > 2) {
     ESP_LOGW(TAG_SPK, "USB speaker only supports mono or stereo playback; additional channels will be ignored");
   }
