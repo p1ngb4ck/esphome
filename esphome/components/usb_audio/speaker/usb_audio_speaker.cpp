@@ -248,7 +248,7 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
       // ESP_LOGW(TAG_SPK, "Chunk write timeout chunk=%u", (unsigned) chunk);
 
       size_t new_upper = (chunk > CHUNK_GROW_STEP) ? (chunk - CHUNK_GROW_STEP) : chunk;
-      new_upper = std::max(MIN_WRITE_CHUNK, std::min(new_upper, chunk_cap));
+      new_upper = std::max(MIN_WRITE_CHUNK, std::min(new_upper, HARD_CHUNK_CAP));
       size_t aligned = align_to_frame(new_upper);
       if (aligned > 0) {
         new_upper = aligned;
