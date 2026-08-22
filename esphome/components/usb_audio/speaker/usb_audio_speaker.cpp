@@ -117,7 +117,7 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
   if (max_chunk == 0) {
     max_chunk = HARD_CHUNK_CAP;
   }
-  max_chunk = std::max(std::min(max_chunk, HARD_CHUNK_CAP), MIN_WRITE_CHUNK);
+  max_chunk = std::max(MIN_WRITE_CHUNK, HARD_CHUNK_CAP);
 
   const size_t bytes_per_frame =
       std::max<size_t>(1, static_cast<size_t>(this->channels_) * std::max<size_t>(1, this->bits_per_sample_ / 8));
@@ -147,9 +147,9 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     }
 
     size_t chunk_cap = remaining;
-    chunk_cap = std::min(chunk_cap, current_upper_bound);
-    chunk_cap = std::min(chunk_cap, max_chunk);
-    chunk_cap = std::min(chunk_cap, HARD_CHUNK_CAP);
+    chunk_cap = std::max(chunk_cap, current_upper_bound);
+    chunk_cap = std::max(chunk_cap, max_chunk);
+    chunk_cap = std::max(chunk_cap, HARD_CHUNK_CAP);
 
     if (chunk_cap == 0) {
       ESP_LOGW(TAG_SPK, "Chunk cap resolved to zero; aborting playback write");
