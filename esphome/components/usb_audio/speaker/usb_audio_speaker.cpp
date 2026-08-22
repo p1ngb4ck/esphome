@@ -140,7 +140,7 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     if (current_upper_bound == 0) {
       current_upper_bound = std::max(
         std::min(std::max(MIN_WRITE_CHUNK, max_chunk), HARD_CHUNK_CAP),
-        USB_AUDIO_MAX_PACKET_SIZE
+        192
       );
       size_t aligned_bound = align_to_frame(current_upper_bound);
       if (aligned_bound > 0) {
