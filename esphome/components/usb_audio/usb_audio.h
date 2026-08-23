@@ -232,6 +232,10 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Volume / mute state ---------------------------------------------------
   float   spk_volume_{1.0f};
   bool    spk_muted_{false};
+  // Whether the value above has already been sent to the device it is currently attached
+  // to, so an unchanged setting is not requested again.
+  bool    spk_volume_sent_{false};
+  bool    spk_mute_sent_{false};
 
   // -- Volume range (from GET_MIN / GET_MAX on connect) ---------------------
   // Only meaningful while spk_vol_range_known_ is set: these are the device's own

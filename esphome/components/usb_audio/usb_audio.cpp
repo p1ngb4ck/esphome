@@ -1028,6 +1028,8 @@ void USBAudioClient::on_connected() {
   this->probe_speaker_volume_range_();
   this->apply_speaker_volume_();
   this->apply_speaker_mute_();
+  this->spk_volume_sent_ = true;
+  this->spk_mute_sent_ = true;
 
   // Open whichever streams are needed immediately.
   if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)
@@ -1040,6 +1042,9 @@ void USBAudioClient::on_disconnected() {
   this->close_speaker_stream_();
   this->close_microphone_stream_();
   this->device_connected_ = false;
+  // The next device has to be told the state from scratch.
+  this->spk_volume_sent_ = false;
+  this->spk_mute_sent_ = false;
   this->spk_format_ok_ = false;
   this->mic_format_ok_ = false;
   this->spk_open_fails_ = 0;
@@ -1170,15 +1175,27 @@ void USBAudioClient::suspend_microphone() {
 }
 
 void USBAudioClient::set_speaker_volume_level(float volume) {
-  this->spk_volume_ = std::clamp(volume, 0.0f, 1.0f);
-  if (this->device_connected_)
-    this->apply_speaker_volume_();
+  const float clamped = std::clamp(volume, 0.0f, 1.0f);
+  // A media player drives several speakers that all end up here, so the same setting
+  // arrives more than once. Asking the device again for what it was just asked is a
+  // control request that cannot change anything.
+  if (this->spk_volume_sent_ && clamped == this->spk_volume_)
+    return;
+  this->spk_volume_ = clamped;
+  if (!this->device_connected_)
+    return;
+  this->apply_speaker_volume_();
+  this->spk_volume_sent_ = true;
 }
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
+  if (this->spk_mute_sent_ && mute_state == this->spk_muted_)
+    return;
   this->spk_muted_ = mute_state;
-  if (this->device_connected_)
-    this->apply_speaker_mute_();
+  if (!this->device_connected_)
+    return;
+  this->apply_speaker_mute_();
+  this->spk_mute_sent_ = true;
 }
 
 esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {
