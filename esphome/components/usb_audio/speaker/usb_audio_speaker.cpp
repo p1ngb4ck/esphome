@@ -247,8 +247,15 @@ bool USBAudioSpeaker::has_buffered_data() const {
   return this->parent_->get_speaker_queued_bytes() > 0;
 }
 
+// The base class already forwards to a configured audio_dac. When that dac is the
+// usb_audio platform it drives the same Feature Unit, so forwarding here as well would
+// send every request twice.
 void USBAudioSpeaker::set_volume(float volume) {
   speaker::Speaker::set_volume(volume);
+#ifdef USE_AUDIO_DAC
+  if (this->audio_dac_ != nullptr)
+    return;
+#endif
   if (this->parent_ != nullptr) {
     this->parent_->set_speaker_volume_level(volume);
   }
@@ -256,6 +263,10 @@ void USBAudioSpeaker::set_volume(float volume) {
 
 void USBAudioSpeaker::set_mute_state(bool mute_state) {
   speaker::Speaker::set_mute_state(mute_state);
+#ifdef USE_AUDIO_DAC
+  if (this->audio_dac_ != nullptr)
+    return;
+#endif
   if (this->parent_ != nullptr) {
     this->parent_->set_speaker_mute_state(mute_state);
   }

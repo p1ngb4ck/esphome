@@ -88,6 +88,10 @@ class USBAudioClient : public usb_host::USBClient {
 
   void set_speaker_volume_level(float volume);
   void set_speaker_mute_state(bool mute_state);
+  // The last requested values. A request is held while the stream is closed, so these can
+  // be ahead of what the device has been told.
+  float get_speaker_volume_level() const { return this->spk_volume_; }
+  bool get_speaker_mute_state() const { return this->spk_muted_; }
 
   // Speaker write - called from speaker task / play(); returns bytes accepted.
   // timeout_ms: FreeRTOS ring buffer block time (0 = non-blocking).
