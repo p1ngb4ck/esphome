@@ -700,10 +700,8 @@ void USBAudioClient::probe_speaker_volume_range_() {
     this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
     this->spk_vol_max_ = 0;
   }
-  // State the range the way a user reads volume: how far below the device's reference
-  // level (its maximum) the control can go.
-  ESP_LOGD(TAG, "Speaker volume range: 0.00 to -%.2f dB below reference",
-           static_cast<float>(this->spk_vol_max_ - this->spk_vol_min_) / 256.0f);
+  ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB", static_cast<float>(this->spk_vol_min_) / 256.0f,
+           static_cast<float>(this->spk_vol_max_) / 256.0f);
 }
 
 bool USBAudioClient::apply_speaker_volume_() {
@@ -728,10 +726,11 @@ bool USBAudioClient::apply_speaker_volume_() {
     return false;
   }
 
-  // A UAC Feature Unit volume is logarithmic: a signed 1/256 dB value, where the device's
-  // reported maximum is its reference level. ESPHome's volume is a linear amplitude
-  // fraction. Mapping the fraction straight onto the dB range puts half volume near the
-  // bottom of the scale and sounds all but muted, so convert amplitude to dB first.
+  // A UAC Feature Unit volume is a signed 1/256 dB gain: a larger value is louder.
+  // ESPHome's volume is a linear amplitude fraction. Spreading that fraction evenly over
+  // the dB range would put half volume near the bottom of the scale and sound all but
+  // muted, so convert amplitude to dB. Full volume is the largest gain the device offers,
+  // and each halving of the amplitude is 6.02 dB below it.
   const float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
   const float min_db = static_cast<float>(this->spk_vol_min_) / 256.0f;
   const float max_db = static_cast<float>(this->spk_vol_max_) / 256.0f;
@@ -755,24 +754,22 @@ bool USBAudioClient::apply_speaker_volume_() {
     this->spk_volume_fails_ = 0;
     // Read the value back. A device may clamp it to its own range or quantise it to a
     // coarser step (GET_RES), so reporting what we sent would be reporting an assumption.
-    // Attenuation is stated as a positive number below the device's reference level, which
-    // is how volume is normally read.
-    const float want_att_db = max_db - static_cast<float>(vol) / 256.0f;
+    const float sent_db = static_cast<float>(vol) / 256.0f;
     uint8_t rb[2] = {0, 0};
     if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb,
                                      sizeof(rb))) {
       const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
-      const float actual_att_db = max_db - static_cast<float>(actual) / 256.0f;
-      ESP_LOGD(TAG, "Speaker volume %.0f%% -> -%.2f dB (device reports -%.2f dB)", clamped * 100.0f, want_att_db,
-               actual_att_db);
+      const float actual_db = static_cast<float>(actual) / 256.0f;
+      ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (device reports %.2f dB)", clamped * 100.0f, sent_db,
+               actual_db);
       // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
       // rounding.
-      if (std::fabs(actual_att_db - want_att_db) > 0.25f) {
-        ESP_LOGW(TAG, "Speaker volume not applied as requested: asked -%.2f dB, device is at -%.2f dB", want_att_db,
-                 actual_att_db);
+      if (std::fabs(actual_db - sent_db) > 0.25f) {
+        ESP_LOGW(TAG, "Speaker volume not applied as requested: asked %.2f dB, device is at %.2f dB", sent_db,
+                 actual_db);
       }
     } else {
-      ESP_LOGD(TAG, "Speaker volume %.0f%% -> -%.2f dB (readback unavailable)", clamped * 100.0f, want_att_db);
+      ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (readback unavailable)", clamped * 100.0f, sent_db);
     }
     return true;
   }
