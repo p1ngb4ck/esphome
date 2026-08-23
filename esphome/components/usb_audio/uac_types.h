@@ -45,6 +45,8 @@ static constexpr uint8_t UAC_SET_MIN = 0x02;
 static constexpr uint8_t UAC_GET_MIN = 0x82;
 static constexpr uint8_t UAC_SET_MAX = 0x03;
 static constexpr uint8_t UAC_GET_MAX = 0x83;
+static constexpr uint8_t UAC_SET_RES = 0x04;
+static constexpr uint8_t UAC_GET_RES = 0x84;
 
 // -- bmRequestType values ------------------------------------------------------
 // Class request to interface:  OUT=0x21  IN=0xA1

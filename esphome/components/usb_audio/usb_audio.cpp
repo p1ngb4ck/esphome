@@ -577,7 +577,19 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   // from this vector, and for a read it does not copy the vector into the buffer. So a read
   // asks for its data stage by passing a vector of the size it expects; passing an empty
   // one asks the device for zero bytes and it answers with nothing.
-  std::vector<uint8_t> payload(in_data != nullptr ? in_len : out_len);
+  size_t request_len = out_len;
+  if (in_data != nullptr) {
+    // The host requires the size of a control IN transfer to be a whole number of endpoint
+    // 0 packets. Ask for one full packet; wLength is an upper bound, so a device that has
+    // fewer bytes to give ends the data stage early and the short answer is what arrives.
+    const usb_device_desc_t *dev_desc = this->get_device_desc_();
+    if (dev_desc == nullptr || dev_desc->bMaxPacketSize0 == 0) {
+      ESP_LOGW(TAG, "Control request 0x%02X skipped: endpoint 0 packet size is unknown", request);
+      return false;
+    }
+    request_len = dev_desc->bMaxPacketSize0;
+  }
+  std::vector<uint8_t> payload(request_len);
   if (out_data != nullptr && out_len != 0)
     memcpy(payload.data(), out_data, out_len);
 
