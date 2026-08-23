@@ -118,13 +118,26 @@ struct UacAltInfo {
 struct UacFeatureUnit {
   uint8_t unit_id{0};
   uint8_t source_id{0};
-  uint8_t channel_count{0};
+  // bmaControls entries: the master entry plus one per logical channel.
+  uint8_t control_entries{0};
   uint8_t control_size{0};  // bControlSize: bytes per bmaControls entry
-  // bmaControls[0] = master, [1..n] = per-channel - only master stored here
+  // bmaControls[0] = master, [1..n] = per-channel
   uint8_t master_controls{0};
-  bool    has_mute{false};
-  bool    has_volume{false};
+  bool    has_mute{false};    // master entry
+  bool    has_volume{false};  // master entry
+  // Channels that carry the control when the master entry does not. Bit i stands for
+  // logical channel i + 1, so up to eight channels are covered.
+  uint8_t mute_channels{0};
+  uint8_t volume_channels{0};
+
+  bool mute_available() const { return this->has_mute || this->mute_channels != 0; }
+  bool volume_available() const { return this->has_volume || this->volume_channels != 0; }
 };
+
+// Channel number addressing every channel of a Feature Unit at once.
+static constexpr uint8_t UAC_FU_MASTER_CHANNEL = 0;
+// Channels addressable through the per-channel bitmaps above.
+static constexpr uint8_t UAC_FU_MAX_CHANNELS = 8;
 
 }  // namespace usb_audio
 }  // namespace esphome

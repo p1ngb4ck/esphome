@@ -313,7 +313,20 @@ uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t ma
     fu.master_controls = d[6];
     fu.has_mute   = (fu.master_controls & UAC_FU_CTL_MUTE) != 0;
     fu.has_volume = (fu.master_controls & UAC_FU_CTL_VOLUME) != 0;
-    fu.channel_count = (desc->bLength - 7) / fu.control_size;
+    fu.control_entries = (desc->bLength - 7) / fu.control_size;
+
+    // Not every device puts its controls on the master entry; some describe them per
+    // channel only. Record those so a control that exists can still be reached.
+    for (uint8_t entry = 1; entry < fu.control_entries && entry <= UAC_FU_MAX_CHANNELS; entry++) {
+      const uint16_t control_off = 6 + static_cast<uint16_t>(entry) * fu.control_size;
+      if (control_off >= desc->bLength)
+        break;
+      const uint8_t controls = d[control_off];
+      if (controls & UAC_FU_CTL_MUTE)
+        fu.mute_channels |= static_cast<uint8_t>(1 << (entry - 1));
+      if (controls & UAC_FU_CTL_VOLUME)
+        fu.volume_channels |= static_cast<uint8_t>(1 << (entry - 1));
+    }
 
     units[count++] = fu;
   }
@@ -354,15 +367,15 @@ bool USBAudioClient::parse_feature_units_() {
   if (this->spk_cfg_.configured) {
     if (this->speaker_fu_.unit_id != 0) {
       ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", this->speaker_fu_.unit_id,
-               YESNO(this->speaker_fu_.has_mute), YESNO(this->speaker_fu_.has_volume));
+               YESNO(this->speaker_fu_.mute_available()), YESNO(this->speaker_fu_.volume_available()));
     } else {
       ESP_LOGW(TAG, "No Feature Unit in the playback path; volume and mute are unavailable");
     }
   }
   if (this->mic_cfg_.configured) {
     if (this->mic_fu_.unit_id != 0) {
-      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_fu_.unit_id, YESNO(this->mic_fu_.has_mute),
-               YESNO(this->mic_fu_.has_volume));
+      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_fu_.unit_id, YESNO(this->mic_fu_.mute_available()),
+               YESNO(this->mic_fu_.volume_available()));
     } else {
       ESP_LOGW(TAG, "No Feature Unit in the capture path; volume and mute are unavailable");
     }
@@ -613,8 +626,31 @@ bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
 
 // -- Volume / mute -------------------------------------------------------------
 
+// Channels a Feature Unit control has to be written to. A device that describes the
+// control on the master entry takes a single request for all channels; one that describes
+// it per channel needs a request per channel. Returns the number written to channels.
+static uint8_t uac_control_channels(bool on_master, uint8_t channel_mask, uint8_t *channels) {
+  if (on_master) {
+    channels[0] = UAC_FU_MASTER_CHANNEL;
+    return 1;
+  }
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < UAC_FU_MAX_CHANNELS; i++) {
+    if (channel_mask & (1 << i))
+      channels[count++] = static_cast<uint8_t>(i + 1);
+  }
+  return count;
+}
+
+uint8_t USBAudioClient::speaker_volume_channels_(uint8_t *channels) const {
+  return uac_control_channels(this->speaker_fu_.has_volume, this->speaker_fu_.volume_channels, channels);
+}
+
 bool USBAudioClient::apply_speaker_volume_() {
-  if (!this->speaker_fu_.has_volume) {
+  uint8_t channels[UAC_FU_MAX_CHANNELS];
+  const uint8_t channel_count = this->speaker_volume_channels_(channels);
+
+  if (channel_count == 0) {
     // The descriptor says there is no volume control. That is a property of the device, not
     // a transient failure, so stop asking.
     if (this->spk_volume_supported_) {
@@ -643,7 +679,12 @@ bool USBAudioClient::apply_speaker_volume_() {
   }
 
   uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};
-  bool ok = this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, 0, buf, sizeof(buf));
+  bool ok = true;
+  for (uint8_t i = 0; i < channel_count; i++) {
+    if (!this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf,
+                                      sizeof(buf)))
+      ok = false;
+  }
   if (ok) {
     this->pending_spk_volume_ = false;
     this->spk_volume_fails_ = 0;
@@ -653,7 +694,8 @@ bool USBAudioClient::apply_speaker_volume_() {
     // is how volume is normally read.
     const float want_att_db = max_db - static_cast<float>(vol) / 256.0f;
     uint8_t rb[2] = {0, 0};
-    if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, 0, rb, sizeof(rb))) {
+    if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb,
+                                     sizeof(rb))) {
       const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
       const float actual_att_db = max_db - static_cast<float>(actual) / 256.0f;
       ESP_LOGD(TAG, "Speaker volume %.0f%% -> -%.2f dB (device reports -%.2f dB)", clamped * 100.0f, want_att_db,
@@ -684,7 +726,11 @@ bool USBAudioClient::apply_speaker_volume_() {
 }
 
 bool USBAudioClient::apply_speaker_mute_() {
-  if (!this->speaker_fu_.has_mute) {
+  uint8_t channels[UAC_FU_MAX_CHANNELS];
+  const uint8_t channel_count =
+      uac_control_channels(this->speaker_fu_.has_mute, this->speaker_fu_.mute_channels, channels);
+
+  if (channel_count == 0) {
     if (this->spk_mute_supported_) {
       ESP_LOGW(TAG, "Speaker mute control not supported by device");
       this->spk_mute_supported_ = false;
@@ -696,7 +742,11 @@ bool USBAudioClient::apply_speaker_mute_() {
     return false;
 
   uint8_t val = this->spk_muted_ ? 1 : 0;
-  bool ok = this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_MUTE_CONTROL, 0, &val, 1);
+  bool ok = true;
+  for (uint8_t i = 0; i < channel_count; i++) {
+    if (!this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
+      ok = false;
+  }
   if (ok) {
     this->pending_spk_mute_ = false;
     this->spk_mute_fails_ = 0;
@@ -713,10 +763,6 @@ bool USBAudioClient::apply_speaker_mute_() {
   }
   return false;
 }
-
-// -----------------------------------------------------------------------------
-// Stream open / close
-// -----------------------------------------------------------------------------
 
 bool USBAudioClient::open_speaker_stream_() {
   if (this->spk_stream_open_)
@@ -819,11 +865,15 @@ bool USBAudioClient::open_speaker_stream_() {
 
   // Read volume range so we can map [0,1] correctly.
   // Use a separate lambda that issues GET_MIN / GET_MAX (different bRequest, same selector).
-  if (this->speaker_fu_.has_volume) {
-    auto get_vol_range = [this](uint8_t bRequest, int16_t &out) {
+  if (this->speaker_fu_.volume_available()) {
+    // Query the range on the same channel the value will be written to.
+    uint8_t vol_channels[UAC_FU_MAX_CHANNELS];
+    const uint8_t vol_channel =
+        this->speaker_volume_channels_(vol_channels) > 0 ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
+    auto get_vol_range = [this, vol_channel](uint8_t bRequest, int16_t &out) {
       bool ok = false;
       bool done = false;
-      uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | 0);  // selector | master channel
+      uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);  // selector | channel
       uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
       this->control_transfer(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex,
                              [&ok, &done, &out](const usb_host::TransferStatus &s) {
@@ -1116,7 +1166,7 @@ void USBAudioClient::set_speaker_volume_level(float volume) {
   this->spk_volume_ = std::clamp(volume, 0.0f, 1.0f);
   // A new value from the user is a fresh attempt, so allow the retries again. Only when the
   // descriptor has no volume control is the answer permanent.
-  if (this->speaker_fu_.has_volume) {
+  if (this->speaker_fu_.volume_available()) {
     this->spk_volume_fails_ = 0;
     this->spk_volume_supported_ = true;
   }
@@ -1126,7 +1176,7 @@ void USBAudioClient::set_speaker_volume_level(float volume) {
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
   this->spk_muted_ = mute_state;
-  if (this->speaker_fu_.has_mute) {
+  if (this->speaker_fu_.mute_available()) {
     this->spk_mute_fails_ = 0;
     this->spk_mute_supported_ = true;
   }

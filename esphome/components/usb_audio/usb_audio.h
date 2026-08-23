@@ -145,6 +145,9 @@ class USBAudioClient : public usb_host::USBClient {
   bool uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
                               const uint8_t *data, size_t len);
   bool set_sampling_frequency_(uint8_t ep_addr, uint32_t freq);
+  // Fill channels with the Feature Unit channel numbers a speaker volume request has to be
+  // written to, and return how many. channels must hold UAC_FU_MAX_CHANNELS entries.
+  uint8_t speaker_volume_channels_(uint8_t *channels) const;
   bool apply_speaker_volume_();
   bool apply_speaker_mute_();
 
