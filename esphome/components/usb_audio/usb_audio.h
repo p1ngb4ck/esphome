@@ -121,6 +121,11 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Descriptor parsing ----------------------------------------------------
   bool parse_descriptors_();
   bool find_ac_interface_();  // sets ac_intf_
+  // Record the units and terminals of the AudioControl interface. Returns the number
+  // written to nodes, which holds at most UAC_MAX_TOPOLOGY_NODES entries.
+  uint8_t collect_topology_(UacTopologyNode *nodes);
+  // Record every Feature Unit of the AudioControl interface, at most max_count.
+  uint8_t collect_feature_units_(UacFeatureUnit *units, uint8_t max_count);
   bool parse_feature_units_();
   bool parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits,
                             uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out);

@@ -73,8 +73,26 @@ static constexpr uint8_t UAC_EP_SAMPLING_FREQ_CONTROL = 0x01;
 static constexpr uint8_t UAC_FU_CTL_MUTE   = (1 << 0);
 static constexpr uint8_t UAC_FU_CTL_VOLUME = (1 << 1);
 
+// -- Terminal types (specification section 2.1) -------------------------------
+// An Output Terminal of this type sends audio to the host, so it belongs to the capture
+// path. Any other Output Terminal type is a physical sink and belongs to playback.
+static constexpr uint16_t UAC_TERMINAL_TYPE_USB_STREAMING = 0x0101;
+
 // -- Maximum number of discrete sample frequencies per alt-setting -------------
 static constexpr uint8_t UAC_MAX_SAMPLE_FREQS = 8;
+
+// -- Maximum number of AudioControl units and terminals tracked ----------------
+static constexpr uint8_t UAC_MAX_TOPOLOGY_NODES = 16;
+
+// -- One AudioControl unit or terminal, reduced to what a topology walk needs --
+struct UacTopologyNode {
+  uint8_t  id{0};
+  uint8_t  subtype{0};
+  // Upstream connection. 0 means the node has none, which is also the specification's
+  // "no connection" value, so it doubles as a chain terminator.
+  uint8_t  first_source{0};
+  uint16_t terminal_type{0};  // Input and Output Terminals only
+};
 
 // -- Described audio streaming alt-setting parameters -------------------------
 // Filled during descriptor parsing for each AS interface alternate setting > 0.

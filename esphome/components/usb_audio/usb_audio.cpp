@@ -174,50 +174,136 @@ bool USBAudioClient::find_ac_interface_() {
   return false;
 }
 
-bool USBAudioClient::parse_feature_units_() {
+// Offset of the first upstream source ID inside an AudioControl unit or terminal
+// descriptor. The leading fields of these descriptors are the same in UAC 1.0 and 2.0, so
+// a walk built on them does not depend on the audio class version. Returns 0 for
+// descriptors that have no upstream connection.
+static uint8_t uac_first_source_offset(uint8_t subtype) {
+  switch (subtype) {
+    case UAC_AC_OUTPUT_TERMINAL:
+      return 7;  // bSourceID
+    case UAC_AC_FEATURE_UNIT:
+      return 4;  // bSourceID
+    case UAC_AC_MIXER_UNIT:
+    case UAC_AC_SELECTOR_UNIT:
+      return 5;  // baSourceID[0], preceded by bNrInPins
+    case UAC_AC_PROCESSING_UNIT:
+    case UAC_AC_EXTENSION_UNIT:
+      return 7;  // baSourceID[0], preceded by wProcessType and bNrInPins
+    default:
+      return 0;
+  }
+}
+
+static const UacTopologyNode *uac_find_node(const UacTopologyNode *nodes, uint8_t count, uint8_t id) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (nodes[i].id == id)
+      return &nodes[i];
+  }
+  return nullptr;
+}
+
+// Follow the signal path upstream from the Output Terminal of one direction and return the
+// first Feature Unit on it, or 0 when there is none. A unit with several inputs is followed
+// on its first pin only, which is where a device that offers one volume control puts it.
+static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count, bool capture) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (nodes[i].subtype != UAC_AC_OUTPUT_TERMINAL)
+      continue;
+    if ((nodes[i].terminal_type == UAC_TERMINAL_TYPE_USB_STREAMING) != capture)
+      continue;
+    uint8_t next = nodes[i].first_source;
+    // A malformed descriptor can describe a cycle, so bound the walk by the node count.
+    for (uint8_t hop = 0; hop < count && next != 0; hop++) {
+      const UacTopologyNode *node = uac_find_node(nodes, count, next);
+      if (node == nullptr)
+        break;
+      if (node->subtype == UAC_AC_FEATURE_UNIT)
+        return node->id;
+      next = node->first_source;
+    }
+  }
+  return 0;
+}
+
+uint8_t USBAudioClient::collect_topology_(UacTopologyNode *nodes) {
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
-    return false;
+    return 0;
 
   uint16_t total = cfg->wTotalLength;
   int offset = 0;
   const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
   bool in_ac = false;
-  bool spk_found = false;
-  bool mic_found = false;
-
-  // Simple heuristic: the first Feature Unit after the AC interface is the speaker FU;
-  // the second (if present) is the microphone FU. Most single-chip UAC devices follow this.
-  // More robust: we'd walk the terminal chain, but that requires tracking terminal IDs -
-  // this simpler approach works for the vast majority of USB headsets/speakers.
+  uint8_t count = 0;
 
   while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
-    const uint8_t dtype = desc->bDescriptorType;
-
-    if (dtype == USB_W_VALUE_DT_INTERFACE) {
+    if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
       const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
       in_ac = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
                id->bAlternateSetting == 0 && id->bInterfaceNumber == this->ac_intf_);
       continue;
     }
-
-    if (!in_ac || dtype != UAC_CS_INTERFACE)
+    if (!in_ac || desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 4)
       continue;
-    if (desc->bLength < 3)
+    if (count >= UAC_MAX_TOPOLOGY_NODES) {
+      ESP_LOGW(TAG, "Audio function has more than %u units; topology is incomplete", UAC_MAX_TOPOLOGY_NODES);
+      break;
+    }
+
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
+    const uint8_t subtype = d[2];
+    const bool is_terminal = (subtype == UAC_AC_INPUT_TERMINAL || subtype == UAC_AC_OUTPUT_TERMINAL);
+    const uint8_t src_off = uac_first_source_offset(subtype);
+    if (src_off == 0 && !is_terminal)
+      continue;  // header or an unknown descriptor: not part of the signal path
+
+    UacTopologyNode node{};
+    node.subtype = subtype;
+    node.id = d[3];
+    if (is_terminal) {
+      if (desc->bLength < 6)
+        continue;
+      node.terminal_type = static_cast<uint16_t>(d[4] | (d[5] << 8));
+    }
+    if (src_off != 0) {
+      if (desc->bLength <= src_off)
+        continue;
+      node.first_source = d[src_off];
+    }
+    nodes[count++] = node;
+  }
+  return count;
+}
+
+uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t max_count) {
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  if (cfg == nullptr)
+    return 0;
+
+  uint16_t total = cfg->wTotalLength;
+  int offset = 0;
+  const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  bool in_ac = false;
+  uint8_t count = 0;
+
+  while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr && count < max_count) {
+    if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+      const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
+      in_ac = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
+               id->bAlternateSetting == 0 && id->bInterfaceNumber == this->ac_intf_);
+      continue;
+    }
+    if (!in_ac || desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 7)
       continue;
 
     const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
     if (d[2] != UAC_AC_FEATURE_UNIT)
       continue;
 
-    // Feature Unit layout (UAC 1.0 table 4-7):
-    // [0] bLength  [1] bDescriptorType  [2] bDescriptorSubtype
+    // Feature Unit layout (UAC 1.0 section 4.3.2.5):
     // [3] bUnitID  [4] bSourceID  [5] bControlSize
-    // [6..6+bControlSize-1] bmaControls[0] (master)
-    // (followed by per-channel controls but we only need master)
-    if (desc->bLength < 7)
-      continue;
-
+    // [6..] bmaControls[0] (master), then one entry per channel.
     UacFeatureUnit fu{};
     fu.unit_id      = d[3];
     fu.source_id    = d[4];
@@ -227,22 +313,59 @@ bool USBAudioClient::parse_feature_units_() {
     fu.master_controls = d[6];
     fu.has_mute   = (fu.master_controls & UAC_FU_CTL_MUTE) != 0;
     fu.has_volume = (fu.master_controls & UAC_FU_CTL_VOLUME) != 0;
-    // channel_count inferred from descriptor length
     fu.channel_count = (desc->bLength - 7) / fu.control_size;
 
-    if (this->spk_cfg_.configured && !spk_found) {
-      this->speaker_fu_ = fu;
-      spk_found = true;
-      ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", fu.unit_id, YESNO(fu.has_mute),
-               YESNO(fu.has_volume));
-    } else if (this->mic_cfg_.configured && !mic_found) {
-      this->mic_fu_ = fu;
-      mic_found = true;
-      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", fu.unit_id, YESNO(fu.has_mute), YESNO(fu.has_volume));
-    }
+    units[count++] = fu;
+  }
+  return count;
+}
 
-    if ((!this->spk_cfg_.configured || spk_found) && (!this->mic_cfg_.configured || mic_found))
-      break;
+bool USBAudioClient::parse_feature_units_() {
+  // Another device may have been attached before, so start from nothing.
+  this->speaker_fu_ = {};
+  this->mic_fu_ = {};
+
+  UacTopologyNode nodes[UAC_MAX_TOPOLOGY_NODES];
+  const uint8_t node_count = this->collect_topology_(nodes);
+
+  UacFeatureUnit units[UAC_MAX_TOPOLOGY_NODES];
+  const uint8_t unit_count = this->collect_feature_units_(units, UAC_MAX_TOPOLOGY_NODES);
+
+  uint8_t spk_fu_id = uac_find_feature_unit(nodes, node_count, false);
+  uint8_t mic_fu_id = uac_find_feature_unit(nodes, node_count, true);
+
+  // A device may describe a topology this walk cannot follow. Picking a Feature Unit by
+  // descriptor order would then be a guess, and sending a control request to the wrong unit
+  // changes the wrong thing, so only fall back when there is nothing to guess between.
+  if (spk_fu_id == 0 && mic_fu_id == 0 && unit_count == 1) {
+    ESP_LOGD(TAG, "Could not follow the audio topology; using the only Feature Unit found");
+    spk_fu_id = units[0].unit_id;
+    mic_fu_id = units[0].unit_id;
+  }
+
+  for (uint8_t i = 0; i < unit_count; i++) {
+    if (this->spk_cfg_.configured && units[i].unit_id == spk_fu_id)
+      this->speaker_fu_ = units[i];
+    if (this->mic_cfg_.configured && units[i].unit_id == mic_fu_id)
+      this->mic_fu_ = units[i];
+  }
+
+  // Unit ID 0 is reserved by the specification, so it marks "nothing found" here.
+  if (this->spk_cfg_.configured) {
+    if (this->speaker_fu_.unit_id != 0) {
+      ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", this->speaker_fu_.unit_id,
+               YESNO(this->speaker_fu_.has_mute), YESNO(this->speaker_fu_.has_volume));
+    } else {
+      ESP_LOGW(TAG, "No Feature Unit in the playback path; volume and mute are unavailable");
+    }
+  }
+  if (this->mic_cfg_.configured) {
+    if (this->mic_fu_.unit_id != 0) {
+      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_fu_.unit_id, YESNO(this->mic_fu_.has_mute),
+               YESNO(this->mic_fu_.has_volume));
+    } else {
+      ESP_LOGW(TAG, "No Feature Unit in the capture path; volume and mute are unavailable");
+    }
   }
 
   return true;  // non-fatal if not found - volume/mute will be silently skipped
