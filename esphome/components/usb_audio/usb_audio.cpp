@@ -693,7 +693,7 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   if (!result->done.load(std::memory_order_acquire)) {
     // Submitted, but the host never reported it finishing either way.
     ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
-             request, (req_type & USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
+             request, (req_type & usb_host::USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
     return false;
   }
   if (!result->success) {
