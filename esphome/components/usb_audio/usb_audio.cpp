@@ -582,16 +582,22 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   auto result = std::make_shared<UacControlResult>();
   std::vector<uint8_t> payload(out_data, out_data + out_len);
 
-  this->control_transfer(req_type, request, value, index,
-                         [result](const usb_host::TransferStatus &s) {
-                           result->success = s.success;
-                           if (s.success && s.data != nullptr) {
-                             result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
-                             memcpy(result->data, s.data, result->data_len);
-                           }
-                           result->done.store(true, std::memory_order_release);
-                         },
-                         payload);
+  if (!this->control_transfer(req_type, request, value, index,
+                              [result](const usb_host::TransferStatus &s) {
+                                result->success = s.success;
+                                if (s.success && s.data != nullptr) {
+                                  result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
+                                  memcpy(result->data, s.data, result->data_len);
+                                }
+                                result->done.store(true, std::memory_order_release);
+                              },
+                              payload)) {
+    // Nothing was handed to the host, so no callback is coming. Waiting for one would spend
+    // the full timeout and then report a device that did not answer, which is not what
+    // happened.
+    ESP_LOGW(TAG, "Control request 0x%02X was not submitted", request);
+    return false;
+  }
 
   const uint32_t started = millis();
   while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS)
