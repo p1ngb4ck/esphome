@@ -74,12 +74,13 @@ void USBAudioSpeaker::finish() {
 }
 
 namespace {
-constexpr size_t MIN_WRITE_CHUNK = 512;
-constexpr size_t CHUNK_GROW_STEP = 512;
-constexpr size_t MAX_TIMEOUT_RETRIES = 4;
-constexpr size_t SUCCESS_STREAK_FOR_GROWTH = 16;
-constexpr size_t HARD_CHUNK_CAP = 4096;
+// Upper bound on the time one play() call may spend pushing data into the USB ring buffer.
 constexpr uint32_t MAX_WORK_TIME_MS = 20;
+// Share of the work budget a single blocking write may consume. The isochronous sink drains
+// at exactly real time, so a chunk worth more playback time than this can only time out.
+constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
+// Rate limit for the "sink is backed up" warning.
+constexpr uint32_t TIMEOUT_LOG_INTERVAL_MS = 1000;
 }  // namespace
 
 size_t USBAudioSpeaker::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
@@ -109,178 +110,86 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
       (time_budget_ms > 0) ? std::min<uint32_t>(time_budget_ms, MAX_WORK_TIME_MS) : MAX_WORK_TIME_MS;
   const uint32_t start_ms = millis();
 
+  const size_t bytes_per_frame =
+      std::max<size_t>(1, static_cast<size_t>(this->channels_) * std::max<size_t>(1, this->bits_per_sample_ / 8));
+
+  // Write granularity is the isochronous packet the sink consumes per service interval, so a
+  // write never leaves a partial packet behind. Fall back to a single audio frame while the
+  // stream is not open yet and the packet size is therefore unknown.
+  size_t packet_bytes = this->parent_->get_speaker_packet_bytes();
+  if (packet_bytes < bytes_per_frame) {
+    packet_bytes = bytes_per_frame;
+  }
+
+  // The sink drains at real time and never faster: sample_rate frames per second. Asking a
+  // blocking write for more playback time than it may block for can only ever time out, so
+  // cap one chunk at what drains within a fraction of the budget. Deriving this from the
+  // stream format keeps it correct for any rate the endpoint was opened with.
+  const size_t bytes_per_ms = std::max<size_t>(1, (static_cast<size_t>(this->sample_rate_) * bytes_per_frame) / 1000);
+  size_t max_chunk = bytes_per_ms * std::max<uint32_t>(1, work_budget_ms / WRITE_BUDGET_DIVISOR);
+  max_chunk = (max_chunk / packet_bytes) * packet_bytes;
+  if (max_chunk == 0) {
+    max_chunk = packet_bytes;
+  }
+
   size_t total_written = 0;
   size_t remaining = length;
   const uint8_t *current = data;
 
-  size_t max_chunk = this->parent_->get_speaker_buffer_size();
-  if (max_chunk == 0) {
-    max_chunk = HARD_CHUNK_CAP;
-  }
-  max_chunk = std::max(std::min(max_chunk, HARD_CHUNK_CAP), MIN_WRITE_CHUNK);
-
-  const size_t bytes_per_frame =
-      std::max<size_t>(1, static_cast<size_t>(this->channels_) * std::max<size_t>(1, this->bits_per_sample_ / 8));
-  auto align_to_frame = [bytes_per_frame](size_t value) -> size_t {
-    if (bytes_per_frame <= 1) {
-      return value;
-    }
-    return (value / bytes_per_frame) * bytes_per_frame;
-  };
-
-  size_t timeout_retry_count = 0;
-
-  while (remaining > 0) {
-    uint32_t elapsed_ms = millis() - start_ms;
+  while (remaining >= bytes_per_frame) {
+    const uint32_t elapsed_ms = millis() - start_ms;
     if (elapsed_ms >= work_budget_ms) {
       break;
     }
 
-    size_t current_upper_bound = this->chunk_upper_bound_;
-    if (current_upper_bound == 0) {
-      current_upper_bound = std::min(std::max(MIN_WRITE_CHUNK, max_chunk), HARD_CHUNK_CAP);
-      size_t aligned_bound = align_to_frame(current_upper_bound);
-      if (aligned_bound > 0) {
-        current_upper_bound = aligned_bound;
-      }
-      this->chunk_upper_bound_ = current_upper_bound;
+    // Whole packets while there is enough left for one, whole frames for the tail.
+    size_t chunk = std::min(remaining, max_chunk);
+    size_t aligned = (chunk / packet_bytes) * packet_bytes;
+    if (aligned == 0) {
+      aligned = (chunk / bytes_per_frame) * bytes_per_frame;
     }
-
-    size_t chunk_cap = remaining;
-    chunk_cap = std::min(chunk_cap, current_upper_bound);
-    chunk_cap = std::min(chunk_cap, max_chunk);
-    chunk_cap = std::min(chunk_cap, HARD_CHUNK_CAP);
-
-    if (chunk_cap == 0) {
-      ESP_LOGW(TAG_SPK, "Chunk cap resolved to zero; aborting playback write");
-      break;
-    }
-
-    size_t chunk = this->preferred_chunk_size_;
-    if (chunk == 0 || chunk > chunk_cap) {
-      chunk = chunk_cap;
-    }
-
-    size_t aligned_chunk = align_to_frame(chunk);
-    if (aligned_chunk > 0) {
-      chunk = aligned_chunk;
-    } else {
-      aligned_chunk = align_to_frame(chunk_cap);
-      if (aligned_chunk > 0) {
-        chunk = aligned_chunk;
-      }
-    }
-
-    if (chunk > chunk_cap) {
-      chunk = chunk_cap;
-    }
-    if (chunk > remaining) {
-      chunk = remaining;
-    }
+    chunk = aligned;
     if (chunk == 0) {
-      ESP_LOGW(TAG_SPK, "Chunk resolved to zero after alignment; aborting playback write");
       break;
     }
 
-    uint32_t remaining_budget_ms = work_budget_ms - elapsed_ms;
-    if (remaining_budget_ms == 0) {
-      remaining_budget_ms = 1;
+    uint32_t call_timeout_ms = work_budget_ms - elapsed_ms;
+    if (call_timeout_ms > this->write_timeout_ms_) {
+      call_timeout_ms = this->write_timeout_ms_;
     }
-    uint32_t call_timeout_ms = std::min<uint32_t>(this->write_timeout_ms_, remaining_budget_ms);
     if (call_timeout_ms == 0) {
       call_timeout_ms = 1;
     }
 
-    ESP_LOGV(TAG_SPK, "Attempting USB write chunk=%u remaining=%u timeout_ms=%u", (unsigned) chunk,
-             (unsigned) remaining, (unsigned) call_timeout_ms);
-    esp_err_t err = this->parent_->write_speaker(current, chunk, call_timeout_ms);
-
-    if (err == ESP_OK) {
-      this->last_write_ms_ = millis();
-      total_written += chunk;
-      current += chunk;
-      remaining -= chunk;
-      this->chunk_success_streak_++;
-      timeout_retry_count = 0;
-      ESP_LOGV(TAG_SPK, "Chunk write ok chunk=%u total_written=%u", (unsigned) chunk, (unsigned) total_written);
-
-      const size_t frames_written = chunk / bytes_per_frame;
-      if (frames_written > 0) {
-        const int64_t timestamp_us = esp_timer_get_time();
-        this->audio_output_callback_(static_cast<uint32_t>(frames_written), timestamp_us);
+    const esp_err_t err = this->parent_->write_speaker(current, chunk, call_timeout_ms);
+    if (err != ESP_OK) {
+      // A short write is a normal outcome, not an error: play() reports how much was taken
+      // and the caller keeps the rest. Retrying here with an ever smaller chunk cannot help,
+      // because the drain rate is fixed by the sample clock. Only report a sink that stays
+      // backed up, and at most once per second so a stall does not flood the log.
+      const uint32_t now = millis();
+      if (now - this->last_timeout_log_ms_ >= TIMEOUT_LOG_INTERVAL_MS) {
+        this->last_timeout_log_ms_ = now;
+        if (err == ESP_ERR_TIMEOUT) {
+          ESP_LOGW(TAG_SPK, "USB sink backed up; accepted %u of %u bytes", (unsigned) total_written,
+                   (unsigned) length);
+        } else {
+          ESP_LOGW(TAG_SPK, "Write error: %s", esp_err_to_name(err));
+        }
       }
-
-      if (this->preferred_chunk_size_ < chunk_cap) {
-        size_t grown = this->preferred_chunk_size_ + CHUNK_GROW_STEP;
-        if (grown < MIN_WRITE_CHUNK) {
-          grown = MIN_WRITE_CHUNK;
-        }
-        if (grown > chunk_cap) {
-          grown = chunk_cap;
-        }
-        size_t aligned = align_to_frame(grown);
-        if (aligned > 0) {
-          grown = aligned;
-        }
-        this->preferred_chunk_size_ = grown;
-      }
-
-      if (this->chunk_success_streak_ >= SUCCESS_STREAK_FOR_GROWTH && this->chunk_upper_bound_ < chunk_cap) {
-        size_t new_bound = this->chunk_upper_bound_ + CHUNK_GROW_STEP;
-        new_bound = std::min(new_bound, chunk_cap);
-        size_t aligned = align_to_frame(new_bound);
-        if (aligned > 0) {
-          new_bound = aligned;
-        }
-        if (new_bound > this->chunk_upper_bound_) {
-          ESP_LOGD(TAG_SPK, "Increasing chunk upper bound to %u", (unsigned) new_bound);
-          this->chunk_upper_bound_ = new_bound;
-        }
-        this->chunk_success_streak_ = 0;
-      }
-
-      continue;
+      break;
     }
 
-    this->chunk_success_streak_ = 0;
+    this->last_write_ms_ = millis();
+    total_written += chunk;
+    current += chunk;
+    remaining -= chunk;
 
-    if (err == ESP_ERR_TIMEOUT) {
-      ESP_LOGW(TAG_SPK, "Chunk write timeout chunk=%u", (unsigned) chunk);
-
-      size_t new_upper = (chunk > CHUNK_GROW_STEP) ? (chunk - CHUNK_GROW_STEP) : chunk;
-      new_upper = std::max(MIN_WRITE_CHUNK, std::min(new_upper, chunk_cap));
-      size_t aligned = align_to_frame(new_upper);
-      if (aligned > 0) {
-        new_upper = aligned;
-      }
-      if (new_upper < this->chunk_upper_bound_) {
-        ESP_LOGD(TAG_SPK, "Reducing chunk upper bound to %u", (unsigned) new_upper);
-        this->chunk_upper_bound_ = new_upper;
-      }
-
-      size_t reduced = this->preferred_chunk_size_ / 2;
-      if (reduced < MIN_WRITE_CHUNK) {
-        reduced = MIN_WRITE_CHUNK;
-      }
-      reduced = std::min(reduced, this->chunk_upper_bound_);
-      aligned = align_to_frame(reduced);
-      if (aligned > 0) {
-        reduced = aligned;
-      }
-      this->preferred_chunk_size_ = reduced;
-
-      timeout_retry_count++;
-      vTaskDelay(pdMS_TO_TICKS(call_timeout_ms));
-      if (timeout_retry_count < MAX_TIMEOUT_RETRIES) {
-        continue;
-      }
-      ESP_LOGW(TAG_SPK, "Max timeout retries reached with chunk=%u", (unsigned) chunk);
-    } else {
-      ESP_LOGW(TAG_SPK, "Write error: %s", esp_err_to_name(err));
-      vTaskDelay(pdMS_TO_TICKS(call_timeout_ms));
+    const size_t frames_written = chunk / bytes_per_frame;
+    if (frames_written > 0) {
+      const int64_t timestamp_us = esp_timer_get_time();
+      this->audio_output_callback_(static_cast<uint32_t>(frames_written), timestamp_us);
     }
-
-    break;
   }
 
   return total_written;

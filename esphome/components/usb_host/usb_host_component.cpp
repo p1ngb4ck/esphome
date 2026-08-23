@@ -257,17 +257,28 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
 
   if (stream->streaming) {
     const uint8_t *payload = xfer->data_buffer;
+    uint32_t total_bytes = 0;
     for (int i = 0; i < xfer->num_isoc_packets; i++) {
       usb_isoc_packet_desc_t *desc = &xfer->isoc_packet_desc[i];
       const bool error = (desc->status != USB_TRANSFER_STATUS_COMPLETED && desc->status != USB_TRANSFER_STATUS_SKIPPED);
       // OUT: the sample clock decides how many bytes this packet may carry and on_isoc_packet
-      // fills exactly that many. IN: report what was actually received. Packets are always
-      // allocated mps apart in the buffer, so the payload stride is mps regardless of size.
-      const uint32_t fill = stream->is_output ? isoc_next_packet_size(stream) : desc->actual_num_bytes;
-      client->on_isoc_packet(xfer->bEndpointAddress, payload, fill, error);
-      desc->num_bytes = stream->is_output ? fill : stream->mps;
-      payload += stream->mps;
+      // fills exactly that many. IN: report what was actually received, and keep asking for a
+      // full mps.
+      //
+      // The payload stride is the packet size, not mps: the host controller lays the packets
+      // out back to back, advancing by isoc_packet_desc[].num_bytes (see _buffer_fill_isoc()
+      // in hcd_dwc.c), so a short packet moves every following packet down by that shortfall.
+      // Writing at an mps stride only matches while every packet happens to be exactly mps.
+      const uint32_t fill = stream->is_output ? isoc_next_packet_size(stream) : stream->mps;
+      client->on_isoc_packet(xfer->bEndpointAddress, payload, stream->is_output ? fill : desc->actual_num_bytes,
+                             error);
+      desc->num_bytes = fill;
+      payload += fill;
+      total_bytes += fill;
     }
+    // Isochronous transfers are described by the packet list, but keep the transfer length
+    // consistent with it rather than leaving the allocation size behind.
+    xfer->num_bytes = static_cast<int>(total_bytes);
     if (usb_host_transfer_submit(xfer) != ESP_OK) {
       // Resubmission failed (e.g. periodic scheduler rejected it): retire this URB instead of
       // leaving it dangling. The stream keeps running on the remaining URBs, and when the last
@@ -328,8 +339,13 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
     // transfers already fit the negotiated bandwidth instead of a full mps.
     for (uint8_t i = 0; i < stream.num_urbs; i++) {
       memset(stream.xfers[i]->data_buffer, 0, static_cast<size_t>(stream.mps) * stream.packets_per_urb);
-      for (uint8_t j = 0; j < stream.packets_per_urb; j++)
-        stream.xfers[i]->isoc_packet_desc[j].num_bytes = isoc_next_packet_size(&stream);
+      uint32_t total_bytes = 0;
+      for (uint8_t j = 0; j < stream.packets_per_urb; j++) {
+        const uint32_t fill = isoc_next_packet_size(&stream);
+        stream.xfers[i]->isoc_packet_desc[j].num_bytes = fill;
+        total_bytes += fill;
+      }
+      stream.xfers[i]->num_bytes = static_cast<int>(total_bytes);
     }
   }
 

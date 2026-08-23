@@ -85,6 +85,7 @@ struct UacAltInfo {
   uint8_t  feedback_ep_addr{0};  // companion async feedback IN endpoint (0 = none)
   uint16_t feedback_mps{0};      // feedback endpoint max packet size
   uint16_t mps{0};            // max packet size x mult
+  uint8_t  b_interval{0};     // endpoint bInterval (service interval; 0 = not read)
   uint8_t  channels{0};
   uint8_t  sub_frame_size{0}; // bytes per audio sample (1, 2, 3, or 4)
   uint8_t  bit_resolution{0}; // actual bits used (e.g. 16 or 24)

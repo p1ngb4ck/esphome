@@ -24,6 +24,19 @@ static constexpr uint8_t ISOC_NUM_URBS = 3;
 // Packets per URB - small for audio to minimise latency.
 static constexpr uint8_t ISOC_PACKETS_PER_URB = 4;
 
+// Service intervals per second for an isochronous endpoint. At full speed the endpoint is
+// serviced every bInterval frames (1 ms each), at high speed every 2^(bInterval-1)
+// microframes (125 us each). bInterval 0 is illegal for isochronous endpoints; treat it as
+// "every interval" so a sloppy descriptor still yields the common 1 ms / 125 us case.
+static uint32_t uac_service_intervals_per_second(bool high_speed, uint8_t b_interval) {
+  if (high_speed) {
+    const uint8_t exponent = (b_interval >= 1 && b_interval <= 16) ? static_cast<uint8_t>(b_interval - 1) : 0;
+    return std::max<uint32_t>(1, 8000u >> exponent);
+  }
+  const uint32_t period = (b_interval >= 1 && b_interval <= 16) ? b_interval : 1;
+  return std::max<uint32_t>(1, 1000u / period);
+}
+
 // -----------------------------------------------------------------------------
 // Configuration setters
 // -----------------------------------------------------------------------------
@@ -297,6 +310,9 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
         cur_alt_info.mps = is_high_speed
                                ? static_cast<uint16_t>(USB_EP_DESC_GET_MPS(ep) * (USB_EP_DESC_GET_MULT(ep) + 1))
                                : std::min<uint16_t>(USB_EP_DESC_GET_MPS(ep), 1023);
+        // bInterval selects the service interval and therefore how many bytes per interval
+        // the sample clock has to produce; without it the pacing can only guess.
+        cur_alt_info.b_interval = ep->bInterval;
         // UAC1 audio endpoint descriptor (bLength 9) carries bSynchAddress at offset 8: the
         // companion feedback IN endpoint address for an asynchronous OUT endpoint.
         if (desc->bLength >= 9 && reinterpret_cast<const uint8_t *>(ep)[8] != 0)
@@ -484,14 +500,32 @@ bool USBAudioClient::open_speaker_stream_() {
   this->spk_stream_.interface_num  = this->spk_as_intf_;
   this->spk_stream_.alt_setting    = this->spk_alt_.alt_setting;
 
-  // Sample-clock pacing for the OUT stream. frame_size = channels * subframe; a full-speed
-  // endpoint is serviced once per 1 ms frame (1000/s), a high-speed one per 125 us
-  // microframe (8000/s). packet_size is the floor bytes per interval, packet_size_frac the
-  // per-interval frame remainder that the accumulator folds back in (e.g. 44.1 kHz).
+  // Sample-clock pacing for the OUT stream. frame_size = channels * subframe; the service
+  // interval follows from the device speed and the endpoint's bInterval. packet_size is the
+  // floor bytes per interval, packet_size_frac the per-interval frame remainder that the
+  // accumulator folds back in (e.g. 44.1 kHz).
   {
     const uint32_t frame_size =
         static_cast<uint32_t>(this->spk_cfg_.channels) * (this->spk_cfg_.bits_per_sample / 8);
-    const uint32_t frac_div = this->device_is_high_speed_ ? 8000u : 1000u;
+    const uint32_t derived_ips =
+        uac_service_intervals_per_second(this->device_is_high_speed_, this->spk_alt_.b_interval);
+    uint32_t frac_div = derived_ips;
+
+    // A UAC endpoint sizes its mps to carry exactly one service interval of audio (plus at
+    // most one extra frame for fractional rates and async slack). If the derived interval
+    // rate asks for no more than half of mps, the speed or bInterval it came from does not
+    // describe this endpoint - most UAC devices are full-speed and are serviced once per
+    // 1 ms frame, so an inflated interval rate starves the device by that same factor.
+    // Halve back down to what mps actually describes, never below the 1 ms frame rate.
+    while (frac_div > 1000u && this->spk_alt_.mps != 0 &&
+           ((this->spk_cfg_.sample_rate / frac_div) * frame_size) * 2 <= static_cast<uint32_t>(this->spk_alt_.mps)) {
+      frac_div /= 2;
+    }
+    if (frac_div != derived_ips) {
+      ESP_LOGW(TAG, "Speaker pacing: %" PRIu32 " intervals/s does not fit mps=%u, using %" PRIu32 "/s",
+               derived_ips, this->spk_alt_.mps, frac_div);
+    }
+
     this->spk_stream_.is_output       = true;
     this->spk_stream_.frame_size      = frame_size;
     this->spk_stream_.frac_div        = frac_div;
@@ -500,6 +534,12 @@ bool USBAudioClient::open_speaker_stream_() {
     this->spk_stream_.frac_accum      = 0;
     this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
     this->spk_stream_.fb_accum        = 0;
+
+    ESP_LOGI(TAG, "Speaker pacing: %s bInterval=%u %" PRIu32 " intervals/s, %" PRIu32
+                  " bytes/packet (frac %" PRIu32 "/%" PRIu32 "), frame=%" PRIu32 " bytes, mps=%u",
+             this->device_is_high_speed_ ? "HS" : "FS", this->spk_alt_.b_interval, frac_div,
+             this->spk_stream_.packet_size, this->spk_stream_.packet_size_frac, frac_div, frame_size,
+             this->spk_alt_.mps);
   }
 
   if (!this->stream_open(this->spk_stream_, this)) {
@@ -718,16 +758,28 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
       return;
     }
     const size_t fill_bytes = len;
-    size_t received = 0;
-    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, fill_bytes);
-    if (item != nullptr) {
-      memcpy(const_cast<uint8_t *>(data), item, received);
+    uint8_t *dst = const_cast<uint8_t *>(data);
+    size_t filled = 0;
+    // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
+    // wrap returns a short block. Reading once and padding the rest with silence would drop
+    // the packet's remaining bytes' worth of playback time on every wrap: the data stays
+    // queued, the drain rate falls below real time and the buffer backs up permanently.
+    // Read again for the remainder instead.
+    while (filled < fill_bytes) {
+      size_t received = 0;
+      void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, fill_bytes - filled);
+      if (item == nullptr)
+        break;
+      if (received > 0) {
+        memcpy(dst + filled, item, received);
+        filled += received;
+      }
       vRingbufferReturnItem(this->spk_rb_, item);
-      if (received < fill_bytes)
-        memset(const_cast<uint8_t *>(data) + received, 0, fill_bytes - received);
-    } else {
-      memset(const_cast<uint8_t *>(data), 0, fill_bytes);
+      if (received == 0)
+        break;
     }
+    if (filled < fill_bytes)
+      memset(dst + filled, 0, fill_bytes - filled);
   } else {
     // -- Microphone IN: write PCM into the ring buffer ------------------------
     if (this->mic_rb_ == nullptr || this->mic_suspended_)

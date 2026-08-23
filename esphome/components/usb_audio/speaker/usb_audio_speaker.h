@@ -49,9 +49,7 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
   uint32_t last_write_ms_{0};
   bool finish_requested_{false};
   uint32_t finish_deadline_ms_{0};
-  size_t preferred_chunk_size_{0};
-  size_t chunk_upper_bound_{0};
-  size_t chunk_success_streak_{0};
+  uint32_t last_timeout_log_ms_{0};
 };
 
 }  // namespace usb_audio

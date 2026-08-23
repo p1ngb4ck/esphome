@@ -81,6 +81,13 @@ class USBAudioClient : public usb_host::USBClient {
   // Microphone read - called from microphone task; blocks up to timeout_ms.
   esp_err_t read_microphone(uint8_t *buffer, size_t size, size_t *bytes_read, uint32_t timeout_ms);
 
+  // Bytes the isochronous OUT sample clock moves per service interval, i.e. the granularity
+  // the sink consumes at. 0 while no speaker stream is open. Writers align their chunks to
+  // this so no partial packet is queued.
+  uint32_t get_speaker_packet_bytes() const {
+    return this->spk_stream_open_ ? this->spk_stream_.packet_size : 0;
+  }
+
   uint32_t get_speaker_buffer_size() const { return this->spk_buf_size_; }
   uint32_t get_microphone_buffer_size() const { return this->mic_buf_size_; }
   bool device_connected() const { return this->device_connected_; }
