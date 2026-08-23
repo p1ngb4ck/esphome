@@ -652,16 +652,25 @@ bool USBAudioClient::apply_speaker_volume_() {
 
   if (channel_count == 0) {
     // The descriptor says there is no volume control. That is a property of the device, not
-    // a transient failure, so stop asking.
+    // a transient failure, so stop asking. Later requests are still answered, at debug
+    // level, because going silent leaves nothing to explain why the volume does not move.
     if (this->spk_volume_supported_) {
       ESP_LOGW(TAG, "Speaker volume control not supported by device");
       this->spk_volume_supported_ = false;
+    } else {
+      ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
     }
     this->pending_spk_volume_ = false;
     return false;
   }
-  if (!this->spk_stream_open_ || !this->spk_volume_supported_)
+  if (!this->spk_volume_supported_) {
+    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: volume control was given up on", this->spk_volume_ * 100.0f);
     return false;
+  }
+  if (!this->spk_stream_open_) {
+    ESP_LOGD(TAG, "Speaker volume %.0f%% held until the stream is open", this->spk_volume_ * 100.0f);
+    return false;
+  }
 
   // A UAC Feature Unit volume is logarithmic: a signed 1/256 dB value, where the device's
   // reported maximum is its reference level. ESPHome's volume is a linear amplitude
@@ -734,12 +743,20 @@ bool USBAudioClient::apply_speaker_mute_() {
     if (this->spk_mute_supported_) {
       ESP_LOGW(TAG, "Speaker mute control not supported by device");
       this->spk_mute_supported_ = false;
+    } else {
+      ESP_LOGD(TAG, "Speaker mute %s ignored: device has no mute control", ONOFF(this->spk_muted_));
     }
     this->pending_spk_mute_ = false;
     return false;
   }
-  if (!this->spk_stream_open_ || !this->spk_mute_supported_)
+  if (!this->spk_mute_supported_) {
+    ESP_LOGD(TAG, "Speaker mute %s ignored: mute control was given up on", ONOFF(this->spk_muted_));
     return false;
+  }
+  if (!this->spk_stream_open_) {
+    ESP_LOGD(TAG, "Speaker mute %s held until the stream is open", ONOFF(this->spk_muted_));
+    return false;
+  }
 
   uint8_t val = this->spk_muted_ ? 1 : 0;
   bool ok = true;
