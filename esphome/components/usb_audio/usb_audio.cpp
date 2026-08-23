@@ -154,22 +154,70 @@ bool USBAudioClient::find_ac_interface_() {
   if (cfg == nullptr)
     return false;
 
+  // The AudioStreaming interfaces this component is going to use, when they are known.
+  uint8_t wanted[2];
+  uint8_t wanted_count = 0;
+  if (this->spk_cfg_.configured && this->spk_format_ok_)
+    wanted[wanted_count++] = this->spk_as_intf_;
+  if (this->mic_cfg_.configured && this->mic_format_ok_)
+    wanted[wanted_count++] = this->mic_as_intf_;
+
   uint16_t total = cfg->wTotalLength;
   int offset = 0;
   const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  bool in_ac = false;
+  bool found_any = false;
+  uint8_t current_ac = 0;
+  uint8_t first_ac = 0;
 
   while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
-    if (desc->bDescriptorType != USB_W_VALUE_DT_INTERFACE)
+    if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+      const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
+      in_ac = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
+               id->bAlternateSetting == 0);
+      if (in_ac) {
+        current_ac = id->bInterfaceNumber;
+        if (!found_any) {
+          first_ac = current_ac;
+          found_any = true;
+        }
+      }
       continue;
-    const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
-    if (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
-        id->bAlternateSetting == 0) {
-      this->ac_intf_ = id->bInterfaceNumber;
-      return true;
+    }
+    if (!in_ac || desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 8)
+      continue;
+
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
+    if (d[2] != UAC_AC_HEADER)
+      continue;
+
+    // Class-specific AC interface header: bInCollection at [7], then one interface number
+    // per entry. The Collection is what ties an AudioControl interface to the
+    // AudioStreaming interfaces of the same audio function, and a device may hold several
+    // such functions.
+    const uint8_t in_collection = d[7];
+    for (uint8_t i = 0; i < in_collection && (8 + i) < desc->bLength; i++) {
+      for (uint8_t w = 0; w < wanted_count; w++) {
+        if (d[8 + i] != wanted[w])
+          continue;
+        this->ac_intf_ = current_ac;
+        ESP_LOGD(TAG, "AudioControl interface %u owns streaming interface %u", current_ac, wanted[w]);
+        return true;
+      }
     }
   }
-  ESP_LOGE(TAG, "No AudioControl interface found");
-  return false;
+
+  if (!found_any) {
+    ESP_LOGE(TAG, "No AudioControl interface found");
+    return false;
+  }
+
+  this->ac_intf_ = first_ac;
+  if (wanted_count != 0) {
+    ESP_LOGW(TAG, "No AudioControl Collection lists streaming interface %u; addressing interface %u", wanted[0],
+             first_ac);
+  }
+  return true;
 }
 
 // Offset of the first upstream source ID inside an AudioControl unit or terminal
@@ -1027,12 +1075,6 @@ void USBAudioClient::on_connected() {
   this->mic_format_ok_ = false;
   this->status_clear_error();
 
-  if (!this->find_ac_interface_()) {
-    this->set_stream_error_("Device has no AudioControl interface; not usable as USB audio");
-    return;
-  }
-  this->parse_feature_units_();
-
   if (this->spk_cfg_.configured) {
     this->spk_format_ok_ = this->parse_as_interface_(true, this->spk_cfg_.channels,
                                                      static_cast<uint8_t>(this->spk_cfg_.bits_per_sample),
@@ -1054,6 +1096,14 @@ void USBAudioClient::on_connected() {
       this->set_stream_error_("Device does not offer the configured microphone format");
     }
   }
+
+  // Which AudioControl interface to address depends on which streaming interfaces are in
+  // use, so this has to come after they have been picked.
+  if (!this->find_ac_interface_()) {
+    this->set_stream_error_("Device has no AudioControl interface; not usable as USB audio");
+    return;
+  }
+  this->parse_feature_units_();
 
   this->device_connected_ = true;
 
