@@ -558,9 +558,36 @@ namespace {
 struct UacControlResult {
   std::atomic<bool> done{false};
   bool success{false};
+  uint16_t status{0};  // usb_transfer_status_t as the host reported it
   uint8_t data[UAC_CTRL_MAX_DATA_LEN]{};
   size_t data_len{0};
 };
+
+// What the host said about a finished transfer. A request the device rejected, one that
+// never reached it and one that was cut short are three different answers, and which one
+// came back decides where to look next.
+const char *uac_transfer_status_str(uint16_t status) {
+  switch (status) {
+    case USB_TRANSFER_STATUS_COMPLETED:
+      return "completed";
+    case USB_TRANSFER_STATUS_ERROR:
+      return "bus error";
+    case USB_TRANSFER_STATUS_TIMED_OUT:
+      return "timed out";
+    case USB_TRANSFER_STATUS_CANCELED:
+      return "canceled";
+    case USB_TRANSFER_STATUS_STALL:
+      return "stalled by device";
+    case USB_TRANSFER_STATUS_OVERFLOW:
+      return "overflow";
+    case USB_TRANSFER_STATUS_SKIPPED:
+      return "skipped";
+    case USB_TRANSFER_STATUS_NO_DEVICE:
+      return "no device";
+    default:
+      return "unknown";
+  }
+}
 }  // namespace
 
 bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
@@ -596,6 +623,7 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   if (!this->control_transfer(req_type, request, value, index,
                               [result](const usb_host::TransferStatus &s) {
                                 result->success = s.success;
+                                result->status = s.error_code;
                                 if (s.success && s.data != nullptr) {
                                   result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
                                   memcpy(result->data, s.data, result->data_len);
@@ -615,16 +643,23 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     vTaskDelay(pdMS_TO_TICKS(5));
 
   if (!result->done.load(std::memory_order_acquire)) {
-    ESP_LOGW(TAG, "Control request 0x%02X timed out", request);
+    // Submitted, but the host never reported it finishing either way.
+    ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
+             request, (req_type & USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
     return false;
   }
-  if (!result->success)
+  if (!result->success) {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X: %s", request, index,
+             uac_transfer_status_str(result->status));
     return false;
-  if (in_data != nullptr) {
-    if (result->data_len < in_len)
-      return false;
+  }
+  if (in_data != nullptr && result->data_len < in_len) {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X returned %u of %u bytes", request, index,
+             static_cast<unsigned>(result->data_len), static_cast<unsigned>(in_len));
+    return false;
+  }
+  if (in_data != nullptr)
     memcpy(in_data, result->data, in_len);
-  }
   return true;
 }
 
