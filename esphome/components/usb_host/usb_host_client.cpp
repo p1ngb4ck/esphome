@@ -152,7 +152,7 @@ static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<c
   return buffer.data();
 }
 
-// ── Static transfer callbacks (USB task context) ──────────────────────────────
+// -- Static transfer callbacks (USB task context) ------------------------------
 
 // Shared completion logic: fill status, fire callback, release slot.
 static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer) {
@@ -178,7 +178,7 @@ static void transfer_callback(usb_transfer_t *xfer) {
 }
 #endif
 
-// ── USBClient event callback (USB task context) ───────────────────────────────
+// -- USBClient event callback (USB task context) -------------------------------
 
 void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
   auto *client = static_cast<USBClient *>(arg);
@@ -208,7 +208,7 @@ void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, vo
   App.wake_loop_threadsafe();
 }
 
-// ── USBClient lifecycle ───────────────────────────────────────────────────────
+// -- USBClient lifecycle -------------------------------------------------------
 
 void USBClient::setup() {
   usb_host_client_config_t config{.is_synchronous = false,
@@ -370,7 +370,7 @@ void USBClient::dump_config() {
   ESP_LOGCONFIG(TAG, "USBClient\n  Vendor id %04X\n  Product id %04X", this->vid_, this->pid_);
 }
 
-// ── TransferRequest pool management (lock-free, thread-safe) ─────────────────
+// -- TransferRequest pool management (lock-free, thread-safe) -----------------
 
 TransferRequest *USBClient::get_trq_() {
   trq_bitmask_t mask = this->trq_in_use_.load(std::memory_order_acquire);
@@ -403,7 +403,7 @@ void USBClient::release_trq(TransferRequest *trq) {
   this->trq_in_use_.fetch_and(mask, std::memory_order_release);
 }
 
-// ── Thin forwarders -- allocate trq, fill fields, delegate to USBHost ──────────
+// -- Thin forwarders -- allocate trq, fill fields, delegate to USBHost ----------
 
 #ifdef USE_USB_BULK_TRANSFERS
 
@@ -502,7 +502,7 @@ bool USBClient::release_interface(uint8_t interface_num) {
   return get_usb_host()->do_release_interface(this->handle_, this->device_handle_, interface_num);
 }
 
-// ── Isochronous thin forwarders ───────────────────────────────────────────────
+// -- Isochronous thin forwarders -----------------------------------------------
 #ifdef USE_USB_ISOC_TRANSFERS
 
 usb_transfer_t *USBClient::isoc_alloc(uint8_t ep_addr, uint16_t mps, uint8_t num_packets, usb_transfer_cb_t callback,

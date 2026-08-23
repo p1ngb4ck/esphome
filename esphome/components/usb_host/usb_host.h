@@ -107,9 +107,9 @@ enum ClientState {
   USB_CLIENT_CONNECTED,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Isochronous stream types -- compiled only when USE_USB_ISOC_TRANSFERS is set.
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 #ifdef USE_USB_ISOC_TRANSFERS
 
 struct IsocCbCtx {
@@ -150,9 +150,9 @@ struct IsocStream {
 
 #endif  // USE_USB_ISOC_TRANSFERS
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // USBClient -- device state machine + thin forwarding layer to USBHost.
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 class USBClient : public Component {
   friend class USBHost;
 
@@ -176,19 +176,19 @@ class USBClient : public Component {
   LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
   EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
 
-  // ── Bulk / interrupt transfers ──────────────────────────────────────────────
+  // -- Bulk / interrupt transfers ----------------------------------------------
 #ifdef USE_USB_BULK_TRANSFERS
   bool transfer_in(uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
   bool transfer_out(uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data, uint16_t length);
 #endif
 
-  // ── Control transfers ───────────────────────────────────────────────────────
+  // -- Control transfers -------------------------------------------------------
 #ifdef USE_USB_CONTROL_TRANSFERS
   bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index, const transfer_cb_t &callback,
                         const std::vector<uint8_t> &data = {});
 #endif
 
-  // ── Interface claim / release / alt-setting ─────────────────────────────────
+  // -- Interface claim / release / alt-setting ---------------------------------
   bool claim_interface(uint8_t interface_num, uint8_t alt_setting = 0);
   bool release_interface(uint8_t interface_num);
 
@@ -196,7 +196,7 @@ class USBClient : public Component {
   bool set_interface(uint8_t interface_num, uint8_t alt_setting);
 #endif
 
-  // ── Isochronous support ─────────────────────────────────────────────────────
+  // -- Isochronous support -----------------------------------------------------
 #ifdef USE_USB_ISOC_TRANSFERS
   usb_transfer_t *isoc_alloc(uint8_t ep_addr, uint16_t mps, uint8_t num_packets, usb_transfer_cb_t callback,
                              void *context);
@@ -240,13 +240,13 @@ class USBClient : public Component {
   const usb_device_desc_t *get_device_desc_() const { return this->device_desc_; }
   const usb_config_desc_t *get_config_desc_() const { return this->config_desc_; }
 };
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // USBHost -- USB host stack + stateless transfer submission engine.
 //
 // Acts as the Linux host controller driver: owns usb_host_install(), the lib
 // event loop, and all ESP-IDF transfer submission calls.  Never touches client
 // memory -- clients own their TransferRequest pools and hand filled slots here.
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 class USBHost final : public Component {
  public:
   float get_setup_priority() const override { return setup_priority::BUS; }
@@ -257,7 +257,7 @@ class USBHost final : public Component {
   // peripheral_map = BIT0 | BIT1 -> both controllers; default BIT0 = HS only.
   void set_dual_host(bool enable) { this->dual_host_ = enable; }
 
-  // ── Submission engine (called by USBClient thin forwarders) ────────────────
+  // -- Submission engine (called by USBClient thin forwarders) ----------------
 
   // Bulk / interrupt IN and OUT -- always compiled if any client uses them
   bool submit_transfer(TransferRequest *trq);
@@ -275,7 +275,7 @@ class USBHost final : public Component {
   bool do_release_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                             uint8_t interface_num);
 
-  // ── Isochronous ─────────────────────────────────────────────────────────────
+  // -- Isochronous -------------------------------------------------------------
 #ifdef USE_USB_ISOC_TRANSFERS
   usb_transfer_t *do_isoc_alloc(uint8_t ep_addr, usb_device_handle_t device_handle, uint16_t mps, uint8_t num_packets,
                                 usb_transfer_cb_t callback, void *context);

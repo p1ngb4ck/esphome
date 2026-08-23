@@ -21,12 +21,12 @@ static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
 // URBs per stream (triple-buffering).
 static constexpr uint8_t ISOC_NUM_URBS = 3;
 
-// Packets per URB — small for audio to minimise latency.
+// Packets per URB - small for audio to minimise latency.
 static constexpr uint8_t ISOC_PACKETS_PER_URB = 4;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Configuration setters
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 void USBAudioClient::set_microphone_params(uint8_t channels, uint16_t bits, uint32_t sample_rate) {
   this->mic_cfg_.channels = channels;
@@ -42,9 +42,9 @@ void USBAudioClient::set_speaker_params(uint8_t channels, uint16_t bits, uint32_
   this->spk_cfg_.configured = true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Component lifecycle
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 void USBAudioClient::setup() {
   if (this->spk_buf_size_ == 0)
@@ -66,9 +66,9 @@ void USBAudioClient::loop() {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Descriptor parsing
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 bool USBAudioClient::find_ac_interface_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
@@ -107,7 +107,7 @@ bool USBAudioClient::parse_feature_units_() {
 
   // Simple heuristic: the first Feature Unit after the AC interface is the speaker FU;
   // the second (if present) is the microphone FU. Most single-chip UAC devices follow this.
-  // More robust: we'd walk the terminal chain, but that requires tracking terminal IDs —
+  // More robust: we'd walk the terminal chain, but that requires tracking terminal IDs -
   // this simpler approach works for the vast majority of USB headsets/speakers.
 
   while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
@@ -164,7 +164,7 @@ bool USBAudioClient::parse_feature_units_() {
       break;
   }
 
-  return true;  // non-fatal if not found — volume/mute will be silently skipped
+  return true;  // non-fatal if not found - volume/mute will be silently skipped
 }
 
 bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
@@ -233,7 +233,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       cur_is_as  = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOSTREAMING);
       cur_alt_info = {};
       format_seen  = false;
-      // alt 0 is zero-bandwidth — skip but stay on interface
+      // alt 0 is zero-bandwidth - skip but stay on interface
       continue;
     }
 
@@ -248,7 +248,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
         // [0] bLength [1] bDescriptorType [2] bDescriptorSubType
         // [3] bFormatType (must be 0x01 for Type I)
         // [4] bNrChannels [5] bSubFrameSize [6] bBitResolution
-        // [7] bSamFreqType  then: continuous=(lower 3B, upper 3B); discrete=N×3B each
+        // [7] bSamFreqType  then: continuous=(lower 3B, upper 3B); discrete=Nx3B each
         if (d[3] != 0x01)  // only Type I
           continue;
         cur_alt_info.channels       = d[4];
@@ -328,9 +328,9 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Control transfer helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                              const uint8_t *data, size_t len) {
@@ -404,7 +404,7 @@ bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
   return ok;
 }
 
-// ── Volume / mute ─────────────────────────────────────────────────────────────
+// -- Volume / mute -------------------------------------------------------------
 
 bool USBAudioClient::apply_speaker_volume_() {
   if (!this->spk_stream_open_ || !this->speaker_fu_.has_volume) {
@@ -458,9 +458,9 @@ bool USBAudioClient::apply_speaker_mute_() {
   return ok;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Stream open / close
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 bool USBAudioClient::open_speaker_stream_() {
   if (this->spk_stream_open_)
@@ -626,9 +626,9 @@ void USBAudioClient::close_microphone_stream_() {
   ESP_LOGI(TAG, "Microphone stream closed");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Connection lifecycle
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 void USBAudioClient::on_connected() {
   const usb_device_desc_t *dev = this->get_device_desc_();
@@ -678,9 +678,9 @@ void USBAudioClient::on_disconnected() {
   ESP_LOGI(TAG, "USB Audio device disconnected");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Isochronous packet dispatch (USB-task context)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {
   // Async OUT feedback endpoint: the device reports its desired rate (samples per service
@@ -704,7 +704,7 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
   const bool is_in = (ep_addr & 0x80) != 0;
 
   if (!is_in) {
-    // ── Speaker OUT: drain ring buffer into this packet's payload area ──────
+    // -- Speaker OUT: drain ring buffer into this packet's payload area ------
     // `data` points into the URB's data_buffer. The isoc_cb_ trampoline calls
     // on_isoc_packet() BEFORE resubmitting, so writing here fills the buffer
     // for the next transmission.
@@ -729,7 +729,7 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
       memset(const_cast<uint8_t *>(data), 0, fill_bytes);
     }
   } else {
-    // ── Microphone IN: write PCM into the ring buffer ────────────────────────
+    // -- Microphone IN: write PCM into the ring buffer ------------------------
     if (this->mic_rb_ == nullptr || this->mic_suspended_)
       return;
     // Non-blocking send; if full, drop oldest data (overwrite) is not possible
@@ -738,9 +738,9 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Subcomponent API
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 bool USBAudioClient::ensure_started_speaker() {
   if (!this->device_connected_)

@@ -44,7 +44,7 @@ void USBHost::loop() {
   }
 }
 
-// ── Submission engine ─────────────────────────────────────────────────────────
+// -- Submission engine ---------------------------------------------------------
 
 bool USBHost::submit_transfer(TransferRequest *trq) {
   esp_err_t err = usb_host_transfer_submit(trq->transfer);
@@ -55,7 +55,7 @@ bool USBHost::submit_transfer(TransferRequest *trq) {
   return true;
 }
 
-// ── Interface claim / release ─────────────────────────────────────────────────
+// -- Interface claim / release -------------------------------------------------
 
 bool USBHost::do_claim_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                                  uint8_t interface_num, uint8_t alt_setting) {
@@ -77,7 +77,7 @@ bool USBHost::do_release_interface(usb_host_client_handle_t client_handle, usb_d
   return true;
 }
 
-// ── Control transfer submission ───────────────────────────────────────────────
+// -- Control transfer submission -----------------------------------------------
 #ifdef USE_USB_CONTROL_TRANSFERS
 
 bool USBHost::submit_control(usb_host_client_handle_t client_handle, TransferRequest *trq) {
@@ -151,7 +151,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
 
 #endif  // USE_USB_CONTROL_TRANSFERS
 
-// ── Isochronous ───────────────────────────────────────────────────────────────
+// -- Isochronous ---------------------------------------------------------------
 #ifdef USE_USB_ISOC_TRANSFERS
 
 usb_transfer_t *USBHost::do_isoc_alloc(uint8_t ep_addr, usb_device_handle_t device_handle, uint16_t mps,
