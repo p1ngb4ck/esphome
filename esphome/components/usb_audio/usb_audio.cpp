@@ -91,8 +91,7 @@ void USBAudioClient::loop() {
     this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
   }
 
-  if (this->spk_stream_open_ && !this->spk_suspended_ &&
-      (int32_t) (millis() - this->spk_ctrl_retry_at_ms_) >= 0) {
+  if (this->device_connected_ && (int32_t) (millis() - this->spk_ctrl_retry_at_ms_) >= 0) {
     if (this->pending_spk_volume_)
       this->apply_speaker_volume_();
     if (this->pending_spk_mute_)
@@ -674,6 +673,39 @@ uint8_t USBAudioClient::speaker_volume_channels_(uint8_t *channels) const {
   return uac_control_channels(this->speaker_fu_.has_volume, this->speaker_fu_.volume_channels, channels);
 }
 
+void USBAudioClient::probe_speaker_volume_range_() {
+  if (!this->speaker_fu_.volume_available())
+    return;
+
+  // Query the range on the same channel the value will be written to.
+  uint8_t vol_channels[UAC_FU_MAX_CHANNELS];
+  const uint8_t vol_channel =
+      this->speaker_volume_channels_(vol_channels) > 0 ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
+  auto get_vol_range = [this, vol_channel](uint8_t bRequest, int16_t &out) {
+    uint8_t buf[2] = {0, 0};
+    const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
+    const uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
+    if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf, sizeof(buf)))
+      return false;
+    out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
+    return true;
+  };
+  const bool min_ok = get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
+  const bool max_ok = get_vol_range(UAC_GET_MAX, this->spk_vol_max_);
+  // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
+  // not strictly increasing means the reads did not return a usable answer. Fall back to
+  // the full signed range so the control still spans something sensible.
+  if (!min_ok || !max_ok || this->spk_vol_min_ == UAC_VOLUME_SILENCE || this->spk_vol_max_ <= this->spk_vol_min_) {
+    ESP_LOGW(TAG, "Speaker volume range unusable; falling back to %d..0 dB", UAC_VOLUME_FALLBACK_MIN / 256);
+    this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
+    this->spk_vol_max_ = 0;
+  }
+  // State the range the way a user reads volume: how far below the device's reference
+  // level (its maximum) the control can go.
+  ESP_LOGD(TAG, "Speaker volume range: 0.00 to -%.2f dB below reference",
+           static_cast<float>(this->spk_vol_max_ - this->spk_vol_min_) / 256.0f);
+}
+
 bool USBAudioClient::apply_speaker_volume_() {
   uint8_t channels[UAC_FU_MAX_CHANNELS];
   const uint8_t channel_count = this->speaker_volume_channels_(channels);
@@ -693,10 +725,6 @@ bool USBAudioClient::apply_speaker_volume_() {
   }
   if (!this->spk_volume_supported_) {
     ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: volume control was given up on", this->spk_volume_ * 100.0f);
-    return false;
-  }
-  if (!this->spk_stream_open_) {
-    ESP_LOGD(TAG, "Speaker volume %.0f%% held until the stream is open", this->spk_volume_ * 100.0f);
     return false;
   }
 
@@ -779,10 +807,6 @@ bool USBAudioClient::apply_speaker_mute_() {
   }
   if (!this->spk_mute_supported_) {
     ESP_LOGD(TAG, "Speaker mute %s ignored: mute control was given up on", ONOFF(this->spk_muted_));
-    return false;
-  }
-  if (!this->spk_stream_open_) {
-    ESP_LOGD(TAG, "Speaker mute %s held until the stream is open", ONOFF(this->spk_muted_));
     return false;
   }
 
@@ -908,45 +932,7 @@ bool USBAudioClient::open_speaker_stream_() {
   // Set sampling frequency on the endpoint.
   this->set_sampling_frequency_(this->spk_alt_.ep_addr, this->spk_cfg_.sample_rate);
 
-  // Read volume range so we can map [0,1] correctly.
-  // Use a separate lambda that issues GET_MIN / GET_MAX (different bRequest, same selector).
-  if (this->speaker_fu_.volume_available()) {
-    // Query the range on the same channel the value will be written to.
-    uint8_t vol_channels[UAC_FU_MAX_CHANNELS];
-    const uint8_t vol_channel =
-        this->speaker_volume_channels_(vol_channels) > 0 ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
-    auto get_vol_range = [this, vol_channel](uint8_t bRequest, int16_t &out) {
-      uint8_t buf[2] = {0, 0};
-      const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
-      const uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
-      if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf,
-                                       sizeof(buf)))
-        return false;
-      out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
-      return true;
-    };
-    const bool min_ok = get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
-    const bool max_ok = get_vol_range(UAC_GET_MAX, this->spk_vol_max_);
-    // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
-    // not strictly increasing means the reads did not return a usable answer. Fall back to
-    // the full signed range so the control still spans something sensible.
-    if (!min_ok || !max_ok || this->spk_vol_min_ == UAC_VOLUME_SILENCE ||
-        this->spk_vol_max_ <= this->spk_vol_min_) {
-      ESP_LOGW(TAG, "Speaker volume range unusable; falling back to %d..0 dB", UAC_VOLUME_FALLBACK_MIN / 256);
-      this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
-      this->spk_vol_max_ = 0;
-    }
-    // State the range the way a user reads volume: how far below the device's reference
-    // level (its maximum) the control can go.
-    ESP_LOGD(TAG, "Speaker volume range: 0.00 to -%.2f dB below reference",
-             static_cast<float>(this->spk_vol_max_ - this->spk_vol_min_) / 256.0f);
-  }
-
   this->spk_stream_open_ = true;
-  this->pending_spk_volume_ = true;
-  this->pending_spk_mute_   = true;
-  this->apply_speaker_volume_();
-  this->apply_speaker_mute_();
 
   ESP_LOGI(TAG, "Speaker stream open");
   return true;
@@ -1053,6 +1039,15 @@ void USBAudioClient::on_connected() {
   }
 
   this->device_connected_ = true;
+
+  // Feature Unit requests go to the AudioControl interface, so the saved volume and mute
+  // state can be sent as soon as the device is there. Nothing about them depends on an
+  // AudioStreaming alt-setting being selected or a stream being open.
+  this->probe_speaker_volume_range_();
+  this->pending_spk_volume_ = true;
+  this->pending_spk_mute_ = true;
+  this->apply_speaker_volume_();
+  this->apply_speaker_mute_();
 
   // Open whichever streams are needed immediately.
   if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)

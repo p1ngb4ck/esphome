@@ -155,6 +155,8 @@ class USBAudioClient : public usb_host::USBClient {
   // Fill channels with the Feature Unit channel numbers a speaker volume request has to be
   // written to, and return how many. channels must hold UAC_FU_MAX_CHANNELS entries.
   uint8_t speaker_volume_channels_(uint8_t *channels) const;
+  // Read the volume range the device reports, so a fraction can be mapped onto it.
+  void probe_speaker_volume_range_();
   bool apply_speaker_volume_();
   bool apply_speaker_mute_();
 
