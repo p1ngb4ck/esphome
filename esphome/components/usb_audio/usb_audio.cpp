@@ -91,12 +91,6 @@ void USBAudioClient::loop() {
     this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
   }
 
-  if (this->device_connected_ && (int32_t) (millis() - this->spk_ctrl_retry_at_ms_) >= 0) {
-    if (this->pending_spk_volume_)
-      this->apply_speaker_volume_();
-    if (this->pending_spk_mute_)
-      this->apply_speaker_mute_();
-  }
 }
 
 // Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
@@ -713,22 +707,8 @@ void USBAudioClient::probe_speaker_volume_range_() {
 bool USBAudioClient::apply_speaker_volume_() {
   uint8_t channels[UAC_FU_MAX_CHANNELS];
   const uint8_t channel_count = this->speaker_volume_channels_(channels);
-
   if (channel_count == 0) {
-    // The descriptor says there is no volume control. That is a property of the device, not
-    // a transient failure, so stop asking. Later requests are still answered, at debug
-    // level, because going silent leaves nothing to explain why the volume does not move.
-    if (this->spk_volume_supported_) {
-      ESP_LOGW(TAG, "Speaker volume control not supported by device");
-      this->spk_volume_supported_ = false;
-    } else {
-      ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
-    }
-    this->pending_spk_volume_ = false;
-    return false;
-  }
-  if (!this->spk_volume_supported_) {
-    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: volume control was given up on", this->spk_volume_ * 100.0f);
+    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
     return false;
   }
 
@@ -755,61 +735,37 @@ bool USBAudioClient::apply_speaker_volume_() {
                                       sizeof(buf)))
       ok = false;
   }
-  if (ok) {
-    this->pending_spk_volume_ = false;
-    this->spk_volume_fails_ = 0;
-    // Read the value back. A device may clamp it to its own range or quantise it to a
-    // coarser step (GET_RES), so reporting what we sent would be reporting an assumption.
-    const float sent_db = static_cast<float>(vol) / 256.0f;
-    uint8_t rb[2] = {0, 0};
-    if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb,
-                                     sizeof(rb))) {
-      const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
-      const float actual_db = static_cast<float>(actual) / 256.0f;
-      ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (device reports %.2f dB)", clamped * 100.0f, sent_db,
+  const float sent_db = static_cast<float>(vol) / 256.0f;
+  if (!ok) {
+    ESP_LOGW(TAG, "Speaker volume %.0f%% (%.2f dB) was not accepted by the device", clamped * 100.0f, sent_db);
+    return false;
+  }
+
+  // Read the value back. A device may clamp it to its own range or quantise it to a
+  // coarser step (GET_RES), so reporting what we sent would be reporting an assumption.
+  uint8_t rb[2] = {0, 0};
+  if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
+    const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
+    const float actual_db = static_cast<float>(actual) / 256.0f;
+    ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (device reports %.2f dB)", clamped * 100.0f, sent_db, actual_db);
+    // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
+    // rounding.
+    if (std::fabs(actual_db - sent_db) > 0.25f) {
+      ESP_LOGW(TAG, "Speaker volume not applied as requested: asked %.2f dB, device is at %.2f dB", sent_db,
                actual_db);
-      // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
-      // rounding.
-      if (std::fabs(actual_db - sent_db) > 0.25f) {
-        ESP_LOGW(TAG, "Speaker volume not applied as requested: asked %.2f dB, device is at %.2f dB", sent_db,
-                 actual_db);
-      }
-    } else {
-      ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (readback unavailable)", clamped * 100.0f, sent_db);
     }
-    return true;
-  }
-  // The control exists but the transfer failed. Devices commonly NAK control requests while
-  // they are busy setting up the stream, so retry a few times before giving up on it.
-  this->spk_volume_fails_++;
-  this->spk_ctrl_retry_at_ms_ = millis() + UAC_CTRL_RETRY_MS;
-  if (this->spk_volume_fails_ >= UAC_CTRL_MAX_FAILS) {
-    ESP_LOGW(TAG, "Speaker volume control failed %u times; giving up on it", this->spk_volume_fails_);
-    this->pending_spk_volume_ = false;
-    this->spk_volume_supported_ = false;
   } else {
-    ESP_LOGD(TAG, "Failed to set speaker volume; retry %u of %u", this->spk_volume_fails_, UAC_CTRL_MAX_FAILS);
+    ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (readback unavailable)", clamped * 100.0f, sent_db);
   }
-  return false;
+  return true;
 }
 
 bool USBAudioClient::apply_speaker_mute_() {
   uint8_t channels[UAC_FU_MAX_CHANNELS];
   const uint8_t channel_count =
       uac_control_channels(this->speaker_fu_.has_mute, this->speaker_fu_.mute_channels, channels);
-
   if (channel_count == 0) {
-    if (this->spk_mute_supported_) {
-      ESP_LOGW(TAG, "Speaker mute control not supported by device");
-      this->spk_mute_supported_ = false;
-    } else {
-      ESP_LOGD(TAG, "Speaker mute %s ignored: device has no mute control", ONOFF(this->spk_muted_));
-    }
-    this->pending_spk_mute_ = false;
-    return false;
-  }
-  if (!this->spk_mute_supported_) {
-    ESP_LOGD(TAG, "Speaker mute %s ignored: mute control was given up on", ONOFF(this->spk_muted_));
+    ESP_LOGD(TAG, "Speaker mute %s ignored: device has no mute control", ONOFF(this->spk_muted_));
     return false;
   }
 
@@ -819,21 +775,12 @@ bool USBAudioClient::apply_speaker_mute_() {
     if (!this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
       ok = false;
   }
-  if (ok) {
-    this->pending_spk_mute_ = false;
-    this->spk_mute_fails_ = 0;
-    return true;
+  if (!ok) {
+    ESP_LOGW(TAG, "Speaker mute %s was not accepted by the device", ONOFF(this->spk_muted_));
+    return false;
   }
-  this->spk_mute_fails_++;
-  this->spk_ctrl_retry_at_ms_ = millis() + UAC_CTRL_RETRY_MS;
-  if (this->spk_mute_fails_ >= UAC_CTRL_MAX_FAILS) {
-    ESP_LOGW(TAG, "Speaker mute control failed %u times; giving up on it", this->spk_mute_fails_);
-    this->pending_spk_mute_ = false;
-    this->spk_mute_supported_ = false;
-  } else {
-    ESP_LOGD(TAG, "Failed to set speaker mute; retry %u of %u", this->spk_mute_fails_, UAC_CTRL_MAX_FAILS);
-  }
-  return false;
+  ESP_LOGD(TAG, "Speaker mute %s", ONOFF(this->spk_muted_));
+  return true;
 }
 
 bool USBAudioClient::open_speaker_stream_() {
@@ -1047,8 +994,6 @@ void USBAudioClient::on_connected() {
   // state can be sent as soon as the device is there. Nothing about them depends on an
   // AudioStreaming alt-setting being selected or a stream being open.
   this->probe_speaker_volume_range_();
-  this->pending_spk_volume_ = true;
-  this->pending_spk_mute_ = true;
   this->apply_speaker_volume_();
   this->apply_speaker_mute_();
 
@@ -1067,12 +1012,6 @@ void USBAudioClient::on_disconnected() {
   this->mic_format_ok_ = false;
   this->spk_open_fails_ = 0;
   this->mic_open_fails_ = 0;
-  this->spk_volume_fails_ = 0;
-  this->spk_mute_fails_   = 0;
-  this->spk_volume_supported_ = true;
-  this->spk_mute_supported_   = true;
-  this->pending_spk_volume_ = true;
-  this->pending_spk_mute_   = true;
   // The device is gone, so nothing will ever drain the queued audio. Drop it rather than
   // playing it into the next device that shows up.
   this->flush_speaker_buffer_();
@@ -1200,24 +1139,14 @@ void USBAudioClient::suspend_microphone() {
 
 void USBAudioClient::set_speaker_volume_level(float volume) {
   this->spk_volume_ = std::clamp(volume, 0.0f, 1.0f);
-  // A new value from the user is a fresh attempt, so allow the retries again. Only when the
-  // descriptor has no volume control is the answer permanent.
-  if (this->speaker_fu_.volume_available()) {
-    this->spk_volume_fails_ = 0;
-    this->spk_volume_supported_ = true;
-  }
-  this->pending_spk_volume_ = true;
-  this->apply_speaker_volume_();
+  if (this->device_connected_)
+    this->apply_speaker_volume_();
 }
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
   this->spk_muted_ = mute_state;
-  if (this->speaker_fu_.mute_available()) {
-    this->spk_mute_fails_ = 0;
-    this->spk_mute_supported_ = true;
-  }
-  this->pending_spk_mute_ = true;
-  this->apply_speaker_mute_();
+  if (this->device_connected_)
+    this->apply_speaker_mute_();
 }
 
 esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {

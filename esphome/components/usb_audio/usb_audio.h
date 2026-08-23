@@ -28,10 +28,6 @@ static constexpr uint32_t USB_AUDIO_DEFAULT_BUFFER_SIZE = 6400;
 // up to the maximum.
 static constexpr uint32_t STREAM_REOPEN_BASE_MS = 1000;
 static constexpr uint32_t STREAM_REOPEN_MAX_MS = 30000;
-// Attempts before a Feature Unit control is treated as unsupported rather than busy.
-static constexpr uint8_t UAC_CTRL_MAX_FAILS = 3;
-// Delay between those attempts.
-static constexpr uint32_t UAC_CTRL_RETRY_MS = 500;
 
 // UAC 1.0 Feature Unit volume is a signed 1/256 dB value. 0x8000 is reserved to mean
 // silence and is never a range endpoint. When a device gives no usable range, span this
@@ -236,16 +232,6 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Volume / mute state ---------------------------------------------------
   float   spk_volume_{1.0f};
   bool    spk_muted_{false};
-  bool    pending_spk_volume_{true};
-  bool    pending_spk_mute_{true};
-  bool    spk_volume_supported_{true};
-  bool    spk_mute_supported_{true};
-  // A control transfer can fail because the device is busy handling the stream, not because
-  // it lacks the control. Retry a bounded number of times before declaring it unsupported,
-  // instead of logging once and never trying again.
-  uint8_t spk_volume_fails_{0};
-  uint8_t spk_mute_fails_{0};
-  uint32_t spk_ctrl_retry_at_ms_{0};
 
   // -- Volume range (from GET_MIN / GET_MAX on connect) ---------------------
   int16_t spk_vol_min_{-0x7FFF};
