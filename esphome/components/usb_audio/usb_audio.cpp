@@ -579,7 +579,13 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   }
 
   auto result = std::make_shared<UacControlResult>();
-  std::vector<uint8_t> payload(out_data, out_data + out_len);
+  // control_transfer takes both the setup packet's wLength and the size of the transfer
+  // from this vector, and for a read it does not copy the vector into the buffer. So a read
+  // asks for its data stage by passing a vector of the size it expects; passing an empty
+  // one asks the device for zero bytes and it answers with nothing.
+  std::vector<uint8_t> payload(in_data != nullptr ? in_len : out_len);
+  if (out_data != nullptr && out_len != 0)
+    memcpy(payload.data(), out_data, out_len);
 
   if (!this->control_transfer(req_type, request, value, index,
                               [result](const usb_host::TransferStatus &s) {
