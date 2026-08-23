@@ -5,10 +5,12 @@
 #include "esphome/core/hal.h"
 #include "usb/usb_helpers.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
-#include <algorithm>
+#include <memory>
 
 namespace esphome {
 namespace usb_audio {
@@ -17,6 +19,9 @@ static const char *const TAG = "usb_audio";
 
 // Timeout for each blocking control transfer during connection setup.
 static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
+
+// Largest data stage any control request in this component uses.
+static constexpr size_t UAC_CTRL_MAX_DATA_LEN = 8;
 
 // URBs per stream (triple-buffering).
 static constexpr uint8_t ISOC_NUM_URBS = 3;
@@ -552,63 +557,80 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
 // Control transfer helpers
 // -----------------------------------------------------------------------------
 
+namespace {
+// Result of a control transfer. The caller stops waiting once the timeout expires, but the
+// transfer stays submitted and its callback runs later on the USB task, so the callback
+// must not write to anything owned by the caller's stack frame. Both sides hold a shared
+// pointer to this block instead, and it lives until the last of them is gone.
+struct UacControlResult {
+  std::atomic<bool> done{false};
+  bool success{false};
+  uint8_t data[UAC_CTRL_MAX_DATA_LEN]{};
+  size_t data_len{0};
+};
+}  // namespace
+
+bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
+                                            const uint8_t *out_data, size_t out_len, uint8_t *in_data,
+                                            size_t in_len) {
+  if (out_len > UAC_CTRL_MAX_DATA_LEN || in_len > UAC_CTRL_MAX_DATA_LEN) {
+    ESP_LOGE(TAG, "Control request 0x%02X wants more than %u bytes of data", request,
+             static_cast<unsigned>(UAC_CTRL_MAX_DATA_LEN));
+    return false;
+  }
+
+  auto result = std::make_shared<UacControlResult>();
+  std::vector<uint8_t> payload(out_data, out_data + out_len);
+
+  this->control_transfer(req_type, request, value, index,
+                         [result](const usb_host::TransferStatus &s) {
+                           result->success = s.success;
+                           if (s.success && s.data != nullptr) {
+                             result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
+                             memcpy(result->data, s.data, result->data_len);
+                           }
+                           result->done.store(true, std::memory_order_release);
+                         },
+                         payload);
+
+  const uint32_t started = millis();
+  while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS)
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+  if (!result->done.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Control request 0x%02X timed out", request);
+    return false;
+  }
+  if (!result->success)
+    return false;
+  if (in_data != nullptr) {
+    if (result->data_len < in_len)
+      return false;
+    memcpy(in_data, result->data, in_len);
+  }
+  return true;
+}
+
 bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                              const uint8_t *data, size_t len) {
-  std::vector<uint8_t> buf(data, data + len);
-  bool ok = false;
-  bool done = false;
   // wValue: (selector << 8) | channel
   // wIndex: (unit_id << 8) | ac_intf_num
-  uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
-  uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
-  this->control_transfer(UAC_REQ_TYPE_INTF_SET, UAC_SET_CUR, wValue, wIndex,
-                         [&ok, &done](const usb_host::TransferStatus &s) {
-                           ok = s.success;
-                           done = true;
-                         },
-                         buf);
-  uint32_t t = millis();
-  while (!done && (millis() - t) < CTRL_TIMEOUT_MS)
-    vTaskDelay(pdMS_TO_TICKS(5));
-  return ok && done;
+  const uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
+  const uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
+  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_SET, UAC_SET_CUR, wValue, wIndex, data, len, nullptr, 0);
 }
 
 bool USBAudioClient::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
                                              uint8_t *data, size_t len) {
-  bool ok = false;
-  bool done = false;
-  uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
-  uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
-  this->control_transfer(UAC_REQ_TYPE_INTF_GET, UAC_GET_CUR, wValue, wIndex,
-                         [&ok, &done, data, len](const usb_host::TransferStatus &s) {
-                           ok = s.success;
-                           done = true;
-                           if (s.success && s.data_len >= len)
-                             memcpy(data, s.data, len);
-                         });
-  uint32_t t = millis();
-  while (!done && (millis() - t) < CTRL_TIMEOUT_MS)
-    vTaskDelay(pdMS_TO_TICKS(5));
-  return ok && done;
+  const uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
+  const uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
+  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, UAC_GET_CUR, wValue, wIndex, nullptr, 0, data, len);
 }
 
 bool USBAudioClient::uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
                                             const uint8_t *data, size_t len) {
-  std::vector<uint8_t> buf(data, data + len);
-  bool ok = false;
-  bool done = false;
-  uint16_t wValue = static_cast<uint16_t>(selector << 8);
-  uint16_t wIndex = ep_addr;
-  this->control_transfer(UAC_REQ_TYPE_EP_SET, UAC_SET_CUR, wValue, wIndex,
-                         [&ok, &done](const usb_host::TransferStatus &s) {
-                           ok = s.success;
-                           done = true;
-                         },
-                         buf);
-  uint32_t t = millis();
-  while (!done && (millis() - t) < CTRL_TIMEOUT_MS)
-    vTaskDelay(pdMS_TO_TICKS(5));
-  return ok && done;
+  const uint16_t wValue = static_cast<uint16_t>(selector << 8);
+  return this->uac_control_transfer_(UAC_REQ_TYPE_EP_SET, UAC_SET_CUR, wValue, ep_addr, data, len, nullptr, 0);
 }
 
 bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
@@ -888,21 +910,14 @@ bool USBAudioClient::open_speaker_stream_() {
     const uint8_t vol_channel =
         this->speaker_volume_channels_(vol_channels) > 0 ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
     auto get_vol_range = [this, vol_channel](uint8_t bRequest, int16_t &out) {
-      bool ok = false;
-      bool done = false;
-      uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);  // selector | channel
-      uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
-      this->control_transfer(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex,
-                             [&ok, &done, &out](const usb_host::TransferStatus &s) {
-                               ok = s.success;
-                               done = true;
-                               if (s.success && s.data_len >= 2)
-                                 out = static_cast<int16_t>(s.data[0] | (s.data[1] << 8));
-                             });
-      uint32_t t = millis();
-      while (!done && (millis() - t) < CTRL_TIMEOUT_MS)
-        vTaskDelay(pdMS_TO_TICKS(5));
-      return ok && done;
+      uint8_t buf[2] = {0, 0};
+      const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
+      const uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
+      if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf,
+                                       sizeof(buf)))
+        return false;
+      out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
+      return true;
     };
     const bool min_ok = get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
     const bool max_ok = get_vol_range(UAC_GET_MAX, this->spk_vol_max_);

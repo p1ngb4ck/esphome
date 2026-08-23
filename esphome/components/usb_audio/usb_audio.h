@@ -135,6 +135,13 @@ class USBAudioClient : public usb_host::USBClient {
                             uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out);
 
   // -- UAC control requests --------------------------------------------------
+  // Issue a class-specific control transfer and wait for it to finish, up to
+  // CTRL_TIMEOUT_MS. The completion callback runs on the USB task and can fire after the
+  // wait has been given up, so the result is not kept on the caller's stack.
+  // Pass out_data for a request with an outgoing data stage, in_data to keep an incoming
+  // one; both are limited to UAC_CTRL_MAX_DATA_LEN bytes.
+  bool uac_control_transfer_(uint8_t req_type, uint8_t request, uint16_t value, uint16_t index,
+                             const uint8_t *out_data, size_t out_len, uint8_t *in_data, size_t in_len);
   // Issue a class-specific control transfer and busy-wait for completion.
   // wIndex for interface requests: (unit_id << 8) | ac_intf_num
   // wIndex for endpoint requests:  ep_addr
