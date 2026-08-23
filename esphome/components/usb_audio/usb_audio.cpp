@@ -710,15 +710,23 @@ void USBAudioClient::probe_speaker_volume_range_() {
   // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
   // not strictly increasing means the reads did not return a usable answer.
   if (!min_ok || !max_ok || vol_min == UAC_VOLUME_SILENCE || vol_max <= vol_min) {
-    ESP_LOGW(TAG, "Device did not report a usable volume range; leaving its volume alone");
+    ESP_LOGW(TAG, "Device reported no volume range; falling back to the absolute dB scale");
     return;
   }
 
+  // The resolution says which settings between the endpoints the device can actually take.
+  // A device that does not answer is treated as taking every step.
+  int16_t vol_res = 0;
+  if (!get_vol_range(UAC_GET_RES, vol_res) || vol_res <= 0)
+    vol_res = 1;
+
   this->spk_vol_min_ = vol_min;
   this->spk_vol_max_ = vol_max;
+  this->spk_vol_res_ = vol_res;
   this->spk_vol_range_known_ = true;
-  ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB", static_cast<float>(this->spk_vol_min_) / 256.0f,
-           static_cast<float>(this->spk_vol_max_) / 256.0f);
+  ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB in steps of %.2f dB",
+           static_cast<float>(this->spk_vol_min_) / 256.0f, static_cast<float>(this->spk_vol_max_) / 256.0f,
+           static_cast<float>(this->spk_vol_res_) / 256.0f);
 }
 
 bool USBAudioClient::apply_speaker_volume_() {
@@ -728,28 +736,28 @@ bool USBAudioClient::apply_speaker_volume_() {
     ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
     return false;
   }
-  if (!this->spk_vol_range_known_) {
-    // Without the device's own endpoints there is nothing to map a fraction onto, and any
-    // value picked here would be one this component made up.
-    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device did not report its volume range",
-             this->spk_volume_ * 100.0f);
-    return false;
-  }
 
-  // A UAC Feature Unit volume is a signed 1/256 dB gain: a larger value is louder.
-  // ESPHome's volume is a linear amplitude fraction. Spreading that fraction evenly over
-  // the dB range would put half volume near the bottom of the scale and sound all but
-  // muted, so convert amplitude to dB. Full volume is the largest gain the device offers,
-  // and each halving of the amplitude is 6.02 dB below it.
+  // A Feature Unit volume is already a dB scale, so a 0..1 setting is a position on that
+  // scale, not an amplitude to be converted onto it. MIN, MAX and RES are what the device
+  // says about that scale, and they are read on connect.
   const float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
-  const float min_db = static_cast<float>(this->spk_vol_min_) / 256.0f;
-  const float max_db = static_cast<float>(this->spk_vol_max_) / 256.0f;
   int16_t vol;
   if (clamped <= 0.0f) {
-    vol = this->spk_vol_min_;
+    // The class reserves this code for silence; it is not the low end of the range.
+    vol = UAC_VOLUME_SILENCE;
+  } else if (this->spk_vol_range_known_) {
+    const int32_t span = static_cast<int32_t>(this->spk_vol_max_) - this->spk_vol_min_;
+    int32_t raw = this->spk_vol_min_ + std::lround(static_cast<double>(span) * clamped);
+    // Settings between two steps are not addressable, so land on one.
+    const int32_t res = this->spk_vol_res_;
+    raw = this->spk_vol_min_ + ((raw - this->spk_vol_min_) / res) * res;
+    vol = static_cast<int16_t>(std::clamp<int32_t>(raw, this->spk_vol_min_, this->spk_vol_max_));
   } else {
-    const float db = std::clamp(max_db + 20.0f * std::log10(clamped), min_db, max_db);
-    vol = static_cast<int16_t>(std::lround(db * 256.0f));
+    // With no endpoints from the device the absolute definition is all that is left: the
+    // value is gain in dB, so full volume is unity gain and each halving of the amplitude
+    // is 6.02 dB below it.
+    const int32_t raw = std::lround(20.0 * std::log10(static_cast<double>(clamped)) * 256.0);
+    vol = static_cast<int16_t>(std::clamp<int32_t>(raw, UAC_VOLUME_MIN_GAIN, 0));
   }
 
   uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};

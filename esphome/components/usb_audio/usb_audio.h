@@ -32,6 +32,8 @@ static constexpr uint32_t STREAM_REOPEN_MAX_MS = 30000;
 // UAC 1.0 Feature Unit volume is a signed 1/256 dB value. 0x8000 is reserved to mean
 // silence and is never a range endpoint.
 static constexpr int16_t UAC_VOLUME_SILENCE = static_cast<int16_t>(0x8000);
+// Smallest gain the class can express; 0x8000 below it is the silence code, not a value.
+static constexpr int16_t UAC_VOLUME_MIN_GAIN = static_cast<int16_t>(0x8001);
 
 // -- Forward declarations -----------------------------------------------------
 class USBAudioMicrophone;
@@ -237,6 +239,7 @@ class USBAudioClient : public usb_host::USBClient {
   bool    spk_vol_range_known_{false};
   int16_t spk_vol_min_{0};
   int16_t spk_vol_max_{0};
+  int16_t spk_vol_res_{1};  // GET_RES: the step the device can actually be set to
 };
 
 }  // namespace usb_audio
