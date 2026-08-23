@@ -524,6 +524,26 @@ bool USBAudioClient::apply_speaker_volume_() {
   if (ok) {
     this->pending_spk_volume_ = false;
     this->spk_volume_fails_ = 0;
+    // Read the value back. A device may clamp it to its own range or quantise it to a
+    // coarser step (GET_RES), so reporting what we sent would be reporting an assumption.
+    // Attenuation is stated as a positive number below the device's reference level, which
+    // is how volume is normally read.
+    const float want_att_db = max_db - static_cast<float>(vol) / 256.0f;
+    uint8_t rb[2] = {0, 0};
+    if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, 0, rb, sizeof(rb))) {
+      const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
+      const float actual_att_db = max_db - static_cast<float>(actual) / 256.0f;
+      ESP_LOGD(TAG, "Speaker volume %.0f%% -> -%.2f dB (device reports -%.2f dB)", clamped * 100.0f, want_att_db,
+               actual_att_db);
+      // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
+      // rounding.
+      if (std::fabs(actual_att_db - want_att_db) > 0.25f) {
+        ESP_LOGW(TAG, "Speaker volume not applied as requested: asked -%.2f dB, device is at -%.2f dB", want_att_db,
+                 actual_att_db);
+      }
+    } else {
+      ESP_LOGD(TAG, "Speaker volume %.0f%% -> -%.2f dB (readback unavailable)", clamped * 100.0f, want_att_db);
+    }
     return true;
   }
   // The control exists but the transfer failed. Devices commonly NAK control requests while
@@ -705,8 +725,10 @@ bool USBAudioClient::open_speaker_stream_() {
       this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
       this->spk_vol_max_ = 0;
     }
-    ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB", static_cast<float>(this->spk_vol_min_) / 256.0f,
-             static_cast<float>(this->spk_vol_max_) / 256.0f);
+    // State the range the way a user reads volume: how far below the device's reference
+    // level (its maximum) the control can go.
+    ESP_LOGD(TAG, "Speaker volume range: 0.00 to -%.2f dB below reference",
+             static_cast<float>(this->spk_vol_max_ - this->spk_vol_min_) / 256.0f);
   }
 
   this->spk_stream_open_ = true;
