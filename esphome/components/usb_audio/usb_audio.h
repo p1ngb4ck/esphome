@@ -33,6 +33,12 @@ static constexpr uint8_t UAC_CTRL_MAX_FAILS = 3;
 // Delay between those attempts.
 static constexpr uint32_t UAC_CTRL_RETRY_MS = 500;
 
+// UAC 1.0 Feature Unit volume is a signed 1/256 dB value. 0x8000 is reserved to mean
+// silence and is never a range endpoint. When a device gives no usable range, span this
+// much instead (-64 dB to 0 dB).
+static constexpr int16_t UAC_VOLUME_SILENCE = static_cast<int16_t>(0x8000);
+static constexpr int16_t UAC_VOLUME_FALLBACK_MIN = -64 * 256;
+
 // -- Forward declarations -----------------------------------------------------
 class USBAudioMicrophone;
 class USBAudioSpeaker;
@@ -96,6 +102,10 @@ class USBAudioClient : public usb_host::USBClient {
   uint32_t get_speaker_packet_bytes() const {
     return this->spk_stream_open_ ? this->spk_stream_.packet_size : 0;
   }
+
+  // Bytes still queued for the speaker. Exact, unlike inferring it from the time of the last
+  // write, which cannot tell a paused stream from a drained one.
+  uint32_t get_speaker_queued_bytes() const;
 
   uint32_t get_speaker_buffer_size() const { return this->spk_buf_size_; }
   uint32_t get_microphone_buffer_size() const { return this->mic_buf_size_; }

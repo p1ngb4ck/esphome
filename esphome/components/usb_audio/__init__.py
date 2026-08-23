@@ -20,6 +20,7 @@ USBAudioClient = usb_audio_ns.class_(
 CONF_USB_AUDIO_ID = "usb_audio_id"
 CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
+CONF_FEEDBACK = "feedback"
 CONF_DEFAULT_BUFFER_SIZE = 6400
 
 SUPPORTED_VARIANTS = [
@@ -38,6 +39,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
             ): cv.positive_int,
+            cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
         }
     ),
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
@@ -50,6 +52,7 @@ async def to_code(config):
 
     cg.add(var.set_microphone_buffer_size(config[CONF_MICROPHONE_BUFFER_SIZE]))
     cg.add(var.set_speaker_buffer_size(config[CONF_SPEAKER_BUFFER_SIZE]))
+    cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

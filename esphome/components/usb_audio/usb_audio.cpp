@@ -125,6 +125,13 @@ void USBAudioClient::set_stream_error_(const char *what) {
   this->status_set_error();
 }
 
+uint32_t USBAudioClient::get_speaker_queued_bytes() const {
+  if (this->spk_rb_ == nullptr)
+    return 0;
+  const size_t free_bytes = xRingbufferGetCurFreeSize(this->spk_rb_);
+  return (this->spk_buf_size_ > free_bytes) ? static_cast<uint32_t>(this->spk_buf_size_ - free_bytes) : 0;
+}
+
 void USBAudioClient::flush_speaker_buffer_() {
   if (this->spk_rb_ == nullptr)
     return;
@@ -497,11 +504,20 @@ bool USBAudioClient::apply_speaker_volume_() {
   if (!this->spk_stream_open_ || !this->spk_volume_supported_)
     return false;
 
-  // Map [0.0, 1.0] linearly across [spk_vol_min_, spk_vol_max_].
-  float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
-  int16_t vol = static_cast<int16_t>(
-      std::lround(static_cast<float>(this->spk_vol_min_) +
-                  clamped * static_cast<float>(this->spk_vol_max_ - this->spk_vol_min_)));
+  // A UAC Feature Unit volume is logarithmic: a signed 1/256 dB value, where the device's
+  // reported maximum is its reference level. ESPHome's volume is a linear amplitude
+  // fraction. Mapping the fraction straight onto the dB range puts half volume near the
+  // bottom of the scale and sounds all but muted, so convert amplitude to dB first.
+  const float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
+  const float min_db = static_cast<float>(this->spk_vol_min_) / 256.0f;
+  const float max_db = static_cast<float>(this->spk_vol_max_) / 256.0f;
+  int16_t vol;
+  if (clamped <= 0.0f) {
+    vol = this->spk_vol_min_;
+  } else {
+    const float db = std::clamp(max_db + 20.0f * std::log10(clamped), min_db, max_db);
+    vol = static_cast<int16_t>(std::lround(db * 256.0f));
+  }
 
   uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};
   bool ok = this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, 0, buf, sizeof(buf));
@@ -678,10 +694,19 @@ bool USBAudioClient::open_speaker_stream_() {
         vTaskDelay(pdMS_TO_TICKS(5));
       return ok && done;
     };
-    get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
-    get_vol_range(UAC_GET_MAX, this->spk_vol_max_);
-    ESP_LOGD(TAG, "Speaker vol range: min=0x%04X max=0x%04X",
-             static_cast<uint16_t>(this->spk_vol_min_), static_cast<uint16_t>(this->spk_vol_max_));
+    const bool min_ok = get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
+    const bool max_ok = get_vol_range(UAC_GET_MAX, this->spk_vol_max_);
+    // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
+    // not strictly increasing means the reads did not return a usable answer. Fall back to
+    // the full signed range so the control still spans something sensible.
+    if (!min_ok || !max_ok || this->spk_vol_min_ == UAC_VOLUME_SILENCE ||
+        this->spk_vol_max_ <= this->spk_vol_min_) {
+      ESP_LOGW(TAG, "Speaker volume range unusable; falling back to %d..0 dB", UAC_VOLUME_FALLBACK_MIN / 256);
+      this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
+      this->spk_vol_max_ = 0;
+    }
+    ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB", static_cast<float>(this->spk_vol_min_) / 256.0f,
+             static_cast<float>(this->spk_vol_max_) / 256.0f);
   }
 
   this->spk_stream_open_ = true;

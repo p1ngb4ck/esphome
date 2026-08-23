@@ -155,12 +155,17 @@ static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<c
 // -- Static transfer callbacks (USB task context) ------------------------------
 
 // Shared completion logic: fill status, fire callback, release slot.
-static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer) {
+// setup_offset is the number of leading bytes in data_buffer that are not payload. For
+// control transfers the buffer starts with the 8 byte setup packet the host wrote, which is
+// the request header and not the device's answer; bulk and interrupt buffers hold payload
+// from byte 0.
+static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer, size_t setup_offset) {
   trq->status.error_code = xfer->status;
   trq->status.success = xfer->status == USB_TRANSFER_STATUS_COMPLETED;
   trq->status.endpoint = xfer->bEndpointAddress;
-  trq->status.data = xfer->data_buffer;
-  trq->status.data_len = xfer->actual_num_bytes;
+  const size_t actual = (xfer->actual_num_bytes > 0) ? static_cast<size_t>(xfer->actual_num_bytes) : 0;
+  trq->status.data = xfer->data_buffer + setup_offset;
+  trq->status.data_len = (actual > setup_offset) ? (actual - setup_offset) : 0;
   if (trq->callback != nullptr)
     trq->callback(trq->status);
   trq->client->release_trq(trq);
@@ -168,13 +173,13 @@ static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer) {
 
 #ifdef USE_USB_CONTROL_TRANSFERS
 static void control_callback(const usb_transfer_t *xfer) {
-  complete_trq(static_cast<TransferRequest *>(xfer->context), xfer);
+  complete_trq(static_cast<TransferRequest *>(xfer->context), xfer, SETUP_PACKET_SIZE);
 }
 #endif
 
 #if defined(USE_USB_BULK_TRANSFERS) || defined(USE_USB_CONTROL_TRANSFERS)
 static void transfer_callback(usb_transfer_t *xfer) {
-  complete_trq(static_cast<TransferRequest *>(xfer->context), xfer);
+  complete_trq(static_cast<TransferRequest *>(xfer->context), xfer, 0);
 }
 #endif
 

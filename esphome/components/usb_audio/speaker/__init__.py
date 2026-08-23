@@ -12,8 +12,6 @@ from .. import CONF_USB_AUDIO_ID, USBAudioClient, usb_audio_ns
 
 USBAudioSpeaker = usb_audio_ns.class_("USBAudioSpeaker", speaker.Speaker, cg.Component)
 
-CONF_WRITE_TIMEOUT = "write_timeout"
-CONF_FEEDBACK = "feedback"
 BITS_PER_SAMPLE_OPTIONS = [8, 16, 24, 32]
 
 
@@ -48,10 +46,6 @@ CONFIG_SCHEMA = cv.All(
                 ),
                 cv.Optional(CONF_BITS_PER_SAMPLE, default="16bit"): _bits_validator(),
                 cv.Optional(CONF_NUM_CHANNELS, default=2): cv.int_range(min=1, max=2),
-                cv.Optional(
-                    CONF_WRITE_TIMEOUT, default="20ms"
-                ): cv.positive_time_period_milliseconds,
-                cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
             }
         ).extend(cv.COMPONENT_SCHEMA)
     ),
@@ -65,20 +59,15 @@ async def to_code(config):
     await speaker.register_speaker(var, config)
 
     parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
-    cg.add(parent.set_feedback_enabled(config[CONF_FEEDBACK]))
-
     await cg.register_parented(var, config[CONF_USB_AUDIO_ID])
 
     sample_rate = int(config[CONF_SAMPLE_RATE])
     bits_per_sample = int(config[CONF_BITS_PER_SAMPLE])
     channels = int(config[CONF_NUM_CHANNELS])
-    write_timeout = config[CONF_WRITE_TIMEOUT].total_milliseconds
 
     cg.add(var.set_sample_rate(sample_rate))
     cg.add(var.set_bits_per_sample(bits_per_sample))
     cg.add(var.set_channels(channels))
-    cg.add(var.set_write_timeout(write_timeout))
 
-    parent = await cg.get_variable(config[CONF_USB_AUDIO_ID])
     cg.add(parent.set_speaker(var))
     cg.add(parent.set_speaker_params(channels, bits_per_sample, sample_rate))

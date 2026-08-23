@@ -18,6 +18,22 @@ namespace usb_audio {
 
 static const char *const TAG_SPK = "usb_audio.spk";
 
+namespace {
+// Upper bound on the time one play() call may spend pushing data into the USB ring buffer.
+constexpr uint32_t MAX_WORK_TIME_MS = 20;
+// Share of the work budget a single blocking write may consume. The isochronous sink drains
+// at exactly real time, so a chunk worth more playback time than this can only time out.
+constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
+// Window over which the accepted byte rate is measured before it is judged.
+constexpr uint32_t RATE_WINDOW_MS = 1000;
+// Fraction of the nominal sample rate the sink must keep up with, in percent. A short write
+// is normal backpressure: the sink drains at exactly real time and the caller keeps the
+// remainder. Only a sustained shortfall below this means playback is actually breaking up.
+constexpr uint32_t RATE_WARN_PERCENT = 80;
+// How long finish() waits for the queue to drain before stopping anyway.
+constexpr uint32_t FINISH_TIMEOUT_MS = 1000;
+}  // namespace
+
 void USBAudioSpeaker::setup() {
   this->audio_stream_info_ = audio::AudioStreamInfo(this->bits_per_sample_, this->channels_, this->sample_rate_);
 }
@@ -27,7 +43,6 @@ void USBAudioSpeaker::dump_config() {
   ESP_LOGCONFIG(TAG_SPK, "  Sample rate: %lu Hz", this->sample_rate_);
   ESP_LOGCONFIG(TAG_SPK, "  Bits per sample: %u", this->bits_per_sample_);
   ESP_LOGCONFIG(TAG_SPK, "  Channels: %u", this->channels_);
-  ESP_LOGCONFIG(TAG_SPK, "  Write timeout: %lu ms", this->write_timeout_ms_);
   if (this->channels_ > 2) {
     ESP_LOGW(TAG_SPK, "USB speaker only supports mono or stereo playback; additional channels will be ignored");
   }
@@ -63,6 +78,23 @@ void USBAudioSpeaker::stop() {
   this->parent_->suspend_speaker();
   this->state_ = speaker::STATE_STOPPED;
   this->finish_requested_ = false;
+  this->pause_state_ = false;
+  this->rate_window_start_ms_ = 0;
+}
+
+void USBAudioSpeaker::set_pause_state(bool pause_state) {
+  if (this->pause_state_ == pause_state || this->parent_ == nullptr) {
+    return;
+  }
+  this->pause_state_ = pause_state;
+  // Suspending feeds the endpoint silence rather than closing it: the device keeps its
+  // sample clock and the alt-setting stays selected, so resuming is immediate.
+  if (pause_state) {
+    this->parent_->suspend_speaker();
+  } else {
+    this->parent_->resume_speaker();
+    this->rate_window_start_ms_ = 0;
+  }
 }
 
 void USBAudioSpeaker::finish() {
@@ -71,27 +103,16 @@ void USBAudioSpeaker::finish() {
     return;
   }
   this->finish_requested_ = true;
-  this->finish_deadline_ms_ = millis() + (this->write_timeout_ms_ * 3);
+  this->finish_deadline_ms_ = millis() + FINISH_TIMEOUT_MS;
 }
 
-namespace {
-// Upper bound on the time one play() call may spend pushing data into the USB ring buffer.
-constexpr uint32_t MAX_WORK_TIME_MS = 20;
-// Share of the work budget a single blocking write may consume. The isochronous sink drains
-// at exactly real time, so a chunk worth more playback time than this can only time out.
-constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
-// Window over which the accepted byte rate is measured before it is judged.
-constexpr uint32_t RATE_WINDOW_MS = 1000;
-// Fraction of the nominal sample rate the sink must keep up with, in percent. A short write
-// is normal backpressure: the sink drains at exactly real time and the caller keeps the
-// remainder. Only a sustained shortfall below this means playback is actually breaking up.
-constexpr uint32_t RATE_WARN_PERCENT = 80;
-}  // namespace
 
 size_t USBAudioSpeaker::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
-  uint32_t time_budget_ms = this->write_timeout_ms_;
+  // The caller's block time is the budget; MAX_WORK_TIME_MS only caps how long one call may
+  // hold the audio task.
+  uint32_t time_budget_ms = MAX_WORK_TIME_MS;
   if (ticks_to_wait != portMAX_DELAY) {
-    uint32_t ticks_ms = static_cast<uint32_t>(ticks_to_wait) * portTICK_PERIOD_MS;
+    const uint32_t ticks_ms = static_cast<uint32_t>(ticks_to_wait) * portTICK_PERIOD_MS;
     if (ticks_ms > 0) {
       time_budget_ms = std::min(time_budget_ms, ticks_ms);
     }
@@ -100,7 +121,7 @@ size_t USBAudioSpeaker::play(const uint8_t *data, size_t length, TickType_t tick
 }
 
 size_t USBAudioSpeaker::play(const uint8_t *data, size_t length) {
-  return this->play_internal_(data, length, this->write_timeout_ms_);
+  return this->play_internal_(data, length, MAX_WORK_TIME_MS);
 }
 
 size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint32_t time_budget_ms) {
@@ -159,9 +180,6 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     }
 
     uint32_t call_timeout_ms = work_budget_ms - elapsed_ms;
-    if (call_timeout_ms > this->write_timeout_ms_) {
-      call_timeout_ms = this->write_timeout_ms_;
-    }
     if (call_timeout_ms == 0) {
       call_timeout_ms = 1;
     }
@@ -179,7 +197,6 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
       break;
     }
 
-    this->last_write_ms_ = millis();
     total_written += chunk;
     current += chunk;
     remaining -= chunk;
@@ -222,11 +239,12 @@ void USBAudioSpeaker::check_throughput_(size_t accepted, size_t bytes_per_ms) {
 }
 
 bool USBAudioSpeaker::has_buffered_data() const {
-  if (!this->is_running()) {
+  if (!this->is_running() || this->parent_ == nullptr) {
     return false;
   }
-  const uint32_t now = millis();
-  return (now - this->last_write_ms_) < (this->write_timeout_ms_ * 2);
+  // Ask the queue rather than inferring it from the time of the last write, which reports
+  // "buffered" for a stream that has long since drained and "empty" for a paused one.
+  return this->parent_->get_speaker_queued_bytes() > 0;
 }
 
 void USBAudioSpeaker::set_volume(float volume) {

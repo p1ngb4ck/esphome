@@ -29,10 +29,14 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
   size_t play(const uint8_t *data, size_t length) override;
   bool has_buffered_data() const override;
 
+  // Pause keeps the isochronous stream running and feeds it silence, so the device's clock
+  // never stops and playback resumes without renegotiating the interface.
+  void set_pause_state(bool pause_state) override;
+  bool get_pause_state() const override { return this->pause_state_; }
+
   void set_sample_rate(uint32_t sample_rate) { this->sample_rate_ = sample_rate; }
   void set_bits_per_sample(uint16_t bits) { this->bits_per_sample_ = bits; }
   void set_channels(uint8_t channels) { this->channels_ = channels; }
-  void set_write_timeout(uint32_t timeout_ms) { this->write_timeout_ms_ = timeout_ms; }
 
   void set_volume(float volume) override;
   void set_mute_state(bool mute_state) override;
@@ -48,8 +52,7 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
   uint16_t bits_per_sample_{16};
   uint8_t channels_{2};
 
-  uint32_t write_timeout_ms_{20};
-  uint32_t last_write_ms_{0};
+  bool pause_state_{false};
   bool finish_requested_{false};
   uint32_t finish_deadline_ms_{0};
   // Throughput window (see check_throughput_). start 0 means "not started yet".
