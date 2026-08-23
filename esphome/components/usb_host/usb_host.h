@@ -128,6 +128,11 @@ struct IsocStream {
   uint8_t interface_num{0};
   uint8_t alt_setting{0};
   bool streaming{false};
+  // Set from the USB task when the last URB retires while streaming was still requested,
+  // i.e. the stream stopped on its own (device gone, or the periodic scheduler rejected
+  // every resubmission). Nothing is transferred any more, but no close() was asked for, so
+  // the owner has to notice and tear the stream down.
+  std::atomic<bool> died{false};
   // UAC OUT pacing (isochronous sample clock). For an output stream each packet carries a
   // sample-rate-derived byte count instead of a full mps: sending mps-sized packets is ~2x
   // real time, overruns the device and, on the HS periodic scheduler (ESP32-P4), fails

@@ -24,6 +24,15 @@ namespace usb_audio {
 
 static constexpr uint32_t USB_AUDIO_DEFAULT_BUFFER_SIZE = 6400;
 
+// Backoff for reopening a stream that keeps failing: first retry after this delay, doubling
+// up to the maximum.
+static constexpr uint32_t STREAM_REOPEN_BASE_MS = 1000;
+static constexpr uint32_t STREAM_REOPEN_MAX_MS = 30000;
+// Attempts before a Feature Unit control is treated as unsupported rather than busy.
+static constexpr uint8_t UAC_CTRL_MAX_FAILS = 3;
+// Delay between those attempts.
+static constexpr uint32_t UAC_CTRL_RETRY_MS = 500;
+
 // -- Forward declarations -----------------------------------------------------
 class USBAudioMicrophone;
 class USBAudioSpeaker;
@@ -125,6 +134,15 @@ class USBAudioClient : public usb_host::USBClient {
   bool open_microphone_stream_();
   void close_speaker_stream_();
   void close_microphone_stream_();
+  // Drop whatever is still queued so a reopened stream does not start by playing audio from
+  // the previous session.
+  void flush_speaker_buffer_();
+  // Reopening a stream that keeps failing must not be retried on every play() call. Returns
+  // true when the next attempt is due, and records the outcome so the delay can grow.
+  bool reopen_due_(const uint32_t &next_attempt_ms, uint8_t fail_count) const;
+  void note_open_result_(bool ok, uint32_t &next_attempt_ms, uint8_t &fail_count);
+  // Report a condition that leaves the component unusable until the device changes.
+  void set_stream_error_(const char *what);
 
   // -- Subcomponent pointers ------------------------------------------------
   USBAudioMicrophone *microphone_{nullptr};
@@ -162,6 +180,17 @@ class USBAudioClient : public usb_host::USBClient {
   bool feedback_enabled_{true};
   bool mic_stream_open_{false};
 
+  // -- Stream open backoff ---------------------------------------------------
+  // A device that enumerates but refuses to stream would otherwise be retried on every
+  // play() call. Delay grows from 1 s to STREAM_REOPEN_MAX_MS and resets on success or on
+  // reconnect.
+  uint32_t spk_reopen_at_ms_{0};
+  uint32_t mic_reopen_at_ms_{0};
+  uint8_t  spk_open_fails_{0};
+  uint8_t  mic_open_fails_{0};
+  bool     spk_format_ok_{false};  // a usable speaker alt-setting was found on this device
+  bool     mic_format_ok_{false};
+
   // -- Ring buffers (SPSC: USB task <-> application task) ---------------------
   RingbufHandle_t spk_rb_{nullptr};   // writer: speaker task; reader: USB task isoc OUT callback
   RingbufHandle_t mic_rb_{nullptr};   // writer: USB task isoc IN callback; reader: microphone task
@@ -180,8 +209,12 @@ class USBAudioClient : public usb_host::USBClient {
   bool    pending_spk_mute_{true};
   bool    spk_volume_supported_{true};
   bool    spk_mute_supported_{true};
-  bool    spk_volume_warned_{false};
-  bool    spk_mute_warned_{false};
+  // A control transfer can fail because the device is busy handling the stream, not because
+  // it lacks the control. Retry a bounded number of times before declaring it unsupported,
+  // instead of logging once and never trying again.
+  uint8_t spk_volume_fails_{0};
+  uint8_t spk_mute_fails_{0};
+  uint32_t spk_ctrl_retry_at_ms_{0};
 
   // -- Volume range (from GET_MIN / GET_MAX on connect) ---------------------
   int16_t spk_vol_min_{-0x7FFF};

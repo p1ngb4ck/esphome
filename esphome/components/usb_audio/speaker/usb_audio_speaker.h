@@ -40,6 +40,9 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
  protected:
   bool ensure_started_();
   size_t play_internal_(const uint8_t *data, size_t length, uint32_t time_budget_ms);
+  // Accumulate the accepted byte count and warn once per window if it falls behind the
+  // sample clock. bytes_per_ms is the nominal rate of the configured stream format.
+  void check_throughput_(size_t accepted, size_t bytes_per_ms);
 
   uint32_t sample_rate_{48000};
   uint16_t bits_per_sample_{16};
@@ -49,7 +52,9 @@ class USBAudioSpeaker : public speaker::Speaker, public Component, public Parent
   uint32_t last_write_ms_{0};
   bool finish_requested_{false};
   uint32_t finish_deadline_ms_{0};
-  uint32_t last_timeout_log_ms_{0};
+  // Throughput window (see check_throughput_). start 0 means "not started yet".
+  uint32_t rate_window_start_ms_{0};
+  size_t   rate_window_bytes_{0};
 };
 
 }  // namespace usb_audio

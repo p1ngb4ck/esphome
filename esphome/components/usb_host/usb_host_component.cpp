@@ -237,6 +237,13 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
   auto finish_urb = [xfer, stream, client_handle, device_handle]() {
     usb_host_transfer_free(xfer);
     if (stream->pending_urbs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      // Last URB gone. If nobody asked for a close, the stream stopped by itself and is now
+      // silently dead: flag it so the owner can tear it down instead of writing into a
+      // buffer that is never drained again.
+      if (stream->streaming) {
+        stream->streaming = false;
+        stream->died.store(true, std::memory_order_release);
+      }
       get_usb_host()->defer([stream, client_handle, device_handle]() {
         stream->xfers.reset();
         stream->ctxs.reset();
@@ -315,6 +322,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
   stream.ctxs = std::make_unique<IsocCbCtx[]>(stream.num_urbs);
   stream.pending_urbs.store(stream.num_urbs, std::memory_order_relaxed);
 
+  stream.died.store(false, std::memory_order_relaxed);
   stream.streaming = true;
   for (uint8_t i = 0; i < stream.num_urbs; i++) {
     stream.ctxs[i].client = cb;

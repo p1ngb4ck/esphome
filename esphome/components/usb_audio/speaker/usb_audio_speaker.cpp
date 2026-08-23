@@ -5,6 +5,7 @@
 #include "../usb_audio.h"
 
 #include <algorithm>
+#include <cinttypes>
 
 #include "esphome/core/log.h"
 #include "esp_err.h"
@@ -79,8 +80,12 @@ constexpr uint32_t MAX_WORK_TIME_MS = 20;
 // Share of the work budget a single blocking write may consume. The isochronous sink drains
 // at exactly real time, so a chunk worth more playback time than this can only time out.
 constexpr uint32_t WRITE_BUDGET_DIVISOR = 2;
-// Rate limit for the "sink is backed up" warning.
-constexpr uint32_t TIMEOUT_LOG_INTERVAL_MS = 1000;
+// Window over which the accepted byte rate is measured before it is judged.
+constexpr uint32_t RATE_WINDOW_MS = 1000;
+// Fraction of the nominal sample rate the sink must keep up with, in percent. A short write
+// is normal backpressure: the sink drains at exactly real time and the caller keeps the
+// remainder. Only a sustained shortfall below this means playback is actually breaking up.
+constexpr uint32_t RATE_WARN_PERCENT = 80;
 }  // namespace
 
 size_t USBAudioSpeaker::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
@@ -163,19 +168,13 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
 
     const esp_err_t err = this->parent_->write_speaker(current, chunk, call_timeout_ms);
     if (err != ESP_OK) {
-      // A short write is a normal outcome, not an error: play() reports how much was taken
-      // and the caller keeps the rest. Retrying here with an ever smaller chunk cannot help,
-      // because the drain rate is fixed by the sample clock. Only report a sink that stays
-      // backed up, and at most once per second so a stall does not flood the log.
-      const uint32_t now = millis();
-      if (now - this->last_timeout_log_ms_ >= TIMEOUT_LOG_INTERVAL_MS) {
-        this->last_timeout_log_ms_ = now;
-        if (err == ESP_ERR_TIMEOUT) {
-          ESP_LOGW(TAG_SPK, "USB sink backed up; accepted %u of %u bytes", (unsigned) total_written,
-                   (unsigned) length);
-        } else {
-          ESP_LOGW(TAG_SPK, "Write error: %s", esp_err_to_name(err));
-        }
+      // A short write is a normal outcome, not an error: the sink drains at exactly real
+      // time and the caller keeps the remainder. Retrying with a smaller chunk cannot help,
+      // because the drain rate is fixed by the sample clock. Anything other than a timeout
+      // is a real fault and is reported immediately.
+      if (err != ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG_SPK, "Speaker write failed: %s", esp_err_to_name(err));
+        this->rate_window_start_ms_ = 0;
       }
       break;
     }
@@ -192,7 +191,34 @@ size_t USBAudioSpeaker::play_internal_(const uint8_t *data, size_t length, uint3
     }
   }
 
+  this->check_throughput_(total_written, bytes_per_ms);
   return total_written;
+}
+
+// Judge the sink by throughput, not by whether a single write was short. Over a one second
+// window the accepted bytes have to track the sample clock; a sustained shortfall is the one
+// symptom that actually means the audio is breaking up (a stream that stopped draining, or a
+// device that fell behind), and it is worth one warning per window.
+void USBAudioSpeaker::check_throughput_(size_t accepted, size_t bytes_per_ms) {
+  const uint32_t now = millis();
+  if (this->rate_window_start_ms_ == 0) {
+    this->rate_window_start_ms_ = now;
+    this->rate_window_bytes_ = accepted;
+    return;
+  }
+  this->rate_window_bytes_ += accepted;
+  const uint32_t elapsed_ms = now - this->rate_window_start_ms_;
+  if (elapsed_ms < RATE_WINDOW_MS)
+    return;
+
+  const size_t expected = bytes_per_ms * elapsed_ms;
+  const size_t floor_bytes = expected / 100 * RATE_WARN_PERCENT;
+  if (this->rate_window_bytes_ < floor_bytes) {
+    ESP_LOGW(TAG_SPK, "Speaker underrunning: accepted %u of %u bytes over %" PRIu32 " ms",
+             (unsigned) this->rate_window_bytes_, (unsigned) expected, elapsed_ms);
+  }
+  this->rate_window_start_ms_ = now;
+  this->rate_window_bytes_ = 0;
 }
 
 bool USBAudioSpeaker::has_buffered_data() const {

@@ -71,11 +71,72 @@ void USBAudioClient::setup() {
 void USBAudioClient::loop() {
   this->process_usb_events_();
 
-  if (this->spk_stream_open_ && !this->spk_suspended_) {
+  // A stream can stop on its own: the device went away mid-transfer, or the periodic
+  // scheduler rejected every resubmission until no URB was left. Nothing is drained after
+  // that, so every write would block until timeout forever. Tear it down here so the state
+  // reflects reality and the normal reopen path (with backoff) can take over.
+  if (this->spk_stream_open_ && this->spk_stream_.died.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Speaker stream stopped unexpectedly; closing");
+    this->close_speaker_stream_();
+    this->note_open_result_(false, this->spk_reopen_at_ms_, this->spk_open_fails_);
+  }
+  if (this->mic_stream_open_ && this->mic_stream_.died.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Microphone stream stopped unexpectedly; closing");
+    this->close_microphone_stream_();
+    this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
+  }
+
+  if (this->spk_stream_open_ && !this->spk_suspended_ &&
+      (int32_t) (millis() - this->spk_ctrl_retry_at_ms_) >= 0) {
     if (this->pending_spk_volume_)
       this->apply_speaker_volume_();
     if (this->pending_spk_mute_)
       this->apply_speaker_mute_();
+  }
+}
+
+// Backoff helpers. next_attempt_ms is an absolute millis() deadline; fail_count only sets
+// how far it is pushed out.
+bool USBAudioClient::reopen_due_(const uint32_t &next_attempt_ms, uint8_t fail_count) const {
+  if (fail_count == 0)
+    return true;
+  return (int32_t) (millis() - next_attempt_ms) >= 0;
+}
+
+void USBAudioClient::note_open_result_(bool ok, uint32_t &next_attempt_ms, uint8_t &fail_count) {
+  if (ok) {
+    fail_count = 0;
+    next_attempt_ms = millis();
+    return;
+  }
+  uint32_t delay_ms = STREAM_REOPEN_BASE_MS;
+  for (uint8_t i = 0; i < fail_count && delay_ms < STREAM_REOPEN_MAX_MS; i++)
+    delay_ms *= 2;
+  if (delay_ms > STREAM_REOPEN_MAX_MS)
+    delay_ms = STREAM_REOPEN_MAX_MS;
+  if (fail_count < 255)
+    fail_count++;
+  next_attempt_ms = millis() + delay_ms;
+  ESP_LOGD(TAG, "Stream open failed (%u in a row); next attempt in %" PRIu32 " ms", fail_count, delay_ms);
+}
+
+void USBAudioClient::set_stream_error_(const char *what) {
+  ESP_LOGE(TAG, "%s", what);
+  this->status_set_error();
+}
+
+void USBAudioClient::flush_speaker_buffer_() {
+  if (this->spk_rb_ == nullptr)
+    return;
+  // Drain whatever is left so a reopened stream does not start by playing stale audio.
+  while (true) {
+    size_t received = 0;
+    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, this->spk_buf_size_);
+    if (item == nullptr)
+      break;
+    vRingbufferReturnItem(this->spk_rb_, item);
+    if (received == 0)
+      break;
   }
 }
 
@@ -423,15 +484,18 @@ bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
 // -- Volume / mute -------------------------------------------------------------
 
 bool USBAudioClient::apply_speaker_volume_() {
-  if (!this->spk_stream_open_ || !this->speaker_fu_.has_volume) {
-    if (!this->speaker_fu_.has_volume && !this->spk_volume_warned_) {
+  if (!this->speaker_fu_.has_volume) {
+    // The descriptor says there is no volume control. That is a property of the device, not
+    // a transient failure, so stop asking.
+    if (this->spk_volume_supported_) {
       ESP_LOGW(TAG, "Speaker volume control not supported by device");
-      this->spk_volume_warned_ = true;
+      this->spk_volume_supported_ = false;
     }
     this->pending_spk_volume_ = false;
-    this->spk_volume_supported_ = false;
     return false;
   }
+  if (!this->spk_stream_open_ || !this->spk_volume_supported_)
+    return false;
 
   // Map [0.0, 1.0] linearly across [spk_vol_min_, spk_vol_max_].
   float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
@@ -443,35 +507,52 @@ bool USBAudioClient::apply_speaker_volume_() {
   bool ok = this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, 0, buf, sizeof(buf));
   if (ok) {
     this->pending_spk_volume_ = false;
-    this->spk_volume_warned_ = false;
-  } else if (!this->spk_volume_warned_) {
-    ESP_LOGW(TAG, "Failed to set speaker volume");
-    this->spk_volume_warned_ = true;
+    this->spk_volume_fails_ = 0;
+    return true;
   }
-  return ok;
+  // The control exists but the transfer failed. Devices commonly NAK control requests while
+  // they are busy setting up the stream, so retry a few times before giving up on it.
+  this->spk_volume_fails_++;
+  this->spk_ctrl_retry_at_ms_ = millis() + UAC_CTRL_RETRY_MS;
+  if (this->spk_volume_fails_ >= UAC_CTRL_MAX_FAILS) {
+    ESP_LOGW(TAG, "Speaker volume control failed %u times; giving up on it", this->spk_volume_fails_);
+    this->pending_spk_volume_ = false;
+    this->spk_volume_supported_ = false;
+  } else {
+    ESP_LOGD(TAG, "Failed to set speaker volume; retry %u of %u", this->spk_volume_fails_, UAC_CTRL_MAX_FAILS);
+  }
+  return false;
 }
 
 bool USBAudioClient::apply_speaker_mute_() {
-  if (!this->spk_stream_open_ || !this->speaker_fu_.has_mute) {
-    if (!this->speaker_fu_.has_mute && !this->spk_mute_warned_) {
+  if (!this->speaker_fu_.has_mute) {
+    if (this->spk_mute_supported_) {
       ESP_LOGW(TAG, "Speaker mute control not supported by device");
-      this->spk_mute_warned_ = true;
+      this->spk_mute_supported_ = false;
     }
     this->pending_spk_mute_ = false;
-    this->spk_mute_supported_ = false;
     return false;
   }
+  if (!this->spk_stream_open_ || !this->spk_mute_supported_)
+    return false;
 
   uint8_t val = this->spk_muted_ ? 1 : 0;
   bool ok = this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_MUTE_CONTROL, 0, &val, 1);
   if (ok) {
     this->pending_spk_mute_ = false;
-    this->spk_mute_warned_ = false;
-  } else if (!this->spk_mute_warned_) {
-    ESP_LOGW(TAG, "Failed to set speaker mute");
-    this->spk_mute_warned_ = true;
+    this->spk_mute_fails_ = 0;
+    return true;
   }
-  return ok;
+  this->spk_mute_fails_++;
+  this->spk_ctrl_retry_at_ms_ = millis() + UAC_CTRL_RETRY_MS;
+  if (this->spk_mute_fails_ >= UAC_CTRL_MAX_FAILS) {
+    ESP_LOGW(TAG, "Speaker mute control failed %u times; giving up on it", this->spk_mute_fails_);
+    this->pending_spk_mute_ = false;
+    this->spk_mute_supported_ = false;
+  } else {
+    ESP_LOGD(TAG, "Failed to set speaker mute; retry %u of %u", this->spk_mute_fails_, UAC_CTRL_MAX_FAILS);
+  }
+  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -488,7 +569,7 @@ bool USBAudioClient::open_speaker_stream_() {
   if (this->spk_rb_ == nullptr) {
     this->spk_rb_ = xRingbufferCreate(this->spk_buf_size_, RINGBUF_TYPE_BYTEBUF);
     if (this->spk_rb_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create speaker ring buffer");
+      this->set_stream_error_("Failed to allocate speaker ring buffer");
       return false;
     }
   }
@@ -622,7 +703,7 @@ bool USBAudioClient::open_microphone_stream_() {
   if (this->mic_rb_ == nullptr) {
     this->mic_rb_ = xRingbufferCreate(this->mic_buf_size_, RINGBUF_TYPE_BYTEBUF);
     if (this->mic_rb_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create microphone ring buffer");
+      this->set_stream_error_("Failed to allocate microphone ring buffer");
       return false;
     }
   }
@@ -655,6 +736,7 @@ void USBAudioClient::close_speaker_stream_() {
   this->stream_close(this->spk_stream_);
   this->spk_stream_open_ = false;
   this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
+  this->flush_speaker_buffer_();
   ESP_LOGI(TAG, "Speaker stream closed");
 }
 
@@ -675,46 +757,70 @@ void USBAudioClient::on_connected() {
   if (dev != nullptr)
     ESP_LOGI(TAG, "USB Audio device connected: VID=0x%04X PID=0x%04X", dev->idVendor, dev->idProduct);
 
-  if (!this->find_ac_interface_())
+  // Fresh device: forget everything the previous one taught us.
+  this->spk_reopen_at_ms_ = millis();
+  this->mic_reopen_at_ms_ = millis();
+  this->spk_open_fails_ = 0;
+  this->mic_open_fails_ = 0;
+  this->spk_format_ok_ = false;
+  this->mic_format_ok_ = false;
+  this->status_clear_error();
+
+  if (!this->find_ac_interface_()) {
+    this->set_stream_error_("Device has no AudioControl interface; not usable as USB audio");
     return;
+  }
   this->parse_feature_units_();
 
-  bool spk_ok = true;
-  bool mic_ok = true;
-
   if (this->spk_cfg_.configured) {
-    spk_ok = this->parse_as_interface_(true, this->spk_cfg_.channels,
-                                        static_cast<uint8_t>(this->spk_cfg_.bits_per_sample),
-                                        this->spk_cfg_.sample_rate,
-                                        this->spk_as_intf_, this->spk_alt_);
+    this->spk_format_ok_ = this->parse_as_interface_(true, this->spk_cfg_.channels,
+                                                     static_cast<uint8_t>(this->spk_cfg_.bits_per_sample),
+                                                     this->spk_cfg_.sample_rate,
+                                                     this->spk_as_intf_, this->spk_alt_);
+    if (!this->spk_format_ok_) {
+      // The device cannot do the configured format. Retrying will not change that, so say so
+      // once and leave the status set until a different device shows up.
+      this->set_stream_error_("Device does not offer the configured speaker format");
+    }
   }
 
   if (this->mic_cfg_.configured) {
-    mic_ok = this->parse_as_interface_(false, this->mic_cfg_.channels,
-                                        static_cast<uint8_t>(this->mic_cfg_.bits_per_sample),
-                                        this->mic_cfg_.sample_rate,
-                                        this->mic_as_intf_, this->mic_alt_);
+    this->mic_format_ok_ = this->parse_as_interface_(false, this->mic_cfg_.channels,
+                                                     static_cast<uint8_t>(this->mic_cfg_.bits_per_sample),
+                                                     this->mic_cfg_.sample_rate,
+                                                     this->mic_as_intf_, this->mic_alt_);
+    if (!this->mic_format_ok_) {
+      this->set_stream_error_("Device does not offer the configured microphone format");
+    }
   }
 
   this->device_connected_ = true;
 
   // Open whichever streams are needed immediately.
-  if (this->spk_cfg_.configured && spk_ok && !this->spk_suspended_)
-    this->open_speaker_stream_();
-  if (this->mic_cfg_.configured && mic_ok && !this->mic_suspended_)
-    this->open_microphone_stream_();
+  if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)
+    this->note_open_result_(this->open_speaker_stream_(), this->spk_reopen_at_ms_, this->spk_open_fails_);
+  if (this->mic_cfg_.configured && this->mic_format_ok_ && !this->mic_suspended_)
+    this->note_open_result_(this->open_microphone_stream_(), this->mic_reopen_at_ms_, this->mic_open_fails_);
 }
 
 void USBAudioClient::on_disconnected() {
   this->close_speaker_stream_();
   this->close_microphone_stream_();
   this->device_connected_ = false;
-  this->spk_volume_warned_ = false;
-  this->spk_mute_warned_   = false;
+  this->spk_format_ok_ = false;
+  this->mic_format_ok_ = false;
+  this->spk_open_fails_ = 0;
+  this->mic_open_fails_ = 0;
+  this->spk_volume_fails_ = 0;
+  this->spk_mute_fails_   = 0;
   this->spk_volume_supported_ = true;
   this->spk_mute_supported_   = true;
   this->pending_spk_volume_ = true;
   this->pending_spk_mute_   = true;
+  // The device is gone, so nothing will ever drain the queued audio. Drop it rather than
+  // playing it into the next device that shows up.
+  this->flush_speaker_buffer_();
+  this->status_clear_error();
   ESP_LOGI(TAG, "USB Audio device disconnected");
 }
 
@@ -795,25 +901,32 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
 // -----------------------------------------------------------------------------
 
 bool USBAudioClient::ensure_started_speaker() {
-  if (!this->device_connected_)
+  if (!this->device_connected_ || !this->spk_format_ok_)
     return false;
-  if (!this->spk_stream_open_)
-    return this->open_speaker_stream_();
-  return true;
+  if (this->spk_stream_open_)
+    return true;
+  if (!this->reopen_due_(this->spk_reopen_at_ms_, this->spk_open_fails_))
+    return false;
+  const bool ok = this->open_speaker_stream_();
+  this->note_open_result_(ok, this->spk_reopen_at_ms_, this->spk_open_fails_);
+  return ok;
 }
 
 bool USBAudioClient::ensure_started_microphone() {
-  if (!this->device_connected_)
+  if (!this->device_connected_ || !this->mic_format_ok_)
     return false;
-  if (!this->mic_stream_open_)
-    return this->open_microphone_stream_();
-  return true;
+  if (this->mic_stream_open_)
+    return true;
+  if (!this->reopen_due_(this->mic_reopen_at_ms_, this->mic_open_fails_))
+    return false;
+  const bool ok = this->open_microphone_stream_();
+  this->note_open_result_(ok, this->mic_reopen_at_ms_, this->mic_open_fails_);
+  return ok;
 }
 
 void USBAudioClient::resume_speaker() {
   this->spk_suspended_ = false;
-  if (this->device_connected_ && !this->spk_stream_open_)
-    this->open_speaker_stream_();
+  this->ensure_started_speaker();
 }
 
 void USBAudioClient::suspend_speaker() {
@@ -822,8 +935,7 @@ void USBAudioClient::suspend_speaker() {
 
 void USBAudioClient::resume_microphone() {
   this->mic_suspended_ = false;
-  if (this->device_connected_ && !this->mic_stream_open_)
-    this->open_microphone_stream_();
+  this->ensure_started_microphone();
 }
 
 void USBAudioClient::suspend_microphone() {
@@ -832,14 +944,22 @@ void USBAudioClient::suspend_microphone() {
 
 void USBAudioClient::set_speaker_volume_level(float volume) {
   this->spk_volume_ = std::clamp(volume, 0.0f, 1.0f);
-  this->spk_volume_warned_ = false;
+  // A new value from the user is a fresh attempt, so allow the retries again. Only when the
+  // descriptor has no volume control is the answer permanent.
+  if (this->speaker_fu_.has_volume) {
+    this->spk_volume_fails_ = 0;
+    this->spk_volume_supported_ = true;
+  }
   this->pending_spk_volume_ = true;
   this->apply_speaker_volume_();
 }
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
   this->spk_muted_ = mute_state;
-  this->spk_mute_warned_ = false;
+  if (this->speaker_fu_.has_mute) {
+    this->spk_mute_fails_ = 0;
+    this->spk_mute_supported_ = true;
+  }
   this->pending_spk_mute_ = true;
   this->apply_speaker_mute_();
 }
