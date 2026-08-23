@@ -674,6 +674,7 @@ uint8_t USBAudioClient::speaker_volume_channels_(uint8_t *channels) const {
 }
 
 void USBAudioClient::probe_speaker_volume_range_() {
+  this->spk_vol_range_known_ = false;
   if (!this->speaker_fu_.volume_available())
     return;
 
@@ -690,16 +691,20 @@ void USBAudioClient::probe_speaker_volume_range_() {
     out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
     return true;
   };
-  const bool min_ok = get_vol_range(UAC_GET_MIN, this->spk_vol_min_);
-  const bool max_ok = get_vol_range(UAC_GET_MAX, this->spk_vol_max_);
+  int16_t vol_min = 0;
+  int16_t vol_max = 0;
+  const bool min_ok = get_vol_range(UAC_GET_MIN, vol_min);
+  const bool max_ok = get_vol_range(UAC_GET_MAX, vol_max);
   // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
-  // not strictly increasing means the reads did not return a usable answer. Fall back to
-  // the full signed range so the control still spans something sensible.
-  if (!min_ok || !max_ok || this->spk_vol_min_ == UAC_VOLUME_SILENCE || this->spk_vol_max_ <= this->spk_vol_min_) {
-    ESP_LOGW(TAG, "Speaker volume range unusable; falling back to %d..0 dB", UAC_VOLUME_FALLBACK_MIN / 256);
-    this->spk_vol_min_ = UAC_VOLUME_FALLBACK_MIN;
-    this->spk_vol_max_ = 0;
+  // not strictly increasing means the reads did not return a usable answer.
+  if (!min_ok || !max_ok || vol_min == UAC_VOLUME_SILENCE || vol_max <= vol_min) {
+    ESP_LOGW(TAG, "Device did not report a usable volume range; leaving its volume alone");
+    return;
   }
+
+  this->spk_vol_min_ = vol_min;
+  this->spk_vol_max_ = vol_max;
+  this->spk_vol_range_known_ = true;
   ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB", static_cast<float>(this->spk_vol_min_) / 256.0f,
            static_cast<float>(this->spk_vol_max_) / 256.0f);
 }
@@ -709,6 +714,13 @@ bool USBAudioClient::apply_speaker_volume_() {
   const uint8_t channel_count = this->speaker_volume_channels_(channels);
   if (channel_count == 0) {
     ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
+    return false;
+  }
+  if (!this->spk_vol_range_known_) {
+    // Without the device's own endpoints there is nothing to map a fraction onto, and any
+    // value picked here would be one this component made up.
+    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device did not report its volume range",
+             this->spk_volume_ * 100.0f);
     return false;
   }
 
