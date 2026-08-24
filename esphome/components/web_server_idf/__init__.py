@@ -22,8 +22,10 @@ async def to_code(config: ConfigType) -> None:
     include_builtin_idf_component("esp-tls")
 
 
-# multipart.cpp is fully #ifdef'd on USE_WEBSERVER_OTA (set by the
-# web_server OTA platform); skip it when OTA uploads are not configured.
+# multipart.cpp is #ifdef'd on USE_WEBSERVER_OTA (set by the web_server OTA
+# platform) OR USE_WEBSERVER_FILE_API (set by web_server -> file_api, whose
+# /files/upload handler drives the same parser); skip it only when neither
+# consumer is configured.
 FILTER_SOURCE_FILES = filter_source_files_from_defines(
-    {"multipart.cpp": "USE_WEBSERVER_OTA"}
+    {"multipart.cpp": ("USE_WEBSERVER_OTA", "USE_WEBSERVER_FILE_API")}
 )
