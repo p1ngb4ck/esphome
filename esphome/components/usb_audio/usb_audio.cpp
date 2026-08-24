@@ -70,6 +70,10 @@ void USBAudioClient::setup() {
   if (this->mic_buf_size_ == 0)
     this->mic_buf_size_ = USB_AUDIO_DEFAULT_BUFFER_SIZE;
 
+  // Remember which task runs the component loop; a blocking control transfer issued from it
+  // has to keep the host library's event handler running, see uac_control_transfer_.
+  this->loop_task_ = xTaskGetCurrentTaskHandle();
+
   usb_host::USBClient::setup();
 }
 
@@ -686,9 +690,21 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     return false;
   }
 
+  // A control transfer only makes progress while usb_host_lib_handle_events() is being
+  // called, and the only caller of it is USBHost::loop(), which runs on the component loop
+  // task. Waiting on that task without driving it means waiting for something this wait is
+  // itself preventing, which is why these requests never completed while a request issued
+  // from the stream task did. Drive it here for as long as the wait lasts. Requests from
+  // other tasks must not touch it, since it belongs to the loop task.
+  const bool on_loop_task = (this->loop_task_ != nullptr && xTaskGetCurrentTaskHandle() == this->loop_task_);
   const uint32_t started = millis();
-  while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS)
-    vTaskDelay(pdMS_TO_TICKS(5));
+  while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
+    if (on_loop_task) {
+      uint32_t event_flags = 0;
+      usb_host_lib_handle_events(0, &event_flags);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 
   if (!result->done.load(std::memory_order_acquire)) {
     // Submitted, but the host never reported it finishing either way.

@@ -189,6 +189,8 @@ class USBAudioClient : public usb_host::USBClient {
   bool device_is_high_speed_{false};
 
   // -- Descriptor parsing results --------------------------------------------
+  // The task that runs the component loop, captured in setup().
+  TaskHandle_t loop_task_{nullptr};
   uint8_t ac_intf_{0};             // AudioControl interface number
   UacFeatureUnit speaker_fu_{};    // Feature Unit serving the speaker terminal
   UacFeatureUnit mic_fu_{};        // Feature Unit serving the microphone terminal
