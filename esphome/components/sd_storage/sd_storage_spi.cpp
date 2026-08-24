@@ -54,13 +54,20 @@ void SdSpi::setup() {
   // show up in the registry even if the initial mount fails, instead of only existing once a
   // card happens to be present. No mark_failed() here: a failed mount is not a broken
   // component, and this lets sd_storage.mount retry later without a reboot.
-  if (storage::global_storage_registry != nullptr)
+  if (storage::global_storage_registry != nullptr) {
     if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       // Registry full = codegen/runtime device-count mismatch: the device would be invisible
       // to resolve_path()/consumers. Fatal -- do not run with a silently missing device.
       ESP_LOGE(TAG_SPI, "Storage registration failed");
       this->mark_failed();
     }
+  } else {
+    // Same contract as StorageWorker::setup(): the registry (BUS priority) is guaranteed to
+    // exist by the time this runs. Without it the device is invisible to resolve_path(), so
+    // every storage.* action would report "no storage mounted" with no diagnostic at all.
+    ESP_LOGE(TAG_SPI, "storage registry unavailable -- device cannot be registered");
+    this->mark_failed();
+  }
 
   if (this->cd_pin_ != nullptr) {
     // With a CD pin configured, only mount if a card is actually seen at boot -- otherwise wait
@@ -92,7 +99,10 @@ void SdSpi::dump_config() {
   if (this->is_mounted_) {
     ESP_LOGCONFIG(TAG_SPI, "  Card Type: %s", SdStorageBase::card_type_to_string(this->card_type_));
     ESP_LOGCONFIG(TAG_SPI, "  Total bytes: %" PRIu64, this->total_bytes_);
-    ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
+    if (this->update_card_info())
+      ESP_LOGCONFIG(TAG_SPI, "  Used bytes: %" PRIu64, this->used_bytes_);
+    else
+      ESP_LOGCONFIG(TAG_SPI, "  Used bytes: unavailable");
   }
   if (this->is_failed()) {
     ESP_LOGE(TAG_SPI, "Setup failed: %s", SdSpi::error_code_to_str(this->init_error_));
@@ -140,8 +150,8 @@ esp_err_t SdSpi::mount_manual_(sdmmc_host_t &host, sdspi_device_config_t &slot_c
     return err;
   }
 
-  BYTE pdrv = FF_DRV_NOT_USED;
-  if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == FF_DRV_NOT_USED) {
+  BYTE pdrv = 0xFF;
+  if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == 0xFF) {
     sdspi_host_remove_device(this->sdspi_handle_);
     this->sdspi_handle_ = -1;
     delete card;  // NOLINT(cppcoreguidelines-owning-memory)
@@ -150,7 +160,8 @@ esp_err_t SdSpi::mount_manual_(sdmmc_host_t &host, sdspi_device_config_t &slot_c
   ff_diskio_register_sdmmc(pdrv, card);
   char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
 
-  if (!storage::ensure_requested_filesystem(TAG_SPI, pdrv, drv, this->requested_file_system_)) {
+  if (!storage::ensure_requested_filesystem(TAG_SPI, pdrv, drv, this->requested_file_system_,
+                                            this->format_on_mismatch_)) {
     ff_diskio_register(pdrv, nullptr);
     sdspi_host_remove_device(this->sdspi_handle_);
     this->sdspi_handle_ = -1;
@@ -193,7 +204,7 @@ esp_err_t SdSpi::mount_manual_(sdmmc_host_t &host, sdspi_device_config_t &slot_c
 storage::StorageError SdSpi::unmount_manual_() {
   StorageError err = StorageError::STORAGE_ERROR_OK;
   BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
-  if (pdrv != FF_DRV_NOT_USED) {
+  if (pdrv != 0xFF) {
     char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
     FRESULT res = f_mount(nullptr, drv, 0);
     if (res != FR_OK) {
@@ -290,19 +301,29 @@ StorageError SdSpi::mount() {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
+  BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
+  if (pdrv == 0xFF)
+    ESP_LOGE(TAG_SPI, "No diskio binding for card (pdrv lookup failed); direct FATFS path operations will fail");
+  this->set_fatfs_drive_(pdrv);
   this->update_card_info();
 
   ESP_LOGI(TAG_SPI, "SD card mounted at %s (max %" PRIu32 " kHz, real %" PRIu32 " kHz)", this->mount_path_,
            static_cast<uint32_t>(this->card_->max_freq_khz), static_cast<uint32_t>(this->card_->real_freq_khz));
 
-  if (storage::global_storage_registry != nullptr)
+  if (storage::global_storage_registry != nullptr) {
     if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       // Registry full = codegen/runtime device-count mismatch: the device would be invisible
       // to resolve_path()/consumers. Fatal -- do not run with a silently missing device.
       ESP_LOGE(TAG_SPI, "Storage registration failed");
       this->mark_failed();
     }
+  } else {
+    // Same contract as StorageWorker::setup(): the registry (BUS priority) is guaranteed to
+    // exist by the time this runs. Without it the device is invisible to resolve_path(), so
+    // every storage.* action would report "no storage mounted" with no diagnostic at all.
+    ESP_LOGE(TAG_SPI, "storage registry unavailable -- device cannot be registered");
+    this->mark_failed();
+  }
 
   this->on_mounted_.call(this->mount_path_);
 
@@ -347,8 +368,11 @@ StorageError SdSpi::unmount() {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  if (sdspi_host_deinit() != ESP_OK)
+  if (sdspi_host_deinit() != ESP_OK) {
     ESP_LOGW(TAG_SPI, "sdspi_host_deinit() failed");
+    if (unmount_err == StorageError::STORAGE_ERROR_OK)
+      unmount_err = StorageError::STORAGE_ERROR_NOT_READY;
+  }
 
   // Report the flush and teardown results so a failed unmount does not look clean.
   if (flush_err != StorageError::STORAGE_ERROR_OK)
@@ -367,19 +391,28 @@ bool SdSpi::update_card_info() {
   this->total_bytes_ = (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) == ESP_OK)
-    this->used_bytes_ = total_bytes - free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG_SPI, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return false;
+  }
+  this->used_bytes_ = total_bytes - free_bytes;
   return true;
 }
 
-uint64_t SdSpi::get_free_bytes_impl() const {
+StorageError SdSpi::get_free_bytes_impl(uint64_t &free_out) const {
   if (!this->is_mounted_)
-    return 0;
+    return StorageError::STORAGE_ERROR_NOT_READY;
 
   uint64_t total_bytes = 0, free_bytes = 0;
-  if (esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes) != ESP_OK)
-    return 0;
-  return free_bytes;
+  esp_err_t err = esp_vfs_fat_info(this->mount_path_, &total_bytes, &free_bytes);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG_SPI, "esp_vfs_fat_info(%s) failed: %s", this->mount_path_, esp_err_to_name(err));
+    return (err == ESP_ERR_INVALID_STATE) ? StorageError::STORAGE_ERROR_NOT_READY
+                                          : StorageError::STORAGE_ERROR_READ_ERROR;
+  }
+  free_out = free_bytes;
+  return StorageError::STORAGE_ERROR_OK;
 }
 
 uint32_t SdSpi::get_block_size_impl() const { return (this->card_ != nullptr) ? this->card_->csd.sector_size : 512; }

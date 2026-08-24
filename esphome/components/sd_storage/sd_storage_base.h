@@ -14,9 +14,9 @@
 namespace esphome::sd_storage {
 
 // Map a FatFs FRESULT to a storage::StorageError, shared by the drivers so none reinvents it.
-// for_rmdir turns FR_DENIED into NOT_EMPTY (vs PERMISSION_DENIED); is_write picks WRITE_ERROR
+// for_rmdir turns FR_DENIED into NOT_EMPTY (vs PERMISSION_DENIED); writing picks WRITE_ERROR
 // vs READ_ERROR for the generic default.
-storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write);
+storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool writing);
 
 // Note: SDHC and SDXC cards cannot be distinguished by the OCR capacity bit alone (that only
 // separates SDSC from "high/extended capacity"); doing so would require checking the card's
@@ -45,6 +45,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   void set_mount_path(const char *path) { this->set_mount_path_(path); }
   void set_id(const char *id) { this->storage_id_ = id; }
   void set_cd_pin(GPIOPin *pin) { this->cd_pin_ = pin; }
+  void set_format_on_mismatch(bool format_on_mismatch) { this->format_on_mismatch_ = format_on_mismatch; }
   bool is_mounted() const { return this->is_mounted_; }
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
@@ -86,7 +87,9 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
 
   // Subclasses provide handle pool and card capacity/space info
   virtual SdFileHandle *get_handle_pool() = 0;
-  virtual uint64_t get_free_bytes_impl() const = 0;
+  // Query free space on the mounted filesystem. Writes free_out only on success; returns the
+  // real error (never a fabricated figure) so get_info() can propagate a failed query.
+  virtual storage::StorageError get_free_bytes_impl(uint64_t &free_out) const = 0;
   virtual uint32_t get_block_size_impl() const = 0;
 
   // Build absolute VFS path from a relative path into caller-supplied buffer.
@@ -101,7 +104,17 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   // Captures the FATFS drive string ("N:") for this card. Called by SdMmc::mount()/SdSpi::mount()
   // after a successful mount, since only the subclass holds the sdmmc_card_t* needed to look it
   // up via ff_diskio_get_pdrv_card() (diskio_sdmmc.h).
-  void set_fatfs_drive_(BYTE pdrv) { snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%u:", pdrv); }
+  // 0xFF is ff_diskio_get_pdrv_card()'s "not found" marker, not a drive number: storing it
+  // would produce "255:" and every FATFS-native op would fail deep inside FatFs with a
+  // generic error. Leave the string empty instead -- build_fatfs_path_() and format() both
+  // reject that explicitly.
+  void set_fatfs_drive_(BYTE pdrv) {
+    if (pdrv == 0xFF) {
+      this->fatfs_drive_[0] = '\0';
+      return;
+    }
+    snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%u:", pdrv);
+  }
 
   // Closes every still-open handle before unmount, so nothing is left holding a FILE* into a
   // filesystem that's about to disappear. Best-effort: keeps going even if a flush/close fails
@@ -152,6 +165,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   uint64_t used_bytes_{0};
   const char *storage_id_{nullptr};
   GPIOPin *cd_pin_{nullptr};
+  bool format_on_mismatch_{false};
   char fatfs_drive_[5]{};  // "N:" -- set via set_fatfs_drive_() after a successful mount
 
   LazyCallbackManager<void(const char *)> on_mounted_;
