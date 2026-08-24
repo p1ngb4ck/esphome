@@ -11,6 +11,7 @@ from esphome.const import (
     CONF_FORMAT,
     CONF_ID,
     CONF_ON_ERROR,
+    CONF_PATH,
     CONF_TYPE,
     CONF_URL,
 )
@@ -49,7 +50,6 @@ ReleaseImageAction = online_image_ns.class_(
     "OnlineImageReleaseAction", automation.Action, cg.Parented.template(OnlineImage)
 )
 
-<<<<<<< HEAD
 
 def _validate_local_path(value):
     """A local storage source is a POSIX path (/sdcard/img.png); file:// is accepted as an
@@ -60,8 +60,6 @@ def _validate_local_path(value):
     return value
 
 
-=======
->>>>>>> 2b11fbe1646055feb49e275bb3021ffcc9bf0464
 ONLINE_IMAGE_SCHEMA = (
     runtime_image.runtime_image_schema(OnlineImage)
     .extend(
@@ -70,14 +68,11 @@ ONLINE_IMAGE_SCHEMA = (
             #   url:  an http(s):// address, fetched via http_request
             #   path: a local storage path (POSIX; file:// accepted as an alias)
             cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
-<<<<<<< HEAD
             cv.Optional(CONF_URL): cv.url,
             cv.Optional(CONF_PATH): _validate_local_path,
-=======
             cv.Required(CONF_URL): cv.url,
             # AUTO (Content-Type detection) is online_image specific; not in the shared registry
             cv.Required(CONF_FORMAT): cv.one_of(*IMAGE_FORMATS, "AUTO", upper=True),
->>>>>>> 2b11fbe1646055feb49e275bb3021ffcc9bf0464
             cv.Optional(CONF_BUFFER_SIZE, default=65536): cv.int_range(256, 65536),
             cv.Optional(CONF_REQUEST_HEADERS): cv.All(
                 cv.Schema({cv.string: cv.templatable(cv.string)})
