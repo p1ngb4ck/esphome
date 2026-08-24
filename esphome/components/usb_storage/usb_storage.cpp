@@ -36,7 +36,8 @@ storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool
     case FR_EXIST:
       return storage::StorageError::STORAGE_ERROR_ALREADY_EXISTS;
     case FR_DENIED:
-      return for_rmdir ? storage::StorageError::STORAGE_ERROR_NOT_EMPTY : storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
+      return for_rmdir ? storage::StorageError::STORAGE_ERROR_NOT_EMPTY
+                       : storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
     case FR_INVALID_NAME:
       return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
     case FR_NOT_READY:
@@ -44,7 +45,8 @@ storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool
     case FR_WRITE_PROTECTED:
       return storage::StorageError::STORAGE_ERROR_PERMISSION_DENIED;
     default:
-      return is_write ? storage::StorageError::STORAGE_ERROR_WRITE_ERROR : storage::StorageError::STORAGE_ERROR_READ_ERROR;
+      return is_write ? storage::StorageError::STORAGE_ERROR_WRITE_ERROR
+                      : storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
 }
 
@@ -392,7 +394,8 @@ void USBStorageClient::on_connected() {
   // Before the one and only f_mount below: probe the first sectors and, if a manually
   // requested filesystem mismatches what is on the medium, reformat first -- the mount then
   // happens on the correct filesystem from the start.
-  if (!storage::ensure_requested_filesystem(TAG, this->fatfs_drive_, drive_path, this->requested_file_system_)) {
+  if (!storage::ensure_requested_filesystem(TAG, this->fatfs_drive_, drive_path, this->requested_file_system_,
+                                            this->format_on_mismatch_)) {
     this->disk_ready_ = false;
     this->disconnect();
     return;
@@ -661,30 +664,8 @@ void USBStorageDevice::loop() {
 }
 
 storage::StorageError USBStorageDevice::format() {
-  if (this->fatfs_drive_ < 0) {
-    ESP_LOGE(TAG, "Cannot format: no FATFS drive (device not mounted)");
-    return storage::StorageError::STORAGE_ERROR_NOT_FOUND;
-  }
-  char drive_path[8];
-  snprintf(drive_path, sizeof(drive_path), "%d:", this->fatfs_drive_);
-  const bool want_exfat = this->requested_file_system_ == storage::FS_SELECT_EXFAT;
-  // Detach the mounted FATFS volume but keep the diskio drive registered so f_mkfs can reach the
-  // medium; then re-register the VFS via mount() to expose the fresh, empty filesystem.
-  f_mount(nullptr, drive_path, 0);
-  auto work = std::make_unique<uint8_t[]>(FF_MAX_SS);
-  MKFS_PARM parm{};
-  parm.fmt = want_exfat ? FM_EXFAT : (FM_FAT | FM_FAT32);
-  ESP_LOGI(TAG, "Formatting '%s' as %s...", drive_path, want_exfat ? "exFAT" : "FAT");
-  FRESULT res = f_mkfs(drive_path, &parm, work.get(), FF_MAX_SS);
-  if (res != FR_OK) {
-    ESP_LOGE(TAG, "f_mkfs failed (%d)", static_cast<int>(res));
-    this->unmount();
-    this->mount();
-    return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
-  }
-  this->unmount();
-  this->mount();
-  return storage::StorageError::STORAGE_ERROR_OK;
+  ESP_LOGW(TAG, "Format not implemented for USB storage");
+  return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
 }
 
 storage::StorageError USBStorageDevice::sync() {
@@ -743,7 +724,8 @@ storage::StorageError USBStorageDevice::open(const char *path, storage::FileHand
       case ENFILE:
         return storage::StorageError::STORAGE_ERROR_TOO_MANY_OPEN_FILES;
       default:
-        return mode == storage::OpenMode::OPEN_MODE_READ ? storage::StorageError::STORAGE_ERROR_READ_ERROR : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+        return mode == storage::OpenMode::OPEN_MODE_READ ? storage::StorageError::STORAGE_ERROR_READ_ERROR
+                                                         : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
     }
   }
 
