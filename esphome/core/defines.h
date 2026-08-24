@@ -162,14 +162,6 @@
 #define USE_POWER_SUPPLY
 #define USE_PREFERENCES_BACKUP
 #define USE_PREFERENCES_SYNC_EVERY_LOOP
-// Only defined by key-lookup preference backends; the slot-based platforms
-// (esp8266, rp2040) never set it in generated builds, and their preferences
-// managers do not provide load_from_key(), so the PreferencesKeyLookupContract
-// assert would fail their clang-tidy environments. Written as a deny-list so
-// the no-platform analysis configuration (whose Preferences stub provides
-// load_from_key()) keeps covering the key-lookup code paths, and so a future
-// slot-based platform fails the assert loudly instead of silently losing
-// analysis coverage.
 #if !defined(USE_ESP8266) && !defined(USE_RP2)
 #define USE_PREFERENCE_KEY_LOOKUP
 #endif
@@ -199,10 +191,6 @@
 #define USE_STORAGE_TRANSFER_BUFFER
 #define USE_STORAGE_WORKER
 #define USE_STORAGE_WORKER_TASK
-// USE_STORAGE_FILE_SYSTEM_SELECT is deliberately absent: it gates storage/fatfs_select.h,
-// which includes FatFs's ff.h/diskio.h. Those come from a managed component that only exists
-// in a driver's build, so defining it here would leave static analysis with an unresolvable
-// include instead of extra coverage.
 #define USE_SWITCH
 #define USE_TEXT
 #define USE_TEXT_SENSOR
