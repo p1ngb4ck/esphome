@@ -14,6 +14,7 @@ from esphome.components.esp32 import (
 import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID
 from esphome.core import CORE
+from esphome.cpp_generator import MockObj
 from esphome.cpp_types import Component
 from esphome.types import ConfigType
 
@@ -32,7 +33,9 @@ CONF_MAX_PACKET_SIZE = "max_packet_size"
 CONF_DUAL_HOST = "dual_host"
 
 
-def usb_device_schema(cls=USBClient, vid: int = None, pid: int = None) -> cv.Schema:
+def usb_device_schema(
+    cls=USBClient, vid: int | None = None, pid: int | None = None
+) -> cv.Schema:
     schema = cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(cls),
@@ -110,7 +113,7 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-async def register_usb_client(config):
+async def register_usb_client(config: ConfigType) -> MockObj:
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
     return var

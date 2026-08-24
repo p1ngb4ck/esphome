@@ -1,0 +1,648 @@
+From d3126230c59deb3ddfa871dd2879401e41686ffa Mon Sep 17 00:00:00 2001
+From: p1ngb4ck <oliver@ok-it-handel.de>
+Date: Sun, 23 Aug 2026 12:07:53 +0000
+Subject: [PATCH 1/2] [usb_audio,usb_host] Replace non-ASCII comment glyphs
+ with ASCII
+
+The comment banners and a few inline comments used box-drawing characters, em
+dashes and a multiplication sign. Those bytes do not survive being pasted
+through a terminal, which makes every patch touching these files fail to apply
+for anyone transferring it that way, even when only ASCII lines changed: the
+context and removal lines carry the multi-byte characters regardless.
+
+Mechanical replacement only, comments and no code: U+2500 and U+2014 become '-',
+U+00D7 becomes 'x', U+2194 becomes '<->'. Banner rules are trimmed back to the
+100 column limit since one dash now takes one column instead of three.
+---
+ esphome/components/usb_audio/uac_types.h      | 30 ++++++------
+ esphome/components/usb_audio/usb_audio.cpp    | 48 +++++++++----------
+ esphome/components/usb_audio/usb_audio.h      | 44 ++++++++---------
+ esphome/components/usb_host/usb_host.h        | 24 +++++-----
+ .../components/usb_host/usb_host_client.cpp   | 12 ++---
+ .../usb_host/usb_host_component.cpp           |  8 ++--
+ 6 files changed, 83 insertions(+), 83 deletions(-)
+
+diff --git a/esphome/components/usb_audio/uac_types.h b/esphome/components/usb_audio/uac_types.h
+index bb988b763..2f1b9474d 100644
+--- a/esphome/components/usb_audio/uac_types.h
++++ b/esphome/components/usb_audio/uac_types.h
+@@ -12,16 +12,16 @@
+ namespace esphome {
+ namespace usb_audio {
+ 
+-// ── Interface subclass codes (bInterfaceSubClass) ────────────────────────────
++// -- Interface subclass codes (bInterfaceSubClass) ----------------------------
+ static constexpr uint8_t UAC_SC_AUDIOCONTROL   = 0x01;
+ static constexpr uint8_t UAC_SC_AUDIOSTREAMING  = 0x02;
+ static constexpr uint8_t UAC_SC_MIDISTREAMING   = 0x03;
+ 
+-// ── Class-specific descriptor types (bDescriptorType) ────────────────────────
++// -- Class-specific descriptor types (bDescriptorType) ------------------------
+ static constexpr uint8_t UAC_CS_INTERFACE = 0x24;
+ static constexpr uint8_t UAC_CS_ENDPOINT  = 0x25;
+ 
+-// ── AudioControl interface descriptor subtypes (bDescriptorSubType) ──────────
++// -- AudioControl interface descriptor subtypes (bDescriptorSubType) ----------
+ static constexpr uint8_t UAC_AC_HEADER          = 0x01;
+ static constexpr uint8_t UAC_AC_INPUT_TERMINAL  = 0x02;
+ static constexpr uint8_t UAC_AC_OUTPUT_TERMINAL = 0x03;
+@@ -31,14 +31,14 @@ static constexpr uint8_t UAC_AC_FEATURE_UNIT    = 0x06;
+ static constexpr uint8_t UAC_AC_PROCESSING_UNIT = 0x07;
+ static constexpr uint8_t UAC_AC_EXTENSION_UNIT  = 0x08;
+ 
+-// ── AudioStreaming interface descriptor subtypes (bDescriptorSubType) ─────────
++// -- AudioStreaming interface descriptor subtypes (bDescriptorSubType) ---------
+ static constexpr uint8_t UAC_AS_GENERAL     = 0x01;
+ static constexpr uint8_t UAC_AS_FORMAT_TYPE = 0x02;
+ 
+-// ── Class-specific endpoint descriptor subtypes ───────────────────────────────
++// -- Class-specific endpoint descriptor subtypes -------------------------------
+ static constexpr uint8_t UAC_EP_GENERAL = 0x01;
+ 
+-// ── Audio class request codes (bRequest) ─────────────────────────────────────
++// -- Audio class request codes (bRequest) -------------------------------------
+ static constexpr uint8_t UAC_SET_CUR = 0x01;
+ static constexpr uint8_t UAC_GET_CUR = 0x81;
+ static constexpr uint8_t UAC_SET_MIN = 0x02;
+@@ -46,7 +46,7 @@ static constexpr uint8_t UAC_GET_MIN = 0x82;
+ static constexpr uint8_t UAC_SET_MAX = 0x03;
+ static constexpr uint8_t UAC_GET_MAX = 0x83;
+ 
+-// ── bmRequestType values ──────────────────────────────────────────────────────
++// -- bmRequestType values ------------------------------------------------------
+ // Class request to interface:  OUT=0x21  IN=0xA1
+ // Class request to endpoint:   OUT=0x22  IN=0xA2
+ static constexpr uint8_t UAC_REQ_TYPE_INTF_SET = 0x21;
+@@ -54,7 +54,7 @@ static constexpr uint8_t UAC_REQ_TYPE_INTF_GET = 0xA1;
+ static constexpr uint8_t UAC_REQ_TYPE_EP_SET   = 0x22;
+ static constexpr uint8_t UAC_REQ_TYPE_EP_GET   = 0xA2;
+ 
+-// ── Feature Unit control selectors (wValue high byte) ────────────────────────
++// -- Feature Unit control selectors (wValue high byte) ------------------------
+ static constexpr uint8_t UAC_FU_MUTE_CONTROL      = 0x01;
+ static constexpr uint8_t UAC_FU_VOLUME_CONTROL     = 0x02;
+ static constexpr uint8_t UAC_FU_BASS_CONTROL       = 0x03;
+@@ -66,17 +66,17 @@ static constexpr uint8_t UAC_FU_DELAY_CONTROL      = 0x08;
+ static constexpr uint8_t UAC_FU_BASS_BOOST_CONTROL = 0x09;
+ static constexpr uint8_t UAC_FU_LOUDNESS_CONTROL   = 0x0A;
+ 
+-// ── Sampling Frequency endpoint control selector ──────────────────────────────
++// -- Sampling Frequency endpoint control selector ------------------------------
+ static constexpr uint8_t UAC_EP_SAMPLING_FREQ_CONTROL = 0x01;
+ 
+-// ── Feature Unit channel mask bits (bmaControls) ─────────────────────────────
++// -- Feature Unit channel mask bits (bmaControls) -----------------------------
+ static constexpr uint8_t UAC_FU_CTL_MUTE   = (1 << 0);
+ static constexpr uint8_t UAC_FU_CTL_VOLUME = (1 << 1);
+ 
+-// ── Maximum number of discrete sample frequencies per alt-setting ─────────────
++// -- Maximum number of discrete sample frequencies per alt-setting -------------
+ static constexpr uint8_t UAC_MAX_SAMPLE_FREQS = 8;
+ 
+-// ── Described audio streaming alt-setting parameters ─────────────────────────
++// -- Described audio streaming alt-setting parameters -------------------------
+ // Filled during descriptor parsing for each AS interface alternate setting > 0.
+ struct UacAltInfo {
+   uint8_t  alt_setting{0};
+@@ -84,7 +84,7 @@ struct UacAltInfo {
+   uint8_t  ep_attr{0};        // endpoint bmAttributes (sync type in bits 3:2)
+   uint8_t  feedback_ep_addr{0};  // companion async feedback IN endpoint (0 = none)
+   uint16_t feedback_mps{0};      // feedback endpoint max packet size
+-  uint16_t mps{0};            // max packet size × mult
++  uint16_t mps{0};            // max packet size x mult
+   uint8_t  channels{0};
+   uint8_t  sub_frame_size{0}; // bytes per audio sample (1, 2, 3, or 4)
+   uint8_t  bit_resolution{0}; // actual bits used (e.g. 16 or 24)
+@@ -95,13 +95,13 @@ struct UacAltInfo {
+   bool     valid{false};
+ };
+ 
+-// ── Feature Unit bookkeeping ─────────────────────────────────────────────────
++// -- Feature Unit bookkeeping -------------------------------------------------
+ struct UacFeatureUnit {
+   uint8_t unit_id{0};
+   uint8_t source_id{0};
+   uint8_t channel_count{0};
+   uint8_t control_size{0};  // bControlSize: bytes per bmaControls entry
+-  // bmaControls[0] = master, [1..n] = per-channel — only master stored here
++  // bmaControls[0] = master, [1..n] = per-channel - only master stored here
+   uint8_t master_controls{0};
+   bool    has_mute{false};
+   bool    has_volume{false};
+diff --git a/esphome/components/usb_audio/usb_audio.cpp b/esphome/components/usb_audio/usb_audio.cpp
+index 1fbf3feaf..5057728d5 100644
+--- a/esphome/components/usb_audio/usb_audio.cpp
++++ b/esphome/components/usb_audio/usb_audio.cpp
+@@ -21,12 +21,12 @@ static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
+ // URBs per stream (triple-buffering).
+ static constexpr uint8_t ISOC_NUM_URBS = 3;
+ 
+-// Packets per URB — small for audio to minimise latency.
++// Packets per URB - small for audio to minimise latency.
+ static constexpr uint8_t ISOC_PACKETS_PER_URB = 4;
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Configuration setters
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ void USBAudioClient::set_microphone_params(uint8_t channels, uint16_t bits, uint32_t sample_rate) {
+   this->mic_cfg_.channels = channels;
+@@ -42,9 +42,9 @@ void USBAudioClient::set_speaker_params(uint8_t channels, uint16_t bits, uint32_
+   this->spk_cfg_.configured = true;
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Component lifecycle
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ void USBAudioClient::setup() {
+   if (this->spk_buf_size_ == 0)
+@@ -66,9 +66,9 @@ void USBAudioClient::loop() {
+   }
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Descriptor parsing
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ bool USBAudioClient::find_ac_interface_() {
+   const usb_config_desc_t *cfg = this->get_config_desc_();
+@@ -107,7 +107,7 @@ bool USBAudioClient::parse_feature_units_() {
+ 
+   // Simple heuristic: the first Feature Unit after the AC interface is the speaker FU;
+   // the second (if present) is the microphone FU. Most single-chip UAC devices follow this.
+-  // More robust: we'd walk the terminal chain, but that requires tracking terminal IDs —
++  // More robust: we'd walk the terminal chain, but that requires tracking terminal IDs -
+   // this simpler approach works for the vast majority of USB headsets/speakers.
+ 
+   while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
+@@ -164,7 +164,7 @@ bool USBAudioClient::parse_feature_units_() {
+       break;
+   }
+ 
+-  return true;  // non-fatal if not found — volume/mute will be silently skipped
++  return true;  // non-fatal if not found - volume/mute will be silently skipped
+ }
+ 
+ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
+@@ -233,7 +233,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
+       cur_is_as  = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOSTREAMING);
+       cur_alt_info = {};
+       format_seen  = false;
+-      // alt 0 is zero-bandwidth — skip but stay on interface
++      // alt 0 is zero-bandwidth - skip but stay on interface
+       continue;
+     }
+ 
+@@ -248,7 +248,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
+         // [0] bLength [1] bDescriptorType [2] bDescriptorSubType
+         // [3] bFormatType (must be 0x01 for Type I)
+         // [4] bNrChannels [5] bSubFrameSize [6] bBitResolution
+-        // [7] bSamFreqType  then: continuous=(lower 3B, upper 3B); discrete=N×3B each
++        // [7] bSamFreqType  then: continuous=(lower 3B, upper 3B); discrete=Nx3B each
+         if (d[3] != 0x01)  // only Type I
+           continue;
+         cur_alt_info.channels       = d[4];
+@@ -328,9 +328,9 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
+   return true;
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Control transfer helpers
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
+                                              const uint8_t *data, size_t len) {
+@@ -404,7 +404,7 @@ bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
+   return ok;
+ }
+ 
+-// ── Volume / mute ─────────────────────────────────────────────────────────────
++// -- Volume / mute -------------------------------------------------------------
+ 
+ bool USBAudioClient::apply_speaker_volume_() {
+   if (!this->spk_stream_open_ || !this->speaker_fu_.has_volume) {
+@@ -458,9 +458,9 @@ bool USBAudioClient::apply_speaker_mute_() {
+   return ok;
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Stream open / close
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ bool USBAudioClient::open_speaker_stream_() {
+   if (this->spk_stream_open_)
+@@ -626,9 +626,9 @@ void USBAudioClient::close_microphone_stream_() {
+   ESP_LOGI(TAG, "Microphone stream closed");
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Connection lifecycle
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ void USBAudioClient::on_connected() {
+   const usb_device_desc_t *dev = this->get_device_desc_();
+@@ -678,9 +678,9 @@ void USBAudioClient::on_disconnected() {
+   ESP_LOGI(TAG, "USB Audio device disconnected");
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Isochronous packet dispatch (USB-task context)
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) {
+   // Async OUT feedback endpoint: the device reports its desired rate (samples per service
+@@ -704,7 +704,7 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
+   const bool is_in = (ep_addr & 0x80) != 0;
+ 
+   if (!is_in) {
+-    // ── Speaker OUT: drain ring buffer into this packet's payload area ──────
++    // -- Speaker OUT: drain ring buffer into this packet's payload area ------
+     // `data` points into the URB's data_buffer. The isoc_cb_ trampoline calls
+     // on_isoc_packet() BEFORE resubmitting, so writing here fills the buffer
+     // for the next transmission.
+@@ -729,7 +729,7 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
+       memset(const_cast<uint8_t *>(data), 0, fill_bytes);
+     }
+   } else {
+-    // ── Microphone IN: write PCM into the ring buffer ────────────────────────
++    // -- Microphone IN: write PCM into the ring buffer ------------------------
+     if (this->mic_rb_ == nullptr || this->mic_suspended_)
+       return;
+     // Non-blocking send; if full, drop oldest data (overwrite) is not possible
+@@ -738,9 +738,9 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
+   }
+ }
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Subcomponent API
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ 
+ bool USBAudioClient::ensure_started_speaker() {
+   if (!this->device_connected_)
+diff --git a/esphome/components/usb_audio/usb_audio.h b/esphome/components/usb_audio/usb_audio.h
+index 8b2a71b5e..928001572 100644
+--- a/esphome/components/usb_audio/usb_audio.h
++++ b/esphome/components/usb_audio/usb_audio.h
+@@ -24,24 +24,24 @@ namespace usb_audio {
+ 
+ static constexpr uint32_t USB_AUDIO_DEFAULT_BUFFER_SIZE = 6400;
+ 
+-// ── Forward declarations ─────────────────────────────────────────────────────
++// -- Forward declarations -----------------------------------------------------
+ class USBAudioMicrophone;
+ class USBAudioSpeaker;
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // USBAudioClient
+ //
+ // Native USB Audio Class 1.0 host driver built on USBClient.
+-// No uac_host library — implements the class protocol directly using
++// No uac_host library - implements the class protocol directly using
+ // USBClient's control_transfer() and stream_open_() / stream_close_().
+ //
+ // Supports simultaneous speaker (ISOC OUT) and microphone (ISOC IN) streams.
+ // Both streams route through on_isoc_packet() which dispatches by ep_addr.
+ //
+ // Thread model:
+-//   USB task   — fires isoc callbacks, reads/writes ring buffers
+-//   Main loop  — runs loop(), applies pending volume/mute, opens/closes streams
+-// ─────────────────────────────────────────────────────────────────────────────
++//   USB task   - fires isoc callbacks, reads/writes ring buffers
++//   Main loop  - runs loop(), applies pending volume/mute, opens/closes streams
++// -----------------------------------------------------------------------------
+ class USBAudioClient : public usb_host::USBClient {
+  public:
+   USBAudioClient() : usb_host::USBClient(0, 0) {}
+@@ -51,7 +51,7 @@ class USBAudioClient : public usb_host::USBClient {
+   float get_setup_priority() const override { return setup_priority::IO; }
+   uint8_t get_interface_class() const { return USB_CLASS_AUDIO; }
+ 
+-  // ── Configuration setters ─────────────────────────────────────────────────
++  // -- Configuration setters -------------------------------------------------
+   void set_microphone_buffer_size(uint32_t size) { this->mic_buf_size_ = size; }
+   void set_speaker_buffer_size(uint32_t size) { this->spk_buf_size_ = size; }
+ 
+@@ -63,7 +63,7 @@ class USBAudioClient : public usb_host::USBClient {
+   void set_microphone(USBAudioMicrophone *mic) { this->microphone_ = mic; }
+   void set_speaker(USBAudioSpeaker *spk) { this->speaker_ = spk; }
+ 
+-  // ── Subcomponent API — called from USBAudioSpeaker / USBAudioMicrophone ────
++  // -- Subcomponent API - called from USBAudioSpeaker / USBAudioMicrophone ----
+   bool ensure_started_speaker();
+   bool ensure_started_microphone();
+   void resume_speaker();
+@@ -74,11 +74,11 @@ class USBAudioClient : public usb_host::USBClient {
+   void set_speaker_volume_level(float volume);
+   void set_speaker_mute_state(bool mute_state);
+ 
+-  // Speaker write — called from speaker task / play(); returns bytes accepted.
++  // Speaker write - called from speaker task / play(); returns bytes accepted.
+   // timeout_ms: FreeRTOS ring buffer block time (0 = non-blocking).
+   esp_err_t write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms);
+ 
+-  // Microphone read — called from microphone task; blocks up to timeout_ms.
++  // Microphone read - called from microphone task; blocks up to timeout_ms.
+   esp_err_t read_microphone(uint8_t *buffer, size_t size, size_t *bytes_read, uint32_t timeout_ms);
+ 
+   uint32_t get_speaker_buffer_size() const { return this->spk_buf_size_; }
+@@ -89,17 +89,17 @@ class USBAudioClient : public usb_host::USBClient {
+   void on_connected() override;
+   void on_disconnected() override;
+ 
+-  // USB-task context — dispatches by endpoint direction.
++  // USB-task context - dispatches by endpoint direction.
+   void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) override;
+ 
+-  // ── Descriptor parsing ────────────────────────────────────────────────────
++  // -- Descriptor parsing ----------------------------------------------------
+   bool parse_descriptors_();
+   bool find_ac_interface_();  // sets ac_intf_
+   bool parse_feature_units_();
+   bool parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits,
+                             uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out);
+ 
+-  // ── UAC control requests ──────────────────────────────────────────────────
++  // -- UAC control requests --------------------------------------------------
+   // Issue a class-specific control transfer and busy-wait for completion.
+   // wIndex for interface requests: (unit_id << 8) | ac_intf_num
+   // wIndex for endpoint requests:  ep_addr
+@@ -113,17 +113,17 @@ class USBAudioClient : public usb_host::USBClient {
+   bool apply_speaker_volume_();
+   bool apply_speaker_mute_();
+ 
+-  // ── Stream open / close ───────────────────────────────────────────────────
++  // -- Stream open / close ---------------------------------------------------
+   bool open_speaker_stream_();
+   bool open_microphone_stream_();
+   void close_speaker_stream_();
+   void close_microphone_stream_();
+ 
+-  // ── Subcomponent pointers ────────────────────────────────────────────────
++  // -- Subcomponent pointers ------------------------------------------------
+   USBAudioMicrophone *microphone_{nullptr};
+   USBAudioSpeaker *speaker_{nullptr};
+ 
+-  // ── Audio format config (set from to_code / subcomponent setup) ──────────
++  // -- Audio format config (set from to_code / subcomponent setup) ----------
+   struct EndpointConfig {
+     uint8_t  channels{0};
+     uint16_t bits_per_sample{0};
+@@ -136,7 +136,7 @@ class USBAudioClient : public usb_host::USBClient {
+   // isochronous high-bandwidth multiplier and selects the OUT pacing service interval.
+   bool device_is_high_speed_{false};
+ 
+-  // ── Descriptor parsing results ────────────────────────────────────────────
++  // -- Descriptor parsing results --------------------------------------------
+   uint8_t ac_intf_{0};             // AudioControl interface number
+   UacFeatureUnit speaker_fu_{};    // Feature Unit serving the speaker terminal
+   UacFeatureUnit mic_fu_{};        // Feature Unit serving the microphone terminal
+@@ -146,7 +146,7 @@ class USBAudioClient : public usb_host::USBClient {
+   uint8_t mic_as_intf_{0};         // AudioStreaming interface for microphone
+   UacAltInfo mic_alt_{};           // chosen alt-setting for microphone
+ 
+-  // ── Stream state ──────────────────────────────────────────────────────────
++  // -- Stream state ----------------------------------------------------------
+   usb_host::IsocStream spk_stream_{};
+   usb_host::IsocStream mic_stream_{};
+   usb_host::IsocStream spk_fb_stream_{};  // async OUT feedback IN stream (shares spk interface)
+@@ -155,18 +155,18 @@ class USBAudioClient : public usb_host::USBClient {
+   bool feedback_enabled_{true};
+   bool mic_stream_open_{false};
+ 
+-  // ── Ring buffers (SPSC: USB task ↔ application task) ─────────────────────
++  // -- Ring buffers (SPSC: USB task <-> application task) ---------------------
+   RingbufHandle_t spk_rb_{nullptr};   // writer: speaker task; reader: USB task isoc OUT callback
+   RingbufHandle_t mic_rb_{nullptr};   // writer: USB task isoc IN callback; reader: microphone task
+   uint32_t spk_buf_size_{USB_AUDIO_DEFAULT_BUFFER_SIZE};
+   uint32_t mic_buf_size_{USB_AUDIO_DEFAULT_BUFFER_SIZE};
+ 
+-  // ── Playback state ────────────────────────────────────────────────────────
++  // -- Playback state --------------------------------------------------------
+   bool spk_suspended_{false};   // true when speaker is explicitly paused
+   bool mic_suspended_{false};   // true when microphone is explicitly paused
+   bool device_connected_{false};
+ 
+-  // ── Volume / mute state ───────────────────────────────────────────────────
++  // -- Volume / mute state ---------------------------------------------------
+   float   spk_volume_{1.0f};
+   bool    spk_muted_{false};
+   bool    pending_spk_volume_{true};
+@@ -176,7 +176,7 @@ class USBAudioClient : public usb_host::USBClient {
+   bool    spk_volume_warned_{false};
+   bool    spk_mute_warned_{false};
+ 
+-  // ── Volume range (from GET_MIN / GET_MAX on connect) ─────────────────────
++  // -- Volume range (from GET_MIN / GET_MAX on connect) ---------------------
+   int16_t spk_vol_min_{-0x7FFF};
+   int16_t spk_vol_max_{0x0000};
+ };
+diff --git a/esphome/components/usb_host/usb_host.h b/esphome/components/usb_host/usb_host.h
+index 58c811b23..14da477e3 100644
+--- a/esphome/components/usb_host/usb_host.h
++++ b/esphome/components/usb_host/usb_host.h
+@@ -107,9 +107,9 @@ enum ClientState {
+   USB_CLIENT_CONNECTED,
+ };
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // Isochronous stream types -- compiled only when USE_USB_ISOC_TRANSFERS is set.
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ #ifdef USE_USB_ISOC_TRANSFERS
+ 
+ struct IsocCbCtx {
+@@ -150,9 +150,9 @@ struct IsocStream {
+ 
+ #endif  // USE_USB_ISOC_TRANSFERS
+ 
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // USBClient -- device state machine + thin forwarding layer to USBHost.
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ class USBClient : public Component {
+   friend class USBHost;
+ 
+@@ -176,19 +176,19 @@ class USBClient : public Component {
+   LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
+   EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
+ 
+-  // ── Bulk / interrupt transfers ──────────────────────────────────────────────
++  // -- Bulk / interrupt transfers ----------------------------------------------
+ #ifdef USE_USB_BULK_TRANSFERS
+   bool transfer_in(uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
+   bool transfer_out(uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data, uint16_t length);
+ #endif
+ 
+-  // ── Control transfers ───────────────────────────────────────────────────────
++  // -- Control transfers -------------------------------------------------------
+ #ifdef USE_USB_CONTROL_TRANSFERS
+   bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index, const transfer_cb_t &callback,
+                         const std::vector<uint8_t> &data = {});
+ #endif
+ 
+-  // ── Interface claim / release / alt-setting ─────────────────────────────────
++  // -- Interface claim / release / alt-setting ---------------------------------
+   bool claim_interface(uint8_t interface_num, uint8_t alt_setting = 0);
+   bool release_interface(uint8_t interface_num);
+ 
+@@ -196,7 +196,7 @@ class USBClient : public Component {
+   bool set_interface(uint8_t interface_num, uint8_t alt_setting);
+ #endif
+ 
+-  // ── Isochronous support ─────────────────────────────────────────────────────
++  // -- Isochronous support -----------------------------------------------------
+ #ifdef USE_USB_ISOC_TRANSFERS
+   usb_transfer_t *isoc_alloc(uint8_t ep_addr, uint16_t mps, uint8_t num_packets, usb_transfer_cb_t callback,
+                              void *context);
+@@ -240,13 +240,13 @@ class USBClient : public Component {
+   const usb_device_desc_t *get_device_desc_() const { return this->device_desc_; }
+   const usb_config_desc_t *get_config_desc_() const { return this->config_desc_; }
+ };
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ // USBHost -- USB host stack + stateless transfer submission engine.
+ //
+ // Acts as the Linux host controller driver: owns usb_host_install(), the lib
+ // event loop, and all ESP-IDF transfer submission calls.  Never touches client
+ // memory -- clients own their TransferRequest pools and hand filled slots here.
+-// ─────────────────────────────────────────────────────────────────────────────
++// -----------------------------------------------------------------------------
+ class USBHost final : public Component {
+  public:
+   float get_setup_priority() const override { return setup_priority::BUS; }
+@@ -257,7 +257,7 @@ class USBHost final : public Component {
+   // peripheral_map = BIT0 | BIT1 -> both controllers; default BIT0 = HS only.
+   void set_dual_host(bool enable) { this->dual_host_ = enable; }
+ 
+-  // ── Submission engine (called by USBClient thin forwarders) ────────────────
++  // -- Submission engine (called by USBClient thin forwarders) ----------------
+ 
+   // Bulk / interrupt IN and OUT -- always compiled if any client uses them
+   bool submit_transfer(TransferRequest *trq);
+@@ -275,7 +275,7 @@ class USBHost final : public Component {
+   bool do_release_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
+                             uint8_t interface_num);
+ 
+-  // ── Isochronous ─────────────────────────────────────────────────────────────
++  // -- Isochronous -------------------------------------------------------------
+ #ifdef USE_USB_ISOC_TRANSFERS
+   usb_transfer_t *do_isoc_alloc(uint8_t ep_addr, usb_device_handle_t device_handle, uint16_t mps, uint8_t num_packets,
+                                 usb_transfer_cb_t callback, void *context);
+diff --git a/esphome/components/usb_host/usb_host_client.cpp b/esphome/components/usb_host/usb_host_client.cpp
+index 04ee13d3f..5c2e6f5d6 100644
+--- a/esphome/components/usb_host/usb_host_client.cpp
++++ b/esphome/components/usb_host/usb_host_client.cpp
+@@ -152,7 +152,7 @@ static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<c
+   return buffer.data();
+ }
+ 
+-// ── Static transfer callbacks (USB task context) ──────────────────────────────
++// -- Static transfer callbacks (USB task context) ------------------------------
+ 
+ // Shared completion logic: fill status, fire callback, release slot.
+ static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer) {
+@@ -178,7 +178,7 @@ static void transfer_callback(usb_transfer_t *xfer) {
+ }
+ #endif
+ 
+-// ── USBClient event callback (USB task context) ───────────────────────────────
++// -- USBClient event callback (USB task context) -------------------------------
+ 
+ void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
+   auto *client = static_cast<USBClient *>(arg);
+@@ -208,7 +208,7 @@ void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, vo
+   App.wake_loop_threadsafe();
+ }
+ 
+-// ── USBClient lifecycle ───────────────────────────────────────────────────────
++// -- USBClient lifecycle -------------------------------------------------------
+ 
+ void USBClient::setup() {
+   usb_host_client_config_t config{.is_synchronous = false,
+@@ -370,7 +370,7 @@ void USBClient::dump_config() {
+   ESP_LOGCONFIG(TAG, "USBClient\n  Vendor id %04X\n  Product id %04X", this->vid_, this->pid_);
+ }
+ 
+-// ── TransferRequest pool management (lock-free, thread-safe) ─────────────────
++// -- TransferRequest pool management (lock-free, thread-safe) -----------------
+ 
+ TransferRequest *USBClient::get_trq_() {
+   trq_bitmask_t mask = this->trq_in_use_.load(std::memory_order_acquire);
+@@ -403,7 +403,7 @@ void USBClient::release_trq(TransferRequest *trq) {
+   this->trq_in_use_.fetch_and(mask, std::memory_order_release);
+ }
+ 
+-// ── Thin forwarders -- allocate trq, fill fields, delegate to USBHost ──────────
++// -- Thin forwarders -- allocate trq, fill fields, delegate to USBHost ----------
+ 
+ #ifdef USE_USB_BULK_TRANSFERS
+ 
+@@ -502,7 +502,7 @@ bool USBClient::release_interface(uint8_t interface_num) {
+   return get_usb_host()->do_release_interface(this->handle_, this->device_handle_, interface_num);
+ }
+ 
+-// ── Isochronous thin forwarders ───────────────────────────────────────────────
++// -- Isochronous thin forwarders -----------------------------------------------
+ #ifdef USE_USB_ISOC_TRANSFERS
+ 
+ usb_transfer_t *USBClient::isoc_alloc(uint8_t ep_addr, uint16_t mps, uint8_t num_packets, usb_transfer_cb_t callback,
+diff --git a/esphome/components/usb_host/usb_host_component.cpp b/esphome/components/usb_host/usb_host_component.cpp
+index 68ebef4c8..24322a9da 100644
+--- a/esphome/components/usb_host/usb_host_component.cpp
++++ b/esphome/components/usb_host/usb_host_component.cpp
+@@ -44,7 +44,7 @@ void USBHost::loop() {
+   }
+ }
+ 
+-// ── Submission engine ─────────────────────────────────────────────────────────
++// -- Submission engine ---------------------------------------------------------
+ 
+ bool USBHost::submit_transfer(TransferRequest *trq) {
+   esp_err_t err = usb_host_transfer_submit(trq->transfer);
+@@ -55,7 +55,7 @@ bool USBHost::submit_transfer(TransferRequest *trq) {
+   return true;
+ }
+ 
+-// ── Interface claim / release ─────────────────────────────────────────────────
++// -- Interface claim / release -------------------------------------------------
+ 
+ bool USBHost::do_claim_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
+                                  uint8_t interface_num, uint8_t alt_setting) {
+@@ -77,7 +77,7 @@ bool USBHost::do_release_interface(usb_host_client_handle_t client_handle, usb_d
+   return true;
+ }
+ 
+-// ── Control transfer submission ───────────────────────────────────────────────
++// -- Control transfer submission -----------------------------------------------
+ #ifdef USE_USB_CONTROL_TRANSFERS
+ 
+ bool USBHost::submit_control(usb_host_client_handle_t client_handle, TransferRequest *trq) {
+@@ -151,7 +151,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
+ 
+ #endif  // USE_USB_CONTROL_TRANSFERS
+ 
+-// ── Isochronous ───────────────────────────────────────────────────────────────
++// -- Isochronous ---------------------------------------------------------------
+ #ifdef USE_USB_ISOC_TRANSFERS
+ 
+ usb_transfer_t *USBHost::do_isoc_alloc(uint8_t ep_addr, usb_device_handle_t device_handle, uint16_t mps,
