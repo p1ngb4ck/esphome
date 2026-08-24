@@ -14,9 +14,9 @@
 namespace esphome::sd_storage {
 
 // Map a FatFs FRESULT to a storage::StorageError, shared by the drivers so none reinvents it.
-// for_rmdir turns FR_DENIED into NOT_EMPTY (vs PERMISSION_DENIED); is_write picks WRITE_ERROR
+// for_rmdir turns FR_DENIED into NOT_EMPTY (vs PERMISSION_DENIED); writing picks WRITE_ERROR
 // vs READ_ERROR for the generic default.
-storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool is_write);
+storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool writing);
 
 // Note: SDHC and SDXC cards cannot be distinguished by the OCR capacity bit alone (that only
 // separates SDSC from "high/extended capacity"); doing so would require checking the card's
@@ -104,7 +104,17 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   // Captures the FATFS drive string ("N:") for this card. Called by SdMmc::mount()/SdSpi::mount()
   // after a successful mount, since only the subclass holds the sdmmc_card_t* needed to look it
   // up via ff_diskio_get_pdrv_card() (diskio_sdmmc.h).
-  void set_fatfs_drive_(BYTE pdrv) { snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%u:", pdrv); }
+  // 0xFF is ff_diskio_get_pdrv_card()'s "not found" marker, not a drive number: storing it
+  // would produce "255:" and every FATFS-native op would fail deep inside FatFs with a
+  // generic error. Leave the string empty instead -- build_fatfs_path_() and format() both
+  // reject that explicitly.
+  void set_fatfs_drive_(BYTE pdrv) {
+    if (pdrv == 0xFF) {
+      this->fatfs_drive_[0] = '\0';
+      return;
+    }
+    snprintf(this->fatfs_drive_, sizeof(this->fatfs_drive_), "%u:", pdrv);
+  }
 
   // Closes every still-open handle before unmount, so nothing is left holding a FILE* into a
   // filesystem that's about to disappear. Best-effort: keeps going even if a flush/close fails

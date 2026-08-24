@@ -12,8 +12,6 @@
 #include "ff.h"
 #include "diskio_sdmmc.h"
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
-// FF_DRV_NOT_USED, ff_diskio_get_drive(), ff_diskio_register() -- the generic diskio layer
-// the manual mount mirror drives; diskio_sdmmc.h above only covers the sdmmc binding.
 #include "diskio_impl.h"
 #endif
 #include "sdmmc_cmd.h"
@@ -47,13 +45,20 @@ void SdMmc::setup() {
   // show up in the registry even if the initial mount fails, instead of only existing once a
   // card happens to be present. No mark_failed() here: a failed mount is not a broken
   // component, and this lets sd_storage.mount retry later without a reboot.
-  if (storage::global_storage_registry != nullptr)
+  if (storage::global_storage_registry != nullptr) {
     if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       // Registry full = codegen/runtime device-count mismatch: the device would be invisible
       // to resolve_path()/consumers. Fatal -- do not run with a silently missing device.
       ESP_LOGE(TAG, "Storage registration failed");
       this->mark_failed();
     }
+  } else {
+    // Same contract as StorageWorker::setup(): the registry (BUS priority) is guaranteed to
+    // exist by the time this runs. Without it the device is invisible to resolve_path(), so
+    // every storage.* action would report "no storage mounted" with no diagnostic at all.
+    ESP_LOGE(TAG, "storage registry unavailable -- device cannot be registered");
+    this->mark_failed();
+  }
 
   if (this->cd_pin_ != nullptr) {
     this->cd_pin_->setup();
@@ -89,6 +94,7 @@ void SdMmc::dump_config() {
 
 #ifdef USE_STORAGE_FILE_SYSTEM_SELECT
 esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_config) {
+  if (this->is_mounted_) return storage::StorageError::STORAGE_ERROR_OK;
   // Step for step what esp_vfs_fat_sdmmc_mount does (all public IDF API), with the probe
   // window inserted between diskio registration and f_mount.
   auto *card = new sdmmc_card_t{};  // NOLINT(cppcoreguidelines-owning-memory) - freed in unmount_manual_
@@ -97,16 +103,14 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
     delete card;                                        // NOLINT(cppcoreguidelines-owning-memory)
     return err;
   }
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
-  // Pre-6 builds initialised the slot before mount() already (see setup above).
+  // Unconditional: this path does not go through esp_vfs_fat_sdmmc_mount(), so nothing
+  // else initialises the slot. sdmmc_card_init() below drives the bus and needs the slot's
+  // pins and width configured first.
   err = sdmmc_host_init_slot(host.slot, &slot_config);
   if (err != ESP_OK) {
     delete card;  // NOLINT(cppcoreguidelines-owning-memory)
     return err;
   }
-#else
-  (void) slot_config;
-#endif
   err = ESP_FAIL;
   for (int attempt = 1; attempt <= 3; attempt++) {
     ESP_LOGD(TAG, "Initialising SD card slot %d (attempt %d/3)", this->slot_, attempt);
@@ -121,8 +125,8 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
     return err;
   }
 
-  BYTE pdrv = FF_DRV_NOT_USED;
-  if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == FF_DRV_NOT_USED) {
+  BYTE pdrv = 0xFF;
+  if (ff_diskio_get_drive(&pdrv) != ESP_OK || pdrv == 0xFF) {
     delete card;  // NOLINT(cppcoreguidelines-owning-memory)
     return ESP_ERR_NO_MEM;
   }
@@ -167,7 +171,7 @@ esp_err_t SdMmc::mount_manual_(sdmmc_host_t &host, sdmmc_slot_config_t &slot_con
 storage::StorageError SdMmc::unmount_manual_() {
   storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
-  if (pdrv != FF_DRV_NOT_USED) {
+  if (pdrv != 0xFF) {
     char drv[3] = {static_cast<char>('0' + pdrv), ':', '\0'};
     FRESULT res = f_mount(nullptr, drv, 0);
     if (res != FR_OK) {
@@ -181,12 +185,17 @@ storage::StorageError SdMmc::unmount_manual_() {
   }
   if (esp_vfs_fat_unregister_path(this->mount_path_) != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
     err = storage::StorageError::STORAGE_ERROR_NOT_READY;
+  // Last step of esp_vfs_fat_sdcard_unmount(), which this mirrors: without it the SDMMC
+  // peripheral stays initialised and the slot clocked after every unmount.
+  if (sdmmc_host_deinit() != ESP_OK && err == storage::StorageError::STORAGE_ERROR_OK)
+    err = storage::StorageError::STORAGE_ERROR_NOT_READY;
   delete this->card_;  // NOLINT(cppcoreguidelines-owning-memory)
   return err;
 }
 #endif  // USE_STORAGE_FILE_SYSTEM_SELECT
 
 storage::StorageError SdMmc::mount() {
+  if (this->is_mounted_) return storage::StorageError::STORAGE_ERROR_OK;
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.max_freq_khz = static_cast<int>(this->data_rate_khz_);
   host.flags = this->mode_1bit_ ? SDMMC_HOST_FLAG_1BIT : SDMMC_HOST_FLAG_4BIT;
@@ -206,16 +215,6 @@ storage::StorageError SdMmc::mount() {
   }
 #endif
   slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
-  {
-    esp_err_t pre_ret = sdmmc_host_init_slot(host.slot, &slot_config);
-    if (pre_ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to init SDMMC slot %d: %s", this->slot_, esp_err_to_name(pre_ret));
-      return storage::StorageError::STORAGE_ERROR_NOT_READY;
-    }
-  }
-#endif
 
   const esp_vfs_fat_mount_config_t mount_config = {
       .format_if_mount_failed = false,
@@ -259,18 +258,28 @@ storage::StorageError SdMmc::mount() {
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
-  this->set_fatfs_drive_(ff_diskio_get_pdrv_card(this->card_));
+  BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
+  if (pdrv == 0xFF)
+    ESP_LOGE(TAG, "No diskio binding for card (pdrv lookup failed); direct FATFS path operations will fail");
+  this->set_fatfs_drive_(pdrv);
   this->update_card_info();
 
   ESP_LOGI(TAG, "SD/MMC card mounted at %s", this->mount_path_);
 
-  if (storage::global_storage_registry != nullptr)
+  if (storage::global_storage_registry != nullptr) {
     if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
       // Registry full = codegen/runtime device-count mismatch: the device would be invisible
       // to resolve_path()/consumers. Fatal -- do not run with a silently missing device.
       ESP_LOGE(TAG, "Storage registration failed");
       this->mark_failed();
     }
+  } else {
+    // Same contract as StorageWorker::setup(): the registry (BUS priority) is guaranteed to
+    // exist by the time this runs. Without it the device is invisible to resolve_path(), so
+    // every storage.* action would report "no storage mounted" with no diagnostic at all.
+    ESP_LOGE(TAG, "storage registry unavailable -- device cannot be registered");
+    this->mark_failed();
+  }
 
   this->on_mounted_.call(this->mount_path_);
 
