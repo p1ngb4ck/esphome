@@ -27,6 +27,7 @@ binary_storage_ns = cg.esphome_ns.namespace("binary_storage")
 NVSStore = binary_storage_ns.class_("NVSStore")
 RawStorage = storage_ns.class_("RawStorage")
 IntervalSyncer = preferences_ns.class_("IntervalSyncer", cg.Component)
+IntervalSyncer = preferences_ns.class_("IntervalSyncer", cg.PollingComponent)
 
 CONF_FLASH_WRITE_INTERVAL = "flash_write_interval"
 CONF_RTC_STORAGE = "rtc_storage"
@@ -137,13 +138,10 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 @coroutine_with_priority(CoroPriority.PREFERENCES)
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     write_interval = config[CONF_FLASH_WRITE_INTERVAL]
-    if write_interval.total_milliseconds == 0:
-        cg.add_define("USE_PREFERENCES_SYNC_EVERY_LOOP")
-    else:
-        cg.add(var.set_write_interval(write_interval))
+    cg.add(var.set_update_interval(write_interval))
     if config.get(CONF_RTC_STORAGE):
         preferences.request_rtc_storage()
     if config.get(CONF_STORAGE_BACKEND):
