@@ -23,6 +23,13 @@ static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
 // Largest data stage any control request in this component uses.
 static constexpr size_t UAC_CTRL_MAX_DATA_LEN = 8;
 
+// Audio devices in the field reject a class request now and then and answer the very same
+// request a moment later, so one refusal does not mean the control is not there. The Linux
+// USB audio mixer allows ten attempts before it gives up on a request; the same count is
+// used here. A request the host never completed is not retried: that is a host or link
+// problem and repeating it only spends the timeout again.
+static constexpr uint8_t UAC_CTRL_ATTEMPTS = 10;
+
 // URBs per stream (triple-buffering).
 static constexpr uint8_t ISOC_NUM_URBS = 3;
 
@@ -651,43 +658,24 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     return false;
   }
 
-  auto result = std::make_shared<UacControlResult>();
-  // control_transfer takes both the setup packet's wLength and the size of the transfer
-  // from this vector, and for a read it does not copy the vector into the buffer. So a read
-  // asks for its data stage by passing a vector of the size it expects; passing an empty
-  // one asks the device for zero bytes and it answers with nothing.
-  size_t request_len = out_len;
+  // wLength is the length the class definition gives the request: two bytes for a volume,
+  // one for a mute, three for a sampling frequency. It is part of what identifies the
+  // request to the device, so it is sent as defined and never rounded.
+  //
+  // The buffer behind it is a separate matter. The host controller sizes an IN data stage
+  // from the buffer rather than from wLength, and it needs whole endpoint 0 packets, so a
+  // read rounds its buffer up to one. Anything the device does not send simply stays
+  // untouched in it.
+  size_t buffer_len = out_len;
+  const size_t w_length = (in_data != nullptr) ? in_len : out_len;
   if (in_data != nullptr) {
-    // The host requires the size of a control IN transfer to be a whole number of endpoint
-    // 0 packets. Ask for one full packet; wLength is an upper bound, so a device that has
-    // fewer bytes to give ends the data stage early and the short answer is what arrives.
     const usb_device_desc_t *dev_desc = this->get_device_desc_();
     if (dev_desc == nullptr || dev_desc->bMaxPacketSize0 == 0) {
       ESP_LOGW(TAG, "Control request 0x%02X skipped: endpoint 0 packet size is unknown", request);
       return false;
     }
-    request_len = dev_desc->bMaxPacketSize0;
-  }
-  std::vector<uint8_t> payload(request_len);
-  if (out_data != nullptr && out_len != 0)
-    memcpy(payload.data(), out_data, out_len);
-
-  if (!this->control_transfer(req_type, request, value, index,
-                              [result](const usb_host::TransferStatus &s) {
-                                result->success = s.success;
-                                result->status = s.error_code;
-                                if (s.success && s.data != nullptr) {
-                                  result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
-                                  memcpy(result->data, s.data, result->data_len);
-                                }
-                                result->done.store(true, std::memory_order_release);
-                              },
-                              payload)) {
-    // Nothing was handed to the host, so no callback is coming. Waiting for one would spend
-    // the full timeout and then report a device that did not answer, which is not what
-    // happened.
-    ESP_LOGW(TAG, "Control request 0x%02X was not submitted", request);
-    return false;
+    const size_t mps0 = dev_desc->bMaxPacketSize0;
+    buffer_len = ((in_len + mps0 - 1) / mps0) * mps0;
   }
 
   // A control transfer only makes progress while usb_host_lib_handle_events() is being
@@ -697,34 +685,77 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   // from the stream task did. Drive it here for as long as the wait lasts. Requests from
   // other tasks must not touch it, since it belongs to the loop task.
   const bool on_loop_task = (this->loop_task_ != nullptr && xTaskGetCurrentTaskHandle() == this->loop_task_);
-  const uint32_t started = millis();
-  while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
-    if (on_loop_task) {
-      uint32_t event_flags = 0;
-      usb_host_lib_handle_events(0, &event_flags);
+
+  uint16_t last_status = USB_TRANSFER_STATUS_COMPLETED;
+  size_t last_len = 0;
+  bool short_answer = false;
+  for (uint8_t attempt = 0; attempt < UAC_CTRL_ATTEMPTS; attempt++) {
+    auto result = std::make_shared<UacControlResult>();
+    std::vector<uint8_t> payload(buffer_len);
+    if (out_data != nullptr && out_len != 0)
+      memcpy(payload.data(), out_data, out_len);
+
+    if (!this->control_transfer(req_type, request, value, index,
+                                [result](const usb_host::TransferStatus &s) {
+                                  result->success = s.success;
+                                  result->status = s.error_code;
+                                  if (s.success && s.data != nullptr) {
+                                    result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
+                                    memcpy(result->data, s.data, result->data_len);
+                                  }
+                                  result->done.store(true, std::memory_order_release);
+                                },
+                                payload, static_cast<int32_t>(w_length))) {
+      // Nothing was handed to the host, so no callback is coming. Waiting for one would
+      // spend the full timeout and then report a device that did not answer, which is not
+      // what happened.
+      ESP_LOGW(TAG, "Control request 0x%02X was not submitted", request);
+      return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+
+    const uint32_t started = millis();
+    while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
+      if (on_loop_task) {
+        uint32_t event_flags = 0;
+        usb_host_lib_handle_events(0, &event_flags);
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    if (!result->done.load(std::memory_order_acquire)) {
+      // Submitted, but the host never reported it finishing either way. That is not the
+      // device turning the request down, so repeating it would only spend the timeout
+      // again.
+      ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
+               request, (req_type & usb_host::USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
+      return false;
+    }
+    if (result->success) {
+      if (in_data == nullptr)
+        return true;
+      if (result->data_len >= in_len) {
+        memcpy(in_data, result->data, in_len);
+        return true;
+      }
+      // A short answer is the device declining to give what the request asked for; it can
+      // answer the next attempt in full.
+      short_answer = true;
+      last_len = result->data_len;
+      continue;
+    }
+    short_answer = false;
+    last_status = result->status;
   }
 
-  if (!result->done.load(std::memory_order_acquire)) {
-    // Submitted, but the host never reported it finishing either way.
-    ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
-             request, (req_type & usb_host::USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
-    return false;
+  if (short_answer) {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X after %u attempts: returned %u of %u bytes", request, index,
+             static_cast<unsigned>(UAC_CTRL_ATTEMPTS), static_cast<unsigned>(last_len),
+             static_cast<unsigned>(in_len));
+  } else {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X after %u attempts: %s", request, index,
+             static_cast<unsigned>(UAC_CTRL_ATTEMPTS), uac_transfer_status_str(last_status));
   }
-  if (!result->success) {
-    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X: %s", request, index,
-             uac_transfer_status_str(result->status));
-    return false;
-  }
-  if (in_data != nullptr && result->data_len < in_len) {
-    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X returned %u of %u bytes", request, index,
-             static_cast<unsigned>(result->data_len), static_cast<unsigned>(in_len));
-    return false;
-  }
-  if (in_data != nullptr)
-    memcpy(in_data, result->data, in_len);
-  return true;
+  return false;
 }
 
 bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
@@ -804,8 +835,10 @@ void USBAudioClient::probe_speaker_volume_range_() {
   };
   int16_t vol_min = 0;
   int16_t vol_max = 0;
-  const bool min_ok = get_vol_range(UAC_GET_MIN, vol_min);
+  // MAX before MIN, so a device that only answers the first request leaves the more
+  // informative of the two behind.
   const bool max_ok = get_vol_range(UAC_GET_MAX, vol_max);
+  const bool min_ok = get_vol_range(UAC_GET_MIN, vol_min);
   // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
   // not strictly increasing means the reads did not return a usable answer.
   if (!min_ok || !max_ok || vol_min == UAC_VOLUME_SILENCE || vol_max <= vol_min) {
@@ -839,18 +872,22 @@ bool USBAudioClient::apply_speaker_volume_() {
   // A Feature Unit volume is already a dB scale, so a 0..1 setting is a position on that
   // scale, not an amplitude to be converted onto it. MIN, MAX and RES are what the device
   // says about that scale, and they are read on connect.
+  //
+  // The reserved 0x8000 silence code is not sent for any of this. It is not part of the
+  // scale, a device is free to treat it as an out of range value, and the bottom of the
+  // range is the quietest setting the device itself offers anyway.
   const float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
   int16_t vol;
-  if (clamped <= 0.0f) {
-    // The class reserves this code for silence; it is not the low end of the range.
-    vol = UAC_VOLUME_SILENCE;
-  } else if (this->spk_vol_range_known_) {
+  if (this->spk_vol_range_known_) {
     const int32_t span = static_cast<int32_t>(this->spk_vol_max_) - this->spk_vol_min_;
-    int32_t raw = this->spk_vol_min_ + std::lround(static_cast<double>(span) * clamped);
-    // Settings between two steps are not addressable, so land on one.
+    const int32_t raw = this->spk_vol_min_ + std::lround(static_cast<double>(span) * clamped);
+    // Settings between two steps are not addressable, so land on the nearest one rather
+    // than always on the one below.
     const int32_t res = this->spk_vol_res_;
-    raw = this->spk_vol_min_ + ((raw - this->spk_vol_min_) / res) * res;
-    vol = static_cast<int16_t>(std::clamp<int32_t>(raw, this->spk_vol_min_, this->spk_vol_max_));
+    const int32_t stepped = this->spk_vol_min_ + std::lround(static_cast<double>(raw - this->spk_vol_min_) / res) * res;
+    vol = static_cast<int16_t>(std::clamp<int32_t>(stepped, this->spk_vol_min_, this->spk_vol_max_));
+  } else if (clamped <= 0.0f) {
+    vol = UAC_VOLUME_MIN_GAIN;
   } else {
     // With no endpoints from the device the absolute definition is all that is left: the
     // value is gain in dB, so full volume is unity gain and each halving of the amplitude
@@ -879,9 +916,10 @@ bool USBAudioClient::apply_speaker_volume_() {
     const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
     const float actual_db = static_cast<float>(actual) / 256.0f;
     ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (device reports %.2f dB)", clamped * 100.0f, sent_db, actual_db);
-    // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
-    // rounding.
-    if (std::fabs(actual_db - sent_db) > 0.25f) {
+    // A device may only be settable in steps of its reported resolution, so landing within
+    // one of them is it rounding. Anything past that is the device overriding us.
+    const float tolerance = this->spk_vol_range_known_ ? (static_cast<float>(this->spk_vol_res_) / 256.0f) : 0.25f;
+    if (std::fabs(actual_db - sent_db) > tolerance) {
       ESP_LOGW(TAG, "Speaker volume not applied as requested: asked %.2f dB, device is at %.2f dB", sent_db,
                actual_db);
     }

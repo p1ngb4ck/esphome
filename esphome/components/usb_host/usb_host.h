@@ -189,8 +189,17 @@ class USBClient : public Component {
 
   // -- Control transfers -------------------------------------------------------
 #ifdef USE_USB_CONTROL_TRANSFERS
+  // w_length is what goes into the setup packet's wLength field, i.e. the number of bytes
+  // the request itself is defined to carry. It defaults to the size of data, which is what
+  // a request whose data stage is exactly its buffer wants.
+  //
+  // They are separate because the host controller sizes the data stage from the buffer and
+  // not from wLength (see the comment in the IDF's _buffer_fill_ctrl), and an IN data stage
+  // needs a buffer of whole endpoint packets. A control read therefore rounds its buffer up
+  // and passes the length the class defines here, so what goes on the wire stays the
+  // request the device expects. Negative means "take it from data".
   bool control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index, const transfer_cb_t &callback,
-                        const std::vector<uint8_t> &data = {});
+                        const std::vector<uint8_t> &data = {}, int32_t w_length = -1);
 #endif
 
   // -- Interface claim / release / alt-setting ---------------------------------

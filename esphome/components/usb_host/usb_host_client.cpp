@@ -463,7 +463,7 @@ bool USBClient::transfer_out(uint8_t ep_address, const transfer_cb_t &callback, 
 #ifdef USE_USB_CONTROL_TRANSFERS
 
 bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, uint16_t index,
-                                 const transfer_cb_t &callback, const std::vector<uint8_t> &data) {
+                                 const transfer_cb_t &callback, const std::vector<uint8_t> &data, int32_t w_length) {
   auto *trq = this->get_trq_();
   if (trq == nullptr)
     return false;
@@ -473,12 +473,20 @@ bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, 
     this->release_trq(trq);
     return false;
   }
+  const size_t setup_length = (w_length < 0) ? length : static_cast<size_t>(w_length);
+  if (setup_length > length) {
+    // The device is being told it may send or receive more than the buffer holds.
+    ESP_LOGE(TAG, "control_transfer: wLength %u exceeds the %u byte buffer", static_cast<unsigned>(setup_length),
+             static_cast<unsigned>(length));
+    this->release_trq(trq);
+    return false;
+  }
   auto control_packet = ByteBuffer(SETUP_PACKET_SIZE, LITTLE);
   control_packet.put_uint8(type);
   control_packet.put_uint8(request);
   control_packet.put_uint16(value);
   control_packet.put_uint16(index);
-  control_packet.put_uint16(length);
+  control_packet.put_uint16(setup_length);
   memcpy(trq->transfer->data_buffer, control_packet.get_data().data(), SETUP_PACKET_SIZE);
   if (length != 0 && !(type & USB_DIR_IN))
     memcpy(trq->transfer->data_buffer + SETUP_PACKET_SIZE, data.data(), length);
