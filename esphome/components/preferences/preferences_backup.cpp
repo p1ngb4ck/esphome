@@ -10,7 +10,7 @@
 #include <string>
 
 #include "esphome/components/storage/storage.h"
-#include "esphome/components/esp32/preferences.h"
+#include "preferences_store.h"
 
 #include <esp_rom_crc.h>
 
@@ -1234,7 +1234,7 @@ bool preferences_export_to_raw(RawStorage *device, uint64_t address, uint64_t wi
   // Flush pending preference writes so NVS reflects the current state.
   global_preferences->sync();
 
-  storage::KeyValueStorage *kv = esphome::esp32::get_preferences_store();
+  storage::KeyValueStorage *kv = preferences::get_backup_store();
   if (kv == nullptr) {
     ESP_LOGE(TAG, "preferences store unavailable");
     return false;
@@ -1359,7 +1359,7 @@ bool preferences_import_from_raw(RawStorage *device, uint64_t address, uint64_t 
   }
 
   sweep_app_entities();
-  storage::KeyValueStorage *kv = esphome::esp32::get_preferences_store();
+  storage::KeyValueStorage *kv = preferences::get_backup_store();
   if (kv == nullptr) {
     ESP_LOGE(TAG, "preferences store unavailable");
     return false;
@@ -1427,7 +1427,7 @@ bool preferences_export_to_storage(const char *path, const char *format, const P
   // Flush pending preference writes so NVS reflects the current state.
   global_preferences->sync();
 
-  storage::KeyValueStorage *kv = esphome::esp32::get_preferences_store();
+  storage::KeyValueStorage *kv = preferences::get_backup_store();
   if (kv == nullptr) {
     ESP_LOGE(TAG, "preferences store unavailable");
     return false;
@@ -1629,7 +1629,7 @@ bool preferences_import_from_storage(const char *path, const char *format, bool 
     return false;
   }
 
-  storage::KeyValueStorage *store = esphome::esp32::get_preferences_store();
+  storage::KeyValueStorage *store = preferences::get_backup_store();
   if (store == nullptr) {
     ESP_LOGE(TAG, "preferences store unavailable");
     return false;

@@ -4,6 +4,10 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/preferences_rtc.h"
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+#include "esphome/components/storage/storage.h"
+#include "esphome/components/binary_storage/nvs_store.h"
+#endif
 #include <esp_attr.h>
 #include <nvs_flash.h>
 #include <soc/soc_caps.h>
@@ -13,6 +17,29 @@
 namespace esphome::esp32 {
 
 static const char *const TAG = "preferences";
+
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+// The esp32 flash preference path routed through the KeyValueStorage interface. The store adopts the
+// "esphome" NVS handle that open() establishes very early (before the logger), so this is
+// format-identical to raw NVS -- it is the interface seam the storage-backed override hooks into.
+// The RTC path is untouched and never goes through here.
+static binary_storage::NVSStore s_pref_store;
+#endif
+
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+static storage::KeyValueStorage *s_kv = nullptr;
+
+// True iff a value of exactly len bytes exists for key; fills data on success.
+static bool pref_kv_read(uint32_t key, uint8_t *data, size_t len) {
+  size_t stored = 0;
+  if (s_kv == nullptr || s_kv->get_size(key, &stored) != storage::StorageError::STORAGE_ERROR_OK)
+    return false;
+  if (stored != len)
+    return false;
+  size_t got = 0;
+  return s_kv->get(key, data, len, &got) == storage::StorageError::STORAGE_ERROR_OK && got == len;
+}
+#endif
 
 struct NVSData {
   uint32_t key;
@@ -109,6 +136,10 @@ bool ESP32PreferenceBackend::load(uint8_t *data, size_t len) {
   char key_str[UINT32_MAX_STR_SIZE];
   uint32_to_str(key_str, this->key);
   size_t actual_len;
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+  if (s_kv != nullptr)
+    return pref_kv_read(this->key, data, len);
+#endif
   esp_err_t err = nvs_get_blob(this->nvs_handle, key_str, nullptr, &actual_len);
   if (err != 0) {
     ESP_LOGV(TAG, "nvs_get_blob('%s'): %s - the key might not be set yet", key_str, esp_err_to_name(err));
@@ -132,9 +163,24 @@ void ESP32Preferences::open() {
   // Runs from app_main() before the logger is initialized; any logging here
   // must be deferred. See s_open_err and make_preference() below.
   nvs_flash_init();
+#ifdef USE_ESP32_PREFERENCES_NO_INTERNAL
+  // Preferences are backed by an external store bound later (set_external_preferences_store);
+  // do not open the internal "esphome" namespace or fall back to it. nvs_flash_init() above is
+  // kept because other IDF subsystems (wifi/BT calibration) may need the default partition. s_kv
+  // stays null until the external store is bound, so any preference read before then returns the
+  // default -- pre-storage readers must therefore use RTC (keep_early).
+  this->nvs_handle = 0;
+  return;
+#endif
   esp_err_t err = nvs_open("esphome", NVS_READWRITE, &this->nvs_handle);
-  if (err == 0)
+  if (err == 0) {
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+    s_pref_store.set_namespace("esphome");
+    s_pref_store.adopt_handle(this->nvs_handle);
+    s_kv = &s_pref_store;
+#endif
     return;
+  }
 
   s_open_err = err;
   nvs_flash_deinit();
@@ -145,6 +191,13 @@ void ESP32Preferences::open() {
   if (err != 0) {
     this->nvs_handle = 0;
   }
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+  else {
+    s_pref_store.set_namespace("esphome");
+    s_pref_store.adopt_handle(this->nvs_handle);
+    s_kv = &s_pref_store;
+  }
+#endif
 }
 
 ESPPreferenceObject ESP32Preferences::make_preference(size_t length, uint32_t type, bool in_flash) {
@@ -230,7 +283,15 @@ bool ESP32Preferences::sync() {
     uint32_to_str(key_str, save.key);
     ESP_LOGVV(TAG, "Checking if NVS data %s has changed", key_str);
     if (this->is_changed_(this->nvs_handle, save, key_str)) {
-      esp_err_t err = nvs_set_blob(this->nvs_handle, key_str, save.data.data(), save.data.size());
+      esp_err_t err;
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+      if (s_kv != nullptr)
+        err = s_kv->set(save.key, save.data.data(), save.data.size()) == storage::StorageError::STORAGE_ERROR_OK
+                  ? ESP_OK
+                  : ESP_FAIL;
+      else
+#endif
+        err = nvs_set_blob(this->nvs_handle, key_str, save.data.data(), save.data.size());
       ESP_LOGV(TAG, "sync: key: %s, len: %zu", key_str, save.data.size());
       if (err != 0) {
         ESP_LOGV(TAG, "nvs_set_blob('%s', len=%zu) failed: %s", key_str, save.data.size(), esp_err_to_name(err));
@@ -270,6 +331,19 @@ bool ESP32Preferences::sync() {
 
 bool ESP32Preferences::is_changed_(uint32_t nvs_handle, const NVSData &to_save, const char *key_str) {
   size_t actual_len;
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+  if (s_kv != nullptr) {
+    if (s_kv->get_size(to_save.key, &actual_len) != storage::StorageError::STORAGE_ERROR_OK)
+      return true;  // not set yet -> changed
+    if (actual_len != to_save.data.size())
+      return true;
+    SmallBufferWithHeapFallback<256> stored_data(actual_len);
+    size_t got = 0;
+    if (s_kv->get(to_save.key, stored_data.get(), actual_len, &got) != storage::StorageError::STORAGE_ERROR_OK)
+      return true;
+    return memcmp(to_save.data.data(), stored_data.get(), to_save.data.size()) != 0;
+  }
+#endif
   esp_err_t err = nvs_get_blob(nvs_handle, key_str, nullptr, &actual_len);
   if (err != 0) {
     ESP_LOGV(TAG, "nvs_get_blob('%s'): %s - the key might not be set yet", key_str, esp_err_to_name(err));
@@ -309,6 +383,14 @@ bool ESP32Preferences::reset() {
 static ESP32Preferences s_preferences;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 ESP32Preferences *get_preferences() { return &s_preferences; }
+
+#ifdef USE_ESP32_PREFERENCES_STORAGE
+// Rebind the flash-preference KeyValueStorage to an external store (e.g. an esp_partition NVS on
+// external flash). All flash-backed preferences created AFTER this call read/write through the new
+// store; earlier ones keep their store. Called once the external store is initialised (storage
+// stage). RTC-backed preferences (in_flash=false) are unaffected.
+void set_external_preferences_store(storage::KeyValueStorage *kv) { s_kv = kv; }
+#endif
 
 void setup_preferences() {
   s_preferences.open();
