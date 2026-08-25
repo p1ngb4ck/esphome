@@ -21,7 +21,14 @@ CONF_USB_AUDIO_ID = "usb_audio_id"
 CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
 CONF_FEEDBACK = "feedback"
+CONF_VOLUME_CURVE = "volume_curve"
 CONF_DEFAULT_BUFFER_SIZE = 6400
+
+VolumeCurve = usb_audio_ns.enum("VolumeCurve", is_class=True)
+VOLUME_CURVES = {
+    "linear": VolumeCurve.LINEAR,
+    "logarithmic": VolumeCurve.LOGARITHMIC,
+}
 
 SUPPORTED_VARIANTS = [
     esp32.const.VARIANT_ESP32S2,
@@ -40,6 +47,9 @@ CONFIG_SCHEMA = cv.All(
                 CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
             ): cv.positive_int,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
+            cv.Optional(CONF_VOLUME_CURVE, default="linear"): cv.enum(
+                VOLUME_CURVES, lower=True
+            ),
         }
     ),
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
@@ -53,6 +63,7 @@ async def to_code(config):
     cg.add(var.set_microphone_buffer_size(config[CONF_MICROPHONE_BUFFER_SIZE]))
     cg.add(var.set_speaker_buffer_size(config[CONF_SPEAKER_BUFFER_SIZE]))
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
+    cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

@@ -34,6 +34,26 @@ static constexpr uint32_t STREAM_REOPEN_MAX_MS = 30000;
 static constexpr int16_t UAC_VOLUME_SILENCE = static_cast<int16_t>(0x8000);
 // Smallest gain the class can express; 0x8000 below it is the silence code, not a value.
 static constexpr int16_t UAC_VOLUME_MIN_GAIN = static_cast<int16_t>(0x8001);
+// A device whose reported scale tops out at or below this is not describing a scale it
+// plays on. The Linux USB audio mixer draws the same line at -96 dB.
+static constexpr int16_t UAC_VOLUME_BOGUS_MAX = static_cast<int16_t>(-96 * 256);
+
+// How a 0..1 setting is turned into a position on the device's volume scale.
+//
+// LINEAR treats the setting as a position on the scale itself: 50 percent is the middle of
+// what the device reports between MIN and MAX. That is what the class definition describes
+// and what the reference implementations do, and on a device with a narrow scale it is
+// what feels right.
+//
+// LOGARITHMIC treats the setting as an amplitude and converts it: 50 percent is 6.02 dB
+// below full, a quarter is 12.04 dB below, and so on, clamped into the device's scale. On a
+// device whose scale runs down to -100 dB or further this is the more predictable of the
+// two, because a linear position spends most of its travel in a range that is already
+// inaudible.
+enum class VolumeCurve : uint8_t {
+  LINEAR = 0,
+  LOGARITHMIC = 1,
+};
 
 // -- Forward declarations -----------------------------------------------------
 class USBAudioMicrophone;
@@ -70,6 +90,7 @@ class USBAudioClient : public usb_host::USBClient {
   void set_speaker_params(uint8_t channels, uint16_t bits, uint32_t sample_rate);
   // Use an asynchronous OUT endpoint's feedback stream to pace playback (default on).
   void set_feedback_enabled(bool enabled) { this->feedback_enabled_ = enabled; }
+  void set_volume_curve(VolumeCurve curve) { this->volume_curve_ = curve; }
 
   void set_microphone(USBAudioMicrophone *mic) { this->microphone_ = mic; }
   void set_speaker(USBAudioSpeaker *spk) { this->speaker_ = spk; }
@@ -86,8 +107,15 @@ class USBAudioClient : public usb_host::USBClient {
   void set_speaker_mute_state(bool mute_state);
   // The last requested values. A request is held while the stream is closed, so these can
   // be ahead of what the device has been told.
-  float get_speaker_volume_level() const { return this->spk_volume_; }
-  bool get_speaker_mute_state() const { return this->spk_muted_; }
+  float get_speaker_volume_level() const { return this->spk_ctl_.volume; }
+  bool get_speaker_mute_state() const { return this->spk_ctl_.muted; }
+
+  // The capture side of the same thing. A device that describes a Feature Unit in its
+  // capture path takes these the same way the playback path takes the two above.
+  void set_microphone_volume_level(float volume);
+  void set_microphone_mute_state(bool mute_state);
+  float get_microphone_volume_level() const { return this->mic_ctl_.volume; }
+  bool get_microphone_mute_state() const { return this->mic_ctl_.muted; }
 
   // Speaker write - called from speaker task / play(); returns bytes accepted.
   // timeout_ms: FreeRTOS ring buffer block time (0 = non-blocking).
@@ -147,14 +175,20 @@ class USBAudioClient : public usb_host::USBClient {
                                uint8_t *data, size_t len);
   bool uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
                               const uint8_t *data, size_t len);
-  bool set_sampling_frequency_(uint8_t ep_addr, uint32_t freq);
-  // Fill channels with the Feature Unit channel numbers a speaker volume request has to be
-  // written to, and return how many. channels must hold UAC_FU_MAX_CHANNELS entries.
-  uint8_t speaker_volume_channels_(uint8_t *channels) const;
+  // Tell the device which rate the stream runs at. UAC 1.0 puts that control on the
+  // isochronous endpoint, UAC 2.0 on the Clock Source entity behind the terminal.
+  bool set_sample_rate_(const UacAltInfo &alt, const UacControlState &ctl, uint32_t freq);
+  // Find the Clock Source entity that drives a terminal, or 0 when there is none.
+  uint8_t find_clock_source_(uint8_t terminal_id);
+  // Read the class-specific AudioControl header of the first audio function and record
+  // which version of the class the device speaks.
+  void detect_uac_version_();
   // Read the volume range the device reports, so a fraction can be mapped onto it.
-  void probe_speaker_volume_range_();
-  bool apply_speaker_volume_();
-  bool apply_speaker_mute_();
+  void probe_volume_range_(UacControlState &ctl, const char *what);
+  bool apply_volume_(UacControlState &ctl, const char *what);
+  bool apply_mute_(UacControlState &ctl, const char *what);
+  void set_volume_level_(UacControlState &ctl, const char *what, float volume);
+  void set_mute_state_(UacControlState &ctl, const char *what, bool mute_state);
 
   // -- Stream open / close ---------------------------------------------------
   bool open_speaker_stream_();
@@ -192,8 +226,11 @@ class USBAudioClient : public usb_host::USBClient {
   // The task that runs the component loop, captured in setup().
   TaskHandle_t loop_task_{nullptr};
   uint8_t ac_intf_{0};             // AudioControl interface number
-  UacFeatureUnit speaker_fu_{};    // Feature Unit serving the speaker terminal
-  UacFeatureUnit mic_fu_{};        // Feature Unit serving the microphone terminal
+  // Which version of the audio class the attached device speaks, from bcdADC.
+  uint16_t uac_version_{UAC_VERSION_1};
+  // Feature Unit, volume and mute of each direction.
+  UacControlState spk_ctl_{};
+  UacControlState mic_ctl_{};
 
   uint8_t spk_as_intf_{0};         // AudioStreaming interface for speaker
   UacAltInfo spk_alt_{};           // chosen alt-setting for speaker
@@ -231,21 +268,8 @@ class USBAudioClient : public usb_host::USBClient {
   bool mic_suspended_{false};   // true when microphone is explicitly paused
   bool device_connected_{false};
 
-  // -- Volume / mute state ---------------------------------------------------
-  float   spk_volume_{1.0f};
-  bool    spk_muted_{false};
-  // Whether the value above has already been sent to the device it is currently attached
-  // to, so an unchanged setting is not requested again.
-  bool    spk_volume_sent_{false};
-  bool    spk_mute_sent_{false};
-
-  // -- Volume range (from GET_MIN / GET_MAX on connect) ---------------------
-  // Only meaningful while spk_vol_range_known_ is set: these are the device's own
-  // endpoints, never a stand-in for them.
-  bool    spk_vol_range_known_{false};
-  int16_t spk_vol_min_{0};
-  int16_t spk_vol_max_{0};
-  int16_t spk_vol_res_{1};  // GET_RES: the step the device can actually be set to
+  // -- Volume mapping --------------------------------------------------------
+  VolumeCurve volume_curve_{VolumeCurve::LINEAR};
 };
 
 }  // namespace usb_audio

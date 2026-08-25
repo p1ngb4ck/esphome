@@ -12,6 +12,13 @@
 namespace esphome {
 namespace usb_audio {
 
+// -- Audio class version (bcdADC in the class-specific AC interface header) ---
+// The two versions share their descriptor headers and their addressing, but they differ in
+// how a Feature Unit lists its controls, in how a parameter's range is asked for, and in
+// where the sample clock lives. Everything that differs is selected from this value.
+static constexpr uint16_t UAC_VERSION_1 = 0x0100;
+static constexpr uint16_t UAC_VERSION_2 = 0x0200;
+
 // -- Interface subclass codes (bInterfaceSubClass) ----------------------------
 static constexpr uint8_t UAC_SC_AUDIOCONTROL   = 0x01;
 static constexpr uint8_t UAC_SC_AUDIOSTREAMING  = 0x02;
@@ -30,6 +37,10 @@ static constexpr uint8_t UAC_AC_SELECTOR_UNIT   = 0x05;
 static constexpr uint8_t UAC_AC_FEATURE_UNIT    = 0x06;
 static constexpr uint8_t UAC_AC_PROCESSING_UNIT = 0x07;
 static constexpr uint8_t UAC_AC_EXTENSION_UNIT  = 0x08;
+// UAC 2.0 only: the sample clock became an entity of its own.
+static constexpr uint8_t UAC2_AC_CLOCK_SOURCE     = 0x0A;
+static constexpr uint8_t UAC2_AC_CLOCK_SELECTOR   = 0x0B;
+static constexpr uint8_t UAC2_AC_CLOCK_MULTIPLIER = 0x0C;
 
 // -- AudioStreaming interface descriptor subtypes (bDescriptorSubType) ---------
 static constexpr uint8_t UAC_AS_GENERAL     = 0x01;
@@ -47,6 +58,12 @@ static constexpr uint8_t UAC_SET_MAX = 0x03;
 static constexpr uint8_t UAC_GET_MAX = 0x83;
 static constexpr uint8_t UAC_SET_RES = 0x04;
 static constexpr uint8_t UAC_GET_RES = 0x84;
+
+// UAC 2.0 replaced the per-attribute request codes with two: CUR carries the value and
+// RANGE returns every (MIN, MAX, RES) triplet the control offers. The direction lives in
+// bmRequestType, so the same code is used for reading and writing.
+static constexpr uint8_t UAC2_CS_CUR   = 0x01;
+static constexpr uint8_t UAC2_CS_RANGE = 0x02;
 
 // -- bmRequestType values ------------------------------------------------------
 // Class request to interface:  OUT=0x21  IN=0xA1
@@ -69,11 +86,25 @@ static constexpr uint8_t UAC_FU_BASS_BOOST_CONTROL = 0x09;
 static constexpr uint8_t UAC_FU_LOUDNESS_CONTROL   = 0x0A;
 
 // -- Sampling Frequency endpoint control selector ------------------------------
+// UAC 1.0: the sample rate is a control on the isochronous endpoint itself.
 static constexpr uint8_t UAC_EP_SAMPLING_FREQ_CONTROL = 0x01;
+// UAC 2.0: it is a control on the Clock Source entity feeding the terminal, and the value
+// is four bytes instead of three.
+static constexpr uint8_t UAC2_CS_SAM_FREQ_CONTROL = 0x01;
 
-// -- Feature Unit channel mask bits (bmaControls) -----------------------------
+// -- Feature Unit control bits (bmaControls) ----------------------------------
+// UAC 1.0 gives each control one bit per entry.
 static constexpr uint8_t UAC_FU_CTL_MUTE   = (1 << 0);
 static constexpr uint8_t UAC_FU_CTL_VOLUME = (1 << 1);
+// UAC 2.0 gives each control two bits in a fixed four byte entry: 0 means the control is
+// not there, 1 that it can only be read, 3 that the host may set it. Only a control the
+// host may set is of use here, and 2 is not a defined value.
+static constexpr uint32_t UAC2_FU_CTL_MUTE_MASK    = 0x00000003u;
+static constexpr uint32_t UAC2_FU_CTL_MUTE_RW      = 0x00000003u;
+static constexpr uint32_t UAC2_FU_CTL_VOLUME_MASK  = 0x0000000Cu;
+static constexpr uint32_t UAC2_FU_CTL_VOLUME_RW    = 0x0000000Cu;
+// Bytes per bmaControls entry in UAC 2.0; the descriptor has no bControlSize field.
+static constexpr uint8_t UAC2_FU_CONTROL_SIZE = 4;
 
 // -- Terminal types (specification section 2.1) -------------------------------
 // An Output Terminal of this type sends audio to the host, so it belongs to the capture
@@ -113,6 +144,14 @@ struct UacAltInfo {
   uint32_t sample_freq_lower{0}; // used when sample_freq_type == 0
   uint32_t sample_freq_upper{0}; // used when sample_freq_type == 0
   uint32_t sample_freq[UAC_MAX_SAMPLE_FREQS]{};
+  // bTerminalLink from the class-specific AS interface descriptor: the Terminal of the
+  // AudioControl interface this stream is the USB end of. It is how the Clock Source that
+  // drives the stream is found.
+  uint8_t  terminal_link{0};
+  // UAC 2.0 does not list sample frequencies in the descriptors; the Clock Source entity
+  // answers for them. An alt-setting marked this way is not matched against a frequency
+  // during parsing, and the rate is set on the clock when the stream opens.
+  bool     freq_from_clock{false};
   bool     valid{false};
 };
 
@@ -140,6 +179,31 @@ struct UacFeatureUnit {
 static constexpr uint8_t UAC_FU_MASTER_CHANNEL = 0;
 // Channels addressable through the per-channel bitmaps above.
 static constexpr uint8_t UAC_FU_MAX_CHANNELS = 8;
+
+// -- Volume and mute state of one direction -----------------------------------
+// Playback and capture differ only in which Feature Unit they address, so both keep the
+// same block and the same code drives them.
+struct UacControlState {
+  UacFeatureUnit fu{};
+  // The last requested values. A request made while no device is attached is held here, so
+  // these can be ahead of what the device has been told.
+  float volume{1.0f};
+  bool  muted{false};
+  // Whether the values above have already been sent to the device currently attached, so
+  // an unchanged setting is not requested again.
+  bool  volume_sent{false};
+  bool  mute_sent{false};
+
+  // What the device answered when asked what its volume scale is. The endpoints are only
+  // meaningful while range_known is set: they are the device's own, never a stand-in.
+  bool    range_known{false};
+  int16_t vol_min{0};
+  int16_t vol_max{0};
+  int16_t vol_res{1};  // the step the device can actually be set to
+
+  // Sample clock entity driving this direction (UAC 2.0 only; 0 when there is none).
+  uint8_t clock_id{0};
+};
 
 }  // namespace usb_audio
 }  // namespace esphome

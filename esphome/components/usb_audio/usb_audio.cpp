@@ -23,6 +23,13 @@ static constexpr uint32_t CTRL_TIMEOUT_MS = 1000;
 // Largest data stage any control request in this component uses.
 static constexpr size_t UAC_CTRL_MAX_DATA_LEN = 8;
 
+// Audio devices in the field reject a class request now and then and answer the very same
+// request a moment later, so one refusal does not mean the control is not there. The Linux
+// USB audio mixer allows ten attempts before it gives up on a request; the same count is
+// used here. A request the host never completed is not retried: that is a host or link
+// problem and repeating it only spends the timeout again.
+static constexpr uint8_t UAC_CTRL_ATTEMPTS = 10;
+
 // URBs per stream (triple-buffering).
 static constexpr uint8_t ISOC_NUM_URBS = 3;
 
@@ -152,6 +159,49 @@ void USBAudioClient::flush_speaker_buffer_() {
 // -----------------------------------------------------------------------------
 // Descriptor parsing
 // -----------------------------------------------------------------------------
+
+void USBAudioClient::detect_uac_version_() {
+  // Assume the older version until the device says otherwise: a device that does not
+  // describe itself is far more likely to be a 1.0 one, and the 1.0 layouts are the ones a
+  // 2.0 device would never be parsed with by accident.
+  this->uac_version_ = UAC_VERSION_1;
+
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  if (cfg == nullptr)
+    return;
+
+  uint16_t total = cfg->wTotalLength;
+  int offset = 0;
+  const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  bool in_ac = false;
+
+  while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
+    if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+      const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
+      in_ac = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
+               id->bAlternateSetting == 0);
+      continue;
+    }
+    if (!in_ac || desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 5)
+      continue;
+
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
+    if (d[2] != UAC_AC_HEADER)
+      continue;
+
+    // Class-specific AC interface header: bcdADC at [3..4]. This is read before the
+    // streaming interfaces are picked, so it is the first audio function's header. A device
+    // that describes two functions of different class versions is not something the
+    // specification provides for.
+    const uint16_t bcd = static_cast<uint16_t>(d[3] | (d[4] << 8));
+    this->uac_version_ = (bcd >= UAC_VERSION_2) ? UAC_VERSION_2 : UAC_VERSION_1;
+    ESP_LOGD(TAG, "Device speaks audio class %u.%u", static_cast<unsigned>(bcd >> 8),
+             static_cast<unsigned>((bcd >> 4) & 0x0F));
+    return;
+  }
+
+  ESP_LOGD(TAG, "No AudioControl header found; assuming audio class 1.0");
+}
 
 bool USBAudioClient::find_ac_interface_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
@@ -351,30 +401,58 @@ uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t ma
     if (d[2] != UAC_AC_FEATURE_UNIT)
       continue;
 
-    // Feature Unit layout (UAC 1.0 section 4.3.2.5):
-    // [3] bUnitID  [4] bSourceID  [5] bControlSize
-    // [6..] bmaControls[0] (master), then one entry per channel.
+    // Feature Unit layout:
+    //   UAC 1.0 (section 4.3.2.5): [3] bUnitID [4] bSourceID [5] bControlSize
+    //                              [6..] bmaControls[0] (master), then one per channel,
+    //                              bControlSize bytes each, one bit per control.
+    //   UAC 2.0 (section 4.7.2.8): [3] bUnitID [4] bSourceID
+    //                              [5..] bmaControls[0] (master), then one per channel,
+    //                              always four bytes each, two bits per control.
+    // Both end with iFeature, which is why the trailing byte is not counted as an entry.
+    const bool v2 = (this->uac_version_ >= UAC_VERSION_2);
     UacFeatureUnit fu{};
     fu.unit_id      = d[3];
     fu.source_id    = d[4];
-    fu.control_size = d[5];
-    if (fu.control_size == 0 || (7 + fu.control_size) > desc->bLength)
+    fu.control_size = v2 ? UAC2_FU_CONTROL_SIZE : d[5];
+    const uint8_t controls_off = v2 ? 5 : 6;
+    if (fu.control_size == 0 || (controls_off + fu.control_size + 1) > desc->bLength)
       continue;
-    fu.master_controls = d[6];
-    fu.has_mute   = (fu.master_controls & UAC_FU_CTL_MUTE) != 0;
-    fu.has_volume = (fu.master_controls & UAC_FU_CTL_VOLUME) != 0;
-    fu.control_entries = (desc->bLength - 7) / fu.control_size;
+    fu.control_entries = (desc->bLength - controls_off - 1) / fu.control_size;
+    if (fu.control_entries == 0)
+      continue;
+
+    // What one bmaControls entry says about mute and volume, in whichever encoding the
+    // class version uses. A UAC 2.0 control that can only be read is of no use here, so it
+    // counts as not being there.
+    auto entry_controls = [&](uint8_t entry, bool &mute, bool &volume) {
+      const uint16_t off = controls_off + static_cast<uint16_t>(entry) * fu.control_size;
+      if (off + fu.control_size > desc->bLength) {
+        mute = volume = false;
+        return;
+      }
+      if (!v2) {
+        mute = (d[off] & UAC_FU_CTL_MUTE) != 0;
+        volume = (d[off] & UAC_FU_CTL_VOLUME) != 0;
+        return;
+      }
+      const uint32_t bm = static_cast<uint32_t>(d[off]) | (static_cast<uint32_t>(d[off + 1]) << 8) |
+                          (static_cast<uint32_t>(d[off + 2]) << 16) | (static_cast<uint32_t>(d[off + 3]) << 24);
+      mute = (bm & UAC2_FU_CTL_MUTE_MASK) == UAC2_FU_CTL_MUTE_RW;
+      volume = (bm & UAC2_FU_CTL_VOLUME_MASK) == UAC2_FU_CTL_VOLUME_RW;
+    };
+
+    entry_controls(0, fu.has_mute, fu.has_volume);
+    fu.master_controls = d[controls_off];
 
     // Not every device puts its controls on the master entry; some describe them per
     // channel only. Record those so a control that exists can still be reached.
     for (uint8_t entry = 1; entry < fu.control_entries && entry <= UAC_FU_MAX_CHANNELS; entry++) {
-      const uint16_t control_off = 6 + static_cast<uint16_t>(entry) * fu.control_size;
-      if (control_off >= desc->bLength)
-        break;
-      const uint8_t controls = d[control_off];
-      if (controls & UAC_FU_CTL_MUTE)
+      bool mute = false;
+      bool volume = false;
+      entry_controls(entry, mute, volume);
+      if (mute)
         fu.mute_channels |= static_cast<uint8_t>(1 << (entry - 1));
-      if (controls & UAC_FU_CTL_VOLUME)
+      if (volume)
         fu.volume_channels |= static_cast<uint8_t>(1 << (entry - 1));
     }
 
@@ -385,8 +463,10 @@ uint8_t USBAudioClient::collect_feature_units_(UacFeatureUnit *units, uint8_t ma
 
 bool USBAudioClient::parse_feature_units_() {
   // Another device may have been attached before, so start from nothing.
-  this->speaker_fu_ = {};
-  this->mic_fu_ = {};
+  this->spk_ctl_.fu = {};
+  this->mic_ctl_.fu = {};
+  this->spk_ctl_.clock_id = 0;
+  this->mic_ctl_.clock_id = 0;
 
   UacTopologyNode nodes[UAC_MAX_TOPOLOGY_NODES];
   const uint8_t node_count = this->collect_topology_(nodes);
@@ -408,24 +488,24 @@ bool USBAudioClient::parse_feature_units_() {
 
   for (uint8_t i = 0; i < unit_count; i++) {
     if (this->spk_cfg_.configured && units[i].unit_id == spk_fu_id)
-      this->speaker_fu_ = units[i];
+      this->spk_ctl_.fu = units[i];
     if (this->mic_cfg_.configured && units[i].unit_id == mic_fu_id)
-      this->mic_fu_ = units[i];
+      this->mic_ctl_.fu = units[i];
   }
 
   // Unit ID 0 is reserved by the specification, so it marks "nothing found" here.
   if (this->spk_cfg_.configured) {
-    if (this->speaker_fu_.unit_id != 0) {
-      ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", this->speaker_fu_.unit_id,
-               YESNO(this->speaker_fu_.mute_available()), YESNO(this->speaker_fu_.volume_available()));
+    if (this->spk_ctl_.fu.unit_id != 0) {
+      ESP_LOGD(TAG, "Speaker Feature Unit: id=%u mute=%s vol=%s", this->spk_ctl_.fu.unit_id,
+               YESNO(this->spk_ctl_.fu.mute_available()), YESNO(this->spk_ctl_.fu.volume_available()));
     } else {
       ESP_LOGW(TAG, "No Feature Unit in the playback path; volume and mute are unavailable");
     }
   }
   if (this->mic_cfg_.configured) {
-    if (this->mic_fu_.unit_id != 0) {
-      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_fu_.unit_id, YESNO(this->mic_fu_.mute_available()),
-               YESNO(this->mic_fu_.volume_available()));
+    if (this->mic_ctl_.fu.unit_id != 0) {
+      ESP_LOGD(TAG, "Mic Feature Unit: id=%u mute=%s vol=%s", this->mic_ctl_.fu.unit_id,
+               YESNO(this->mic_ctl_.fu.mute_available()), YESNO(this->mic_ctl_.fu.volume_available()));
     } else {
       ESP_LOGW(TAG, "No Feature Unit in the capture path; volume and mute are unavailable");
     }
@@ -453,6 +533,10 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       usb_host_device_info(this->device_handle_, &dev_info) == ESP_OK && dev_info.speed == USB_SPEED_HIGH;
   this->device_is_high_speed_ = is_high_speed;
 
+  // The two class versions describe a streaming format in different descriptors, so which
+  // one the device speaks has to be settled before its descriptors are read.
+  const bool uac2 = (this->uac_version_ >= UAC_VERSION_2);
+
   uint8_t cur_intf = 0;
   uint8_t cur_alt  = 0;
   bool    cur_is_as = false;
@@ -465,9 +549,13 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
     // Check if this alt-setting matches the requested format.
     if (cur_alt_info.channels != channels || cur_alt_info.bit_resolution != bits)
       return;
-    // Check sample rate.
-    bool freq_ok = false;
-    if (cur_alt_info.sample_freq_type == 0) {
+    // Check sample rate. An alt-setting whose rate is a property of a Clock Source has
+    // nothing in its descriptors to check against; the clock is asked when the stream
+    // opens.
+    bool freq_ok = cur_alt_info.freq_from_clock;
+    if (freq_ok) {
+      // nothing to check here
+    } else if (cur_alt_info.sample_freq_type == 0) {
       freq_ok = (sample_rate >= cur_alt_info.sample_freq_lower && sample_rate <= cur_alt_info.sample_freq_upper);
     } else {
       for (uint8_t i = 0; i < cur_alt_info.sample_freq_type && i < UAC_MAX_SAMPLE_FREQS; i++) {
@@ -509,6 +597,33 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
 
     if (dtype == UAC_CS_INTERFACE && desc->bLength >= 3) {
       uint8_t sub = d[2];
+
+      if (sub == UAC_AS_GENERAL && desc->bLength >= 4) {
+        // Class-specific AS interface descriptor. Both versions start with bTerminalLink,
+        // which is the Terminal of the AudioControl interface this stream belongs to and
+        // therefore the way to the Clock Source in UAC 2.0.
+        cur_alt_info.terminal_link = d[3];
+        // UAC 2.0 (section 4.9.2) moved the channel count here:
+        // [3] bTerminalLink [4] bmControls [5] bFormatType [6..9] bmFormats
+        // [10] bNrChannels [11..14] bmChannelConfig [15] iChannelNames
+        if (uac2 && desc->bLength >= 11) {
+          cur_alt_info.channels = d[10];
+          format_seen = true;
+        }
+        continue;
+      }
+
+      if (sub == UAC_AS_FORMAT_TYPE && uac2 && desc->bLength >= 6) {
+        // Type I Format Type descriptor (UAC 2.0 table 2-2). The sample frequencies are
+        // not here: in this version the Clock Source entity answers for them.
+        // [3] bFormatType [4] bSubslotSize [5] bBitResolution
+        if (d[3] != 0x01)  // only Type I
+          continue;
+        cur_alt_info.sub_frame_size = d[4];
+        cur_alt_info.bit_resolution = d[5];
+        cur_alt_info.freq_from_clock = true;
+        continue;
+      }
 
       if (sub == UAC_AS_FORMAT_TYPE && desc->bLength >= 8) {
         // Type I Format Type descriptor (UAC 1.0 table 4-21):
@@ -651,43 +766,24 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
     return false;
   }
 
-  auto result = std::make_shared<UacControlResult>();
-  // control_transfer takes both the setup packet's wLength and the size of the transfer
-  // from this vector, and for a read it does not copy the vector into the buffer. So a read
-  // asks for its data stage by passing a vector of the size it expects; passing an empty
-  // one asks the device for zero bytes and it answers with nothing.
-  size_t request_len = out_len;
+  // wLength is the length the class definition gives the request: two bytes for a volume,
+  // one for a mute, three for a sampling frequency. It is part of what identifies the
+  // request to the device, so it is sent as defined and never rounded.
+  //
+  // The buffer behind it is a separate matter. The host controller sizes an IN data stage
+  // from the buffer rather than from wLength, and it needs whole endpoint 0 packets, so a
+  // read rounds its buffer up to one. Anything the device does not send simply stays
+  // untouched in it.
+  size_t buffer_len = out_len;
+  const size_t w_length = (in_data != nullptr) ? in_len : out_len;
   if (in_data != nullptr) {
-    // The host requires the size of a control IN transfer to be a whole number of endpoint
-    // 0 packets. Ask for one full packet; wLength is an upper bound, so a device that has
-    // fewer bytes to give ends the data stage early and the short answer is what arrives.
     const usb_device_desc_t *dev_desc = this->get_device_desc_();
     if (dev_desc == nullptr || dev_desc->bMaxPacketSize0 == 0) {
       ESP_LOGW(TAG, "Control request 0x%02X skipped: endpoint 0 packet size is unknown", request);
       return false;
     }
-    request_len = dev_desc->bMaxPacketSize0;
-  }
-  std::vector<uint8_t> payload(request_len);
-  if (out_data != nullptr && out_len != 0)
-    memcpy(payload.data(), out_data, out_len);
-
-  if (!this->control_transfer(req_type, request, value, index,
-                              [result](const usb_host::TransferStatus &s) {
-                                result->success = s.success;
-                                result->status = s.error_code;
-                                if (s.success && s.data != nullptr) {
-                                  result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
-                                  memcpy(result->data, s.data, result->data_len);
-                                }
-                                result->done.store(true, std::memory_order_release);
-                              },
-                              payload)) {
-    // Nothing was handed to the host, so no callback is coming. Waiting for one would spend
-    // the full timeout and then report a device that did not answer, which is not what
-    // happened.
-    ESP_LOGW(TAG, "Control request 0x%02X was not submitted", request);
-    return false;
+    const size_t mps0 = dev_desc->bMaxPacketSize0;
+    buffer_len = ((in_len + mps0 - 1) / mps0) * mps0;
   }
 
   // A control transfer only makes progress while usb_host_lib_handle_events() is being
@@ -697,34 +793,77 @@ bool USBAudioClient::uac_control_transfer_(uint8_t req_type, uint8_t request, ui
   // from the stream task did. Drive it here for as long as the wait lasts. Requests from
   // other tasks must not touch it, since it belongs to the loop task.
   const bool on_loop_task = (this->loop_task_ != nullptr && xTaskGetCurrentTaskHandle() == this->loop_task_);
-  const uint32_t started = millis();
-  while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
-    if (on_loop_task) {
-      uint32_t event_flags = 0;
-      usb_host_lib_handle_events(0, &event_flags);
+
+  uint16_t last_status = USB_TRANSFER_STATUS_COMPLETED;
+  size_t last_len = 0;
+  bool short_answer = false;
+  for (uint8_t attempt = 0; attempt < UAC_CTRL_ATTEMPTS; attempt++) {
+    auto result = std::make_shared<UacControlResult>();
+    std::vector<uint8_t> payload(buffer_len);
+    if (out_data != nullptr && out_len != 0)
+      memcpy(payload.data(), out_data, out_len);
+
+    if (!this->control_transfer(req_type, request, value, index,
+                                [result](const usb_host::TransferStatus &s) {
+                                  result->success = s.success;
+                                  result->status = s.error_code;
+                                  if (s.success && s.data != nullptr) {
+                                    result->data_len = std::min<size_t>(s.data_len, UAC_CTRL_MAX_DATA_LEN);
+                                    memcpy(result->data, s.data, result->data_len);
+                                  }
+                                  result->done.store(true, std::memory_order_release);
+                                },
+                                payload, static_cast<int32_t>(w_length))) {
+      // Nothing was handed to the host, so no callback is coming. Waiting for one would
+      // spend the full timeout and then report a device that did not answer, which is not
+      // what happened.
+      ESP_LOGW(TAG, "Control request 0x%02X was not submitted", request);
+      return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+
+    const uint32_t started = millis();
+    while (!result->done.load(std::memory_order_acquire) && (millis() - started) < CTRL_TIMEOUT_MS) {
+      if (on_loop_task) {
+        uint32_t event_flags = 0;
+        usb_host_lib_handle_events(0, &event_flags);
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    if (!result->done.load(std::memory_order_acquire)) {
+      // Submitted, but the host never reported it finishing either way. That is not the
+      // device turning the request down, so repeating it would only spend the timeout
+      // again.
+      ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
+               request, (req_type & usb_host::USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
+      return false;
+    }
+    if (result->success) {
+      if (in_data == nullptr)
+        return true;
+      if (result->data_len >= in_len) {
+        memcpy(in_data, result->data, in_len);
+        return true;
+      }
+      // A short answer is the device declining to give what the request asked for; it can
+      // answer the next attempt in full.
+      short_answer = true;
+      last_len = result->data_len;
+      continue;
+    }
+    short_answer = false;
+    last_status = result->status;
   }
 
-  if (!result->done.load(std::memory_order_acquire)) {
-    // Submitted, but the host never reported it finishing either way.
-    ESP_LOGW(TAG, "Control request 0x%02X to %s 0x%04X: no completion within %" PRIu32 " ms",
-             request, (req_type & usb_host::USB_DIR_IN) != 0 ? "get" : "set", index, CTRL_TIMEOUT_MS);
-    return false;
+  if (short_answer) {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X after %u attempts: returned %u of %u bytes", request, index,
+             static_cast<unsigned>(UAC_CTRL_ATTEMPTS), static_cast<unsigned>(last_len),
+             static_cast<unsigned>(in_len));
+  } else {
+    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X after %u attempts: %s", request, index,
+             static_cast<unsigned>(UAC_CTRL_ATTEMPTS), uac_transfer_status_str(last_status));
   }
-  if (!result->success) {
-    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X: %s", request, index,
-             uac_transfer_status_str(result->status));
-    return false;
-  }
-  if (in_data != nullptr && result->data_len < in_len) {
-    ESP_LOGW(TAG, "Control request 0x%02X to 0x%04X returned %u of %u bytes", request, index,
-             static_cast<unsigned>(result->data_len), static_cast<unsigned>(in_len));
-    return false;
-  }
-  if (in_data != nullptr)
-    memcpy(in_data, result->data, in_len);
-  return true;
+  return false;
 }
 
 bool USBAudioClient::uac_set_cur_interface_(uint8_t unit_id, uint8_t selector, uint8_t channel,
@@ -740,7 +879,10 @@ bool USBAudioClient::uac_get_cur_interface_(uint8_t unit_id, uint8_t selector, u
                                              uint8_t *data, size_t len) {
   const uint16_t wValue = static_cast<uint16_t>((selector << 8) | channel);
   const uint16_t wIndex = static_cast<uint16_t>((unit_id << 8) | this->ac_intf_);
-  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, UAC_GET_CUR, wValue, wIndex, nullptr, 0, data, len);
+  // UAC 1.0 has one request code per attribute, so reading the current value has its own.
+  // UAC 2.0 has one code for the value in either direction, and bmRequestType says which.
+  const uint8_t request = (this->uac_version_ >= UAC_VERSION_2) ? UAC2_CS_CUR : UAC_GET_CUR;
+  return this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, request, wValue, wIndex, nullptr, 0, data, len);
 }
 
 bool USBAudioClient::uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
@@ -749,17 +891,109 @@ bool USBAudioClient::uac_set_cur_endpoint_(uint8_t ep_addr, uint8_t selector,
   return this->uac_control_transfer_(UAC_REQ_TYPE_EP_SET, UAC_SET_CUR, wValue, ep_addr, data, len, nullptr, 0);
 }
 
-bool USBAudioClient::set_sampling_frequency_(uint8_t ep_addr, uint32_t freq) {
-  // Sampling frequency is 3 bytes little-endian.
-  uint8_t buf[3] = {
+uint8_t USBAudioClient::find_clock_source_(uint8_t terminal_id) {
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  if (cfg == nullptr || terminal_id == 0)
+    return 0;
+
+  // Two passes over the AudioControl interface. The first asks the Terminal which clock it
+  // is fed from, the second follows a Clock Selector to the entity behind it, because a
+  // Selector is not something a frequency can be set on.
+  auto scan = [&](uint8_t want_id, bool follow_selector) -> uint8_t {
+    uint16_t total = cfg->wTotalLength;
+    int offset = 0;
+    const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+    bool in_ac = false;
+    while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
+      if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+        const auto *id = reinterpret_cast<const usb_intf_desc_t *>(desc);
+        in_ac = (id->bInterfaceClass == USB_CLASS_AUDIO && id->bInterfaceSubClass == UAC_SC_AUDIOCONTROL &&
+                 id->bAlternateSetting == 0 && id->bInterfaceNumber == this->ac_intf_);
+        continue;
+      }
+      if (!in_ac || desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 4)
+        continue;
+      const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
+      if (d[3] != want_id)
+        continue;
+      const uint8_t subtype = d[2];
+      if (!follow_selector) {
+        // UAC 2.0 Terminal descriptors: bCSourceID sits after bAssocTerminal on an Input
+        // Terminal and after bSourceID as well on an Output Terminal.
+        if (subtype == UAC_AC_INPUT_TERMINAL && desc->bLength > 7)
+          return d[7];
+        if (subtype == UAC_AC_OUTPUT_TERMINAL && desc->bLength > 8)
+          return d[8];
+        return 0;
+      }
+      if (subtype == UAC2_AC_CLOCK_SOURCE)
+        return want_id;
+      // Clock Selector: baCSourceID[0] follows bNrInPins.
+      if (subtype == UAC2_AC_CLOCK_SELECTOR && desc->bLength > 5)
+        return d[5];
+      // Clock Multiplier: bCSourceID follows bClockID.
+      if (subtype == UAC2_AC_CLOCK_MULTIPLIER && desc->bLength > 4)
+        return d[4];
+      return 0;
+    }
+    return 0;
+  };
+
+  const uint8_t source = scan(terminal_id, false);
+  if (source == 0)
+    return 0;
+  const uint8_t clock = scan(source, true);
+  return (clock != 0) ? clock : source;
+}
+
+bool USBAudioClient::set_sample_rate_(const UacAltInfo &alt, const UacControlState &ctl, uint32_t freq) {
+  if (this->uac_version_ < UAC_VERSION_2) {
+    // UAC 1.0: a three byte control on the isochronous endpoint itself. A device is allowed
+    // not to have it when it runs at one fixed rate, so a refusal is not fatal.
+    uint8_t buf[3] = {
+        static_cast<uint8_t>(freq & 0xFF),
+        static_cast<uint8_t>((freq >> 8) & 0xFF),
+        static_cast<uint8_t>((freq >> 16) & 0xFF),
+    };
+    const bool ok = this->uac_set_cur_endpoint_(alt.ep_addr, UAC_EP_SAMPLING_FREQ_CONTROL, buf, sizeof(buf));
+    if (!ok) {
+      ESP_LOGW(TAG, "SET_CUR sampling freq ep=0x%02X freq=%" PRIu32 " failed (may not be supported)", alt.ep_addr,
+               freq);
+    }
+    return ok;
+  }
+
+  // UAC 2.0: a four byte control on the Clock Source entity that drives the terminal the
+  // stream is attached to. Nothing about it is addressed through the endpoint any more.
+  if (ctl.clock_id == 0) {
+    ESP_LOGW(TAG, "No Clock Source behind terminal %u; leaving the rate as the device has it", alt.terminal_link);
+    return false;
+  }
+  uint8_t buf[4] = {
       static_cast<uint8_t>(freq & 0xFF),
       static_cast<uint8_t>((freq >> 8) & 0xFF),
       static_cast<uint8_t>((freq >> 16) & 0xFF),
+      static_cast<uint8_t>((freq >> 24) & 0xFF),
   };
-  bool ok = this->uac_set_cur_endpoint_(ep_addr, UAC_EP_SAMPLING_FREQ_CONTROL, buf, sizeof(buf));
-  if (!ok)
-    ESP_LOGW(TAG, "SET_CUR sampling freq ep=0x%02X freq=%" PRIu32 " failed (may not be supported)", ep_addr, freq);
-  return ok;
+  const uint16_t wValue = static_cast<uint16_t>(UAC2_CS_SAM_FREQ_CONTROL << 8);
+  const uint16_t wIndex = static_cast<uint16_t>((ctl.clock_id << 8) | this->ac_intf_);
+  if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_SET, UAC2_CS_CUR, wValue, wIndex, buf, sizeof(buf), nullptr,
+                                   0)) {
+    ESP_LOGW(TAG, "SET_CUR sample rate on clock %u to %" PRIu32 " Hz failed", ctl.clock_id, freq);
+    return false;
+  }
+
+  // The clock is what the stream is then timed by, so what it ended up at decides whether
+  // the audio comes out at the right pitch. Saying what we asked for would say nothing.
+  uint8_t rb[4] = {0, 0, 0, 0};
+  if (this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, UAC2_CS_CUR, wValue, wIndex, nullptr, 0, rb, sizeof(rb))) {
+    const uint32_t actual = static_cast<uint32_t>(rb[0]) | (static_cast<uint32_t>(rb[1]) << 8) |
+                            (static_cast<uint32_t>(rb[2]) << 16) | (static_cast<uint32_t>(rb[3]) << 24);
+    if (actual != freq) {
+      ESP_LOGW(TAG, "Clock %u is at %" PRIu32 " Hz, not the requested %" PRIu32 " Hz", ctl.clock_id, actual, freq);
+    }
+  }
+  return true;
 }
 
 // -- Volume / mute -------------------------------------------------------------
@@ -780,137 +1014,215 @@ static uint8_t uac_control_channels(bool on_master, uint8_t channel_mask, uint8_
   return count;
 }
 
-uint8_t USBAudioClient::speaker_volume_channels_(uint8_t *channels) const {
-  return uac_control_channels(this->speaker_fu_.has_volume, this->speaker_fu_.volume_channels, channels);
-}
-
-void USBAudioClient::probe_speaker_volume_range_() {
-  this->spk_vol_range_known_ = false;
-  if (!this->speaker_fu_.volume_available())
+void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what) {
+  ctl.range_known = false;
+  if (ctl.fu.unit_id == 0 || !ctl.fu.volume_available())
     return;
 
-  // Query the range on the same channel the value will be written to.
+  // Ask on the same channel the value will be written to.
   uint8_t vol_channels[UAC_FU_MAX_CHANNELS];
-  const uint8_t vol_channel =
-      this->speaker_volume_channels_(vol_channels) > 0 ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
-  auto get_vol_range = [this, vol_channel](uint8_t bRequest, int16_t &out) {
-    uint8_t buf[2] = {0, 0};
-    const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
-    const uint16_t wIndex = static_cast<uint16_t>((this->speaker_fu_.unit_id << 8) | this->ac_intf_);
-    if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf, sizeof(buf)))
-      return false;
-    out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
-    return true;
-  };
+  const uint8_t vol_count = uac_control_channels(ctl.fu.has_volume, ctl.fu.volume_channels, vol_channels);
+  const uint8_t vol_channel = (vol_count > 0) ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
+  const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
+  const uint16_t wIndex = static_cast<uint16_t>((ctl.fu.unit_id << 8) | this->ac_intf_);
+
   int16_t vol_min = 0;
   int16_t vol_max = 0;
-  const bool min_ok = get_vol_range(UAC_GET_MIN, vol_min);
-  const bool max_ok = get_vol_range(UAC_GET_MAX, vol_max);
-  // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
-  // not strictly increasing means the reads did not return a usable answer.
-  if (!min_ok || !max_ok || vol_min == UAC_VOLUME_SILENCE || vol_max <= vol_min) {
-    ESP_LOGW(TAG, "Device reported no volume range; falling back to the absolute dB scale");
-    return;
+  int16_t vol_res = 0;
+  bool range_ok = false;
+
+  if (this->uac_version_ >= UAC_VERSION_2) {
+    // One RANGE request answers with the number of sub-ranges followed by a (MIN, MAX, RES)
+    // triplet for each, two bytes per value for a volume. A control split into several
+    // sub-ranges has gaps in it that cannot be expressed as one scale, so only the first is
+    // taken and the rest is left to the device to clamp.
+    uint8_t buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, UAC2_CS_RANGE, wValue, wIndex, nullptr, 0, buf,
+                                    sizeof(buf))) {
+      const uint16_t subranges = static_cast<uint16_t>(buf[0] | (buf[1] << 8));
+      if (subranges >= 1) {
+        vol_min = static_cast<int16_t>(buf[2] | (buf[3] << 8));
+        vol_max = static_cast<int16_t>(buf[4] | (buf[5] << 8));
+        vol_res = static_cast<int16_t>(buf[6] | (buf[7] << 8));
+        range_ok = true;
+        if (subranges > 1) {
+          ESP_LOGD(TAG, "%s volume has %u sub-ranges; using the first", what,
+                   static_cast<unsigned>(subranges));
+        }
+      }
+    }
+  } else {
+    auto get_vol_range = [this, wValue, wIndex](uint8_t bRequest, int16_t &out) {
+      uint8_t buf[2] = {0, 0};
+      if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf,
+                                       sizeof(buf)))
+        return false;
+      ESP_LOGD(TAG,
+         "VOLUME RANGE req=0x%02X raw=[%02X %02X]",
+         bRequest, buf[0], buf[1]);
+      out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
+      return true;
+    };
+    // MAX before MIN, so a device that only answers the first request leaves the more
+    // informative of the two behind.
+    const bool max_ok = get_vol_range(UAC_GET_MAX, vol_max);
+    const bool min_ok = get_vol_range(UAC_GET_MIN, vol_min);
+    range_ok = max_ok && min_ok;
+    // The resolution says which settings between the endpoints the device can actually
+    // take. A device that does not answer is treated as taking every step.
+    if (range_ok && !get_vol_range(UAC_GET_RES, vol_res))
+      vol_res = 0;
   }
 
-  // The resolution says which settings between the endpoints the device can actually take.
-  // A device that does not answer is treated as taking every step.
-  int16_t vol_res = 0;
-  if (!get_vol_range(UAC_GET_RES, vol_res) || vol_res <= 0)
+  if (!range_ok) {
+    ESP_LOGW(TAG, "%s reported no volume range; falling back to the absolute dB scale", what);
+    return;
+  }
+  // 0x8000 is the reserved "silence" code and never a range endpoint, and a range that is
+  // not strictly increasing means the answer is not a scale.
+  if (vol_min == UAC_VOLUME_SILENCE || vol_max <= vol_min) {
+    ESP_LOGW(TAG, "%s reported an unusable volume range (%d..%d); falling back to the absolute dB scale", what,
+             static_cast<int>(vol_min), static_cast<int>(vol_max));
+    return;
+  }
+  // A scale whose loudest setting is still that far down is not a scale a device is
+  // playing on; it is a stand-in a device returns when it has nothing to report. Mapping
+  // onto it would leave every setting inaudible.
+  if (vol_max <= UAC_VOLUME_BOGUS_MAX) {
+    ESP_LOGW(TAG, "%s reported a volume range topping out at %.2f dB; treating it as bogus", what,
+             static_cast<float>(vol_max) / 256.0f);
+    return;
+  }
+  // A step that is not positive, or one no smaller than the whole scale, describes nothing
+  // that can be landed on. Take every step instead.
+  if (vol_res <= 0 || vol_res >= static_cast<int32_t>(vol_max) - vol_min)
     vol_res = 1;
 
-  this->spk_vol_min_ = vol_min;
-  this->spk_vol_max_ = vol_max;
-  this->spk_vol_res_ = vol_res;
-  this->spk_vol_range_known_ = true;
-  ESP_LOGD(TAG, "Speaker volume range: %.2f dB to %.2f dB in steps of %.2f dB",
-           static_cast<float>(this->spk_vol_min_) / 256.0f, static_cast<float>(this->spk_vol_max_) / 256.0f,
-           static_cast<float>(this->spk_vol_res_) / 256.0f);
+  ctl.vol_min = vol_min;
+  ctl.vol_max = vol_max;
+  ctl.vol_res = vol_res;
+  ctl.range_known = true;
+  ESP_LOGD(TAG, "%s volume range: %.2f dB to %.2f dB in steps of %.2f dB", what,
+           static_cast<float>(ctl.vol_min) / 256.0f, static_cast<float>(ctl.vol_max) / 256.0f,
+           static_cast<float>(ctl.vol_res) / 256.0f);
 }
 
-bool USBAudioClient::apply_speaker_volume_() {
+bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   uint8_t channels[UAC_FU_MAX_CHANNELS];
-  const uint8_t channel_count = this->speaker_volume_channels_(channels);
-  if (channel_count == 0) {
-    ESP_LOGD(TAG, "Speaker volume %.0f%% ignored: device has no volume control", this->spk_volume_ * 100.0f);
+  const uint8_t channel_count = uac_control_channels(ctl.fu.has_volume, ctl.fu.volume_channels, channels);
+  if (ctl.fu.unit_id == 0 || channel_count == 0) {
+    ESP_LOGD(TAG, "%s volume %.0f%% ignored: device has no volume control", what, ctl.volume * 100.0f);
     return false;
   }
 
-  // A Feature Unit volume is already a dB scale, so a 0..1 setting is a position on that
-  // scale, not an amplitude to be converted onto it. MIN, MAX and RES are what the device
-  // says about that scale, and they are read on connect.
-  const float clamped = std::clamp(this->spk_volume_, 0.0f, 1.0f);
+  // A Feature Unit volume is a dB scale, and MIN, MAX and RES are what the device says
+  // about that scale. How a 0..1 setting is placed on it is the configured curve: as a
+  // position on the scale, or as an amplitude converted onto it.
+  //
+  // The reserved 0x8000 silence code is not sent for any of this. It is not part of the
+  // scale, a device is free to treat it as an out of range value, and the bottom of the
+  // range is the quietest setting the device itself offers anyway.
+  const float clamped = std::clamp(ctl.volume, 0.0f, 1.0f);
   int16_t vol;
-  if (clamped <= 0.0f) {
-    // The class reserves this code for silence; it is not the low end of the range.
-    vol = UAC_VOLUME_SILENCE;
-  } else if (this->spk_vol_range_known_) {
-    const int32_t span = static_cast<int32_t>(this->spk_vol_max_) - this->spk_vol_min_;
-    int32_t raw = this->spk_vol_min_ + std::lround(static_cast<double>(span) * clamped);
-    // Settings between two steps are not addressable, so land on one.
-    const int32_t res = this->spk_vol_res_;
-    raw = this->spk_vol_min_ + ((raw - this->spk_vol_min_) / res) * res;
-    vol = static_cast<int16_t>(std::clamp<int32_t>(raw, this->spk_vol_min_, this->spk_vol_max_));
+  if (ctl.range_known) {
+    int32_t raw;
+    if (this->volume_curve_ == VolumeCurve::LOGARITHMIC && clamped > 0.0f) {
+      // Full scale is the top of what the device offers, and each halving of the amplitude
+      // is 6.02 dB below that.
+      raw = static_cast<int32_t>(ctl.vol_max) + std::lround(20.0 * std::log10(static_cast<double>(clamped)) * 256.0);
+    } else if (this->volume_curve_ == VolumeCurve::LOGARITHMIC) {
+      raw = ctl.vol_min;
+    } else {
+      const int32_t span = static_cast<int32_t>(ctl.vol_max) - ctl.vol_min;
+      raw = ctl.vol_min + std::lround(static_cast<double>(span) * clamped);
+    }
+    raw = std::clamp<int32_t>(raw, ctl.vol_min, ctl.vol_max);
+    // Settings between two steps are not addressable, so land on the nearest one rather
+    // than always on the one below.
+    const int32_t res = ctl.vol_res;
+    const int32_t stepped = ctl.vol_min + std::lround(static_cast<double>(raw - ctl.vol_min) / res) * res;
+    vol = static_cast<int16_t>(std::clamp<int32_t>(stepped, ctl.vol_min, ctl.vol_max));
+  } else if (clamped <= 0.0f) {
+    vol = UAC_VOLUME_MIN_GAIN;
   } else {
     // With no endpoints from the device the absolute definition is all that is left: the
     // value is gain in dB, so full volume is unity gain and each halving of the amplitude
-    // is 6.02 dB below it.
+    // is 6.02 dB below it. There is no scale to place a position on, so the curve setting
+    // has nothing to choose between here.
     const int32_t raw = std::lround(20.0 * std::log10(static_cast<double>(clamped)) * 256.0);
     vol = static_cast<int16_t>(std::clamp<int32_t>(raw, UAC_VOLUME_MIN_GAIN, 0));
   }
 
-  uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};
+  uint8_t buf[2] = {
+    static_cast<uint8_t>(std::lround(clamped * 255.0f)),
+    0x80,
+  };
+  ESP_LOGD(TAG, "%s SET volume %.0f%%: vol=%d bytes=%02X %02X",
+         what, clamped * 100.0f, static_cast<int>(vol), buf[0], buf[1]);
   bool ok = true;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (!this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf,
-                                      sizeof(buf)))
+    if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
       ok = false;
   }
   const float sent_db = static_cast<float>(vol) / 256.0f;
   if (!ok) {
-    ESP_LOGW(TAG, "Speaker volume %.0f%% (%.2f dB) was not accepted by the device", clamped * 100.0f, sent_db);
+    ESP_LOGW(TAG, "%s volume %.0f%% (%.2f dB) was not accepted by the device", what, clamped * 100.0f, sent_db);
     return false;
   }
 
   // Read the value back. A device may clamp it to its own range or quantise it to a
-  // coarser step (GET_RES), so reporting what we sent would be reporting an assumption.
+  // coarser step, so reporting what we sent would be reporting an assumption.
   uint8_t rb[2] = {0, 0};
-  if (this->uac_get_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
-    const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
-    const float actual_db = static_cast<float>(actual) / 256.0f;
-    ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (device reports %.2f dB)", clamped * 100.0f, sent_db, actual_db);
-    // One step is 1/256 dB; anything past a quarter dB is the device overriding us, not
-    // rounding.
-    if (std::fabs(actual_db - sent_db) > 0.25f) {
-      ESP_LOGW(TAG, "Speaker volume not applied as requested: asked %.2f dB, device is at %.2f dB", sent_db,
-               actual_db);
+  if (this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
+    ESP_LOGD(TAG,
+           "%s volume GET RAW: [%02X %02X] LE=0x%04X",
+           what,
+           rb[0],
+           rb[1],
+           static_cast<unsigned>(rb[0] | (rb[1] << 8)));
+    const int16_t actual_db = static_cast<int16_t>(rb[0] | (rb[1] << 8));
+    const float actual_percent = (static_cast<float>(rb[0]) / 255.0f) * 100.0f;
+
+    ESP_LOGD(TAG,
+             "%s volume %.0f%% -> %.2f dB (device reports %.1f%%, raw=%02X %02X)",
+             what,
+             clamped * 100.0f,
+             sent_db,
+             actual_percent,
+             rb[0],
+             rb[1]
+    );
+    // A device may only be settable in steps of its reported resolution, so landing within
+    // one of them is it rounding. Anything past that is the device overriding us.
+    if (std::fabs(actual_percent - clamped * 100.0f) > 1.0f) {
+    ESP_LOGW(TAG, "%s volume not applied as requested: asked %.1f%%, device is at %.1f%%", what,
+           clamped * 100.0f, actual_percent);
     }
   } else {
-    ESP_LOGD(TAG, "Speaker volume %.0f%% -> %.2f dB (readback unavailable)", clamped * 100.0f, sent_db);
+    ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (readback unavailable)", what, clamped * 100.0f, sent_db);
   }
   return true;
 }
 
-bool USBAudioClient::apply_speaker_mute_() {
+bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
   uint8_t channels[UAC_FU_MAX_CHANNELS];
-  const uint8_t channel_count =
-      uac_control_channels(this->speaker_fu_.has_mute, this->speaker_fu_.mute_channels, channels);
-  if (channel_count == 0) {
-    ESP_LOGD(TAG, "Speaker mute %s ignored: device has no mute control", ONOFF(this->spk_muted_));
+  const uint8_t channel_count = uac_control_channels(ctl.fu.has_mute, ctl.fu.mute_channels, channels);
+  if (ctl.fu.unit_id == 0 || channel_count == 0) {
+    ESP_LOGD(TAG, "%s mute %s ignored: device has no mute control", what, ONOFF(ctl.muted));
     return false;
   }
 
-  uint8_t val = this->spk_muted_ ? 1 : 0;
+  uint8_t val = ctl.muted ? 1 : 0;
   bool ok = true;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (!this->uac_set_cur_interface_(this->speaker_fu_.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
+    if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
       ok = false;
   }
   if (!ok) {
-    ESP_LOGW(TAG, "Speaker mute %s was not accepted by the device", ONOFF(this->spk_muted_));
+    ESP_LOGW(TAG, "%s mute %s was not accepted by the device", what, ONOFF(ctl.muted));
     return false;
   }
-  ESP_LOGD(TAG, "Speaker mute %s", ONOFF(this->spk_muted_));
+  ESP_LOGD(TAG, "%s mute %s", what, ONOFF(ctl.muted));
   return true;
 }
 
@@ -1011,7 +1323,7 @@ bool USBAudioClient::open_speaker_stream_() {
   }
 
   // Set sampling frequency on the endpoint.
-  this->set_sampling_frequency_(this->spk_alt_.ep_addr, this->spk_cfg_.sample_rate);
+  this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
 
   this->spk_stream_open_ = true;
 
@@ -1045,7 +1357,7 @@ bool USBAudioClient::open_microphone_stream_() {
     return false;
   }
 
-  this->set_sampling_frequency_(this->mic_alt_.ep_addr, this->mic_cfg_.sample_rate);
+  this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
   this->mic_stream_open_ = true;
   ESP_LOGI(TAG, "Microphone stream open");
   return true;
@@ -1091,6 +1403,10 @@ void USBAudioClient::on_connected() {
   this->mic_format_ok_ = false;
   this->status_clear_error();
 
+  // Which version of the class the device speaks decides how its descriptors are laid out,
+  // so it is settled before any of them is read.
+  this->detect_uac_version_();
+
   if (this->spk_cfg_.configured) {
     this->spk_format_ok_ = this->parse_as_interface_(true, this->spk_cfg_.channels,
                                                      static_cast<uint8_t>(this->spk_cfg_.bits_per_sample),
@@ -1121,16 +1437,31 @@ void USBAudioClient::on_connected() {
   }
   this->parse_feature_units_();
 
+  // In UAC 2.0 the sample rate is a property of a Clock Source entity rather than of the
+  // endpoint, so the clock behind each stream's terminal is looked up once here.
+  if (this->uac_version_ >= UAC_VERSION_2) {
+    if (this->spk_format_ok_)
+      this->spk_ctl_.clock_id = this->find_clock_source_(this->spk_alt_.terminal_link);
+    if (this->mic_format_ok_)
+      this->mic_ctl_.clock_id = this->find_clock_source_(this->mic_alt_.terminal_link);
+    ESP_LOGD(TAG, "Clock sources: speaker=%u mic=%u", this->spk_ctl_.clock_id, this->mic_ctl_.clock_id);
+  }
+
   this->device_connected_ = true;
 
   // Feature Unit requests go to the AudioControl interface, so the saved volume and mute
   // state can be sent as soon as the device is there. Nothing about them depends on an
   // AudioStreaming alt-setting being selected or a stream being open.
-  this->probe_speaker_volume_range_();
-  this->apply_speaker_volume_();
-  this->apply_speaker_mute_();
-  this->spk_volume_sent_ = true;
-  this->spk_mute_sent_ = true;
+  this->probe_volume_range_(this->spk_ctl_, "Speaker");
+  this->apply_volume_(this->spk_ctl_, "Speaker");
+  this->apply_mute_(this->spk_ctl_, "Speaker");
+  this->spk_ctl_.volume_sent = true;
+  this->spk_ctl_.mute_sent = true;
+  this->probe_volume_range_(this->mic_ctl_, "Mic");
+  this->apply_volume_(this->mic_ctl_, "Mic");
+  this->apply_mute_(this->mic_ctl_, "Mic");
+  this->mic_ctl_.volume_sent = true;
+  this->mic_ctl_.mute_sent = true;
 
   // Open whichever streams are needed immediately.
   if (this->spk_cfg_.configured && this->spk_format_ok_ && !this->spk_suspended_)
@@ -1144,8 +1475,12 @@ void USBAudioClient::on_disconnected() {
   this->close_microphone_stream_();
   this->device_connected_ = false;
   // The next device has to be told the state from scratch.
-  this->spk_volume_sent_ = false;
-  this->spk_mute_sent_ = false;
+  this->spk_ctl_.volume_sent = false;
+  this->spk_ctl_.mute_sent = false;
+  this->spk_ctl_.range_known = false;
+  this->mic_ctl_.volume_sent = false;
+  this->mic_ctl_.mute_sent = false;
+  this->mic_ctl_.range_known = false;
   this->spk_format_ok_ = false;
   this->mic_format_ok_ = false;
   this->spk_open_fails_ = 0;
@@ -1275,28 +1610,45 @@ void USBAudioClient::suspend_microphone() {
   this->mic_suspended_ = true;
 }
 
-void USBAudioClient::set_speaker_volume_level(float volume) {
+// Take a volume or mute request for one direction. A request that cannot change what the
+// device was last told is dropped: a media player drives several speakers that all end up
+// here, so the same setting arrives more than once, and asking the device again for what
+// it was just asked is a control request that cannot change anything.
+void USBAudioClient::set_volume_level_(UacControlState &ctl, const char *what, float volume) {
   const float clamped = std::clamp(volume, 0.0f, 1.0f);
-  // A media player drives several speakers that all end up here, so the same setting
-  // arrives more than once. Asking the device again for what it was just asked is a
-  // control request that cannot change anything.
-  if (this->spk_volume_sent_ && clamped == this->spk_volume_)
+  if (ctl.volume_sent && clamped == ctl.volume)
     return;
-  this->spk_volume_ = clamped;
+  ctl.volume = clamped;
   if (!this->device_connected_)
     return;
-  this->apply_speaker_volume_();
-  this->spk_volume_sent_ = true;
+  this->apply_volume_(ctl, what);
+  ctl.volume_sent = true;
+}
+
+void USBAudioClient::set_mute_state_(UacControlState &ctl, const char *what, bool mute_state) {
+  if (ctl.mute_sent && mute_state == ctl.muted)
+    return;
+  ctl.muted = mute_state;
+  if (!this->device_connected_)
+    return;
+  this->apply_mute_(ctl, what);
+  ctl.mute_sent = true;
+}
+
+void USBAudioClient::set_speaker_volume_level(float volume) {
+  this->set_volume_level_(this->spk_ctl_, "Speaker", volume);
 }
 
 void USBAudioClient::set_speaker_mute_state(bool mute_state) {
-  if (this->spk_mute_sent_ && mute_state == this->spk_muted_)
-    return;
-  this->spk_muted_ = mute_state;
-  if (!this->device_connected_)
-    return;
-  this->apply_speaker_mute_();
-  this->spk_mute_sent_ = true;
+  this->set_mute_state_(this->spk_ctl_, "Speaker", mute_state);
+}
+
+void USBAudioClient::set_microphone_volume_level(float volume) {
+  this->set_volume_level_(this->mic_ctl_, "Mic", volume);
+}
+
+void USBAudioClient::set_microphone_mute_state(bool mute_state) {
+  this->set_mute_state_(this->mic_ctl_, "Mic", mute_state);
 }
 
 esp_err_t USBAudioClient::write_speaker(const uint8_t *data, size_t length, uint32_t timeout_ms) {
