@@ -26,7 +26,6 @@ storage_ns = cg.esphome_ns.namespace("storage")
 binary_storage_ns = cg.esphome_ns.namespace("binary_storage")
 NVSStore = binary_storage_ns.class_("NVSStore")
 RawStorage = storage_ns.class_("RawStorage")
-IntervalSyncer = preferences_ns.class_("IntervalSyncer", cg.Component)
 IntervalSyncer = preferences_ns.class_("IntervalSyncer", cg.PollingComponent)
 
 CONF_FLASH_WRITE_INTERVAL = "flash_write_interval"
