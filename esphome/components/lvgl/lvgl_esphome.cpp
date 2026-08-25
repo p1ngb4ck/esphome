@@ -644,7 +644,6 @@ void LvglComponent::draw_end_() {
   }
 }
 
-<<<<<<< HEAD
 void LvglComponent::register_monitor_callback() {
   // Register monitor callback if not already registered
   // This allows components to register draw_end callbacks after setup
@@ -654,22 +653,12 @@ void LvglComponent::register_monitor_callback() {
   }
 }
 
-bool LvglComponent::is_paused() const {
-  if (this->paused_)
-    return true;
-  if (this->update_when_display_idle_) {
-    for (auto *disp : this->displays_) {
-      if (!disp->is_idle())
-        return true;
-    }
-=======
 bool LvglComponent::displays_busy_() const {
   if (!this->update_when_display_idle_)
     return false;
   for (auto *disp : this->displays_) {
     if (!disp->is_idle())
       return true;
->>>>>>> b4ad0eb86bab936163ab90cb1b1f659f1032c8f3
   }
   return false;
 }
