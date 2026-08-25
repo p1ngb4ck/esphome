@@ -1153,7 +1153,10 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     vol = static_cast<int16_t>(std::clamp<int32_t>(raw, UAC_VOLUME_MIN_GAIN, 0));
   }
 
-  uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};
+  uint8_t buf[2] = {
+    static_cast<uint8_t>(std::lround(clamped * 255.0f)),
+    0x80,
+  };
   ESP_LOGD(TAG, "%s SET volume %.0f%%: vol=%d bytes=%02X %02X",
          what, clamped * 100.0f, static_cast<int>(vol), buf[0], buf[1]);
   bool ok = true;
