@@ -1194,7 +1194,6 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     );
     // A device may only be settable in steps of its reported resolution, so landing within
     // one of them is it rounding. Anything past that is the device overriding us.
-    const float actual_percent = static_cast<float>(rb[0]) * 100.0f / 255.0f;
     if (std::fabs(actual_percent - clamped * 100.0f) > 1.0f) {
     ESP_LOGW(TAG, "%s volume not applied as requested: asked %.1f%%, device is at %.1f%%", what,
            clamped * 100.0f, actual_percent);
