@@ -2417,10 +2417,10 @@ async def _reconcile_vfs_fatfs_sdkconfig(
                 "FF_USE_LFN == 0. Remove CONFIG_FATFS_LFN_NONE, or unset enable_exfat."
             )
         if not user_picked_lfn:
-            set_opt("CONFIG_FATFS_LFN_NONE", False)
-            set_opt("CONFIG_FATFS_LFN_HEAP", True)
-            set_opt("CONFIG_FATFS_MAX_LFN", 255)
-        set_opt("CONFIG_FATFS_VOLUME_COUNT", 4)
+            set_idf_sdkconfig_default("CONFIG_FATFS_LFN_NONE", False)
+            set_idf_sdkconfig_default("CONFIG_FATFS_LFN_HEAP", True)
+            set_idf_sdkconfig_default("CONFIG_FATFS_MAX_LFN", 255)
+            set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
     elif enable_exfat:
         # FATFS is not in the build, so tear down any stale patched copy before failing --
         # otherwise the error state also leaves the override behind until enable_exfat is
