@@ -663,8 +663,13 @@ void USBUartTypeCH934X::start_input(USBUartChannelBase *channel) {
 }
 
 void CH934XChannel::write_array(const uint8_t *data, size_t len) {
-  if (!this->initialised_.load() || this->tx_shared_channel_ == nullptr)
+  // Same diagnostic as USBUartChannelBase::write_array(), which this override replaces --
+  // otherwise a write to a configured-but-unconnected CH934x channel is silently dropped
+  // while every other usb_uart driver reports it.
+  if (!this->initialised_.load() || this->tx_shared_channel_ == nullptr) {
+    ESP_LOGD(TAG, "Channel not initialised - write ignored");
     return;
+  }
 
   auto *shared = this->tx_shared_channel_;
 #ifdef USE_UART_DEBUGGER
