@@ -28,6 +28,7 @@ KEY_PATH = "path"
 KEY_OVERRIDE_PATH = "override_path"
 KEY_SUBMODULES = "submodules"
 KEY_EXTRA_BUILD_FILES = "extra_build_files"
+KEY_CERT_BUNDLE = "cert_bundle"
 KEY_FULL_CERT_BUNDLE = "full_cert_bundle"
 KEY_NETWORK_SDKCONFIG = "network_sdkconfig"
 
