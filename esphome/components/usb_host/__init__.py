@@ -58,14 +58,18 @@ def _set_max_packet_size(config: dict) -> dict:
     # variant is known.
     if CONF_MAX_PACKET_SIZE not in config:
         config[CONF_MAX_PACKET_SIZE] = _default_max_packet_size()
-    CORE.data.setdefault(DOMAIN, {})[CONF_MAX_PACKET_SIZE] = config[
-        CONF_MAX_PACKET_SIZE
-    ]
+    domain_data = CORE.data.setdefault(DOMAIN, {})
+    domain_data[CONF_MAX_PACKET_SIZE] = config[CONF_MAX_PACKET_SIZE]
+    domain_data[CONF_MAX_TRANSFER_REQUESTS] = config[CONF_MAX_TRANSFER_REQUESTS]
     return config
 
 
 def get_max_packet_size() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_PACKET_SIZE, 64)
+
+
+def get_max_transfer_requests() -> int:
+    return CORE.data.get(DOMAIN, {}).get(CONF_MAX_TRANSFER_REQUESTS, 16)
 
 
 def _default_max_packet_size() -> int:

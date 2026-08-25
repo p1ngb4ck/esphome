@@ -136,6 +136,7 @@ size_t RingBuffer::pop(uint8_t *data, size_t len) {
   }
   return len;
 }
+
 void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
   if (!this->initialised_.load()) {
     ESP_LOGD(TAG, "Channel not initialised - write ignored");
@@ -144,7 +145,7 @@ void USBUartChannelBase::write_array(const uint8_t *data, size_t len) {
 #ifdef USE_UART_DEBUGGER
   if (this->debug_) {
     constexpr size_t batch = 16;
-    char buf[format_hex_pretty_size(batch)];  // "XX,XX,...,XX\0"
+    char buf[format_hex_pretty_size(batch)];
     for (size_t off = 0; off < len; off += batch) {
       size_t n = std::min(len - off, batch);
       format_hex_pretty_to(buf, data + off, n, ',');
@@ -224,7 +225,7 @@ void USBUartComponent::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
-      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];  // "XX,XX,...,XX\0"
+      char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];
       format_hex_pretty_to(buf, chunk->data, chunk->length, ',');
       ESP_LOGD(TAG, "%s<<< %s", channel->debug_prefix_.c_str(), buf);
     }
@@ -429,7 +430,8 @@ void USBUartTypeCdcAcm::on_connected() {
     // Claim the communication (interrupt) interface so CDC class requests are accepted
     // by the device. Some CDC ACM implementations (e.g. EFR32 NCP) require this before
     // they enable data flow on the bulk endpoints.
-    if (channel->cdc_dev_.interrupt_interface_number != 0xFF &&
+    // Skipped when claim_notification_ep is false to conserve HCD channels.
+    if (channel->claim_notification_ep_ && channel->cdc_dev_.interrupt_interface_number != 0xFF &&
         channel->cdc_dev_.interrupt_interface_number != channel->cdc_dev_.bulk_interface_number) {
       auto err_comm = usb_host_interface_claim(this->handle_, this->device_handle_,
                                                channel->cdc_dev_.interrupt_interface_number, 0);
@@ -440,6 +442,8 @@ void USBUartTypeCdcAcm::on_connected() {
       } else {
         ESP_LOGD(TAG, "Claimed comm interface %d", channel->cdc_dev_.interrupt_interface_number);
       }
+    } else if (!channel->claim_notification_ep_) {
+      channel->cdc_dev_.interrupt_interface_number = 0xFF;
     }
     auto err =
         usb_host_interface_claim(this->handle_, this->device_handle_, channel->cdc_dev_.bulk_interface_number, 0);
@@ -465,7 +469,7 @@ void USBUartTypeCdcAcm::on_disconnected() {
       usb_host_endpoint_halt(this->device_handle_, channel->cdc_dev_.out_ep->bEndpointAddress);
       usb_host_endpoint_flush(this->device_handle_, channel->cdc_dev_.out_ep->bEndpointAddress);
     }
-    if (channel->cdc_dev_.notify_ep != nullptr) {
+    if (channel->claim_notification_ep_ && channel->cdc_dev_.notify_ep != nullptr) {
       usb_host_endpoint_halt(this->device_handle_, channel->cdc_dev_.notify_ep->bEndpointAddress);
       usb_host_endpoint_flush(this->device_handle_, channel->cdc_dev_.notify_ep->bEndpointAddress);
     }
@@ -478,7 +482,6 @@ void USBUartTypeCdcAcm::on_disconnected() {
     // Reset the input and output started flags to their initial state to avoid the possibility of spurious restarts
     channel->input_started_.store(true);
     channel->output_started_.store(true);
-    channel->input_buffer_.clear();
     // Drain any pending output chunks and return them to the pool
     {
       UsbOutputChunk *chunk;
@@ -486,6 +489,7 @@ void USBUartTypeCdcAcm::on_disconnected() {
         channel->output_pool_.release(chunk);
       }
     }
+    channel->input_buffer_.clear();
     channel->initialised_.store(false);
   }
   USBClient::on_disconnected();

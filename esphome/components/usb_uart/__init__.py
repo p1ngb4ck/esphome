@@ -4,6 +4,7 @@ from esphome.components.esp32 import VARIANT_ESP32P4, get_esp32_variant
 from esphome.components.uart import CONF_DEBUG_PREFIX, CONF_FLUSH_TIMEOUT, UARTComponent
 from esphome.components.usb_host import (
     get_max_packet_size,
+    get_max_transfer_requests,
     register_usb_client,
     usb_device_schema,
 )
@@ -15,6 +16,7 @@ from esphome.const import (
     CONF_DEBUG,
     CONF_DUMMY_RECEIVER,
     CONF_ID,
+    CONF_TYPE,
 )
 from esphome.core import CORE
 from esphome.cpp_types import Component
@@ -26,6 +28,7 @@ CODEOWNERS = ["@clydebarrow"]
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
+CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 
 UARTParityOptions = usb_uart_ns.enum("UARTParityOptions")
 UART_PARITY_OPTIONS = {
@@ -44,42 +47,61 @@ UART_STOP_BITS_OPTIONS = {
 }
 
 DEFAULT_BAUD_RATE = 9600
+# CH934x TX packets carry a 3-byte header ([port, len_lo, len_hi]) inside every chunk, so the
+# usable payload per chunk is that much smaller. Kept in sync with CH934XChannel::TX_HEADER_SIZE.
+CH934X_TX_HEADER_SIZE = 3
+CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
 
 
 class Type:
     def __init__(
         self,
-        name: str,
-        vid: int,
-        pid: int,
-        cls: str | None,
-        max_channels: int = 1,
-        baud_rate_required: bool = True,
-        max_baud: int = 1_000_000,
-    ) -> None:
+        name,
+        vid,
+        pid,
+        cls,
+        max_channels=1,
+        baud_rate_required=True,
+        channel_cls=None,
+        max_baud=1_000_000,
+    ):
         self.name = name
         cls = cls or name
+        self.cls_name = cls
         self.vid = vid
         self.pid = pid
         self.cls = usb_uart_ns.class_(f"USBUartType{cls}", USBUartComponent)
+        # max_channels may be a callable (evaluated lazily during config validation)
         self._max_channels = max_channels
         self.baud_rate_required = baud_rate_required
+        self.channel_cls = channel_cls or USBUartChannel
         self.max_baud = max_baud
 
     @property
-    def max_channels(self) -> int:
+    def max_channels(self):
         return (
             3
-            if (
-                CORE.is_esp32
-                and get_esp32_variant() != VARIANT_ESP32P4
-                and self._max_channels > 3
-            )
+            if CORE.is_esp32
+            and get_esp32_variant() != VARIANT_ESP32P4
+            and self._max_channels > 3
             else self._max_channels
         )
 
 
+class MpxType(Type):
+    @property
+    def max_channels(self):
+        # Multiplexed devices aren't restricted by the number of available USB endpoints
+        return self._max_channels
+
+
 uart_types = (
+    MpxType("CH9344", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344L", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH9344Q", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
+    MpxType("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
+    MpxType("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     Type("CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False),
     Type("CH34X", 0x1A86, 0x55D5, "CH34X", 4, max_baud=2_000_000),
     Type("CH340", 0x1A86, 0x7523, "CH34X", 1, max_baud=2_000_000),
@@ -99,45 +121,53 @@ uart_types = (
 )
 
 
-def channel_schema(type_: "Type") -> cv.Schema:
+def channel_schema(type_: "Type", baud_rate_required):
+    max_channels = type_.max_channels
     return cv.Schema(
         {
             cv.Required(CONF_CHANNELS): cv.All(
                 cv.ensure_list(
-                    cv.Schema(
-                        {
-                            cv.GenerateID(): cv.declare_id(USBUartChannel),
-                            cv.Optional(CONF_BUFFER_SIZE, default=256): cv.int_range(
-                                min=64, max=8192
-                            ),
-                            (
-                                cv.Required(CONF_BAUD_RATE)
-                                if type_.baud_rate_required
-                                else cv.Optional(
-                                    CONF_BAUD_RATE, default=DEFAULT_BAUD_RATE
-                                )
-                            ): cv.int_range(min=300, max=type_.max_baud),
-                            cv.Optional(CONF_STOP_BITS, default="1"): cv.enum(
-                                UART_STOP_BITS_OPTIONS, upper=True
-                            ),
-                            cv.Optional(CONF_PARITY, default="NONE"): cv.enum(
-                                UART_PARITY_OPTIONS, upper=True
-                            ),
-                            cv.Optional(CONF_DATA_BITS, default=8): cv.int_range(
-                                min=5, max=8
-                            ),
-                            cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
-                            cv.Optional(CONF_DEBUG, default=False): cv.boolean,
-                            cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
-                            cv.Optional(
-                                CONF_FLUSH_TIMEOUT, default="100ms"
-                            ): cv.positive_time_period_milliseconds,
-                        }
+                    cv.All(
+                        cv.Schema(
+                            {
+                                cv.GenerateID(): cv.declare_id(type_.channel_cls),
+                                cv.Optional(
+                                    CONF_BUFFER_SIZE, default=256
+                                ): cv.int_range(min=64, max=8192),
+                                (
+                                    cv.Required(CONF_BAUD_RATE)
+                                    if baud_rate_required
+                                    else cv.Optional(
+                                        CONF_BAUD_RATE, default=DEFAULT_BAUD_RATE
+                                    )
+                                ): cv.int_range(min=300, max=type_.max_baud),
+                                cv.Optional(CONF_STOP_BITS, default="1"): cv.enum(
+                                    UART_STOP_BITS_OPTIONS, upper=True
+                                ),
+                                cv.Optional(CONF_PARITY, default="NONE"): cv.enum(
+                                    UART_PARITY_OPTIONS, upper=True
+                                ),
+                                cv.Optional(CONF_DATA_BITS, default=8): cv.int_range(
+                                    min=5, max=8
+                                ),
+                                cv.Optional(
+                                    CONF_DUMMY_RECEIVER, default=False
+                                ): cv.boolean,
+                                cv.Optional(
+                                    CONF_CLAIM_NOTIFICATION_EP, default=False
+                                ): cv.boolean,
+                                cv.Optional(CONF_DEBUG, default=False): cv.boolean,
+                                cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
+                                cv.Optional(
+                                    CONF_FLUSH_TIMEOUT, default="100ms"
+                                ): cv.positive_time_period_milliseconds,
+                            }
+                        ),
                     )
                 ),
                 cv.Length(
                     max=type_.max_channels,
-                    msg=f"Device type {type_.name} supports a maximum of {type_.max_channels} channels",
+                    msg=f"{type_.name} supports a maximum of {max_channels} channels on this ESP32 variant",
                 ),
             )
         }
@@ -148,7 +178,7 @@ CONFIG_SCHEMA = cv.ensure_list(
     cv.typed_schema(
         {
             it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
-                channel_schema(it)
+                channel_schema(it, it.baud_rate_required)
             )
             for it in uart_types
         },
@@ -158,24 +188,50 @@ CONFIG_SCHEMA = cv.ensure_list(
 
 
 async def to_code(config: list[ConfigType]) -> None:
-    # The output chunk pool/queue are compile-time-sized templates shared by all
-    # USBUartChannel instances, so use the largest buffer_size across every channel
-    # of every device. Add one extra slot because LockFreeQueue<T,N> is a ring
-    # buffer that wastes one entry.
-    max_buffer_size = max(
-        channel[CONF_BUFFER_SIZE]
-        for device in config
-        for channel in device[CONF_CHANNELS]
-    )
-    output_chunk_count = max(max_buffer_size // get_max_packet_size(), 2) + 1
+    # The output chunk pool/queue are compile-time-sized templates shared by all channel
+    # instances. Add one extra slot because LockFreeQueue<T,N> is a ring buffer that wastes
+    # one entry.
+    type_by_name = {t.name: t for t in uart_types}
+    mps = get_max_packet_size()
+    payload = mps - CH934X_TX_HEADER_SIZE
+
+    output_chunk_count = 3
+    for device in config:
+        device_type = type_by_name.get(device[CONF_TYPE])
+        if isinstance(device_type, MpxType) and payload > 0:
+            # A multiplexed device routes every channel's TX through the shared queue on
+            # channel 0, and that queue only drains between loops -- so the pool has to hold
+            # ceil(buffer / payload) chunks for EVERY channel at once, not just the largest.
+            need = (
+                sum(
+                    -(-channel[CONF_BUFFER_SIZE] // payload)
+                    for channel in device[CONF_CHANNELS]
+                )
+                + 1
+            )
+        else:
+            device_max = max(
+                channel[CONF_BUFFER_SIZE] for channel in device[CONF_CHANNELS]
+            )
+            need = max(device_max // mps, 2) + 1
+        output_chunk_count = max(output_chunk_count, need)
+    # LockFreeQueue/EventPool index slots with a uint8_t, so the count cannot exceed 255.
+    output_chunk_count = min(output_chunk_count, 255)
     cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
-    # The refactored usb_host compiles its bulk/interrupt and control transfer paths only
-    # when a consumer requests them (Linux-URB-style submission engine); usb_uart needs both.
+
+    # Multiplexed (CH934x) drivers initialise their channels in parallel over a single shared
+    # command endpoint. Cap the concurrent init "lanes" at the transfer-request pool size so a
+    # wide device cannot exhaust it during setup.
+    max_init_lanes = get_max_transfer_requests()
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
     for device in config:
         var = await register_usb_client(device)
+        device_type = type_by_name.get(device[CONF_TYPE])
+        if isinstance(device_type, MpxType):
+            lanes = min(len(device[CONF_CHANNELS]), max_init_lanes)
+            cg.add(var.set_init_lanes(lanes))
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
             await cg.register_parented(chvar, var)
@@ -184,6 +240,7 @@ async def to_code(config: list[ConfigType]) -> None:
             cg.add(chvar.set_parity(channel[CONF_PARITY]))
             cg.add(chvar.set_baud_rate(channel[CONF_BAUD_RATE]))
             cg.add(chvar.set_dummy_receiver(channel[CONF_DUMMY_RECEIVER]))
+            cg.add(chvar.set_claim_notification_ep(channel[CONF_CLAIM_NOTIFICATION_EP]))
             cg.add(chvar.set_flush_timeout(channel[CONF_FLUSH_TIMEOUT]))
             cg.add(chvar.set_debug(channel[CONF_DEBUG]))
             if channel[CONF_DEBUG_PREFIX]:
