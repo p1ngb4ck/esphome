@@ -10,7 +10,6 @@
 #include <esp_partition.h>
 
 #include <algorithm>
-#include <esp_task_wdt.h>
 #include <sdkconfig.h>
 #include <spi_flash_mmap.h>
 #ifdef USE_OTA_DOWNGRADE_PROTECTION
@@ -197,15 +196,6 @@ OTAResponseTypes IDFOTABackend::begin(size_t image_size, ota::OTAType ota_type) 
 }
 
 OTAResponseTypes IDFOTABackend::app_slot_begin_(size_t image_size) {
-  // esp_ota_begin() erases the destination region, which blocks loopTask and
-  // scales with the erase size -- a fixed watchdog overruns on large OTA slots.
-  // An unknown size (0, e.g. web_server uploads) erases the whole partition, so
-  // budget against the bytes actually erased. ~10ms/KiB (conservative
-  // ~100 KiB/s erase) over a 15s floor; panic stays on so a stuck erase still
-  // resets rather than hanging forever.
-  size_t erase_size = image_size;
-  if (erase_size == 0 || erase_size > this->partition_->size) {
-    erase_size = this->partition_->size;
   // Both lazy-erase paths below replace esp_ota_begin()'s blocking full erase.
   // Size check replaces the one that erase performed (0 = unknown size,
   // e.g. web_server uploads).

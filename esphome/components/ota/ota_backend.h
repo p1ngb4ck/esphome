@@ -94,18 +94,6 @@ enum OTAType : uint8_t {
   OTA_TYPE_UPDATE_BOOTLOADER = 0x02,
 };
 
-/** Whoever keeps a filesystem mounted on a data partition registers one of these, so an OTA
- * that rewrites the partition (an in-band pre-fill OTA) can have the mount let go of
- * the flash before bytes fly and pick it back up afterwards — no reboot required. */
-class OTADataPartitionListener {
- public:
-  virtual ~OTADataPartitionListener() = default;
-  virtual const char *ota_data_partition_label() = 0;
-  virtual void on_ota_data_partition_before_write() = 0;
-  virtual void on_ota_data_partition_after_write(bool success) = 0;
-};
-void register_data_partition_listener(OTADataPartitionListener *listener);
-OTADataPartitionListener *find_data_partition_listener(const char *label);
 // The OTA backend method surface. Exactly one backend exists per build,
 // selected in ota_backend_factory.h where this concept is asserted on
 // make_ota_backend()'s return type. Semantics beyond the signatures:
@@ -124,6 +112,19 @@ concept OTABackendContract = requires(T backend, size_t image_size, uint8_t *dat
   backend.abort();
   { backend.supports_compression() } -> std::same_as<bool>;
 };
+
+/** Whoever keeps a filesystem mounted on a data partition registers one of these, so an OTA
+ * that rewrites the partition (an in-band pre-fill OTA) can have the mount let go of
+ * the flash before bytes fly and pick it back up afterwards — no reboot required. */
+class OTADataPartitionListener {
+ public:
+  virtual ~OTADataPartitionListener() = default;
+  virtual const char *ota_data_partition_label() = 0;
+  virtual void on_ota_data_partition_before_write() = 0;
+  virtual void on_ota_data_partition_after_write(bool success) = 0;
+};
+void register_data_partition_listener(OTADataPartitionListener *listener);
+OTADataPartitionListener *find_data_partition_listener(const char *label);
 
 /** Listener interface for OTA state changes.
  *
