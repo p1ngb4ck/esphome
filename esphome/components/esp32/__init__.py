@@ -2368,7 +2368,6 @@ async def _add_yaml_idf_components(components: list[ConfigType]):
             path=component.get(CONF_PATH),
         )
 
-
 @coroutine_with_priority(CoroPriority.FINAL)
 async def _reconcile_vfs_fatfs_sdkconfig(
     disable_vfs_termios: bool,
@@ -2377,78 +2376,83 @@ async def _reconcile_vfs_fatfs_sdkconfig(
     disable_fatfs: bool,
     enable_exfat: bool,
 ) -> None:
-    """Reconcile VFS/FATFS sdkconfig flags after all require_*() calls; user sdkconfig_options win."""
+    """Reconcile VFS/FATFS sdkconfig flags.
+
+    Runs at FINAL priority so every require_vfs_termios()/require_vfs_select()/
+    require_vfs_dir()/require_fatfs() call (made from the various components' to_code at
+    their own priorities) is seen first. A user-supplied sdkconfig_options value always
+    takes precedence.
+    """
     opts = CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]
 
-    # USB Serial JTAG VFS needs termios (require_vfs_termios(), e.g. logger). ~1.8KB flash when off.
+    # VFS support for termios (terminal I/O functions)
+    # USB Serial JTAG VFS functions require termios support.
+    # Components that need it (e.g., logger when USB_SERIAL_JTAG is supported but not selected
+    # as the logger output) call require_vfs_termios().
+    # Saves approximately 1.8KB of flash when disabled (default).
     if CORE.data.get(KEY_VFS_TERMIOS_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_TERMIOS", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_TERMIOS", not disable_vfs_termios)
 
-    # VFS select is only needed for UART/eventfd fds (require_vfs_select(), e.g. openthread);
-    # sockets use lwip_select() either way. ~2.7KB flash when off.
+    # VFS support for select() with file descriptors
+    # ESPHome only uses select() with sockets via lwip_select(), which still works.
+    # VFS select is only needed for UART/eventfd file descriptors.
+    # Components that need it (e.g., openthread) call require_vfs_select().
+    # Saves approximately 2.7KB of flash when disabled (default).
     if CORE.data.get(KEY_VFS_SELECT_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_SELECT", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_SELECT", not disable_vfs_select)
 
-    # Directory functions: opendir/readdir/mkdir etc. (require_vfs_dir()). ~0.5KB flash when off.
+    # VFS support for directory functions (opendir, readdir, mkdir, etc.)
+    # Components that need it (e.g., storage drivers) call require_vfs_dir().
+    # Saves approximately 0.5KB+ of flash when disabled (default).
     if CORE.data.get(KEY_VFS_DIR_REQUIRED, False):
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_DIR", True)
     else:
         set_idf_sdkconfig_default("CONFIG_VFS_SUPPORT_DIR", not disable_vfs_dir)
 
-    # FATFS (require_fatfs()): LFN + one volume per esp_vfs_fat mount. Defaults only;
-    # sdkconfig_options override. FATFS_LONG_FILENAMES is a Kconfig choice -- if the user set
-    # any member, leave the group alone. LFN_HEAP allocates per LFN op; LFN_STACK uses stack.
-    lfn_keys = (
-        "CONFIG_FATFS_LFN_NONE",
-        "CONFIG_FATFS_LFN_HEAP",
-        "CONFIG_FATFS_LFN_STACK",
-    )
-    user_picked_lfn = any(k in opts for k in lfn_keys)
-    fatfs_required = CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False)
-    if fatfs_required:
-        if enable_exfat and sdkconfig_option_is_true(opts, "CONFIG_FATFS_LFN_NONE"):
-            raise EsphomeError(
-                f"'{CONF_ENABLE_EXFAT}' needs long filename support, but 'CONFIG_FATFS_LFN_NONE' "
-                "is set in the esp32 framework sdkconfig_options -- exFAT cannot be built with "
-                "FF_USE_LFN == 0. Remove CONFIG_FATFS_LFN_NONE, or unset enable_exfat."
-            )
-        if not user_picked_lfn:
+    # FATFS support
+    # Components that need FATFS (SD card, USB storage, ...) call require_fatfs().
+    if CORE.data[KEY_ESP32].get(KEY_FATFS_REQUIRED, False):
+        # Storage drivers need long filenames (heap-allocated, full 255-char length) and
+        # enough FATFS volumes for several drivers at once (SD + USB + wear levelling —
+        # every esp_vfs_fat mount consumes one). All of these are only defaults: override
+        # any of them via esp32 -> framework -> advanced -> sdkconfig_options.
+        lfn_choice_keys = (
+            "CONFIG_FATFS_LFN_NONE",
+            "CONFIG_FATFS_LFN_HEAP",
+            "CONFIG_FATFS_LFN_STACK",
+        )
+        if not any(k in opts for k in lfn_choice_keys):
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_NONE", False)
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_HEAP", True)
+        if not opts.get("CONFIG_FATFS_LFN_NONE", False):
             set_idf_sdkconfig_default("CONFIG_FATFS_MAX_LFN", 255)
-            set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
-    elif enable_exfat:
-        # FATFS is not in the build, so tear down any stale patched copy before failing --
-        # otherwise the error state also leaves the override behind until enable_exfat is
-        # removed too, the exact state the unconditional reconcile below is meant to prevent.
+        set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
+        # Long filenames are a hard requirement of exFAT and are already set right above;
+        # the FatFs #defines themselves come via a patched project-local component copy.
         _sync_exfat_fatfs_override(
-            False,
+            enable_exfat,
             str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
             get_esp32_variant(),
         )
-        raise EsphomeError(
+    elif enable_exfat:
+        raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
             f"mounts a FAT filesystem, so the FatFs library is not part of the build"
         )
     elif disable_fatfs:
-        if not user_picked_lfn:
+        lfn_choice_keys = (
+            "CONFIG_FATFS_LFN_NONE",
+            "CONFIG_FATFS_LFN_HEAP",
+            "CONFIG_FATFS_LFN_STACK",
+        )
+        if not any(k in opts for k in lfn_choice_keys):
             set_idf_sdkconfig_default("CONFIG_FATFS_LFN_NONE", True)
         # Kconfig range is [1,10]; 0 gets clamped to the default.
         set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 1)
-
-    # Reconcile the project-local FatFs override on every run, not only when FATFS is required,
-    # so a stale patched copy is removed once exFAT is no longer active (e.g. the SD component was
-    # dropped from the YAML). _sync_exfat_fatfs_override() early-returns and cleans up when
-    # disabled, so this both installs and tears down.
-    _sync_exfat_fatfs_override(
-        fatfs_required and enable_exfat,
-        str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
-        get_esp32_variant(),
-    )
 
 
 @coroutine_with_priority(CoroPriority.FINAL - 1)
