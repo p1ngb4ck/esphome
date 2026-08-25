@@ -175,10 +175,7 @@ void LEDCOutput::setup() {
       ledc_ll_enable_reset_reg(false);
     }
 #else
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     periph_module_reset(PERIPH_LEDC_MODULE);
-#pragma GCC diagnostic pop
 #endif
 #endif
     ledc_peripheral_reset_done = true;
