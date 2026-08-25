@@ -1057,6 +1057,7 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
       if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf,
                                        sizeof(buf)))
         return false;
+      ESP_LOGD(TAG, "%s RANGE req=0x%02X raw=%02X %02X", what, bRequest, buf[0], buf[1]);
       out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
       return true;
     };
@@ -1151,6 +1152,8 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   }
 
   uint8_t buf[2] = {static_cast<uint8_t>(vol & 0xFF), static_cast<uint8_t>((vol >> 8) & 0xFF)};
+  ESP_LOGD(TAG, "%s SET volume %.0f%%: vol=%d bytes=%02X %02X",
+         what, clamped * 100.0f, static_cast<int>(vol), buf[0], buf[1]);
   bool ok = true;
   for (uint8_t i = 0; i < channel_count; i++) {
     if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
@@ -1166,6 +1169,12 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   // coarser step, so reporting what we sent would be reporting an assumption.
   uint8_t rb[2] = {0, 0};
   if (this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
+    ESP_LOGD(TAG,
+           "%s volume GET RAW: [%02X %02X] LE=0x%04X",
+           what,
+           rb[0],
+           rb[1],
+           static_cast<unsigned>(rb[0] | (rb[1] << 8)));
     const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
     const float actual_db = static_cast<float>(actual) / 256.0f;
     ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (device reports %.2f dB)", what, clamped * 100.0f, sent_db,
