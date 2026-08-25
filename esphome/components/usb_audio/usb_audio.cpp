@@ -1180,7 +1180,7 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
            rb[0],
            rb[1],
            static_cast<unsigned>(rb[0] | (rb[1] << 8)));
-    const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
+    const int16_t actual_db = static_cast<int16_t>(rb[0] | (rb[1] << 8));
     const float actual_percent = (static_cast<float>(rb[0]) / 255.0f) * 100.0f;
 
     ESP_LOGD(TAG,
