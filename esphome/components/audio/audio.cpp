@@ -42,6 +42,10 @@ bool AudioStreamInfo::operator==(const AudioStreamInfo &rhs) const {
 
 const char *audio_file_type_to_string(AudioFileType file_type) {
   switch (file_type) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioFileType::AAC:
+      return "AAC";
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
       return "FLAC";
@@ -112,6 +116,11 @@ AudioFileType detect_audio_file_type(const char *content_type, const char *url) 
 #ifdef USE_AUDIO_OPUS_SUPPORT
     if (str_endswith_ignore_case(url, ".opus")) {
       return AudioFileType::OPUS;
+    }
+#endif
+#ifdef USE_AUDIO_AAC_SUPPORT
+    if (str_endswith_ignore_case(url, ".aac") || str_endswith_ignore_case(url, ".m4a")) {
+      return AudioFileType::AAC;
     }
 #endif
   }

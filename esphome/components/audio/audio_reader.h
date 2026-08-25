@@ -29,10 +29,9 @@ class AudioReader {
   /*
    * @brief Class that facilitates reading a raw audio file.
    * Files can be read from flash (stored in a AudioFile struct), from an http source, or —
-   * with the storage component in the build — from any mounted storage by a local path
-   * (/sdcard/music/track.flac; the file:// prefix is accepted as an optional alias). Anything
-   * without an http(s):// scheme is treated as a local storage path. Storage reads use the
-   * DATA-PLANE handle API and are therefore safe from the speaker task.
+   * with the storage component in the build — from any mounted storage via file:// URIs
+   * (file:///sdcard/music/track.flac). Storage reads use the DATA-PLANE handle API and are
+   * therefore safe from the speaker task.
    * The file data is sent to a ring buffer sink.
    */
  public:

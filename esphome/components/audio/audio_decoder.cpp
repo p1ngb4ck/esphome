@@ -78,6 +78,17 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
   this->end_of_file_ = false;
 
   switch (this->audio_file_type_) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+    case AudioFileType::AAC:
+      this->aac_decoder_ = make_unique<esp_audio_codec_adapter::AACDecoder>();
+
+      // AAC typically has 1024 samples per frame
+      this->free_buffer_required_ = 1024 * sizeof(int16_t) * 2;  // samples * size per sample * channels
+
+      // Reallocate the output transfer buffer to the smallest necessary size
+      this->output_transfer_buffer_->reallocate(this->free_buffer_required_);
+      break;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
     case AudioFileType::FLAC:
       this->flac_decoder_ = make_unique<micro_flac::FLACDecoder>();
@@ -197,6 +208,11 @@ AudioDecoderState AudioDecoder::decode(bool stop_gracefully) {
       state = FileDecoderState::IDLE;
     } else {
       switch (this->audio_file_type_) {
+#ifdef USE_AUDIO_AAC_SUPPORT
+        case AudioFileType::AAC:
+          state = this->decode_aac_();
+          break;
+#endif
 #ifdef USE_AUDIO_FLAC_SUPPORT
         case AudioFileType::FLAC:
           state = this->decode_flac_();
@@ -245,6 +261,42 @@ AudioDecoderState AudioDecoder::decode(bool stop_gracefully) {
   }
   return AudioDecoderState::DECODING;
 }
+
+#ifdef USE_AUDIO_AAC_SUPPORT
+FileDecoderState AudioDecoder::decode_aac_() {
+  // AAC decoder processes frames from the input buffer
+  uint8_t *buffer_start = this->input_transfer_buffer_->get_buffer_start();
+  size_t buffer_length = this->input_transfer_buffer_->available();
+
+  // Decode AAC frame
+  auto result = this->aac_decoder_->decode_frame(buffer_start, buffer_length,
+                                                 (int16_t *) this->output_transfer_buffer_->get_buffer_end());
+
+  if (result.status == esp_audio_codec_adapter::AAC_DECODER_SUCCESS) {
+    // Update buffers
+    this->input_transfer_buffer_->decrease_buffer_length(result.bytes_consumed);
+    this->output_transfer_buffer_->increase_buffer_length(result.output_samples * sizeof(int16_t));
+
+    // Extract audio stream info on first successful decode
+    if (!this->audio_stream_info_.has_value() && result.sample_rate > 0) {
+      this->audio_stream_info_ =
+          audio::AudioStreamInfo(16, result.channels, result.sample_rate);  // AAC outputs 16-bit PCM
+    }
+
+    return FileDecoderState::MORE_TO_PROCESS;
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_OUT_OF_DATA) {
+    // Need more data
+    return FileDecoderState::IDLE;
+  } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_SYNC_ERROR) {
+    // Recoverable sync error, skip some data and try again
+    this->input_transfer_buffer_->decrease_buffer_length(std::min(buffer_length, (size_t) 1));
+    return FileDecoderState::POTENTIALLY_FAILED;
+  } else {
+    // Serious error
+    return FileDecoderState::FAILED;
+  }
+}
+#endif
 
 #ifdef USE_AUDIO_FLAC_SUPPORT
 FileDecoderState AudioDecoder::decode_flac_() {
