@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#if defined(USE_BINARY_STORAGE_NVS) || defined(USE_ESP32_PREFERENCES_STORAGE)
+#if defined(USE_BINARY_STORAGE_NVS) || defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
 
 #include "esphome/core/component.h"
 #include "esphome/components/storage/storage.h"
@@ -67,4 +67,4 @@ class NVSStore : public storage::KeyValueStorage {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_NVS || USE_ESP32_PREFERENCES_STORAGE
+#endif  // USE_BINARY_STORAGE_NVS || USE_ESP32_PREFERENCES_STORAGE || USE_PREFERENCES_BACKUP

@@ -21,7 +21,6 @@ from esphome.types import ConfigType
 CODEOWNERS = ["@esphome/core"]
 
 preferences_ns = cg.esphome_ns.namespace("preferences")
-esp32_ns = cg.esphome_ns.namespace("esp32")
 storage_ns = cg.esphome_ns.namespace("storage")
 binary_storage_ns = cg.esphome_ns.namespace("binary_storage")
 NVSStore = binary_storage_ns.class_("NVSStore")
@@ -168,7 +167,7 @@ async def to_code(config: ConfigType) -> None:
         cg.add_define("USE_ESP32_PREFERENCES_STORAGE")
         CORE.data.setdefault("binary_storage_device_types", set()).add("nvs")
         store = await cg.get_variable(external)
-        cg.add(esp32_ns.set_external_preferences_store(store))
+        cg.add(preferences_ns.set_external_store(store))
     await cg.register_component(var, config)
 
 
@@ -176,7 +175,7 @@ async def to_code(config: ConfigType) -> None:
 # "esphome" NVS namespace) to a storage target and restore them. The C++ only
 # compiles in when one of these actions is used (USE_PREFERENCES_BACKUP), and
 # only on esp32. Backup reads/writes the live preferences through the active
-# KeyValueStorage view (esp32::get_preferences_store()), so it works on plain
+# KeyValueStorage view (preferences::get_backup_store()), so it works on plain
 # internal NVS as well as an external/storage-backed preferences store.
 #
 # Selection is an option on the action: `preferences:` lists global IDs --
@@ -465,7 +464,7 @@ async def _build_preferences_action(
 ):
     var = cg.new_Pvariable(action_id, template_arg)
     cg.add_define("USE_PREFERENCES_BACKUP")
-    # The active preferences store the engine reads/writes through (esp32::get_preferences_store())
+    # The active preferences store the engine reads/writes through (preferences::get_backup_store())
     # is a binary_storage NVSStore -- make sure that class is compiled and kept in the build even
     # when no `type: nvs` device or storage-backed preferences path pulls it in on its own.
     cg.add_define("USE_BINARY_STORAGE_NVS")

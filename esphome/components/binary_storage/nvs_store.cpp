@@ -1,6 +1,6 @@
 #include "nvs_store.h"
 
-#if defined(USE_BINARY_STORAGE_NVS) || defined(USE_ESP32_PREFERENCES_STORAGE)
+#if defined(USE_BINARY_STORAGE_NVS) || defined(USE_ESP32_PREFERENCES_STORAGE) || defined(USE_PREFERENCES_BACKUP)
 
 #include "esphome/core/log.h"
 
@@ -215,4 +215,4 @@ void NVSStore::dump_config() {
 }  // namespace binary_storage
 }  // namespace esphome
 
-#endif  // USE_BINARY_STORAGE_NVS || USE_ESP32_PREFERENCES_STORAGE
+#endif  // USE_BINARY_STORAGE_NVS || USE_ESP32_PREFERENCES_STORAGE || USE_PREFERENCES_BACKUP
