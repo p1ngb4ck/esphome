@@ -1181,9 +1181,17 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
            rb[1],
            static_cast<unsigned>(rb[0] | (rb[1] << 8)));
     const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
-    const float actual_db = static_cast<float>(actual) / 256.0f;
-    ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (device reports %.2f dB)", what, clamped * 100.0f, sent_db,
-             actual_db);
+    const float actual_percent = (static_cast<float>(rb[0]) / 255.0f) * 100.0f;
+
+    ESP_LOGD(TAG,
+             "%s volume %.0f%% -> %.2f dB (device reports %.1f%%, raw=%02X %02X)",
+             what,
+             clamped * 100.0f,
+             sent_db,
+             actual_percent,
+             rb[0],
+             rb[1]
+    );
     // A device may only be settable in steps of its reported resolution, so landing within
     // one of them is it rounding. Anything past that is the device overriding us.
     const float tolerance = ctl.range_known ? (static_cast<float>(ctl.vol_res) / 256.0f) : 0.25f;
