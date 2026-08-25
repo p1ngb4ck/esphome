@@ -1057,7 +1057,9 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
       if (!this->uac_control_transfer_(UAC_REQ_TYPE_INTF_GET, bRequest, wValue, wIndex, nullptr, 0, buf,
                                        sizeof(buf)))
         return false;
-      ESP_LOGD(TAG, "%s RANGE req=0x%02X raw=%02X %02X", what, bRequest, buf[0], buf[1]);
+      ESP_LOGD(TAG,
+         "VOLUME RANGE %s req=0x%02X raw=[%02X %02X]",
+         range_name, bRequest, buf[0], buf[1]);
       out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
       return true;
     };
