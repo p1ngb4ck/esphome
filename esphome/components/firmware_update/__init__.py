@@ -16,9 +16,7 @@ AUTO_LOAD = ["md5", "ota"]
 CONF_ALLOW_PARTITION_ACCESS = "allow_partition_access"
 
 firmware_update_ns = cg.esphome_ns.namespace("firmware_update")
-FirmwareUpdateComponent = firmware_update_ns.class_(
-    "FirmwareUpdateComponent", OTAComponent
-)
+FirmwareUpdateComponent = firmware_update_ns.class_("FirmwareUpdateComponent", OTAComponent)
 FirmwareUpdateFlashAction = firmware_update_ns.class_(
     "FirmwareUpdateFlashAction", automation.Action
 )
@@ -30,17 +28,13 @@ def _validate_local_path(value):
     left in place for the reader to strip."""
     value = cv.string_strict(value)
     if not value.startswith("file://") and not value.startswith("/"):
-        raise cv.Invalid(
-            "path must be an absolute POSIX path (e.g. /sdcard/firmware.bin)"
-        )
+        raise cv.Invalid("path must be an absolute POSIX path (e.g. /sdcard/firmware.bin)")
     return value
 
 
 def _validate_partition_access(config):
     if config.get(CONF_ALLOW_PARTITION_ACCESS) and not CORE.is_esp32:
-        raise cv.Invalid(
-            f"{CONF_ALLOW_PARTITION_ACCESS} is only supported on the esp32"
-        )
+        raise cv.Invalid(f"{CONF_ALLOW_PARTITION_ACCESS} is only supported on the esp32")
     return config
 
 
@@ -73,7 +67,7 @@ async def to_code(config):
         cg.add_define("USE_OTA_PARTITIONS")
 
 
-FIRMWARE_UPDATE_FLASH_ACTION_SCHEMA = automation.maybe_simple_id(
+FIRMWARE_UPDATE_FLASH_ACTION_SCHEMA = cv.maybe_simple_id(
     {
         cv.GenerateID(): cv.use_id(FirmwareUpdateComponent),
         cv.Optional(CONF_PATH): cv.templatable(_validate_local_path),
