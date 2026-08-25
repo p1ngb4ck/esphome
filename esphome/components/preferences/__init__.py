@@ -17,7 +17,6 @@ from esphome.core import CORE, ID, coroutine_with_priority
 import esphome.final_validate as fv
 from esphome.coroutine import CoroPriority
 from esphome.types import ConfigType
-from esphome.types import ConfigType
 
 CODEOWNERS = ["@esphome/core"]
 
