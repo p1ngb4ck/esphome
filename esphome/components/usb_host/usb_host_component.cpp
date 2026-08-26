@@ -132,7 +132,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
   xfer->context = sem;
   xfer->callback = [](usb_transfer_t *t) { xSemaphoreGive(static_cast<SemaphoreHandle_t>(t->context)); };
   */
-  esp_err_t err = client_handle.control_transfer(REQ_TYPE, B_REQUEST_SET_INTERFACE, alt_setting & 0xFF, 0, &callback,
+  esp_err_t err = this->control_transfer(REQ_TYPE, B_REQUEST_SET_INTERFACE, alt_setting & 0xFF, 0, &callback,
                                   {0, interface_num & 0xFF, 0, 0, 0});
   // err = usb_host_transfer_submit_control(client_handle, xfer);
   // bool ok = false;
