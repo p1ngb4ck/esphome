@@ -66,6 +66,7 @@ from .boards import BOARDS, STANDARD_BOARDS
 from .const import (
     KEY_ARDUINO_LIBRARIES,
     KEY_BOARD,
+    KEY_CERT_BUNDLE,
     KEY_COMPONENTS,
     KEY_ESP32,
     KEY_EXCLUDE_COMPONENTS,
@@ -804,6 +805,10 @@ def _enable_arduino_library(name: str) -> None:
     # Also enable any required IDF components
     for idf_component in ARDUINO_LIBRARY_IDF_COMPONENTS.get(name, ()):
         include_builtin_idf_component(idf_component)
+    if not ARDUINO_LIBRARIES_NEEDING_CERT_BUNDLE.isdisjoint(
+        {name, *ARDUINO_LIBRARY_DEPENDENCIES.get(name, ())}
+    ):
+        require_certificate_bundle()
 
 
 def add_extra_script(stage: str, filename: str, path: Path):
@@ -1752,6 +1757,16 @@ def require_vfs_termios() -> None:
     CORE.data[KEY_VFS_TERMIOS_REQUIRED] = True
 
 
+def require_certificate_bundle() -> None:
+    """Enable the mbedTLS root certificate bundle for this build.
+
+    The bundle is off by default; components that verify TLS server
+    certificates (http_request, audio streaming) call this so the bundle is
+    compiled and gen_crt_bundle runs only when something uses it.
+    """
+    CORE.data[KEY_ESP32][KEY_CERT_BUNDLE] = True
+
+
 def require_full_certificate_bundle() -> None:
     """Request the full certificate bundle instead of the common-CAs-only bundle.
 
@@ -1761,6 +1776,7 @@ def require_full_certificate_bundle() -> None:
 
     Call this from components that need to connect to services using uncommon CAs.
     """
+    require_certificate_bundle()
     CORE.data[KEY_ESP32][KEY_FULL_CERT_BUNDLE] = True
 
 
@@ -2234,6 +2250,31 @@ async def _set_libc_picolibc_newlib_compat() -> None:
         option,
         CORE.data[KEY_ESP32].get(KEY_LIBC_PICOLIBC_NEWLIB_COMPAT_REQUIRED, False),
     )
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _reconcile_certificate_bundle_sdkconfig() -> None:
+    """Enable the mbedTLS certificate bundle only when something asked for it.
+
+    Runs at FINAL priority so every require_certificate_bundle() call has
+    happened. Without a request the bundle is disabled, which skips
+    esp_crt_bundle.c, the gen_crt_bundle step and the x509_crt_bundle.S embed.
+    A user-supplied sdkconfig_options value takes precedence.
+    """
+    data = CORE.data[KEY_ESP32]
+    enabled = data.get(KEY_CERT_BUNDLE, False)
+    set_idf_sdkconfig_default("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", enabled)
+    if not enabled:
+        return
+    # Use CMN (common CAs) bundle by default to save ~51KB flash
+    # CMN covers CAs with >1% market share (~99% of websites)
+    # Components needing uncommon CAs can call require_full_certificate_bundle()
+    use_full_bundle = data.get(KEY_FULL_CERT_BUNDLE, False)
+    set_idf_sdkconfig_default(
+        "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL", use_full_bundle
+    )
+    if not use_full_bundle:
+        set_idf_sdkconfig_default("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN", True)
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
@@ -2978,6 +3019,9 @@ async def to_code(config):
     # FINAL priority: runs after every network/coexistence request_*() call
     CORE.add_job(_reconcile_network_sdkconfig)
 
+    # FINAL priority: runs after every require_certificate_bundle() call
+    CORE.add_job(_reconcile_certificate_bundle_sdkconfig)
+
     # FINAL: require_*() calls can come from to_code at or below this priority, so an
     # inline read would be iteration-order-dependent; reconcile once after every job ran.
     CORE.add_job(
@@ -3006,6 +3050,10 @@ async def to_code(config):
 
     for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
         add_idf_sdkconfig_option(name, RawSdkconfigValue(value))
+    # A bundle forced on through sdkconfig_options is a request like any other,
+        # so it still gets the CMN variant pinned.
+        if conf[CONF_SDKCONFIG_OPTIONS].get("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE") == "y":
+            require_certificate_bundle()
 
     # Components from YAML are added in a separate coroutine with FINAL priority
     # Schedule it to run after all other components
