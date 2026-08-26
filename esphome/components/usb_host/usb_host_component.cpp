@@ -248,7 +248,7 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
 
 bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
                           usb_device_handle_t device_handle) {
-  callback_t callback = [this, &stream, cb](const TransferStatus &status) {
+  transfer_cb_t callback = [this, &stream, cb](const TransferStatus &status) {
     if (!status.success) {
       ESP_LOGW(TAG, "set_interface %u alt %u failed: %s", stream.interface_num, stream.alt_setting,
                status.status_str());
