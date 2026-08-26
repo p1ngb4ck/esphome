@@ -154,7 +154,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
     ok = true;
   }
 
-  /* vSemaphoreDelete(sem);
+  vSemaphoreDelete(sem);
   usb_host_transfer_free(xfer);
   return ok; */
   return true;
