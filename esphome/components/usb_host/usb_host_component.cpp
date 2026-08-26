@@ -92,11 +92,11 @@ bool USBHost::submit_control(usb_host_client_handle_t client_handle, TransferReq
 bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
                                uint8_t interface_num, uint8_t alt_setting) {
   // usb_transfer_t *xfer = nullptr;
-  const transfer_cb_t callback = [](usb_transfer_t *t) {
-      if (t->status != USB_TRANSFER_STATUS_COMPLETED) {
-        ESP_LOGE(TAG, "set_interface: transfer status %d", t->status);
-      }
-   };
+  const transfer_cb_t callback = [](const TransferStatus &status) {
+    if (status.status != USB_TRANSFER_STATUS_COMPLETED) {
+      ESP_LOGE(TAG, "set_interface: transfer status %d", status.status);
+    }
+  };
   // SET_INTERFACE has no data phase so SETUP_PACKET_SIZE (8 bytes) is sufficient.
   
   /* esp_err_t err = usb_host_transfer_alloc(SETUP_PACKET_SIZE, 0, &xfer);
