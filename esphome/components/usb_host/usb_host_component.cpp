@@ -184,22 +184,15 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
         stream->streaming = false;
         stream->died.store(true, std::memory_order_release);
       }
-      get_usb_host()->defer([stream, client] {
-        client->set_interface(
-            stream->interface_num,
-            0,
-            [stream, client](const TransferStatus &status) {
-              if (!status.success) {
-                ESP_LOGW(TAG, "failed to reset interface");
-              }
-
-              stream->xfers.reset();
-              stream->ctxs.reset();
-
-              if (stream->owns_interface) {
-                client->release_interface(stream->interface_num);
-              }
-            });
+      get_usb_host()->defer([stream, client_handle, device_handle]() {
+        stream->xfers.reset();
+        stream->ctxs.reset();
+        if (stream->owns_interface) {
+          if (stream->alt_setting != 0)
+            get_usb_host()->do_set_interface(client_handle, device_handle, stream->interface_num, 0);
+          get_usb_host()->do_release_interface(client_handle, device_handle, stream->interface_num);
+        }
+        ESP_LOGD(TAG, "stream_close deferred: ep=0x%02X", stream->ep_addr);
       });
     }
   };
