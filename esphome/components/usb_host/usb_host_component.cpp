@@ -96,7 +96,6 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
       if (t->status != USB_TRANSFER_STATUS_COMPLETED) {
         ESP_LOGE(TAG, "set_interface: transfer status %d", t->status);
       }
-      complete_trq(static_cast<TransferRequest *>(t->context), t, SETUP_PACKET_SIZE);
    };
   // SET_INTERFACE has no data phase so SETUP_PACKET_SIZE (8 bytes) is sufficient.
   
