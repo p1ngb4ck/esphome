@@ -345,6 +345,10 @@ ARDUINO_LIBRARY_IDF_COMPONENTS: dict[str, tuple[str, ...]] = {
     "Zigbee": ("espressif__esp-zigbee-lib", "espressif__esp-zboss-lib"),
 }
 
+# Arduino libraries whose sources reference esp_crt_bundle_attach without a
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE guard, so enabling them needs the bundle.
+ARDUINO_LIBRARIES_NEEDING_CERT_BUNDLE = frozenset({"NetworkClientSecure"})
+
 # Arduino library to Arduino library dependencies
 # When enabling one library, also enable its dependencies
 # Kconfig "select" statements don't work with CONFIG_ARDUINO_SELECTIVE_COMPILATION
@@ -659,6 +663,18 @@ def sdkconfig_option_is_true(opts: dict[str, SdkconfigValueType], name: str) -> 
     if isinstance(raw, bool):
         return raw
     return str(getattr(raw, "value", raw)).strip().lower() in ("y", "true", "1")
+
+
+
+def set_idf_sdkconfig_default(name: str, value: SdkconfigValueType) -> None:
+    """Set an sdkconfig option unless it is already set.
+
+    For the FINAL priority reconcile jobs: they run after every to_code,
+    including the user's sdkconfig_options, and must not override an
+    existing value.
+    """
+    if name not in CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS]:
+        add_idf_sdkconfig_option(name, value)
 
 
 def add_idf_sdkconfig_option(name: str, value: SdkconfigValueType):
