@@ -203,7 +203,7 @@ class USBClient : public Component {
 #endif
 
   // -- Interface claim / release / alt-setting ---------------------------------
-  bool claim_interface(uint8_t interface_num, uint8_t alt_setting = 0);
+  bool claim_interface(uint8_t interface_num, uint8_t alt_setting = 0, const transfer_cb_t &callback = nullptr);
   bool release_interface(uint8_t interface_num);
 
 #ifdef USE_USB_CONTROL_TRANSFERS
