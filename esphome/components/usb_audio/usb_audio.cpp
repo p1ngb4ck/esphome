@@ -1231,6 +1231,10 @@ bool USBAudioClient::open_speaker_stream_() {
     return true;
   if (!this->spk_cfg_.configured || !this->spk_alt_.valid)
     return false;
+  // An open already under way, or a previous one still draining. Either way, starting a
+  // second sequence on the same stream would trample the first.
+  if (!this->spk_stream_.is_closed())
+    return true;
 
   // Create ring buffer if not yet done.
   if (this->spk_rb_ == nullptr) {
@@ -1290,45 +1294,8 @@ bool USBAudioClient::open_speaker_stream_() {
              this->spk_alt_.mps);
   }
 
-  if (!this->stream_open(this->spk_stream_, this)) {
-    ESP_LOGE(TAG, "stream_open_ failed for speaker");
-    return false;
-  }
-
-  // Asynchronous OUT endpoint (bmAttributes sync type 0b01) with a companion feedback IN
-  // endpoint: open it on the already-claimed AS interface so the device's own clock paces
-  // playback. Adaptive/synchronous endpoints (or when disabled) stay on nominal pacing.
-  const uint8_t sync_type = (this->spk_alt_.ep_attr >> 2) & 0x03;
-  if (this->feedback_enabled_ && sync_type == 0x01 && this->spk_alt_.feedback_ep_addr != 0) {
-    this->spk_stream_.fb_shift        = this->device_is_high_speed_ ? 16 : 14;
-    this->spk_fb_stream_.ep_addr      = this->spk_alt_.feedback_ep_addr;
-    this->spk_fb_stream_.mps          = this->spk_alt_.feedback_mps != 0
-                                            ? this->spk_alt_.feedback_mps
-                                            : (this->device_is_high_speed_ ? 4 : 3);
-    this->spk_fb_stream_.packets_per_urb = 1;
-    this->spk_fb_stream_.num_urbs        = 2;
-    this->spk_fb_stream_.interface_num   = this->spk_as_intf_;
-    this->spk_fb_stream_.alt_setting     = this->spk_alt_.alt_setting;
-    this->spk_fb_stream_.is_output       = false;
-    this->spk_fb_stream_.owns_interface  = false;  // shares the speaker OUT interface
-    if (this->stream_open(this->spk_fb_stream_, this)) {
-      this->spk_fb_open_ = true;
-      ESP_LOGI(TAG, "Speaker async feedback stream open (ep=0x%02X)", this->spk_alt_.feedback_ep_addr);
-    } else {
-      ESP_LOGW(TAG, "Speaker feedback stream open failed; using nominal pacing");
-    }
-  } else {
-    ESP_LOGD(TAG, "Speaker OUT sync type %u, feedback ep 0x%02X (feedback %s)", sync_type,
-             this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
-  }
-
-  // Set sampling frequency on the endpoint.
-  this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
-
-  this->spk_stream_open_ = true;
-
-  ESP_LOGI(TAG, "Speaker stream open");
-  return true;
+  // Opening continues in on_stream_open() once the device has taken the alt-setting.
+  return this->stream_open(this->spk_stream_, this);
 }
 
 bool USBAudioClient::open_microphone_stream_() {
@@ -1336,6 +1303,8 @@ bool USBAudioClient::open_microphone_stream_() {
     return true;
   if (!this->mic_cfg_.configured || !this->mic_alt_.valid)
     return false;
+  if (!this->mic_stream_.is_closed())
+    return true;
 
   if (this->mic_rb_ == nullptr) {
     this->mic_rb_ = xRingbufferCreate(this->mic_buf_size_, RINGBUF_TYPE_BYTEBUF);
@@ -1352,25 +1321,20 @@ bool USBAudioClient::open_microphone_stream_() {
   this->mic_stream_.interface_num  = this->mic_as_intf_;
   this->mic_stream_.alt_setting    = this->mic_alt_.alt_setting;
 
-  if (!this->stream_open(this->mic_stream_, this)) {
-    ESP_LOGE(TAG, "stream_open_ failed for microphone");
-    return false;
-  }
-
-  this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
-  this->mic_stream_open_ = true;
-  ESP_LOGI(TAG, "Microphone stream open");
-  return true;
+  // Opening continues in on_stream_open() once the device has taken the alt-setting.
+  return this->stream_open(this->mic_stream_, this);
 }
 
 void USBAudioClient::close_speaker_stream_() {
-  if (!this->spk_stream_open_)
-    return;
-  if (this->spk_fb_open_) {
+  // Unconditional: an open that is still selecting its alt-setting has to be cancelled too,
+  // and it has not set spk_stream_open_ yet.
+  if (this->spk_fb_open_ || !this->spk_fb_stream_.is_closed()) {
     this->stream_close(this->spk_fb_stream_);
     this->spk_fb_open_ = false;
   }
   this->stream_close(this->spk_stream_);
+  if (!this->spk_stream_open_)
+    return;
   this->spk_stream_open_ = false;
   this->spk_stream_.fb_value.store(0, std::memory_order_relaxed);
   this->flush_speaker_buffer_();
@@ -1378,9 +1342,9 @@ void USBAudioClient::close_speaker_stream_() {
 }
 
 void USBAudioClient::close_microphone_stream_() {
+  this->stream_close(this->mic_stream_);
   if (!this->mic_stream_open_)
     return;
-  this->stream_close(this->mic_stream_);
   this->mic_stream_open_ = false;
   ESP_LOGI(TAG, "Microphone stream closed");
 }
@@ -1515,52 +1479,100 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
   if (error || len == 0)
     return;
 
-  const bool is_in = (ep_addr & 0x80) != 0;
+  // -- Microphone IN: write PCM into the ring buffer --------------------------
+  if (this->mic_rb_ == nullptr || this->mic_suspended_)
+    return;
+  // Non-blocking send; if full, drop oldest data (overwrite) is not possible with
+  // RINGBUF_TYPE_BYTEBUF, so we just skip if full to avoid blocking.
+  xRingbufferSend(this->mic_rb_, data, len, 0);
+}
 
-  if (!is_in) {
-    // -- Speaker OUT: drain ring buffer into this packet's payload area ------
-    // `data` points into the URB's data_buffer. The isoc_cb_ trampoline calls
-    // on_isoc_packet() BEFORE resubmitting, so writing here fills the buffer
-    // for the next transmission.
-    // `len` = actual_num_bytes (bytes sent in the completed transfer), which
-    // may be 0 for SKIPPED packets. We always fill a full mps-worth of bytes
-    // so that the resubmitted packet carries real data.
-    // `len` is the sample-clock packet size the pacing layer chose for this packet; fill
-    // exactly that many bytes so the stream matches the negotiated endpoint bandwidth.
-    if (this->spk_rb_ == nullptr || this->spk_suspended_) {
-      memset(const_cast<uint8_t *>(data), 0, len);
+size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) {
+  // -- Speaker OUT: drain the ring buffer into this packet's payload area ------
+  // max_len is the sample-clock packet size the pacing layer chose for this packet. What is
+  // not written is zero filled by the caller, so a short read is silence.
+  if (this->spk_rb_ == nullptr || this->spk_suspended_)
+    return 0;
+  size_t filled = 0;
+  // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
+  // wrap returns a short block. Reading once and padding the rest with silence would drop
+  // the packet's remaining bytes' worth of playback time on every wrap: the data stays
+  // queued, the drain rate falls below real time and the buffer backs up permanently.
+  // Read again for the remainder instead.
+  while (filled < max_len) {
+    size_t received = 0;
+    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, max_len - filled);
+    if (item == nullptr)
+      break;
+    if (received > 0) {
+      memcpy(data + filled, item, received);
+      filled += received;
+    }
+    vRingbufferReturnItem(this->spk_rb_, item);
+    if (received == 0)
+      break;
+  }
+  return filled;
+}
+
+// Second half of opening a stream. The endpoint only exists once the device has switched to
+// the alt-setting, which is a control transfer, so everything that talks to the running
+// stream waits until usb_host reports the outcome here.
+void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
+  if (&stream == &this->spk_fb_stream_) {
+    this->spk_fb_open_ = ok;
+    if (ok) {
+      ESP_LOGI(TAG, "Speaker async feedback stream open (ep=0x%02X)", this->spk_alt_.feedback_ep_addr);
+    } else {
+      ESP_LOGW(TAG, "Speaker feedback stream open failed; using nominal pacing");
+    }
+    return;
+  }
+
+  if (&stream == &this->spk_stream_) {
+    if (!ok) {
+      ESP_LOGE(TAG, "stream_open_ failed for speaker");
+      this->note_open_result_(false, this->spk_reopen_at_ms_, this->spk_open_fails_);
       return;
     }
-    const size_t fill_bytes = len;
-    uint8_t *dst = const_cast<uint8_t *>(data);
-    size_t filled = 0;
-    // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
-    // wrap returns a short block. Reading once and padding the rest with silence would drop
-    // the packet's remaining bytes' worth of playback time on every wrap: the data stays
-    // queued, the drain rate falls below real time and the buffer backs up permanently.
-    // Read again for the remainder instead.
-    while (filled < fill_bytes) {
-      size_t received = 0;
-      void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, fill_bytes - filled);
-      if (item == nullptr)
-        break;
-      if (received > 0) {
-        memcpy(dst + filled, item, received);
-        filled += received;
-      }
-      vRingbufferReturnItem(this->spk_rb_, item);
-      if (received == 0)
-        break;
+    // Asynchronous OUT endpoint (bmAttributes sync type 0b01) with a companion feedback IN
+    // endpoint: open it on the already-claimed AS interface so the device's own clock paces
+    // playback. Adaptive/synchronous endpoints (or when disabled) stay on nominal pacing.
+    const uint8_t sync_type = (this->spk_alt_.ep_attr >> 2) & 0x03;
+    if (this->feedback_enabled_ && sync_type == 0x01 && this->spk_alt_.feedback_ep_addr != 0) {
+      this->spk_stream_.fb_shift = this->device_is_high_speed_ ? 16 : 14;
+      this->spk_fb_stream_.ep_addr = this->spk_alt_.feedback_ep_addr;
+      this->spk_fb_stream_.mps =
+          this->spk_alt_.feedback_mps != 0 ? this->spk_alt_.feedback_mps : (this->device_is_high_speed_ ? 4 : 3);
+      this->spk_fb_stream_.packets_per_urb = 1;
+      this->spk_fb_stream_.num_urbs = 2;
+      this->spk_fb_stream_.interface_num = this->spk_as_intf_;
+      this->spk_fb_stream_.alt_setting = this->spk_alt_.alt_setting;
+      this->spk_fb_stream_.is_output = false;
+      this->spk_fb_stream_.owns_interface = false;  // shares the speaker OUT interface
+      this->stream_open(this->spk_fb_stream_, this);
+    } else {
+      ESP_LOGD(TAG, "Speaker OUT sync type %u, feedback ep 0x%02X (feedback %s)", sync_type,
+               this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
     }
-    if (filled < fill_bytes)
-      memset(dst + filled, 0, fill_bytes - filled);
-  } else {
-    // -- Microphone IN: write PCM into the ring buffer ------------------------
-    if (this->mic_rb_ == nullptr || this->mic_suspended_)
+
+    this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    this->spk_stream_open_ = true;
+    this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
+    ESP_LOGI(TAG, "Speaker stream open");
+    return;
+  }
+
+  if (&stream == &this->mic_stream_) {
+    if (!ok) {
+      ESP_LOGE(TAG, "stream_open_ failed for microphone");
+      this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
       return;
-    // Non-blocking send; if full, drop oldest data (overwrite) is not possible
-    // with RINGBUF_TYPE_BYTEBUF, so we just skip if full to avoid blocking.
-    xRingbufferSend(this->mic_rb_, data, len, 0);
+    }
+    this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
+    this->mic_stream_open_ = true;
+    this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
+    ESP_LOGI(TAG, "Microphone stream open");
   }
 }
 

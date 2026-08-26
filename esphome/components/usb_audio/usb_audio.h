@@ -145,6 +145,8 @@ class USBAudioClient : public usb_host::USBClient {
 
   // USB-task context - dispatches by endpoint direction.
   void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) override;
+  size_t on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) override;
+  void on_stream_open(usb_host::IsocStream &stream, bool ok) override;
 
   // -- Descriptor parsing ----------------------------------------------------
   bool parse_descriptors_();

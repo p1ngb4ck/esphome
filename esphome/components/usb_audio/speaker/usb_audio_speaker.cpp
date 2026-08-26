@@ -62,7 +62,9 @@ void USBAudioSpeaker::start() {
     return;
   }
   if (!this->ensure_started_()) {
-    ESP_LOGE(TAG_SPK, "USB host not started");
+    // No device, an unusable format, or the backoff after a failed open. Opening is
+    // retried from the parent, so this is a state to report, not an error to repeat.
+    ESP_LOGW(TAG_SPK, "USB audio stream not available yet");
     this->status_set_warning();
     return;
   }
