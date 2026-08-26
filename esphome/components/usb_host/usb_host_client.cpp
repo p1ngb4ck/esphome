@@ -501,8 +501,18 @@ bool USBClient::control_transfer(uint8_t type, uint8_t request, uint16_t value, 
   return true;
 }
 
-bool USBClient::set_interface(uint8_t interface_num, uint8_t alt_setting) {
-  return get_usb_host()->do_set_interface(this->handle_, this->device_handle_, interface_num, alt_setting);
+bool USBClient::set_interface(uint8_t interface_num, uint8_t alt_setting,
+                              const transfer_cb_t &callback) {
+  static constexpr uint8_t REQ_TYPE =
+      USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE;
+  static constexpr uint8_t B_REQUEST_SET_INTERFACE = 11;
+
+  return this->control_transfer(
+      REQ_TYPE,
+      B_REQUEST_SET_INTERFACE,
+      alt_setting,
+      interface_num,
+      callback);
 }
 
 #endif  // USE_USB_CONTROL_TRANSFERS

@@ -89,66 +89,6 @@ bool USBHost::submit_control(usb_host_client_handle_t client_handle, TransferReq
   return true;
 }
 
-bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
-                               uint8_t interface_num, uint8_t alt_setting) {
-  usb_transfer_t *xfer = nullptr;
-  // SET_INTERFACE has no data phase so SETUP_PACKET_SIZE (8 bytes) is sufficient.
-  esp_err_t err = usb_host_transfer_alloc(SETUP_PACKET_SIZE, 0, &xfer);
-  if (err != ESP_OK || xfer == nullptr) {
-    ESP_LOGE(TAG, "set_interface: alloc failed: %s", esp_err_to_name(err));
-    return false;
-  }
-
-  SemaphoreHandle_t sem = xSemaphoreCreateBinary();
-  if (sem == nullptr) {
-    usb_host_transfer_free(xfer);
-    ESP_LOGE(TAG, "set_interface: semaphore alloc failed");
-    return false;
-  }
-
-  static constexpr uint8_t REQ_TYPE = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE;
-  static constexpr uint8_t B_REQUEST_SET_INTERFACE = 11;
-
-  auto *setup = reinterpret_cast<uint8_t *>(xfer->data_buffer);
-  setup[0] = REQ_TYPE;
-  setup[1] = B_REQUEST_SET_INTERFACE;
-  setup[2] = alt_setting & 0xFF;
-  setup[3] = 0;
-  setup[4] = interface_num & 0xFF;
-  setup[5] = 0;
-  setup[6] = 0;
-  setup[7] = 0;
-
-  xfer->device_handle = device_handle;
-  xfer->bEndpointAddress = 0;
-  xfer->num_bytes = static_cast<int>(SETUP_PACKET_SIZE);
-  xfer->timeout_ms = 5000;
-  xfer->context = sem;
-  xfer->callback = [](usb_transfer_t *t) { xSemaphoreGive(static_cast<SemaphoreHandle_t>(t->context)); };
-
-  err = usb_host_transfer_submit_control(client_handle, xfer);
-  bool ok = false;
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "set_interface: submit failed: %s", esp_err_to_name(err));
-  } else {
-    ok = xSemaphoreTake(sem, pdMS_TO_TICKS(6000)) == pdTRUE;
-    if (!ok) {
-      // ESP-IDF owns the transfer until the callback fires (guaranteed on disconnect too),
-      // so do not free xfer/sem here -- the callback will run and give the semaphore.
-      ESP_LOGE(TAG, "set_interface: wait timeout");
-      return false;
-    }
-    if (xfer->status != USB_TRANSFER_STATUS_COMPLETED) {
-      ESP_LOGE(TAG, "set_interface: transfer status %d", xfer->status);
-      ok = false;
-    }
-  }
-
-  vSemaphoreDelete(sem);
-  usb_host_transfer_free(xfer);
-  return ok;
-}
-
 #endif  // USE_USB_CONTROL_TRANSFERS
 
 // -- Isochronous ---------------------------------------------------------------
