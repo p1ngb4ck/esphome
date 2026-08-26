@@ -93,7 +93,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
                                uint8_t interface_num, uint8_t alt_setting) {
   // usb_transfer_t *xfer = nullptr;
   const transfer_cb_t callback = [](const TransferStatus &status) {
-    if (status.status != USB_TRANSFER_STATUS_COMPLETED) {
+    if (!status.success) {
       ESP_LOGE(TAG, "set_interface: transfer status %d", status.status);
     }
   };
