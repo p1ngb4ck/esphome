@@ -251,7 +251,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
   transfer_cb_t callback = [this, &stream, cb](const TransferStatus &status) {
     if (!status.success) {
       ESP_LOGW(TAG, "set_interface %u alt %u failed: %s", stream.interface_num, stream.alt_setting,
-               status.status_str());
+               esp_err_to_name(status.error_code));
     }
   };
   if (stream.ep_addr == 0 || stream.mps == 0 || stream.num_urbs == 0 || stream.packets_per_urb == 0) {
