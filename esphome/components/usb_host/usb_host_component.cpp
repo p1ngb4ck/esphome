@@ -248,6 +248,12 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
 
 bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
                           usb_device_handle_t device_handle) {
+  callback_t callback = [this, &stream, cb](const TransferStatus &status) {
+    if (!status.success) {
+      ESP_LOGW(TAG, "set_interface %u alt %u failed: %s", stream.interface_num, stream.alt_setting,
+               status.status_str());
+    }
+  };
   if (stream.ep_addr == 0 || stream.mps == 0 || stream.num_urbs == 0 || stream.packets_per_urb == 0) {
     ESP_LOGE(TAG, "stream_open: invalid parameters");
     return false;
@@ -258,7 +264,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
       return false;
 
     if (stream.alt_setting != 0) {
-      if (!this->do_set_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
+      if (!this->do_set_interface(stream.interface_num, stream.alt_setting, callback)) {
         this->do_release_interface(client_handle, device_handle, stream.interface_num);
         return false;
       }
@@ -320,7 +326,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
         // Nothing was submitted -- clean up synchronously right now.
         stream.xfers.reset();
         stream.ctxs.reset();
-        cb->set_interface(client_handle, device_handle, stream.interface_num, 0);
+        cb->set_interface(stream.interface_num, 0, callback);
         this->do_release_interface(client_handle, device_handle, stream.interface_num);
       }
       return false;
