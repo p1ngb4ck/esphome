@@ -94,7 +94,7 @@ bool USBHost::do_set_interface(usb_host_client_handle_t client_handle, usb_devic
   // usb_transfer_t *xfer = nullptr;
   const transfer_cb_t callback = [](const TransferStatus &status) {
     if (!status.success) {
-      ESP_LOGE(TAG, "set_interface: transfer status %d", status.status);
+      ESP_LOGE(TAG, "set_interface: transfer status %PRIu32", status.error_code);
     }
   };
   // SET_INTERFACE has no data phase so SETUP_PACKET_SIZE (8 bytes) is sufficient.
