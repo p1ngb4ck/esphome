@@ -279,8 +279,6 @@ class USBHost final : public Component {
   // Control transfer submission -- guarded
 #ifdef USE_USB_CONTROL_TRANSFERS
   bool submit_control(usb_host_client_handle_t client_handle, TransferRequest *trq);
-  bool do_set_interface(usb_host_client_handle_t client_handle, usb_device_handle_t device_handle,
-                        uint8_t interface_num, uint8_t alt_setting);
 #endif
 
   // Interface claim / release -- always needed
