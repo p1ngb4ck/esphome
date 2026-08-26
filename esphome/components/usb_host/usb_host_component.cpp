@@ -258,7 +258,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
       return false;
 
     if (stream.alt_setting != 0) {
-      if (!cb->set_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting)) {
+      if (client_handle->set_interface(stream.interface_num, stream.alt_setting)) {
         this->do_release_interface(client_handle, device_handle, stream.interface_num);
         return false;
       }
@@ -283,8 +283,8 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
         this->do_isoc_free(stream.xfers[j]);
       stream.ctxs.reset();
       stream.xfers.reset();
-      cb->set_interface(client_handle, device_handle, stream.interface_num, 0);
-      cb->release_interface(client_handle, device_handle, stream.interface_num);
+      client_handle->set_interface(stream.interface_num, 0);
+      this->do_release_interface(client_handle, device_handle, stream.interface_num);
       return false;
     }
   }
@@ -320,8 +320,8 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
         // Nothing was submitted -- clean up synchronously right now.
         stream.xfers.reset();
         stream.ctxs.reset();
-        cb->set_interface(client_handle, device_handle, stream.interface_num, 0);
-        cb->release_interface(client_handle, device_handle, stream.interface_num);
+        client_handle->set_interface(stream.interface_num, 0);
+        this->do_release_interface(client_handle, device_handle, stream.interface_num);
       }
       return false;
     }
