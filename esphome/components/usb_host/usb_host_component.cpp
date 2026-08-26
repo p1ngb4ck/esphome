@@ -180,26 +180,14 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       // Last URB gone. If nobody asked for a close, the stream stopped by itself and is now
       // silently dead: flag it so the owner can tear it down instead of writing into a
       // buffer that is never drained again.
-      if (stream->streaming) {
-        stream->streaming = false;
+      if (stream->streaming.exchange(false, std::memory_order_acq_rel))
         stream->died.store(true, std::memory_order_release);
-      }
-      get_usb_host()->defer([stream, client] {
-        client->set_interface(
-            stream->interface_num,
-            0,
-            [stream, client](const TransferStatus &status) {
-              if (!status.success) {
-                ESP_LOGW(TAG, "failed to reset interface");
-              }
-
-              stream->xfers.reset();
-              stream->ctxs.reset();
-
-              if (stream->owns_interface) {
-                client->release_interface(stream->interface_num);
-              }
-            });
+      get_usb_host()->defer([stream, client, client_handle, device_handle] {
+        stream->xfers.reset();
+        stream->ctxs.reset();
+        get_usb_host()->stream_release_(*stream, client, client_handle, device_handle);
+        stream->open_state.store(IsocOpenState::CLOSED, std::memory_order_release);
+        ESP_LOGD(TAG, "stream_close deferred: ep=0x%02X", stream->ep_addr);
       });
     }
   };
@@ -209,14 +197,14 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
     return;
   }
 
-  if (stream->streaming) {
-    const uint8_t *payload = xfer->data_buffer;
+  if (stream->streaming.load(std::memory_order_acquire)) {
+    uint8_t *payload = xfer->data_buffer;
     uint32_t total_bytes = 0;
     for (int i = 0; i < xfer->num_isoc_packets; i++) {
       usb_isoc_packet_desc_t *desc = &xfer->isoc_packet_desc[i];
       const bool error = (desc->status != USB_TRANSFER_STATUS_COMPLETED && desc->status != USB_TRANSFER_STATUS_SKIPPED);
-      // OUT: the sample clock decides how many bytes this packet may carry and on_isoc_packet
-      // fills exactly that many. IN: report what was actually received, and keep asking for a
+      // OUT: the sample clock decides how many bytes this packet may carry and on_isoc_fill()
+      // writes into the URB. IN: report what was actually received, and keep asking for a
       // full mps.
       //
       // The payload stride is the packet size, not mps: the host controller lays the packets
@@ -224,8 +212,14 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
       // in hcd_dwc.c), so a short packet moves every following packet down by that shortfall.
       // Writing at an mps stride only matches while every packet happens to be exactly mps.
       const uint32_t fill = stream->is_output ? isoc_next_packet_size(stream) : stream->mps;
-      client->on_isoc_packet(xfer->bEndpointAddress, payload, stream->is_output ? fill : desc->actual_num_bytes,
-                             error);
+      if (stream->is_output) {
+        const size_t written = client->on_isoc_fill(xfer->bEndpointAddress, payload, fill);
+        // Whatever the client did not produce is silence, not the previous packet again.
+        if (written < fill)
+          memset(payload + written, 0, fill - written);
+      } else {
+        client->on_isoc_packet(xfer->bEndpointAddress, payload, desc->actual_num_bytes, error);
+      }
       desc->num_bytes = fill;
       payload += fill;
       total_bytes += fill;
@@ -246,37 +240,13 @@ void USBHost::isoc_cb(usb_transfer_t *xfer) {
   }
 }
 
-bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
-                          usb_device_handle_t device_handle) {
-  transfer_cb_t callback = [this, &stream, cb](const TransferStatus &status) {
-    if (!status.success) {
-      ESP_LOGW(TAG, "set_interface %u alt %u failed: %s", stream.interface_num, stream.alt_setting,
-               esp_err_to_name(status.error_code));
-    }
-  };
-  if (stream.ep_addr == 0 || stream.mps == 0 || stream.num_urbs == 0 || stream.packets_per_urb == 0) {
-    ESP_LOGE(TAG, "stream_open: invalid parameters");
-    return false;
-  }
-
-  if (stream.owns_interface) {
-    if (!this->do_claim_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting))
-      return false;
-
-    if (stream.alt_setting != 0) {
-      if (cb->set_interface(stream.interface_num, stream.alt_setting, callback)) {
-        this->do_release_interface(client_handle, device_handle, stream.interface_num);
-        return false;
-      }
-    }
-  }
-
+bool USBHost::stream_start_urbs_(IsocStream &stream, USBClient *cb, usb_device_handle_t device_handle) {
   stream.xfers = std::make_unique<usb_transfer_t *[]>(stream.num_urbs);
   stream.ctxs = std::make_unique<IsocCbCtx[]>(stream.num_urbs);
   stream.pending_urbs.store(stream.num_urbs, std::memory_order_relaxed);
-
   stream.died.store(false, std::memory_order_relaxed);
-  stream.streaming = true;
+  stream.streaming.store(true, std::memory_order_release);
+
   for (uint8_t i = 0; i < stream.num_urbs; i++) {
     stream.ctxs[i].client = cb;
     stream.ctxs[i].stream = &stream;
@@ -284,13 +254,12 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
                                           USBHost::isoc_cb, &stream.ctxs[i]);
     if (stream.xfers[i] == nullptr) {
       ESP_LOGE(TAG, "stream_open: URB %u alloc failed", i);
-      stream.streaming = false;
+      stream.streaming.store(false, std::memory_order_release);
       for (uint8_t j = 0; j < i; j++)
         this->do_isoc_free(stream.xfers[j]);
+      stream.pending_urbs.store(0, std::memory_order_release);
       stream.ctxs.reset();
       stream.xfers.reset();
-      cb->set_interface(stream.interface_num, 0, callback);
-      this->do_release_interface(client_handle, device_handle, stream.interface_num);
       return false;
     }
   }
@@ -313,21 +282,21 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
   for (uint8_t i = 0; i < stream.num_urbs; i++) {
     if (!this->do_isoc_submit(stream.xfers[i])) {
       ESP_LOGE(TAG, "stream_open: URB %u submit failed", i);
-      // Free unsubmitted URBs directly; already-submitted ones (0..i-1) will
-      // drain through isoc_cb and free themselves. Adjust pending_urbs to
-      // reflect only the submitted count so the last callback triggers cleanup.
+      // URBs 0..i-1 are already in flight and free themselves through isoc_cb. Stop the
+      // resubmission first, then free the ones that never went out and take them off the
+      // count relatively: a blind store would overwrite a decrement an in-flight URB has
+      // already made, and the count would never reach zero.
+      stream.streaming.store(false, std::memory_order_release);
       for (uint8_t j = i; j < stream.num_urbs; j++) {
         usb_host_transfer_free(stream.xfers[j]);
         stream.xfers[j] = nullptr;
       }
-      stream.pending_urbs.store(i, std::memory_order_release);
-      stream.streaming = false;
-      if (i == 0) {
-        // Nothing was submitted -- clean up synchronously right now.
+      const uint8_t never_submitted = stream.num_urbs - i;
+      if (stream.pending_urbs.fetch_sub(never_submitted, std::memory_order_acq_rel) == never_submitted) {
+        // Every submitted URB had already retired, so nothing will call finish_urb() again
+        // and the buffers are ours to drop right here.
         stream.xfers.reset();
         stream.ctxs.reset();
-        cb->set_interface(stream.interface_num, 0, callback);
-        this->do_release_interface(client_handle, device_handle, stream.interface_num);
       }
       return false;
     }
@@ -338,15 +307,116 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
   return true;
 }
 
-void USBHost::stream_close(IsocStream &stream, usb_host_client_handle_t client_handle,
-                           usb_device_handle_t device_handle) {
-  if (!stream.streaming && !stream.xfers)
+void USBHost::stream_release_(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
+                              usb_device_handle_t device_handle) {
+  if (!stream.owns_interface)
+    return;
+  // Only the owner may touch the alt-setting: a feedback stream shares its interface with
+  // the data stream, and resetting it here would tear that one down.
+  if (stream.alt_setting != 0) {
+    cb->set_interface(stream.interface_num, 0, [](const TransferStatus &status) {
+      if (!status.success)
+        ESP_LOGW(TAG, "alt-setting reset failed");
+    });
+  }
+  this->do_release_interface(client_handle, device_handle, stream.interface_num);
+}
+
+bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
+                          usb_device_handle_t device_handle) {
+  if (stream.ep_addr == 0 || stream.mps == 0 || stream.num_urbs == 0 || stream.packets_per_urb == 0) {
+    ESP_LOGE(TAG, "stream_open: invalid parameters");
+    return false;
+  }
+  // Opening on top of a stream that is still draining would overwrite xfers/ctxs while
+  // in-flight callbacks still point into them.
+  if (!stream.is_closed()) {
+    ESP_LOGW(TAG, "stream_open: ep=0x%02X is not closed yet", stream.ep_addr);
+    return false;
+  }
+
+  if (!stream.owns_interface) {
+    // Shares an already selected interface with the stream that owns it, so there is
+    // nothing to claim and nothing to switch.
+    const bool ok = this->stream_start_urbs_(stream, cb, device_handle);
+    stream.open_state.store(ok ? IsocOpenState::RUNNING : IsocOpenState::CLOSED, std::memory_order_release);
+    cb->on_stream_open(stream, ok);
+    return ok;
+  }
+
+  if (!this->do_claim_interface(client_handle, device_handle, stream.interface_num, stream.alt_setting))
+    return false;
+
+  if (stream.alt_setting == 0) {
+    const bool ok = this->stream_start_urbs_(stream, cb, device_handle);
+    // Only give the interface back when nothing is draining: if URBs did go out, the last
+    // one to retire runs the same teardown and doing it twice releases it twice.
+    if (!ok && stream.pending_urbs.load(std::memory_order_acquire) == 0)
+      this->stream_release_(stream, cb, client_handle, device_handle);
+    stream.open_state.store(ok ? IsocOpenState::RUNNING : IsocOpenState::CLOSED, std::memory_order_release);
+    cb->on_stream_open(stream, ok);
+    return ok;
+  }
+
+  // The endpoint only exists once the device has switched to the alt-setting, and switching
+  // is a control transfer. Submit it and finish the open from its completion rather than
+  // blocking the caller -- every caller here is the main loop.
+  stream.open_state.store(IsocOpenState::SELECTING_ALT, std::memory_order_release);
+  const bool submitted = cb->set_interface(
+      stream.interface_num, stream.alt_setting,
+      [this, &stream, cb, client_handle, device_handle](const TransferStatus &status) {
+        // Completion runs on the USB task; hand the rest to the main loop so the whole open
+        // sequence stays on the task that started it.
+        const bool selected = status.success;
+        this->defer([this, &stream, cb, client_handle, device_handle, selected]() {
+          // The owner may have closed the stream while the device was being switched. Give
+          // the interface back rather than starting URBs nobody asked for any more.
+          if (stream.open_state.load(std::memory_order_acquire) != IsocOpenState::SELECTING_ALT) {
+            this->stream_release_(stream, cb, client_handle, device_handle);
+            cb->on_stream_open(stream, false);
+            return;
+          }
+          bool ok = selected;
+          if (!ok) {
+            ESP_LOGE(TAG, "stream_open: SET_INTERFACE %u alt %u failed", stream.interface_num, stream.alt_setting);
+          } else {
+            ok = this->stream_start_urbs_(stream, cb, device_handle);
+          }
+          if (!ok) {
+            if (stream.pending_urbs.load(std::memory_order_acquire) == 0)
+              this->stream_release_(stream, cb, client_handle, device_handle);
+            stream.open_state.store(IsocOpenState::CLOSED, std::memory_order_release);
+          } else {
+            stream.open_state.store(IsocOpenState::RUNNING, std::memory_order_release);
+          }
+          cb->on_stream_open(stream, ok);
+        });
+      });
+  if (!submitted) {
+    ESP_LOGE(TAG, "stream_open: SET_INTERFACE %u alt %u not submitted", stream.interface_num, stream.alt_setting);
+    this->stream_release_(stream, cb, client_handle, device_handle);
+    stream.open_state.store(IsocOpenState::CLOSED, std::memory_order_release);
+    cb->on_stream_open(stream, false);
+    return false;
+  }
+  return true;
+}
+
+void USBHost::stream_close(IsocStream &stream) {
+  // An open that has not started its URBs yet is cancelled by taking it out of
+  // SELECTING_ALT: the SET_INTERFACE completion then gives the interface back instead of
+  // starting a stream nobody wants. Nothing else has to happen, there is no URB to drain.
+  auto selecting = IsocOpenState::SELECTING_ALT;
+  if (stream.open_state.compare_exchange_strong(selecting, IsocOpenState::CLOSED, std::memory_order_acq_rel))
     return;
 
-  // Signal callbacks to stop resubmitting. In-flight URBs will return, free
-  // themselves, and the last one defers alt-setting reset, interface release,
-  // and buffer cleanup to the main loop via get_usb_host()->defer() -- no blocking needed.
-  stream.streaming = false;
+  if (!stream.streaming.load(std::memory_order_acquire) && !stream.xfers)
+    return;
+
+  // Signal callbacks to stop resubmitting. In-flight URBs will return, free themselves, and
+  // the last one defers alt-setting reset, interface release and buffer cleanup to the main
+  // loop via defer() -- no blocking needed. is_closed() reports when that has happened.
+  stream.streaming.store(false, std::memory_order_release);
 }
 
 #endif  // USE_USB_ISOC_TRANSFERS
