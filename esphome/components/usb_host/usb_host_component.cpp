@@ -289,7 +289,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
         this->do_isoc_free(stream.xfers[j]);
       stream.ctxs.reset();
       stream.xfers.reset();
-      cb->set_interface(client_handle, device_handle, stream.interface_num, 0);
+      cb->set_interface(stream.interface_num, 0, callback);
       this->do_release_interface(client_handle, device_handle, stream.interface_num);
       return false;
     }
