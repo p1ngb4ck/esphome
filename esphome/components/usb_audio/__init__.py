@@ -111,13 +111,15 @@ def _usb_audio_streams(full_config):
 def _select_fifo_bias(out_mps: int, in_mps: int):
     """First split that carries both directions, or None when none of them does.
 
-    The default split comes first everywhere: moving away from it changes the USB host for
-    everything sharing it, so it is only worth doing when what was asked for does not fit.
-    After that the order expresses which direction gets the headroom, not which split is
-    acceptable -- every split in the list carries what was asked for.
+    Playback gets the room whenever a speaker is configured: a speaker endpoint is the
+    larger of the two by a wide margin, its format is what a listener notices, and most
+    microphones are mono and fit into what is left either way. Taking that split even where
+    the default would do also covers a device whose endpoint asks for more than the format
+    alone suggests. Capture on its own keeps the default split as long as that carries it,
+    since moving away from the default changes the USB host for everything sharing it.
     """
-    if out_mps and not in_mps:
-        order = (BIAS_BALANCED, BIAS_PERIODIC_OUT, BIAS_IN)
+    if out_mps:
+        order = (BIAS_PERIODIC_OUT, BIAS_BALANCED, BIAS_IN)
     else:
         order = (BIAS_BALANCED, BIAS_IN, BIAS_PERIODIC_OUT)
     for bias in order:
@@ -138,33 +140,32 @@ def _final_validate(config):
     if _select_fifo_bias(out_mps, in_mps) is not None:
         return config
 
-    # Nothing fits. Say which direction is over which limit rather than only that it does
-    # not work, and what the largest playback format that would still fit alongside a
-    # capture stream is.
+    # Say which stream is over which limit and what would bring it inside, rather than only
+    # that the combination does not work.
     widest_out = max(limits["out"] for limits in FS_MPS_LIMITS.values())
-    if out_mps and in_mps:
-        out_biased = FS_MPS_LIMITS[BIAS_PERIODIC_OUT]
-        in_biased = FS_MPS_LIMITS[BIAS_IN]
-        raise cv.Invalid(
-            f"Playback and capture do not fit together on the {variant}. The USB "
-            f"controller splits one packet buffer between the two directions: it carries "
-            f"either {out_biased['out']} bytes out with {out_biased['in']} in, or "
-            f"{in_biased['out']} bytes out with {in_biased['in']} in. This speaker needs "
-            f"{out_mps} bytes per isochronous packet and this microphone {in_mps}, which "
-            f"no split covers. Configure only one of the two, or bring one of them inside "
-            f"a split with fewer channels or a lower sample rate."
-        )
-    if out_mps:
+    widest_in = max(limits["in"] for limits in FS_MPS_LIMITS.values())
+    if out_mps > widest_out:
         raise cv.Invalid(
             f"This speaker format does not fit the USB controller of the {variant}: it "
             f"needs {out_mps} bytes per isochronous packet and at most {widest_out} are "
             f"available. Use fewer channels or a lower sample rate."
         )
-    widest_in = max(limits["in"] for limits in FS_MPS_LIMITS.values())
+    if in_mps > widest_in:
+        raise cv.Invalid(
+            f"This microphone format does not fit the USB controller of the {variant}: it "
+            f"needs {in_mps} bytes per isochronous packet and at most {widest_in} are "
+            f"available. Use fewer channels or a lower sample rate."
+        )
+    # Each fits on its own, so it is the combination. Playback is what gets the room, so
+    # capture is what has to give.
+    capture_left = FS_MPS_LIMITS[BIAS_PERIODIC_OUT]["in"]
     raise cv.Invalid(
-        f"This microphone format does not fit the USB controller of the {variant}: it "
-        f"needs {in_mps} bytes per isochronous packet and at most {widest_in} are "
-        f"available. Use fewer channels or a lower sample rate."
+        f"Playback and capture do not fit together on the {variant}. The USB controller "
+        f"splits one packet buffer between the two directions, and the split that carries "
+        f"this speaker's {out_mps} bytes per isochronous packet leaves {capture_left} "
+        f"bytes for capture. This microphone needs {in_mps}. Bring it within "
+        f"{capture_left} bytes -- one channel, or a lower sample rate -- or configure only "
+        f"one of the two."
     )
 
 
@@ -192,15 +193,18 @@ def _apply_fifo_bias() -> None:
     # The split is a property of the USB host, not of this component, so anything else
     # sharing it is affected. That is worth saying out loud.
     limits = FS_MPS_LIMITS[bias]
+    reason = (
+        f"playback needs {out_mps} bytes per isochronous packet"
+        if out_mps
+        else f"capture needs {in_mps} bytes per isochronous packet"
+    )
     _LOGGER.warning(
-        "usb_audio: setting the USB host packet buffer split to '%s' on the %s. "
-        "Playback needs %d and capture %d bytes per isochronous packet, which the default "
-        "split does not carry. While this is set, isochronous endpoints are limited to %d "
-        "bytes out and %d bytes in for every component sharing this USB host.",
-        bias,
+        "usb_audio: the USB host packet buffer on the %s is split towards '%s' because %s. "
+        "While this is set, isochronous endpoints are limited to %d bytes out and %d bytes "
+        "in, for every component sharing this USB host.",
         variant,
-        out_mps,
-        in_mps,
+        bias,
+        reason,
         limits["out"],
         limits["in"],
     )
