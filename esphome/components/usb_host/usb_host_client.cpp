@@ -152,8 +152,8 @@ static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<c
   return buffer.data();
 }
 
+#if defined(USE_USB_BULK_TRANSFERS) || defined(USE_USB_CONTROL_TRANSFERS)
 // -- Static transfer callbacks (USB task context) ------------------------------
-
 // Shared completion logic: fill status, fire callback, release slot.
 // setup_offset is the number of leading bytes in data_buffer that are not payload. For
 // control transfers the buffer starts with the 8 byte setup packet the host wrote, which is
@@ -170,6 +170,7 @@ static void complete_trq(TransferRequest *trq, const usb_transfer_t *xfer, size_
     trq->callback(trq->status);
   trq->client->release_trq(trq);
 }
+#endif
 
 #ifdef USE_USB_CONTROL_TRANSFERS
 static void control_callback(const usb_transfer_t *xfer) {
@@ -177,7 +178,7 @@ static void control_callback(const usb_transfer_t *xfer) {
 }
 #endif
 
-#if defined(USE_USB_BULK_TRANSFERS) || defined(USE_USB_CONTROL_TRANSFERS)
+#if defined(USE_USB_BULK_TRANSFERS)
 static void transfer_callback(usb_transfer_t *xfer) {
   complete_trq(static_cast<TransferRequest *>(xfer->context), xfer, 0);
 }
