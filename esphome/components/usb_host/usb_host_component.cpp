@@ -264,7 +264,7 @@ bool USBHost::stream_open(IsocStream &stream, USBClient *cb, usb_host_client_han
       return false;
 
     if (stream.alt_setting != 0) {
-      if (!this->do_set_interface(stream.interface_num, stream.alt_setting, callback)) {
+      if (cb->set_interface(stream.interface_num, stream.alt_setting, callback)) {
         this->do_release_interface(client_handle, device_handle, stream.interface_num);
         return false;
       }
