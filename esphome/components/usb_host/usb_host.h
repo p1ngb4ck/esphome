@@ -27,6 +27,22 @@ namespace esphome::usb_host {
 //
 // Transfer submission engine (USBHost) is stateless w.r.t. client memory -- the
 // Linux URB model: client owns the pool, fills a slot, hands it to USBHost.
+//
+// TransferRequest pool access pattern:
+// - get_trq_() [allocate]: called from BOTH the USB task and the main loop
+//   * USB task: via input callbacks that restart their transfer immediately
+//   * Main loop: for output transfers and flow-controlled input restarts
+// - release_trq() [deallocate]: called from BOTH the USB task and the main loop
+//   * USB task: right after a transfer callback completes (this is what keeps the
+//     pool from running dry under load)
+//   * Main loop: when a submission fails
+//
+// The dual-threaded allocation/deallocation is intentional rather than an oversight:
+// - the USB task can restart an input transfer and give the slot back without a
+//   context switch to the main loop
+// - the main loop keeps control of backpressure by deciding when to restart after
+//   it has consumed the data
+// The atomic bitmask makes that safe without taking a mutex on either side.
 
 static const char *const TAG = "usb_host";
 
@@ -50,6 +66,9 @@ static constexpr size_t SETUP_PACKET_SIZE = 8;
 static constexpr size_t MAX_REQUESTS = USB_HOST_MAX_REQUESTS;
 static_assert(MAX_REQUESTS >= 1 && MAX_REQUESTS <= 32, "MAX_REQUESTS must be between 1 and 32");
 
+// Bitmask type tracking which TransferRequest slots are in use. It needs at least as many
+// bits as MAX_REQUESTS, hence uint16_t up to 16 requests and uint32_t for 17-32. This is
+// tied to the static_assert above: raising MAX_REQUESTS beyond 32 means changing both.
 using trq_bitmask_t = std::conditional<(MAX_REQUESTS <= 16), uint16_t, uint32_t>::type;
 static constexpr trq_bitmask_t ALL_REQUESTS_IN_USE = MAX_REQUESTS == 32 ? ~0 : (1 << MAX_REQUESTS) - 1;
 
@@ -108,7 +127,9 @@ enum ClientState {
 };
 
 // -----------------------------------------------------------------------------
-// Isochronous stream types -- compiled only when USE_USB_ISOC_TRANSFERS is set.
+// Isochronous stream types -- compiled only when USE_USB_ISOC_TRANSFERS is set, which
+// usb_host.require_isoc_transfers() does. That helper requests control transfers too,
+// so the #error below only fires for a build that defines the macros by hand.
 // -----------------------------------------------------------------------------
 #if defined(USE_USB_ISOC_TRANSFERS) && !defined(USE_USB_CONTROL_TRANSFERS)
 #error "USE_USB_ISOC_TRANSFERS requires USE_USB_CONTROL_TRANSFERS (alt-setting selection)"
@@ -122,6 +143,7 @@ enum ClientState {
 enum class IsocOpenState : uint8_t {
   CLOSED,         // nothing claimed, no URBs, safe to open
   SELECTING_ALT,  // SET_INTERFACE submitted, waiting for the device to answer
+  ABORTING,       // closed while SELECTING_ALT; its completion still has to release
   RUNNING,        // URBs submitted
 };
 
@@ -163,8 +185,8 @@ struct IsocStream {
   // Asynchronous OUT feedback: device-reported rate (samples per (micro)frame, Q10.14 at
   // full speed / Q16.16 at high speed). 0 = no feedback yet, use the nominal pacing above.
   std::atomic<uint32_t> fb_value{0};
-  uint8_t fb_shift{14};          // fractional bits of fb_value (14 FS, 16 HS)
-  uint32_t fb_accum{0};          // feedback fractional accumulator
+  uint8_t fb_shift{14};  // fractional bits of fb_value (14 FS, 16 HS)
+  uint32_t fb_accum{0};  // feedback fractional accumulator
   // A feedback stream shares its AS interface with the data stream, so it must not claim
   // or release that interface itself.
   bool owns_interface{true};
@@ -195,6 +217,9 @@ class USBClient : public Component {
   void on_opened(uint8_t addr);
   virtual void on_removed(usb_device_handle_t handle);
   void dump_config() override;
+  // THREAD CONTEXT: both the USB task and the main loop
+  // - USB task: immediately after a transfer callback completes
+  // - Main loop: when a transfer submission failed
   void release_trq(TransferRequest *trq);
   trq_bitmask_t get_trq_in_use() const { return trq_in_use_; }
 
@@ -205,15 +230,29 @@ class USBClient : public Component {
 
   // Lock-free event queue and pool -- public for static callbacks
   LockFreeQueue<UsbEvent, USB_EVENT_QUEUE_SIZE> event_queue;
+  // The pool is one entry smaller than the queue because LockFreeQueue<T, N> is a ring
+  // buffer holding N-1 elements. Sizing it that way makes allocate() return nullptr before
+  // push() can fail, so a pool slot is never leaked on a full queue. The "- 1" is that
+  // guarantee, not an off-by-one.
   EventPool<UsbEvent, USB_EVENT_QUEUE_SIZE - 1> event_pool;
 
   // -- Bulk / interrupt transfers ----------------------------------------------
+  // Compiled only when a component calls usb_host.require_bulk_transfers() from its
+  // to_code(); without that, these members do not exist and calls fail to compile.
 #ifdef USE_USB_BULK_TRANSFERS
+  // THREAD CONTEXT: both the USB task and the main loop
+  // - USB task: an input callback restarting its own transfer for immediate reception
+  // - Main loop: initial setup, and flow-controlled restarts after data was consumed
   bool transfer_in(uint8_t ep_address, const transfer_cb_t &callback, uint16_t length);
+  // THREAD CONTEXT: both the USB task and the main loop
+  // - USB task: an output callback restarting output directly, without a defer
+  // - Main loop: the initial output trigger from write_array() and loop()
   bool transfer_out(uint8_t ep_address, const transfer_cb_t &callback, const uint8_t *data, uint16_t length);
 #endif
 
   // -- Control transfers -------------------------------------------------------
+  // Compiled only when a component calls usb_host.require_control_transfers() from its
+  // to_code(); without that, these members do not exist and calls fail to compile.
 #ifdef USE_USB_CONTROL_TRANSFERS
   // w_length is what goes into the setup packet's wLength field, i.e. the number of bytes
   // the request itself is defined to carry. It defaults to the size of data, which is what
@@ -237,6 +276,8 @@ class USBClient : public Component {
 #endif
 
   // -- Isochronous support -----------------------------------------------------
+  // Compiled only when a component calls usb_host.require_isoc_transfers() from its
+  // to_code(); without that, these members do not exist and calls fail to compile.
 #ifdef USE_USB_ISOC_TRANSFERS
   usb_transfer_t *isoc_alloc(uint8_t ep_addr, uint16_t mps, uint8_t num_packets, usb_transfer_cb_t callback,
                              void *context);
@@ -246,6 +287,12 @@ class USBClient : public Component {
   // Starts the open sequence. A true return only means it started: an owning stream has to
   // select its alt-setting first, which is a control transfer. on_stream_open() reports the
   // outcome, and is_running() tells whether the stream is carrying data.
+  //
+  // Callback contract: once the open is accepted, on_stream_open() is called exactly once,
+  // whether the sequence succeeds or fails, so a state machine may key off it alone. The
+  // two precondition checks (invalid parameters, stream not closed yet) reject the call
+  // before it is accepted and report through the return value only -- they say nothing
+  // about the stream that is already there.
   bool stream_open(IsocStream &stream, USBClient *cb);
   void stream_close(IsocStream &stream);
 
@@ -281,6 +328,8 @@ class USBClient : public Component {
   const usb_config_desc_t *config_desc_{nullptr};
   int device_addr_{-1};
   int state_{USB_CLIENT_INIT};
+  // Lock-free pool management, no dynamic allocation: bit i set means requests_[i] is in
+  // use. Both threads allocate and deallocate, hence the atomic (see the header comment).
   std::atomic<trq_bitmask_t> trq_in_use_;
   uint16_t vid_{};
   uint16_t pid_{};
@@ -305,10 +354,6 @@ class USBHost final : public Component {
   float get_setup_priority() const override { return setup_priority::BUS; }
   void loop() override;
   void setup() override;
-
-  // Enable simultaneous HS + FS USB host on ESP32-P4 (requires espressif/usb >= 1.4.0).
-  // peripheral_map = BIT0 | BIT1 -> both controllers; default BIT0 = HS only.
-  void set_dual_host(bool enable) { this->dual_host_ = enable; }
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
 
@@ -340,12 +385,12 @@ class USBHost final : public Component {
   // Second half of the open sequence: allocate the URBs, seed an OUT stream with silence
   // and submit. Split out so it can run either straight from stream_open() or from the
   // SET_INTERFACE completion.
-  bool stream_start_urbs_(IsocStream &stream, USBClient *cb, usb_device_handle_t device_handle);
+  bool stream_start_urbs(IsocStream &stream, USBClient *cb, usb_device_handle_t device_handle);
   // Give back whatever the stream holds of its interface. Does nothing for a stream that
   // shares its interface with another one, and skips the alt-setting reset when there is
   // nothing to reset.
-  void stream_release_(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
-                       usb_device_handle_t device_handle);
+  void stream_release(IsocStream &stream, USBClient *cb, usb_host_client_handle_t client_handle,
+                      usb_device_handle_t device_handle);
 
   // Static trampoline stored as xfer->callback for every ISOC URB.
   // Iterates isoc_packet_desc[], calls client->on_isoc_packet() per packet, resubmits.
@@ -354,7 +399,6 @@ class USBHost final : public Component {
 
  protected:
   std::vector<USBClient *> clients_{};
-  bool dual_host_{false};
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().
