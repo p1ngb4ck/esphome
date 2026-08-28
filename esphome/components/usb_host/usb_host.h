@@ -355,6 +355,13 @@ class USBHost final : public Component {
   void loop() override;
   void setup() override;
 
+  // Run the ESP32-P4's high-speed and full-speed host controllers at the same time, so one
+  // board can serve devices of both speeds. Selected through usb_host_config_t's
+  // peripheral_map: BIT0 | BIT1 enables both controllers, the default BIT0 is HS only. That
+  // field only exists from espressif/usb 1.4.0 (IDF 6.0), hence the guards at the use site
+  // and in codegen.
+  void set_dual_host(bool enable) { this->dual_host_ = enable; }
+
   // -- Submission engine (called by USBClient thin forwarders) ----------------
 
   // Bulk / interrupt IN and OUT -- always compiled if any client uses them
@@ -399,6 +406,7 @@ class USBHost final : public Component {
 
  protected:
   std::vector<USBClient *> clients_{};
+  bool dual_host_{false};
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().
