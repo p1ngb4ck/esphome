@@ -82,8 +82,6 @@
 #define USE_HTTP_REQUEST_OTA_WATCHDOG_TIMEOUT 8000  // NOLINT
 #define USE_I2S_AUDIO_SPDIF_MODE
 #define USE_IMAGE
-#define USE_IMPROV_SERIAL
-#define USE_IMPROV_SERIAL_NEXT_URL
 #define USE_INFRARED
 #define USE_IR_RF
 #define USE_JSON
@@ -234,6 +232,9 @@
 #define USE_STORE_YAML_EXPORT
 #define API_MAX_SEND_QUEUE 8
 #define MAX_API_CONNECTIONS 6
+// The Improv library is not in the Zephyr tidy environment
+#define USE_IMPROV_SERIAL
+#define USE_IMPROV_SERIAL_NEXT_URL
 #define USE_MD5
 #define USE_NOISE
 #define USE_SHA256
@@ -244,8 +245,9 @@
 #endif
 #define USE_RTTTL_FINISHED_PLAYBACK_CALLBACK
 #define USE_RUNTIME_IMAGE_BMP
-#define USE_RUNTIME_IMAGE_PNG
 #define USE_RUNTIME_IMAGE_JPEG
+#define USE_RUNTIME_IMAGE_PNG
+#define USE_RUNTIME_IMAGE_QOI
 #define USE_RUNTIME_STATS
 #define USE_OTA
 #define USE_OTA_PASSWORD
@@ -367,6 +369,7 @@
 #define USE_SPEAKER
 #define USE_SPEAKER_MEDIA_PLAYER_ON_OFF
 #define USE_SPI
+#define USE_SPI_PSRAM_DMA
 #define USE_VOICE_ASSISTANT
 #define USE_WEBSERVER
 #define USE_WEBSERVER_AUTH
@@ -548,6 +551,8 @@
 
 #ifdef USE_HOST
 #define USE_HTTP_REQUEST_RESPONSE
+// Host only: the uart arm would shadow the native logger UART arms in other envs
+#define USE_IMPROV_SERIAL_UART
 #define USE_SOCKET_IMPL_BSD_SOCKETS
 #define USE_ESPHOME_TASK_LOG_BUFFER
 #define ESPHOME_TASK_LOG_BUFFER_SIZE 64
