@@ -303,25 +303,71 @@ static const UacTopologyNode *uac_find_node(const UacTopologyNode *nodes, uint8_
   return nullptr;
 }
 
-// Follow the signal path upstream from the Output Terminal of one direction and return the
-// first Feature Unit on it, or 0 when there is none. A unit with several inputs is followed
-// on its first pin only, which is where a device that offers one volume control puts it.
-static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count, bool capture) {
+// Walk upstream from an Output Terminal and report the first Feature Unit on the path, plus
+// whether the path reaches `want_source`. A unit with several inputs is followed on its
+// first pin only, which is where a device that offers one volume control puts it.
+//
+// Upstream is the right direction for both directions of audio: playback runs Input
+// Terminal (USB streaming) -> Feature Unit -> Output Terminal (speaker), capture runs Input
+// Terminal (microphone) -> Feature Unit -> Output Terminal (USB streaming). Either way the
+// Feature Unit sits between the two, which is also how sound/usb/mixer.c builds its mixer.
+static uint8_t uac_walk_from_output_terminal(const UacTopologyNode *nodes, uint8_t count,
+                                             const UacTopologyNode &output_terminal, uint8_t want_source,
+                                             bool &reaches_source) {
+  reaches_source = false;
+  uint8_t feature_unit = 0;
+  uint8_t next = output_terminal.first_source;
+  // A malformed descriptor can describe a cycle, so bound the walk by the node count.
+  for (uint8_t hop = 0; hop < count && next != 0; hop++) {
+    if (next == want_source) {
+      reaches_source = true;
+      break;
+    }
+    const UacTopologyNode *node = uac_find_node(nodes, count, next);
+    if (node == nullptr)
+      break;
+    if (feature_unit == 0 && node->subtype == UAC_AC_FEATURE_UNIT)
+      feature_unit = node->id;
+    next = node->first_source;
+  }
+  return feature_unit;
+}
+
+// Feature Unit belonging to one specific stream, identified by the Terminal its AudioStreaming
+// interface links to (bTerminalLink).
+//
+// Selecting the Output Terminal by type alone is wrong on any device with more than one of
+// them: a card with a speaker jack, a headphone jack and an S/PDIF output describes three
+// playback Output Terminals, and the first one in descriptor order need not be the one the
+// chosen stream feeds. Volume and mute would then be applied to a Feature Unit that is not in
+// the path being played, which is silent from the user's side and reports no error.
+//
+// For capture, bTerminalLink names the Output Terminal itself, so the walk starts there.
+// For playback it names the Input Terminal, so each candidate Output Terminal is walked and
+// the one whose path reaches that Input Terminal is the stream's own.
+static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count, uint8_t terminal_link,
+                                     bool capture) {
+  if (terminal_link == 0)
+    return 0;
+
+  if (capture) {
+    const UacTopologyNode *terminal = uac_find_node(nodes, count, terminal_link);
+    if (terminal == nullptr || terminal->subtype != UAC_AC_OUTPUT_TERMINAL)
+      return 0;
+    bool unused = false;
+    return uac_walk_from_output_terminal(nodes, count, *terminal, 0, unused);
+  }
+
   for (uint8_t i = 0; i < count; i++) {
     if (nodes[i].subtype != UAC_AC_OUTPUT_TERMINAL)
       continue;
-    if ((nodes[i].terminal_type == UAC_TERMINAL_TYPE_USB_STREAMING) != capture)
+    // A playback path ends at a physical sink, never back at the host.
+    if (nodes[i].terminal_type == UAC_TERMINAL_TYPE_USB_STREAMING)
       continue;
-    uint8_t next = nodes[i].first_source;
-    // A malformed descriptor can describe a cycle, so bound the walk by the node count.
-    for (uint8_t hop = 0; hop < count && next != 0; hop++) {
-      const UacTopologyNode *node = uac_find_node(nodes, count, next);
-      if (node == nullptr)
-        break;
-      if (node->subtype == UAC_AC_FEATURE_UNIT)
-        return node->id;
-      next = node->first_source;
-    }
+    bool reaches = false;
+    const uint8_t feature_unit = uac_walk_from_output_terminal(nodes, count, nodes[i], terminal_link, reaches);
+    if (reaches)
+      return feature_unit;
   }
   return 0;
 }
@@ -474,8 +520,10 @@ bool USBAudioClient::parse_feature_units_() {
   UacFeatureUnit units[UAC_MAX_TOPOLOGY_NODES];
   const uint8_t unit_count = this->collect_feature_units_(units, UAC_MAX_TOPOLOGY_NODES);
 
-  uint8_t spk_fu_id = uac_find_feature_unit(nodes, node_count, false);
-  uint8_t mic_fu_id = uac_find_feature_unit(nodes, node_count, true);
+  // Tie each direction to the Terminal its own stream links to, so a device with several
+  // outputs does not get its volume applied to a path it is not playing on.
+  uint8_t spk_fu_id = uac_find_feature_unit(nodes, node_count, this->spk_alt_.terminal_link, false);
+  uint8_t mic_fu_id = uac_find_feature_unit(nodes, node_count, this->mic_alt_.terminal_link, true);
 
   // A device may describe a topology this walk cannot follow. Picking a Feature Unit by
   // descriptor order would then be a guess, and sending a control request to the wrong unit
@@ -519,6 +567,11 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
+
+  // alt_out is a member that outlives the device it was filled for. Clear it before the
+  // search, otherwise the first-match rule below would keep a previous device's setting.
+  intf_out = 0;
+  alt_out = {};
 
   uint16_t total = cfg->wTotalLength;
   int offset = 0;
@@ -571,7 +624,11 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
     bool ep_is_out = (cur_alt_info.ep_addr & 0x80) == 0;
     if (ep_is_out != want_out)
       return;
-    // Accept this alt-setting.
+    // Accept this alt-setting. The first match wins: a device may describe several
+    // alt-settings of the same format on different Terminals, and overwriting would silently
+    // hand the stream to whichever happens to come last in the descriptor.
+    if (alt_out.valid)
+      return;
     intf_out = cur_intf;
     alt_out  = cur_alt_info;
   };
