@@ -2,7 +2,7 @@ import logging
 
 import esphome.codegen as cg
 from esphome.components import esp32
-from esphome.components.usb_host import usb_host_ns
+from esphome.components.usb_host import dual_host_enabled, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -36,7 +36,20 @@ CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
 CONF_FEEDBACK = "feedback"
 CONF_VOLUME_CURVE = "volume_curve"
+CONF_CHANNEL_PAIR = "channel_pair"
+CONF_VID = "vid"
+CONF_PID = "pid"
 CONF_DEFAULT_BUFFER_SIZE = 6400
+
+UacChannelPair = usb_audio_ns.enum("UacChannelPair", is_class=True)
+# ESPHome has no surround path, so a multichannel card is driven as one stereo pair. This
+# picks which pair when the device offers nothing but multichannel alt-settings; a card that
+# also describes plain stereo uses that and ignores this option.
+CHANNEL_PAIRS = {
+    "front": UacChannelPair.FRONT,
+    "side": UacChannelPair.SIDE,
+    "back": UacChannelPair.BACK,
+}
 
 VolumeCurve = usb_audio_ns.enum("VolumeCurve", is_class=True)
 VOLUME_CURVES = {
@@ -64,12 +77,25 @@ SUPPORTED_VARIANTS = [
 # out of date for the balanced split.
 #
 # The high-speed controller in the ESP32-P4 has four times the FIFO and comfortably carries
-# both directions at once, so nothing is set there and ESP-IDF's default stands.
+# both directions at once, so nothing is set there and ESP-IDF's default stands -- unless
+# dual host is on. Then a device can land on that chip's full-speed controller instead, whose
+# FIFO is the full-speed one: _calculate_fifo_from_bias() in hcd_dwc.c derives its split from
+# each port's own depth, 256 without a high-speed PHY and 1024 with one. The bias is one
+# sdkconfig option applied to every port, so setting it costs the high-speed port nothing it
+# would notice while giving the full-speed port the split it needs.
 BIAS_BALANCED = "balanced"
 BIAS_IN = "in"
 BIAS_PERIODIC_OUT = "periodic_out"
 
-FIFO_BIAS_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
+FS_ONLY_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
+
+
+def _needs_fifo_bias(variant) -> bool:
+    """Whether a full-speed controller is in play and its packet limits therefore apply."""
+    if variant in FS_ONLY_VARIANTS:
+        return True
+    return variant == esp32.const.VARIANT_ESP32P4 and dual_host_enabled()
+
 
 # Largest isochronous packet each direction can carry, per split.
 FS_MPS_LIMITS = {
@@ -131,7 +157,7 @@ def _select_fifo_bias(out_mps: int, in_mps: int):
 
 def _final_validate(config):
     variant = esp32.get_esp32_variant()
-    if variant not in FIFO_BIAS_VARIANTS:
+    if not _needs_fifo_bias(variant):
         return config
 
     speaker, microphone = _usb_audio_streams(fv.full_config.get())
@@ -174,7 +200,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 def _apply_fifo_bias() -> None:
     variant = esp32.get_esp32_variant()
-    if variant not in FIFO_BIAS_VARIANTS:
+    if not _needs_fifo_bias(variant):
         return
 
     speaker, microphone = _usb_audio_streams(CORE.config)
@@ -220,6 +246,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
             ): cv.positive_int,
+            cv.Optional(CONF_CHANNEL_PAIR, default="front"): cv.enum(
+                CHANNEL_PAIRS, lower=True
+            ),
+            cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
+            cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
             cv.Optional(CONF_VOLUME_CURVE, default="linear"): cv.enum(
                 VOLUME_CURVES, lower=True
@@ -236,8 +267,11 @@ async def to_code(config):
 
     cg.add(var.set_microphone_buffer_size(config[CONF_MICROPHONE_BUFFER_SIZE]))
     cg.add(var.set_speaker_buffer_size(config[CONF_SPEAKER_BUFFER_SIZE]))
+    cg.add(var.set_vid(config[CONF_VID]))
+    cg.add(var.set_pid(config[CONF_PID]))
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
     cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
+    cg.add(var.set_channel_pair(config[CONF_CHANNEL_PAIR]))
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

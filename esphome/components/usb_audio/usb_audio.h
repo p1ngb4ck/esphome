@@ -75,12 +75,18 @@ class USBAudioSpeaker;
 // -----------------------------------------------------------------------------
 class USBAudioClient : public usb_host::USBClient {
  public:
-  USBAudioClient() : usb_host::USBClient(0, 0) {}
+  // Only devices that describe an Audio Class interface are ours. Without this the client
+  // matches anything that enumerates, including hubs and mass storage, and takes the first
+  // device it sees. vid and pid stay 0 by default, which the host reads as "any", and are
+  // narrowed from the config when the user names a specific device.
+  USBAudioClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_AUDIO); }
+
+  void set_vid(uint16_t vid) { this->vid_ = vid; }
+  void set_pid(uint16_t pid) { this->pid_ = pid; }
 
   void setup() override;
   void loop() override;
   float get_setup_priority() const override { return setup_priority::IO; }
-  uint8_t get_interface_class() const { return USB_CLASS_AUDIO; }
 
   // -- Configuration setters -------------------------------------------------
   void set_microphone_buffer_size(uint32_t size) { this->mic_buf_size_ = size; }
@@ -91,6 +97,9 @@ class USBAudioClient : public usb_host::USBClient {
   // Use an asynchronous OUT endpoint's feedback stream to pace playback (default on).
   void set_feedback_enabled(bool enabled) { this->feedback_enabled_ = enabled; }
   void set_volume_curve(VolumeCurve curve) { this->volume_curve_ = curve; }
+  // Which pair of a multichannel device is driven as the stereo stream. Only consulted
+  // when the device offers no plain stereo alt-setting.
+  void set_channel_pair(UacChannelPair pair) { this->channel_pair_ = pair; }
 
   void set_microphone(USBAudioMicrophone *mic) { this->microphone_ = mic; }
   void set_speaker(USBAudioSpeaker *spk) { this->speaker_ = spk; }
@@ -157,6 +166,12 @@ class USBAudioClient : public usb_host::USBClient {
   // Record every Feature Unit of the AudioControl interface, at most max_count.
   uint8_t collect_feature_units_(UacFeatureUnit *units, uint8_t max_count);
   bool parse_feature_units_();
+  // Channel layout declared by a Terminal, for UAC 1.0 where it is not on the stream.
+  uint32_t terminal_channel_config_(uint8_t terminal_id);
+  // Playback and capture halves of the multichannel pair mapping. Both run on the USB
+  // task from the isochronous callbacks.
+  size_t fill_mapped_(uint8_t *data, size_t max_len);
+  void push_mapped_capture_(const uint8_t *data, size_t len);
   bool parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits,
                             uint32_t sample_rate, uint8_t &intf_out, UacAltInfo &alt_out);
 
@@ -272,6 +287,7 @@ class USBAudioClient : public usb_host::USBClient {
 
   // -- Volume mapping --------------------------------------------------------
   VolumeCurve volume_curve_{VolumeCurve::LINEAR};
+  UacChannelPair channel_pair_{UacChannelPair::FRONT};
 };
 
 }  // namespace usb_audio

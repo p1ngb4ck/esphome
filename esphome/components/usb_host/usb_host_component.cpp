@@ -4,6 +4,10 @@
 #include "usb_host.h"
 #include <cinttypes>
 #include "esphome/core/log.h"
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+#include "driver/gpio.h"
+#include "hal/usb_wrap_ll.h"
+#endif
 
 namespace esphome::usb_host {
 
@@ -15,7 +19,32 @@ static USBHost *&usb_host_ref() {
 USBHost *get_usb_host() { return usb_host_ref(); }
 
 void USBHost::setup() {
+#if defined(USE_ESP32_VARIANT_ESP32P4)
+  // The full-speed OTG controller shares two internal FSLS PHYs with USB-Serial-JTAG. Out of
+  // reset the controller gets PHY 1 (GPIO26/27) and USB-Serial-JTAG gets PHY 0 (GPIO24/25).
+  // A board that wires its full-speed connector to GPIO24/25 needs the other mapping, which
+  // is a software register in LP_SYS -- no eFuse required. usb_phy.c does not touch this
+  // selector, so it has to happen here, before usb_host_install() brings the PHY up.
+  if (this->fs_phy_index_ == 0) {
+    usb_wrap_ll_phy_select(nullptr, 0);
+    // usb_phy.c raises the pad drive strength on GPIO26/27 unconditionally, because that is
+    // what soc's internal_phy_io names. After the swap the controller drives the other pair,
+    // so raise it there too rather than relying on the fixed constant.
+    gpio_set_drive_capability(GPIO_NUM_24, GPIO_DRIVE_CAP_3);
+    gpio_set_drive_capability(GPIO_NUM_25, GPIO_DRIVE_CAP_3);
+    ESP_LOGI(TAG, "USB FS PHY 0 selected (D- GPIO24, D+ GPIO25)");
+  }
+#endif
   usb_host_config_t config{};
+#if defined(USE_ESP32_VARIANT_ESP32P4) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  if (this->dual_host_) {
+    // Peripheral index 0 is the high-speed controller, 1 is the full-speed one, per
+    // USB_DWC_LL_GET_HW() in the P4's hal. Setting both bits brings up both root ports.
+    // Needs espressif/usb >= 1.3.0, which is where dual host landed.
+    config.peripheral_map = BIT(0) | BIT(1);
+    ESP_LOGI(TAG, "USB dual-host enabled (HS + FS)");
+  }
+#endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));
     this->mark_failed();

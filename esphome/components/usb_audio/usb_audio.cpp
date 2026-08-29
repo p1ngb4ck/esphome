@@ -303,25 +303,71 @@ static const UacTopologyNode *uac_find_node(const UacTopologyNode *nodes, uint8_
   return nullptr;
 }
 
-// Follow the signal path upstream from the Output Terminal of one direction and return the
-// first Feature Unit on it, or 0 when there is none. A unit with several inputs is followed
-// on its first pin only, which is where a device that offers one volume control puts it.
-static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count, bool capture) {
+// Walk upstream from an Output Terminal and report the first Feature Unit on the path, plus
+// whether the path reaches `want_source`. A unit with several inputs is followed on its
+// first pin only, which is where a device that offers one volume control puts it.
+//
+// Upstream is the right direction for both directions of audio: playback runs Input
+// Terminal (USB streaming) -> Feature Unit -> Output Terminal (speaker), capture runs Input
+// Terminal (microphone) -> Feature Unit -> Output Terminal (USB streaming). Either way the
+// Feature Unit sits between the two, which is also how sound/usb/mixer.c builds its mixer.
+static uint8_t uac_walk_from_output_terminal(const UacTopologyNode *nodes, uint8_t count,
+                                             const UacTopologyNode &output_terminal, uint8_t want_source,
+                                             bool &reaches_source) {
+  reaches_source = false;
+  uint8_t feature_unit = 0;
+  uint8_t next = output_terminal.first_source;
+  // A malformed descriptor can describe a cycle, so bound the walk by the node count.
+  for (uint8_t hop = 0; hop < count && next != 0; hop++) {
+    if (next == want_source) {
+      reaches_source = true;
+      break;
+    }
+    const UacTopologyNode *node = uac_find_node(nodes, count, next);
+    if (node == nullptr)
+      break;
+    if (feature_unit == 0 && node->subtype == UAC_AC_FEATURE_UNIT)
+      feature_unit = node->id;
+    next = node->first_source;
+  }
+  return feature_unit;
+}
+
+// Feature Unit belonging to one specific stream, identified by the Terminal its AudioStreaming
+// interface links to (bTerminalLink).
+//
+// Selecting the Output Terminal by type alone is wrong on any device with more than one of
+// them: a card with a speaker jack, a headphone jack and an S/PDIF output describes three
+// playback Output Terminals, and the first one in descriptor order need not be the one the
+// chosen stream feeds. Volume and mute would then be applied to a Feature Unit that is not in
+// the path being played, which is silent from the user's side and reports no error.
+//
+// For capture, bTerminalLink names the Output Terminal itself, so the walk starts there.
+// For playback it names the Input Terminal, so each candidate Output Terminal is walked and
+// the one whose path reaches that Input Terminal is the stream's own.
+static uint8_t uac_find_feature_unit(const UacTopologyNode *nodes, uint8_t count, uint8_t terminal_link,
+                                     bool capture) {
+  if (terminal_link == 0)
+    return 0;
+
+  if (capture) {
+    const UacTopologyNode *terminal = uac_find_node(nodes, count, terminal_link);
+    if (terminal == nullptr || terminal->subtype != UAC_AC_OUTPUT_TERMINAL)
+      return 0;
+    bool unused = false;
+    return uac_walk_from_output_terminal(nodes, count, *terminal, 0, unused);
+  }
+
   for (uint8_t i = 0; i < count; i++) {
     if (nodes[i].subtype != UAC_AC_OUTPUT_TERMINAL)
       continue;
-    if ((nodes[i].terminal_type == UAC_TERMINAL_TYPE_USB_STREAMING) != capture)
+    // A playback path ends at a physical sink, never back at the host.
+    if (nodes[i].terminal_type == UAC_TERMINAL_TYPE_USB_STREAMING)
       continue;
-    uint8_t next = nodes[i].first_source;
-    // A malformed descriptor can describe a cycle, so bound the walk by the node count.
-    for (uint8_t hop = 0; hop < count && next != 0; hop++) {
-      const UacTopologyNode *node = uac_find_node(nodes, count, next);
-      if (node == nullptr)
-        break;
-      if (node->subtype == UAC_AC_FEATURE_UNIT)
-        return node->id;
-      next = node->first_source;
-    }
+    bool reaches = false;
+    const uint8_t feature_unit = uac_walk_from_output_terminal(nodes, count, nodes[i], terminal_link, reaches);
+    if (reaches)
+      return feature_unit;
   }
   return 0;
 }
@@ -474,8 +520,10 @@ bool USBAudioClient::parse_feature_units_() {
   UacFeatureUnit units[UAC_MAX_TOPOLOGY_NODES];
   const uint8_t unit_count = this->collect_feature_units_(units, UAC_MAX_TOPOLOGY_NODES);
 
-  uint8_t spk_fu_id = uac_find_feature_unit(nodes, node_count, false);
-  uint8_t mic_fu_id = uac_find_feature_unit(nodes, node_count, true);
+  // Tie each direction to the Terminal its own stream links to, so a device with several
+  // outputs does not get its volume applied to a path it is not playing on.
+  uint8_t spk_fu_id = uac_find_feature_unit(nodes, node_count, this->spk_alt_.terminal_link, false);
+  uint8_t mic_fu_id = uac_find_feature_unit(nodes, node_count, this->mic_alt_.terminal_link, true);
 
   // A device may describe a topology this walk cannot follow. Picking a Feature Unit by
   // descriptor order would then be a guess, and sending a control request to the wrong unit
@@ -514,11 +562,94 @@ bool USBAudioClient::parse_feature_units_() {
   return true;  // non-fatal if not found - volume/mute will be silently skipped
 }
 
+namespace {
+
+// Frame position of one spatial channel: the number of positions below it that the device
+// declares, since channels appear in a frame in bit order.
+uint8_t uac_position_offset(uint32_t channel_config, uint32_t position_bit) {
+  uint8_t offset = 0;
+  for (uint32_t bit = 1; bit < position_bit; bit <<= 1) {
+    if ((channel_config & bit) != 0)
+      offset++;
+  }
+  return offset;
+}
+
+// Resolve where a pair sits in a frame. A device that declares no bitmap leaves the layout
+// undefined, in which case the conventional order is assumed, which is what the Linux driver
+// does as well. Returns false when the pair is not carried by this alt-setting.
+bool uac_resolve_pair(const UacAltInfo &alt, UacChannelPair pair, uint8_t &left, uint8_t &right) {
+  const uint32_t mask = uac_pair_mask(pair);
+  const uint32_t left_bit = mask & (~mask + 1);  // lowest set bit of the pair
+  const uint32_t right_bit = mask & ~left_bit;
+
+  if (alt.channel_config == 0) {
+    uac_pair_default_offsets(pair, left, right);
+    return alt.channels > left && alt.channels > right;
+  }
+  if ((alt.channel_config & mask) != mask)
+    return false;
+  left = uac_position_offset(alt.channel_config, left_bit);
+  right = uac_position_offset(alt.channel_config, right_bit);
+  return alt.channels > left && alt.channels > right;
+}
+
+const char *uac_pair_name(UacChannelPair pair) {
+  switch (pair) {
+    case UacChannelPair::SIDE: return "side";
+    case UacChannelPair::BACK: return "back";
+    case UacChannelPair::FRONT:
+    default: return "front";
+  }
+}
+
+}  // namespace
+
+// Channel layout a Terminal declares. UAC 1.0 keeps it on the Terminal rather than on the
+// streaming interface, so a stream's layout is only reachable through its bTerminalLink.
+uint32_t USBAudioClient::terminal_channel_config_(uint8_t terminal_id) {
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  if (cfg == nullptr || terminal_id == 0)
+    return 0;
+
+  const bool uac2 = (this->uac_version_ >= UAC_VERSION_2);
+  uint16_t total = cfg->wTotalLength;
+  int offset = 0;
+  const usb_standard_desc_t *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+
+  while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
+    if (desc->bDescriptorType != UAC_CS_INTERFACE || desc->bLength < 4)
+      continue;
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(desc);
+    // Only an Input Terminal carries the layout; an Output Terminal takes whatever its
+    // source hands it.
+    if (d[2] != UAC_AC_INPUT_TERMINAL || d[3] != terminal_id)
+      continue;
+    if (uac2) {
+      // [8] bNrChannels [9..12] bmChannelConfig
+      if (desc->bLength < 13)
+        return 0;
+      return static_cast<uint32_t>(d[9]) | (static_cast<uint32_t>(d[10]) << 8) |
+             (static_cast<uint32_t>(d[11]) << 16) | (static_cast<uint32_t>(d[12]) << 24);
+    }
+    // UAC 1.0: [7] bNrChannels [8..9] wChannelConfig
+    if (desc->bLength < 10)
+      return 0;
+    return static_cast<uint32_t>(d[8]) | (static_cast<uint32_t>(d[9]) << 8);
+  }
+  return 0;
+}
+
 bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_t bits, uint32_t sample_rate,
                                           uint8_t &intf_out, UacAltInfo &alt_out) {
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
+
+  // alt_out is a member that outlives the device it was filled for. Clear it before the
+  // search, otherwise the first-match rule below would keep a previous device's setting.
+  intf_out = 0;
+  alt_out = {};
 
   uint16_t total = cfg->wTotalLength;
   int offset = 0;
@@ -543,11 +674,22 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
   UacAltInfo cur_alt_info{};
   bool format_seen = false;
 
+  // An alt-setting carrying exactly the requested channel count is always preferred: it puts
+  // no mapping in the data path and moves the least over the wire. A multichannel setting is
+  // only taken when the device offers no such setting at all, and then one pair is lifted out
+  // of the frame. Both are remembered so the choice does not depend on descriptor order.
+  UacAltInfo mapped_alt{};
+  uint8_t mapped_intf = 0;
+
   auto try_commit = [&]() {
     if (!format_seen || !cur_alt_info.valid)
       return;
-    // Check if this alt-setting matches the requested format.
-    if (cur_alt_info.channels != channels || cur_alt_info.bit_resolution != bits)
+    if (cur_alt_info.bit_resolution != bits)
+      return;
+    // A multichannel alt-setting is usable when it carries the requested pair, but only for a
+    // stereo request; there is nothing sensible to lift out for any other channel count.
+    const bool exact = (cur_alt_info.channels == channels);
+    if (!exact && (channels != 2 || cur_alt_info.channels < 2))
       return;
     // Check sample rate. An alt-setting whose rate is a property of a Clock Source has
     // nothing in its descriptors to check against; the clock is asked when the stream
@@ -571,9 +713,33 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
     bool ep_is_out = (cur_alt_info.ep_addr & 0x80) == 0;
     if (ep_is_out != want_out)
       return;
-    // Accept this alt-setting.
-    intf_out = cur_intf;
-    alt_out  = cur_alt_info;
+
+    // The first match of each kind wins. A device may describe the same format on several
+    // Terminals, and overwriting would hand the stream to whichever comes last in the
+    // descriptor, which is not something a user can predict or influence.
+    if (exact) {
+      if (alt_out.valid)
+        return;
+      intf_out = cur_intf;
+      alt_out = cur_alt_info;
+      return;
+    }
+
+    if (mapped_alt.valid)
+      return;
+    // UAC 1.0 keeps the layout on the Terminal, so it is only reachable now that
+    // bTerminalLink is known.
+    if (cur_alt_info.channel_config == 0)
+      cur_alt_info.channel_config = this->terminal_channel_config_(cur_alt_info.terminal_link);
+    uint8_t left = 0;
+    uint8_t right = 0;
+    if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right))
+      return;
+    cur_alt_info.channel_map_active = true;
+    cur_alt_info.map_left = left;
+    cur_alt_info.map_right = right;
+    mapped_alt = cur_alt_info;
+    mapped_intf = cur_intf;
   };
 
   while ((desc = usb_parse_next_descriptor(desc, total, &offset)) != nullptr) {
@@ -608,6 +774,11 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
         // [10] bNrChannels [11..14] bmChannelConfig [15] iChannelNames
         if (uac2 && desc->bLength >= 11) {
           cur_alt_info.channels = d[10];
+          // [11..14] bmChannelConfig; UAC 2.0 puts the layout on the streaming interface.
+          if (desc->bLength >= 15) {
+            cur_alt_info.channel_config = static_cast<uint32_t>(d[11]) | (static_cast<uint32_t>(d[12]) << 8) |
+                                          (static_cast<uint32_t>(d[13]) << 16) | (static_cast<uint32_t>(d[14]) << 24);
+          }
           format_seen = true;
         }
         continue;
@@ -700,6 +871,16 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
 
   // Commit the final accumulated alt-setting.
   try_commit();
+
+  // No plain stereo setting on this device: fall back to lifting a pair out of a
+  // multichannel frame.
+  if (!alt_out.valid && mapped_alt.valid) {
+    intf_out = mapped_intf;
+    alt_out = mapped_alt;
+    ESP_LOGI(TAG, "%s: no %u-channel setting; taking the %s pair from %u channels (frame slots %u and %u)",
+             want_out ? "Speaker" : "Mic", channels, uac_pair_name(this->channel_pair_), alt_out.channels,
+             alt_out.map_left, alt_out.map_right);
+  }
 
   if (!alt_out.valid) {
     ESP_LOGE(TAG, "No %s AS alt-setting found for channels=%u bits=%u rate=%" PRIu32,
@@ -1257,8 +1438,11 @@ bool USBAudioClient::open_speaker_stream_() {
   // floor bytes per interval, packet_size_frac the per-interval frame remainder that the
   // accumulator folds back in (e.g. 44.1 kHz).
   {
+    // The wire carries the device's frame, which is wider than the host's whenever a pair is
+    // being lifted out of a multichannel stream. Pacing off the host frame would ask the
+    // device for a fraction of the bytes it expects per interval.
     const uint32_t frame_size =
-        static_cast<uint32_t>(this->spk_cfg_.channels) * (this->spk_cfg_.bits_per_sample / 8);
+        static_cast<uint32_t>(this->spk_alt_.channels) * (this->spk_cfg_.bits_per_sample / 8);
     const uint32_t derived_ips =
         uac_service_intervals_per_second(this->device_is_high_speed_, this->spk_alt_.b_interval);
     uint32_t frac_div = derived_ips;
@@ -1409,6 +1593,16 @@ void USBAudioClient::on_connected() {
     if (this->mic_format_ok_)
       this->mic_ctl_.clock_id = this->find_clock_source_(this->mic_alt_.terminal_link);
     ESP_LOGD(TAG, "Clock sources: speaker=%u mic=%u", this->spk_ctl_.clock_id, this->mic_ctl_.clock_id);
+    // Set the rate now, while every AudioStreaming interface is still on its zero-bandwidth
+    // alt-setting. A Clock Source is addressed through the AudioControl interface and does
+    // not need the stream, and a device is entitled to refuse or quietly ignore a clock
+    // change once an alt-setting is active -- it would then run at its own rate while the
+    // host paced at the configured one, which is silence with nothing logged. Linux sets it
+    // in the same order, before the interface is selected.
+    if (this->spk_format_ok_)
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    if (this->mic_format_ok_)
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
   }
 
   this->device_connected_ = true;
@@ -1484,7 +1678,105 @@ void USBAudioClient::on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t
     return;
   // Non-blocking send; if full, drop oldest data (overwrite) is not possible with
   // RINGBUF_TYPE_BYTEBUF, so we just skip if full to avoid blocking.
+  if (this->mic_alt_.channel_map_active) {
+    this->push_mapped_capture_(data, len);
+    return;
+  }
   xRingbufferSend(this->mic_rb_, data, len, 0);
+}
+
+// Expand host stereo frames into the device's wider frame, writing the pair into its two
+// slots and leaving every other slot silent. Returns whole device frames only, so a packet
+// never ends mid-frame.
+size_t USBAudioClient::fill_mapped_(uint8_t *data, size_t max_len) {
+  const size_t sample = this->spk_alt_.sub_frame_size;
+  const size_t dev_frame = sample * this->spk_alt_.channels;
+  const size_t host_frame = sample * 2;
+  if (sample == 0 || dev_frame == 0 || max_len < dev_frame)
+    return 0;
+
+  const size_t frames = max_len / dev_frame;
+  const size_t want = frames * host_frame;
+  // Slots outside the pair are not touched below, so the packet is cleared first.
+  memset(data, 0, frames * dev_frame);
+
+  // Carries a host frame split across a ring buffer wrap.
+  uint8_t partial[8];
+  size_t partial_len = 0;
+  size_t produced = 0;
+  size_t taken = 0;
+
+  auto emit = [&](const uint8_t *frame) {
+    uint8_t *dst = data + produced * dev_frame;
+    memcpy(dst + this->spk_alt_.map_left * sample, frame, sample);
+    memcpy(dst + this->spk_alt_.map_right * sample, frame + sample, sample);
+    produced++;
+  };
+
+  while (taken < want && produced < frames) {
+    size_t received = 0;
+    void *item = xRingbufferReceiveUpTo(this->spk_rb_, &received, 0, want - taken);
+    if (item == nullptr || received == 0) {
+      if (item != nullptr)
+        vRingbufferReturnItem(this->spk_rb_, item);
+      break;
+    }
+    const uint8_t *src = static_cast<const uint8_t *>(item);
+    size_t left = received;
+
+    if (partial_len != 0) {
+      const size_t need = host_frame - partial_len;
+      const size_t take = std::min(need, left);
+      memcpy(partial + partial_len, src, take);
+      partial_len += take;
+      src += take;
+      left -= take;
+      if (partial_len == host_frame) {
+        emit(partial);
+        partial_len = 0;
+      }
+    }
+    while (left >= host_frame && produced < frames) {
+      emit(src);
+      src += host_frame;
+      left -= host_frame;
+    }
+    if (left != 0 && left < host_frame && left <= sizeof(partial)) {
+      memcpy(partial, src, left);
+      partial_len = left;
+      left = 0;
+    }
+
+    taken += received;
+    vRingbufferReturnItem(this->spk_rb_, item);
+  }
+
+  return produced * dev_frame;
+}
+
+// The capture counterpart: keep the pair's two slots out of each device frame and drop the
+// rest, so the ring buffer only ever holds host stereo frames.
+void USBAudioClient::push_mapped_capture_(const uint8_t *data, size_t len) {
+  const size_t sample = this->mic_alt_.sub_frame_size;
+  const size_t dev_frame = sample * this->mic_alt_.channels;
+  const size_t host_frame = sample * 2;
+  if (sample == 0 || dev_frame == 0 || len < dev_frame)
+    return;
+
+  // Small fixed staging block so a large packet does not need a buffer of its own.
+  uint8_t chunk[64];
+  size_t chunk_len = 0;
+  for (size_t off = 0; off + dev_frame <= len; off += dev_frame) {
+    if (chunk_len + host_frame > sizeof(chunk)) {
+      xRingbufferSend(this->mic_rb_, chunk, chunk_len, 0);
+      chunk_len = 0;
+    }
+    memcpy(chunk + chunk_len, data + off + this->mic_alt_.map_left * sample, sample);
+    memcpy(chunk + chunk_len + sample, data + off + this->mic_alt_.map_right * sample, sample);
+    chunk_len += host_frame;
+  }
+  if (chunk_len != 0)
+    xRingbufferSend(this->mic_rb_, chunk, chunk_len, 0);
 }
 
 size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_len) {
@@ -1493,6 +1785,10 @@ size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_l
   // not written is zero filled by the caller, so a short read is silence.
   if (this->spk_rb_ == nullptr || this->spk_suspended_)
     return 0;
+
+  if (this->spk_alt_.channel_map_active)
+    return this->fill_mapped_(data, max_len);
+
   size_t filled = 0;
   // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
   // wrap returns a short block. Reading once and padding the rest with silence would drop
@@ -1556,7 +1852,11 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
                this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
     }
 
-    this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    // UAC 1.0 only: the sampling frequency is a control on the isochronous endpoint, which
+    // exists only now that the alt-setting is active. UAC 2.0 was handled at connect time,
+    // before the interface was selected.
+    if (this->uac_version_ < UAC_VERSION_2)
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
     this->spk_stream_open_ = true;
     this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
     ESP_LOGI(TAG, "Speaker stream open");
@@ -1569,7 +1869,8 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
       this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
       return;
     }
-    this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
+    if (this->uac_version_ < UAC_VERSION_2)
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
     this->mic_stream_open_ = true;
     this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
     ESP_LOGI(TAG, "Microphone stream open");
