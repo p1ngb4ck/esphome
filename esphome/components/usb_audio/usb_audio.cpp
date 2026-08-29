@@ -1593,6 +1593,16 @@ void USBAudioClient::on_connected() {
     if (this->mic_format_ok_)
       this->mic_ctl_.clock_id = this->find_clock_source_(this->mic_alt_.terminal_link);
     ESP_LOGD(TAG, "Clock sources: speaker=%u mic=%u", this->spk_ctl_.clock_id, this->mic_ctl_.clock_id);
+    // Set the rate now, while every AudioStreaming interface is still on its zero-bandwidth
+    // alt-setting. A Clock Source is addressed through the AudioControl interface and does
+    // not need the stream, and a device is entitled to refuse or quietly ignore a clock
+    // change once an alt-setting is active -- it would then run at its own rate while the
+    // host paced at the configured one, which is silence with nothing logged. Linux sets it
+    // in the same order, before the interface is selected.
+    if (this->spk_format_ok_)
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    if (this->mic_format_ok_)
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
   }
 
   this->device_connected_ = true;
@@ -1842,7 +1852,11 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
                this->spk_alt_.feedback_ep_addr, this->feedback_enabled_ ? "enabled" : "disabled");
     }
 
-    this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    // UAC 1.0 only: the sampling frequency is a control on the isochronous endpoint, which
+    // exists only now that the alt-setting is active. UAC 2.0 was handled at connect time,
+    // before the interface was selected.
+    if (this->uac_version_ < UAC_VERSION_2)
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
     this->spk_stream_open_ = true;
     this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
     ESP_LOGI(TAG, "Speaker stream open");
@@ -1855,7 +1869,8 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
       this->note_open_result_(false, this->mic_reopen_at_ms_, this->mic_open_fails_);
       return;
     }
-    this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
+    if (this->uac_version_ < UAC_VERSION_2)
+      this->set_sample_rate_(this->mic_alt_, this->mic_ctl_, this->mic_cfg_.sample_rate);
     this->mic_stream_open_ = true;
     this->note_open_result_(true, this->mic_reopen_at_ms_, this->mic_open_fails_);
     ESP_LOGI(TAG, "Microphone stream open");
