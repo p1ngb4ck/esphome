@@ -104,11 +104,6 @@ bool USBStorageClient::parse_msc_endpoints_() {
   this->bulk_out_ep_ = 0;
   this->bulk_in_mps_ = 0;
   this->bulk_out_mps_ = 0;
-#if defined(CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT)
-  const static uint8_t bulk_out_ep_max_mps = 255;
-#else
-  const static uint8_t bulk_out_ep_max_mps = 255;
-#endif
 
   int offset = 0;
   const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(cfg);
@@ -130,9 +125,6 @@ bool USBStorageClient::parse_msc_endpoints_() {
       } else {
         this->bulk_out_ep_ = ep->bEndpointAddress;
         this->bulk_out_mps_ = USB_EP_DESC_GET_MPS(ep);
-        if (this->bulk_out_mps_ > bulk_out_ep_max_mps) {
-          this->bulk_out_mps_ = bulk_out_ep_max_mps;
-        }
       }
     }
     if (this->bulk_in_ep_ && this->bulk_out_ep_)
