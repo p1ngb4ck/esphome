@@ -142,17 +142,24 @@ class RingBuffer {
   uint8_t *buffer_;
 };
 
-// Structure for queuing received USB data chunks
+// Structure for queuing received USB data chunks.
+//
+// The payload is not stored inline. One chunk holds one packet of the IN endpoint, and
+// wMaxPacketSize is a property of that endpoint: 64 bytes on a full-speed device, 512 on a
+// high-speed one, and on a chip with two host controllers both can be attached at the same
+// time. A compile-time array would force the endpoint to fit the buffer, which is backwards.
+// The payload therefore points into a slab that RxChunkPool sizes from the endpoint once the
+// device is open.
 struct UsbDataChunk {
-  uint8_t data[usb_host::USB_MAX_PACKET_SIZE];
+  uint8_t *data;
   uint16_t length;
   USBUartChannelBase *channel;
-
-  // Required for EventPool - no cleanup needed for POD types
-  void release() {}
 };
 
-// Structure for queuing outgoing USB data chunks (one per USB packet)
+// Structure for queuing outgoing USB data chunks. Unlike IN, a bulk OUT transfer may be any
+// length up to the host's transfer buffer -- a short packet is legal and simply ends the
+// transfer -- so an OUT chunk does not have to hold a whole wMaxPacketSize and stays a
+// compile-time buffer.
 struct UsbOutputChunk {
   static constexpr size_t MAX_CHUNK_SIZE = usb_host::USB_MAX_PACKET_SIZE;
   uint8_t data[MAX_CHUNK_SIZE];
@@ -160,6 +167,78 @@ struct UsbOutputChunk {
 
   // Required for EventPool - no cleanup needed for POD types
   void release() {}
+};
+
+// Fixed set of receive chunks whose payloads are equal slices of a single allocation.
+//
+// The slice size is the IN endpoint's wMaxPacketSize, so the storage cannot exist before a
+// device is attached: it is allocated when the endpoints are known and released once the
+// queue has drained after a disconnect. Slots are handed out with the same atomic bitmask as
+// the USB host's transfer pool, because allocate() runs in USB-task context while release()
+// runs on the main loop.
+template<uint8_t COUNT> class RxChunkPool {
+  static_assert(COUNT >= 1 && COUNT <= 32, "RxChunkPool tracks its slots in a 32 bit mask");
+
+ public:
+  bool allocate_storage(uint16_t slice_size) {
+    this->free_storage();
+    if (slice_size == 0)
+      return false;
+    RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+    this->base_ = allocator.allocate(static_cast<size_t>(slice_size) * COUNT);
+    if (this->base_ == nullptr)
+      return false;
+    this->slice_size_ = slice_size;
+    for (uint8_t i = 0; i < COUNT; i++)
+      this->chunks_[i].data = this->base_ + static_cast<size_t>(i) * slice_size;
+    return true;
+  }
+
+  // Only safe once nothing holds a chunk any more: the queue is drained and the USB task is
+  // no longer submitting. See the deferred free in USBUartComponent::loop().
+  void free_storage() {
+    if (this->base_ != nullptr) {
+      RAMAllocator<uint8_t> allocator(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
+      allocator.deallocate(this->base_, static_cast<size_t>(this->slice_size_) * COUNT);
+      this->base_ = nullptr;
+    }
+    for (auto &chunk : this->chunks_)
+      chunk.data = nullptr;
+    this->slice_size_ = 0;
+    this->in_use_.store(0, std::memory_order_release);
+  }
+
+  bool has_storage() const { return this->base_ != nullptr; }
+  uint16_t slice_size() const { return this->slice_size_; }
+
+  UsbDataChunk *allocate() {
+    if (this->base_ == nullptr)
+      return nullptr;
+    uint32_t mask = this->in_use_.load(std::memory_order_acquire);
+    for (;;) {
+      if (mask == ALL_IN_USE)
+        return nullptr;
+      const uint32_t lsb = ~mask & (mask + 1);
+      if (this->in_use_.compare_exchange_weak(mask, mask | lsb, std::memory_order_acquire))
+        return &this->chunks_[__builtin_ctz(lsb)];
+    }
+  }
+
+  void release(UsbDataChunk *chunk) {
+    if (chunk == nullptr)
+      return;
+    const size_t index = chunk - this->chunks_;
+    if (index >= COUNT)
+      return;
+    this->in_use_.fetch_and(~(static_cast<uint32_t>(1) << index), std::memory_order_release);
+  }
+
+ protected:
+  static constexpr uint32_t ALL_IN_USE = COUNT == 32 ? ~0U : (1U << COUNT) - 1;
+  UsbDataChunk chunks_[COUNT]{};
+  std::atomic<uint32_t> in_use_{0};
+  uint8_t *base_{nullptr};
+  uint16_t slice_size_{0};
 };
 
 // Common, non-final base for all USB UART channel implementations.
@@ -276,7 +355,8 @@ class USBUartComponent : public usb_host::USBClient {
   static constexpr int USB_DATA_QUEUE_SIZE = 32;
   LockFreeQueue<UsbDataChunk, USB_DATA_QUEUE_SIZE> usb_data_queue_;
   // Pool sized to queue capacity (SIZE-1) — see USBUartChannelBase::output_pool_ comment.
-  EventPool<UsbDataChunk, USB_DATA_QUEUE_SIZE - 1> chunk_pool_;
+  // Its payload storage is sized from the IN endpoint when the device is opened.
+  RxChunkPool<USB_DATA_QUEUE_SIZE - 1> chunk_pool_;
 
  protected:
   // Issue one control transfer as part of the setup state machine. The completion

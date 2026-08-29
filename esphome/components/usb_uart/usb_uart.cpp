@@ -235,8 +235,11 @@ void USBUartComponent::loop() {
 
 #ifdef USE_UART_DEBUGGER
     if (channel->debug_) {
+      // The hex buffer is a build-time constant while the packet size comes from the device,
+      // so a device whose packets are larger than the configured max_packet_size has its
+      // debug line truncated. Only the log line is affected, never the data itself.
       char buf[format_hex_pretty_size(usb_host::USB_MAX_PACKET_SIZE)];
-      format_hex_pretty_to(buf, chunk->data, chunk->length, ',');
+      format_hex_pretty_to(buf, chunk->data, std::min<uint16_t>(chunk->length, usb_host::USB_MAX_PACKET_SIZE), ',');
 #ifdef UART_DEBUGGER_ADD_SETTINGS
       if (channel->debug_add_settings_) {
         char settings[32];
@@ -283,6 +286,10 @@ void USBUartComponent::loop() {
         channel->destroying_.store(false);
       }
     }
+    // Same deferral for the receive chunk storage: chunks stay valid until the queue that
+    // carries them is empty. The next device gets storage sized for its own endpoints.
+    if (this->state_ != usb_host::USB_CLIENT_CONNECTED && this->chunk_pool_.has_storage())
+      this->chunk_pool_.free_storage();
   }
 
   // Disable loop when idle. Callbacks re-enable via enable_loop_soon_any_context().
@@ -423,20 +430,6 @@ void USBUartComponent::start_output(USBUartChannelBase *channel) {
   ESP_LOGV(TAG, "Output %u bytes started", len);
 }
 
-/**
- * Hacky fix for some devices that report incorrect MPS values
- * @param ep The endpoint descriptor
- */
-static void fix_mps(const usb_ep_desc_t *ep) {
-  if (ep != nullptr) {
-    auto *ep_mutable = const_cast<usb_ep_desc_t *>(ep);
-    if (ep->wMaxPacketSize > usb_host::USB_MAX_PACKET_SIZE) {
-      ESP_LOGW(TAG, "Corrected MPS of EP 0x%02X from %u to %u", static_cast<uint8_t>(ep->bEndpointAddress & 0xFF),
-               ep->wMaxPacketSize, usb_host::USB_MAX_PACKET_SIZE);
-      ep_mutable->wMaxPacketSize = usb_host::USB_MAX_PACKET_SIZE;
-    }
-  }
-}
 void USBUartTypeCdcAcm::on_connected() {
   auto cdc_devs = this->parse_descriptors(this->device_handle_);
   if (cdc_devs.empty()) {
@@ -462,8 +455,6 @@ void USBUartTypeCdcAcm::on_connected() {
     }
     channel->destroying_.store(false);
     channel->cdc_dev_ = cdc_devs[i++];
-    fix_mps(channel->cdc_dev_.in_ep);
-    fix_mps(channel->cdc_dev_.out_ep);
     channel->initialised_.store(true);
     // Claim the communication (interrupt) interface so CDC class requests are accepted
     // by the device. Some CDC ACM implementations (e.g. EFR32 NCP) require this before
@@ -492,6 +483,20 @@ void USBUartTypeCdcAcm::on_connected() {
       this->disconnect();
       return;
     }
+  }
+  // One receive chunk has to hold one whole packet of the IN endpoint, so the storage is
+  // sized from the endpoints of the device that is actually attached. Taking the widest of
+  // them covers every channel out of the one shared pool.
+  uint16_t rx_packet_size = 0;
+  for (auto *channel : this->channels_) {
+    if (channel->cdc_dev_.in_ep != nullptr)
+      rx_packet_size = std::max<uint16_t>(rx_packet_size, USB_EP_DESC_GET_MPS(channel->cdc_dev_.in_ep));
+  }
+  if (!this->chunk_pool_.allocate_storage(rx_packet_size)) {
+    ESP_LOGE(TAG, "Out of memory for %u byte receive chunks", rx_packet_size);
+    this->status_set_error(LOG_STR("Out of memory for receive chunks"));
+    this->disconnect();
+    return;
   }
   this->status_clear_error();
   this->enable_channels();

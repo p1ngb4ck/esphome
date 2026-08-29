@@ -726,16 +726,6 @@ uart::UARTFlushResult CH934XChannel::flush() {
   return uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS;
 }
 
-static void fix_mps(const usb_ep_desc_t *ep) {
-  if (ep != nullptr) {
-    auto *ep_mutable = const_cast<usb_ep_desc_t *>(ep);
-    if (ep->wMaxPacketSize > usb_host::USB_MAX_PACKET_SIZE) {
-      ESP_LOGW(TAG, "Corrected MPS of EP 0x%02X from %u to %u", static_cast<uint8_t>(ep->bEndpointAddress & 0xFF),
-               ep->wMaxPacketSize, usb_host::USB_MAX_PACKET_SIZE);
-      ep_mutable->wMaxPacketSize = usb_host::USB_MAX_PACKET_SIZE;
-    }
-  }
-}
 void USBUartTypeCH934X::on_connected() {
   ESP_LOGI(TAG, "CH934X connected (VID=%04X, PID=%04X)", this->vid_, this->pid_);
 
@@ -746,10 +736,19 @@ void USBUartTypeCH934X::on_connected() {
     return;
   }
 
-  fix_mps(this->uart_host_dev_.in_ep);
-  fix_mps(this->uart_host_dev_.out_ep);
-  fix_mps(this->uart_host_dev_.ep_cmd_read);
-  fix_mps(this->uart_host_dev_.ep_cmd_write);
+  // A receive chunk holds one packet of an IN endpoint, so the storage is sized from the
+  // endpoints this device declares. Both IN endpoints share the one pool, so take the wider.
+  uint16_t rx_packet_size = 0;
+  if (this->uart_host_dev_.in_ep != nullptr)
+    rx_packet_size = std::max<uint16_t>(rx_packet_size, USB_EP_DESC_GET_MPS(this->uart_host_dev_.in_ep));
+  if (this->uart_host_dev_.ep_cmd_read != nullptr)
+    rx_packet_size = std::max<uint16_t>(rx_packet_size, USB_EP_DESC_GET_MPS(this->uart_host_dev_.ep_cmd_read));
+  if (!this->chunk_pool_.allocate_storage(rx_packet_size)) {
+    ESP_LOGE(TAG, "Out of memory for %u byte receive chunks", rx_packet_size);
+    this->status_set_error(LOG_STR("Out of memory for receive chunks"));
+    this->disconnect();
+    return;
+  }
 
   auto err = usb_host_interface_claim(this->handle_, this->device_handle_, this->uart_host_dev_.data_interface, 0);
   if (err != ESP_OK) {
