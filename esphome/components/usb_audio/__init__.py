@@ -2,7 +2,7 @@ import logging
 
 import esphome.codegen as cg
 from esphome.components import esp32
-from esphome.components.usb_host import dual_host_enabled, usb_host_ns
+from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -76,13 +76,16 @@ SUPPORTED_VARIANTS = [
 # OTG_DFIFO_DEPTH of 256. They are not the ones in the ESP-IDF Kconfig help text, which is
 # out of date for the balanced split.
 #
-# The high-speed controller in the ESP32-P4 has four times the FIFO and comfortably carries
-# both directions at once, so nothing is set there and ESP-IDF's default stands -- unless
-# dual host is on. Then a device can land on that chip's full-speed controller instead, whose
-# FIFO is the full-speed one: _calculate_fifo_from_bias() in hcd_dwc.c derives its split from
-# each port's own depth, 256 without a high-speed PHY and 1024 with one. The bias is one
-# sdkconfig option applied to every port, so setting it costs the high-speed port nothing it
-# would notice while giving the full-speed port the split it needs.
+# Nothing is set on the ESP32-P4. It has two host controllers and with dual host they run at
+# the same time, but the bias is a single sdkconfig option that _calculate_fifo_from_bias()
+# applies to both, each scaled by that port's own OTG_DFIFO_DEPTH -- 1024 with a high-speed
+# PHY, 256 without. On the high-speed port the two non-balanced splits set nptx_fifo_lines to
+# depth / 16, which usb_dwc_hal_get_mps_limits() reports as 256 bytes of non-periodic OUT,
+# below the 512 byte wMaxPacketSize every high-speed bulk OUT endpoint has -- hcd_pipe_alloc()
+# then rejects every bulk pipe on that port. The default split costs neither port anything
+# here: at depth 1024 it leaves 1024 bytes of non-periodic OUT for bulk and 512 bytes of
+# periodic OUT for isochronous, and at depth 256 it leaves the full-speed port the same
+# 408 in / 128 out it would get anyway.
 BIAS_BALANCED = "balanced"
 BIAS_IN = "in"
 BIAS_PERIODIC_OUT = "periodic_out"
@@ -91,10 +94,12 @@ FS_ONLY_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
 
 
 def _needs_fifo_bias(variant) -> bool:
-    """Whether a full-speed controller is in play and its packet limits therefore apply."""
-    if variant in FS_ONLY_VARIANTS:
-        return True
-    return variant == esp32.const.VARIANT_ESP32P4 and dual_host_enabled()
+    """Whether the split on this variant is ours to choose.
+
+    Only where the full-speed controller is the only controller in the chip, so moving the
+    split cannot take anything away from another one.
+    """
+    return variant in FS_ONLY_VARIANTS
 
 
 # Largest isochronous packet each direction can carry, per split.
