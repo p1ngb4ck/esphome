@@ -2,7 +2,7 @@ import logging
 
 import esphome.codegen as cg
 from esphome.components import esp32
-from esphome.components.usb_host import usb_host_ns
+from esphome.components.usb_host import dual_host_enabled, usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -77,12 +77,25 @@ SUPPORTED_VARIANTS = [
 # out of date for the balanced split.
 #
 # The high-speed controller in the ESP32-P4 has four times the FIFO and comfortably carries
-# both directions at once, so nothing is set there and ESP-IDF's default stands.
+# both directions at once, so nothing is set there and ESP-IDF's default stands -- unless
+# dual host is on. Then a device can land on that chip's full-speed controller instead, whose
+# FIFO is the full-speed one: _calculate_fifo_from_bias() in hcd_dwc.c derives its split from
+# each port's own depth, 256 without a high-speed PHY and 1024 with one. The bias is one
+# sdkconfig option applied to every port, so setting it costs the high-speed port nothing it
+# would notice while giving the full-speed port the split it needs.
 BIAS_BALANCED = "balanced"
 BIAS_IN = "in"
 BIAS_PERIODIC_OUT = "periodic_out"
 
-FIFO_BIAS_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
+FS_ONLY_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
+
+
+def _needs_fifo_bias(variant) -> bool:
+    """Whether a full-speed controller is in play and its packet limits therefore apply."""
+    if variant in FS_ONLY_VARIANTS:
+        return True
+    return variant == esp32.const.VARIANT_ESP32P4 and dual_host_enabled()
+
 
 # Largest isochronous packet each direction can carry, per split.
 FS_MPS_LIMITS = {
@@ -144,7 +157,7 @@ def _select_fifo_bias(out_mps: int, in_mps: int):
 
 def _final_validate(config):
     variant = esp32.get_esp32_variant()
-    if variant not in FIFO_BIAS_VARIANTS:
+    if not _needs_fifo_bias(variant):
         return config
 
     speaker, microphone = _usb_audio_streams(fv.full_config.get())
@@ -187,7 +200,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 def _apply_fifo_bias() -> None:
     variant = esp32.get_esp32_variant()
-    if variant not in FIFO_BIAS_VARIANTS:
+    if not _needs_fifo_bias(variant):
         return
 
     speaker, microphone = _usb_audio_streams(CORE.config)

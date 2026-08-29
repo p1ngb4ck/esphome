@@ -78,6 +78,7 @@ def _store_host_options(config: dict) -> dict:
     domain_data = CORE.data.setdefault(DOMAIN, {})
     domain_data[CONF_MAX_PACKET_SIZE] = config[CONF_MAX_PACKET_SIZE]
     domain_data[CONF_MAX_TRANSFER_REQUESTS] = config[CONF_MAX_TRANSFER_REQUESTS]
+    domain_data[CONF_DUAL_HOST] = config[CONF_DUAL_HOST]
     return config
 
 
@@ -144,6 +145,16 @@ def get_max_packet_size() -> int:
 
 def get_max_transfer_requests() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_TRANSFER_REQUESTS, 16)
+
+
+def dual_host_enabled() -> bool:
+    """Whether both USB controllers are brought up.
+
+    Matters to consumers because the two controllers are not equivalent: with dual host a
+    device can land on the full-speed one, whose FIFO and packet limits are those of a
+    full-speed controller no matter how capable the variant is overall.
+    """
+    return bool(CORE.data.get(DOMAIN, {}).get(CONF_DUAL_HOST, False))
 
 
 def _default_max_packet_size() -> int:
