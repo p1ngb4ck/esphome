@@ -70,25 +70,19 @@ SUPPORTED_VARIANTS = [
 # fixed splits. Audio runs on isochronous endpoints, so a stream that needs a larger packet
 # than the split allows cannot be submitted at all.
 #
-# The two families are handled apart, because what the split costs is not the same on them.
+# On the full-speed controller in the ESP32-S2 and S3 the split is tight enough that the
+# direction has to be chosen. The numbers below follow _calculate_fifo_from_bias() in
+# hcd_dwc.c together with usb_dwc_hal_get_mps_limits(), for a FIFO of 200 lines and an
+# OTG_DFIFO_DEPTH of 256. They are not the ones in the ESP-IDF Kconfig help text, which is
+# out of date for the balanced split.
 #
-# ESP32-S2 and S3 are full speed only. There is a single port, every endpoint on it is a
-# full-speed one, and the split is tight enough that the direction has to be chosen. The
-# numbers below follow _calculate_fifo_from_bias() in hcd_dwc.c together with
-# usb_dwc_hal_get_mps_limits(), for a FIFO of 200 lines and an OTG_DFIFO_DEPTH of 256. They
-# are not the ones in the ESP-IDF Kconfig help text, which is out of date for the balanced
-# split.
-#
-# The ESP32-P4 always installs its high-speed port, and dual host adds the full-speed one on
-# top. The bias is a single sdkconfig option, but _calculate_fifo_from_bias() derives each
-# port's split from that port's own OTG_DFIFO_DEPTH: 1024 with a high-speed PHY, 256 without.
-# On the high-speed port the two non-balanced splits set nptx_fifo_lines to depth / 16, which
-# usb_dwc_hal_get_mps_limits() turns into 256 bytes of non-periodic OUT, while every
-# high-speed bulk OUT endpoint carries a 512 byte wMaxPacketSize by definition of USB 2.0.
-# Moving the split off balanced therefore makes hcd_pipe_alloc() reject every bulk OUT pipe
-# on that port -- mass storage and every other bulk driver stop working. So on the P4 the
-# split stays balanced and a full-speed audio device has to fit inside what balanced leaves
-# it. ESP-IDF's own default is balanced, so nothing is written for this variant at all.
+# The high-speed controller in the ESP32-P4 has four times the FIFO and comfortably carries
+# both directions at once, so nothing is set there and ESP-IDF's default stands -- unless
+# dual host is on. Then a device can land on that chip's full-speed controller instead, whose
+# FIFO is the full-speed one: _calculate_fifo_from_bias() in hcd_dwc.c derives its split from
+# each port's own depth, 256 without a high-speed PHY and 1024 with one. The bias is one
+# sdkconfig option applied to every port, so setting it costs the high-speed port nothing it
+# would notice while giving the full-speed port the split it needs.
 BIAS_BALANCED = "balanced"
 BIAS_IN = "in"
 BIAS_PERIODIC_OUT = "periodic_out"
@@ -96,17 +90,8 @@ BIAS_PERIODIC_OUT = "periodic_out"
 FS_ONLY_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
 
 
-def _bias_is_selectable(variant) -> bool:
-    """Whether the split may be moved away from balanced on this variant.
-
-    Only where the full-speed controller is the only one there is. A variant that also has
-    a high-speed port shares the one sdkconfig option with it and would lose bulk on it.
-    """
-    return variant in FS_ONLY_VARIANTS
-
-
-def _fs_port_in_play(variant) -> bool:
-    """Whether a full-speed port can carry the audio device, so its packet limits apply."""
+def _needs_fifo_bias(variant) -> bool:
+    """Whether a full-speed controller is in play and its packet limits therefore apply."""
     if variant in FS_ONLY_VARIANTS:
         return True
     return variant == esp32.const.VARIANT_ESP32P4 and dual_host_enabled()
@@ -149,8 +134,8 @@ def _usb_audio_streams(full_config):
     return streams.get(CONF_SPEAKER), streams.get(CONF_MICROPHONE)
 
 
-def _bias_order(out_mps: int, selectable: bool):
-    """The splits this variant may use, best first.
+def _select_fifo_bias(out_mps: int, in_mps: int):
+    """First split that carries both directions, or None when none of them does.
 
     Playback gets the room whenever a speaker is configured: a speaker endpoint is the
     larger of the two by a wide margin, its format is what a listener notices, and most
@@ -158,20 +143,12 @@ def _bias_order(out_mps: int, selectable: bool):
     the default would do also covers a device whose endpoint asks for more than the format
     alone suggests. Capture on its own keeps the default split as long as that carries it,
     since moving away from the default changes the USB host for everything sharing it.
-
-    Where the split is not selectable there is nothing to order: balanced is the only one
-    the variant can be given.
     """
-    if not selectable:
-        return (BIAS_BALANCED,)
     if out_mps:
-        return (BIAS_PERIODIC_OUT, BIAS_BALANCED, BIAS_IN)
-    return (BIAS_BALANCED, BIAS_IN, BIAS_PERIODIC_OUT)
-
-
-def _select_fifo_bias(out_mps: int, in_mps: int, selectable: bool):
-    """First usable split that carries both directions, or None when none of them does."""
-    for bias in _bias_order(out_mps, selectable):
+        order = (BIAS_PERIODIC_OUT, BIAS_BALANCED, BIAS_IN)
+    else:
+        order = (BIAS_BALANCED, BIAS_IN, BIAS_PERIODIC_OUT)
+    for bias in order:
         limits = FS_MPS_LIMITS[bias]
         if out_mps <= limits["out"] and in_mps <= limits["in"]:
             return bias
@@ -180,31 +157,14 @@ def _select_fifo_bias(out_mps: int, in_mps: int, selectable: bool):
 
 def _final_validate(config):
     variant = esp32.get_esp32_variant()
-    if not _fs_port_in_play(variant):
+    if not _needs_fifo_bias(variant):
         return config
 
-    selectable = _bias_is_selectable(variant)
     speaker, microphone = _usb_audio_streams(fv.full_config.get())
     out_mps = _endpoint_mps(speaker) if speaker else 0
     in_mps = _endpoint_mps(microphone) if microphone else 0
-    if _select_fifo_bias(out_mps, in_mps, selectable) is not None:
+    if _select_fifo_bias(out_mps, in_mps) is not None:
         return config
-
-    if not selectable:
-        # The balanced split is the only one on offer here, so name the reason: the other
-        # two would be applied to the high-speed port as well and cost it bulk transfers.
-        limits = FS_MPS_LIMITS[BIAS_BALANCED]
-        over = "speaker" if out_mps > limits["out"] else "microphone"
-        needs = out_mps if over == "speaker" else in_mps
-        available = limits["out"] if over == "speaker" else limits["in"]
-        raise cv.Invalid(
-            f"With dual_host enabled this {over} does not fit the full-speed USB "
-            f"controller of the {variant}: it needs {needs} bytes per isochronous packet "
-            f"and at most {available} are available. The packet buffer split cannot be "
-            f"widened for it, because the same setting applies to the high-speed "
-            f"controller, where it would leave too little room for bulk transfers. Use "
-            f"fewer channels or a lower sample rate, or turn dual_host off."
-        )
 
     # Say which stream is over which limit and what would bring it inside, rather than only
     # that the combination does not work.
@@ -240,16 +200,13 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 def _apply_fifo_bias() -> None:
     variant = esp32.get_esp32_variant()
-    if not _bias_is_selectable(variant):
-        # Balanced is ESP-IDF's own default, so a variant that has to keep it needs no
-        # option written at all. Whether the streams fit inside it was settled in
-        # validation.
+    if not _needs_fifo_bias(variant):
         return
 
     speaker, microphone = _usb_audio_streams(CORE.config)
     out_mps = _endpoint_mps(speaker) if speaker else 0
     in_mps = _endpoint_mps(microphone) if microphone else 0
-    bias = _select_fifo_bias(out_mps, in_mps, True)
+    bias = _select_fifo_bias(out_mps, in_mps)
     if bias is None:
         # Rejected during validation; nothing sensible to set.
         return
