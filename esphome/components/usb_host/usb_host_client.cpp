@@ -235,22 +235,11 @@ void USBClient::setup() {
     this->mark_failed();
     return;
   }
-  // Pre-allocate transfer buffers for all pool slots at setup -- no runtime allocation.
-  // A control transfer keeps the 8 byte setup packet in the same buffer as its data stage,
-  // so the buffer has to be that much larger than the largest packet or the data stage is
-  // capped below one packet. That bites on a 64 byte configuration, where it would leave 56.
-  // A failure here leaves request.transfer null, and the first get_trq_() handing out that
-  // slot would dereference it. Fail the component instead of crashing on the first transfer.
-  for (auto &request : this->requests_) {
-    err = usb_host_transfer_alloc(SETUP_PACKET_SIZE + USB_MAX_PACKET_SIZE, 0, &request.transfer);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Transfer buffer alloc failed: %s", esp_err_to_name(err));
-      this->status_set_error(LOG_STR("Transfer buffer alloc failed"));
-      this->mark_failed();
-      return;
-    }
-    request.client = this;
-  }
+  // The transfer buffers are not allocated here. Their size depends on the device, and no
+  // device is attached yet: a client that ends up on the high-speed controller sees 512 byte
+  // bulk packets where one on the full-speed controller sees 64, and both run at the same
+  // time from this same code. The pool is allocated in handle_open_state_() once the
+  // descriptors say what this device needs, and released again in disconnect().
   xTaskCreate(usb_task_fn, "usb_task", USB_TASK_STACK_SIZE, this, USB_TASK_PRIORITY, &this->usb_task_handle_);
   if (this->usb_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create USB task");
@@ -354,6 +343,10 @@ void USBClient::handle_open_state_() {
     this->disconnect();
     return;
   }
+  if (!this->alloc_transfer_pool_()) {
+    this->disconnect();
+    return;
+  }
   this->state_ = USB_CLIENT_CONNECTED;
   char buf_manuf[DESC_STRING_BUF_SIZE];
   char buf_product[DESC_STRING_BUF_SIZE];
@@ -367,6 +360,62 @@ void USBClient::handle_open_state_() {
   usb_client_print_config_descriptor(this->config_desc_, nullptr);
 #endif
   this->on_connected();
+}
+
+size_t USBClient::transfer_buffer_size_() const {
+  // Every endpoint of the active configuration, not only the ones this driver claims: the
+  // pool is shared across them and a driver may claim another interface later. This is what
+  // lets the same code serve a device on the high-speed controller and one on the
+  // full-speed controller at the same time, each with the packet size it actually declares.
+  // USB_EP_DESC_GET_MPS() masks off the high-speed multiplier bits, which is what a single
+  // packet holds; the isochronous path allocates its own transfers and handles MULT itself.
+  size_t largest = this->device_desc_ != nullptr ? this->device_desc_->bMaxPacketSize0 : 0;
+  if (this->config_desc_ != nullptr) {
+    int offset = 0;
+    const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(this->config_desc_);
+    while ((next = usb_parse_next_descriptor_of_type(next, this->config_desc_->wTotalLength, USB_W_VALUE_DT_ENDPOINT,
+                                                     &offset)) != nullptr) {
+      const size_t mps = USB_EP_DESC_GET_MPS(reinterpret_cast<const usb_ep_desc_t *>(next));
+      if (mps > largest)
+        largest = mps;
+    }
+  }
+  // The configured value is a floor, for a driver whose control data stage is larger than
+  // any endpoint packet on the device. It never caps what the device asks for.
+  if (largest < USB_MIN_TRANSFER_BUFFER)
+    largest = USB_MIN_TRANSFER_BUFFER;
+  // A control transfer keeps the 8 byte setup packet in the same buffer as its data stage,
+  // so the buffer has to be that much larger than the largest packet or the data stage is
+  // capped below one packet. That bites on a 64 byte device, where it would leave 56.
+  return SETUP_PACKET_SIZE + largest;
+}
+
+bool USBClient::alloc_transfer_pool_() {
+  const size_t size = this->transfer_buffer_size_();
+  ESP_LOGD(TAG, "Allocating %u transfer buffers of %u bytes", static_cast<unsigned>(MAX_REQUESTS),
+           static_cast<unsigned>(size));
+  for (auto &request : this->requests_) {
+    // A failure leaves request.transfer null, and the first get_trq_() handing out that slot
+    // would dereference it. Give this device up instead of crashing on the first transfer.
+    const auto err = usb_host_transfer_alloc(size, 0, &request.transfer);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Transfer buffer alloc failed: %s", esp_err_to_name(err));
+      this->free_transfer_pool_();
+      return false;
+    }
+    request.client = this;
+  }
+  return true;
+}
+
+void USBClient::free_transfer_pool_() {
+  for (auto &request : this->requests_) {
+    if (request.transfer == nullptr)
+      continue;
+    usb_host_transfer_free(request.transfer);
+    request.transfer = nullptr;
+  }
+  this->trq_in_use_.store(0);
 }
 
 void USBClient::on_opened(uint8_t addr) {
@@ -386,6 +435,9 @@ void USBClient::disconnect() {
   auto err = usb_host_device_close(this->handle_, this->device_handle_);
   if (err != ESP_OK)
     ESP_LOGE(TAG, "Device close failed: %s", esp_err_to_name(err));
+  // After the close, so nothing is still in flight against these buffers. The next device
+  // this client picks up gets a pool sized for itself.
+  this->free_transfer_pool_();
   this->state_ = USB_CLIENT_INIT;
   this->device_handle_ = nullptr;
   this->device_addr_ = -1;
@@ -411,6 +463,13 @@ TransferRequest *USBClient::get_trq_() {
     if (this->trq_in_use_.compare_exchange_weak(mask, desired, std::memory_order::acquire)) {
       auto i = __builtin_ctz(lsb);
       auto *trq = &this->requests_[i];
+      if (trq->transfer == nullptr) {
+        // No device attached, so the pool has not been sized yet. Only reachable if a driver
+        // submits outside the connected state.
+        ESP_LOGE(TAG, "No transfer buffers: no device attached");
+        this->release_trq(trq);
+        return nullptr;
+      }
       trq->transfer->context = trq;
       trq->transfer->device_handle = this->device_handle_;
       return trq;

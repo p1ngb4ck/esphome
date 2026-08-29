@@ -140,24 +140,17 @@ bool USBStorageClient::parse_msc_endpoints_() {
              this->bulk_out_mps_);
     return false;
   }
-  // A data phase is split into whole packets, so a single packet still has to fit the
-  // host's per-transfer buffer, which is sized from the usb_host max_packet_size option.
-  // Anything above that cannot be served at all -- say so here rather than failing on the
-  // first transfer.
-  if (max_chunk_for_mps_(this->bulk_in_mps_) == 0 || max_chunk_for_mps_(this->bulk_out_mps_) == 0) {
-    ESP_LOGE(TAG, "MSC endpoint packet size (in %u out %u) exceeds the usb_host max_packet_size of %u",
-             this->bulk_in_mps_, this->bulk_out_mps_, static_cast<unsigned>(usb_host::USB_MAX_PACKET_SIZE));
-    return false;
-  }
+  // The client's transfer buffers are sized from this device's own descriptors, so one whole
+  // packet of these endpoints always fits, at full speed and at high speed alike.
   ESP_LOGD(TAG, "MSC endpoints: bulk_in=0x%02X (mps %u) bulk_out=0x%02X (mps %u) intf=%d", this->bulk_in_ep_,
            this->bulk_in_mps_, this->bulk_out_ep_, this->bulk_out_mps_, this->msc_interface_);
   return true;
 }
 
-uint16_t USBStorageClient::max_chunk_for_mps_(uint16_t mps) {
+uint16_t USBStorageClient::max_chunk_for_mps_(uint16_t mps) const {
   if (mps == 0)
     return 0;
-  return static_cast<uint16_t>((usb_host::USB_MAX_PACKET_SIZE / mps) * mps);
+  return static_cast<uint16_t>((this->transfer_capacity() / mps) * mps);
 }
 
 uint16_t USBStorageClient::round_up_to_in_mps_(uint16_t len) const {

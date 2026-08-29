@@ -94,8 +94,10 @@ class USBStorageClient : public usb_host::USBClient {
   bool send_chunked_(const uint8_t *buf, uint32_t len);
   // Largest whole number of mps-sized packets that still fits a single host transfer.
   // Intermediate pieces of a data phase must be full packets: a short packet tells the
-  // device the phase has ended.
-  static uint16_t max_chunk_for_mps_(uint16_t mps);
+  // device the phase has ended. The transfer size comes from the attached device, so this is
+  // a member and not a constant: the same driver serves a full-speed device on one
+  // controller and a high-speed device on the other.
+  uint16_t max_chunk_for_mps_(uint16_t mps) const;
   bool recv_csw_(uint32_t expected_tag);
 
   bool wait_transfer_(uint32_t timeout_ms = 5000);

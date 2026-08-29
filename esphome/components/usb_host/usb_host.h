@@ -72,7 +72,14 @@ static_assert(MAX_REQUESTS >= 1 && MAX_REQUESTS <= 32, "MAX_REQUESTS must be bet
 using trq_bitmask_t = std::conditional<(MAX_REQUESTS <= 16), uint16_t, uint32_t>::type;
 static constexpr trq_bitmask_t ALL_REQUESTS_IN_USE = MAX_REQUESTS == 32 ? ~0 : (1 << MAX_REQUESTS) - 1;
 
+// Compile-time packet size from the usb_host max_packet_size option. Used where a buffer has
+// to have a fixed size at compile time (usb_uart's chunk pool), which cannot follow a device.
 static constexpr size_t USB_MAX_PACKET_SIZE = USB_HOST_MAX_PACKET_SIZE;
+// Floor for a client's transfer buffers. The size actually used is derived per device from
+// its own descriptors, so a device on the high-speed controller gets its 512 byte packets and
+// one on the full-speed controller gets its 64, at the same time. This only raises the floor,
+// for a driver whose control data stage is larger than any endpoint packet on the device.
+static constexpr size_t USB_MIN_TRANSFER_BUFFER = USB_HOST_MAX_PACKET_SIZE;
 static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;
 static constexpr size_t USB_TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t USB_TASK_PRIORITY = 5;
@@ -308,9 +315,21 @@ class USBClient : public Component {
   virtual void on_stream_open(IsocStream &stream, bool ok) {}
 #endif
 
+  // Bytes a single transfer of this client can carry. Sized from the attached device's
+  // descriptors, so it differs between a device on the high-speed controller and one on the
+  // full-speed controller, and is only meaningful while a device is attached.
+  size_t transfer_capacity() const {
+    return this->requests_[0].transfer != nullptr ? this->requests_[0].transfer->data_buffer_size : 0;
+  }
+
  protected:
   bool process_usb_events_();
   void handle_open_state_();
+  // Largest transfer buffer this device can need: the widest wMaxPacketSize it declares,
+  // including its control endpoint, and never below USB_MIN_TRANSFER_BUFFER.
+  size_t transfer_buffer_size_() const;
+  bool alloc_transfer_pool_();
+  void free_transfer_pool_();
   TransferRequest *get_trq_();
   virtual void disconnect();
   virtual void on_connected() {}
