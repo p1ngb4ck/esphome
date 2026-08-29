@@ -384,6 +384,8 @@ size_t USBClient::transfer_buffer_size_() const {
   // any endpoint packet on the device. It never caps what the device asks for.
   if (largest < USB_MIN_TRANSFER_BUFFER)
     largest = USB_MIN_TRANSFER_BUFFER;
+  if (largest > USB_MAX_PACKET_SIZE)
+    largest = USB_MAX_PACKET_SIZE;
   // A control transfer keeps the 8 byte setup packet in the same buffer as its data stage,
   // so the buffer has to be that much larger than the largest packet or the data stage is
   // capped below one packet. That bites on a 64 byte device, where it would leave 56.
