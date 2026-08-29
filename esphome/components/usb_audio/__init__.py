@@ -36,9 +36,20 @@ CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
 CONF_FEEDBACK = "feedback"
 CONF_VOLUME_CURVE = "volume_curve"
+CONF_CHANNEL_PAIR = "channel_pair"
 CONF_VID = "vid"
 CONF_PID = "pid"
 CONF_DEFAULT_BUFFER_SIZE = 6400
+
+UacChannelPair = usb_audio_ns.enum("UacChannelPair", is_class=True)
+# ESPHome has no surround path, so a multichannel card is driven as one stereo pair. This
+# picks which pair when the device offers nothing but multichannel alt-settings; a card that
+# also describes plain stereo uses that and ignores this option.
+CHANNEL_PAIRS = {
+    "front": UacChannelPair.FRONT,
+    "side": UacChannelPair.SIDE,
+    "back": UacChannelPair.BACK,
+}
 
 VolumeCurve = usb_audio_ns.enum("VolumeCurve", is_class=True)
 VOLUME_CURVES = {
@@ -222,6 +233,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
             ): cv.positive_int,
+            cv.Optional(CONF_CHANNEL_PAIR, default="front"): cv.enum(
+                CHANNEL_PAIRS, lower=True
+            ),
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
@@ -244,6 +258,7 @@ async def to_code(config):
     cg.add(var.set_pid(config[CONF_PID]))
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
     cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
+    cg.add(var.set_channel_pair(config[CONF_CHANNEL_PAIR]))
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

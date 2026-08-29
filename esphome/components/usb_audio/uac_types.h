@@ -111,6 +111,63 @@ static constexpr uint8_t UAC2_FU_CONTROL_SIZE = 4;
 // path. Any other Output Terminal type is a physical sink and belongs to playback.
 static constexpr uint16_t UAC_TERMINAL_TYPE_USB_STREAMING = 0x0101;
 
+// -- Spatial channel positions (UAC 1.0 wChannelConfig / UAC 2.0 bmChannelConfig) --
+// The first twelve bits are identical in both class versions. A channel's position inside
+// an audio frame is its index among the set bits, counting up from bit 0, so the bitmap is
+// both the layout and the ordering.
+static constexpr uint32_t UAC_CH_FRONT_LEFT            = 1u << 0;
+static constexpr uint32_t UAC_CH_FRONT_RIGHT           = 1u << 1;
+static constexpr uint32_t UAC_CH_FRONT_CENTER          = 1u << 2;
+static constexpr uint32_t UAC_CH_LFE                   = 1u << 3;
+static constexpr uint32_t UAC_CH_BACK_LEFT             = 1u << 4;
+static constexpr uint32_t UAC_CH_BACK_RIGHT            = 1u << 5;
+static constexpr uint32_t UAC_CH_FRONT_LEFT_OF_CENTER  = 1u << 6;
+static constexpr uint32_t UAC_CH_FRONT_RIGHT_OF_CENTER = 1u << 7;
+static constexpr uint32_t UAC_CH_BACK_CENTER           = 1u << 8;
+static constexpr uint32_t UAC_CH_SIDE_LEFT             = 1u << 9;
+static constexpr uint32_t UAC_CH_SIDE_RIGHT            = 1u << 10;
+static constexpr uint32_t UAC_CH_TOP_CENTER            = 1u << 11;
+
+// Which pair of a multichannel stream is carried as stereo. ESPHome has no surround path,
+// so a 5.1 or 7.1 device is driven as one stereo pair and the other channels stay silent.
+// Front is the pair a card marks as the main output.
+enum class UacChannelPair : uint8_t {
+  FRONT = 0,
+  SIDE = 1,
+  BACK = 2,
+};
+
+// The two position bits making up a pair.
+inline uint32_t uac_pair_mask(UacChannelPair pair) {
+  switch (pair) {
+    case UacChannelPair::SIDE: return UAC_CH_SIDE_LEFT | UAC_CH_SIDE_RIGHT;
+    case UacChannelPair::BACK: return UAC_CH_BACK_LEFT | UAC_CH_BACK_RIGHT;
+    case UacChannelPair::FRONT:
+    default: return UAC_CH_FRONT_LEFT | UAC_CH_FRONT_RIGHT;
+  }
+}
+
+// Frame positions a pair takes when the device declares no bitmap at all. The class then
+// leaves the layout undefined and the convention, which the Linux driver follows too, is the
+// order of the position list above.
+inline void uac_pair_default_offsets(UacChannelPair pair, uint8_t &left, uint8_t &right) {
+  switch (pair) {
+    case UacChannelPair::SIDE:
+      left = 9;
+      right = 10;
+      break;
+    case UacChannelPair::BACK:
+      left = 4;
+      right = 5;
+      break;
+    case UacChannelPair::FRONT:
+    default:
+      left = 0;
+      right = 1;
+      break;
+  }
+}
+
 // -- Maximum number of discrete sample frequencies per alt-setting -------------
 static constexpr uint8_t UAC_MAX_SAMPLE_FREQS = 8;
 
@@ -138,6 +195,14 @@ struct UacAltInfo {
   uint16_t mps{0};            // max packet size x mult
   uint8_t  b_interval{0};     // endpoint bInterval (service interval; 0 = not read)
   uint8_t  channels{0};
+  // Spatial layout of those channels, 0 when the device declares none.
+  uint32_t channel_config{0};
+  // Set when the device offers no plain stereo alt-setting and a pair is being lifted out of
+  // a multichannel frame. map_left and map_right are the pair's frame positions; every other
+  // position in the frame is written as silence on playback and dropped on capture.
+  bool     channel_map_active{false};
+  uint8_t  map_left{0};
+  uint8_t  map_right{0};
   uint8_t  sub_frame_size{0}; // bytes per audio sample (1, 2, 3, or 4)
   uint8_t  bit_resolution{0}; // actual bits used (e.g. 16 or 24)
   uint8_t  sample_freq_type{0};  // 0 = continuous range; N = N discrete freqs
