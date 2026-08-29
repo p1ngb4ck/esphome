@@ -2339,6 +2339,36 @@ async def _reconcile_certificate_bundle_sdkconfig() -> None:
 
 
 @coroutine_with_priority(CoroPriority.FINAL)
+async def _reconcile_mbedtls_sha512_sdkconfig() -> None:
+    """Disable SHA-384/SHA-512 only when nothing in the build needs them.
+
+    ESPHome itself hashes with neither, and SHA-384 shares the compression function of
+    SHA-512 (mbedtls_internal_sha512_process), so dropping both removes the ~3 KB software
+    fallback that IDF 6.0's PSA parallel engine always links in. On IDF < 6.0 they are a
+    single hardware-only config with no software fallback, so there is nothing to save.
+
+    TLS is the exception, and it is not optional for the components that use it. Servers
+    routinely settle on ECDHE-RSA-AES256-GCM-SHA384 (TLS 1.2) or TLS_AES_256_GCM_SHA384
+    (TLS 1.3), whose PRF and key schedule are SHA-384, and certificate chains signed with
+    sha384WithRSAEncryption or ecdsa-with-SHA384 cannot be verified without it. A build that
+    dropped SHA-384 fails the handshake against those. So anything that asked for the
+    certificate bundle -- which is what a TLS client asks for to verify a server -- counts
+    as a request for SHA-384/SHA-512 as well.
+
+    Runs at FINAL priority so every require_mbedtls_sha512() and require_certificate_bundle()
+    call has happened; reading the flags from the platform to_code would run before any
+    component's own to_code and never see them.
+    """
+    if idf_version() < cv.Version(6, 0, 0):
+        return
+    data = CORE.data[KEY_ESP32]
+    if data.get(KEY_MBEDTLS_SHA512_REQUIRED, False) or data.get(KEY_CERT_BUNDLE, False):
+        return
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", False)
+    add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", False)
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
 async def _reconcile_network_sdkconfig() -> None:
     """Reconcile WiFi/Ethernet/Bluetooth/coexistence sdkconfig flags.
 
@@ -3100,19 +3130,9 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_MBEDTLS_PKCS7_C", False)
 
     # Disable SHA-384 and SHA-512 in mbedTLS
-    # ESPHome doesn't use either algorithm. SHA-384 shares the same
-    # compression function as SHA-512 (mbedtls_internal_sha512_process),
-    # so both must be disabled to eliminate the ~3KB software fallback
-    # that IDF 6.0's PSA parallel engine always links in.
-    # On IDF < 6.0 these are a single config and hardware-only (no
-    # software fallback), so there was no code size cost to leaving
-    # them enabled.
-    # Components that need SHA-384/SHA-512 can call require_mbedtls_sha512()
-    if idf_version() >= cv.Version(6, 0, 0) and not CORE.data[KEY_ESP32].get(
-        KEY_MBEDTLS_SHA512_REQUIRED, False
-    ):
-        add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", False)
-        add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", False)
+    # FINAL priority: components request SHA-384/SHA-512 from their own to_code, which runs
+    # after this one, so the decision cannot be made inline here.
+    CORE.add_job(_reconcile_mbedtls_sha512_sdkconfig)
 
     # FINAL priority: runs after every require_libc_picolibc_newlib_compat() call
     CORE.add_job(_set_libc_picolibc_newlib_compat)

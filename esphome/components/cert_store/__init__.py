@@ -121,6 +121,10 @@ async def to_code(config):
     # Force the built-in Mozilla CA bundle in: it is the default trust anchor whenever a consumer
     # requests a CA without naming an entry, so it must always be available.
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
+    # Chains are routinely signed with sha384WithRSAEncryption or ecdsa-with-SHA384, and the
+    # suites servers settle on (ECDHE-RSA-AES256-GCM-SHA384, TLS_AES_256_GCM_SHA384) use
+    # SHA-384 for the PRF, so verification needs it present.
+    esp32.require_mbedtls_sha512()
 
     for entry in config[CONF_ENTRIES]:
         if entry[CONF_SOURCE] == SOURCE_EMBEDDED:

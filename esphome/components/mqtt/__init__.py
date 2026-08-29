@@ -7,6 +7,7 @@ from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     idf_version,
     include_builtin_idf_component,
+    require_mbedtls_sha512,
 )
 from esphome.config_helpers import (
     filter_source_files_from_defines,
@@ -451,6 +452,9 @@ async def to_code(config):
 
     # esp-idf only
     if CONF_CERTIFICATE_AUTHORITY in config:
+        # The broker's chain may be signed with SHA-384, and the suites both ends settle on
+        # (ECDHE-RSA-AES256-GCM-SHA384, TLS_AES_256_GCM_SHA384) derive their keys from it.
+        require_mbedtls_sha512()
         cg.add(var.set_ca_certificate(config[CONF_CERTIFICATE_AUTHORITY]))
         cg.add(var.set_skip_cert_cn_check(config[CONF_SKIP_CERT_CN_CHECK]))
         if CONF_CLIENT_CERTIFICATE in config:
