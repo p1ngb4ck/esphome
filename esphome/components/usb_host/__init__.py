@@ -32,6 +32,13 @@ CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
 CONF_DUAL_HOST = "dual_host"
+CONF_FS_PINS = "fs_pins"
+
+# GPIO pair the ESP32-P4 full-speed OTG controller is wired to on the board. The chip has
+# two internal FSLS PHYs: PHY 0 on GPIO24 (D-) / GPIO25 (D+), PHY 1 on GPIO26 / GPIO27.
+# Out of reset OTG_FS gets PHY 1 and USB-Serial-JTAG gets PHY 0; selecting "24_25" swaps
+# them, which also moves USB-Serial-JTAG to GPIO26/27.
+FS_PIN_CHOICES = {"26_27": 1, "24_25": 0}
 
 # Transfer-class requirement tracking. Consumer components call the require_*()
 # functions below; the FINAL-priority job turns the union into defines.
@@ -173,6 +180,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_MAX_PACKET_SIZE, default=_default_max_packet_size
             ): cv.one_of(64, 128, 256, 512, 1024, int=True),
             cv.Optional(CONF_DUAL_HOST, default=False): _dual_host_validator,
+            cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
     ),
@@ -212,6 +220,7 @@ async def to_code(config: ConfigType) -> None:
 
     if config.get(CONF_DUAL_HOST):
         cg.add(var.set_dual_host(True))
+    cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
 
     devices = config.get(CONF_DEVICES)
     if devices:

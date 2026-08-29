@@ -361,6 +361,9 @@ class USBHost final : public Component {
   // field only exists from espressif/usb 1.4.0 (IDF 6.0), hence the guards at the use site
   // and in codegen.
   void set_dual_host(bool enable) { this->dual_host_ = enable; }
+  // Which of the ESP32-P4's two internal FSLS PHYs the full-speed OTG controller uses:
+  // 0 is GPIO24/25, 1 is GPIO26/27 (the reset default). Set from the fs_pins option.
+  void set_fs_phy_index(uint8_t index) { this->fs_phy_index_ = index; }
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
 
@@ -407,6 +410,7 @@ class USBHost final : public Component {
  protected:
   std::vector<USBClient *> clients_{};
   bool dual_host_{false};
+  uint8_t fs_phy_index_{1};
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().
