@@ -36,6 +36,8 @@ CONF_MICROPHONE_BUFFER_SIZE = "microphone_buffer_size"
 CONF_SPEAKER_BUFFER_SIZE = "speaker_buffer_size"
 CONF_FEEDBACK = "feedback"
 CONF_VOLUME_CURVE = "volume_curve"
+CONF_VID = "vid"
+CONF_PID = "pid"
 CONF_DEFAULT_BUFFER_SIZE = 6400
 
 VolumeCurve = usb_audio_ns.enum("VolumeCurve", is_class=True)
@@ -220,6 +222,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_SPEAKER_BUFFER_SIZE, default=CONF_DEFAULT_BUFFER_SIZE
             ): cv.positive_int,
+            cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
+            cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_FEEDBACK, default=True): cv.boolean,
             cv.Optional(CONF_VOLUME_CURVE, default="linear"): cv.enum(
                 VOLUME_CURVES, lower=True
@@ -236,6 +240,8 @@ async def to_code(config):
 
     cg.add(var.set_microphone_buffer_size(config[CONF_MICROPHONE_BUFFER_SIZE]))
     cg.add(var.set_speaker_buffer_size(config[CONF_SPEAKER_BUFFER_SIZE]))
+    cg.add(var.set_vid(config[CONF_VID]))
+    cg.add(var.set_pid(config[CONF_PID]))
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
     cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
 

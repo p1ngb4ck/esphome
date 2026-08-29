@@ -75,12 +75,18 @@ class USBAudioSpeaker;
 // -----------------------------------------------------------------------------
 class USBAudioClient : public usb_host::USBClient {
  public:
-  USBAudioClient() : usb_host::USBClient(0, 0) {}
+  // Only devices that describe an Audio Class interface are ours. Without this the client
+  // matches anything that enumerates, including hubs and mass storage, and takes the first
+  // device it sees. vid and pid stay 0 by default, which the host reads as "any", and are
+  // narrowed from the config when the user names a specific device.
+  USBAudioClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_AUDIO); }
+
+  void set_vid(uint16_t vid) { this->vid_ = vid; }
+  void set_pid(uint16_t pid) { this->pid_ = pid; }
 
   void setup() override;
   void loop() override;
   float get_setup_priority() const override { return setup_priority::IO; }
-  uint8_t get_interface_class() const { return USB_CLASS_AUDIO; }
 
   // -- Configuration setters -------------------------------------------------
   void set_microphone_buffer_size(uint32_t size) { this->mic_buf_size_ = size; }
