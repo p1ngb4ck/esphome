@@ -117,8 +117,11 @@ class USBHIDClient : public usb_host::USBClient {
   void on_transfer_in_(uint8_t ep, const uint8_t *data, size_t len, bool media);
   void start_in_transfer_(HIDDevice *dev, uint8_t ep, uint16_t mps, bool media);
 
-  HIDDevice devices_[HID_MAX_DEVICES]{};
-  int connected_devices_{0};
+  // One device, not an array of them. USBClient holds a single device_handle_ and its state
+  // machine runs INIT -> OPEN -> CONNECTED for that one device; a NEW_DEV event arriving
+  // while the client is CONNECTED is never opened. A second HID device therefore means a
+  // second usb_hid instance, which is what MULTI_CONF is for.
+  HIDDevice device_{};
 
   std::vector<HIDDeviceDriver *> drivers_;
   RawHIDDriver *raw_driver_{nullptr};

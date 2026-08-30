@@ -145,25 +145,12 @@ bool USBHIDClient::parse_hid_interface_() {
     return false;
   }
 
-  // Find a free slot
-  int slot = -1;
-  for (int i = 0; i < HID_MAX_DEVICES; i++) {
-    if (!this->devices_[i].active) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot < 0) {
-    ESP_LOGW(TAG, "No free HID device slots");
-    return false;
-  }
-
   if (!this->claim_interface(hid_intf->bInterfaceNumber)) {
     ESP_LOGE(TAG, "Failed to claim HID interface %d", hid_intf->bInterfaceNumber);
     return false;
   }
 
-  HIDDevice *d = &this->devices_[slot];
+  HIDDevice *d = &this->device_;
   d->dev_hdl = this->device_handle_;
   d->dev_addr = static_cast<uint8_t>(this->device_addr_);
   d->vid = vid;
@@ -173,7 +160,6 @@ bool USBHIDClient::parse_hid_interface_() {
   d->in_ep = in_ep_desc->bEndpointAddress;
   d->out_ep = out_ep;
   d->active = true;
-  this->connected_devices_++;
 
   // Match driver
   for (auto *drv : this->drivers_) {
@@ -192,23 +178,14 @@ bool USBHIDClient::parse_hid_interface_() {
 
   this->start_in_transfer_(d, d->in_ep, in_ep_desc->wMaxPacketSize, false);
 
-  ESP_LOGI(TAG, "HID device ready (slot %d, protocol %d)", slot, d->protocol);
+  ESP_LOGI(TAG, "HID device ready on interface %d (protocol %d)", d->interface_num, d->protocol);
 
   if (d->protocol == HID_PROTO_KEYBOARD && !is_xbox360)
     this->setup_media_interface_(d);
 
 #ifdef USE_TEXT_SENSOR
-  if (this->device_name_sensor_) {
-    std::string combined;
-    for (int i = 0; i < HID_MAX_DEVICES; i++) {
-      if (this->devices_[i].active && this->devices_[i].driver) {
-        if (!combined.empty())
-          combined += "+";
-        combined += this->devices_[i].driver->get_name();
-      }
-    }
-    this->device_name_sensor_->publish_state(combined.empty() ? "Unknown" : combined);
-  }
+  if (this->device_name_sensor_ != nullptr)
+    this->device_name_sensor_->publish_state(d->driver != nullptr ? d->driver->get_name() : "Unknown");
 #endif
 
   return true;
@@ -221,6 +198,10 @@ bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
   if (!cfg)
     return false;
 
+  // The second HID interface of a keyboard, the one that carries the media keys. Found by
+  // the same rule as the first -- any interface of class 0x03 -- rather than by assuming it
+  // is number 1: that only holds for a plain keyboard, and the main search stopped assuming
+  // it when it was widened to composite devices.
   const usb_intf_desc_t *media_intf = nullptr;
   const usb_ep_desc_t *media_ep = nullptr;
   int offset = 0;
@@ -231,7 +212,9 @@ bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
 
     if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
       const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
-      if (intf->bInterfaceNumber == 1 && intf->bInterfaceClass == USB_CLASS_HID)
+      if (media_intf != nullptr)
+        break;  // Endpoints of the interface after it are not ours.
+      if (intf->bInterfaceClass == USB_CLASS_HID && intf->bInterfaceNumber != dev->interface_num)
         media_intf = intf;
     } else if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT && media_intf) {
       const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
@@ -248,8 +231,8 @@ bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
     return false;
   }
 
-  if (!this->claim_interface(1)) {
-    ESP_LOGW(TAG, "Failed to claim media interface 1");
+  if (!this->claim_interface(media_intf->bInterfaceNumber)) {
+    ESP_LOGW(TAG, "Failed to claim media interface %d", media_intf->bInterfaceNumber);
     return false;
   }
 
@@ -257,22 +240,18 @@ bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
   dev->media_active = true;
 
   this->start_in_transfer_(dev, dev->media_in_ep, media_ep->wMaxPacketSize, true);
-  ESP_LOGI(TAG, "Media interface ready on ep 0x%02X", dev->media_in_ep);
+  ESP_LOGI(TAG, "Media interface %d ready on ep 0x%02X", media_intf->bInterfaceNumber, dev->media_in_ep);
   return true;
 }
 
 // ── on_transfer_in_ ──────────────────────────────────────────────────────────
 
 void USBHIDClient::on_transfer_in_(uint8_t ep, const uint8_t *data, size_t len, bool media) {
-  HIDDevice *dev = nullptr;
-  for (int i = 0; i < HID_MAX_DEVICES; i++) {
-    if (this->devices_[i].active &&
-        (this->devices_[i].in_ep == ep || this->devices_[i].media_in_ep == ep)) {
-      dev = &this->devices_[i];
-      break;
-    }
-  }
-  if (!dev || !dev->driver)
+  // Both endpoints belong to the one device this client serves, so which of them a report
+  // arrived on says nothing that the media flag does not already say.
+  (void) ep;
+  HIDDevice *dev = &this->device_;
+  if (!dev->active || dev->driver == nullptr)
     return;
 
   if (media) {
@@ -289,13 +268,7 @@ void USBHIDClient::on_transfer_in_(uint8_t ep, const uint8_t *data, size_t len, 
 // ── on_disconnected ───────────────────────────────────────────────────────────
 
 void USBHIDClient::on_disconnected() {
-  for (int i = 0; i < HID_MAX_DEVICES; i++) {
-    this->devices_[i].active = false;
-    this->devices_[i].media_active = false;
-    this->devices_[i].dev_hdl = nullptr;
-    this->devices_[i].driver = nullptr;
-  }
-  this->connected_devices_ = 0;
+  this->device_ = HIDDevice{};
 
 #ifdef USE_TEXT_SENSOR
   if (this->device_name_sensor_)
