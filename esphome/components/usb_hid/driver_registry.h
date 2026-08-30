@@ -25,17 +25,16 @@
 #define HAS_GAMEPAD_DRIVER
 #endif
 
-#ifdef USB_HID_ENABLE_RAW
-#include "raw_driver.h"
-#define HAS_RAW_DRIVER
-#endif
-
 namespace esphome {
 namespace usb_hid {
 
 class USBHIDClient;  // forward declaration
 
 inline void register_all_drivers(USBHIDClient *component) {
+  // With none of the protocol drivers enabled every branch below is compiled out and the
+  // parameter goes unused, which is a warning rather than a mistake.
+  (void) component;
+
 #ifdef HAS_KEYBOARD_DRIVER
   component->register_device_driver(new KeyboardDriver(component));
 #endif
@@ -49,12 +48,9 @@ inline void register_all_drivers(USBHIDClient *component) {
   component->register_device_driver(new GamepadDriver(component));
 #endif
 
-  // The raw driver matches everything, so it is registered after the ones that identify a
-  // device by its protocol. Which device reaches it at all is decided by the vid and pid on
-  // the client, and codegen only builds it in where a raw section asked for it.
-#ifdef HAS_RAW_DRIVER
-  component->register_raw_driver(new RawHIDDriver(component));
-#endif
+  // The raw driver is not created here. It carries configuration -- buttons, triggers, the
+  // long-press threshold -- so codegen constructs it and hands it to the client through
+  // register_raw_driver(), which happens before App.setup() calls into this function.
 }
 
 }  // namespace usb_hid

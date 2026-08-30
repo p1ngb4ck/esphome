@@ -142,10 +142,13 @@ async def to_code(config):
         cg.add_build_flag("-DUSB_HID_ENABLE_GAMEPAD")
 
     if (raw := config.get(CONF_RAW)) is not None:
-        # The build flag makes register_all_drivers() construct the driver and hand it to
-        # the client, so it is fetched back from there rather than created a second time.
+        # Constructed here rather than fetched from the client. register_all_drivers() runs
+        # in USBHIDClient::setup(), which App.setup() reaches only after every generated
+        # statement in main.cpp has already run -- so asking the client for its driver at
+        # this point yields the null it was initialised with.
         cg.add_build_flag("-DUSB_HID_ENABLE_RAW")
-        driver = cg.Pvariable(raw[CONF_ID], var.get_raw_driver(), RawHIDDriver)
+        driver = cg.new_Pvariable(raw[CONF_ID], var)
+        cg.add(var.register_raw_driver(driver))
         cg.add(driver.set_log_reports(raw[CONF_LOG_REPORTS]))
         cg.add(driver.set_long_press_time(raw[CONF_LONG_PRESS_TIME]))
 
