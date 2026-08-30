@@ -143,9 +143,10 @@ class USBHIDClient : public usb_host::USBClient {
 }  // namespace esphome
 
 // After the declarations above, so the driver can derive from HIDDeviceDriver. Only built in
-// where a raw section in the configuration asked for it.
+// where a raw section in the configuration asked for it. See driver_registry.h for why it
+// sits next to this header rather than under devices/.
 #ifdef USB_HID_ENABLE_RAW
-#include "devices/raw/raw_driver.h"
+#include "raw_driver.h"
 #endif
 
 #endif  // USE_ESP32_VARIANT_*

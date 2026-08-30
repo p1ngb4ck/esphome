@@ -1,24 +1,32 @@
 #pragma once
 
+// Every driver header sits next to this one rather than under devices/, because
+// ComponentManifest.resources() in esphome/loader.py lists only the files directly in a
+// component's directory. Subdirectories are descended into only for manifests built with
+// recursive_sources=True, which is set for esphome.core.config alone -- so a header under
+// devices/ is never copied into the build tree and does not exist at compile time, however
+// correct the include path looks. The Python packages under devices/ are unaffected: they
+// are imported, not compiled.
+
 // Include only drivers enabled via build flags set in __init__.py
 
 #ifdef USB_HID_ENABLE_KEYBOARD
-#include "devices/keyboard/keyboard_driver.h"
+#include "keyboard_driver.h"
 #define HAS_KEYBOARD_DRIVER
 #endif
 
 #ifdef USB_HID_ENABLE_MOUSE
-#include "devices/mouse/mouse_driver.h"
+#include "mouse_driver.h"
 #define HAS_MOUSE_DRIVER
 #endif
 
 #ifdef USB_HID_ENABLE_GAMEPAD
-#include "devices/gamepad/gamepad_driver.h"
+#include "gamepad_driver.h"
 #define HAS_GAMEPAD_DRIVER
 #endif
 
 #ifdef USB_HID_ENABLE_RAW
-#include "devices/raw/raw_driver.h"
+#include "raw_driver.h"
 #define HAS_RAW_DRIVER
 #endif
 
