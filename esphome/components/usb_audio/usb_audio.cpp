@@ -513,7 +513,7 @@ bool USBAudioClient::parse_feature_units_() {
   this->mic_ctl_.fu = {};
   this->spk_ctl_.clock_id = 0;
   this->mic_ctl_.clock_id = 0;
-
+  return;
   UacTopologyNode nodes[UAC_MAX_TOPOLOGY_NODES];
   const uint8_t node_count = this->collect_topology_(nodes);
 
