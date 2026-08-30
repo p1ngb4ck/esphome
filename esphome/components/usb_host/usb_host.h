@@ -383,6 +383,18 @@ class USBHost final : public Component {
   // Which of the ESP32-P4's two internal FSLS PHYs the full-speed OTG controller uses:
   // 0 is GPIO24/25, 1 is GPIO26/27 (the reset default). Set from the fs_pins option.
   void set_fs_phy_index(uint8_t index) { this->fs_phy_index_ = index; }
+#ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
+  // How one host controller divides its hardware FIFO between received data, non-periodic
+  // OUT and periodic OUT. The division caps the largest packet each direction can carry, so
+  // a controller carrying a wide isochronous OUT stream and one carrying high-speed bulk
+  // need different divisions. ESP-IDF's own option applies one division to every
+  // controller; the patched component this build uses takes one per controller, indexed
+  // like peripheral_map. Values are usb_host_fifo_bias_t; 0 keeps the Kconfig default.
+  void set_port_fifo_bias(uint8_t peripheral_index, uint8_t bias) {
+    if (peripheral_index < SOC_USB_OTG_PERIPH_NUM)
+      this->port_fifo_bias_[peripheral_index] = bias;
+  }
+#endif
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
 
@@ -430,6 +442,9 @@ class USBHost final : public Component {
   std::vector<USBClient *> clients_{};
   bool dual_host_{false};
   uint8_t fs_phy_index_{1};
+#ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
+  uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
+#endif
 };
 
 // Returns the global USBHost singleton, set during USBHost::setup().

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import esphome.codegen as cg
 from esphome.components.esp32 import (
     VARIANT_ESP32H4,
@@ -139,6 +141,90 @@ async def _emit_transfer_defines() -> None:
         cg.add_define(_TRANSFER_DEFINES[kind])
 
 
+# Per-port hardware FIFO biasing. The DWC controller divides one FIFO between received
+# data, non-periodic OUT and periodic OUT, and which division a port uses caps the largest
+# packet each of its directions can carry. ESP-IDF exposes that choice as a single Kconfig
+# option reaching every port, which cannot serve a chip with two controllers: a full-speed
+# port carrying an isochronous OUT stream wants the periodic-out division, and that same
+# division on a high-speed port leaves 256 bytes of non-periodic OUT, under the 512 byte
+# wMaxPacketSize every high-speed bulk OUT endpoint has, so every bulk pipe is rejected.
+#
+# idf_usb_patch.py adds a per-port bias to the espressif/usb component and the component is
+# built from a patched copy, so each port takes the division it needs and the other port is
+# untouched. Consumers record what they need through set_port_fifo_bias(); the FINAL job
+# below emits it once every consumer has run.
+KEY_PORT_FIFO_BIAS = "port_fifo_bias"
+
+FIFO_BIAS_DEFAULT = "default"
+FIFO_BIAS_BALANCED = "balanced"
+FIFO_BIAS_IN = "in"
+FIFO_BIAS_PERIODIC_OUT = "periodic_out"
+
+# Numeric values of usb_host_fifo_bias_t as the patch defines it.
+_FIFO_BIAS_VALUES = {
+    FIFO_BIAS_DEFAULT: 0,
+    FIFO_BIAS_BALANCED: 1,
+    FIFO_BIAS_IN: 2,
+    FIFO_BIAS_PERIODIC_OUT: 3,
+}
+
+
+def per_port_fifo_bias_available() -> bool:
+    """Whether the build can bias a single port rather than all of them.
+
+    The patched component replaces the one pulled from the registry, and that only happens
+    where the registry component is used at all: from IDF 6.0 the USB host left the IDF
+    tree. On an older IDF the host is an IDF built-in and the Kconfig option is the only
+    lever there is.
+    """
+    return idf_version() >= cv.Version(6, 0, 0)
+
+
+def fs_peripheral_index() -> int | None:
+    """peripheral_map index of the full-speed host controller, or None if none is running.
+
+    Per USB_DWC_LL_GET_HW() the ESP32-P4 has the high-speed controller at index 0 and the
+    full-speed one at index 1, and the latter is only brought up under dual host. On the
+    variants whose full-speed controller is the only controller it is index 0.
+    """
+    variant = get_esp32_variant()
+    if variant == VARIANT_ESP32P4:
+        return 1 if dual_host_enabled() else None
+    if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
+        return 0
+    return None
+
+
+def set_port_fifo_bias(peripheral_index: int, bias: str) -> None:
+    """Ask for a FIFO division on one host controller.
+
+    Recorded rather than emitted so this is callable from any consumer at any codegen
+    priority. Two consumers asking for different divisions on the same port is a real
+    conflict rather than something to silently resolve, so it is raised.
+    """
+    if bias not in _FIFO_BIAS_VALUES:
+        raise ValueError(f"Unknown FIFO bias {bias}")
+    biases = CORE.data.setdefault(DOMAIN, {}).setdefault(KEY_PORT_FIFO_BIAS, {})
+    previous = biases.get(peripheral_index, FIFO_BIAS_DEFAULT)
+    if previous not in (FIFO_BIAS_DEFAULT, bias):
+        raise cv.Invalid(
+            f"Two components need different USB FIFO divisions on host controller "
+            f"{peripheral_index}: {previous} and {bias}. They cannot share that "
+            f"controller; move one of the devices to the other controller."
+        )
+    biases[peripheral_index] = bias
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _emit_port_fifo_bias(var: MockObj) -> None:
+    """Emit the recorded per-port biases, after every set_port_fifo_bias() call."""
+    biases = CORE.data.get(DOMAIN, {}).get(KEY_PORT_FIFO_BIAS, {})
+    for index, bias in sorted(biases.items()):
+        if bias == FIFO_BIAS_DEFAULT:
+            continue
+        cg.add(var.set_port_fifo_bias(index, _FIFO_BIAS_VALUES[bias]))
+
+
 def get_max_packet_size() -> int:
     return CORE.data.get(DOMAIN, {}).get(CONF_MAX_PACKET_SIZE, 64)
 
@@ -208,6 +294,65 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+_USB_OVERRIDE_MARKER = ".esphome_usb_patch"
+
+
+def _sync_usb_component_override() -> str:
+    """Build a patched copy of the espressif/usb component and return its path.
+
+    ESP-IDF's component manager resolves a dependency to a local directory when the
+    manifest gives it an override_path, so a patched copy replaces the registry one without
+    touching anything outside this build directory. The pristine source is the published
+    release archive, downloaded through ESPHome's own URL cache, so the copy is byte-for-byte
+    the version the manifest pins and no git clone is involved.
+
+    Synced on every codegen and stamped with the component version and patch revision, so a
+    copy left over from an earlier revision is replaced rather than trusted.
+    """
+    import io
+    import shutil
+    import zipfile
+
+    from esphome.external_files import compute_local_file_path, download_content
+
+    from . import idf_usb_patch as patch
+
+    dest = Path(CORE.build_path) / "components-src" / "espressif__usb"
+    marker = dest / _USB_OVERRIDE_MARKER
+    if marker.is_file() and marker.read_text() == patch.PATCH_STAMP:
+        return str(dest)
+
+    archive = download_content(
+        patch.USB_COMPONENT_URL,
+        compute_local_file_path(DOMAIN, patch.USB_COMPONENT_URL),
+    )
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        zf.extractall(dest)
+
+    for rel, old, new in patch.PATCHES:
+        target = dest / rel
+        if not target.is_file():
+            raise cv.Invalid(
+                f"usb_host: {rel} is missing from espressif/usb "
+                f"{patch.USB_COMPONENT_VERSION}; the per-port FIFO patch does not fit "
+                f"this version"
+            )
+        text = target.read_text()
+        if text.count(old) != 1:
+            raise cv.Invalid(
+                f"usb_host: the per-port FIFO patch no longer applies to {rel} in "
+                f"espressif/usb {patch.USB_COMPONENT_VERSION} -- the code it anchors on "
+                f"is missing or appears more than once"
+            )
+        target.write_text(text.replace(old, new, 1))
+
+    marker.write_text(patch.PATCH_STAMP)
+    return str(dest)
+
+
 async def register_usb_client(config: ConfigType) -> MockObj:
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
@@ -215,9 +360,18 @@ async def register_usb_client(config: ConfigType) -> MockObj:
 
 
 async def to_code(config: ConfigType) -> None:
-    # IDF 6.0 moved USB host to an external component; 1.4.1 requires IDF >= 6.0
-    if idf_version() >= cv.Version(6, 0, 0):
-        add_idf_component(name="espressif/usb", ref="1.4.1")
+    # IDF 6.0 moved USB host to an external component; 1.4.1 requires IDF >= 6.0.
+    # It is built from a patched copy so each host controller can take its own FIFO
+    # division -- see idf_usb_patch.py for why one division cannot serve two controllers.
+    if per_port_fifo_bias_available():
+        from . import idf_usb_patch as idf_usb_patch_mod
+
+        add_idf_component(
+            name="espressif/usb",
+            ref=idf_usb_patch_mod.USB_COMPONENT_VERSION,
+            override_path=_sync_usb_component_override(),
+        )
+        cg.add_define("USE_USB_HOST_PER_PORT_FIFO_BIAS")
 
     add_idf_sdkconfig_option("CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE", 1024)
     if config.get(CONF_ENABLE_HUBS):
@@ -245,6 +399,11 @@ async def to_code(config: ConfigType) -> None:
     # turn the collected set into defines once after every job ran. Emitting per call
     # instead would make the result depend on component iteration order.
     CORE.add_job(_emit_transfer_defines)
+
+    # FINAL for the same reason: a consumer's set_port_fifo_bias() runs at its own
+    # priority, and reading the record here would depend on component iteration order.
+    if per_port_fifo_bias_available():
+        CORE.add_job(_emit_port_fifo_bias, var)
 
     for device in devices or ():
         await register_usb_client(device)

@@ -2,7 +2,12 @@ import logging
 
 import esphome.codegen as cg
 from esphome.components import esp32
-from esphome.components.usb_host import usb_host_ns
+from esphome.components.usb_host import (
+    fs_peripheral_index,
+    per_port_fifo_bias_available,
+    set_port_fifo_bias,
+    usb_host_ns,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -76,30 +81,30 @@ SUPPORTED_VARIANTS = [
 # OTG_DFIFO_DEPTH of 256. They are not the ones in the ESP-IDF Kconfig help text, which is
 # out of date for the balanced split.
 #
-# Nothing is set on the ESP32-P4. It has two host controllers and with dual host they run at
-# the same time, but the bias is a single sdkconfig option that _calculate_fifo_from_bias()
-# applies to both, each scaled by that port's own OTG_DFIFO_DEPTH -- 1024 with a high-speed
-# PHY, 256 without. On the high-speed port the two non-balanced splits set nptx_fifo_lines to
-# depth / 16, which usb_dwc_hal_get_mps_limits() reports as 256 bytes of non-periodic OUT,
-# below the 512 byte wMaxPacketSize every high-speed bulk OUT endpoint has -- hcd_pipe_alloc()
-# then rejects every bulk pipe on that port. The default split costs neither port anything
-# here: at depth 1024 it leaves 1024 bytes of non-periodic OUT for bulk and 512 bytes of
-# periodic OUT for isochronous, and at depth 256 it leaves the full-speed port the same
-# 408 in / 128 out it would get anyway.
+# The ESP32-P4 has two host controllers and dual host runs them at the same time, so the
+# split is chosen per controller rather than for the chip. Only the full-speed one is moved.
+# The high-speed one keeps ESP-IDF's balanced split, where it has 1024 bytes of non-periodic
+# OUT for bulk and 512 bytes of periodic OUT for isochronous and needs nothing from here;
+# moving it would set nptx_fifo_lines to depth / 16, which usb_dwc_hal_get_mps_limits()
+# reports as 256 bytes of non-periodic OUT, below the 512 byte wMaxPacketSize every
+# high-speed bulk OUT endpoint has, and hcd_pipe_alloc() would then reject every bulk pipe
+# on it. usb_host makes the per-controller choice possible; see its idf_usb_patch.py.
+#
+# The line counts below are for a full-speed controller with 200 FIFO lines, confirmed for
+# the S2 and S3. The P4's full-speed controller reports its own count from hardware, so
+# there the numbers bound the validation slightly rather than exactly.
 BIAS_BALANCED = "balanced"
 BIAS_IN = "in"
 BIAS_PERIODIC_OUT = "periodic_out"
 
-FS_ONLY_VARIANTS = (esp32.const.VARIANT_ESP32S2, esp32.const.VARIANT_ESP32S3)
 
+def _needs_fifo_bias() -> bool:
+    """Whether a full-speed controller is in play and its packet limits therefore apply.
 
-def _needs_fifo_bias(variant) -> bool:
-    """Whether the split on this variant is ours to choose.
-
-    Only where the full-speed controller is the only controller in the chip, so moving the
-    split cannot take anything away from another one.
+    An isochronous stream only meets the limits below where a full-speed controller serves
+    it. Which controller that is, and whether there is one at all, is usb_host's to say.
     """
-    return variant in FS_ONLY_VARIANTS
+    return fs_peripheral_index() is not None
 
 
 # Largest isochronous packet each direction can carry, per split.
@@ -162,7 +167,7 @@ def _select_fifo_bias(out_mps: int, in_mps: int):
 
 def _final_validate(config):
     variant = esp32.get_esp32_variant()
-    if not _needs_fifo_bias(variant):
+    if not _needs_fifo_bias():
         return config
 
     speaker, microphone = _usb_audio_streams(fv.full_config.get())
@@ -205,7 +210,8 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 def _apply_fifo_bias() -> None:
     variant = esp32.get_esp32_variant()
-    if not _needs_fifo_bias(variant):
+    index = fs_peripheral_index()
+    if index is None:
         return
 
     speaker, microphone = _usb_audio_streams(CORE.config)
@@ -216,12 +222,22 @@ def _apply_fifo_bias() -> None:
         # Rejected during validation; nothing sensible to set.
         return
 
+    if per_port_fifo_bias_available():
+        # One controller, not all of them. On the P4 this is what keeps the high-speed
+        # controller on the balanced division, where its bulk endpoints have the 512 bytes
+        # of non-periodic OUT they need while this controller carries the audio.
+        set_port_fifo_bias(index, bias)
+        return
+
+    # Without the per-port path this is a single option reaching every controller. That is
+    # only reached where the full-speed controller is the only one, so nothing else loses
+    # anything by it.
     for name, option in FS_BIAS_SDKCONFIG.items():
         esp32.add_idf_sdkconfig_option(option, name == bias)
 
     if bias == BIAS_BALANCED:
         return
-    # The split is a property of the USB host, not of this component, so anything else
+    # The division is a property of the USB host, not of this component, so anything else
     # sharing it is affected. That is worth saying out loud.
     limits = FS_MPS_LIMITS[bias]
     reason = (

@@ -45,6 +45,16 @@ void USBHost::setup() {
     ESP_LOGI(TAG, "USB dual-host enabled (HS + FS)");
   }
 #endif
+#ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
+  // Each controller resolves its own split from its own FIFO depth, so setting one here
+  // leaves the other on ESP-IDF's Kconfig default rather than moving it too.
+  for (uint8_t i = 0; i < SOC_USB_OTG_PERIPH_NUM; i++) {
+    config.fifo_bias_per_port[i] = static_cast<usb_host_fifo_bias_t>(this->port_fifo_bias_[i]);
+    if (this->port_fifo_bias_[i] != 0) {
+      ESP_LOGI(TAG, "USB controller %u FIFO bias %u", i, this->port_fifo_bias_[i]);
+    }
+  }
+#endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));
     this->mark_failed();
