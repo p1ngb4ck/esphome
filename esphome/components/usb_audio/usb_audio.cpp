@@ -513,7 +513,7 @@ bool USBAudioClient::parse_feature_units_() {
   this->mic_ctl_.fu = {};
   this->spk_ctl_.clock_id = 0;
   this->mic_ctl_.clock_id = 0;
-  return;
+
   UacTopologyNode nodes[UAC_MAX_TOPOLOGY_NODES];
   const uint8_t node_count = this->collect_topology_(nodes);
 
@@ -733,17 +733,9 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       cur_alt_info.channel_config = this->terminal_channel_config_(cur_alt_info.terminal_link);
     uint8_t left = 0;
     uint8_t right = 1;
-    /* if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right)) {
-      cur_alt_info.channel_map_active = true;
-      cur_alt_info.channels = 2;
-      cur_alt_info.map_left = left;
-      cur_alt_info.map_right = right;
-      mapped_alt = cur_alt_info;
-      mapped_intf = cur_intf;
+    if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right))
       return;
-    } */
-    cur_alt_info.channel_map_active = false;
-    cur_alt_info.channels = 2;
+    cur_alt_info.channel_map_active = true;
     cur_alt_info.map_left = left;
     cur_alt_info.map_right = right;
     mapped_alt = cur_alt_info;
@@ -1794,8 +1786,8 @@ size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_l
   if (this->spk_rb_ == nullptr || this->spk_suspended_)
     return 0;
 
-  if (this->spk_alt_.channel_map_active)
-    return this->fill_mapped_(data, max_len);
+  // if (this->spk_alt_.channel_map_active)
+  //   return this->fill_mapped_(data, max_len);
 
   size_t filled = 0;
   // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
