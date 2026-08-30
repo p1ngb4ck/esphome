@@ -1183,12 +1183,18 @@ bool USBAudioClient::set_sample_rate_(const UacAltInfo &alt, const UacControlSta
 // Channels a Feature Unit control has to be written to. A device that describes the
 // control on the master entry takes a single request for all channels; one that describes
 // it per channel needs a request per channel. Returns the number written to channels.
+// Every entry of a Feature Unit that carries a control, in the order they should be written.
+//
+// A unit may carry the same control on its master entry and on its per-channel entries at
+// the same time, and the two are separate settings: writing the master leaves whatever the
+// channels powered up with in place. Linux builds a control element for each in
+// parse_audio_feature_unit() and initialises them all, with no else between the two cases.
+// Returning at the master, as this did, meant a device whose channels come up silent stayed
+// silent however loud the master was set.
 static uint8_t uac_control_channels(bool on_master, uint8_t channel_mask, uint8_t *channels) {
-  if (on_master) {
-    channels[0] = UAC_FU_MASTER_CHANNEL;
-    return 1;
-  }
   uint8_t count = 0;
+  if (on_master)
+    channels[count++] = UAC_FU_MASTER_CHANNEL;
   for (uint8_t i = 0; i < UAC_FU_MAX_CHANNELS; i++) {
     if (channel_mask & (1 << i))
       channels[count++] = static_cast<uint8_t>(i + 1);
@@ -1202,7 +1208,7 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
     return;
 
   // Ask on the same channel the value will be written to.
-  uint8_t vol_channels[UAC_FU_MAX_CHANNELS];
+  uint8_t vol_channels[UAC_FU_MAX_TARGETS];
   const uint8_t vol_count = uac_control_channels(ctl.fu.has_volume, ctl.fu.volume_channels, vol_channels);
   const uint8_t vol_channel = (vol_count > 0) ? vol_channels[0] : UAC_FU_MASTER_CHANNEL;
   const uint16_t wValue = static_cast<uint16_t>((UAC_FU_VOLUME_CONTROL << 8) | vol_channel);
@@ -1345,7 +1351,7 @@ void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what
 }
 
 bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
-  uint8_t channels[UAC_FU_MAX_CHANNELS];
+  uint8_t channels[UAC_FU_MAX_TARGETS];
   const uint8_t channel_count = uac_control_channels(ctl.fu.has_volume, ctl.fu.volume_channels, channels);
   if (ctl.fu.unit_id == 0 || channel_count == 0) {
     ESP_LOGD(TAG, "%s volume %.0f%% ignored: device has no volume control", what, ctl.volume * 100.0f);
@@ -1396,13 +1402,16 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     static_cast<uint8_t>(static_cast<uint16_t>(vol) & 0xFF),
     static_cast<uint8_t>((static_cast<uint16_t>(vol) >> 8) & 0xFF),
   };
-  ESP_LOGD(TAG, "%s SET volume %.0f%%: %.2f dB (raw %d, bytes %02X %02X)", what, clamped * 100.0f,
-           static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1]);
-  bool ok = true;
+  ESP_LOGD(TAG, "%s SET volume %.0f%%: %.2f dB (raw %d, bytes %02X %02X) to %u Feature Unit entries", what,
+           clamped * 100.0f, static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1], channel_count);
+  uint8_t written = 0;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
-      ok = false;
+    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
+      written++;
   }
+  const bool ok = written > 0;
+  if (written > 0 && written < channel_count)
+    ESP_LOGD(TAG, "%s volume reached %u of %u Feature Unit entries", what, written, channel_count);
   const float sent_db = static_cast<float>(vol) / 256.0f;
   if (!ok) {
     ESP_LOGW(TAG, "%s volume %.0f%% (%.2f dB) was not accepted by the device", what, clamped * 100.0f, sent_db);
@@ -1433,7 +1442,7 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
 }
 
 bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
-  uint8_t channels[UAC_FU_MAX_CHANNELS];
+  uint8_t channels[UAC_FU_MAX_TARGETS];
   const uint8_t channel_count = uac_control_channels(ctl.fu.has_mute, ctl.fu.mute_channels, channels);
   if (ctl.fu.unit_id == 0 || channel_count == 0) {
     ESP_LOGD(TAG, "%s mute %s ignored: device has no mute control", what, ONOFF(ctl.muted));
@@ -1441,16 +1450,23 @@ bool USBAudioClient::apply_mute_(UacControlState &ctl, const char *what) {
   }
 
   uint8_t val = ctl.muted ? 1 : 0;
-  bool ok = true;
+  uint8_t written = 0;
   for (uint8_t i = 0; i < channel_count; i++) {
-    if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
-      ok = false;
+    if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_MUTE_CONTROL, channels[i], &val, 1))
+      written++;
   }
-  if (!ok) {
+  // A unit can carry the control on the master and on the channels at once and refuse some
+  // of those entries, so a refusal is only a failure when nothing at all was written.
+  if (written == 0) {
     ESP_LOGW(TAG, "%s mute %s was not accepted by the device", what, ONOFF(ctl.muted));
     return false;
   }
-  ESP_LOGD(TAG, "%s mute %s", what, ONOFF(ctl.muted));
+  if (written < channel_count) {
+    ESP_LOGD(TAG, "%s mute %s applied to %u of %u Feature Unit entries", what, ONOFF(ctl.muted), written,
+             channel_count);
+  } else {
+    ESP_LOGD(TAG, "%s mute %s (%u entries)", what, ONOFF(ctl.muted), channel_count);
+  }
   return true;
 }
 

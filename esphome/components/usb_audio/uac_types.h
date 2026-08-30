@@ -245,6 +245,11 @@ static constexpr uint8_t UAC_FU_MASTER_CHANNEL = 0;
 // Channels addressable through the per-channel bitmaps above.
 static constexpr uint8_t UAC_FU_MAX_CHANNELS = 8;
 
+// Addressable control targets: the master, plus each of the channels above. A Feature Unit
+// may carry the same control on the master entry and on the per-channel entries at once,
+// and both then have to be written, so a list of targets can hold all of them.
+static constexpr uint8_t UAC_FU_MAX_TARGETS = UAC_FU_MAX_CHANNELS + 1;
+
 // -- Volume and mute state of one direction -----------------------------------
 // Playback and capture differ only in which Feature Unit they address, so both keep the
 // same block and the same code drives them.
