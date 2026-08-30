@@ -217,6 +217,74 @@ _HOST_WARN_REPLACEMENT = """        .intr_flags = config->intr_flags,
         hub_config.fifo_bias[i] = (hcd_fifo_bias_t)config->fifo_bias_per_port[i];
     }"""
 
+_LS_PREAMBLE_ANCHOR = """static inline bool _buffer_check_done(pipe_t *pipe)
+{
+    // Only control transfers need to be continued
+    if (pipe->ep_char.type != USB_DWC_XFER_TYPE_CTRL) {
+        return true;
+    }
+    // The HW can't handle two transactions with preamble in one frame.
+    // TODO: IDF-12986
+    if (pipe->ep_char.ls_via_fs_hub) {
+        esp_rom_delay_us(1000);
+    }"""
+
+_LS_PREAMBLE_REPLACEMENT = """/**
+ * @brief Wait for the frame counter to advance before the next PREamble transaction
+ *
+ * The controller cannot issue two PRE-qualified transactions in the same frame. Sleeping
+ * for one frame's worth of microseconds only works when the stage completed near the start
+ * of a frame: a completion just before the counter rolls over is followed by another
+ * transaction in the very next frame, which is the case this is meant to prevent. Watch the
+ * counter itself instead.
+ *
+ * The bound is what keeps this safe to call from an interrupt: a stopped frame clock, which
+ * is what a disconnect during a control transfer looks like, must not wedge the handler. A
+ * full-speed frame is 1 ms, so 3 ms is well past any legitimate transition.
+ */
+static inline void _wait_next_preamble_frame(pipe_t *pipe)
+{
+    const uint32_t start_frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal);
+    for (int waited_us = 0; waited_us < 3000; waited_us += 10) {
+        if (usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal) != start_frame) {
+            return;
+        }
+        esp_rom_delay_us(10);
+    }
+}
+
+static inline bool _buffer_check_done(pipe_t *pipe)
+{
+    // Only control transfers need to be continued
+    if (pipe->ep_char.type != USB_DWC_XFER_TYPE_CTRL) {
+        return true;
+    }
+    // The HW can't handle two transactions with preamble in one frame.
+    if (pipe->ep_char.ls_via_fs_hub) {
+        _wait_next_preamble_frame(pipe);
+    }"""
+
+_LS_EP0_ANCHOR = """    ep_char->ls_via_fs_hub = 0;
+    if (pipe_idx > 0) {
+        // TODO: remove warning after IDF-12986
+        if (port_speed == USB_SPEED_FULL && pipe_config->dev_speed == USB_SPEED_LOW) {
+            ESP_LOGW(HCD_DWC_TAG, "Low-speed, extra delay will be applied in ISR");
+            ep_char->ls_via_fs_hub = 1;
+        }
+    }"""
+
+_LS_EP0_REPLACEMENT = """    // A low-speed device reached through a full-speed hub needs a PREamble before every
+    // transaction, the default control pipe included. Excluding pipe index 0 left that pipe
+    // without it, so the first GET_DESCRIPTOR of enumeration went out unqualified and the
+    // device never answered -- no endpoint of such a device could ever be reached, which is
+    // why the exclusion was not noticed. A device on the root port is unaffected either way:
+    // there the port speed is LOW, not FULL.
+    ep_char->ls_via_fs_hub = 0;
+    if (port_speed == USB_SPEED_FULL && pipe_config->dev_speed == USB_SPEED_LOW) {
+        ESP_LOGD(HCD_DWC_TAG, "Low-speed device behind a full-speed hub, PREamble enabled");
+        ep_char->ls_via_fs_hub = 1;
+    }"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -226,6 +294,8 @@ PATCHES = (
     ("private_include/hub.h", _HUB_HEADER_ANCHOR, _HUB_HEADER_REPLACEMENT),
     ("src/hcd_dwc.c", _HCD_CALC_ANCHOR, _HCD_CALC_REPLACEMENT),
     ("src/hcd_dwc.c", _HCD_CALL_ANCHOR, _HCD_CALL_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PREAMBLE_ANCHOR, _LS_PREAMBLE_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_EP0_ANCHOR, _LS_EP0_REPLACEMENT),
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
     ("src/usb_host.c", _HOST_WARN_ANCHOR, _HOST_WARN_REPLACEMENT),
 )
