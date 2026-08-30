@@ -50,9 +50,15 @@ class HIDDeviceDriver {
   virtual const char *get_name() = 0;
 };
 
+class RawHIDDriver;
+
 class USBHIDClient : public usb_host::USBClient {
  public:
-  USBHIDClient() : usb_host::USBClient(0, 0) {}
+  // vid and pid select which device this client attaches to, in the same way as every other
+  // USB client here; 0/0 keeps the previous behaviour of taking whatever appears. It matters
+  // for a HID interface that sits on a composite device such as a sound card, where a second
+  // client for the audio interfaces is attached to the same device at the same time.
+  USBHIDClient(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
 
   void setup() override;
   void loop() override;
@@ -63,6 +69,10 @@ class USBHIDClient : public usb_host::USBClient {
   uint8_t get_interface_class() const override { return usb_host::USB_INTERFACE_CLASS_ANY; }
 
   void register_device_driver(HIDDeviceDriver *driver) { this->drivers_.push_back(driver); }
+  // Kept separately from the list above so codegen can reach it to attach buttons and
+  // triggers, and so it is only consulted once the protocol-specific drivers have declined.
+  void register_raw_driver(RawHIDDriver *driver) { this->raw_driver_ = driver; }
+  RawHIDDriver *get_raw_driver() { return this->raw_driver_; }
 
 #ifdef USE_TEXT_SENSOR
   void register_keyboard_sensor(text_sensor::TextSensor *sensor) { this->keyboard_sensor_ = sensor; }
@@ -110,6 +120,7 @@ class USBHIDClient : public usb_host::USBClient {
   int connected_devices_{0};
 
   std::vector<HIDDeviceDriver *> drivers_;
+  RawHIDDriver *raw_driver_{nullptr};
 
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *keyboard_sensor_{nullptr};
@@ -130,5 +141,11 @@ class USBHIDClient : public usb_host::USBClient {
 
 }  // namespace usb_hid
 }  // namespace esphome
+
+// After the declarations above, so the driver can derive from HIDDeviceDriver. Only built in
+// where a raw section in the configuration asked for it.
+#ifdef USB_HID_ENABLE_RAW
+#include "devices/raw/raw_driver.h"
+#endif
 
 #endif  // USE_ESP32_VARIANT_*

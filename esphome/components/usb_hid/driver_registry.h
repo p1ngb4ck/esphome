@@ -17,6 +17,11 @@
 #define HAS_GAMEPAD_DRIVER
 #endif
 
+#ifdef USB_HID_ENABLE_RAW
+#include "devices/raw/raw_driver.h"
+#define HAS_RAW_DRIVER
+#endif
+
 namespace esphome {
 namespace usb_hid {
 
@@ -34,6 +39,13 @@ inline void register_all_drivers(USBHIDClient *component) {
   // Generic gamepad registered last (fallback)
 #ifdef HAS_GAMEPAD_DRIVER
   component->register_device_driver(new GamepadDriver(component));
+#endif
+
+  // The raw driver matches everything, so it is registered after the ones that identify a
+  // device by its protocol. Which device reaches it at all is decided by the vid and pid on
+  // the client, and codegen only builds it in where a raw section asked for it.
+#ifdef HAS_RAW_DRIVER
+  component->register_raw_driver(new RawHIDDriver(component));
 #endif
 }
 

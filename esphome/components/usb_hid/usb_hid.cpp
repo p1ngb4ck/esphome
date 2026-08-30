@@ -82,25 +82,34 @@ bool USBHIDClient::parse_hid_interface_() {
   uint8_t out_ep = 0;
   int offset = 0;
 
-  // Find interface 0 with an acceptable class
+  // Find a usable interface.
+  //
+  // Linux binds usbhid to every interface of class 0x03 and looks at nothing else --
+  // hid_usb_ids[] carries USB_DEVICE_ID_MATCH_INT_CLASS and no interface number -- and only
+  // then reads bInterfaceNumber to address its control requests. Restricting the search to
+  // interface 0 kept this from ever seeing the HID interface of a composite device such as a
+  // sound card, where interface 0 is AudioControl and the buttons sit further down.
+  //
+  // The vendor-class exception stays on interface 0: those devices are not HID at all and
+  // are recognised by their vid and pid, so widening the search would only make an unrelated
+  // vendor interface look like one of them.
   while (offset < cfg->wTotalLength) {
     const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(
         reinterpret_cast<const uint8_t *>(cfg) + offset);
 
     if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
       const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
-      if (intf->bInterfaceNumber == 0) {
-        bool cls_ok = (intf->bInterfaceClass == USB_CLASS_HID) ||
-                      ((is_xbox360 || is_8bitdo) && intf->bInterfaceClass == 0xFF);
-        if (cls_ok)
-          hid_intf = intf;
-      }
+      bool cls_ok = intf->bInterfaceClass == USB_CLASS_HID ||
+                    ((is_xbox360 || is_8bitdo) && intf->bInterfaceClass == 0xFF &&
+                     intf->bInterfaceNumber == 0);
+      if (cls_ok && hid_intf == nullptr)
+        hid_intf = intf;
     }
     offset += desc->bLength;
   }
 
   if (!hid_intf) {
-    ESP_LOGW(TAG, "No matching HID/vendor interface on interface 0");
+    ESP_LOGW(TAG, "No HID or vendor interface on this device");
     return false;
   }
 
@@ -173,6 +182,10 @@ bool USBHIDClient::parse_hid_interface_() {
       ESP_LOGI(TAG, "Matched to driver: %s", drv->get_name());
       break;
     }
+  }
+  if (!d->driver && this->raw_driver_ != nullptr) {
+    d->driver = this->raw_driver_;
+    ESP_LOGI(TAG, "Matched to driver: %s", this->raw_driver_->get_name());
   }
   if (!d->driver)
     ESP_LOGW(TAG, "No driver for protocol=%d VID=%04X PID=%04X", d->protocol, d->vid, d->pid);
