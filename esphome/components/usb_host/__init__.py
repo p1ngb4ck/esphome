@@ -300,14 +300,20 @@ _USB_OVERRIDE_MARKER = ".esphome_usb_patch"
 def _sync_usb_component_override() -> str:
     """Build a patched copy of the espressif/usb component and return its path.
 
-    ESP-IDF's component manager resolves a dependency to a local directory when the
-    manifest gives it an override_path, so a patched copy replaces the registry one without
-    touching anything outside this build directory. The pristine source is the published
-    release archive, downloaded through ESPHome's own URL cache, so the copy is byte-for-byte
+    ESP-IDF's component manager resolves a dependency to a local directory when the manifest
+    gives it an override_path, so a patched copy replaces the registry one with zero cmake
+    and nothing outside this build directory touched. The pristine source is the published
+    release archive, fetched through ESPHome's own URL cache, so the copy is byte-for-byte
     the version the manifest pins and no git clone is involved.
 
-    Synced on every codegen and stamped with the component version and patch revision, so a
-    copy left over from an earlier revision is replaced rather than trusted.
+    Synced on every codegen and stamped with the component version and a digest of the
+    patches, so a copy left from an earlier revision is replaced rather than trusted. There
+    is no removal path, unlike the exFAT FatFs override: that one lives in the project
+    components directory, which ESP-IDF scans on its own, so a copy left behind after the
+    option is turned off would keep being compiled. This one sits outside every component
+    search path -- the generated CMakeLists only adds src/ -- and is reachable solely through
+    the override_path this function's caller writes into the manifest, so a copy nobody
+    points at is inert.
     """
     import io
     import shutil

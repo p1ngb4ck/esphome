@@ -27,6 +27,8 @@ as a patch that silently applies to something else.
 
 from __future__ import annotations
 
+import hashlib
+
 # Version of the espressif/usb component these anchors were taken from. The download URL
 # and the patches move together; bumping one without the other is a build failure.
 USB_COMPONENT_VERSION = "1.4.1"
@@ -228,6 +230,12 @@ PATCHES = (
     ("src/usb_host.c", _HOST_WARN_ANCHOR, _HOST_WARN_REPLACEMENT),
 )
 
-# Bumped whenever PATCHES or the component version changes, so an existing patched copy in
-# a build directory is replaced rather than trusted.
-PATCH_STAMP = f"v1:{USB_COMPONENT_VERSION}:{len(PATCHES)}"
+# Identifies an existing patched copy. It has to change whenever anything about that copy
+# would change, or a copy left over from an earlier revision is trusted and silently used:
+# hence a digest over the patch bodies themselves rather than a hand-maintained number.
+PATCH_STAMP = "v1:{}:{}".format(
+    USB_COMPONENT_VERSION,
+    hashlib.sha256(
+        "\0".join(part for patch in PATCHES for part in patch).encode()
+    ).hexdigest()[:16],
+)
