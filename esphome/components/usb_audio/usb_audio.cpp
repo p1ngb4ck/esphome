@@ -1442,7 +1442,7 @@ bool USBAudioClient::open_speaker_stream_() {
     // being lifted out of a multichannel stream. Pacing off the host frame would ask the
     // device for a fraction of the bytes it expects per interval.
     const uint32_t frame_size =
-        static_cast<uint32_t>(this->spk_alt_.channels) * (this->spk_cfg_.bits_per_sample / 8);
+    static_cast<uint32_t>(this->spk_alt_.channels) * this->spk_alt_.sub_frame_size;
     const uint32_t derived_ips =
         uac_service_intervals_per_second(this->device_is_high_speed_, this->spk_alt_.b_interval);
     uint32_t frac_div = derived_ips;
