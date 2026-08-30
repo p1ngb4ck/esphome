@@ -1786,8 +1786,8 @@ size_t USBAudioClient::on_isoc_fill(uint8_t ep_addr, uint8_t *data, size_t max_l
   if (this->spk_rb_ == nullptr || this->spk_suspended_)
     return 0;
 
-  // if (this->spk_alt_.channel_map_active)
-  //   return this->fill_mapped_(data, max_len);
+  if (this->spk_alt_.channel_map_active)
+    return this->fill_mapped_(data, max_len);
 
   size_t filled = 0;
   // A byte ring buffer only hands out contiguous memory, so a receive that lands on the
