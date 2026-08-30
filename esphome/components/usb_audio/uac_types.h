@@ -266,6 +266,11 @@ struct UacControlState {
   int16_t vol_max{0};
   int16_t vol_res{1};  // the step the device can actually be set to
 
+  // Whether the device answers GET_CUR with a constant regardless of what was last set.
+  // A device like that says nothing about whether SET_CUR took effect, so its answers are
+  // not read back into anything and the requested value is what gets reported.
+  bool    get_cur_broken{false};
+
   // Sample clock entity driving this direction (UAC 2.0 only; 0 when there is none).
   uint8_t clock_id{0};
 };

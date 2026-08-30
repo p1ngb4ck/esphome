@@ -202,6 +202,7 @@ class USBAudioClient : public usb_host::USBClient {
   void detect_uac_version_();
   // Read the volume range the device reports, so a fraction can be mapped onto it.
   void probe_volume_range_(UacControlState &ctl, const char *what);
+  void probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel);
   bool apply_volume_(UacControlState &ctl, const char *what);
   bool apply_mute_(UacControlState &ctl, const char *what);
   void set_volume_level_(UacControlState &ctl, const char *what, float volume);

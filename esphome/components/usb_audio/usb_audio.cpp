@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -1286,6 +1287,61 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
   ESP_LOGD(TAG, "%s volume range: %.2f dB to %.2f dB in steps of %.2f dB", what,
            static_cast<float>(ctl.vol_min) / 256.0f, static_cast<float>(ctl.vol_max) / 256.0f,
            static_cast<float>(ctl.vol_res) / 256.0f);
+
+  this->probe_sticky_volume_(ctl, what, vol_channel);
+}
+
+// Find out whether GET_CUR tells us anything.
+//
+// Some devices answer GET_CUR with the same value no matter what was last set. That is
+// either a SET_CUR that does nothing or a GET_CUR that reports nothing, and the two cannot
+// be told apart from the outside -- so treating a constant answer as proof that the volume
+// did not take effect is wrong, and it is what produced "volume not applied as requested"
+// on devices whose volume works. Linux reaches the same conclusion in
+// check_sticky_volume_control() and keeps the control usable, serving the requested value
+// rather than the device's.
+//
+// Set both endpoints of the device's own range and read back after each. If the answer
+// never moves, the answers are worthless and nothing is read back from this device again.
+// Whatever the volume was is restored before returning, so probing does not leave the
+// device somewhere it was not.
+void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel) {
+  ctl.get_cur_broken = false;
+
+  auto get_cur = [this, &ctl, channel](int16_t &out) {
+    uint8_t buf[2] = {0, 0};
+    if (!this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channel, buf, sizeof(buf)))
+      return false;
+    out = static_cast<int16_t>(buf[0] | (buf[1] << 8));
+    return true;
+  };
+  auto set_cur = [this, &ctl, channel](int16_t value) {
+    const uint8_t buf[2] = {
+      static_cast<uint8_t>(static_cast<uint16_t>(value) & 0xFF),
+      static_cast<uint8_t>((static_cast<uint16_t>(value) >> 8) & 0xFF),
+    };
+    return this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channel, buf, sizeof(buf));
+  };
+
+  int16_t saved = 0;
+  if (!get_cur(saved))
+    return;  // Nothing answers; there is nothing to distrust.
+
+  const int16_t probes[2] = {ctl.vol_min, ctl.vol_max};
+  for (int16_t probe : probes) {
+    if (probe == saved)
+      continue;
+    int16_t seen = 0;
+    // A refused write or an unreadable answer says nothing either way, so assume the
+    // device is fine and leave the readback in use.
+    if (!set_cur(probe) || !get_cur(seen) || seen != saved)
+      return;
+  }
+
+  ctl.get_cur_broken = true;
+  ESP_LOGD(TAG, "%s reports a constant %.2f dB whatever is set; its readback will be ignored", what,
+           static_cast<float>(saved) / 256.0f);
+  set_cur(saved);
 }
 
 bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
@@ -1334,12 +1390,14 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     vol = static_cast<int16_t>(std::clamp<int32_t>(raw, UAC_VOLUME_MIN_GAIN, 0));
   }
 
+  // A Feature Unit volume is a signed 16-bit value in 1/256 dB, sent little-endian. That is
+  // the whole encoding; there is no percentage anywhere in the class definition.
   uint8_t buf[2] = {
-    static_cast<uint8_t>(std::lround(clamped * 255.0f)),
-    0x80,
+    static_cast<uint8_t>(static_cast<uint16_t>(vol) & 0xFF),
+    static_cast<uint8_t>((static_cast<uint16_t>(vol) >> 8) & 0xFF),
   };
-  ESP_LOGD(TAG, "%s SET volume %.0f%%: vol=%d bytes=%02X %02X",
-         what, clamped * 100.0f, static_cast<int>(vol), buf[0], buf[1]);
+  ESP_LOGD(TAG, "%s SET volume %.0f%%: %.2f dB (raw %d, bytes %02X %02X)", what, clamped * 100.0f,
+           static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1]);
   bool ok = true;
   for (uint8_t i = 0; i < channel_count; i++) {
     if (!this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
@@ -1351,33 +1409,22 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     return false;
   }
 
-  // Read the value back. A device may clamp it to its own range or quantise it to a
-  // coarser step, so reporting what we sent would be reporting an assumption.
+  // Read the value back, unless the device has already been found to answer GET_CUR with a
+  // constant. A device may clamp to its own range or quantise to a coarser step, so
+  // reporting what we sent would be reporting an assumption.
   uint8_t rb[2] = {0, 0};
-  if (this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
-    ESP_LOGD(TAG,
-           "%s volume GET RAW: [%02X %02X] LE=0x%04X",
-           what,
-           rb[0],
-           rb[1],
-           static_cast<unsigned>(rb[0] | (rb[1] << 8)));
-    const int16_t actual_db = static_cast<int16_t>(rb[0] | (rb[1] << 8));
-    const float actual_percent = (static_cast<float>(rb[0]) / 255.0f) * 100.0f;
-
-    ESP_LOGD(TAG,
-             "%s volume %.0f%% -> %.2f dB (device reports %.1f%%, raw=%02X %02X)",
-             what,
-             clamped * 100.0f,
-             sent_db,
-             actual_percent,
-             rb[0],
-             rb[1]
-    );
-    // A device may only be settable in steps of its reported resolution, so landing within
-    // one of them is it rounding. Anything past that is the device overriding us.
-    if (std::fabs(actual_percent - clamped * 100.0f) > 1.0f) {
-    ESP_LOGW(TAG, "%s volume not applied as requested: asked %.1f%%, device is at %.1f%%", what,
-           clamped * 100.0f, actual_percent);
+  if (!ctl.get_cur_broken && this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb,
+                                                          sizeof(rb))) {
+    const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
+    ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (device reports %.2f dB, raw %02X %02X)", what, clamped * 100.0f,
+             sent_db, static_cast<float>(actual) / 256.0f, rb[0], rb[1]);
+    // Compare on the device's own scale. Landing within one step of its reported resolution
+    // is the device rounding; anything past that is the device overriding what was asked
+    // for. Both are its prerogative and neither is an error, so this stays a debug line.
+    const int32_t step = ctl.range_known ? ctl.vol_res : 256;
+    if (std::abs(static_cast<int32_t>(actual) - vol) > step) {
+      ESP_LOGD(TAG, "%s volume settled at %.2f dB instead of %.2f dB", what, static_cast<float>(actual) / 256.0f,
+               sent_db);
     }
   } else {
     ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (readback unavailable)", what, clamped * 100.0f, sent_db);
