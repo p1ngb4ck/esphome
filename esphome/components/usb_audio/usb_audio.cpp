@@ -1855,8 +1855,8 @@ void USBAudioClient::on_stream_open(usb_host::IsocStream &stream, bool ok) {
     // UAC 1.0 only: the sampling frequency is a control on the isochronous endpoint, which
     // exists only now that the alt-setting is active. UAC 2.0 was handled at connect time,
     // before the interface was selected.
-    // if (this->uac_version_ < UAC_VERSION_2)
-    //  this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
+    if (this->uac_version_ < UAC_VERSION_2)
+      this->set_sample_rate_(this->spk_alt_, this->spk_ctl_, this->spk_cfg_.sample_rate);
     this->spk_stream_open_ = true;
     this->note_open_result_(true, this->spk_reopen_at_ms_, this->spk_open_fails_);
     ESP_LOGI(TAG, "Speaker stream open");
