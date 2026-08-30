@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/components/usb_hid/usb_hid.h"
+#include "esphome/core/log.h"
 
 namespace esphome {
 namespace usb_hid {

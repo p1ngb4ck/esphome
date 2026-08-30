@@ -1,7 +1,11 @@
 #pragma once
 
-// USB HID class constants
-static constexpr uint8_t USB_CLASS_HID = 0x03;
+// USB_CLASS_HID and the other bDeviceClass/bInterfaceClass values come from the USB host
+// component's own headers. Defining a constant of that name here shadowed the macro
+// usb/usb_types_ch9.h already provides and broke the build as soon as both were in scope.
+#include "usb/usb_types_ch9.h"
+
+#include <cstdint>
 
 // HID interface subclass
 static constexpr uint8_t HID_SC_NONE = 0x00;

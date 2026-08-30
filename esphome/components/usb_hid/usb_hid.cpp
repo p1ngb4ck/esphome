@@ -58,8 +58,8 @@ void USBHIDClient::on_connected() {
 // ── parse_hid_interface_ ─────────────────────────────────────────────────────
 
 bool USBHIDClient::parse_hid_interface_() {
-  const usb_config_desc_t *cfg = this->get_config_desc();
-  const usb_device_desc_t *dev_desc = this->get_device_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  const usb_device_desc_t *dev_desc = this->get_device_desc_();
   if (!cfg || !dev_desc)
     return false;
 
@@ -217,7 +217,7 @@ bool USBHIDClient::parse_hid_interface_() {
 // ── setup_media_interface_ ───────────────────────────────────────────────────
 
 bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
-  const usb_config_desc_t *cfg = this->get_config_desc();
+  const usb_config_desc_t *cfg = this->get_config_desc_();
   if (!cfg)
     return false;
 

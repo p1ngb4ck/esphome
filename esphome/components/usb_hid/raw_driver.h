@@ -3,7 +3,9 @@
 #include "esphome/components/usb_hid/usb_hid.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/log.h"
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
