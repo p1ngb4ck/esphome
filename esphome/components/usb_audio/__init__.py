@@ -62,6 +62,30 @@ VOLUME_CURVES = {
     "logarithmic": VolumeCurve.LOGARITHMIC,
 }
 
+CONF_DEVICE_QUIRKS = "device_quirks"
+CONF_VOLUME_ENCODING = "volume_encoding"
+
+VolumeEncoding = usb_audio_ns.enum("VolumeEncoding", is_class=True)
+# How a volume value is put on the wire. "db" is the class definition: a signed 16-bit value
+# in 1/256 dB inside the range the device reports. "byte" is for devices that do not follow
+# it and take the setting as a plain 0..255 level instead. The two cannot be told apart by
+# asking the device, so this is selected per VID and PID; Linux carries the equivalent in a
+# per-device quirk table for the same reason.
+VOLUME_ENCODINGS = {
+    "db": VolumeEncoding.DB,
+    "byte": VolumeEncoding.BYTE,
+}
+
+DEVICE_QUIRK_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_VID): cv.hex_uint16_t,
+        cv.Required(CONF_PID): cv.hex_uint16_t,
+        cv.Optional(CONF_VOLUME_ENCODING, default="db"): cv.enum(
+            VOLUME_ENCODINGS, lower=True
+        ),
+    }
+)
+
 SUPPORTED_VARIANTS = [
     esp32.const.VARIANT_ESP32S2,
     esp32.const.VARIANT_ESP32S3,
@@ -276,6 +300,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_VOLUME_CURVE, default="linear"): cv.enum(
                 VOLUME_CURVES, lower=True
             ),
+            cv.Optional(CONF_DEVICE_QUIRKS): cv.ensure_list(DEVICE_QUIRK_SCHEMA),
         }
     ),
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
@@ -293,6 +318,12 @@ async def to_code(config):
     cg.add(var.set_feedback_enabled(config[CONF_FEEDBACK]))
     cg.add(var.set_volume_curve(config[CONF_VOLUME_CURVE]))
     cg.add(var.set_channel_pair(config[CONF_CHANNEL_PAIR]))
+    for quirk in config.get(CONF_DEVICE_QUIRKS, []):
+        cg.add(
+            var.add_device_quirk(
+                quirk[CONF_VID], quirk[CONF_PID], quirk[CONF_VOLUME_ENCODING]
+            )
+        )
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")

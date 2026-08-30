@@ -1313,6 +1313,10 @@ void USBAudioClient::probe_volume_range_(UacControlState &ctl, const char *what)
 // device somewhere it was not.
 void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what, uint8_t channel) {
   ctl.get_cur_broken = false;
+  // The probe writes dB values and judges the answers on that scale. A device on the BYTE
+  // quirk is on neither, so probing it would set it to two arbitrary levels for nothing.
+  if (this->volume_encoding_ != VolumeEncoding::DB)
+    return;
 
   auto get_cur = [this, &ctl, channel](int16_t &out) {
     uint8_t buf[2] = {0, 0};
@@ -1348,6 +1352,30 @@ void USBAudioClient::probe_sticky_volume_(UacControlState &ctl, const char *what
   ESP_LOGD(TAG, "%s reports a constant %.2f dB whatever is set; its readback will be ignored", what,
            static_cast<float>(saved) / 256.0f);
   set_cur(saved);
+}
+
+// Settle the wire encoding for the device that just connected.
+//
+// A device that takes the volume as a plain level rather than as dB cannot be recognised by
+// asking it: it answers MIN, MAX and RES like any other, and its GET_CUR says nothing
+// reliable either. Linux carries the equivalent as a per-device entry in its quirk table
+// rather than probing for it, and this does the same from the configuration. Without a
+// matching entry the class definition applies.
+void USBAudioClient::resolve_device_quirks_() {
+  this->volume_encoding_ = VolumeEncoding::DB;
+  const usb_device_desc_t *dev = this->get_device_desc_();
+  if (dev == nullptr)
+    return;
+  for (const auto &quirk : this->quirks_) {
+    if (quirk.vid != dev->idVendor || quirk.pid != dev->idProduct)
+      continue;
+    this->volume_encoding_ = quirk.volume_encoding;
+    if (quirk.volume_encoding == VolumeEncoding::BYTE) {
+      ESP_LOGI(TAG, "Device quirk for %04X:%04X: volume is sent as a level, not as dB", dev->idVendor,
+               dev->idProduct);
+    }
+    return;
+  }
 }
 
 bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
@@ -1397,13 +1425,22 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
   }
 
   // A Feature Unit volume is a signed 16-bit value in 1/256 dB, sent little-endian. That is
-  // the whole encoding; there is no percentage anywhere in the class definition.
-  uint8_t buf[2] = {
-    static_cast<uint8_t>(static_cast<uint16_t>(vol) & 0xFF),
-    static_cast<uint8_t>((static_cast<uint16_t>(vol) >> 8) & 0xFF),
-  };
-  ESP_LOGD(TAG, "%s SET volume %.0f%%: %.2f dB (raw %d, bytes %02X %02X) to %u Feature Unit entries", what,
-           clamped * 100.0f, static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1], channel_count);
+  // the whole encoding; there is no percentage anywhere in the class definition. A device
+  // carrying the BYTE quirk does not follow it and takes the setting as a plain 0..255
+  // level in the low byte instead.
+  const bool as_level = this->volume_encoding_ == VolumeEncoding::BYTE;
+  uint8_t buf[2];
+  if (as_level) {
+    buf[0] = static_cast<uint8_t>(std::lround(clamped * 255.0f));
+    buf[1] = 0x80;
+    ESP_LOGD(TAG, "%s SET volume %.0f%%: level %u (bytes %02X %02X) to %u Feature Unit entries", what,
+             clamped * 100.0f, buf[0], buf[0], buf[1], channel_count);
+  } else {
+    buf[0] = static_cast<uint8_t>(static_cast<uint16_t>(vol) & 0xFF);
+    buf[1] = static_cast<uint8_t>((static_cast<uint16_t>(vol) >> 8) & 0xFF);
+    ESP_LOGD(TAG, "%s SET volume %.0f%%: %.2f dB (raw %d, bytes %02X %02X) to %u Feature Unit entries", what,
+             clamped * 100.0f, static_cast<float>(vol) / 256.0f, static_cast<int>(vol), buf[0], buf[1], channel_count);
+  }
   uint8_t written = 0;
   for (uint8_t i = 0; i < channel_count; i++) {
     if (this->uac_set_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[i], buf, sizeof(buf)))
@@ -1414,16 +1451,17 @@ bool USBAudioClient::apply_volume_(UacControlState &ctl, const char *what) {
     ESP_LOGD(TAG, "%s volume reached %u of %u Feature Unit entries", what, written, channel_count);
   const float sent_db = static_cast<float>(vol) / 256.0f;
   if (!ok) {
-    ESP_LOGW(TAG, "%s volume %.0f%% (%.2f dB) was not accepted by the device", what, clamped * 100.0f, sent_db);
+    ESP_LOGW(TAG, "%s volume %.0f%% was not accepted by the device", what, clamped * 100.0f);
     return false;
   }
 
   // Read the value back, unless the device has already been found to answer GET_CUR with a
   // constant. A device may clamp to its own range or quantise to a coarser step, so
-  // reporting what we sent would be reporting an assumption.
+  // reporting what we sent would be reporting an assumption. A device on the BYTE quirk is
+  // not answering on the dB scale in the first place, so there is nothing to compare.
   uint8_t rb[2] = {0, 0};
-  if (!ctl.get_cur_broken && this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb,
-                                                          sizeof(rb))) {
+  if (!as_level && !ctl.get_cur_broken &&
+      this->uac_get_cur_interface_(ctl.fu.unit_id, UAC_FU_VOLUME_CONTROL, channels[0], rb, sizeof(rb))) {
     const int16_t actual = static_cast<int16_t>(rb[0] | (rb[1] << 8));
     ESP_LOGD(TAG, "%s volume %.0f%% -> %.2f dB (device reports %.2f dB, raw %02X %02X)", what, clamped * 100.0f,
              sent_db, static_cast<float>(actual) / 256.0f, rb[0], rb[1]);
@@ -1606,6 +1644,7 @@ void USBAudioClient::on_connected() {
     ESP_LOGI(TAG, "USB Audio device connected: VID=0x%04X PID=0x%04X", dev->idVendor, dev->idProduct);
 
   // Fresh device: forget everything the previous one taught us.
+  this->resolve_device_quirks_();
   this->spk_reopen_at_ms_ = millis();
   this->mic_reopen_at_ms_ = millis();
   this->spk_open_fails_ = 0;

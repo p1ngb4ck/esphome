@@ -55,6 +55,28 @@ enum class VolumeCurve : uint8_t {
   LOGARITHMIC = 1,
 };
 
+// How a volume value is put on the wire.
+//
+// DB is the class definition: a signed 16-bit value in 1/256 dB, little-endian, inside the
+// range the device reports through MIN, MAX and RES.
+//
+// BYTE is for devices that do not follow it and take the setting as a plain 0..255 level in
+// the low byte, with 0x80 in the high byte. Those devices cannot be told apart from a
+// conforming one by asking them -- Linux carries the equivalent per device in its quirk
+// table rather than detecting it -- so this is selected per VID and PID from the
+// configuration.
+enum class VolumeEncoding : uint8_t {
+  DB = 0,
+  BYTE = 1,
+};
+
+// One configured device quirk, matched against the device descriptor on connection.
+struct UsbAudioQuirk {
+  uint16_t vid;
+  uint16_t pid;
+  VolumeEncoding volume_encoding;
+};
+
 // -- Forward declarations -----------------------------------------------------
 class USBAudioMicrophone;
 class USBAudioSpeaker;
@@ -97,6 +119,10 @@ class USBAudioClient : public usb_host::USBClient {
   // Use an asynchronous OUT endpoint's feedback stream to pace playback (default on).
   void set_feedback_enabled(bool enabled) { this->feedback_enabled_ = enabled; }
   void set_volume_curve(VolumeCurve curve) { this->volume_curve_ = curve; }
+  // Register a per-device quirk, matched against the device descriptor on connection.
+  void add_device_quirk(uint16_t vid, uint16_t pid, VolumeEncoding encoding) {
+    this->quirks_.push_back(UsbAudioQuirk{vid, pid, encoding});
+  }
   // Which pair of a multichannel device is driven as the stereo stream. Only consulted
   // when the device offers no plain stereo alt-setting.
   void set_channel_pair(UacChannelPair pair) { this->channel_pair_ = pair; }
@@ -289,6 +315,12 @@ class USBAudioClient : public usb_host::USBClient {
   // -- Volume mapping --------------------------------------------------------
   VolumeCurve volume_curve_{VolumeCurve::LINEAR};
   UacChannelPair channel_pair_{UacChannelPair::FRONT};
+  // Configured quirks, and the wire encoding resolved from them for the device currently
+  // attached. Reset to the class definition whenever a device without a quirk connects.
+  std::vector<UsbAudioQuirk> quirks_;
+  VolumeEncoding volume_encoding_{VolumeEncoding::DB};
+
+  void resolve_device_quirks_();
 };
 
 }  // namespace usb_audio
