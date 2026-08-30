@@ -285,6 +285,74 @@ _LS_EP0_REPLACEMENT = """    // A low-speed device reached through a full-speed 
         ep_char->ls_via_fs_hub = 1;
     }"""
 
+_RESET_BAILOUT_ANCHOR = """    ret = ESP_OK;
+bailout:
+    _port_reset_all_pipes(port);
+exit:
+    return ret;
+}"""
+
+_RESET_BAILOUT_REPLACEMENT = """    ret = ESP_OK;
+bailout:
+    // A reset that gets this far has already moved the port to RESETTING, and no command
+    // accepts that state: leaving it there strands the port until the device is unplugged.
+    // Worse, root_port_recycle() in the Hub driver switches on the port state with an
+    // abort() default, and RESETTING lands there -- so a failed reset during enumeration,
+    // where hub_node_reset() issues a second one, took the firmware down when the device was
+    // afterwards torn down.
+    //
+    // Only claim the state when it is still RESETTING. Anything else means the interrupt
+    // handler already moved the port on, and it left a port event pending that the Hub
+    // driver is about to consume; overwriting that would lose the disconnection.
+    if (port->state == HCD_PORT_STATE_RESETTING) {
+        port->flags.conn_dev_ena = 0;
+        port->state = HCD_PORT_STATE_RECOVERY;
+    }
+    _port_reset_all_pipes(port);
+exit:
+    return ret;
+}"""
+
+_HUB_RESET_ERR_ANCHOR = """new_dev_err:
+        // We allow this to fail in case a disconnect/port error happens while disabling.
+        hcd_port_command(root_port_hdl, HCD_PORT_CMD_DISABLE);
+reset_err:
+        break;
+    }"""
+
+_HUB_RESET_ERR_REPLACEMENT = """new_dev_err:
+        // We allow this to fail in case a disconnect/port error happens while disabling.
+        hcd_port_command(root_port_hdl, HCD_PORT_CMD_DISABLE);
+reset_err:
+        // A failed reset leaves nothing behind to drive the port forward: no device object
+        // exists yet, so root_port_recycle() will never run for it. Ask for recovery here,
+        // but only where the port is actually recoverable -- _port_cmd_reset() moves the
+        // port to RECOVERY when its own attempt failed, and the interrupt handler does the
+        // same on disconnection, error and overcurrent.
+        //
+        // The request is safe to raise from inside the event handler even when a
+        // disconnection arrived during the reset. hub_process() takes its action snapshot
+        // before calling this function, so the request bit set here is only acted on in its
+        // next iteration, and that iteration handles the port event before the port request.
+        // hcd_port_handle_event() has therefore cleared flags.event_pending by the time
+        // hcd_port_recover() checks that every port flag is clear.
+        if (hcd_port_get_state(root_port_hdl) == HCD_PORT_STATE_RECOVERY) {
+            HUB_DRIVER_ENTER_CRITICAL();
+            root_hub_port->dynamic.reqs |= PORT_REQ_RECOVER;
+            if (root_hub_port->constant.index == 0) {
+                p_hub_driver_obj->dynamic.flags.actions |= HUB_DRIVER_ACTION_ROOT0_REQ;
+            } else {
+#if HCD_NUM_PORTS > 1
+                p_hub_driver_obj->dynamic.flags.actions |= HUB_DRIVER_ACTION_ROOT1_REQ;
+#else
+                abort();    // Should never occur
+#endif // HCD_NUM_PORTS > 1
+            }
+            HUB_DRIVER_EXIT_CRITICAL();
+        }
+        break;
+    }"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -296,7 +364,9 @@ PATCHES = (
     ("src/hcd_dwc.c", _HCD_CALL_ANCHOR, _HCD_CALL_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PREAMBLE_ANCHOR, _LS_PREAMBLE_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_EP0_ANCHOR, _LS_EP0_REPLACEMENT),
+    ("src/hcd_dwc.c", _RESET_BAILOUT_ANCHOR, _RESET_BAILOUT_REPLACEMENT),
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
+    ("src/hub.c", _HUB_RESET_ERR_ANCHOR, _HUB_RESET_ERR_REPLACEMENT),
     ("src/usb_host.c", _HOST_WARN_ANCHOR, _HOST_WARN_REPLACEMENT),
 )
 
