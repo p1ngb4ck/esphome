@@ -733,7 +733,7 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       cur_alt_info.channel_config = this->terminal_channel_config_(cur_alt_info.terminal_link);
     uint8_t left = 0;
     uint8_t right = 1;
-    if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right)) {
+    /* if (!uac_resolve_pair(cur_alt_info, this->channel_pair_, left, right)) {
       cur_alt_info.channel_map_active = true;
       cur_alt_info.channels = 2;
       cur_alt_info.map_left = left;
@@ -741,8 +741,8 @@ bool USBAudioClient::parse_as_interface_(bool want_out, uint8_t channels, uint8_
       mapped_alt = cur_alt_info;
       mapped_intf = cur_intf;
       return;
-    }
-    cur_alt_info.channel_map_active = true;
+    } */
+    cur_alt_info.channel_map_active = false;
     cur_alt_info.channels = 2;
     cur_alt_info.map_left = left;
     cur_alt_info.map_right = right;
