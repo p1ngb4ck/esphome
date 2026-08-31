@@ -9,12 +9,12 @@
 #include <cstring>
 
 #include "driver/parlio_tx.h"
+#include "hal/parlio_types.h"
 
 namespace esphome {
 namespace spdif {
 
 static const char *const TAG = "spdif.speaker";
-static constexpr uint8_t PARLIO_CLK_SRC_DEFAULT = 4;
 
 // One output clock per biphase cell.
 static const uint8_t CELLS_PER_SAMPLE_PERIOD = CELLS_PER_FRAME;

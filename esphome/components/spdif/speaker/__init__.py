@@ -76,6 +76,7 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
+    include_builtin_idf_component("esp_hal_parlio")
     include_builtin_idf_component("esp_driver_parlio")
 
     var = cg.new_Pvariable(config[CONF_ID])
