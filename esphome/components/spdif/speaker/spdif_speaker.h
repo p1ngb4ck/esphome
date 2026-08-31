@@ -16,7 +16,7 @@
 #include <atomic>
 #include <memory>
 
-#include "../iec60958.h"
+#include "iec60958.h"
 
 namespace esphome {
 namespace spdif {
