@@ -76,7 +76,11 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    add_idf_component(name="espressif/esp_driver_parlio")
+    add_idf_component(
+        name="espressif/usb",
+        repo="github://espressif/esp_driver_parlio",
+    )
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await speaker.register_speaker(var, config)
