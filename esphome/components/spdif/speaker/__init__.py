@@ -1,7 +1,7 @@
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components import audio, speaker
-from esphome.components.esp32 import include_builtin_idf_component
+from esphome.components.esp32 import add_idf_component
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
@@ -76,7 +76,10 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    include_builtin_idf_component("esp_driver_parlio")
+    add_idf_component(
+            name="esphome/esp-hub75",
+            ref="0.3.6",
+        )
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
