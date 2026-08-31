@@ -226,8 +226,8 @@ class ConstAudioSourceBuffer : public AudioReadableBuffer {
 /// queued region) must be used by only one thread, and that thread is the ring buffer's consumer.
 class RingBufferAudioSource : public AudioReadableBuffer {
  public:
-  /// Maximum supported alignment. Sized to cover 32-bit samples across up to 2 channels (8 bytes).
-  static constexpr size_t MAX_ALIGNMENT_BYTES = 8;
+  /// Maximum supported alignment. Sized to cover 32-bit samples across up to 8 channels (32 bytes).
+  static constexpr size_t MAX_ALIGNMENT_BYTES = 32;
 
   /// @brief Creates a new ring-buffer-backed audio source after validating its parameters.
   /// @param ring_buffer The ring buffer to read from. Must be non-null.

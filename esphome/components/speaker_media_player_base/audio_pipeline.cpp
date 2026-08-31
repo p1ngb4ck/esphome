@@ -135,7 +135,7 @@ AudioPipelineState AudioPipeline::process_state() {
                 ESP_LOGE(TAG, "Incompatible bits per sample. Only 16 bits per sample is supported");
                 break;
               case DecodingError::INCOMPATIBLE_CHANNELS:
-                ESP_LOGE(TAG, "Incompatible number of channels. Only 1 or 2 channel audio is supported.");
+                ESP_LOGE(TAG, "Incompatible number of channels. Only 1 through 8 channel audio is supported.");
                 break;
             }
           }
@@ -528,7 +528,7 @@ void AudioPipeline::decode_task(void *params) {
             event.decoding_err = DecodingError::INCOMPATIBLE_BITS_PER_SAMPLE;
             xEventGroupSetBits(this_pipeline->event_group_,
                                EventGroupBits::DECODER_MESSAGE_ERROR | EventGroupBits::PIPELINE_COMMAND_STOP);
-          } else if ((this_pipeline->current_audio_stream_info_.get_channels() > 2)) {
+          } else if ((this_pipeline->current_audio_stream_info_.get_channels() > 8)) {
             // Error state, incompatible number of channels
             event.decoding_err = DecodingError::INCOMPATIBLE_CHANNELS;
             xEventGroupSetBits(this_pipeline->event_group_,
