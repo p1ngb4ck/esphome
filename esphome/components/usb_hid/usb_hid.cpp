@@ -72,13 +72,15 @@ bool USBHIDClient::parse_hid_interface_() {
 
   ESP_LOGI(TAG, "USB device VID:PID = %04X:%04X DevClass=0x%02X", vid, pid, dev_desc->bDeviceClass);
 
-  if (dev_desc->bDeviceClass != 0x03 && dev_desc->bDeviceClass != 0x00 && !is_xbox360 && !is_8bitdo) {
-    ESP_LOGD(TAG, "Device class 0x%02X not handled", dev_desc->bDeviceClass);
-    return false;
-  }
+  // bDeviceClass is deliberately not a precondition. A composite device declares its classes
+  // per interface and puts 0x00 or, with an Interface Association Descriptor, 0xEF in the
+  // device descriptor -- a sound card with front-panel buttons is exactly that. Gating on the
+  // device descriptor contradicted the interface search below, which is the one that decides,
+  // and turned away devices whose HID interface is right there in the configuration.
 
   const usb_intf_desc_t *hid_intf = nullptr;
   const usb_ep_desc_t *in_ep_desc = nullptr;
+  const usb_ep_desc_t *out_ep_desc = nullptr;
   uint8_t out_ep = 0;
   int offset = 0;
 
@@ -126,12 +128,11 @@ bool USBHIDClient::parse_hid_interface_() {
     if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT) {
       const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
       if ((ep->bmAttributes & EP_TYPE_MASK) == EP_TYPE_INTERRUPT) {
-        if (ep->bInterval == 0)
-          const_cast<usb_ep_desc_t *>(ep)->bInterval = 1;
         if (ep->bEndpointAddress & EP_DIR_IN) {
           in_ep_desc = ep;
           ESP_LOGI(TAG, "INT IN ep 0x%02X mps=%d", ep->bEndpointAddress, ep->wMaxPacketSize);
         } else {
+          out_ep_desc = ep;
           out_ep = ep->bEndpointAddress;
           ESP_LOGI(TAG, "INT OUT ep 0x%02X", ep->bEndpointAddress);
         }
@@ -143,6 +144,20 @@ bool USBHIDClient::parse_hid_interface_() {
   if (!in_ep_desc) {
     ESP_LOGW(TAG, "No interrupt IN endpoint found");
     return false;
+  }
+
+  // bInterval 0 is not a legal value for an interrupt endpoint, and the pipe the host
+  // allocates on claim is built from these descriptors, so a device that declares it has to
+  // be corrected before the claim. The buffer belongs to the host library and every client
+  // attached to this device reads the same one -- usb_audio among them on a sound card --
+  // so the correction is applied here, to the two endpoints this client is about to take,
+  // rather than to every interrupt endpoint the scan walked past. A device rejected above is
+  // handed back untouched.
+  for (const usb_ep_desc_t *ep : {in_ep_desc, out_ep_desc}) {
+    if (ep != nullptr && ep->bInterval == 0) {
+      ESP_LOGW(TAG, "Endpoint 0x%02X declares bInterval 0; using 1", ep->bEndpointAddress);
+      const_cast<usb_ep_desc_t *>(ep)->bInterval = 1;
+    }
   }
 
   if (!this->claim_interface(hid_intf->bInterfaceNumber)) {
