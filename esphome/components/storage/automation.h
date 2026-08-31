@@ -539,6 +539,59 @@ template<typename... Ts> class FileStatAction : public Action<Ts...> {
 };
 
 // ---------------------------------------------------------------------------
+// storage.list_dir action -- enumerate one directory, one automation per entry.
+// Synchronous on the calling task, like storage.stat and storage.file_write: the driver's
+// list_dir() is a data-plane call and the busy guard below refuses it while the worker holds the
+// same storage, rather than racing it. That makes the whole walk block the loop, which is why
+// max_entries exists -- see perform_list_dir().
+// ---------------------------------------------------------------------------
+
+// Fires on_entry for each entry (up to max_entries) and then exactly one of on_complete (with the
+// number of entries reported) or on_error (with the error text). An early stop by the entry limit
+// is not an error: on_complete still fires, with the truncated count, and the truncation is logged.
+struct ListDirSink {
+  Trigger<std::string, uint64_t, bool, uint32_t> *on_entry;
+  uint32_t max_entries;
+  uint32_t count;
+  bool truncated;
+};
+
+// Returns the driver's error; sink->count and sink->truncated describe what was reported. Refuses
+// with NOT_READY if a walk is already in progress anywhere -- a driver's list_dir() is not
+// re-entrant and on_entry runs automations while its directory handle is open.
+StorageError perform_list_dir(const std::string &path, ListDirSink *sink);
+
+template<typename... Ts> class ListDirAction : public Action<Ts...> {
+ public:
+  TEMPLATABLE_VALUE(std::string, path)
+
+  void set_max_entries(uint32_t max_entries) { this->max_entries_ = max_entries; }
+
+  Trigger<std::string, uint64_t, bool, uint32_t> *get_entry_trigger() { return &this->entry_trigger_; }
+  Trigger<uint32_t> *get_complete_trigger() { return &this->complete_trigger_; }
+  Trigger<std::string> *get_error_trigger() { return &this->error_trigger_; }
+
+  void play(const Ts &...x) override {
+    ListDirSink sink{&this->entry_trigger_, this->max_entries_, 0, false};
+    // Re-entrancy is refused inside perform_list_dir(), not here: on_entry runs user automations
+    // while a directory handle is open, and one of them may well be a different storage.list_dir
+    // action, which a per-instance flag would not see.
+    StorageError err = perform_list_dir(this->path_.value(x...), &sink);
+    if (err != StorageError::STORAGE_ERROR_OK) {
+      this->error_trigger_.trigger(std::string(error_to_string(err)));
+      return;
+    }
+    this->complete_trigger_.trigger(sink.count);
+  }
+
+ protected:
+  uint32_t max_entries_{256};
+  Trigger<std::string, uint64_t, bool, uint32_t> entry_trigger_;
+  Trigger<uint32_t> complete_trigger_;
+  Trigger<std::string> error_trigger_;
+};
+
+// ---------------------------------------------------------------------------
 // storage.mount / storage.unmount -- target must opt in via MountableStorage
 // (validated at YAML time through the codegen class hierarchy)
 // ---------------------------------------------------------------------------

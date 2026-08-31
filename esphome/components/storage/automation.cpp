@@ -904,6 +904,63 @@ StorageError check_file_exists(const std::string &path) {
   return err;
 }
 
+static bool list_dir_entry_cb(const FileStat *entry, void *ctx) {
+  auto *sink = static_cast<ListDirSink *>(ctx);
+  if (sink->count >= sink->max_entries) {
+    sink->truncated = true;
+    return false;  // Stops the walk; list_dir() still returns OK per its contract.
+  }
+  sink->count++;
+  // FileStat::name is the basename only, for stat() and for every list_dir() entry alike. The
+  // automation gets it as-is and joins it with the directory it asked for if it needs a full path.
+  sink->on_entry->trigger(std::string(entry->name), entry->size, entry->is_dir, entry->mtime);
+  return true;
+}
+
+// One flag for every list_dir action, not one per action: the nesting that has to be caught is an
+// on_entry automation invoking a different storage.list_dir while this walk holds a directory
+// handle open. All of them run on the same task, so a plain bool is enough.
+static bool s_list_dir_running = false;
+
+StorageError perform_list_dir(const std::string &path, ListDirSink *sink) {
+  if (s_list_dir_running) {
+    ESP_LOGE(TAG, "list_dir: already enumerating a directory; refusing to list '%s' from inside it",
+             path.c_str());
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  }
+  if (global_storage_registry == nullptr) {
+    ESP_LOGW(TAG, "list_dir: no storage registry; cannot list '%s'", path.c_str());
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  }
+  const char *rel = nullptr;
+  PathStorage *ps = global_storage_registry->resolve_path(path.c_str(), &rel);
+  if (ps == nullptr) {
+    ESP_LOGW(TAG, "list_dir: no storage mounted for '%s'", path.c_str());
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  }
+  if (worker_task_busy(ps)) {
+    ESP_LOGE(TAG, "list_dir: '%s' is busy with a background transfer -- refusing blocking I/O", path.c_str());
+    return StorageError::STORAGE_ERROR_NOT_READY;
+  }
+  // resolve_path() yields "" for the mount point itself; drivers want a path, so ask for its root.
+  const char *dir = (rel == nullptr || rel[0] == '\0') ? "/" : rel;
+
+  s_list_dir_running = true;
+  StorageError err = ps->list_dir(dir, list_dir_entry_cb, sink);
+  s_list_dir_running = false;
+  if (err != StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "list_dir: listing '%s' failed (%s)", path.c_str(), error_to_string(err));
+    return err;
+  }
+  // Truncation is not an error -- on_complete fires with what was reported -- but it must not be
+  // silent, or a directory that outgrew the limit looks like one that simply got smaller.
+  if (sink->truncated) {
+    ESP_LOGW(TAG, "list_dir: '%s' has more than %u entries; stopped after %u", path.c_str(),
+             static_cast<unsigned>(sink->max_entries), static_cast<unsigned>(sink->count));
+  }
+  return StorageError::STORAGE_ERROR_OK;
+}
+
 static void mount_fire(bool mount, StorageError result, Trigger<std::string> *on_complete) {
   if (result != StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "%s failed (%s)", mount ? "mount" : "unmount", error_to_string(result));

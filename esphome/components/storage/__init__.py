@@ -65,6 +65,8 @@ CONF_ON_COMPLETE = "on_complete"
 CONF_ON_UNREGISTERED = "on_unregistered"
 CONF_ON_EXISTS = "on_exists"
 CONF_ON_MISSING = "on_missing"
+CONF_ON_ENTRY = "on_entry"
+CONF_MAX_ENTRIES = "max_entries"
 
 # No AUTO_LOAD of json: ArduinoJson is gated behind USE_STORAGE_JSON_EXTRACT, so the json component
 # enters the build only when a config uses a `json:` extract step -- enforced by
@@ -1101,6 +1103,74 @@ async def file_stat_action_to_code(
         await automation.build_automation(var.get_exists_trigger(), [], on_exists)
     if (on_missing := config.get(CONF_ON_MISSING)) is not None:
         await automation.build_automation(var.get_missing_trigger(), [], on_missing)
+    if (on_error := config.get(CONF_ON_ERROR)) is not None:
+        await automation.build_automation(
+            var.get_error_trigger(), [(cg.std_string, "x")], on_error
+        )
+    return var
+
+
+ListDirAction = storage_ns.class_("ListDirAction", automation.Action)
+
+
+def _validate_list_dir(config):
+    # A listing with no handler is a silent no-op, and one that only handles entries swallows a
+    # failure to list at all; require a handler like storage.stat does.
+    if not any(k in config for k in (CONF_ON_ENTRY, CONF_ON_COMPLETE, CONF_ON_ERROR)):
+        raise cv.Invalid(
+            "storage.list_dir needs at least one of on_entry, on_complete, or on_error"
+        )
+    return config
+
+
+_LIST_DIR_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_PATH): cv.templatable(cv.string),
+            # The whole walk runs synchronously and every entry runs an automation, so an
+            # unbounded directory would hold the loop until the watchdog fires. Reaching the
+            # limit stops the walk, logs it, and still fires on_complete with the count.
+            cv.Optional(CONF_MAX_ENTRIES, default=256): cv.int_range(min=1, max=65535),
+            # name is the basename only, as FileStat carries it -- join it with the path if a
+            # full path is needed. size is bytes, mtime a Unix timestamp or 0 when unavailable.
+            cv.Optional(CONF_ON_ENTRY): automation.validate_automation(single=True),
+            # Fires once on success with the number of entries reported.
+            cv.Optional(CONF_ON_COMPLETE): automation.validate_automation(single=True),
+            # Fires instead of on_complete when the directory could not be listed at all.
+            cv.Optional(CONF_ON_ERROR): automation.validate_automation(single=True),
+        }
+    ),
+    _validate_list_dir,
+)
+
+
+@automation.register_action(
+    "storage.list_dir",
+    ListDirAction,
+    _LIST_DIR_SCHEMA,
+    synchronous=True,
+)
+async def list_dir_action_to_code(
+    config: ConfigType, action_id: ID, template_arg: cg.TemplateArguments, args: list
+):
+    var = cg.new_Pvariable(action_id, template_arg)
+    cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
+    cg.add(var.set_max_entries(config[CONF_MAX_ENTRIES]))
+    if (on_entry := config.get(CONF_ON_ENTRY)) is not None:
+        await automation.build_automation(
+            var.get_entry_trigger(),
+            [
+                (cg.std_string, "name"),
+                (cg.uint64, "size"),
+                (cg.bool_, "is_dir"),
+                (cg.uint32, "mtime"),
+            ],
+            on_entry,
+        )
+    if (on_complete := config.get(CONF_ON_COMPLETE)) is not None:
+        await automation.build_automation(
+            var.get_complete_trigger(), [(cg.uint32, "count")], on_complete
+        )
     if (on_error := config.get(CONF_ON_ERROR)) is not None:
         await automation.build_automation(
             var.get_error_trigger(), [(cg.std_string, "x")], on_error
