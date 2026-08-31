@@ -42,3 +42,24 @@ script:
           then:
             - storage.file_delete:
                 path: /storage/state.txt
+      # All four trigger signatures of storage.list_dir, so the generated automation bodies are
+      # compiled: on_entry takes four arguments, on_complete a count, on_error a text.
+      - storage.list_dir:
+          path: /storage
+          max_entries: 32
+          on_entry:
+            - logger.log:
+                format: "%s%s (%llu bytes, mtime %u)"
+                args:
+                  - 'is_dir ? "dir " : "file "'
+                  - name.c_str()
+                  - size
+                  - mtime
+          on_complete:
+            - logger.log:
+                format: "listed %u entries"
+                args: [count]
+          on_error:
+            - logger.log:
+                format: "list_dir failed: %s"
+                args: [x.c_str()]
