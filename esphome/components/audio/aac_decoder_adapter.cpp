@@ -56,7 +56,7 @@ AACDecoder::~AACDecoder() {
   }
 }
 
-AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len, int16_t *output) {
+AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len, int16_t *output, size_t output_len) {
   AACDecodeResult result = {AAC_DECODER_ERROR, 0, 0, 0, 0};
 
   if (!this->initialized_ || !input || !output) {
@@ -69,11 +69,11 @@ AACDecodeResult AACDecoder::decode_frame(const uint8_t *input, size_t input_len,
   raw_input.len = input_len;
   raw_input.consumed = 0;
 
-  // Prepare output data structure
-  // AAC typical max frame size: 1024 samples * 2 channels * 2 bytes = 4096 bytes
+  // Prepare output data structure. The caller owns the buffer and is the only one that knows
+  // how much of it is free, so the size is passed in rather than assumed from a frame width.
   esp_audio_dec_out_frame_t frame_output = {};
   frame_output.buffer = reinterpret_cast<uint8_t *>(output);
-  frame_output.len = 4096;  // Max buffer size available
+  frame_output.len = output_len;
   frame_output.decoded_size = 0;
   frame_output.needed_size = 0;
 

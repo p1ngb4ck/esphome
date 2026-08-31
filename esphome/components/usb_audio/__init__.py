@@ -52,8 +52,9 @@ UacChannelPair = usb_audio_ns.enum("UacChannelPair", is_class=True)
 # also describes plain stereo uses that and ignores this option.
 CHANNEL_PAIRS = {
     "front": UacChannelPair.FRONT,
-    "side": UacChannelPair.SIDE,
+    "center_lfe": UacChannelPair.CENTER_LFE,
     "back": UacChannelPair.BACK,
+    "side": UacChannelPair.SIDE,
 }
 
 VolumeCurve = usb_audio_ns.enum("VolumeCurve", is_class=True)

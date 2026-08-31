@@ -597,6 +597,7 @@ bool uac_resolve_pair(const UacAltInfo &alt, UacChannelPair pair, uint8_t &left,
 
 const char *uac_pair_name(UacChannelPair pair) {
   switch (pair) {
+    case UacChannelPair::CENTER_LFE: return "center_lfe";
     case UacChannelPair::SIDE: return "side";
     case UacChannelPair::BACK: return "back";
     case UacChannelPair::FRONT:

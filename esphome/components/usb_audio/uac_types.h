@@ -130,16 +130,19 @@ static constexpr uint32_t UAC_CH_TOP_CENTER            = 1u << 11;
 
 // Which pair of a multichannel stream is carried as stereo. ESPHome has no surround path,
 // so a 5.1 or 7.1 device is driven as one stereo pair and the other channels stay silent.
-// Front is the pair a card marks as the main output.
+// Front is the pair a card marks as the main output. The order below is the order the pairs
+// take in a frame, which is the order of their position bits.
 enum class UacChannelPair : uint8_t {
   FRONT = 0,
-  SIDE = 1,
+  CENTER_LFE = 1,
   BACK = 2,
+  SIDE = 3,
 };
 
 // The two position bits making up a pair.
 inline uint32_t uac_pair_mask(UacChannelPair pair) {
   switch (pair) {
+    case UacChannelPair::CENTER_LFE: return UAC_CH_FRONT_CENTER | UAC_CH_LFE;
     case UacChannelPair::SIDE: return UAC_CH_SIDE_LEFT | UAC_CH_SIDE_RIGHT;
     case UacChannelPair::BACK: return UAC_CH_BACK_LEFT | UAC_CH_BACK_RIGHT;
     case UacChannelPair::FRONT:
@@ -148,17 +151,24 @@ inline uint32_t uac_pair_mask(UacChannelPair pair) {
 }
 
 // Frame positions a pair takes when the device declares no bitmap at all. The class then
-// leaves the layout undefined and the convention, which the Linux driver follows too, is the
-// order of the position list above.
+// leaves the layout undefined and the convention, which the Linux driver follows too, is that
+// the device carries the bitmap its channel count implies: front left and right, then front
+// center and LFE, then the back pair, then the side pair. Applying the rule above to that
+// bitmap -- a channel's position is its index among the set bits -- gives the offsets below.
+// They are ranks within the frame, not the bit numbers of the positions themselves.
 inline void uac_pair_default_offsets(UacChannelPair pair, uint8_t &left, uint8_t &right) {
   switch (pair) {
-    case UacChannelPair::SIDE:
-      left = 9;
-      right = 10;
+    case UacChannelPair::CENTER_LFE:
+      left = 2;
+      right = 3;
       break;
     case UacChannelPair::BACK:
       left = 4;
       right = 5;
+      break;
+    case UacChannelPair::SIDE:
+      left = 6;
+      right = 7;
       break;
     case UacChannelPair::FRONT:
     default:

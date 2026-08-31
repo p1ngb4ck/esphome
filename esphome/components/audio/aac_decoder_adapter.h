@@ -53,9 +53,10 @@ class AACDecoder {
    * @param input Pointer to input AAC data
    * @param input_len Length of input data
    * @param output Pointer to output PCM buffer (int16_t samples)
+   * @param output_len Bytes available in the output buffer
    * @return AACDecodeResult with status and consumed/produced bytes
    */
-  AACDecodeResult decode_frame(const uint8_t *input, size_t input_len, int16_t *output);
+  AACDecodeResult decode_frame(const uint8_t *input, size_t input_len, int16_t *output, size_t output_len);
 
  protected:
   esp_audio_dec_handle_t decoder_{nullptr};

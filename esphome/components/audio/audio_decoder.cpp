@@ -273,16 +273,17 @@ AudioDecoderState AudioDecoder::decode(bool stop_gracefully) {
 #ifdef USE_AUDIO_AAC_SUPPORT
 FileDecoderState AudioDecoder::decode_aac_() {
   // AAC decoder processes frames from the input buffer
-  uint8_t *buffer_start = this->input_transfer_buffer_->get_buffer_start();
-  size_t buffer_length = this->input_transfer_buffer_->available();
+  const uint8_t *buffer_start = this->input_buffer_->data();
+  size_t buffer_length = this->input_buffer_->available();
 
   // Decode AAC frame
   auto result = this->aac_decoder_->decode_frame(buffer_start, buffer_length,
-                                                 (int16_t *) this->output_transfer_buffer_->get_buffer_end());
+                                                 (int16_t *) this->output_transfer_buffer_->get_buffer_end(),
+                                                 this->output_transfer_buffer_->free());
 
   if (result.status == esp_audio_codec_adapter::AAC_DECODER_SUCCESS) {
     // Update buffers
-    this->input_transfer_buffer_->decrease_buffer_length(result.bytes_consumed);
+    this->input_buffer_->consume(result.bytes_consumed);
     this->output_transfer_buffer_->increase_buffer_length(result.output_samples * sizeof(int16_t));
 
     // Extract audio stream info on first successful decode
@@ -297,7 +298,7 @@ FileDecoderState AudioDecoder::decode_aac_() {
     return FileDecoderState::IDLE;
   } else if (result.status == esp_audio_codec_adapter::AAC_DECODER_SYNC_ERROR) {
     // Recoverable sync error, skip some data and try again
-    this->input_transfer_buffer_->decrease_buffer_length(std::min(buffer_length, (size_t) 1));
+    this->input_buffer_->consume(std::min(buffer_length, (size_t) 1));
     return FileDecoderState::POTENTIALLY_FAILED;
   } else {
     // Serious error
