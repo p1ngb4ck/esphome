@@ -17,6 +17,13 @@ static const uint8_t MAX_NO_OUTPUT_ITERATIONS = 32;
 
 static const uint32_t MAX_POTENTIALLY_FAILED_COUNT = 10;
 
+#ifdef USE_AUDIO_AAC_SUPPORT
+// Widest frame this configuration declares, from codegen. Unlike FLAC, MP3 and Opus, AAC has
+// no header pass here: the buffer is sized at start(), before anything of the stream has been
+// read, so the count comes from the configuration rather than from the file.
+static const uint8_t MAX_DECODED_CHANNELS = AUDIO_MAX_CHANNELS;
+#endif
+
 AudioDecoder::AudioDecoder(size_t input_buffer_size, size_t output_buffer_size)
     : input_buffer_size_(input_buffer_size) {
   this->output_transfer_buffer_ = AudioSinkTransferBuffer::create(output_buffer_size);
@@ -83,7 +90,8 @@ esp_err_t AudioDecoder::start(AudioFileType audio_file_type) {
       this->aac_decoder_ = make_unique<esp_audio_codec_adapter::AACDecoder>();
 
       // AAC typically has 1024 samples per frame
-      this->free_buffer_required_ = 1024 * sizeof(int16_t) * 2;  // samples * size per sample * channels
+      this->free_buffer_required_ =
+          1024 * sizeof(int16_t) * MAX_DECODED_CHANNELS;  // samples * size per sample * channels
 
       // Reallocate the output transfer buffer to the smallest necessary size
       this->output_transfer_buffer_->reallocate(this->free_buffer_required_);

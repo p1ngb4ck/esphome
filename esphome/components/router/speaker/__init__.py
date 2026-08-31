@@ -54,7 +54,7 @@ CONFIG_SCHEMA = cv.All(
             # read them from the router's declaration during FINAL_VALIDATE,
             # which can't depend on our FINAL_VALIDATE running first.
             cv.Required(CONF_BITS_PER_SAMPLE): cv.int_range(8, 32),
-            cv.Required(CONF_NUM_CHANNELS): cv.int_range(1, 2),
+            cv.Required(CONF_NUM_CHANNELS): cv.int_range(1, 8),
             cv.Required(CONF_SAMPLE_RATE): cv.int_range(8000, 96000),
         }
     ).extend(cv.COMPONENT_SCHEMA),

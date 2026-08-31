@@ -12,9 +12,12 @@ from esphome.components.esp32 import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
+    CONF_MEDIA_PLAYER,
+    CONF_MICROPHONE,
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
     CONF_SIZE,
+    CONF_SPEAKER,
 )
 from esphome.core import CORE
 import esphome.final_validate as fv
@@ -327,6 +330,52 @@ def final_validate_audio_schema(
     )
 
 
+# Domains whose entries describe a PCM audio format. num_channels means something else
+# entirely elsewhere -- sm16716 and my9231 count LED driver outputs with it, up to 1020 -- so
+# the search is limited to these rather than run over the whole configuration.
+_CHANNEL_COUNT_DOMAINS = (CONF_MEDIA_PLAYER, CONF_MICROPHONE, CONF_SPEAKER)
+
+
+def _channel_counts(node: Any):
+    """Every num_channels value inside a configuration subtree.
+
+    A speaker platform declares its count directly, a media player inside each of its pipeline
+    blocks, and components like mixer and router in the entry that describes their own output,
+    so the walk has to descend rather than read one fixed key.
+    """
+    if isinstance(node, dict):
+        channels = node.get(CONF_NUM_CHANNELS)
+        if isinstance(channels, int):
+            yield channels
+        for value in node.values():
+            yield from _channel_counts(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _channel_counts(value)
+
+
+def _max_configured_channels() -> int:
+    """Widest audio frame this configuration can ask a decoder to produce.
+
+    AAC carries its channel count in the stream, and the decoder has to size its output buffer
+    at start(), before a frame has been parsed. The count therefore cannot come from the file;
+    it comes from the configuration, which is the only place a bound exists at compile time.
+
+    Two is the floor rather than the minimum found. What the buffer has to hold is what the
+    decoder writes, which is whatever the file has, and a stereo file played through a mono
+    speaker is the pipeline's business rather than the buffer's. A configuration that declares
+    fewer channels than it plays therefore keeps today's sizing; only a wider one raises it.
+    """
+    return max(
+        [2]
+        + [
+            count
+            for domain in _CHANNEL_COUNT_DOMAINS
+            for count in _channel_counts(CORE.config.get(domain))
+        ]
+    )
+
+
 def _emit_memory_pair(value: str | None, psram_key: str, internal_key: str) -> None:
     if value == MEMORY_PSRAM:
         add_idf_sdkconfig_option(psram_key, True)
@@ -346,6 +395,8 @@ async def to_code(config: ConfigType) -> None:
         name="esphome/esp-audio-libs",
         ref="3.2.1",
     )
+
+    cg.add_define("AUDIO_MAX_CHANNELS", _max_configured_channels())
 
     data = _get_data()
 
