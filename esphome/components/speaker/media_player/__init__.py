@@ -127,7 +127,9 @@ PIPELINE_SCHEMA = cv.Schema(
         cv.Required(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         cv.Optional(CONF_FORMAT, default="FLAC"): cv.enum(audio.AUDIO_FILE_TYPE_ENUM),
         cv.Optional(CONF_SAMPLE_RATE): cv.int_range(min=1),
-        cv.Optional(CONF_NUM_CHANNELS): cv.int_range(1, 2),
+        # The pipeline carries whatever the source has; the resampler refuses to change the
+        # channel count, so this has to match the speaker it feeds.
+        cv.Optional(CONF_NUM_CHANNELS): cv.int_range(1, 8),
     }
 )
 

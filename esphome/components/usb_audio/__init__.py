@@ -145,16 +145,35 @@ FS_BIAS_SDKCONFIG = {
 }
 
 
+def _service_intervals_per_second() -> int:
+    """How often the controller can service an isochronous endpoint.
+
+    A full-speed bus runs 1 ms frames, so a packet has to carry a whole millisecond of
+    audio. High speed runs 125 us microframes, and an endpoint asking for every microframe
+    carries an eighth of that -- which is what makes a wide format fit a packet buffer that
+    a full-speed device of the same format would not.
+
+    Which of the two applies is a property of the chip: the ESP32-P4 is the only variant
+    with a high-speed controller. It is not a property of the configuration, because the
+    speed and the bInterval come from the descriptor of whatever gets plugged in. This takes
+    the best the hardware can do; the controller checks the endpoint it actually gets
+    against its real limits in hcd_pipe_alloc(), which is where a device that asks for more
+    than the buffer holds is refused, with the reason in the log.
+    """
+    return 8000 if esp32.get_esp32_variant() == esp32.const.VARIANT_ESP32P4 else 1000
+
+
 def _endpoint_mps(stream) -> int:
     """Largest isochronous packet a stream of this format needs.
 
-    A full-speed device is serviced once per 1 ms frame, so a packet carries one
-    millisecond of audio rounded up to a whole audio frame. Devices declare one further
-    frame on top: a rate that is not a multiple of 1000 sends a longer packet whenever its
-    accumulator wraps, and an asynchronous endpoint does the same when its clock runs fast.
+    A packet carries one service interval of audio rounded up to a whole audio frame.
+    Devices declare one further frame on top: a rate that is not a multiple of the interval
+    count sends a longer packet whenever its accumulator wraps, and an asynchronous endpoint
+    does the same when its clock runs fast.
     """
     frame = int(stream[CONF_NUM_CHANNELS]) * (int(stream[CONF_BITS_PER_SAMPLE]) // 8)
-    per_interval = -(-int(stream[CONF_SAMPLE_RATE]) // 1000) * frame
+    intervals = _service_intervals_per_second()
+    per_interval = -(-int(stream[CONF_SAMPLE_RATE]) // intervals) * frame
     return per_interval + frame
 
 

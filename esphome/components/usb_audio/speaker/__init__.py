@@ -45,7 +45,10 @@ CONFIG_SCHEMA = cv.All(
                     min=8000, max=96000
                 ),
                 cv.Optional(CONF_BITS_PER_SAMPLE, default="16bit"): _bits_validator(),
-                cv.Optional(CONF_NUM_CHANNELS, default=2): cv.int_range(min=1, max=2),
+                # A device is driven with the channel count configured here, which needs an
+                # alt-setting carrying exactly that many. Above two there is no fallback:
+                # the pair-from-a-wider-frame path exists for a stereo request only.
+                cv.Optional(CONF_NUM_CHANNELS, default=2): cv.int_range(min=1, max=8),
             }
         ).extend(cv.COMPONENT_SCHEMA)
     ),

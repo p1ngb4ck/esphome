@@ -191,7 +191,10 @@ CONFIG_SCHEMA = cv.All(
 AUDIO_COMPONENT_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_BITS_PER_SAMPLE): cv.int_range(8, 32),
-        cv.Optional(CONF_NUM_CHANNELS): cv.int_range(1, 2),
+        # Surround sources are carried through unchanged; nothing here mixes channels up or
+        # down. micro-flac decodes up to 8, and the resampler and mixer in esp-audio-libs
+        # both iterate over the channel count rather than assuming two.
+        cv.Optional(CONF_NUM_CHANNELS): cv.int_range(1, 8),
         cv.Optional(CONF_SAMPLE_RATE): cv.int_range(8000, 48000),
     }
 )

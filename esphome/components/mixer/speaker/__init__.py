@@ -94,7 +94,10 @@ CONFIG_SCHEMA = cv.All(
                 cv.Length(min=2, max=8),
             ),
             cv.Optional(CONF_BITS_PER_SAMPLE): cv.one_of(8, 16, 24, 32, int=True),
-            cv.Optional(CONF_NUM_CHANNELS): cv.int_range(min=1, max=2),
+            # esp_audio_libs::mixer::mix_frames() maps a source with fewer channels by
+            # clamping the channel index, so a mono source into a surround output is heard
+            # on every channel rather than placed.
+            cv.Optional(CONF_NUM_CHANNELS): cv.int_range(min=1, max=8),
             cv.Optional(CONF_QUEUE_MODE, default=False): cv.boolean,
             cv.Optional(CONF_TASK_STACK_IN_PSRAM): psram.validate_task_stack_in_psram,
         }
