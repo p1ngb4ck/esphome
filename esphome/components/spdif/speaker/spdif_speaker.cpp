@@ -209,7 +209,8 @@ void SpdifSpeaker::loop() {
     this->hardware_failed_.store(false);
     this->should_run_.store(false);
     this->state_ = speaker::STATE_STOPPED;
-    this->status_set_error("S/PDIF output failed to start");
+    this->status_set_error();
+    ESP_LOGE(TAG, "S/PDIF speaker hardware failed");
     return;
   }
   if (this->task_running_.load() && this->state_ == speaker::STATE_STARTING) {
