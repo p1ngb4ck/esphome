@@ -16,14 +16,14 @@
 // Copyright 2015-2016 Espressif Systems (Shanghai) PTE LTD
 
 #include "esp_log.h"
-
-    /**
-     * @brief Utility structure that can be used to split a int32_t up into 2
-     * separate channels with int16_t data.
-     * @author Phil Schatzmann
-     * @copyright Apache License Version 2
-     */
-    struct __attribute__((packed)) Frame {
+#include <math.h>
+  /**
+   * @brief Utility structure that can be used to split a int32_t up into 2
+   * separate channels with int16_t data.
+   * @author Phil Schatzmann
+   * @copyright Apache License Version 2
+   */
+  struct __attribute__((packed)) Frame {
   int16_t channel1;  ///< Left audio channel data
   int16_t channel2;  ///< Right audio channel data
 
