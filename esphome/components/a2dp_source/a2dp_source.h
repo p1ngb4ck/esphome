@@ -84,6 +84,7 @@ class A2DPSource : public Component {
   static int32_t audio_callback_(Frame *frames, int32_t frame_count);
   static void connection_state_(esp_a2d_connection_state_t state, void *self);
   static void audio_state_(esp_a2d_audio_state_t state, void *self);
+  static void authentication_complete_(esp_bt_status_t status);
 
   int32_t fill_frames_(Frame *frames, int32_t frame_count);
   bool accept_device_(const char *name, esp_bd_addr_t address, int rssi);

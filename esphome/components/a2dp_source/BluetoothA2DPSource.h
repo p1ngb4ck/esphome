@@ -212,6 +212,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// Defines the pin code. If nothing is defined we use "1234"
   void set_pin_code(const char* pin_code, esp_bt_pin_type_t pin_type);
 
+  void set_on_authentication_complete(void (*callback)(esp_bt_status_t status));
+
   /// Defines if the BLE should be reset on start
   virtual void set_reset_ble(bool doInit);
 

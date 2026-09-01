@@ -68,6 +68,14 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
   }
 }
 
+void A2DPSource::authentication_complete_(esp_bt_status_t status) {
+  if (global_a2dp_source == nullptr) {
+    return;
+  }
+
+  global_a2dp_source->paired_pending_.store(status == ESP_BT_STATUS_SUCCESS);
+}
+
 void A2DPSource::setup() {
   global_a2dp_source = this;
 
@@ -104,7 +112,9 @@ void A2DPSource::setup() {
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
   this->source_.set_on_connection_state_changed(A2DPSource::connection_state_, this);
   this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
-
+  this->source_.set_on_authentication_complete(
+      A2DPSource::authentication_complete_);
+  
   this->source_.set_auto_reconnect(true);
 
   bool stored = this->has_stored_device();
@@ -218,7 +228,6 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     ESP_LOGI(TAG, "Connecting to the chosen device");
     this->paired_name_ = name;
     this->pairing_mode_.store(false);
-    this->paired_pending_.store(true);
     return true;
   }
 

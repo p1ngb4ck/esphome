@@ -107,6 +107,11 @@ void BluetoothA2DPSource::set_pin_code(const char *pin_code,
   this->pin_code_len = len;
 }
 
+void BluetoothA2DPSource::set_on_authentication_complete(
+    void (*callback)(esp_bt_status_t status)) {
+  this->authentication_complete_callback = callback;
+}
+
 void BluetoothA2DPSource::start(std::vector<const char *> names) {
   ESP_LOGD(BT_APP_TAG, "%s, ", __func__);
   this->bt_names = names;
@@ -374,7 +379,6 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
       ESP_LOGI(BT_AV_TAG, "--Result: Target device found");
       s_a2d_state = APP_AV_STATE_DISCOVERED;
       memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
-      set_last_connection(peer_bd_addr);
       ESP_LOGI(BT_AV_TAG, "Cancel device discovery ...");
       esp_bt_gap_cancel_discovery();
     } else {
@@ -382,6 +386,8 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
     }
   }
 }
+
+void (*authentication_complete_callback)(esp_bt_status_t status) = nullptr;
 
 void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
                                               esp_bt_gap_cb_param_t *param) {
@@ -424,10 +430,14 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
       if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(BT_AV_TAG, "authentication success: %s",
                  param->auth_cmpl.device_name);
-        // esp_log_buffer_hex(BT_AV_TAG, param->auth_cmpl.bda, ESP_BD_ADDR_LEN);
+        memcpy(peer_bd_addr, param->auth_cmpl.bda, ESP_BD_ADDR_LEN);
+        set_last_connection(peer_bd_addr);
       } else {
         ESP_LOGE(BT_AV_TAG, "authentication failed, status:%d",
                  param->auth_cmpl.stat);
+      }
+      if (this->authentication_complete_callback != nullptr) {
+        this->authentication_complete_callback(param->auth_cmpl.stat);
       }
       break;
     }
