@@ -272,7 +272,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   Stream& (*get_next_stream_cb)() = nullptr;
 #endif
   const char* dev_name = "ESP32_A2DP_SRC";
-  bool ssp_enabled = true;
+  bool ssp_enabled = false;
   std::vector<const char*> bt_names;
   esp_bt_pin_type_t pin_type;
   esp_bt_pin_code_t pin_code;
