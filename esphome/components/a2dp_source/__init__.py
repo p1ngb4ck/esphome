@@ -188,7 +188,7 @@ async def a2dp_action_to_code(config, action_id, template_arg, args):
     PairWithNameAction,
     cv.Schema(
         {
-            cv.GenerateID(): cv.use_id(A2DPSource),
+            cv.GenerateID(CONF_A2DP_SOURCE_ID): cv.use_id(A2DPSource),
             cv.Required(CONF_NAME): cv.templatable(cv.string),
         }
     ),
