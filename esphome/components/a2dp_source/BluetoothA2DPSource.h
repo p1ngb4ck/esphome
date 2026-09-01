@@ -325,6 +325,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
 
   virtual void process_user_state_callbacks(uint16_t event, void* param);
 
+  void (*authentication_complete_callback)(esp_bt_status_t status) = nullptr;
+
   virtual bool bt_app_work_dispatch(bt_app_cb_t p_cback, uint16_t event,
                                     void* p_params, int param_len,
                                     bt_app_copy_cb_t p_copy_cback);

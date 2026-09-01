@@ -387,8 +387,6 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
   }
 }
 
-void (*authentication_complete_callback)(esp_bt_status_t status) = nullptr;
-
 void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
                                               esp_bt_gap_cb_param_t *param) {
   ESP_LOGD(BT_AV_TAG, "%s evt %d", __func__, event);
