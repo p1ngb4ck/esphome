@@ -1,0 +1,45 @@
+i2s_audio:
+  - id: i2s_in
+    i2s_bclk_pin: ${i2s_bclk_pin}
+    i2s_lrclk_pin: ${i2s_lrclk_pin}
+
+microphone:
+  - platform: i2s_audio
+    id: from_sender
+    i2s_din_pin: ${i2s_din_pin}
+    i2s_mode: secondary
+    adc_type: external
+    channel: stereo
+    sample_rate: 44100
+    bits_per_sample: 16bit
+
+a2dp_source:
+  id: bt_out
+  microphone:
+    microphone: from_sender
+    channels: [0, 1]
+  local_name: "Test Bridge"
+  on_paired:
+    - logger.log:
+        format: "paired with %s"
+        args: ["name.c_str()"]
+  on_connected:
+    - logger.log: "connected"
+  on_disconnected:
+    - logger.log: "disconnected"
+
+button:
+  - platform: template
+    name: "Pair Bluetooth"
+    on_press:
+      - a2dp_source.start_pairing: bt_out
+  - platform: template
+    name: "Forget Bluetooth device"
+    on_press:
+      - a2dp_source.forget_device: bt_out
+
+binary_sensor:
+  - platform: template
+    name: "Bluetooth connected"
+    device_class: connectivity
+    lambda: return id(bt_out).is_connected();

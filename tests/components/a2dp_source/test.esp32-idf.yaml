@@ -1,0 +1,6 @@
+substitutions:
+  i2s_bclk_pin: GPIO26
+  i2s_lrclk_pin: GPIO25
+  i2s_din_pin: GPIO22
+
+<<: !include common.yaml
