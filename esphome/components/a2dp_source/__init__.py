@@ -196,7 +196,7 @@ async def a2dp_action_to_code(config, action_id, template_arg, args):
 )
 async def pair_with_name_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
-    await cg.register_parented(var, config[CONF_ID])
+    await cg.register_parented(var, config[CONF_A2DP_SOURCE_ID])
     templ = await cg.templatable(config[CONF_NAME], args, cg.std_string)
     cg.add(var.set_name(templ))
     return var
