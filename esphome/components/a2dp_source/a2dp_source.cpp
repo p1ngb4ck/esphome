@@ -323,7 +323,7 @@ void A2DPSource::loop() {
     ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
   }
 
-  if (this->paired_pending_.load()) {
+  if (this->paired_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Paired with %s", this->paired_name_.c_str());
     for (auto *trigger : this->paired_triggers_) {
       trigger->trigger(this->paired_name_);
