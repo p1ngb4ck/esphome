@@ -4,7 +4,7 @@ from esphome.components import esp32, microphone
 from esphome.components.esp32 import add_idf_sdkconfig_option, only_on_variant
 from esphome.components.esp32.const import VARIANT_ESP32
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_TRIGGER_ID, CONF_VOLUME
+from esphome.const import CONF_ID, CONF_NAME, CONF_TRIGGER_ID, CONF_VOLUME
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32", "microphone"]
@@ -24,6 +24,7 @@ a2dp_source_ns = cg.esphome_ns.namespace("a2dp_source")
 A2DPSource = a2dp_source_ns.class_("A2DPSource", cg.Component)
 StartPairingAction = a2dp_source_ns.class_("StartPairingAction", automation.Action)
 ForgetDeviceAction = a2dp_source_ns.class_("ForgetDeviceAction", automation.Action)
+PairWithNameAction = a2dp_source_ns.class_("PairWithNameAction", automation.Action)
 IsConnectedCondition = a2dp_source_ns.class_(
     "IsConnectedCondition", automation.Condition
 )
@@ -170,6 +171,25 @@ A2DP_ACTION_SCHEMA = automation.maybe_simple_id(
 async def a2dp_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+@automation.register_action(
+    "a2dp_source.pair_with_name",
+    PairWithNameAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(A2DPSource),
+            cv.Required(CONF_NAME): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def pair_with_name_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_NAME], args, cg.std_string)
+    cg.add(var.set_name(templ))
     return var
 
 

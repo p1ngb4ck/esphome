@@ -28,11 +28,22 @@ a2dp_source:
   on_disconnected:
     - logger.log: "disconnected"
 
+select:
+  - platform: a2dp_source
+    a2dp_source_id: bt_out
+    name: "Bluetooth device"
+
 button:
   - platform: template
     name: "Pair Bluetooth"
     on_press:
       - a2dp_source.start_pairing: bt_out
+  - platform: template
+    name: "Pair with a known name"
+    on_press:
+      - a2dp_source.pair_with_name:
+          id: bt_out
+          name: "Living Room Speaker"
   - platform: template
     name: "Forget Bluetooth device"
     on_press:

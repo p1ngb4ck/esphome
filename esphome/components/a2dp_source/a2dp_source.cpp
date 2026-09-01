@@ -1,5 +1,7 @@
 #include "a2dp_source.h"
 
+#include "select/a2dp_device_select.h"
+
 #ifdef USE_ESP32_VARIANT_ESP32
 
 #include "esphome/core/log.h"
@@ -61,6 +63,8 @@ void A2DPSource::connection_state_(esp_a2d_connection_state_t state, void *self)
 
 void A2DPSource::setup() {
   global_a2dp_source = this;
+
+  this->devices_.reserve(MAX_DISCOVERED);
 
   size_t ring_bytes = (size_t) SAMPLE_RATE * BYTES_PER_FRAME * this->buffer_duration_ms_ / 1000;
   this->ring_ = xRingbufferCreate(ring_bytes, RINGBUF_TYPE_BYTEBUF);
@@ -137,6 +141,9 @@ bool A2DPSource::has_stored_device() const {
 
 void A2DPSource::start_pairing() {
   uint32_t now = millis();
+  this->devices_.clear();
+  this->chosen_valid_ = false;
+  this->devices_changed_.store(true);
   this->best_valid_ = false;
   this->best_rssi_ = -128;
   this->best_name_[0] = '\0';
@@ -147,6 +154,33 @@ void A2DPSource::start_pairing() {
   ESP_LOGI(TAG, "pairing window open");
   ESP_LOGI(TAG, "put the speaker or receiver into pairing mode now -- on an AV");
   ESP_LOGI(TAG, "receiver that is a menu entry, it is not discoverable otherwise");
+  if (this->device_select_ != nullptr) {
+    ESP_LOGI(TAG, "found devices appear in the select; pick one to pair");
+  }
+}
+
+bool A2DPSource::pair_with_name(const std::string &name) {
+  for (const auto &device : this->devices_) {
+    if (device.name != name) {
+      continue;
+    }
+    memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
+    this->chosen_valid_ = true;
+    // Reopen the window if it had closed, so the inquiry is running when the
+    // chosen device reports itself again -- that sighting is what writes NVS.
+    this->pairing_mode_.store(true);
+    ESP_LOGI(TAG, "pairing with %s on its next sighting", name.c_str());
+    return true;
+  }
+  ESP_LOGW(TAG, "%s was not among the devices found", name.c_str());
+  return false;
+}
+
+void A2DPSource::publish_device_list_() {
+  if (this->device_select_ == nullptr) {
+    return;
+  }
+  this->device_select_->set_devices(this->devices_);
 }
 
 void A2DPSource::forget_device() {
@@ -164,6 +198,37 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
   ESP_LOGI(TAG, "  found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
            address[3], address[4], address[5], rssi);
 
+  // Remember it either way, so the select can offer it and so a later choice by
+  // name has an address to match against.
+  bool known = false;
+  for (auto &device : this->devices_) {
+    if (memcmp(device.address, address, ESP_BD_ADDR_LEN) == 0) {
+      device.rssi = rssi;
+      known = true;
+      break;
+    }
+  }
+  if (!known && this->devices_.size() < MAX_DISCOVERED) {
+    DiscoveredDevice device;
+    device.name = name;
+    memcpy(device.address, address, ESP_BD_ADDR_LEN);
+    device.rssi = rssi;
+    this->devices_.push_back(device);
+    this->devices_changed_.store(true);
+  }
+
+  // A choice made through the select or the action wins over everything below.
+  if (this->chosen_valid_) {
+    if (memcmp(address, this->chosen_addr_, ESP_BD_ADDR_LEN) != 0) {
+      return false;
+    }
+    ESP_LOGI(TAG, "  -> the chosen device");
+    this->paired_name_ = name;
+    this->pairing_mode_.store(false);
+    this->paired_pending_.store(true);
+    return true;
+  }
+
   if (!this->target_name_.empty()) {
     if (strncmp(name, this->target_name_.c_str(), this->target_name_.size()) != 0) {
       return false;
@@ -173,6 +238,12 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     this->pairing_mode_.store(false);
     this->paired_pending_.store(true);
     return true;
+  }
+
+  // With a select attached the user decides, so nothing is taken on its own --
+  // picking one here would race the person reading the list.
+  if (this->device_select_ != nullptr) {
+    return false;
   }
 
   uint32_t now = millis();
@@ -240,6 +311,11 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 }
 
 void A2DPSource::loop() {
+  if (this->devices_changed_.exchange(false)) {
+    // Published from the loop task: the discovery callback runs on Bluedroid's,
+    // and an entity update has to reach the API and the web server from here.
+    this->publish_device_list_();
+  }
   if (this->paired_pending_.exchange(false)) {
     ESP_LOGI(TAG, "paired with %s", this->paired_name_.c_str());
     for (auto *trigger : this->paired_triggers_) {
@@ -282,6 +358,9 @@ void A2DPSource::dump_config() {
     ESP_LOGCONFIG(TAG, "  Fallback after: %" PRIu32 " s", this->fallback_seconds_);
   } else {
     ESP_LOGCONFIG(TAG, "  Target name: %s", this->target_name_.c_str());
+  }
+  if (this->device_select_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Target: chosen from the select");
   }
   ESP_LOGCONFIG(TAG, "  Buffer: %" PRIu32 " ms", this->buffer_duration_ms_);
   ESP_LOGCONFIG(TAG, "  Device stored: %s", YESNO(this->has_stored_device()));

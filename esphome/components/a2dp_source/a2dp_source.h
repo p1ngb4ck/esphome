@@ -17,11 +17,26 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 #include "BluetoothA2DPSource.h"
 
 namespace esphome {
 namespace a2dp_source {
+
+class A2DPDeviceSelect;
+
+// One device seen during a pairing window.
+//
+// The name is owned here and never moves, because the select's traits hold bare
+// pointers into it and treat them as valid for the lifetime of the program. The
+// list is reserved to MAX_DISCOVERED once, so no reallocation can invalidate
+// them, and a device beyond that count is dropped rather than risking it.
+struct DiscoveredDevice {
+  std::string name;
+  esp_bd_addr_t address;
+  int rssi;
+};
 
 // Streams audio to a Bluetooth speaker, headphone or AV receiver as an A2DP
 // source. Classic Bluetooth, so this only exists on the original ESP32; every
@@ -50,6 +65,7 @@ class A2DPSource : public Component {
   void set_volume(uint8_t volume) { this->volume_ = volume; }
   void set_buffer_duration_ms(uint32_t ms) { this->buffer_duration_ms_ = ms; }
   void set_pair_on_boot_if_empty(bool enable) { this->pair_on_boot_if_empty_ = enable; }
+  void set_device_select(A2DPDeviceSelect *select) { this->device_select_ = select; }
 
   void add_on_paired_trigger(Trigger<std::string> *trigger) { this->paired_triggers_.push_back(trigger); }
   void add_on_connected_trigger(Trigger<> *trigger) { this->connected_triggers_.push_back(trigger); }
@@ -60,10 +76,24 @@ class A2DPSource : public Component {
   void start_pairing();
   /// @brief Drops the stored device. The next pairing window picks a new one.
   void forget_device();
+  /// @brief Pairs with one of the devices found in this window, by name.
+  ///
+  /// The address is remembered and taken the next time the inquiry reports it,
+  /// which is the only moment the library will write it to NVS.
+  /// @return false when no device of that name was seen.
+  bool pair_with_name(const std::string &name);
+  /// @brief Devices seen since the pairing window opened.
+  const std::vector<DiscoveredDevice> &discovered_devices() const { return this->devices_; }
+  /// @brief Upper bound on that list, so the select can size its storage once.
+  static size_t max_discovered() { return MAX_DISCOVERED; }
   bool is_pairing() const { return this->pairing_mode_.load(); }
   bool is_connected() const { return this->connected_.load(); }
   /// @brief Whether a device address is stored, which is what survives a reboot.
   bool has_stored_device() const;
+
+  // Enough for any room. The cap exists because the select holds pointers into
+  // devices_, and the single reserve is what keeps them valid.
+  static const size_t MAX_DISCOVERED = 12;
 
  protected:
   // Called from the library's discovery handler for every device that carries
@@ -99,6 +129,16 @@ class A2DPSource : public Component {
   std::atomic<bool> connect_pending_{false};
   std::atomic<bool> disconnect_pending_{false};
 
+  void publish_device_list_();
+
+  A2DPDeviceSelect *device_select_{nullptr};
+  std::vector<DiscoveredDevice> devices_;
+  // Set once a device has been chosen by name; the callback then waits for that
+  // address rather than judging by signal strength.
+  esp_bd_addr_t chosen_addr_{};
+  bool chosen_valid_{false};
+  std::atomic<bool> devices_changed_{false};
+
   uint32_t settle_until_ms_{0};
   uint32_t fallback_after_ms_{0};
   char best_name_[64]{};
@@ -123,6 +163,12 @@ template<typename... Ts> class StartPairingAction : public Action<Ts...>, public
 template<typename... Ts> class ForgetDeviceAction : public Action<Ts...>, public Parented<A2DPSource> {
  public:
   void play(Ts... x) override { this->parent_->forget_device(); }
+};
+
+template<typename... Ts> class PairWithNameAction : public Action<Ts...>, public Parented<A2DPSource> {
+ public:
+  TEMPLATABLE_VALUE(std::string, name)
+  void play(Ts... x) override { this->parent_->pair_with_name(this->name_.value(x...)); }
 };
 
 template<typename... Ts> class IsConnectedCondition : public Condition<Ts...>, public Parented<A2DPSource> {
