@@ -70,7 +70,7 @@ BluetoothA2DPSource::BluetoothA2DPSource() {
   actual_bluetooth_a2dp_source = this;
   actual_bluetooth_a2dp_common = this;
 
-  this->ssp_enabled = false;
+  this->ssp_enabled = true;
   this->pin_type = ESP_BT_PIN_TYPE_VARIABLE;
 
   // default pin code
