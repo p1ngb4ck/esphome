@@ -107,6 +107,7 @@ void A2DPSource::setup() {
   }
 
   this->source_.set_local_name(this->local_name_.c_str());
+  this->source_.set_task_core(CONFIG_BT_BLUEDROID_PINNED_TO_CORE);
   this->source_.set_volume(this->volume_);
   this->source_.set_data_callback_in_frames(A2DPSource::audio_callback_);
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
