@@ -305,6 +305,15 @@ void A2DPSource::loop() {
   if (this->devices_changed_.exchange(false)) {
     this->publish_device_list_();
   }
+  uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
+  if (conn_state != 0xFF) {
+    ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
+  }
+  uint8_t audio_state = this->pending_audio_state_.exchange(0xFF);
+  if (audio_state != 0xFF) {
+    ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
+  }
+
   if (this->paired_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Paired with %s", this->paired_name_.c_str());
     for (auto *trigger : this->paired_triggers_) {

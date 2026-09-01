@@ -34,6 +34,9 @@ IsStreamingCondition = a2dp_source_ns.class_(
     "IsStreamingCondition", automation.Condition
 )
 IsPairedCondition = a2dp_source_ns.class_("IsPairedCondition", automation.Condition)
+IsStreamingCondition = a2dp_source_ns.class_(
+    "IsStreamingCondition", automation.Condition
+)
 
 # Classic Bluetooth exists on the original ESP32 and nowhere else in the family;
 # every later variant is BLE only, and A2DP is a Classic profile. Without this
