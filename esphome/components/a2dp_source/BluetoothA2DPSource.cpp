@@ -379,6 +379,7 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
       ESP_LOGI(BT_AV_TAG, "--Result: Target device found");
       s_a2d_state = APP_AV_STATE_DISCOVERED;
       memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
+      set_last_connection(peer_bd_addr);
       ESP_LOGI(BT_AV_TAG, "Cancel device discovery ...");
       esp_bt_gap_cancel_discovery();
     } else {
