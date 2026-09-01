@@ -83,8 +83,17 @@ CONFIG_SCHEMA = cv.All(
     cv.require_framework_version(esp_idf=cv.Version(5, 0, 0)),
 )
 
-FINAL_VALIDATE_SCHEMA = microphone.final_validate_microphone_source_schema(
-    "a2dp_source", sample_rate=44100
+# The helper validates a microphone source block, not a whole component config,
+# so it has to be addressed at the key it belongs to.
+FINAL_VALIDATE_SCHEMA = cv.Schema(
+    {
+        cv.Required(microphone.CONF_MICROPHONE): (
+            microphone.final_validate_microphone_source_schema(
+                "a2dp_source", sample_rate=44100
+            )
+        ),
+    },
+    extra=cv.ALLOW_EXTRA,
 )
 
 
