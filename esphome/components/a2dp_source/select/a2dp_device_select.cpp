@@ -10,15 +10,9 @@ namespace a2dp_source {
 
 static const char *const TAG = "a2dp_source.select";
 
-// Shown while no pairing window has run, so the entity has something to display
-// rather than an empty list that looks broken.
 static const char *const NO_DEVICES = "(no devices found)";
 
 void A2DPDeviceSelect::setup() {
-  // Reserved once and never grown again. Everything below hands the traits bare
-  // pointers into these strings, and a reallocation would leave the select
-  // pointing at freed memory -- for short names in particular, which live inside
-  // the string object itself and move with it.
   this->option_storage_.reserve(A2DPSource::max_discovered() + 1);
   this->option_storage_.emplace_back(NO_DEVICES);
 
@@ -30,8 +24,6 @@ void A2DPDeviceSelect::setup() {
 }
 
 void A2DPDeviceSelect::set_devices(const std::vector<DiscoveredDevice> &devices) {
-  // The strings are replaced in place, so the vector's capacity is untouched and
-  // the pointers below stay inside the same allocation.
   this->option_storage_.clear();
   if (devices.empty()) {
     this->option_storage_.emplace_back(NO_DEVICES);
@@ -57,9 +49,6 @@ void A2DPDeviceSelect::control(const std::string &value) {
   if (this->parent_ == nullptr || value == NO_DEVICES) {
     return;
   }
-  // Publish first: the pairing itself completes later, when the inquiry reports
-  // the chosen device again, and the entity should show what was picked in the
-  // meantime rather than snapping back.
   this->publish_state(value);
   this->parent_->pair_with_name(value);
 }

@@ -27,6 +27,10 @@ a2dp_source:
     - logger.log: "connected"
   on_disconnected:
     - logger.log: "disconnected"
+  on_streaming_start:
+    - logger.log: "streaming"
+  on_streaming_stop:
+    - logger.log: "streaming stopped"
 
 select:
   - platform: a2dp_source
@@ -54,3 +58,6 @@ binary_sensor:
     name: "Bluetooth connected"
     device_class: connectivity
     lambda: return id(bt_out).is_connected();
+  - platform: template
+    name: "Bluetooth streaming"
+    lambda: return id(bt_out).is_streaming();

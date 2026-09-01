@@ -15,21 +15,12 @@ namespace a2dp_source {
 
 static const char *const TAG = "a2dp_source";
 
-// A2DP carries SBC and SBC is 44100 Hz, 16 bit, stereo. The frame the library
-// hands out is two int16 samples.
 static const uint32_t SAMPLE_RATE = 44100;
 static const size_t BYTES_PER_FRAME = 4;
 
-// The library stores the peer address in this namespace, under the key its
-// last_bda_nvs_name() returns for the source role. Forgetting a device writes
-// six zero bytes rather than erasing the entry, so an all-zero address is what
-// "nothing stored" looks like.
 static const char *const NVS_NAMESPACE = "connected_bda";
 static const char *const NVS_KEY = "src_bda";
 
-// The library's callbacks are plain function pointers with no user argument, so
-// the component has to be reachable from a file-scope pointer. One A2DP source
-// per device is the only sensible configuration anyway -- there is one radio.
 static A2DPSource *global_a2dp_source = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 bool A2DPSource::device_filter_(const char *name, esp_bd_addr_t address, int rssi) {
@@ -52,12 +43,28 @@ void A2DPSource::connection_state_(esp_a2d_connection_state_t state, void *self)
   if (component == nullptr) {
     return;
   }
+  component->pending_connection_state_.store((uint8_t) state);
   bool connected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
   bool was = component->connected_.exchange(connected);
   if (connected && !was) {
     component->connect_pending_.store(true);
   } else if (!connected && was) {
     component->disconnect_pending_.store(true);
+  }
+}
+
+void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
+  auto *component = static_cast<A2DPSource *>(self);
+  if (component == nullptr) {
+    return;
+  }
+  component->pending_audio_state_.store((uint8_t) state);
+  bool streaming = (state == ESP_A2D_AUDIO_STATE_STARTED);
+  bool was = component->streaming_.exchange(streaming);
+  if (streaming && !was) {
+    component->streaming_start_pending_.store(true);
+  } else if (!streaming && was) {
+    component->streaming_stop_pending_.store(true);
   }
 }
 
@@ -69,7 +76,7 @@ void A2DPSource::setup() {
   size_t ring_bytes = (size_t) SAMPLE_RATE * BYTES_PER_FRAME * this->buffer_duration_ms_ / 1000;
   this->ring_ = xRingbufferCreate(ring_bytes, RINGBUF_TYPE_BYTEBUF);
   if (this->ring_ == nullptr) {
-    ESP_LOGE(TAG, "could not allocate the %u byte buffer", (unsigned) ring_bytes);
+    ESP_LOGE(TAG, "Could not allocate the %u byte buffer", (unsigned) ring_bytes);
     this->mark_failed();
     return;
   }
@@ -79,9 +86,6 @@ void A2DPSource::setup() {
       if (data.empty()) {
         return;
       }
-      // Never block here: this runs on whatever task the microphone reads from.
-      // If Bluetooth is not draining, the newest audio is worth more than the
-      // oldest, so the oldest goes.
       if (xRingbufferSend(this->ring_, data.data(), data.size(), 0) != pdTRUE) {
         size_t dropped = 0;
         void *stale = xRingbufferReceiveUpTo(this->ring_, &dropped, 0, data.size());
@@ -99,20 +103,18 @@ void A2DPSource::setup() {
   this->source_.set_data_callback_in_frames(A2DPSource::audio_callback_);
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
   this->source_.set_on_connection_state_changed(A2DPSource::connection_state_, this);
+  this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
 
-  // Always on, in both modes, and this is not cosmetic: the library only writes
-  // the peer address to NVS when reconnect_status is not NoReconnect. Leaving it
-  // off means a successful pairing is forgotten on reset.
   this->source_.set_auto_reconnect(true);
 
   bool stored = this->has_stored_device();
   if (!stored && this->pair_on_boot_if_empty_) {
-    ESP_LOGI(TAG, "no device stored, opening the pairing window");
+    ESP_LOGI(TAG, "No device stored, opening the pairing window");
     this->start_pairing();
   } else if (stored) {
-    ESP_LOGI(TAG, "connecting to the stored device");
+    ESP_LOGD(TAG, "Connecting to the stored device");
   } else {
-    ESP_LOGI(TAG, "no device stored; call a2dp_source.start_pairing to add one");
+    ESP_LOGI(TAG, "No device stored, call a2dp_source.start_pairing to add one");
   }
 
   this->source_.start();
@@ -151,11 +153,9 @@ void A2DPSource::start_pairing() {
   this->fallback_after_ms_ = this->settle_until_ms_ + this->fallback_seconds_ * 1000;
   this->pairing_mode_.store(true);
 
-  ESP_LOGI(TAG, "pairing window open");
-  ESP_LOGI(TAG, "put the speaker or receiver into pairing mode now -- on an AV");
-  ESP_LOGI(TAG, "receiver that is a menu entry, it is not discoverable otherwise");
+  ESP_LOGI(TAG, "Pairing window open");
   if (this->device_select_ != nullptr) {
-    ESP_LOGI(TAG, "found devices appear in the select; pick one to pair");
+    ESP_LOGD(TAG, "Found devices appear in the select");
   }
 }
 
@@ -166,10 +166,8 @@ bool A2DPSource::pair_with_name(const std::string &name) {
     }
     memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
     this->chosen_valid_ = true;
-    // Reopen the window if it had closed, so the inquiry is running when the
-    // chosen device reports itself again -- that sighting is what writes NVS.
     this->pairing_mode_.store(true);
-    ESP_LOGI(TAG, "pairing with %s on its next sighting", name.c_str());
+    ESP_LOGI(TAG, "Pairing with %s on its next sighting", name.c_str());
     return true;
   }
   ESP_LOGW(TAG, "%s was not among the devices found", name.c_str());
@@ -184,22 +182,18 @@ void A2DPSource::publish_device_list_() {
 }
 
 void A2DPSource::forget_device() {
-  ESP_LOGI(TAG, "forgetting the stored device");
+  ESP_LOGI(TAG, "Forgetting the stored device");
   this->source_.clean_last_connection();
 }
 
 bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rssi) {
   if (!this->pairing_mode_.load()) {
-    // Outside the pairing window nothing is accepted. The stored address is what
-    // counts, and a passing device with a similar name must not displace it.
     return false;
   }
 
-  ESP_LOGI(TAG, "  found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
+  ESP_LOGD(TAG, "Found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
            address[3], address[4], address[5], rssi);
 
-  // Remember it either way, so the select can offer it and so a later choice by
-  // name has an address to match against.
   bool known = false;
   for (auto &device : this->devices_) {
     if (memcmp(device.address, address, ESP_BD_ADDR_LEN) == 0) {
@@ -217,12 +211,11 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     this->devices_changed_.store(true);
   }
 
-  // A choice made through the select or the action wins over everything below.
   if (this->chosen_valid_) {
     if (memcmp(address, this->chosen_addr_, ESP_BD_ADDR_LEN) != 0) {
       return false;
     }
-    ESP_LOGI(TAG, "  -> the chosen device");
+    ESP_LOGI(TAG, "Connecting to the chosen device");
     this->paired_name_ = name;
     this->pairing_mode_.store(false);
     this->paired_pending_.store(true);
@@ -233,24 +226,19 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     if (strncmp(name, this->target_name_.c_str(), this->target_name_.size()) != 0) {
       return false;
     }
-    ESP_LOGI(TAG, "  -> matches target_name");
+    ESP_LOGI(TAG, "Connecting to the target_name match");
     this->paired_name_ = name;
     this->pairing_mode_.store(false);
     this->paired_pending_.store(true);
     return true;
   }
 
-  // With a select attached the user decides, so nothing is taken on its own --
-  // picking one here would race the person reading the list.
   if (this->device_select_ != nullptr) {
     return false;
   }
 
   uint32_t now = millis();
 
-  // First stage: collect. Taking whichever device answers first would be a race
-  // with the order the inquiry happens to report them in, and that order says
-  // nothing about which one is meant.
   if (now < this->settle_until_ms_) {
     if (!this->best_valid_ || rssi > this->best_rssi_) {
       strncpy(this->best_name_, name, sizeof(this->best_name_) - 1);
@@ -262,20 +250,16 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     return false;
   }
 
-  // Second stage: wait for the winner to come round again. The inquiry reports
-  // each device repeatedly, so it will. Accepting has to happen from inside this
-  // callback because that is the only place the library writes NVS.
   if (this->best_valid_ && memcmp(address, this->best_addr_, ESP_BD_ADDR_LEN) == 0) {
-    ESP_LOGI(TAG, "  -> strongest of the window at %d dBm", this->best_rssi_);
+    ESP_LOGI(TAG, "Connecting to the strongest device at %d dBm", this->best_rssi_);
     this->paired_name_ = name;
     this->pairing_mode_.store(false);
     this->paired_pending_.store(true);
     return true;
   }
 
-  // If it never comes back, take what is still answering rather than stall.
   if (now > this->fallback_after_ms_) {
-    ESP_LOGW(TAG, "  -> %s stopped answering, taking this one instead",
+    ESP_LOGW(TAG, "%s stopped answering, connecting to this one instead",
              this->best_valid_ ? this->best_name_ : "(nothing)");
     this->paired_name_ = name;
     this->pairing_mode_.store(false);
@@ -302,8 +286,6 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
   }
 
   if (filled < wanted) {
-    // Short reads are filled with silence rather than reported: returning fewer
-    // frames than asked stalls the stream, and a gap is worse than quiet.
     memset(out + filled, 0, wanted - filled);
     this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
   }
@@ -311,26 +293,45 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 }
 
 void A2DPSource::loop() {
+  uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
+  if (conn_state != 0xFF) {
+    ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
+  }
+  uint8_t audio_state = this->pending_audio_state_.exchange(0xFF);
+  if (audio_state != 0xFF) {
+    ESP_LOGD(TAG, "Audio state: %s", this->source_.to_str((esp_a2d_audio_state_t) audio_state));
+  }
+
   if (this->devices_changed_.exchange(false)) {
-    // Published from the loop task: the discovery callback runs on Bluedroid's,
-    // and an entity update has to reach the API and the web server from here.
     this->publish_device_list_();
   }
   if (this->paired_pending_.exchange(false)) {
-    ESP_LOGI(TAG, "paired with %s", this->paired_name_.c_str());
+    ESP_LOGI(TAG, "Paired with %s", this->paired_name_.c_str());
     for (auto *trigger : this->paired_triggers_) {
       trigger->trigger(this->paired_name_);
     }
   }
   if (this->connect_pending_.exchange(false)) {
-    ESP_LOGI(TAG, "connected");
+    ESP_LOGI(TAG, "Connected");
     for (auto *trigger : this->connected_triggers_) {
       trigger->trigger();
     }
   }
   if (this->disconnect_pending_.exchange(false)) {
-    ESP_LOGI(TAG, "disconnected");
+    ESP_LOGI(TAG, "Disconnected");
     for (auto *trigger : this->disconnected_triggers_) {
+      trigger->trigger();
+    }
+  }
+  if (this->streaming_start_pending_.exchange(false)) {
+    ESP_LOGI(TAG, "Streaming");
+    for (auto *trigger : this->streaming_start_triggers_) {
+      trigger->trigger();
+    }
+  }
+  if (this->streaming_stop_pending_.exchange(false)) {
+    ESP_LOGI(TAG, "Streaming stopped");
+    for (auto *trigger : this->streaming_stop_triggers_) {
       trigger->trigger();
     }
   }
@@ -340,10 +341,7 @@ void A2DPSource::loop() {
     this->last_report_ms_ = now;
     uint32_t frames = this->underrun_frames_.exchange(0);
     if (frames > 0) {
-      // A steady trickle means the sender's rate is off; bursts mean something
-      // stalled. Either way it is audible, so it is a warning and not a debug
-      // line.
-      ESP_LOGW(TAG, "inserted %" PRIu32 " frames of silence in the last 10 s (%" PRIu32 " ms)", frames,
+      ESP_LOGW(TAG, "Inserted %" PRIu32 " frames of silence in the last 10 s (%" PRIu32 " ms)", frames,
                frames * 1000 / SAMPLE_RATE);
     }
   }

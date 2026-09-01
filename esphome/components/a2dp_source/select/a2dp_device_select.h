@@ -40,8 +40,6 @@ class A2DPDeviceSelect : public select::Select, public Component {
   void control(const std::string &value) override;
 
   A2DPSource *parent_{nullptr};
-  // Backing store for the option strings. Never resized after setup(), because
-  // the traits hold pointers into it.
   std::vector<std::string> option_storage_;
 };
 

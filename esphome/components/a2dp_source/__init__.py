@@ -16,6 +16,8 @@ CONF_LOCAL_NAME = "local_name"
 CONF_ON_CONNECTED = "on_connected"
 CONF_ON_DISCONNECTED = "on_disconnected"
 CONF_ON_PAIRED = "on_paired"
+CONF_ON_STREAMING_START = "on_streaming_start"
+CONF_ON_STREAMING_STOP = "on_streaming_stop"
 CONF_PAIR_ON_BOOT_IF_EMPTY = "pair_on_boot_if_empty"
 CONF_SETTLE_TIME = "settle_time"
 CONF_TARGET_NAME = "target_name"
@@ -27,6 +29,9 @@ ForgetDeviceAction = a2dp_source_ns.class_("ForgetDeviceAction", automation.Acti
 PairWithNameAction = a2dp_source_ns.class_("PairWithNameAction", automation.Action)
 IsConnectedCondition = a2dp_source_ns.class_(
     "IsConnectedCondition", automation.Condition
+)
+IsStreamingCondition = a2dp_source_ns.class_(
+    "IsStreamingCondition", automation.Condition
 )
 IsPairedCondition = a2dp_source_ns.class_("IsPairedCondition", automation.Condition)
 
@@ -75,6 +80,12 @@ CONFIG_SCHEMA = cv.All(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
             ),
             cv.Optional(CONF_ON_DISCONNECTED): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+            ),
+            cv.Optional(CONF_ON_STREAMING_START): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+            ),
+            cv.Optional(CONF_ON_STREAMING_STOP): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
             ),
         }
@@ -128,6 +139,14 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_disconnected_trigger(trigger))
+    for conf in config.get(CONF_ON_STREAMING_START, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+        cg.add(var.add_on_streaming_start_trigger(trigger))
+    for conf in config.get(CONF_ON_STREAMING_STOP, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+        cg.add(var.add_on_streaming_stop_trigger(trigger))
 
     # A2DP is Classic Bluetooth: Bluedroid host, controller in BR/EDR only mode.
     # BLE is switched off because the profile does not use it and dual mode costs
@@ -204,6 +223,9 @@ async def pair_with_name_to_code(config, action_id, template_arg, args):
 
 @automation.register_condition(
     "a2dp_source.is_connected", IsConnectedCondition, A2DP_ACTION_SCHEMA
+)
+@automation.register_condition(
+    "a2dp_source.is_streaming", IsStreamingCondition, A2DP_ACTION_SCHEMA
 )
 @automation.register_condition(
     "a2dp_source.is_paired", IsPairedCondition, A2DP_ACTION_SCHEMA
