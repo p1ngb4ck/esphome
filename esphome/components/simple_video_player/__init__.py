@@ -5,10 +5,12 @@ import logging
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker
+from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID, CONF_TRIGGER_ID
 from esphome.core import CORE
+import esphome.final_validate as fv
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -141,6 +143,46 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
 )
+
+
+def _final_validate(config):
+    # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
+    # simple_video_player itself -- it only checks what's already there and warns. AVIAudioCodec
+    # (avi_parser.h) only ever reports PCM, MP3 or FLAC for an AVI audio track -- WAV isn't a
+    # thing that can occur there (it's a container format, not a distinct codec an AVI stream
+    # carries), so it's not part of this check. Raw PCM needs no decoder at all either.
+    if CONF_SPEAKER_ID not in config:
+        return config
+
+    full_config = fv.full_config.get()
+    audio_config = full_config.get("audio")
+    if isinstance(audio_config, list):
+        # Defensive: audio is documented as single-instance, but don't assume forever.
+        audio_config = audio_config[0] if audio_config else None
+
+    enabled = set()
+    if isinstance(audio_config, dict):
+        codecs_config = audio_config.get(CONF_CODECS)
+        if isinstance(codecs_config, dict):
+            for name, key in (("flac", CONF_FLAC), ("mp3", CONF_MP3)):
+                if key in codecs_config:
+                    enabled.add(name)
+
+    missing = {"flac", "mp3"} - enabled
+    if missing:
+        missing_str = ", ".join(sorted(missing))
+        _LOGGER.warning(
+            "simple_video_player: an AVI video's audio track can use FLAC, MP3 or raw PCM. "
+            "%s not enabled under `audio: codecs:`. A video whose audio track uses one of those "
+            "will play back with video only (no audio) at runtime -- add it there if your video "
+            "files may use it.",
+            f"{missing_str} {'is' if len(missing) == 1 else 'are'}",
+        )
+
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
