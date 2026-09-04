@@ -235,7 +235,6 @@ DEFAULT_EXCLUDED_IDF_COMPONENTS = (
     "esp_driver_gptimer",  # General purpose timer - re-included by ac_dimmer, opentherm, Arduino BLE libs
     "esp_driver_i2c",  # I2C driver - re-included by i2c; esp32-camera pulls it back itself
     "esp_driver_i2s",  # I2S driver - only needed by i2s_audio component
-    "esp_driver_jpeg",  # JPEG hardware codec driver (ESP32-P4) - only needed when a JPEG backend requires hardware decode
     "esp_driver_ledc",  # LEDC PWM driver - re-included by ledc; esp32-camera pulls it back itself
     "esp_driver_mcpwm",  # MCPWM driver - ESPHome doesn't use motor control PWM
     "esp_driver_pcnt",  # PCNT driver - only needed by pulse_counter, hlw8012 components
@@ -3824,9 +3823,10 @@ async def _init_hw_jpeg() -> None:
     variant = get_esp32_variant()
 
     if variant == VARIANT_ESP32P4:
-        # Built into ESP-IDF core (esp_driver_jpeg), excluded by default to
-        # save compile time on boards that don't need it - re-enable here.
-        include_builtin_idf_component("esp_driver_jpeg")
+        # esp_driver_jpeg (built into ESP-IDF core) is not in
+        # DEFAULT_EXCLUDED_IDF_COMPONENTS -- available by default, same as the old
+        # transcoder component's P4 branch (picture_viewer's original working code) never
+        # needed to re-include anything for it either.
         cg.add_define("USE_HWJPG")
         _LOGGER.info("Enabled hardware JPEG codec (ESP32-P4)")
 
