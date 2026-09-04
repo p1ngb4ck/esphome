@@ -235,6 +235,7 @@ DEFAULT_EXCLUDED_IDF_COMPONENTS = (
     "esp_driver_gptimer",  # General purpose timer - re-included by ac_dimmer, opentherm, Arduino BLE libs
     "esp_driver_i2c",  # I2C driver - re-included by i2c; esp32-camera pulls it back itself
     "esp_driver_i2s",  # I2S driver - only needed by i2s_audio component
+    "esp_driver_jpeg",  # JPEG hardware codec driver (ESP32-P4) - only needed when a JPEG backend requires hardware decode
     "esp_driver_ledc",  # LEDC PWM driver - re-included by ledc; esp32-camera pulls it back itself
     "esp_driver_mcpwm",  # MCPWM driver - ESPHome doesn't use motor control PWM
     "esp_driver_pcnt",  # PCNT driver - only needed by pulse_counter, hlw8012 components
@@ -3782,6 +3783,54 @@ def process_stacktrace(config, line, backtrace_state):
             _decode_pc(config, addr.group())
 
     return backtrace_state
+
+
+# ========== Hardware JPEG Decoder/Encoder ==========
+
+
+def require_hw_jpeg():
+    """Register requirement for hardware JPEG codec.
+
+    Platform-specific initialization:
+    - ESP32-P4: Hardware JPEG codec (esp_driver_jpeg, built into ESP-IDF)
+    - ESP32-S2/S3: esp_new_jpeg (optimized with SIMD)
+    - Other ESP32: JPEGDEC fallback (software, bodmer/JPEGDecoder)
+
+    This registers a requirement flag; the actual initialization runs as a
+    final-priority coroutine so any component can call require_hw_jpeg()
+    during their to_code() and the correct implementation is chosen.
+    """
+    CORE.data["esp32_hw_jpeg_required"] = True
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _init_hw_jpeg() -> None:
+    """Final coroutine: initialize JPEG codec based on platform and requirements."""
+    if not CORE.data.get("esp32_hw_jpeg_required", False):
+        return
+
+    if not CORE.is_esp32:
+        _LOGGER.warning("HW JPEG only available on ESP32")
+        return
+
+    variant = get_esp32_variant()
+
+    if variant == VARIANT_ESP32P4:
+        # Built into ESP-IDF core (esp_driver_jpeg), excluded by default to
+        # save compile time on boards that don't need it - re-enable here.
+        include_builtin_idf_component("esp_driver_jpeg")
+        cg.add_define("USE_HWJPG")
+        _LOGGER.info("Enabled hardware JPEG codec (ESP32-P4)")
+
+    elif variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
+        add_idf_component(name="espressif/esp_new_jpeg", ref="1.0.0")
+        cg.add_define("USE_NEWJPEG")
+        _LOGGER.info("Enabled esp_new_jpeg codec (ESP32-%s)", variant)
+
+    else:
+        cg.add_library("JPEGDEC", "1.8.4", "https://github.com/bitbank2/JPEGDEC#1.8.4")
+        cg.add_define("USE_JPEGDEC")
+        _LOGGER.info("Using JPEGDec library (software, ESP32-%s)", variant)
 
 
 # gpio.cpp only implements ESP32InternalGPIOPin and its ISR helpers, which

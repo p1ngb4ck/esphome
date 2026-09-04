@@ -5,9 +5,10 @@ import logging
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker
-from esphome.components.transcoder import require_jpeg_decoder
+from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID, CONF_TRIGGER_ID
+from esphome.core import CORE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,8 +22,8 @@ except ImportError:
     lv_canvas_t = None
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = []
-AUTO_LOAD = ["transcoder", "image", "audio"]
+DEPENDENCIES = ["storage"]
+AUTO_LOAD = ["image", "audio"]
 
 # Namespaces
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
@@ -133,14 +134,22 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config):
-    require_jpeg_decoder()  # Simple Video Player only needs JPEG decoder
-    cg.add_define("USE_TRANSCODER")
+    # Backend selection (USE_HWJPG / USE_NEWJPEG / USE_JPEGDEC) is esp32's job - the single
+    # source of truth also used by runtime_image.
+    if CORE.is_esp32:
+        from esphome.components.esp32 import require_hw_jpeg
+
+        require_hw_jpeg()
+
+    # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
+    # blocking main-loop read; request it directly instead of relying on whichever storage
+    # device the user happened to configure to have already asked for it.
+    request_storage_worker()
+
     cg.add_define("USE_STORAGE")
     cg.add_define("USE_LVGL")
 
     # Get the single LVGL component instance (required for VSYNC callbacks)
-    from esphome.core import CORE
-
     lvgl_configs = CORE.config.get("lvgl", [])
     if not lvgl_configs:
         raise cv.Invalid("LVGL component is required for simple_video_player")
@@ -177,12 +186,6 @@ async def to_code(config):
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))
-
-    # Link to transcoder component (handles all decoder initialization)
-    # The transcoder dependency ensures it's initialized before simple_video_player
-    cg.add(
-        var.set_transcoder(cg.RawExpression("esphome::transcoder::global_transcoder"))
-    )
 
     # Register automation triggers
     for conf in config.get(CONF_ON_PLAYBACK_STARTED, []):

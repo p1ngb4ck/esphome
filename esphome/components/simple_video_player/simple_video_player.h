@@ -6,7 +6,16 @@
 #include "esphome/core/helpers.h"
 
 #include "esphome/components/lvgl/lvgl_esphome.h"
-#include "esphome/components/transcoder/transcoder.h"
+
+#if defined(USE_HWJPG)
+#include "driver/jpeg_decode.h"
+#include "driver/jpeg_types.h"
+#elif defined(USE_NEWJPEG)
+#include "esp_jpeg_dec.h"
+#include "esp_jpeg_common.h"
+#else
+#include <JPEGDEC.h>
+#endif
 
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
@@ -32,6 +41,21 @@
 #endif
 
 namespace esphome::simple_video_player {
+
+/// Which JPEG backend esp32.require_hw_jpeg() selected for this platform.
+enum class JpegBackend {
+  HW_P4,     // ESP32-P4 hardware JPEG codec (esp_driver_jpeg)
+  NEW_JPEG,  // ESP32-S2/S3 esp_new_jpeg (SIMD-optimized software)
+  JPEGDEC,   // Software fallback (bitbank2/JPEGDEC) - other ESP32 variants
+};
+
+#if defined(USE_HWJPG)
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::HW_P4;
+#elif defined(USE_NEWJPEG)
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::NEW_JPEG;
+#else
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::JPEGDEC;
+#endif
 
 /// Speaker channel modes for audio routing
 enum class SpeakerChannelMode : uint8_t {
@@ -110,7 +134,6 @@ class SimpleVideoPlayer : public Component {
   // Configuration (called from codegen)
   //========================================================================
 
-  void set_transcoder(transcoder::Transcoder *tc) { this->transcoder_ = tc; }
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
@@ -193,6 +216,18 @@ class SimpleVideoPlayer : public Component {
 
   /// Decode JPEG frame and update canvas
   bool decode_frame_(size_t frame_size);
+  // Backend-specific decode, selected at compile time via JPEG_BACKEND (same dispatch pattern
+  // as runtime_image/jpeg_decoder.h -- only one explicit specialization is ever defined per
+  // build, in simple_video_player.cpp, each behind the #ifdef that also guards its backend's
+  // headers above).
+  template<JpegBackend Backend> bool decode_frame_backend_(size_t frame_size);
+  // Backend-specific decoder/buffer initialization, called once from setup(). Same dispatch
+  // pattern as decode_frame_backend_ above.
+  template<JpegBackend Backend> bool init_decoder_backend_();
+  // Backend-specific header-only parse (width/height, no pixel decode), used by
+  // get_video_dimensions_() for the raw-MJPEG case. Same dispatch pattern as above.
+  template<JpegBackend Backend>
+  bool parse_header_backend_(const uint8_t *buffer, size_t size, uint32_t &width, uint32_t &height);
 
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
@@ -269,7 +304,6 @@ class SimpleVideoPlayer : public Component {
 
   // Configuration
   lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
-  transcoder::Transcoder *transcoder_{nullptr};
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (JPEG frame buffer)
@@ -286,9 +320,9 @@ class SimpleVideoPlayer : public Component {
   bool loop_{false};
   std::string video_path_;
 
-  // File reader (uses optimized buffering for local storage)
+  // File reader (backed by storage::StorageWorker -- handles local/network storage
+  // transparently, see buffered_file_reader.h)
   std::unique_ptr<BufferedFileReader> file_reader_;
-  bool is_network_file_{false};
   uint64_t file_size_{0};
 
   // Video format and container parser
