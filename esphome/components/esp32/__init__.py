@@ -3189,6 +3189,11 @@ async def to_code(config):
     # Default exclusions are added in set_core_data() during config validation.
     CORE.add_job(_write_exclude_components)
 
+    # JPEG backend selection at FINAL priority, after all components have had a chance to call
+    # require_hw_jpeg(). Unconditional like _write_exclude_components above -- _init_hw_jpeg()
+    # self-guards on the esp32_hw_jpeg_required flag and no-ops if nothing requested it.
+    CORE.add_job(_init_hw_jpeg)
+
     # Write Arduino selective compilation sdkconfig at FINAL priority after all
     # components have had a chance to call cg.add_library() to enable libraries they need.
     if conf[CONF_TYPE] == FRAMEWORK_ARDUINO:
