@@ -3184,15 +3184,18 @@ async def to_code(config):
     if conf[CONF_COMPONENTS]:
         CORE.add_job(_add_yaml_idf_components, conf[CONF_COMPONENTS])
 
+    # JPEG backend selection at FINAL priority, after all components have had a chance to call
+    # require_hw_jpeg(). Must be scheduled BEFORE _write_exclude_components below: it calls
+    # include_builtin_idf_component() (for the P4 case), and same-priority jobs run in
+    # registration order, so this has to be queued first or the exclude list would already be
+    # finalized with esp_driver_jpeg still excluded. _init_hw_jpeg() self-guards on the
+    # esp32_hw_jpeg_required flag and no-ops if nothing requested it.
+    CORE.add_job(_init_hw_jpeg)
+
     # Write EXCLUDE_COMPONENTS at FINAL priority after all components have had
     # a chance to call include_builtin_idf_component() to re-enable components they need.
     # Default exclusions are added in set_core_data() during config validation.
     CORE.add_job(_write_exclude_components)
-
-    # JPEG backend selection at FINAL priority, after all components have had a chance to call
-    # require_hw_jpeg(). Unconditional like _write_exclude_components above -- _init_hw_jpeg()
-    # self-guards on the esp32_hw_jpeg_required flag and no-ops if nothing requested it.
-    CORE.add_job(_init_hw_jpeg)
 
     # Write Arduino selective compilation sdkconfig at FINAL priority after all
     # components have had a chance to call cg.add_library() to enable libraries they need.
