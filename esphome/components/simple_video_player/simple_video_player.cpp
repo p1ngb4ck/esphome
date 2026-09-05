@@ -269,7 +269,10 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
-  {
+  // Lock LVGL mutex before calling LVGL APIs from this FreeRTOS task -- same requirement as the
+  // canvas buffer assignment further below (LVGL itself is not thread-safe, and this task is not
+  // LVGL's own thread).
+  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
     lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
     // Resize/reposition whenever the canvas doesn't already match the video's real size -- not
@@ -292,6 +295,10 @@ void SimpleVideoPlayer::playback_loop_() {
     // LVGL 8 name), confirmed against this fork's own lv_obj_ codegen in lvcode.py.
     lv_obj_remove_flag(this->canvas_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(this->canvas_);
+
+    xSemaphoreGive(this->lvgl_mutex_);
+  } else {
+    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas resize/unhide");
   }
 
   // Audio/speaker initialization -- independent of the video ring buffer, runs before the
