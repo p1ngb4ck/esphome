@@ -26,6 +26,11 @@ static const uint16_t JPEG_EOI = 0xd9ff;
 static constexpr size_t CACHE_ALIGNMENT = 1024;
 static constexpr size_t DMA_ALIGNMENT = 128;
 
+// Output (decoded RGB565) double-buffer is sized once at setup for the largest video this player
+// will ever be asked to play -- the ESP32-P4 target panel is 1280x800.
+static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
+static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
+
 // Forward-declare the explicit specialization actually compiled for this backend (mirrors the
 // JPEG_BACKEND selection in simple_video_player.h): setup()/playback_loop_() call these via the
 // compile-time-constant JPEG_BACKEND before their out-of-line definitions appear further down in
@@ -717,9 +722,9 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
   // single input_buffer_ -- the ring is what lets the loader task (Core 0) read ahead of the
   // decode task (Core 1) instead of serializing I/O with decode+pacing on one task.
 
-  // Max size based on typical 720p video (1280x720) with alignment
-  uint32_t aligned_max_width = ALIGN_UP(1280, 16);
-  uint32_t aligned_max_height = ALIGN_UP(720, 16);
+  // Max size based on MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT, with alignment
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
   size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
 
   jpeg_decode_memory_alloc_cfg_t output_cfg{};
@@ -807,8 +812,8 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>(
 
   // Compressed-frame input buffers live in frame_ring_ (see allocate_frame_ring_()).
 
-  uint32_t aligned_max_width = ALIGN_UP(1280, 16);
-  uint32_t aligned_max_height = ALIGN_UP(720, 16);
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
   size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
 
   auto *output_buf_0 = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, max_output_size, MALLOC_CAP_SPIRAM));
@@ -915,8 +920,8 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>()
 
   // Compressed-frame input buffers live in frame_ring_ (see allocate_frame_ring_()).
 
-  uint32_t aligned_max_width = ALIGN_UP(1280, 16);
-  uint32_t aligned_max_height = ALIGN_UP(720, 16);
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
   size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
 
   auto *output_buf_0 = static_cast<uint8_t *>(heap_caps_malloc(max_output_size, MALLOC_CAP_SPIRAM));
