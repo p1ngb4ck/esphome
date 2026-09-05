@@ -349,7 +349,7 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
 
   // Configuration
-  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for get_screen_active())
+  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (required at construction; not otherwise used)
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (per ring-buffer slot capacity)
