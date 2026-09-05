@@ -385,9 +385,20 @@ void SimpleVideoPlayer::playback_loop_() {
   // that silently skips setup on contention) is correct here: skipping this on a stray timeout
   // would leave canvas_buffer_ready_ false for the entire playback session.
   bool canvas_ready = false;
-  ESP_LOGI(TAG, "play(): taking lvgl_mutex_ for resize_canvas_buffer_ (blocking)");
-  if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
-    ESP_LOGI(TAG, "play(): lvgl_mutex_ acquired, calling resize_canvas_buffer_");
+  ESP_LOGI(TAG, "play(): lvgl_mutex_=%p count=%u before take", (void *) this->lvgl_mutex_,
+           this->lvgl_mutex_ != nullptr ? static_cast<unsigned>(uxSemaphoreGetCount(this->lvgl_mutex_)) : 0xFFu);
+  // Bounded retry loop instead of a single portMAX_DELAY take -- functionally identical (still
+  // blocks until acquired), but logs every 2s so a genuine permanent deadlock is visible as
+  // repeating log lines instead of silence indistinguishable from a hang elsewhere.
+  uint32_t wait_attempts = 0;
+  while (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    wait_attempts++;
+    ESP_LOGW(TAG, "play(): still waiting for lvgl_mutex_ after %" PRIu32 "s (count=%u)", wait_attempts * 2,
+             static_cast<unsigned>(uxSemaphoreGetCount(this->lvgl_mutex_)));
+  }
+  {
+    ESP_LOGI(TAG, "play(): lvgl_mutex_ acquired after %" PRIu32 " retries, calling resize_canvas_buffer_",
+             wait_attempts);
     canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
     xSemaphoreGive(this->lvgl_mutex_);
   }
