@@ -857,21 +857,27 @@ bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::HW_P4>(const uint8_t 
 
 template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
                                                                               size_t frame_size) {
-  // Align frame size to 16 bytes (hardware requirement)
-  size_t aligned_size = ALIGN_UP(frame_size, 16);
-  if (aligned_size > this->input_buffer_size_) {
-    ESP_LOGE(TAG, "Aligned frame size too large");
+  // Capacity check only -- frame_size itself (not a padded-up value) is what gets passed to
+  // jpeg_decoder_process below, matching picture_viewer's decode_jpeg_hardware_() exactly.
+  if (frame_size > this->input_buffer_size_) {
     return false;
   }
 
-  // Same decode_cfg shape as picture_viewer's decode_jpeg_hardware_(): fixed RGB order, conv_std
-  // left at its BT601 default.
+  // Identical decode_cfg to picture_viewer's decode_jpeg_hardware_(): fixed RGB order, conv_std
+  // left unset (defaults to 0 == JPEG_YUV_RGB_CONV_STD_BT601, same as there).
   jpeg_decode_cfg_t decode_cfg{};
   decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
 
+  // frame_size, not ALIGN_UP(frame_size, 16): picture_viewer passes jpeg_data.size() -- the exact
+  // JPEG byte count -- as the input length here, never a padded-up one. The buffer's memory
+  // address is what needs 16-byte alignment (jpeg_alloc_decoder_mem, in allocate_frame_ring_(),
+  // already guarantees that), not the declared byte count; rounding the count itself up told the
+  // decoder to treat up to 15 bytes of whatever followed the real JPEG EOI marker as more input,
+  // which is a real way to make the hardware decoder itself fail on a fixed, otherwise-correct
+  // frame -- not something error handling around the call can paper over.
   uint32_t out_size = 0;
-  jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+  jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(frame_size),
                        this->output_buffer_[this->current_buffer_index_].get(),
                        static_cast<uint32_t>(this->output_buffer_size_), &out_size);
 
