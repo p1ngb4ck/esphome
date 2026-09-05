@@ -386,12 +386,16 @@ void SimpleVideoPlayer::playback_loop_() {
   // safe because it only runs once per play(). It is not safe: this task runs at priority 10,
   // above the main loop, specifically so decode/pacing can't be starved once playback is running
   // -- but a portMAX_DELAY wait here means if this task is ever not scheduled back in for any
-  // reason, it never comes back, and nothing else can recover it. Bounded retries (short timeout,
-  // same as everywhere else) instead of one indefinite wait: still generous (0.5s total) for the
-  // ordinary "briefly contended" case, but a genuine failure to acquire surfaces as the existing
+  // reason, it never comes back, and nothing else can recover it. Bounded retries (10ms each,
+  // matching every other lvgl_mutex_ site) instead of one indefinite wait -- capped at roughly one
+  // frame period at the configured target_fps_ (the system's own actual time unit, not an
+  // arbitrary constant), enough to absorb ordinary brief contention without ever imposing a
+  // multi-frame stall on top of it. A genuine failure to acquire surfaces as the existing
   // "Failed to size canvas buffer" error path below instead of hanging the whole player forever.
+  uint32_t frame_period_ms = static_cast<uint32_t>(1000.0f / this->target_fps_);
+  int max_attempts = std::max<int>(1, static_cast<int>(frame_period_ms / 10));
   bool canvas_ready = false;
-  for (int attempt = 0; attempt < 50 && !canvas_ready; attempt++) {
+  for (int attempt = 0; attempt < max_attempts && !canvas_ready; attempt++) {
     if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
       canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
       xSemaphoreGive(this->lvgl_mutex_);
