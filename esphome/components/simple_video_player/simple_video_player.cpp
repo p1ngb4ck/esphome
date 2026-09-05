@@ -295,8 +295,20 @@ void SimpleVideoPlayer::playback_loop_() {
     // LVGL 8 name), confirmed against this fork's own lv_obj_ codegen in lvcode.py.
     lv_obj_remove_flag(this->canvas_, LV_OBJ_FLAG_HIDDEN);
     // Bring the canvas to the front of its parent's paint order regardless of where it was
-    // declared in YAML, so other widgets can never end up painted on top of the video.
+    // declared in YAML, so other widgets on the SAME screen can never end up painted on top of
+    // the video.
     lv_obj_move_foreground(this->canvas_);
+
+    // If the canvas lives on a different LVGL screen/page than whichever one is currently
+    // active, none of the above matters -- move_foreground only reorders siblings within the
+    // canvas's own screen, it can't switch which top-level screen the display is showing.
+    // Explicitly activate the canvas's own screen so playback is visible regardless of which
+    // page was active when play() was called.
+    lv_obj_t *canvas_screen = lv_obj_get_screen(this->canvas_);
+    if (canvas_screen != nullptr && canvas_screen != this->lvgl_component_->get_screen_active()) {
+      lv_screen_load(canvas_screen);
+    }
+
     lv_obj_invalidate(this->canvas_);
 
     xSemaphoreGive(this->lvgl_mutex_);
