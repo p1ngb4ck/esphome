@@ -26,6 +26,26 @@ static const uint16_t JPEG_EOI = 0xd9ff;
 static constexpr size_t CACHE_ALIGNMENT = 1024;
 static constexpr size_t DMA_ALIGNMENT = 128;
 
+// Forward-declare the explicit specialization actually compiled for this backend (mirrors the
+// JPEG_BACKEND selection in simple_video_player.h): setup()/playback_loop_() call these via the
+// compile-time-constant JPEG_BACKEND before their out-of-line definitions appear further down in
+// this file, and an explicit specialization must be declared before any implicit instantiation of
+// that same template argument -- without this, the call site implicitly instantiates the
+// (undefined) primary template, making the later explicit-specialization definition an error.
+#if defined(USE_HWJPG)
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
+                                                                              size_t frame_size);
+#elif defined(USE_NEWJPEG)
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(const uint8_t *frame_data,
+                                                                                 size_t frame_size);
+#else
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(const uint8_t *frame_data,
+                                                                                size_t frame_size);
+#endif
+
 //========================================================================
 // Component Lifecycle
 //========================================================================
@@ -252,7 +272,8 @@ void SimpleVideoPlayer::playback_loop_() {
       lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
       lv_coord_t x_offset = (canvas_width - width) / 2;
       lv_coord_t y_offset = (canvas_height - height) / 2;
-      ESP_LOGI(TAG, "Resizing canvas from %ux%u to %" PRIu32 "x%" PRIu32, canvas_width, canvas_height, width, height);
+      ESP_LOGI(TAG, "Resizing canvas from %ldx%ld to %" PRIu32 "x%" PRIu32, static_cast<long>(canvas_width),
+               static_cast<long>(canvas_height), width, height);
       lv_obj_set_size(this->canvas_, width, height);
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
       lv_obj_invalidate(this->canvas_);
@@ -1340,7 +1361,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
              audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
     codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
   } else {
-    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04X", audio_info->codec);
+    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04" PRIX32, audio_info->codec);
     return false;
   }
 
