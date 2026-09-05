@@ -161,6 +161,20 @@ void SimpleVideoPlayer::setup() {
     }
     this->audio_temp_buffer_.reset(temp_buf);
 
+#if defined(SVP_AUDIO_CODEC_MP3) || defined(SVP_AUDIO_CODEC_FLAC)
+    // audio_decoder_ itself: allocated ONCE here too, same as everything else above. The codec is
+    // just as fixed by YAML as sample_rate/channels/bits_per_sample are (see __init__.py), so
+    // whether this is ever needed at all is already known at compile time -- PCM mode never
+    // touches it, so it's never constructed there. AudioDecoder's own start() (verified against
+    // the real audio component source) already resets its per-file state (potentially_failed_
+    // count_, end_of_file_, a fresh per-codec sub-decoder) on every call, and add_source()/
+    // add_sink() are safe to call again on the same instance -- init_audio_decoder_() just calls
+    // those again on this persistent instance instead of recreating the whole object, avoiding a
+    // fresh output_transfer_buffer_ allocation every single play().
+    this->audio_decoder_ =
+        std::make_unique<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE, AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
+#endif
+
     ESP_LOGI(TAG, "Audio playback enabled with speaker (fixed format: %" PRIu32 " Hz, %u ch, %u-bit)",
              AUDIO_SAMPLE_RATE, AUDIO_SOURCE_CHANNELS, AUDIO_BITS_PER_SAMPLE);
   } else {
@@ -590,13 +604,13 @@ void SimpleVideoPlayer::playback_loop_() {
       this->speaker_->stop();
     }
 
-    // audio_decoder_ is the one audio resource still recreated per play() (see header comment on
-    // audio_decoder_) so it's actually freed here. audio_input_ring_buffer_/
-    // audio_decoded_ring_buffer_/audio_temp_buffer_ are permanent (allocated once in setup()) --
-    // deliberately NOT reset()'d here; init_audio_decoder_() clears the ring buffers itself right
-    // before the next session starts, and the temp buffer needs no clearing (it's fully
-    // overwritten before every read).
-    this->audio_decoder_.reset();
+    // audio_decoder_ is permanent now too (allocated once in setup(), see there) -- deliberately
+    // NOT reset()'d here, same reasoning as the ring buffers below: init_audio_decoder_() calls
+    // add_source()/add_sink()/start() on it again right before the next session starts, which is
+    // enough to reinitialize it for a new file (verified against the real audio component
+    // source). audio_input_ring_buffer_/audio_decoded_ring_buffer_/audio_temp_buffer_ are the
+    // same story -- init_audio_decoder_() clears the ring buffers itself, and the temp buffer
+    // needs no clearing (fully overwritten before every read).
     this->audio_enabled_ = false;
 
     ESP_LOGI(TAG, "Audio processing stopped");
@@ -1628,14 +1642,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
 
-  // Only create the decoder for compressed formats (MP3/FLAC). audio::AudioDecoder's own API has
-  // no reset()/stop() to reuse an instance across files, so this one small control object (not a
-  // PSRAM buffer -- its own internal buffers are sized from the fixed AUDIO_DECODER_* constants,
-  // never recomputed) is still recreated per play(); see the header comment on audio_decoder_.
+  // audio_decoder_ itself is persistent now too (allocated once in setup(), see there) --
+  // add_source()/add_sink()/start() are all safe to call again on the same instance for a new
+  // file (verified against the real audio component source: start() resets its own per-file
+  // state every call). Only compressed formats (MP3/FLAC) use it at all; PCM mode leaves it null.
   if (use_decoder) {
-    this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE,
-                                                                  AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
-
     // Add source ring buffer
     std::weak_ptr<ring_buffer::RingBuffer> source_weak = this->audio_input_ring_buffer_;
     if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {

@@ -412,13 +412,14 @@ class SimpleVideoPlayer : public Component {
   static constexpr size_t AUDIO_DECODER_OUTPUT_BUFFER_SIZE = AUDIO_SAMPLE_RATE > 48000 ? (48 * 1024) : (32 * 1024);
 #endif
 
-  // Audio decoding (for AVI with audio streams). audio_input_ring_buffer_/audio_decoded_ring_buffer_/
-  // audio_temp_buffer_ are allocated ONCE in setup() (sized from the AUDIO_* constants above) and
-  // reused for every play() -- only reset()/cleared between sessions, never freed/recreated.
-  // audio_decoder_ is the one remaining exception: audio::AudioDecoder's own public API
-  // (add_source/add_sink/start()) is a one-shot-per-file sequence with no reset()/stop(), so it's
-  // still recreated per play() -- a small control object, not a PSRAM buffer, and fixing that
-  // would mean editing the audio component itself, which is out of scope here.
+  // Audio decoding (for AVI with audio streams). audio_decoder_/audio_input_ring_buffer_/
+  // audio_decoded_ring_buffer_/audio_temp_buffer_ are ALL allocated ONCE in setup() (sized from
+  // the AUDIO_* constants above, only when the fixed codec is MP3/FLAC for audio_decoder_ itself
+  // -- PCM mode never uses it) and reused for every play() -- only reset() (ring buffers) or
+  // re-add_source()/add_sink()/start()'d (audio_decoder_) between sessions, never freed/recreated.
+  // Verified against the real audio component source: AudioDecoder::start() already resets its
+  // own per-file state (potentially_failed_count_, end_of_file_, a fresh per-codec sub-decoder)
+  // on every call, so calling it again on a persistent instance is exactly what it's for.
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
   std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
   std::shared_ptr<ring_buffer::RingBuffer>
