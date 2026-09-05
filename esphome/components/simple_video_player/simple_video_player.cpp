@@ -272,7 +272,11 @@ void SimpleVideoPlayer::playback_loop_() {
   {
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
     lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
-    if ((lv_coord_t) width < canvas_width || (lv_coord_t) height < canvas_height) {
+    // Resize/reposition whenever the canvas doesn't already match the video's real size -- not
+    // just when it's larger than needed. A placeholder canvas (e.g. YAML width/height: 8, meant
+    // to be grown into the real size here once it's known) is *smaller* than the video, so a
+    // "shrink to fit" check alone (width < canvas_width) never fires for it.
+    if ((lv_coord_t) width != canvas_width || (lv_coord_t) height != canvas_height) {
       lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
       lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
       lv_coord_t x_offset = (canvas_width - width) / 2;
@@ -281,8 +285,13 @@ void SimpleVideoPlayer::playback_loop_() {
                static_cast<long>(canvas_height), width, height);
       lv_obj_set_size(this->canvas_, width, height);
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
-      lv_obj_invalidate(this->canvas_);
     }
+    // The canvas may start hidden (e.g. YAML hidden: true, to avoid showing a stale/placeholder
+    // buffer before a video is loaded) -- reveal it now that we're about to own its buffer.
+    // lv_obj_remove_flag() is LVGL 9.5's current name for this (lv_obj_clear_flag() is the old
+    // LVGL 8 name), confirmed against this fork's own lv_obj_ codegen in lvcode.py.
+    lv_obj_remove_flag(this->canvas_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(this->canvas_);
   }
 
   // Audio/speaker initialization -- independent of the video ring buffer, runs before the
@@ -574,14 +583,7 @@ void SimpleVideoPlayer::loader_loop_() {
     }
 
     VideoFrameSlot &slot = this->frame_ring_[this->ring_head_];
-    // Diagnostic timing: how long a single read_next_frame_() (fourcc/size/payload storage round
-    // trips for one video frame, plus any interleaved audio chunks skipped along the way) actually
-    // takes end-to-end -- needed to tell a genuine storage-throughput ceiling apart from per-call
-    // round-trip latency (the read-ahead cache in BufferedFileReader already addresses the latter).
-    int64_t read_start_us = esp_timer_get_time();
     int n = this->read_next_frame_(slot.data.get(), this->input_buffer_size_);
-    int64_t read_duration_us = esp_timer_get_time() - read_start_us;
-    ESP_LOGD(TAG, "read_next_frame_ took %" PRId64 " us (%d bytes)", read_duration_us, n);
 
     if (n == 0 && this->loop_) {
       // EOF with looping enabled: rewind and retry without publishing a slot -- transparent to
