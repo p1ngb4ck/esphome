@@ -189,9 +189,6 @@ class SimpleVideoPlayer : public Component {
   PlaybackError get_last_error() const { return this->last_error_; }
   const std::string &get_current_file() const { return this->video_path_; }
 
-  /// Called by LVGL when render cycle completes (for VSYNC)
-  void on_lvgl_render_complete();
-
   //========================================================================
   // Automation Callbacks
   //========================================================================
@@ -330,6 +327,17 @@ class SimpleVideoPlayer : public Component {
   /// Free all buffers
   void free_buffers_();
 
+  /// Adopt the canvas's own buffer (canvas_buffer_/canvas_buffer_ready_ etc.) -- mirrors
+  /// picture_viewer's ensure_canvas_buffer_(), using this LVGL fork's real 9.5 getter names.
+  void ensure_canvas_buffer_();
+
+  /// (Re)allocate the canvas's buffer in PSRAM for aligned_width x aligned_height RGB565 and hand
+  /// it to LVGL via lv_canvas_set_buffer() -- mirrors picture_viewer's resize_canvas_buffer_(),
+  /// except PSRAM allocation failure here is a hard error (no plain-malloc fallback -- see
+  /// canvas_buffer_'s comment in the header for why). Must be called with lvgl_mutex_ already
+  /// held. Returns false (and leaves canvas_buffer_ready_ false) on allocation failure.
+  bool resize_canvas_buffer_(uint32_t aligned_width, uint32_t aligned_height);
+
   //========================================================================
   // Error Handling
   //========================================================================
@@ -341,7 +349,7 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
 
   // Configuration
-  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
+  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for get_screen_active())
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (per ring-buffer slot capacity)
@@ -396,26 +404,27 @@ class SimpleVideoPlayer : public Component {
   uint32_t video_height_{0};
 
   // Buffers (allocated on demand)
-  std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
-  std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
+  std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM (16KB), aligned for DMA
+  // JPEG decode target -- PSRAM only, sized once at setup for MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT.
+  // Not the canvas's own buffer: decode_frame_() copies from here into canvas_buffer_ after each
+  // successful decode, under lvgl_mutex_. Matches picture_viewer's decode_jpeg_hardware_()
+  // (decodes into its own aligned_output) + write_to_canvas_buffer_() (separate copy into the
+  // canvas) split, rather than decoding directly into whatever buffer the canvas widget owns.
+  std::unique_ptr<uint8_t[]> output_buffer_;
   size_t output_buffer_size_{0};
-  // One lv_draw_buf_t wrapper per output_buffer_ slot, each initialized once (in playback_loop_,
-  // when the video's real dimensions are known) to point at that slot's existing PSRAM allocation
-  // -- never reallocated per frame. Every other canvas user in this codebase (see
-  // esphome/components/lvgl/widgets/canvas.py) attaches pixel data to a canvas via
-  // lv_draw_buf_init() + lv_canvas_set_draw_buf(); lv_canvas_set_buffer() (the older, bare-pointer
-  // API this used to call here) isn't used anywhere else in this LVGL fork's canvas path.
-  lv_draw_buf_t canvas_draw_buf_[2]{};
-  // current_buffer_index_ is written ONLY by the decode task (Core 0); display_buffer_index_ is
-  // written ONLY by on_lvgl_render_complete() (runs on the main loop task, Core 1, synchronously
-  // inside lv_timer_handler()'s call stack -- the only place LVGL APIs are actually safe to call
-  // from, since LvglComponent exposes no lock of its own). pending_display_buffer_index_ is the
-  // one-way handoff: decode sets it (alongside buffer_swap_pending_) to say which buffer it just
-  // finished writing; VSYNC only ever reads it, never writes current_buffer_index_ itself.
-  uint8_t current_buffer_index_{0};          // 0 or 1 - which buffer decode writes into next
-  uint8_t display_buffer_index_{0};          // 0 or 1 - which buffer LVGL is currently displaying
-  uint8_t pending_display_buffer_index_{0};  // 0 or 1 - which buffer decode just finished writing
-  volatile bool buffer_swap_pending_{false};  // True when a decoded buffer is ready for VSYNC to swap in
+
+  // The canvas's own pixel buffer -- mirrors picture_viewer's canvas_buffer_ /
+  // ensure_canvas_buffer_() / resize_canvas_buffer_(), using this LVGL fork's real 9.5 names
+  // (lv_canvas_get_buf(), lv_canvas_set_buffer() -- both confirmed present in the actual vendored
+  // lvgl/lvgl@9.5.0 source, src/widgets/canvas/lv_canvas.h) in place of LVGL 8's
+  // lv_canvas_get_img(). resize_canvas_buffer_() (see .cpp) allocates this via
+  // heap_caps_malloc(..., MALLOC_CAP_SPIRAM) ONLY, with no fallback to plain malloc: P4 has 512KB
+  // and S3 384KB of internal RAM total, nowhere near enough for a video frame buffer, so a failed
+  // PSRAM allocation here is a hard error, not something to silently degrade from.
+  uint16_t *canvas_buffer_{nullptr};
+  int canvas_buffer_width_{0};
+  int canvas_buffer_height_{0};
+  bool canvas_buffer_ready_{false};
 
 #if defined(USE_HWJPG)
   // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_
