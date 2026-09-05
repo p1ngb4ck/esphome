@@ -294,6 +294,9 @@ void SimpleVideoPlayer::playback_loop_() {
     // lv_obj_remove_flag() is LVGL 9.5's current name for this (lv_obj_clear_flag() is the old
     // LVGL 8 name), confirmed against this fork's own lv_obj_ codegen in lvcode.py.
     lv_obj_remove_flag(this->canvas_, LV_OBJ_FLAG_HIDDEN);
+    // Bring the canvas to the front of its parent's paint order regardless of where it was
+    // declared in YAML, so other widgets can never end up painted on top of the video.
+    lv_obj_move_foreground(this->canvas_);
     lv_obj_invalidate(this->canvas_);
 
     xSemaphoreGive(this->lvgl_mutex_);
@@ -1021,12 +1024,6 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
   // This callback runs in LVGL's thread, so NO MUTEX needed for LVGL API calls
 
-  // Always invalidate canvas when playing to keep VSYNC callbacks flowing
-  // This ensures continuous draw cycles that trigger this callback
-  if (this->state_ == PlayerState::PLAYING) {
-    lv_obj_invalidate(this->canvas_);
-  }
-
   if (this->buffer_swap_pending_) {
     // Swap buffers: make the newly decoded buffer visible
     this->display_buffer_index_ = this->current_buffer_index_;
@@ -1040,6 +1037,16 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
 
     this->buffer_swap_pending_ = false;
     this->canvas_needs_invalidate_ = false;
+  }
+
+  // Invalidate AFTER any buffer swap above, never before: lv_canvas_set_buffer() does not
+  // schedule its own redraw (confirmed against LVGL's own canvas widget behavior -- see
+  // https://github.com/lvgl/lvgl/issues/6005, "canvas image not updated on the screen, unless
+  // canvas invalidated"), so invalidating first would only re-schedule a redraw of whatever
+  // buffer was already showing, not the one just swapped in. This also keeps VSYNC callbacks
+  // flowing continuously while playing, even on cycles with nothing new to swap.
+  if (this->state_ == PlayerState::PLAYING) {
+    lv_obj_invalidate(this->canvas_);
   }
 }
 
