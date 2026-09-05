@@ -534,8 +534,28 @@ bool AVIParser::read_uint16_(uint16_t &value) {
 }
 
 bool AVIParser::skip_bytes_(size_t count) {
-  uint64_t current = this->reader_->tell();
-  return this->reader_->seek(current + count);
+  // Discard via the streaming read() path, not seek(): a forward skip within a sequential
+  // stream is exactly what read_chunk() is for -- it serves straight out of
+  // BufferedFileReader's read-ahead buffers whenever the bytes are already there (which they
+  // almost always are here), with no extra storage-worker round trip at all. seek() is a
+  // separate, real worker operation for actual random-access jumps -- and, on the current
+  // double-buffered BufferedFileReader, ALSO eagerly forces a full synchronous re-fill of the
+  // read-ahead pair afterward (to keep the prefetch invariant primed for genuine seeks), so
+  // routing this function's very frequent small forward skips through seek() would now be worse,
+  // not just wasteful: it'd trigger a full blocking refetch on nearly every AVI chunk boundary.
+  // This function is the hot path for AVI parsing (called once per interleaved audio/video
+  // chunk, and again for every odd-sized chunk's 1-byte alignment pad).
+  uint8_t scratch[512];
+  size_t remaining = count;
+  while (remaining > 0) {
+    size_t to_read = std::min(remaining, sizeof(scratch));
+    int n = this->reader_->read(scratch, to_read);
+    if (n <= 0) {
+      return false;  // EOF or read error before the skip finished
+    }
+    remaining -= static_cast<size_t>(n);
+  }
+  return true;
 }
 
 }  // namespace simple_video_player
