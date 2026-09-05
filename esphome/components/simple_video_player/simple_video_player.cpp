@@ -1306,9 +1306,13 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 #endif
 
-  // canvas_buffer_ is owned by LVGL (handed over via lv_canvas_set_buffer() in
-  // resize_canvas_buffer_()) -- not freed here, matches picture_viewer's equivalent buffer.
-  this->canvas_buffer_ = nullptr;
+  // canvas_buffer_ is allocated by this component (resize_canvas_buffer_()) and only ever handed
+  // to LVGL as a raw pointer via lv_canvas_set_buffer() -- LVGL does not take ownership or free it
+  // (confirmed against the real LVGL 9.5 source), so it's ours to free here.
+  if (this->canvas_buffer_ != nullptr) {
+    heap_caps_free(this->canvas_buffer_);
+    this->canvas_buffer_ = nullptr;
+  }
   this->canvas_buffer_ready_ = false;
 
   this->free_frame_ring_();
@@ -1333,21 +1337,36 @@ void SimpleVideoPlayer::ensure_canvas_buffer_() {
 }
 
 bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t aligned_height) {
-  // Mirrors picture_viewer's resize_canvas_buffer_(), except PSRAM-only: P4 has 512KB and S3
-  // 384KB of internal RAM total, nowhere near enough for a video frame buffer, so there is no
-  // plain-malloc fallback here -- a failed PSRAM allocation is a hard error.
-  const size_t buffer_size = static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t);
+  // Allocated once (on the first call), sized for the max resolution this player supports, and
+  // reused for every subsequent play() call -- never reallocated. lv_canvas_set_buffer() does not
+  // free whatever buffer it replaces (confirmed against the real LVGL 9.5 source), so allocating a
+  // fresh buffer on every single play() leaked the previous one every time. PSRAM-only, no
+  // plain-malloc fallback: P4 has 512KB and S3 384KB of internal RAM total, nowhere near enough
+  // for a video frame buffer, so a failed PSRAM allocation is a hard error.
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
 
-  auto *new_buffer = static_cast<uint16_t *>(heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM));
-  if (new_buffer == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate canvas buffer in PSRAM: %zu bytes", buffer_size);
-    this->canvas_buffer_ready_ = false;
+  if (aligned_width > aligned_max_width || aligned_height > aligned_max_height) {
+    ESP_LOGE(TAG, "Video %" PRIu32 "x%" PRIu32 " exceeds max supported %" PRIu32 "x%" PRIu32, aligned_width,
+             aligned_height, aligned_max_width, aligned_max_height);
     return false;
   }
 
-  std::memset(new_buffer, 0, buffer_size);
+  if (this->canvas_buffer_ == nullptr) {
+    const size_t max_buffer_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * sizeof(uint16_t);
+    auto *new_buffer = static_cast<uint16_t *>(heap_caps_malloc(max_buffer_size, MALLOC_CAP_SPIRAM));
+    if (new_buffer == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate canvas buffer in PSRAM: %zu bytes", max_buffer_size);
+      return false;
+    }
+    this->canvas_buffer_ = new_buffer;
+    ESP_LOGI(TAG, "Canvas buffer allocated once (PSRAM): %zu bytes, max %" PRIu32 "x%" PRIu32, max_buffer_size,
+             aligned_max_width, aligned_max_height);
+  }
 
-  lv_canvas_set_buffer(this->canvas_, new_buffer, static_cast<int32_t>(aligned_width),
+  std::memset(this->canvas_buffer_, 0, static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t));
+
+  lv_canvas_set_buffer(this->canvas_, this->canvas_buffer_, static_cast<int32_t>(aligned_width),
                        static_cast<int32_t>(aligned_height), LV_COLOR_FORMAT_RGB565);
 
   this->canvas_buffer_width_ = static_cast<int>(aligned_width);
@@ -1361,8 +1380,7 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
   // one is a different case than a canvas that has never been shown anything yet.
   lv_obj_invalidate(this->canvas_);
 
-  ESP_LOGI(TAG, "Canvas buffer resized to %" PRIu32 "x%" PRIu32 " (%zu bytes, PSRAM)", aligned_width, aligned_height,
-           buffer_size);
+  ESP_LOGI(TAG, "Canvas buffer set to %" PRIu32 "x%" PRIu32, aligned_width, aligned_height);
   return this->canvas_buffer_ready_;
 }
 
