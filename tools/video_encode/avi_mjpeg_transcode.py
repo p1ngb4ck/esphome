@@ -23,21 +23,40 @@ def build_ffmpeg_args(args: argparse.Namespace) -> list[str]:
     ffmpeg_args: list[str] = ["ffmpeg", "-y", "-i", args.input]
 
     # Video: MJPEG, explicit pixel format for determinism, fps and (optional) resolution.
-    # -colorspace bt601 pins the YUV<->RGB matrix explicitly: MJPEG has no reliable in-band
-    # colorspace signaling, and without this ffmpeg's own default can vary by resolution (BT.601
-    # for SD-ish content, BT.709 for HD-ish -- and 1280x800 sits right at that boundary). The
-    # ESP32-P4 hardware decoder's jpeg_decode_cfg_t.conv_std is explicitly set to
-    # JPEG_YUV_RGB_CONV_STD_BT601 to match (see decode_frame_backend_<HW_P4> in
-    # simple_video_player.cpp) -- a mismatch here would show up as inaccurate (not necessarily
-    # broken-looking) colors, particularly reds/blues.
-    ffmpeg_args += ["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-colorspace", "bt601", "-r", str(args.fps)]
+    # out_color_matrix=bt601 on the scale filter is what actually forces the RGB<->YCbCr
+    # conversion matrix. A plain "-colorspace bt601" output flag (this script's previous approach)
+    # only stamps stream metadata -- it does not change which matrix swscale actually uses for the
+    # conversion, and MJPEG has no field to carry that metadata in the first place, so the encoder
+    # silently ignores it; ffmpeg's own default matrix choice can still vary by resolution (BT.601
+    # for SD-ish content, BT.709 for HD-ish -- and 1280x800 sits right at that boundary) unless
+    # something in the filter chain pins it explicitly, which only the scale filter's own
+    # out_color_matrix parameter actually does. The scale filter runs unconditionally below (even
+    # at "iw:ih", i.e. no resize) purely to get this matrix conversion applied regardless of
+    # whether a resolution change was requested. Matches the ESP32-P4 hardware decoder's
+    # jpeg_decode_cfg_t.conv_std, left at its implicit-BT601 default (see
+    # decode_frame_backend_<HW_P4> in simple_video_player.cpp) -- a mismatch here would show up as
+    # inaccurate (not necessarily broken-looking) colors, particularly reds/blues.
+    if args.width and args.height:
+        width_expr, height_expr = str(args.width), str(args.height)
+    elif args.width:
+        width_expr, height_expr = str(args.width), "-1"
+    elif args.height:
+        width_expr, height_expr = "-1", str(args.height)
+    else:
+        width_expr, height_expr = "iw", "ih"
+
+    ffmpeg_args += [
+        "-c:v",
+        "mjpeg",
+        "-pix_fmt",
+        "yuvj420p",
+        "-r",
+        str(args.fps),
+        "-vf",
+        f"scale={width_expr}:{height_expr}:out_color_matrix=bt601",
+    ]
     if args.qscale is not None:
         ffmpeg_args += ["-q:v", str(args.qscale)]
-    if args.width and args.height:
-        ffmpeg_args += ["-vf", f"scale={args.width}:{args.height}"]
-    elif args.width or args.height:
-        # ffmpeg scale filter accepts -1 for "keep aspect ratio" on the other axis.
-        ffmpeg_args += ["-vf", f"scale={args.width or -1}:{args.height or -1}"]
 
     # Explicit stream mapping instead of relying on ffmpeg's automatic "best stream" selection --
     # a source with embedded cover art (a still-image stream ffmpeg can treat as a second "video"
