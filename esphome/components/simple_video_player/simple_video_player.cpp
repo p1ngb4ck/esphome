@@ -374,9 +374,18 @@ void SimpleVideoPlayer::playback_loop_() {
     // canvas.py: every canvas is built via lv_draw_buf_init()+lv_canvas_set_draw_buf()). stride 0
     // means "auto: width * bytes-per-pixel", matching the aligned_width the decoder actually
     // wrote rows at.
+    //
+    // data_size must be LV_DRAW_BUF_SIZE(aligned_width, aligned_height, RGB565) -- the exact size
+    // for THESE declared dimensions, same as canvas.py's own codegen always does -- not
+    // output_buffer_size_, which is the buffer's full pre-allocated capacity for the max
+    // resolution (MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT) and is almost always larger than the
+    // current video's actual aligned_width x aligned_height. Declaring a size inconsistent with
+    // the width/height in the same call is exactly the kind of mismatch that can make LVGL's draw
+    // pipeline reject the buffer outright instead of just rendering it wrong.
+    uint32_t draw_buf_size = LV_DRAW_BUF_SIZE(aligned_width, aligned_height, LV_COLOR_FORMAT_RGB565);
     for (int i = 0; i < 2; i++) {
       lv_draw_buf_init(&this->canvas_draw_buf_[i], aligned_width, aligned_height, LV_COLOR_FORMAT_RGB565, 0,
-                       this->output_buffer_[i].get(), static_cast<uint32_t>(this->output_buffer_size_));
+                       this->output_buffer_[i].get(), draw_buf_size);
       lv_draw_buf_set_flag(&this->canvas_draw_buf_[i], LV_IMAGE_FLAGS_MODIFIABLE);
     }
     // Attach display buffer initially (buffer 0)
