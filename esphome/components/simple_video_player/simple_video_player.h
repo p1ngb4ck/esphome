@@ -399,8 +399,16 @@ class SimpleVideoPlayer : public Component {
   std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
   std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
-  uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
-  uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
+  // current_buffer_index_ is written ONLY by the decode task (Core 0); display_buffer_index_ is
+  // written ONLY by on_lvgl_render_complete() (runs on the main loop task, Core 1). Decode and
+  // VSYNC now run on genuinely different cores (not just preempting each other on one), so unlike
+  // before, two tasks writing the SAME index variable would be a real cross-core data race, not
+  // just a same-core interleaving concern. pending_display_buffer_index_ is the one-way handoff
+  // between them: decode sets it (alongside buffer_swap_pending_) to say which buffer it just
+  // finished writing; VSYNC only ever reads it, never writes current_buffer_index_ itself.
+  uint8_t current_buffer_index_{0};          // 0 or 1 - which buffer decode writes into next
+  uint8_t display_buffer_index_{0};          // 0 or 1 - which buffer LVGL is currently displaying
+  uint8_t pending_display_buffer_index_{0};  // 0 or 1 - which buffer decode just finished writing
 
 #if defined(USE_HWJPG)
   // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_

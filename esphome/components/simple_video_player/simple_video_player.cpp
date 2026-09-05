@@ -340,9 +340,12 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  // Initialize double-buffering indices
-  this->display_buffer_index_ = 0;  // LVGL displays buffer 0 initially
-  this->current_buffer_index_ = 1;  // We decode into buffer 1 first
+  // Initialize double-buffering indices. Safe to write directly here (no cross-core concern):
+  // this runs before the loader task starts and before buffer_swap_pending_ can ever be true, so
+  // on_lvgl_render_complete() has nothing to race with yet.
+  this->display_buffer_index_ = 0;          // LVGL displays buffer 0 initially
+  this->current_buffer_index_ = 1;          // We decode into buffer 1 first
+  this->pending_display_buffer_index_ = 0;  // matches display_buffer_index_ until the first swap
   this->buffer_swap_pending_ = false;
 
   // Set canvas buffer with aligned dimensions
@@ -751,6 +754,14 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
     return false;
   }
 
+  // Publish which buffer we just finished writing, then toggle to the other one for next time --
+  // both writes happen here, on the decode task, exclusively. on_lvgl_render_complete() (runs on
+  // the main loop task, a genuinely different core now) only ever reads
+  // pending_display_buffer_index_, never writes current_buffer_index_ itself, so there is no
+  // cross-core race on either variable.
+  this->pending_display_buffer_index_ = this->current_buffer_index_;
+  this->current_buffer_index_ = 1 - this->current_buffer_index_;
+
   // Mark that we have a new frame ready to swap during VSYNC
   this->buffer_swap_pending_ = true;
   this->canvas_needs_invalidate_ = true;
@@ -1050,9 +1061,10 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
   // This callback runs in LVGL's thread, so NO MUTEX needed for LVGL API calls
 
   if (this->buffer_swap_pending_) {
-    // Swap buffers: make the newly decoded buffer visible
-    this->display_buffer_index_ = this->current_buffer_index_;
-    this->current_buffer_index_ = 1 - this->current_buffer_index_;  // Toggle between 0 and 1
+    // Swap buffers: make the newly decoded buffer visible. Only reads pending_display_buffer_index_
+    // (published by decode_frame_() on the decode task) -- never touches current_buffer_index_,
+    // which decode owns exclusively now that the two run on different cores.
+    this->display_buffer_index_ = this->pending_display_buffer_index_;
 
     // Update canvas to point to the new display buffer
     uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
