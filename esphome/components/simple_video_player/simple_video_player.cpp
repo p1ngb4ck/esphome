@@ -292,7 +292,7 @@ void SimpleVideoPlayer::playback_loop_() {
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
     // Set canvas buffer to display buffer initially (buffer 0)
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_IMG_CF_TRUE_COLOR);
+                         aligned_height, LV_COLOR_FORMAT_RGB565);
 
     xSemaphoreGive(this->lvgl_mutex_);
   } else {
@@ -976,7 +976,7 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
     uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
     uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_IMG_CF_TRUE_COLOR);
+                         aligned_height, LV_COLOR_FORMAT_RGB565);
 
     this->buffer_swap_pending_ = false;
     this->canvas_needs_invalidate_ = false;
