@@ -385,7 +385,9 @@ void SimpleVideoPlayer::playback_loop_() {
   // that silently skips setup on contention) is correct here: skipping this on a stray timeout
   // would leave canvas_buffer_ready_ false for the entire playback session.
   bool canvas_ready = false;
+  ESP_LOGI(TAG, "play(): taking lvgl_mutex_ for resize_canvas_buffer_ (blocking)");
   if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
+    ESP_LOGI(TAG, "play(): lvgl_mutex_ acquired, calling resize_canvas_buffer_");
     canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
     xSemaphoreGive(this->lvgl_mutex_);
   }
@@ -1439,12 +1441,16 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
 
   std::memset(this->canvas_buffer_, 0, static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t));
 
+  ESP_LOGI(TAG, "resize_canvas_buffer_: calling lv_canvas_set_buffer(%p, %" PRIu32 "x%" PRIu32 ")",
+           (void *) this->canvas_buffer_, aligned_width, aligned_height);
   lv_canvas_set_buffer(this->canvas_, this->canvas_buffer_, static_cast<int32_t>(aligned_width),
                        static_cast<int32_t>(aligned_height), LV_COLOR_FORMAT_RGB565);
+  ESP_LOGI(TAG, "resize_canvas_buffer_: lv_canvas_set_buffer() returned");
 
   this->canvas_buffer_width_ = static_cast<int>(aligned_width);
   this->canvas_buffer_height_ = static_cast<int>(aligned_height);
   this->ensure_canvas_buffer_();
+  ESP_LOGI(TAG, "resize_canvas_buffer_: ensure_canvas_buffer_() returned, ready=%d", this->canvas_buffer_ready_);
 
   // Deliberately NOT calling lv_obj_invalidate() here: it was added to fix the fill-then-play
   // case, but instead regressed the normal case (no first frame at all), so it's reverted pending
