@@ -103,10 +103,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
-            ): cv.All(validate_bytes, cv.Range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE)),
+            ): cv.All(cv.validate_bytes, cv.Range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE)),
             cv.Optional(
                 CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
-            ): cv.All(validate_bytes, cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE)),
+            ): cv.All(cv.validate_bytes, cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE)),
             cv.Optional(
                 CONF_PREFETCH_FRAMES, default=DEFAULT_PREFETCH_FRAMES
             ): cv.int_range(min=MIN_PREFETCH_FRAMES, max=MAX_PREFETCH_FRAMES),
