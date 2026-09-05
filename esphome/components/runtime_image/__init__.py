@@ -91,19 +91,21 @@ class JPEGFormat(Format):
 
     def actions(self) -> None:
         cg.add_define("USE_RUNTIME_IMAGE_JPEG")
-        cg.add_library("JPEGDEC", "1.8.4", "https://github.com/bitbank2/JPEGDEC#1.8.4")
-        if CORE.is_host:
-            # JPEGDEC's host detection checks __MACH__/__LINUX__, but gcc only
-            # predefines the lowercase __linux__; without this a Linux host
-            # build tries to include Arduino.h.
-            cg.add_build_flag("-D__LINUX__")
         if CORE.is_esp32:
-            from esphome.components.esp32 import add_idf_component
+            from esphome.components.esp32 import require_hw_jpeg
 
-            # JPEGDEC uses ESP32-S3 SIMD optimizations (guarded by board-level
-            # ARDUINO_ESP32S3_DEV define) that require esp-dsp headers.
-            # On Arduino this overwrites the stub; on IDF it adds the component.
-            add_idf_component(name="espressif/esp-dsp", ref="1.8.2")
+            # Backend selection (USE_HWJPG / USE_NEWJPEG / USE_JPEGDEC, plus
+            # the matching library/IDF component) is esp32's job - the single
+            # source of truth also used by simple_video_player.
+            require_hw_jpeg()
+        else:
+            cg.add_library("JPEGDEC", "1.8.4", "https://github.com/bitbank2/JPEGDEC#1.8.4")
+            cg.add_define("USE_JPEGDEC")
+            if CORE.is_host:
+                # JPEGDEC's host detection checks __MACH__/__LINUX__, but gcc only
+                # predefines the lowercase __linux__; without this a Linux host
+                # build tries to include Arduino.h.
+                cg.add_build_flag("-D__LINUX__")
 
 
 class PNGFormat(Format):

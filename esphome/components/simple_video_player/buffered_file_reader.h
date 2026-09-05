@@ -1,34 +1,33 @@
 /**
  * @file buffered_file_reader.h
- * @brief Optimized buffered file reader for video playback from storage devices
- *
- * Provides efficient buffered reading from SD/USB storage with:
- * - 64KB aligned cache buffer for optimal SD card performance
- * - Cache-aware seeking to avoid unnecessary re-reads
- * - DMA-aligned internal buffer (128-byte alignment)
- * - Works with standard FILE* handles from VFS-mounted storage
- *
- * Based on ESP Brookesia video player's media_src_storage implementation.
+ * @brief Blocking file reader backed by storage::StorageWorker
  */
 
 #pragma once
 
-#include <cstdio>
+#include "esphome/components/storage/storage.h"
+#include "esphome/components/storage/storage_worker.h"
+
 #include <cstdint>
-#include <memory>
+#include <cstdio>
+
+#ifdef USE_ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 
 namespace esphome {
 namespace simple_video_player {
 
 /**
- * @brief Buffered file reader optimized for SD/USB storage access
+ * @brief Blocking file reader backed by storage::StorageWorker.
  *
- * This class provides an efficient buffering layer on top of standard FILE*
- * handles, optimizing for storage device characteristics:
- * - Reads in large 64KB chunks to minimize storage access overhead
- * - Aligns reads to 1024-byte boundaries for optimal SD card performance
- * - Caches data to avoid redundant reads
- * - Provides cache-aware seeking to skip re-reads when possible
+ * StorageWorker's stream API (begin_read/read_chunk/seek/tell/end_read) is asynchronous --
+ * completions fire later, on the main loop. This class turns it back into the synchronous,
+ * blocking interface AVIParser and the playback task already expect: each call submits the
+ * matching worker request and blocks the calling task on a semaphore until the completion
+ * callback signals it. All actual file-ops (buffering, seek/tell, EOF, local-vs-network
+ * dispatch) belong to the worker/driver -- this class reinvents none of it.
  */
 class BufferedFileReader {
  public:
@@ -41,7 +40,7 @@ class BufferedFileReader {
 
   /**
    * @brief Open a file for buffered reading
-   * @param path File path (VFS path like "/sdcard/video.mjpeg")
+   * @param path VFS path (e.g. "/sdcard/video.mjpeg"), resolved against the storage registry
    * @return true if file opened successfully
    */
   bool open(const char *path);
@@ -53,82 +52,67 @@ class BufferedFileReader {
 
   /**
    * @brief Check if file is currently open
-   * @return true if open
    */
-  bool is_open() const { return this->file_handle_ != nullptr; }
+  bool is_open() const { return this->open_; }
 
   /**
    * @brief Read data from file into buffer
-   * @param buffer Destination buffer
-   * @param size Number of bytes to read
    * @return Number of bytes actually read (0 on EOF, -1 on error)
    */
   int read(uint8_t *buffer, size_t size);
 
   /**
-   * @brief Seek to position in file
-   * @param position Absolute byte offset from start
-   * @return true on success
+   * @brief Seek to an absolute position in the file
    */
   bool seek(uint64_t position);
 
   /**
-   * @brief Get current file position
-   * @return Current byte offset from start
+   * @brief Get the current logical file position
    */
   uint64_t tell() const { return this->current_position_; }
 
   /**
-   * @brief Get file size
-   * @param size Output: file size in bytes
-   * @return true on success
+   * @brief Get the file size (via seek-to-end/tell/seek-back through the worker; no separate
+   * stat call -- the worker's own SEEK_MODE_END already resolves file size where needed)
    */
   bool get_size(uint64_t *size);
 
   /**
-   * @brief Flush internal cache (call before seeking)
+   * @brief No-op kept for call-site compatibility: the worker has no separate cache to
+   * pre-warm. Always returns true.
    */
-  void flush_cache();
-
-  /**
-   * @brief Pre-fill cache for optimal startup performance
-   * Call immediately after open() to avoid first-read overhead
-   * @return true if cache was filled successfully
-   */
-  bool prefill_cache();
+  bool prefill_cache() { return true; }
 
  protected:
-  /**
-   * @brief Fill cache with next chunk of data from file
-   * @return Number of bytes read into cache (0 on EOF, -1 on error)
-   */
-  int fill_cache_();
+  // Completion callback shared by every worker call below: records the result and wakes the
+  // blocked caller. The worker guarantees exactly one completion per submitted request, so
+  // done_sem_ never accumulates more than one pending "give".
+  void on_done_(storage::StorageError err) {
+    this->last_result_ = err;
+#ifdef USE_ESP32
+    xSemaphoreGive(this->done_sem_);
+#endif
+  }
 
-  /**
-   * @brief Read data from cache, refilling if needed
-   * @param buffer Destination buffer
-   * @param size Number of bytes to read
-   * @return Number of bytes read (0 on EOF, -1 on error)
-   */
-  int read_from_cache_(uint8_t *buffer, size_t size);
+  // Blocks until on_done_() fires for the just-submitted request; returns its StorageError.
+  storage::StorageError wait_() {
+#ifdef USE_ESP32
+    xSemaphoreTake(this->done_sem_, portMAX_DELAY);
+#endif
+    return this->last_result_;
+  }
 
-  // File handle
-  FILE *file_handle_{nullptr};
+  storage::StreamHandle handle_{};
+  bool open_{false};
+  uint64_t current_position_{0};
 
-  // Cache buffer (allocated in internal RAM with DMA alignment)
-  std::unique_ptr<uint8_t[]> cache_buffer_;
-  static constexpr size_t CACHE_SIZE = 64 * 1024;  // 64KB cache
-  static constexpr size_t ALIGN_SIZE = 1024;       // SD card optimal alignment
-
-  // Cache state
-  size_t cache_filled_{0};      // Number of valid bytes in cache
-  size_t cache_offset_{0};      // Current read position within cache
-  uint64_t cache_file_pos_{0};  // File position where cache starts
-  bool eof_{false};             // End of file reached
-
-  // Current file position tracking
-  uint64_t current_position_{0};  // Logical file position for user
-  uint64_t align_position_{0};    // Aligned file position for actual reads
+#ifdef USE_ESP32
+  SemaphoreHandle_t done_sem_{nullptr};
+#endif
+  // Set by the completion callback just before it gives done_sem_; read by wait_() right after
+  // taking it -- safe with no extra lock since the semaphore itself is the handoff point (the
+  // callback always finishes its write before giving, wait_() always reads after taking).
+  storage::StorageError last_result_{storage::StorageError::STORAGE_ERROR_OK};
 };
 
 }  // namespace simple_video_player

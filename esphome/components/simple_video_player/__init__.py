@@ -5,9 +5,12 @@ import logging
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker
-from esphome.components.transcoder import require_jpeg_decoder
+from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
+from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID, CONF_TRIGGER_ID
+from esphome.core import CORE
+import esphome.final_validate as fv
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,8 +24,8 @@ except ImportError:
     lv_canvas_t = None
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = []
-AUTO_LOAD = ["transcoder", "image", "audio"]
+DEPENDENCIES = ["storage"]
+AUTO_LOAD = ["image", "audio"]
 
 # Namespaces
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
@@ -64,6 +67,7 @@ CONF_CANVAS_ID = "canvas_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
+CONF_PREFETCH_FRAMES = "prefetch_frames"
 CONF_TARGET_FPS = "target_fps"
 CONF_ON_PLAYBACK_STARTED = "on_playback_started"
 CONF_ON_PLAYBACK_FINISHED = "on_playback_finished"
@@ -72,7 +76,11 @@ CONF_ON_PLAYBACK_ERROR = "on_playback_error"
 
 # Default values
 DEFAULT_CACHE_BUFFER_SIZE = 64 * 1024  # 64KB - optimized for better I/O performance
-DEFAULT_INPUT_BUFFER_SIZE = 256 * 1024  # 256KB
+DEFAULT_INPUT_BUFFER_SIZE = 256 * 1024  # 256KB (per frame-ring-buffer slot)
+# Depth of the video frame ring buffer (loader task prefetch, Core 0 -> decode task, Core 1).
+# Generous by design: this pipeline currently targets ESP32-P4 (32MB PSRAM) with the hardware
+# JPEG decoder; a size-conscious default for smaller/software-JPEG targets is future work.
+DEFAULT_PREFETCH_FRAMES = 8
 DEFAULT_TARGET_FPS = 30.0
 
 # Validation ranges
@@ -80,6 +88,8 @@ MIN_CACHE_BUFFER_SIZE = 8 * 1024  # 8KB
 MAX_CACHE_BUFFER_SIZE = 128 * 1024  # 128KB - increased for performance
 MIN_INPUT_BUFFER_SIZE = 128 * 1024  # 128KB
 MAX_INPUT_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
+MIN_PREFETCH_FRAMES = 1
+MAX_PREFETCH_FRAMES = 32
 MIN_FPS = 1.0
 MAX_FPS = 60.0
 
@@ -97,6 +107,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
             ): cv.int_range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE),
+            cv.Optional(
+                CONF_PREFETCH_FRAMES, default=DEFAULT_PREFETCH_FRAMES
+            ): cv.int_range(min=MIN_PREFETCH_FRAMES, max=MAX_PREFETCH_FRAMES),
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
             ),
@@ -132,15 +145,63 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+def _final_validate(config):
+    # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
+    # simple_video_player itself -- it only checks what's already there and warns. AVIAudioCodec
+    # (avi_parser.h) only ever reports PCM, MP3 or FLAC for an AVI audio track -- WAV isn't a
+    # thing that can occur there (it's a container format, not a distinct codec an AVI stream
+    # carries), so it's not part of this check. Raw PCM needs no decoder at all either.
+    if CONF_SPEAKER_ID not in config:
+        return config
+
+    full_config = fv.full_config.get()
+    audio_config = full_config.get("audio")
+    if isinstance(audio_config, list):
+        # Defensive: audio is documented as single-instance, but don't assume forever.
+        audio_config = audio_config[0] if audio_config else None
+
+    enabled = set()
+    if isinstance(audio_config, dict):
+        codecs_config = audio_config.get(CONF_CODECS)
+        if isinstance(codecs_config, dict):
+            for name, key in (("flac", CONF_FLAC), ("mp3", CONF_MP3)):
+                if key in codecs_config:
+                    enabled.add(name)
+
+    missing = {"flac", "mp3"} - enabled
+    if missing:
+        missing_str = ", ".join(sorted(missing))
+        _LOGGER.warning(
+            "simple_video_player: an AVI video's audio track can use FLAC, MP3 or raw PCM. "
+            "%s not enabled under `audio: codecs:`. A video whose audio track uses one of those "
+            "will play back with video only (no audio) at runtime -- add it there if your video "
+            "files may use it.",
+            f"{missing_str} {'is' if len(missing) == 1 else 'are'}",
+        )
+
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
+
 async def to_code(config):
-    require_jpeg_decoder()  # Simple Video Player only needs JPEG decoder
-    cg.add_define("USE_TRANSCODER")
+    # Backend selection (USE_HWJPG / USE_NEWJPEG / USE_JPEGDEC) is esp32's job - the single
+    # source of truth also used by runtime_image.
+    if CORE.is_esp32:
+        from esphome.components.esp32 import require_hw_jpeg
+
+        require_hw_jpeg()
+
+    # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
+    # blocking main-loop read; request it directly instead of relying on whichever storage
+    # device the user happened to configure to have already asked for it.
+    request_storage_worker()
+
     cg.add_define("USE_STORAGE")
     cg.add_define("USE_LVGL")
 
     # Get the single LVGL component instance (required for VSYNC callbacks)
-    from esphome.core import CORE
-
     lvgl_configs = CORE.config.get("lvgl", [])
     if not lvgl_configs:
         raise cv.Invalid("LVGL component is required for simple_video_player")
@@ -174,15 +235,10 @@ async def to_code(config):
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
+    cg.add(var.set_prefetch_frames(config[CONF_PREFETCH_FRAMES]))
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))
-
-    # Link to transcoder component (handles all decoder initialization)
-    # The transcoder dependency ensures it's initialized before simple_video_player
-    cg.add(
-        var.set_transcoder(cg.RawExpression("esphome::transcoder::global_transcoder"))
-    )
 
     # Register automation triggers
     for conf in config.get(CONF_ON_PLAYBACK_STARTED, []):

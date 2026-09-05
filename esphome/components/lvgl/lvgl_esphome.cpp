@@ -682,20 +682,12 @@ void LvKeyboardType::set_obj(lv_obj_t *lv_obj) {
 void LvglComponent::draw_end_() {
   if (this->draw_end_callback_ != nullptr)
     this->draw_end_callback_->trigger();
+  this->draw_end_callbacks_.call();
   // Only reachable once the display is idle again: while busy, the display's refr_timer_ is
   // paused (see loop()), so LVGL never renders/flushes and this event never fires.
   if (this->update_when_display_idle_) {
     for (auto *disp : this->displays_)
       disp->update();
-  }
-}
-
-void LvglComponent::register_monitor_callback() {
-  // Register monitor callback if not already registered
-  // This allows components to register draw_end callbacks after setup
-  if (this->disp_drv_.monitor_cb == nullptr) {
-    this->disp_drv_.monitor_cb = monitor_cb;
-    ESP_LOGD(TAG, "Monitor callback registered");
   }
 }
 
@@ -859,6 +851,7 @@ void LvglComponent::setup() {
   }
   if (this->draw_end_callback_ != nullptr || this->update_when_display_idle_) {
     lv_display_add_event_cb(this->disp_, render_end_cb, LV_EVENT_REFR_READY, this);
+    this->draw_end_event_registered_ = true;
   }
   this->refr_timer_ = lv_display_get_refr_timer(this->disp_);
   lv_timer_set_period(this->refr_timer_, this->refr_timer_period_);

@@ -6,7 +6,16 @@
 #include "esphome/core/helpers.h"
 
 #include "esphome/components/lvgl/lvgl_esphome.h"
-#include "esphome/components/transcoder/transcoder.h"
+
+#if defined(USE_HWJPG)
+#include "driver/jpeg_decode.h"
+#include "driver/jpeg_types.h"
+#elif defined(USE_NEWJPEG)
+#include "esp_jpeg_dec.h"
+#include "esp_jpeg_common.h"
+#else
+#include <JPEGDEC.h>
+#endif
 
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
@@ -14,6 +23,7 @@
 
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
+#include "esphome/components/ring_buffer/ring_buffer.h"
 #endif
 #include "lvgl.h"
 #include "buffered_file_reader.h"
@@ -32,6 +42,21 @@
 #endif
 
 namespace esphome::simple_video_player {
+
+/// Which JPEG backend esp32.require_hw_jpeg() selected for this platform.
+enum class JpegBackend {
+  HW_P4,     // ESP32-P4 hardware JPEG codec (esp_driver_jpeg)
+  NEW_JPEG,  // ESP32-S2/S3 esp_new_jpeg (SIMD-optimized software)
+  JPEGDEC,   // Software fallback (bitbank2/JPEGDEC) - other ESP32 variants
+};
+
+#if defined(USE_HWJPG)
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::HW_P4;
+#elif defined(USE_NEWJPEG)
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::NEW_JPEG;
+#else
+static constexpr JpegBackend JPEG_BACKEND = JpegBackend::JPEGDEC;
+#endif
 
 /// Speaker channel modes for audio routing
 enum class SpeakerChannelMode : uint8_t {
@@ -65,6 +90,17 @@ enum class VideoFormat : uint8_t {
   UNKNOWN = 0,
   RAW_MJPEG = 1,  // Raw concatenated JPEG frames
   AVI_MJPEG = 2,  // AVI container with MJPEG video
+};
+
+/// One slot of the video frame ring buffer: a compressed JPEG frame, read ahead by the loader
+/// task (Core 0) and consumed by the decode/playback task (Core 1). See SimpleVideoPlayer's
+/// frame_ring_ for the synchronization contract.
+struct VideoFrameSlot {
+  enum class Status : uint8_t { FRAME_OK, END_OF_FILE, READ_ERROR };
+
+  std::unique_ptr<uint8_t[]> data;      // PSRAM, input_buffer_size_ bytes
+  size_t size{0};                       // valid compressed bytes; meaningful only if FRAME_OK
+  Status status{Status::FRAME_OK};
 };
 
 // Forward declarations for automation
@@ -110,11 +146,13 @@ class SimpleVideoPlayer : public Component {
   // Configuration (called from codegen)
   //========================================================================
 
-  void set_transcoder(transcoder::Transcoder *tc) { this->transcoder_ = tc; }
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
+  /// Depth of the video frame ring buffer (see frame_ring_). Each slot costs
+  /// input_buffer_size_ bytes of PSRAM -- generous by design on P4 (32MB PSRAM).
+  void set_prefetch_frames(uint32_t frames) { this->prefetch_frames_ = frames; }
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
@@ -171,28 +209,63 @@ class SimpleVideoPlayer : public Component {
 
  protected:
   //========================================================================
-  // Playback Task
+  // Playback Task (decode + pacing, Core 1) and Loader Task (I/O + demux, Core 0)
+  //
+  // The loader task reads ahead into frame_ring_ using the same blocking BufferedFileReader
+  // used everywhere else in this component -- blocking is no longer a problem once it's this
+  // task's only job, isolated from decode's presentation deadline. The playback task does the
+  // one-time setup (open file, probe dimensions, allocate buffers) sequentially, starts the
+  // loader, then becomes a pure consumer: wait for a ready ring slot (bounded by one frame's
+  // duration), decode, pace, swap, repeat.
   //========================================================================
 
-  /// FreeRTOS task entry point
+  /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
   static void playback_task_entry_(void *param);
 
   /// Main playback loop (runs in task)
   void playback_loop_();
 
-  /// Wait for task to stop
-  bool wait_for_task_stop_(uint32_t timeout_ms);
+  /// FreeRTOS task entry point (loader task, pinned to Core 0)
+  static void loader_task_entry_(void *param);
+
+  /// Loader loop: demuxes and reads ahead into frame_ring_ until EOF or stop is signaled
+  void loader_loop_();
+
+  /// Wait for a task to stop (generic: used for both the playback and loader tasks)
+  bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
+
+  //========================================================================
+  // Video Frame Ring Buffer (see VideoFrameSlot)
+  //========================================================================
+
+  /// Allocate frame_ring_ (prefetch_frames_ slots of input_buffer_size_ bytes each)
+  bool allocate_frame_ring_();
+
+  /// Free frame_ring_ and its synchronization primitives
+  void free_frame_ring_();
 
   //========================================================================
   // Frame Processing
   //========================================================================
 
-  /// Read next JPEG frame
+  /// Read the next JPEG frame into dest_buffer (capacity dest_capacity)
   /// Returns frame size or 0 if EOF, -1 on error
-  int read_next_frame_();
+  int read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity);
 
-  /// Decode JPEG frame and update canvas
-  bool decode_frame_(size_t frame_size);
+  /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
+  bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
+  // Backend-specific decode, selected at compile time via JPEG_BACKEND (same dispatch pattern
+  // as runtime_image/jpeg_decoder.h -- only one explicit specialization is ever defined per
+  // build, in simple_video_player.cpp, each behind the #ifdef that also guards its backend's
+  // headers above).
+  template<JpegBackend Backend> bool decode_frame_backend_(const uint8_t *frame_data, size_t frame_size);
+  // Backend-specific decoder/buffer initialization, called once from setup(). Same dispatch
+  // pattern as decode_frame_backend_ above.
+  template<JpegBackend Backend> bool init_decoder_backend_();
+  // Backend-specific header-only parse (width/height, no pixel decode), used by
+  // get_video_dimensions_() for the raw-MJPEG case. Same dispatch pattern as above.
+  template<JpegBackend Backend>
+  bool parse_header_backend_(const uint8_t *buffer, size_t size, uint32_t &width, uint32_t &height);
 
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
@@ -269,11 +342,12 @@ class SimpleVideoPlayer : public Component {
 
   // Configuration
   lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (for VSYNC callbacks)
-  transcoder::Transcoder *transcoder_{nullptr};
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
-  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (JPEG frame buffer)
+  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (per ring-buffer slot capacity)
   float target_fps_{30.0f};                 // Target frame rate
+  static constexpr uint32_t DEFAULT_PREFETCH_FRAMES = 8;
+  uint32_t prefetch_frames_{DEFAULT_PREFETCH_FRAMES};  // Depth of frame_ring_
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -286,9 +360,9 @@ class SimpleVideoPlayer : public Component {
   bool loop_{false};
   std::string video_path_;
 
-  // File reader (uses optimized buffering for local storage)
+  // File reader (backed by storage::StorageWorker -- handles local/network storage
+  // transparently, see buffered_file_reader.h)
   std::unique_ptr<BufferedFileReader> file_reader_;
-  bool is_network_file_{false};
   uint64_t file_size_{0};
 
   // Video format and container parser
@@ -298,8 +372,8 @@ class SimpleVideoPlayer : public Component {
 #ifdef USE_AUDIO
   // Audio decoding (for AVI with audio streams)
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
-  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
-  std::shared_ptr<RingBuffer>
+  std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
+  std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
   std::unique_ptr<uint8_t[]> audio_temp_buffer_;  // Temporary buffer for audio processing (in PSRAM)
   size_t audio_temp_buffer_size_{0};              // Dynamically calculated based on audio params
@@ -323,13 +397,26 @@ class SimpleVideoPlayer : public Component {
 
   // Buffers (allocated on demand)
   std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
-  std::unique_ptr<uint8_t[]> input_buffer_;      // PSRAM (256KB), JPEG encoded frame
   std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
   uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
   uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
 
-  // FreeRTOS task
+  // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
+  // (Core 1). ring_head_ is loader-owned (next slot to fill), ring_tail_ is decode-owned (next
+  // slot to consume); the two semaphores are the only cross-task synchronization needed for a
+  // single-producer/single-consumer ring, no additional locking required.
+  std::unique_ptr<VideoFrameSlot[]> frame_ring_;
+  uint32_t ring_head_{0};
+  uint32_t ring_tail_{0};
+  SemaphoreHandle_t ring_slots_free_{nullptr};   // counts empty slots, initial = prefetch_frames_
+  SemaphoreHandle_t ring_slots_ready_{nullptr};  // counts filled slots, initial = 0
+
+  // Loader task (Core 0): demuxes and reads ahead into frame_ring_
+  TaskHandle_t loader_task_handle_{nullptr};
+  volatile bool loader_task_stop_{false};
+
+  // FreeRTOS task (decode/playback, Core 1)
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
   SemaphoreHandle_t lvgl_mutex_{nullptr};  // Mutex for LVGL thread safety

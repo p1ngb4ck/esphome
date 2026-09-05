@@ -11,9 +11,144 @@
 #include "esp_task_wdt.h"
 #endif
 
+#if defined(USE_HWJPG)
+#include "esp_heap_caps.h"
+#endif
+
 static const char *const TAG = "image_decoder.jpeg";
 
 namespace esphome::runtime_image {
+
+int HOT JpegDecoder::decode(uint8_t *buffer, size_t size) {
+  // JPEG decoder requires complete data
+  // If we know the expected size, wait for it
+  if (this->expected_size_ > 0 && size < this->expected_size_) {
+    ESP_LOGV(TAG, "Download not complete. Size: %zu/%zu", size, this->expected_size_);
+    return 0;
+  }
+  return this->decode_backend_<JPEG_BACKEND>(buffer, size);
+}
+
+#if defined(USE_HWJPG) || defined(USE_NEWJPEG)
+void JpegDecoder::draw_rgb888_buffer_(const uint8_t *rgb, uint32_t width, uint32_t height) {
+  size_t position = 0;
+  for (uint32_t y = 0; y < height; y++) {
+    for (uint32_t x = 0; x < width; x++) {
+      uint8_t r = rgb[position++];
+      uint8_t g = rgb[position++];
+      uint8_t b = rgb[position++];
+      this->draw(x, y, 1, 1, Color(r, g, b, 255));
+    }
+  }
+}
+#endif
+
+#if defined(USE_HWJPG)
+
+// ESP32-P4: hardware JPEG codec (esp_driver_jpeg).
+template<> int JpegDecoder::decode_backend_<JpegBackend::HW_P4>(uint8_t *buffer, size_t size) {
+  jpeg_decode_picture_info_t info;
+  if (jpeg_decoder_get_info(buffer, size, &info) != ESP_OK) {
+    ESP_LOGE(TAG, "Could not parse JPEG header");
+    return DECODE_ERROR_INVALID_TYPE;
+  }
+  if (!this->set_size(static_cast<int>(info.width), static_cast<int>(info.height))) {
+    return DECODE_ERROR_OUT_OF_MEMORY;
+  }
+
+  jpeg_decode_engine_cfg_t eng_cfg = {};
+  eng_cfg.intr_priority = 0;
+  eng_cfg.timeout_ms = 1000;
+  jpeg_decoder_handle_t decoder = nullptr;
+  if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK) {
+    ESP_LOGE(TAG, "Could not create hardware JPEG decoder engine");
+    return DECODE_ERROR_INTERNAL_DECODER_ERROR;
+  }
+
+  jpeg_decode_memory_alloc_cfg_t out_alloc_cfg{};
+  out_alloc_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  size_t out_capacity = 0;
+  auto *outbuf = static_cast<uint8_t *>(
+      jpeg_alloc_decoder_mem(static_cast<size_t>(info.width) * info.height * 3, &out_alloc_cfg, &out_capacity));
+  if (outbuf == nullptr) {
+    ESP_LOGE(TAG, "Could not allocate JPEG output buffer");
+    jpeg_del_decoder_engine(decoder);
+    return DECODE_ERROR_OUT_OF_MEMORY;
+  }
+
+  jpeg_decode_cfg_t decode_cfg{};
+  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+  decode_cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+
+  uint32_t out_size = 0;
+  esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, buffer, static_cast<uint32_t>(size), outbuf,
+                                        static_cast<uint32_t>(out_capacity), &out_size);
+  jpeg_del_decoder_engine(decoder);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Hardware JPEG decode failed: %d", err);
+    heap_caps_free(outbuf);
+    return DECODE_ERROR_INTERNAL_DECODER_ERROR;
+  }
+
+  this->draw_rgb888_buffer_(outbuf, info.width, info.height);
+  heap_caps_free(outbuf);
+  this->decoded_bytes_ = size;
+  return size;
+}
+
+#elif defined(USE_NEWJPEG)
+
+// ESP32-S2/S3: esp_new_jpeg (SIMD-optimized software decoder).
+template<> int JpegDecoder::decode_backend_<JpegBackend::NEW_JPEG>(uint8_t *buffer, size_t size) {
+  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+  config.output_type = JPEG_PIXEL_FORMAT_RGB888;
+  jpeg_dec_handle_t decoder = nullptr;
+  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Could not create esp_new_jpeg decoder");
+    return DECODE_ERROR_INTERNAL_DECODER_ERROR;
+  }
+
+  jpeg_dec_io_t io{};
+  io.inbuf = buffer;
+  io.inbuf_len = static_cast<int>(size);
+
+  jpeg_dec_header_info_t header_info;
+  if (jpeg_dec_parse_header(decoder, &io, &header_info) != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "Could not parse JPEG header");
+    jpeg_dec_close(decoder);
+    return DECODE_ERROR_INVALID_TYPE;
+  }
+  if (!this->set_size(header_info.width, header_info.height)) {
+    jpeg_dec_close(decoder);
+    return DECODE_ERROR_OUT_OF_MEMORY;
+  }
+
+  int outbuf_len = 0;
+  jpeg_dec_get_outbuf_len(decoder, &outbuf_len);
+  auto *outbuf = static_cast<uint8_t *>(jpeg_calloc_align(outbuf_len, 16));
+  if (outbuf == nullptr) {
+    ESP_LOGE(TAG, "Could not allocate JPEG output buffer");
+    jpeg_dec_close(decoder);
+    return DECODE_ERROR_OUT_OF_MEMORY;
+  }
+  io.outbuf = outbuf;
+
+  jpeg_error_t process_err = jpeg_dec_process(decoder, &io);
+  jpeg_dec_close(decoder);
+  if (process_err != JPEG_ERR_OK) {
+    ESP_LOGE(TAG, "esp_new_jpeg decode failed: %d", process_err);
+    jpeg_free_align(outbuf);
+    return DECODE_ERROR_INTERNAL_DECODER_ERROR;
+  }
+
+  this->draw_rgb888_buffer_(outbuf, header_info.width, header_info.height);
+  jpeg_free_align(outbuf);
+  this->decoded_bytes_ = size;
+  return size;
+}
+
+#else
 
 /**
  * @brief Callback method that will be called by the JPEGDEC engine when a chunk
@@ -52,17 +187,8 @@ static int draw_callback(JPEGDRAW *jpeg) {
   return 1;
 }
 
-int HOT JpegDecoder::decode(uint8_t *buffer, size_t size) {
-  // JPEG decoder requires complete data
-  // If we know the expected size, wait for it
-  if (this->expected_size_ > 0 && size < this->expected_size_) {
-    ESP_LOGV(TAG, "Download not complete. Size: %zu/%zu", size, this->expected_size_);
-    return 0;
-  }
-
-  // If size unknown, try to decode and see if it's valid
-  // The JPEGDEC library will fail gracefully if data is incomplete
-
+// Other ESP32 variants and host: JPEGDEC (bitbank2, software).
+template<> int JpegDecoder::decode_backend_<JpegBackend::JPEGDEC>(uint8_t *buffer, size_t size) {
   if (!this->jpeg_.openRAM(buffer, size, draw_callback)) {
     ESP_LOGE(TAG, "Could not open image for decoding: %d", this->jpeg_.getLastError());
     return DECODE_ERROR_INVALID_TYPE;
@@ -103,6 +229,8 @@ int HOT JpegDecoder::decode(uint8_t *buffer, size_t size) {
   this->jpeg_.close();
   return size;
 }
+
+#endif
 
 }  // namespace esphome::runtime_image
 

@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -9,12 +10,6 @@
 #include "esp_dma_utils.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
-
-#include "driver/jpeg_decode.h"
-#include "driver/jpeg_types.h"
-#include "hal/color_types.h"
-
-#include "esphome/components/storage/storage.h"
 
 namespace esphome::simple_video_player {
 
@@ -30,6 +25,31 @@ static const uint16_t JPEG_EOI = 0xd9ff;
 // Cache alignment for optimal SD/storage performance
 static constexpr size_t CACHE_ALIGNMENT = 1024;
 static constexpr size_t DMA_ALIGNMENT = 128;
+
+// Output (decoded RGB565) double-buffer is sized once at setup for the largest video this player
+// will ever be asked to play -- the ESP32-P4 target panel is 1280x800.
+static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
+static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
+
+// Forward-declare the explicit specialization actually compiled for this backend (mirrors the
+// JPEG_BACKEND selection in simple_video_player.h): setup()/playback_loop_() call these via the
+// compile-time-constant JPEG_BACKEND before their out-of-line definitions appear further down in
+// this file, and an explicit specialization must be declared before any implicit instantiation of
+// that same template argument -- without this, the call site implicitly instantiates the
+// (undefined) primary template, making the later explicit-specialization definition an error.
+#if defined(USE_HWJPG)
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
+                                                                              size_t frame_size);
+#elif defined(USE_NEWJPEG)
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(const uint8_t *frame_data,
+                                                                                 size_t frame_size);
+#else
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>();
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(const uint8_t *frame_data,
+                                                                                size_t frame_size);
+#endif
 
 //========================================================================
 // Component Lifecycle
@@ -50,24 +70,6 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 
 void SimpleVideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
-
-  // Verify transcoder is available
-  if (this->transcoder_ == nullptr) {
-    ESP_LOGE(TAG, "Transcoder component not set");
-    this->mark_failed();
-    return;
-  }
-
-  // Initialize JPEG decoder during setup (not during playback)
-  // This ensures resources are allocated early and won't fail during playback
-  // ESP32-P4 only: Hardware JPEG decoder
-  jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
-  if (decoder == nullptr) {
-    ESP_LOGE(TAG, "Failed to initialize JPEG decoder during setup");
-    this->mark_failed();
-    return;
-  }
-  ESP_LOGI(TAG, "Hardware JPEG decoder initialized (handle: %p)", decoder);
 
   // Verify canvas is set
   if (this->canvas_ == nullptr) {
@@ -108,72 +110,26 @@ void SimpleVideoPlayer::setup() {
       static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, this->cache_buffer_size_, MALLOC_CAP_INTERNAL)));
 
   if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate cache buffer (%u bytes)", this->cache_buffer_size_);
+    ESP_LOGE(TAG, "Failed to allocate cache buffer (%" PRIu32 " bytes)", this->cache_buffer_size_);
     this->mark_failed();
     return;
   }
 
-  // Pre-allocate input and output buffers during setup (in PSRAM)
-  // This ensures resources are allocated early and won't fail during playback
-  // ESP32-P4 only: Hardware JPEG decoder
-  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers...");
-
-  // Allocate input buffer (JPEG encoded frame buffer - PSRAM)
-  jpeg_decode_memory_alloc_cfg_t input_cfg = {
-      .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
-  };
-
-  size_t actual_input_size = 0;
-  uint8_t *input_buf =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_input_size));
-
-  if (input_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate input buffer (%u bytes)", this->input_buffer_size_);
+  // Pre-allocate the JPEG decoder's input/output buffers during setup (backend-specific: see
+  // init_decoder_backend_ specializations below). This ensures resources are allocated early
+  // and won't fail during playback.
+  if (!this->init_decoder_backend_<JPEG_BACKEND>()) {
+    ESP_LOGE(TAG, "Failed to initialize JPEG decoder buffers");
     this->mark_failed();
     return;
   }
 
-  this->input_buffer_.reset(input_buf);
-  ESP_LOGI(TAG, "Input buffer allocated: %zu bytes (PSRAM)", actual_input_size);
-
-  // Allocate maximum output buffer (decoded RGB565 frame buffer - PSRAM)
-  // Calculate max size based on typical 720p video (1280x720) with alignment
-  uint32_t max_width = 1280;
-  uint32_t max_height = 720;
-  uint32_t aligned_max_width = ALIGN_UP(max_width, 16);
-  uint32_t aligned_max_height = ALIGN_UP(max_height, 16);
-  size_t max_output_size = aligned_max_width * aligned_max_height * 2;  // RGB565 = 2 bytes per pixel
-
-  jpeg_decode_memory_alloc_cfg_t output_cfg = {
-      .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
-  };
-
-  // Allocate double-buffered output buffers for zero-tearing playback
-  size_t actual_output_size = 0;
-  uint8_t *output_buf_0 =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
-
-  if (output_buf_0 == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate output buffer 0 (%zu bytes)", max_output_size);
+  // Video frame ring buffer: producer (loader task, Core 0) / consumer (decode task, Core 1).
+  if (!this->allocate_frame_ring_()) {
+    ESP_LOGE(TAG, "Failed to allocate video frame ring buffer");
     this->mark_failed();
     return;
   }
-
-  uint8_t *output_buf_1 =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
-
-  if (output_buf_1 == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate output buffer 1 (%zu bytes)", max_output_size);
-    this->mark_failed();
-    return;
-  }
-
-  this->output_buffer_[0].reset(output_buf_0);
-  this->output_buffer_[1].reset(output_buf_1);
-  this->output_buffer_size_ = actual_output_size;
-
-  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", actual_output_size,
-           aligned_max_width, aligned_max_height);
 
   // Audio buffers are now allocated in init_audio_decoder_() when playback starts
   if (this->speaker_ != nullptr) {
@@ -183,8 +139,9 @@ void SimpleVideoPlayer::setup() {
   }
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
-  ESP_LOGCONFIG(TAG, "  Cache buffer: %u bytes (internal RAM)", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Input buffer: %u bytes (PSRAM)", this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes (PSRAM)", this->prefetch_frames_,
+                this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Output buffer: %zu bytes (PSRAM)", this->output_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 #ifdef USE_AUDIO
@@ -200,13 +157,14 @@ void SimpleVideoPlayer::loop() {
 
 void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
-  ESP_LOGCONFIG(TAG, "  Cache buffer size: %u bytes", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Input buffer size: %u bytes", this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Cache buffer size: %" PRIu32 " bytes", this->cache_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes", this->prefetch_frames_,
+                this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
   if (this->state_ != PlayerState::STOPPED) {
     ESP_LOGCONFIG(TAG, "  Current file: %s", this->video_path_.c_str());
-    ESP_LOGCONFIG(TAG, "  Video size: %ux%u", this->video_width_, this->video_height_);
+    ESP_LOGCONFIG(TAG, "  Video size: %" PRIu32 "x%" PRIu32, this->video_width_, this->video_height_);
   }
 }
 
@@ -220,7 +178,7 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   // Stop any existing playback
   if (this->state_ != PlayerState::STOPPED) {
     this->stop();
-    this->wait_for_task_stop_(5000);
+    this->wait_for_task_stop_(this->task_handle_, 5000);
   }
 
   // Update state
@@ -230,14 +188,16 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->last_error_ = PlaybackError::NONE;
   xSemaphoreGive(this->state_mutex_);
 
-  // Create playback task with high priority
-  // Priority 10 ensures video playback takes precedence over main loop (priority 1)
-  // and most other ESPHome components, preventing frame drops from component delays
-  BaseType_t result = xTaskCreate(playback_task_entry_, "video_player",
-                                  8192,  // Stack size
-                                  this,
-                                  10,  // Priority (higher than main loop and most components)
-                                  &this->task_handle_);
+  // Create the decode/playback task, pinned to Core 1, high priority so it takes precedence
+  // over the main loop and most other components. It starts the loader task (Core 0, see
+  // playback_loop_) once its one-time setup (open file, probe dimensions, allocate buffers) is
+  // done, then becomes a pure ring-buffer consumer.
+  BaseType_t result = xTaskCreatePinnedToCore(playback_task_entry_, "video_player",
+                                              8192,  // Stack size
+                                              this,
+                                              10,  // Priority (higher than main loop and most components)
+                                              &this->task_handle_,
+                                              1);  // Core 1
 
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create playback task");
@@ -289,8 +249,7 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
 }
 
 void SimpleVideoPlayer::playback_loop_() {
-  bool canvas_positioned = false;
-  ESP_LOGI(TAG, "Playback task started");
+  ESP_LOGI(TAG, "Playback task started (Core 1)");
 
   // Open file
   if (!this->open_file_(this->video_path_)) {
@@ -308,9 +267,9 @@ void SimpleVideoPlayer::playback_loop_() {
     this->close_file_();
     return;
   }
-  ESP_LOGI(TAG, "Video dimensions: %ux%u", width, height);
+  ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
-  if (!canvas_positioned) {
+  {
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
     lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
     if ((lv_coord_t) width < canvas_width || (lv_coord_t) height < canvas_height) {
@@ -318,18 +277,16 @@ void SimpleVideoPlayer::playback_loop_() {
       lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
       lv_coord_t x_offset = (canvas_width - width) / 2;
       lv_coord_t y_offset = (canvas_height - height) / 2;
-      ESP_LOGI(TAG, "Resizing canvas from %ux%u to %ux%u", canvas_width, canvas_height, width, height);
+      ESP_LOGI(TAG, "Resizing canvas from %ldx%ld to %" PRIu32 "x%" PRIu32, static_cast<long>(canvas_width),
+               static_cast<long>(canvas_height), width, height);
       lv_obj_set_size(this->canvas_, width, height);
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
       lv_obj_invalidate(this->canvas_);
     }
-    canvas_positioned = true;
   }
 
-  // ============================================================================
-  // PHASE 1: Initialize Audio (parallel with prefetch)
-  // ============================================================================
-  // Audio/speaker initialization happens in parallel with background prefetch
+  // Audio/speaker initialization -- independent of the video ring buffer, runs before the
+  // loader/decode pipeline starts.
 #ifdef USE_AUDIO
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     ESP_LOGI(TAG, "Initializing audio decoder and speaker...");
@@ -341,10 +298,7 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // ============================================================================
-  // PHASE 2: Allocate Video Buffers
-  // ============================================================================
-  // Allocate buffers based on video size
+  // Allocate output (decoded RGB565) buffers based on video size
   if (!this->allocate_buffers_(width, height)) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
     this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
@@ -367,22 +321,11 @@ void SimpleVideoPlayer::playback_loop_() {
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
     // Set canvas buffer to display buffer initially (buffer 0)
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_IMG_CF_TRUE_COLOR);
+                         aligned_height, LV_COLOR_FORMAT_RGB565);
 
     xSemaphoreGive(this->lvgl_mutex_);
   } else {
     ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas setup");
-  }
-
-  // Acquire exclusive access to JPEG decoder for duration of playback
-  // ESP32-P4 only: Hardware JPEG decoder
-  if (this->transcoder_ != nullptr) {
-    if (!this->transcoder_->acquire_jpeg_decoder_exclusive("simple_video_player")) {
-      ESP_LOGE(TAG, "Failed to acquire exclusive JPEG decoder access");
-      this->set_error_(PlaybackError::DECODER_INIT_FAILED);
-      this->close_file_();
-      return;
-    }
   }
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
@@ -392,33 +335,41 @@ void SimpleVideoPlayer::playback_loop_() {
   this->cache_buffer_valid_ = 0;
   this->cache_buffer_offset_ = 0;
 
+  // Reset the frame ring to a clean state (drain any leftovers from a previous session, so
+  // semaphore counts and head/tail always start at "all slots free, none ready, index 0"
+  // regardless of how the last playback ended).
+  while (xSemaphoreTake(this->ring_slots_ready_, 0) == pdTRUE) {
+  }
+  while (xSemaphoreTake(this->ring_slots_free_, 0) == pdTRUE) {
+  }
+  for (uint32_t i = 0; i < this->prefetch_frames_; i++) {
+    xSemaphoreGive(this->ring_slots_free_);
+  }
+  this->ring_head_ = 0;
+  this->ring_tail_ = 0;
+
   // Fire started callback
   this->on_started_callbacks_.call();
 
-  // Initialize frame pacing with presentation timestamps
-  this->playback_start_time_us_ = esp_timer_get_time();  // Current time in microseconds
-  this->frame_count_ = 0;
-  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
-
-  // Preload and decode first frames for smooth A/V sync startup
-  // Note: Do NOT increment frame_count_ during preload - it's only for presentation timing
-  ESP_LOGI(TAG, "Preloading frames and audio for synchronized playback...");
-
-  // Decode first frame into buffer 1
-  int first_frame_size = this->read_next_frame_();
-  if (first_frame_size > 0) {
-    this->decode_frame_(first_frame_size);
-    // Don't increment frame_count_ - preload doesn't count toward presentation timing
-  }
-
-  int second_frame_size = this->read_next_frame_();
-  if (second_frame_size > 0) {
-    this->decode_frame_(second_frame_size);
-    // Don't increment frame_count_ - preload doesn't count toward presentation timing
+  // Start the loader task (Core 0): it begins reading ahead into frame_ring_ immediately,
+  // decoupled from this task's decode+pacing work entirely.
+  this->loader_task_stop_ = false;
+  BaseType_t loader_result = xTaskCreatePinnedToCore(loader_task_entry_, "svp_loader",
+                                                     8192,  // Stack size
+                                                     this,
+                                                     9,  // Priority: below decode (10), above default
+                                                     &this->loader_task_handle_,
+                                                     0);  // Core 0 (alongside the audio task)
+  if (loader_result != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create loader task");
+    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
+    this->close_file_();
+    return;
   }
 
 #ifdef USE_AUDIO
-  // Wait for audio buffer to have sufficient data
+  // Wait for audio buffer to have sufficient data -- runs in parallel with the loader task
+  // above, which is already filling the video ring at the same time.
   if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
     // Calculate target: 200ms of audio for smooth startup
     size_t bytes_per_ms = (this->source_audio_channels_ * 2 * this->audio_sample_rate_) / 1000;
@@ -435,26 +386,17 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Setup buffer indices for first frame display
-  // Buffer 1 has first frame, buffer 0 has second frame
-  // Set up for VSYNC callback to display buffer 1 on next render cycle
-  this->display_buffer_index_ = 0;    // Currently nothing displayed
-  this->current_buffer_index_ = 1;    // First decoded frame is in buffer 1
-  this->buffer_swap_pending_ = true;  // Signal VSYNC callback to display it
-
-  // VSYNC callback will handle the actual canvas update and invalidation
-  // This avoids touching LVGL objects from outside LVGL's thread
-
-  // Preload third frame into input buffer (ready for loop)
-  int third_frame_size = this->read_next_frame_();
-  if (third_frame_size <= 0) {
-    ESP_LOGW(TAG, "Failed to preload third frame");
+  // Initialize frame pacing with presentation timestamps. Frame 0's target presentation time is
+  // "now", so the loop below presents it as soon as it's decoded -- no separate preload dance
+  // needed, the ring buffer (already filling since the loader task started above) is what
+  // removes the old first-frame stall.
+  this->playback_start_time_us_ = esp_timer_get_time();
+  this->frame_count_ = 0;
+  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
+  TickType_t ring_wait_ticks = pdMS_TO_TICKS(static_cast<uint32_t>(this->frame_duration_us_ / 1000.0f));
+  if (ring_wait_ticks == 0) {
+    ring_wait_ticks = 1;
   }
-
-  // Main playback loop with async I/O optimization
-  // Note: First frame will be displayed by VSYNC callback
-  // We already have second frame in buffer 0, third frame preloaded
-  int current_frame_size = third_frame_size;
 
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
@@ -463,53 +405,52 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Check if we have a valid frame to decode
-    if (current_frame_size < 0) {
-      // Read error
+    // Wait for the next ring slot. Bail-out policy: if the loader can't keep up within one
+    // frame's duration, skip this cycle rather than stalling the presentation clock -- the
+    // frame that eventually arrives just gets shown a bit late instead of accumulating debt.
+    if (xSemaphoreTake(this->ring_slots_ready_, ring_wait_ticks) != pdTRUE) {
+      ESP_LOGW(TAG, "Loader could not keep up, skipping this cycle");
+      this->frame_count_++;
+      continue;
+    }
+
+    VideoFrameSlot &slot = this->frame_ring_[this->ring_tail_];
+
+    if (slot.status == VideoFrameSlot::Status::END_OF_FILE) {
+      ESP_LOGI(TAG, "Playback finished");
+      this->ring_tail_ = (this->ring_tail_ + 1) % this->prefetch_frames_;
+      xSemaphoreGive(this->ring_slots_free_);
+      this->on_finished_callbacks_.call();
+      break;
+    }
+    if (slot.status == VideoFrameSlot::Status::READ_ERROR) {
       ESP_LOGE(TAG, "Failed to read frame");
+      this->ring_tail_ = (this->ring_tail_ + 1) % this->prefetch_frames_;
+      xSemaphoreGive(this->ring_slots_free_);
       this->set_error_(PlaybackError::FILE_READ_ERROR);
       break;
-    } else if (current_frame_size == 0) {
-      // End of file
-      ESP_LOGI(TAG, "Playback finished");
-
-      if (this->loop_) {
-        ESP_LOGI(TAG, "Looping video");
-        this->seek_to_(0);
-        this->cache_buffer_valid_ = 0;
-        this->cache_buffer_offset_ = 0;
-        current_frame_size = this->read_next_frame_();
-        continue;
-      } else {
-        this->on_finished_callbacks_.call();
-        break;
-      }
     }
 
     // Calculate when this frame should be presented (presentation timestamp)
     int64_t target_present_time_us =
         this->playback_start_time_us_ + static_cast<int64_t>(this->frame_count_ * this->frame_duration_us_);
 
-    // Decode the current frame (already in input buffer)
-    if (!this->decode_frame_(current_frame_size)) {
+    bool decoded = this->decode_frame_(slot.data.get(), slot.size);
+
+    // Release the slot back to the loader immediately -- decode_frame_backend_ has already
+    // consumed everything it needs from it synchronously.
+    this->ring_tail_ = (this->ring_tail_ + 1) % this->prefetch_frames_;
+    xSemaphoreGive(this->ring_slots_free_);
+
+    if (!decoded) {
       ESP_LOGW(TAG, "Failed to decode frame, skipping");
-      // Read next frame and skip this one
-      current_frame_size = this->read_next_frame_();
       continue;
     }
 
-#ifdef USE_AUDIO
-    // Audio decoding and channel conversion is now handled by dedicated audio task on Core 0
-    // No audio processing needed in main playback loop
-#endif
-
-    // Frame rate control with presentation timestamps
-    // Wait until it's time to present this frame
+    // Frame rate control with presentation timestamps: wait until it's time to present this frame
     int64_t current_time_us = esp_timer_get_time();
     int64_t wait_time_us = target_present_time_us - current_time_us;
-
     if (wait_time_us > 0) {
-      // Convert microseconds to milliseconds for vTaskDelay
       vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
     }
 
@@ -522,18 +463,18 @@ void SimpleVideoPlayer::playback_loop_() {
     this->frame_count_++;
 
     // Feed watchdog every 100 frames to prevent task watchdog timeout during long playback
-    // This keeps the system stable without impacting performance
     if (this->frame_count_ % 100 == 0) {
 #ifdef USE_ESP32
-      // ESP32 watchdog - feed task watchdog timer
       esp_task_wdt_reset();
 #endif
     }
-
-    // Read next frame asynchronously (during display time of current frame)
-    // This happens AFTER buffer swap, so it doesn't delay display
-    current_frame_size = this->read_next_frame_();
   }
+
+  // Stop the loader task before closing the file -- it must not still be reading via
+  // file_reader_ once close_file_() tears it down. The loader's own wait on ring_slots_free_ is
+  // bounded (50ms), so it notices loader_task_stop_ promptly regardless of ring state.
+  this->loader_task_stop_ = true;
+  this->wait_for_task_stop_(this->loader_task_handle_, 5000);
 
   this->close_file_();
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
@@ -561,12 +502,6 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Release exclusive access to decoder after playback
-  // ESP32-P4 only: Hardware JPEG decoder
-  if (this->transcoder_ != nullptr) {
-    this->transcoder_->release_jpeg_decoder_exclusive();
-  }
-
   // Clear both buffers on stop - use VSYNC mechanism for non-blocking invalidation
   if (this->output_buffer_[0] && this->output_buffer_[1]) {
     std::memset(this->output_buffer_[0].get(), 0, this->output_buffer_size_);
@@ -585,30 +520,90 @@ void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Playback task finished");
 }
 
-bool SimpleVideoPlayer::wait_for_task_stop_(uint32_t timeout_ms) {
-  if (this->task_handle_ == nullptr) {
+bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms) {
+  if (handle == nullptr) {
     return true;
   }
 
   uint32_t elapsed = 0;
-  while (this->task_handle_ != nullptr && elapsed < timeout_ms) {
+  while (handle != nullptr && elapsed < timeout_ms) {
     vTaskDelay(pdMS_TO_TICKS(10));
     elapsed += 10;
   }
 
-  return this->task_handle_ == nullptr;
+  return handle == nullptr;
+}
+
+//========================================================================
+// Loader Task (Core 0): reads ahead into frame_ring_, decoupled from decode/pacing
+//========================================================================
+
+void SimpleVideoPlayer::loader_task_entry_(void *param) {
+  auto *player = static_cast<SimpleVideoPlayer *>(param);
+  player->loader_loop_();
+  player->loader_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void SimpleVideoPlayer::loader_loop_() {
+  ESP_LOGI(TAG, "Loader task started (Core 0)");
+
+  while (!this->loader_task_stop_) {
+    // Wait for a free ring slot; bounded so a stop request is noticed promptly even when the
+    // ring is full (consumer stalled/stopped).
+    if (xSemaphoreTake(this->ring_slots_free_, pdMS_TO_TICKS(50)) != pdTRUE) {
+      continue;
+    }
+    if (this->loader_task_stop_) {
+      xSemaphoreGive(this->ring_slots_free_);  // don't consume the token, we're not using it
+      break;
+    }
+
+    VideoFrameSlot &slot = this->frame_ring_[this->ring_head_];
+    int n = this->read_next_frame_(slot.data.get(), this->input_buffer_size_);
+
+    if (n == 0 && this->loop_) {
+      // EOF with looping enabled: rewind and retry without publishing a slot -- transparent to
+      // the consumer, which never sees an EOF marker for a looping video.
+      ESP_LOGI(TAG, "Looping video");
+      this->seek_to_(0);
+      this->cache_buffer_valid_ = 0;
+      this->cache_buffer_offset_ = 0;
+      xSemaphoreGive(this->ring_slots_free_);
+      continue;
+    }
+
+    if (n > 0) {
+      slot.size = static_cast<size_t>(n);
+      slot.status = VideoFrameSlot::Status::FRAME_OK;
+    } else {
+      slot.size = 0;
+      slot.status = n == 0 ? VideoFrameSlot::Status::END_OF_FILE : VideoFrameSlot::Status::READ_ERROR;
+    }
+
+    this->ring_head_ = (this->ring_head_ + 1) % this->prefetch_frames_;
+    xSemaphoreGive(this->ring_slots_ready_);
+
+    // EOF/error is terminal for this task -- the consumer will see it via the ring and stop
+    // too, and there is nothing more useful for the loader to read.
+    if (slot.status != VideoFrameSlot::Status::FRAME_OK) {
+      break;
+    }
+  }
+
+  ESP_LOGI(TAG, "Loader task finished");
 }
 
 //========================================================================
 // Frame Processing
 //========================================================================
 
-int SimpleVideoPlayer::read_next_frame_() {
-  // Read frame directly from file - used by preload task
+int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity) {
+  // Read frame directly from file - runs on the loader task, writing into a frame_ring_ slot
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
-    int bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
+    int bytes_read = this->avi_parser_->read_next_frame(frame, dest_buffer, dest_capacity);
 
     if (bytes_read <= 0) {
       return bytes_read;  // EOF or error
@@ -618,11 +613,11 @@ int SimpleVideoPlayer::read_next_frame_() {
     while (frame.stream_type != AVIStreamType::VIDEO) {
 #ifdef USE_AUDIO
       if (frame.stream_type == AVIStreamType::AUDIO && this->audio_enabled_) {
-        this->process_audio_frame_(frame, this->input_buffer_.get(), bytes_read);
+        this->process_audio_frame_(frame, dest_buffer, bytes_read);
       }
 #endif
       // Skip this frame (audio) and read next frame
-      bytes_read = this->avi_parser_->read_next_frame(frame, this->input_buffer_.get(), this->input_buffer_size_);
+      bytes_read = this->avi_parser_->read_next_frame(frame, dest_buffer, dest_capacity);
       if (bytes_read <= 0) {
         return bytes_read;
       }
@@ -632,7 +627,7 @@ int SimpleVideoPlayer::read_next_frame_() {
   } else {
     // Raw MJPEG - search for JPEG EOI marker to find frame boundary
     size_t frame_size = 0;
-    uint8_t *frame_ptr = this->input_buffer_.get();
+    uint8_t *frame_ptr = dest_buffer;
 
     while (true) {
       // Read more data into cache if needed
@@ -658,10 +653,9 @@ int SimpleVideoPlayer::read_next_frame_() {
         // Found EOI marker
         size_t chunk_size = (eoi_ptr - search_start) + 2;  // Include EOI marker
 
-        // Check if frame fits in input buffer
-        if (frame_size + chunk_size > this->input_buffer_size_) {
-          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + chunk_size,
-                   this->input_buffer_size_);
+        // Check if frame fits in the destination slot
+        if (frame_size + chunk_size > dest_capacity) {
+          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %zu)", frame_size + chunk_size, dest_capacity);
           return -1;
         }
 
@@ -675,10 +669,9 @@ int SimpleVideoPlayer::read_next_frame_() {
       } else {
         // EOI not found in this cache chunk, copy entire remaining cache to frame buffer
 
-        // Check if frame fits in input buffer
-        if (frame_size + search_len > this->input_buffer_size_) {
-          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %u)", frame_size + search_len,
-                   this->input_buffer_size_);
+        // Check if frame fits in the destination slot
+        if (frame_size + search_len > dest_capacity) {
+          ESP_LOGE(TAG, "Frame too large for input buffer (%zu > %zu)", frame_size + search_len, dest_capacity);
           return -1;
         }
 
@@ -693,39 +686,10 @@ int SimpleVideoPlayer::read_next_frame_() {
   }
 }
 
-bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
-  // Use decoder acquired exclusively for this playback session
-  // ESP32-P4 only: Hardware JPEG decoder
-  jpeg_decoder_handle_t decoder = this->transcoder_->get_jpeg_decoder();
-  if (decoder == nullptr) {
-    ESP_LOGE(TAG, "JPEG decoder not available (should have been acquired at playback start)");
-    return false;
-  }
-
-  // Align frame size to 16 bytes (hardware requirement)
-  size_t aligned_size = ALIGN_UP(frame_size, 16);
-
-  if (aligned_size > this->input_buffer_size_) {
-    ESP_LOGE(TAG, "Aligned frame size too large");
-    return false;
-  }
-
-  // Configure decoder for RGB565 output
-  // LVGL uses RGB565 little-endian format, so we need BGR element order to match
-  jpeg_decode_cfg_t decode_cfg = {
-      .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
-      .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
-  };
-
-  // Double buffering: Decode into the back buffer (not currently displayed)
-  // LVGL displays display_buffer_index_, we decode into current_buffer_index_
-  uint32_t out_size = this->output_buffer_size_;
-  esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, this->input_buffer_.get(), aligned_size,
-                                       this->output_buffer_[this->current_buffer_index_].get(),
-                                       this->output_buffer_size_, &out_size);
-
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "JPEG decode failed: %d", err);
+bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
+  // Double buffering: decode_frame_backend_ writes into the back buffer (current_buffer_index_,
+  // not currently displayed) -- see JPEG_BACKEND dispatch below.
+  if (!this->decode_frame_backend_<JPEG_BACKEND>(frame_data, frame_size)) {
     return false;
   }
 
@@ -735,6 +699,292 @@ bool SimpleVideoPlayer::decode_frame_(size_t frame_size) {
 
   return true;
 }
+
+//========================================================================
+// JPEG Backend Implementations
+//
+// Exactly one of the three blocks below is compiled per build, selected by which of
+// USE_HWJPG / USE_NEWJPEG / neither is defined -- the same defines JPEG_BACKEND
+// (simple_video_player.h) is derived from. See runtime_image/jpeg_decoder.cpp for the same
+// pattern applied to image decoding.
+//========================================================================
+
+#if defined(USE_HWJPG)
+
+// ESP32-P4: hardware JPEG codec (esp_driver_jpeg). The engine is opened and torn down per
+// frame (see jpeg_alloc_decoder_mem()'s DMA2D-alignment contract, which our buffers already
+// satisfy) rather than held open for the whole playback session, matching the same per-call
+// lifecycle runtime_image's HW_P4 backend uses.
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
+  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (hardware JPEG decoder, ESP32-P4)...");
+
+  // Compressed-frame input buffers now live in frame_ring_ (see allocate_frame_ring_()), not a
+  // single input_buffer_ -- the ring is what lets the loader task (Core 0) read ahead of the
+  // decode task (Core 1) instead of serializing I/O with decode+pacing on one task.
+
+  // Max size based on MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT, with alignment
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
+  size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
+
+  jpeg_decode_memory_alloc_cfg_t output_cfg{};
+  output_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+
+  size_t actual_output_size = 0;
+  auto *output_buf_0 =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
+  if (output_buf_0 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 0 (%zu bytes)", max_output_size);
+    return false;
+  }
+  auto *output_buf_1 =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &output_cfg, &actual_output_size));
+  if (output_buf_1 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 1 (%zu bytes)", max_output_size);
+    return false;
+  }
+
+  this->output_buffer_[0].reset(output_buf_0);
+  this->output_buffer_[1].reset(output_buf_1);
+  this->output_buffer_size_ = actual_output_size;
+
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           actual_output_size, aligned_max_width, aligned_max_height);
+  return true;
+}
+
+template<>
+bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::HW_P4>(const uint8_t *buffer, size_t size,
+                                                                   uint32_t &width, uint32_t &height) {
+  jpeg_decode_picture_info_t header;
+  if (jpeg_decoder_get_info(buffer, static_cast<uint32_t>(size), &header) != ESP_OK) {
+    return false;
+  }
+  width = header.width;
+  height = header.height;
+  return true;
+}
+
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
+                                                                              size_t frame_size) {
+  // Align frame size to 16 bytes (hardware requirement)
+  size_t aligned_size = ALIGN_UP(frame_size, 16);
+  if (aligned_size > this->input_buffer_size_) {
+    ESP_LOGE(TAG, "Aligned frame size too large");
+    return false;
+  }
+
+  jpeg_decode_engine_cfg_t eng_cfg{};
+  eng_cfg.intr_priority = 0;
+  eng_cfg.timeout_ms = 200;
+  jpeg_decoder_handle_t decoder = nullptr;
+  if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK) {
+    ESP_LOGW(TAG, "Could not create hardware JPEG decoder engine");
+    return false;
+  }
+
+  // LVGL uses RGB565 little-endian format, so we need BGR element order to match
+  jpeg_decode_cfg_t decode_cfg{};
+  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+
+  uint32_t out_size = 0;
+  esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+                                       this->output_buffer_[this->current_buffer_index_].get(),
+                                       static_cast<uint32_t>(this->output_buffer_size_), &out_size);
+  jpeg_del_decoder_engine(decoder);
+
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "JPEG decode failed: %d", err);
+    return false;
+  }
+  return true;
+}
+
+#elif defined(USE_NEWJPEG)
+
+// ESP32-S2/S3: esp_new_jpeg (SIMD-optimized software decoder). Buffers use heap_caps_aligned_alloc
+// (16-byte aligned, which is all esp_new_jpeg requires) rather than jpeg_calloc_align, so
+// free_buffers_()'s existing heap_caps_free() calls stay correct across every backend without
+// needing their own dispatch.
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>() {
+  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (esp_new_jpeg decoder)...");
+
+  // Compressed-frame input buffers live in frame_ring_ (see allocate_frame_ring_()).
+
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
+  size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
+
+  auto *output_buf_0 = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, max_output_size, MALLOC_CAP_SPIRAM));
+  if (output_buf_0 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 0 (%zu bytes)", max_output_size);
+    return false;
+  }
+  auto *output_buf_1 = static_cast<uint8_t *>(heap_caps_aligned_alloc(16, max_output_size, MALLOC_CAP_SPIRAM));
+  if (output_buf_1 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 1 (%zu bytes)", max_output_size);
+    return false;
+  }
+
+  this->output_buffer_[0].reset(output_buf_0);
+  this->output_buffer_[1].reset(output_buf_1);
+  this->output_buffer_size_ = max_output_size;
+
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           max_output_size, aligned_max_width, aligned_max_height);
+  return true;
+}
+
+template<>
+bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::NEW_JPEG>(const uint8_t *buffer, size_t size,
+                                                                      uint32_t &width, uint32_t &height) {
+  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+  jpeg_dec_handle_t decoder = nullptr;
+  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK) {
+    return false;
+  }
+
+  jpeg_dec_io_t io{};
+  io.inbuf = const_cast<uint8_t *>(buffer);
+  io.inbuf_len = static_cast<int>(size);
+
+  jpeg_dec_header_info_t header_info;
+  bool ok = jpeg_dec_parse_header(decoder, &io, &header_info) == JPEG_ERR_OK;
+  jpeg_dec_close(decoder);
+  if (!ok) {
+    return false;
+  }
+  width = header_info.width;
+  height = header_info.height;
+  return true;
+}
+
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(const uint8_t *frame_data,
+                                                                                size_t frame_size) {
+  if (frame_size > this->input_buffer_size_) {
+    ESP_LOGE(TAG, "Frame too large for input buffer");
+    return false;
+  }
+
+  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+  // Matches LVGL's RGB565 little-endian canvas format
+  config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+  jpeg_dec_handle_t decoder = nullptr;
+  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK) {
+    ESP_LOGW(TAG, "Could not create esp_new_jpeg decoder");
+    return false;
+  }
+
+  jpeg_dec_io_t io{};
+  io.inbuf = const_cast<uint8_t *>(frame_data);
+  io.inbuf_len = static_cast<int>(frame_size);
+  io.outbuf = this->output_buffer_[this->current_buffer_index_].get();
+
+  jpeg_dec_header_info_t header_info;
+  jpeg_error_t err = jpeg_dec_parse_header(decoder, &io, &header_info);
+  if (err == JPEG_ERR_OK) {
+    err = jpeg_dec_process(decoder, &io);
+  }
+  jpeg_dec_close(decoder);
+
+  if (err != JPEG_ERR_OK) {
+    ESP_LOGW(TAG, "esp_new_jpeg decode failed: %d", err);
+    return false;
+  }
+  return true;
+}
+
+#else
+
+// Other ESP32 variants: JPEGDEC (bitbank2, software fallback). JPEGDEC's draw callback has no
+// user-`this` slot beyond setUserPointer(), so the destination buffer/stride is passed through
+// that instead of touching the player instance from the callback.
+struct SvpJpegDrawCtx {
+  uint8_t *out;        // RGB565 destination buffer (output_buffer_[current_buffer_index_])
+  uint32_t out_width;  // aligned row width, for stride
+};
+
+static int svp_jpegdec_draw_callback_(JPEGDRAW *jpeg) {
+  auto *ctx = static_cast<SvpJpegDrawCtx *>(jpeg->pUser);
+  for (int y = 0; y < jpeg->iHeight; y++) {
+    uint16_t *dst_row = reinterpret_cast<uint16_t *>(ctx->out) + (jpeg->y + y) * ctx->out_width + jpeg->x;
+    const uint16_t *src_row = jpeg->pPixels + y * jpeg->iWidth;
+    std::memcpy(dst_row, src_row, jpeg->iWidth * sizeof(uint16_t));
+  }
+  return 1;
+}
+
+template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>() {
+  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (software JPEGDEC decoder)...");
+
+  // Compressed-frame input buffers live in frame_ring_ (see allocate_frame_ring_()).
+
+  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
+  size_t max_output_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * 2;  // RGB565
+
+  auto *output_buf_0 = static_cast<uint8_t *>(heap_caps_malloc(max_output_size, MALLOC_CAP_SPIRAM));
+  if (output_buf_0 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 0 (%zu bytes)", max_output_size);
+    return false;
+  }
+  auto *output_buf_1 = static_cast<uint8_t *>(heap_caps_malloc(max_output_size, MALLOC_CAP_SPIRAM));
+  if (output_buf_1 == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate output buffer 1 (%zu bytes)", max_output_size);
+    return false;
+  }
+
+  this->output_buffer_[0].reset(output_buf_0);
+  this->output_buffer_[1].reset(output_buf_1);
+  this->output_buffer_size_ = max_output_size;
+
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           max_output_size, aligned_max_width, aligned_max_height);
+  return true;
+}
+
+template<>
+bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::JPEGDEC>(const uint8_t *buffer, size_t size,
+                                                                     uint32_t &width, uint32_t &height) {
+  JPEGDEC jpeg;
+  if (!jpeg.openRAM(const_cast<uint8_t *>(buffer), static_cast<int>(size), nullptr)) {
+    return false;
+  }
+  width = jpeg.getWidth();
+  height = jpeg.getHeight();
+  jpeg.close();
+  return true;
+}
+
+template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(const uint8_t *frame_data,
+                                                                               size_t frame_size) {
+  if (frame_size > this->input_buffer_size_) {
+    ESP_LOGE(TAG, "Frame too large for input buffer");
+    return false;
+  }
+
+  JPEGDEC jpeg;
+  SvpJpegDrawCtx ctx{this->output_buffer_[this->current_buffer_index_].get(), ALIGN_UP(this->video_width_, 16)};
+
+  if (!jpeg.openRAM(const_cast<uint8_t *>(frame_data), static_cast<int>(frame_size), svp_jpegdec_draw_callback_)) {
+    ESP_LOGW(TAG, "Could not open frame for decoding: %d", jpeg.getLastError());
+    return false;
+  }
+  jpeg.setUserPointer(&ctx);
+  jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+
+  bool ok = jpeg.decode(0, 0, 0);
+  jpeg.close();
+
+  if (!ok) {
+    ESP_LOGW(TAG, "JPEGDEC decode failed: %d", jpeg.getLastError());
+    return false;
+  }
+  return true;
+}
+
+#endif
 
 void SimpleVideoPlayer::on_lvgl_render_complete() {
   // VSYNC: Buffer swap and invalidation after LVGL render cycle completes
@@ -755,7 +1005,7 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
     uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
     uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
     lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_IMG_CF_TRUE_COLOR);
+                         aligned_height, LV_COLOR_FORMAT_RGB565);
 
     this->buffer_swap_pending_ = false;
     this->canvas_needs_invalidate_ = false;
@@ -779,7 +1029,8 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->video_width_ = width;
     this->video_height_ = height;
 
-    ESP_LOGI(TAG, "AVI video dimensions: %ux%u, FPS: %u/%u", width, height, video_info->fps_num, video_info->fps_den);
+    ESP_LOGI(TAG, "AVI video dimensions: %" PRIu32 "x%" PRIu32 ", FPS: %" PRIu32 "/%" PRIu32, width, height,
+             video_info->fps_num, video_info->fps_den);
     return true;
   } else {
     // Raw MJPEG - read first chunk to get JPEG header
@@ -792,16 +1043,11 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->cache_buffer_offset_ = 0;
 
     // Parse JPEG header
-    jpeg_decode_picture_info_t header;
-    esp_err_t err = jpeg_decoder_get_info(this->cache_buffer_.get(), bytes_read, &header);
-
-    if (err != ESP_OK) {
+    if (!this->parse_header_backend_<JPEG_BACKEND>(this->cache_buffer_.get(), static_cast<size_t>(bytes_read), width,
+                                                    height)) {
       ESP_LOGE(TAG, "Failed to parse JPEG header");
       return false;
     }
-
-    width = header.width;
-    height = header.height;
 
     // Store dimensions
     this->video_width_ = width;
@@ -848,36 +1094,17 @@ VideoFormat SimpleVideoPlayer::detect_format_() {
 }
 
 bool SimpleVideoPlayer::open_file_(const std::string &path) {
-  // Check if this is a network path
-  if (storage::global_storage && storage::global_storage->is_network_path(path)) {
-    ESP_LOGI(TAG, "Opening network file: %s", path.c_str());
-    this->is_network_file_ = true;
-    // For network files, we don't open a FILE* handle
-    // Instead, we'll use network storage API in read_data_()
+  ESP_LOGI(TAG, "Opening file: %s", path.c_str());
 
-    // Try to get file size (may not be supported by all backends)
-    // For now, assume unknown size for network files
-    this->file_size_ = 0;
-    return true;
-  }
-
-  // Open local file with optimized buffered reader
-  ESP_LOGI(TAG, "Opening local file with buffered reader: %s", path.c_str());
-  this->is_network_file_ = false;
-
-  // Create buffered file reader
+  // Storage-backed file reader: resolves the path against the storage registry and handles
+  // local (filesystem) vs network storage transparently -- see buffered_file_reader.h.
   this->file_reader_ = std::make_unique<BufferedFileReader>();
   if (!this->file_reader_->open(path.c_str())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     this->file_reader_.reset();
     return false;
   }
-
-  // Pre-fill cache for optimal startup performance
-  // This eliminates the first-read overhead and ensures smooth playback from the start
-  if (!this->file_reader_->prefill_cache()) {
-    ESP_LOGW(TAG, "Failed to prefill file cache, playback may start slowly");
-  }
+  this->file_reader_->prefill_cache();
 
   // Get file size
   if (!this->file_reader_->get_size(&this->file_size_)) {
@@ -939,61 +1166,29 @@ void SimpleVideoPlayer::close_file_() {
     this->file_reader_.reset();
   }
 
-  this->is_network_file_ = false;
   this->file_size_ = 0;
   this->video_format_ = VideoFormat::UNKNOWN;
 }
 
 int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
-  if (this->is_network_file_) {
-    // Network file - use storage API
-    // Note: This is a simplified implementation that reads chunks
-    // A full implementation would need to handle streaming more efficiently
-    if (storage::global_storage == nullptr) {
-      return -1;
-    }
-
-    // For network streaming, we need to read the file in chunks
-    // This is a placeholder - actual implementation depends on network storage backend
-    ESP_LOGW(TAG, "Network file streaming not fully implemented yet");
+  if (!this->file_reader_ || !this->file_reader_->is_open()) {
     return -1;
-  } else {
-    // Local file - use buffered reader
-    if (!this->file_reader_ || !this->file_reader_->is_open()) {
-      return -1;
-    }
-
-    return this->file_reader_->read(buffer, size);
   }
+  return this->file_reader_->read(buffer, size);
 }
 
 bool SimpleVideoPlayer::seek_to_(uint64_t position) {
-  if (this->is_network_file_) {
-    // Network files don't support seeking in this simple implementation
-    // Would need to close and reopen with range request
-    ESP_LOGW(TAG, "Seek not supported for network files");
+  if (!this->file_reader_ || !this->file_reader_->is_open()) {
     return false;
-  } else {
-    if (!this->file_reader_ || !this->file_reader_->is_open()) {
-      return false;
-    }
-
-    return this->file_reader_->seek(position);
   }
+  return this->file_reader_->seek(position);
 }
 
 bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
-  if (this->is_network_file_) {
-    // Network file size might not be known
-    size = 0;
+  if (!this->file_reader_ || !this->file_reader_->is_open()) {
     return false;
-  } else {
-    if (!this->file_reader_ || !this->file_reader_->is_open()) {
-      return false;
-    }
-
-    return this->file_reader_->get_size(&size);
   }
+  return this->file_reader_->get_size(&size);
 }
 
 //========================================================================
@@ -1008,41 +1203,39 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
   // Calculate required output buffer size (RGB565 = 2 bytes per pixel)
   size_t required_output_size = aligned_width * aligned_height * 2;
 
-  ESP_LOGI(TAG, "Verifying buffers for %ux%u video (aligned: %ux%u)", video_width, video_height, aligned_width,
-           aligned_height);
+  ESP_LOGI(TAG, "Verifying buffers for %" PRIu32 "x%" PRIu32 " video (aligned: %" PRIu32 "x%" PRIu32 ")", video_width,
+           video_height, aligned_width, aligned_height);
   ESP_LOGI(TAG, "Required output buffer: %zu bytes, allocated: %zu bytes", required_output_size,
            this->output_buffer_size_);
 
   // Verify buffers were pre-allocated during setup
-  if (!this->input_buffer_) {
-    ESP_LOGE(TAG, "Input buffer not pre-allocated (this should not happen)");
+  if (!this->frame_ring_) {
+    ESP_LOGE(TAG, "Frame ring buffer not pre-allocated (this should not happen)");
     return false;
   }
 
-  if (!this->output_buffer_) {
+  if (!this->output_buffer_[0] || !this->output_buffer_[1]) {
     ESP_LOGE(TAG, "Output buffer not pre-allocated (this should not happen)");
     return false;
   }
 
   // Check if pre-allocated buffers are large enough
   if (required_output_size > this->output_buffer_size_) {
-    ESP_LOGE(TAG, "Video too large for pre-allocated buffer: %ux%u requires %zu bytes, only %zu bytes available",
+    ESP_LOGE(TAG,
+             "Video too large for pre-allocated buffer: %" PRIu32 "x%" PRIu32
+             " requires %zu bytes, only %zu bytes available",
              aligned_width, aligned_height, required_output_size, this->output_buffer_size_);
     ESP_LOGE(TAG, "Increase max video resolution in setup() or use smaller video");
     return false;
   }
 
-  ESP_LOGI(TAG, "Buffers verified - Input: %u bytes, Output: %zu bytes (using %zu bytes)", this->input_buffer_size_,
-           this->output_buffer_size_, required_output_size);
+  ESP_LOGI(TAG, "Buffers verified - Input: %" PRIu32 " bytes, Output: %zu bytes (using %zu bytes)",
+           this->input_buffer_size_, this->output_buffer_size_, required_output_size);
 
   return true;
 }
 
 void SimpleVideoPlayer::free_buffers_() {
-  if (this->input_buffer_) {
-    heap_caps_free(this->input_buffer_.release());
-  }
-
   // Free both double-buffered output buffers
   if (this->output_buffer_[0]) {
     heap_caps_free(this->output_buffer_[0].release());
@@ -1052,6 +1245,68 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 
   this->output_buffer_size_ = 0;
+
+  this->free_frame_ring_();
+}
+
+bool SimpleVideoPlayer::allocate_frame_ring_() {
+  if (this->prefetch_frames_ == 0) {
+    ESP_LOGE(TAG, "prefetch_frames must be at least 1");
+    return false;
+  }
+
+  this->frame_ring_ = std::make_unique<VideoFrameSlot[]>(this->prefetch_frames_);
+
+  for (uint32_t i = 0; i < this->prefetch_frames_; i++) {
+    uint8_t *buf = nullptr;
+#if defined(USE_HWJPG)
+    // Same DMA2D-alignment contract as the (now removed) single input_buffer_ used --
+    // jpeg_decoder_process() requires it for its bit_stream argument too.
+    jpeg_decode_memory_alloc_cfg_t input_cfg{};
+    input_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
+    size_t actual_size = 0;
+    buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_size));
+#else
+    buf = static_cast<uint8_t *>(heap_caps_malloc(this->input_buffer_size_, MALLOC_CAP_SPIRAM));
+#endif
+    if (buf == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate frame ring slot %" PRIu32 " (%" PRIu32 " bytes)", i,
+               this->input_buffer_size_);
+      return false;
+    }
+    this->frame_ring_[i].data.reset(buf);
+  }
+
+  this->ring_slots_free_ = xSemaphoreCreateCounting(this->prefetch_frames_, this->prefetch_frames_);
+  this->ring_slots_ready_ = xSemaphoreCreateCounting(this->prefetch_frames_, 0);
+  if (this->ring_slots_free_ == nullptr || this->ring_slots_ready_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create ring buffer semaphores");
+    return false;
+  }
+
+  double total_mb = (static_cast<double>(this->prefetch_frames_) * this->input_buffer_size_) / (1024.0 * 1024.0);
+  ESP_LOGI(TAG, "Video frame ring buffer: %" PRIu32 " slots x %" PRIu32 " bytes (%.2f MB total, PSRAM)",
+           this->prefetch_frames_, this->input_buffer_size_, total_mb);
+  return true;
+}
+
+void SimpleVideoPlayer::free_frame_ring_() {
+  if (this->frame_ring_) {
+    for (uint32_t i = 0; i < this->prefetch_frames_; i++) {
+      if (this->frame_ring_[i].data) {
+        heap_caps_free(this->frame_ring_[i].data.release());
+      }
+    }
+    this->frame_ring_.reset();
+  }
+  if (this->ring_slots_free_ != nullptr) {
+    vSemaphoreDelete(this->ring_slots_free_);
+    this->ring_slots_free_ = nullptr;
+  }
+  if (this->ring_slots_ready_ != nullptr) {
+    vSemaphoreDelete(this->ring_slots_ready_);
+    this->ring_slots_ready_ = nullptr;
+  }
 }
 
 //========================================================================
@@ -1098,20 +1353,20 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   audio::AudioFileType codec_type = audio::AudioFileType::NONE;
   if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::MP3)) {
     codec_type = audio::AudioFileType::MP3;
-    ESP_LOGI(TAG, "Audio codec: MP3, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-             audio_info->bits_per_sample);
+    ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+             audio_info->channels, audio_info->bits_per_sample);
   } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
     codec_type = audio::AudioFileType::FLAC;
-    ESP_LOGI(TAG, "Audio codec: FLAC, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-             audio_info->bits_per_sample);
+    ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+             audio_info->channels, audio_info->bits_per_sample);
   } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::PCM)) {
     // PCM audio in AVI is raw samples without WAV header
     // We'll handle it directly without AudioDecoder
-    ESP_LOGI(TAG, "Audio codec: PCM (raw), %u Hz, %u channels, %u bits - will process directly",
+    ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
              audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
     codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
   } else {
-    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04X", audio_info->codec);
+    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04" PRIX32, audio_info->codec);
     return false;
   }
 
@@ -1131,11 +1386,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   if (!this->speaker_->is_running()) {
-    ESP_LOGE(TAG, "Speaker failed to start within %u ms", SPEAKER_INIT_TIMEOUT_MS);
+    ESP_LOGE(TAG, "Speaker failed to start within %" PRIu32 " ms", SPEAKER_INIT_TIMEOUT_MS);
     return false;
   }
 
-  ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %u Hz", audio_info->bits_per_sample,
+  ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
   // ============================================================================
@@ -1171,16 +1426,17 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   ESP_LOGI(TAG, "Audio buffer config: PCM data rate = %zu bytes/sec (%.1f KB/s)", bytes_per_second_decoded,
            bytes_per_second_decoded / 1024.0f);
-  ESP_LOGI(TAG, "  Input buffer: %zu KB (%u ms)", input_buffer_size / 1024, INPUT_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%u ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Temp buffer: %zu KB (%u ms)", this->audio_temp_buffer_size_ / 1024, TEMP_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Input buffer: %zu KB (%" PRIu32 " ms)", input_buffer_size / 1024, INPUT_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%" PRIu32 " ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Temp buffer: %zu KB (%" PRIu32 " ms)", this->audio_temp_buffer_size_ / 1024,
+           TEMP_BUFFER_DURATION_MS);
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
 
   if (use_decoder) {
     // Create ring buffer for encoded audio input (automatically uses PSRAM via RAMAllocator)
-    this->audio_input_ring_buffer_ = RingBuffer::create(input_buffer_size);
+    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(input_buffer_size);
     if (this->audio_input_ring_buffer_ == nullptr) {
       ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", input_buffer_size / 1024);
       return false;
@@ -1188,7 +1444,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
     // If channel conversion is needed, create intermediate ring buffer for decoded audio
     if (this->needs_channel_conversion_) {
-      this->audio_decoded_ring_buffer_ = RingBuffer::create(decoded_buffer_size);
+      this->audio_decoded_ring_buffer_ = ring_buffer::RingBuffer::create(decoded_buffer_size);
       if (this->audio_decoded_ring_buffer_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", decoded_buffer_size / 1024);
         return false;
@@ -1229,7 +1485,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(decoder_input_buffer_size, decoder_output_buffer_size);
 
     // Add source ring buffer
-    std::weak_ptr<RingBuffer> source_weak = this->audio_input_ring_buffer_;
+    std::weak_ptr<ring_buffer::RingBuffer> source_weak = this->audio_input_ring_buffer_;
     if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {
       ESP_LOGE(TAG, "Failed to add audio decoder source");
       return false;
@@ -1238,7 +1494,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     // Add sink based on whether channel conversion is needed
     if (this->needs_channel_conversion_) {
       // Decoder outputs to intermediate buffer (we'll convert in audio task)
-      std::weak_ptr<RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
+      std::weak_ptr<ring_buffer::RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
       if (this->audio_decoder_->add_sink(decoded_weak) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add audio decoder sink (intermediate buffer)");
         return false;

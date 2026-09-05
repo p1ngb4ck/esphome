@@ -1,291 +1,168 @@
 /**
  * @file buffered_file_reader.cpp
- * @brief Implementation of optimized buffered file reader
+ * @brief Implementation of the storage::StorageWorker-backed file reader
  */
 
 #include "buffered_file_reader.h"
 #include "esphome/core/log.h"
-#include <algorithm>
-#include <cstring>
-#include <unistd.h>
-
-#ifdef USE_ESP32
-#include "esp_heap_caps.h"
-#endif
 
 namespace esphome {
 namespace simple_video_player {
 
 static const char *const TAG = "buffered_file_reader";
 
-// Helper macro for alignment
-#define ALIGN_DOWN(num, align) ((num) & ~((align) -1))
-
 BufferedFileReader::BufferedFileReader() {
-  // Allocate cache buffer with DMA alignment for optimal SD card performance
 #ifdef USE_ESP32
-  this->cache_buffer_.reset(
-      static_cast<uint8_t *>(heap_caps_aligned_alloc(128, CACHE_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-#else
-  this->cache_buffer_.reset(new uint8_t[CACHE_SIZE]);
+  this->done_sem_ = xSemaphoreCreateBinary();
 #endif
-
-  if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate %zu byte cache buffer", CACHE_SIZE);
-  }
 }
 
-BufferedFileReader::~BufferedFileReader() { this->close(); }
+BufferedFileReader::~BufferedFileReader() {
+  this->close();
+#ifdef USE_ESP32
+  if (this->done_sem_ != nullptr) {
+    vSemaphoreDelete(this->done_sem_);
+  }
+#endif
+}
 
 bool BufferedFileReader::open(const char *path) {
-  if (this->file_handle_ != nullptr) {
+  if (this->open_) {
     ESP_LOGW(TAG, "File already open, closing first");
     this->close();
   }
 
-  if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Cache buffer not allocated");
+  if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr) {
+    ESP_LOGE(TAG, "Storage not available");
     return false;
   }
 
-  // Open file using standard fopen (works with VFS-mounted storage)
-  this->file_handle_ = std::fopen(path, "rb");
-  if (this->file_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file: %s", path);
+  const char *rel = nullptr;
+  storage::PathStorage *ps = storage::global_storage_registry->resolve_path(path, &rel);
+  if (ps == nullptr) {
+    ESP_LOGE(TAG, "'%s' does not resolve to a mounted storage", path);
     return false;
   }
 
-  // Reset state
-  this->flush_cache();
+  storage::StorageError submit =
+      storage::global_storage_worker->begin_read(ps, rel, &this->handle_, [this](storage::StorageError e) {
+        this->on_done_(e);
+      });
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "begin_read('%s') failed to submit: %s", path, storage::error_to_string(submit));
+    return false;
+  }
+
+  storage::StorageError result = this->wait_();
+  if (result != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "Failed to open '%s': %s", path, storage::error_to_string(result));
+    return false;
+  }
+
+  this->open_ = true;
   this->current_position_ = 0;
-  this->align_position_ = 0;
-  this->eof_ = false;
-
   return true;
 }
 
 void BufferedFileReader::close() {
-  if (this->file_handle_ != nullptr) {
-    std::fclose(this->file_handle_);
-    this->file_handle_ = nullptr;
+  if (!this->open_) {
+    return;
   }
 
-  this->flush_cache();
-}
+  storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_done_(e); });
+  this->wait_();
 
-void BufferedFileReader::flush_cache() {
-  this->cache_filled_ = 0;
-  this->cache_offset_ = 0;
-  this->cache_file_pos_ = 0;
-  this->eof_ = false;
-}
-
-bool BufferedFileReader::prefill_cache() {
-  if (this->file_handle_ == nullptr) {
-    ESP_LOGE(TAG, "Cannot prefill cache: file not open");
-    return false;
-  }
-
-  if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Cannot prefill cache: buffer not allocated");
-    return false;
-  }
-
-  // Fill cache from current position
-  int bytes_read = this->fill_cache_();
-  if (bytes_read < 0) {
-    ESP_LOGE(TAG, "Failed to prefill cache");
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Prefilled cache with %d bytes", bytes_read);
-  return true;
-}
-
-int BufferedFileReader::fill_cache_() {
-  if (this->file_handle_ == nullptr) {
-    return -1;
-  }
-
-  // Use read() instead of fread() for better control and alignment
-  int fd = fileno(this->file_handle_);
-  if (fd < 0) {
-    ESP_LOGE(TAG, "Invalid file descriptor");
-    return -1;
-  }
-
-  // Read full cache chunk
-  ssize_t bytes_read = ::read(fd, this->cache_buffer_.get(), CACHE_SIZE);
-
-  if (bytes_read < 0) {
-    ESP_LOGE(TAG, "Read error: %d", errno);
-    return -1;
-  }
-
-  if (bytes_read < static_cast<ssize_t>(CACHE_SIZE)) {
-    this->eof_ = true;
-  }
-
-  this->cache_filled_ = bytes_read;
-  this->cache_offset_ = 0;
-
-  ESP_LOGV(TAG, "Filled cache: %zu bytes (EOF: %d)", this->cache_filled_, this->eof_);
-
-  return bytes_read;
-}
-
-int BufferedFileReader::read_from_cache_(uint8_t *buffer, size_t size) {
-  size_t total_read = 0;
-
-  while (size > 0) {
-    // Check if we need to refill cache
-    if (this->cache_offset_ >= this->cache_filled_) {
-      // Cache exhausted, check if EOF
-      if (this->eof_) {
-        break;  // No more data
-      }
-
-      // Update cache file position before refilling
-      this->cache_file_pos_ += this->cache_filled_;
-
-      // Refill cache
-      int bytes_read = this->fill_cache_();
-      if (bytes_read <= 0) {
-        // Error or EOF with no data
-        return (total_read > 0) ? static_cast<int>(total_read) : bytes_read;
-      }
-    }
-
-    // Calculate available data in cache
-    size_t available = this->cache_filled_ - this->cache_offset_;
-    size_t to_copy = std::min(size, available);
-
-    // Copy from cache to output buffer
-    std::memcpy(buffer, this->cache_buffer_.get() + this->cache_offset_, to_copy);
-
-    // Update pointers
-    buffer += to_copy;
-    this->cache_offset_ += to_copy;
-    this->current_position_ += to_copy;
-    size -= to_copy;
-    total_read += to_copy;
-  }
-
-  return static_cast<int>(total_read);
+  this->open_ = false;
+  this->current_position_ = 0;
 }
 
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
-  if (this->file_handle_ == nullptr) {
+  if (!this->open_) {
     return -1;
   }
 
-  // Handle seek offset if needed (when current_position_ != align_position_ + cache_offset_)
-  // This happens after a seek that lands mid-cache
-  if (this->cache_filled_ > 0) {
-    // Check if current position is within cached data
-    uint64_t cache_start = this->cache_file_pos_;
-    uint64_t cache_end = this->cache_file_pos_ + this->cache_filled_;
-
-    if (this->current_position_ >= cache_start && this->current_position_ < cache_end) {
-      // Position is in cache, adjust offset
-      this->cache_offset_ = this->current_position_ - cache_start;
-    } else {
-      // Position is outside cache, need to seek and refill
-      this->flush_cache();
-
-      // Align seek position to ALIGN_SIZE boundary
-      this->align_position_ = ALIGN_DOWN(this->current_position_, ALIGN_SIZE);
-      this->cache_file_pos_ = this->align_position_;
-
-      if (std::fseek(this->file_handle_, this->align_position_, SEEK_SET) != 0) {
-        ESP_LOGE(TAG, "Failed to seek to aligned position %llu", this->align_position_);
-        return -1;
-      }
-
-      // Fill cache
-      int bytes_read = this->fill_cache_();
-      if (bytes_read <= 0) {
-        return bytes_read;
-      }
-
-      // Adjust offset to skip to current position
-      size_t skip = this->current_position_ - this->align_position_;
-      if (skip >= this->cache_filled_) {
-        ESP_LOGE(TAG, "Seek skip too large: %zu >= %zu", skip, this->cache_filled_);
-        return -1;
-      }
-      this->cache_offset_ = skip;
-    }
+  size_t bytes_read = 0;
+  storage::StorageError submit = storage::global_storage_worker->read_chunk(
+      this->handle_, buffer, size, &bytes_read, [this](storage::StorageError e) { this->on_done_(e); });
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "read_chunk failed to submit: %s", storage::error_to_string(submit));
+    return -1;
   }
 
-  return this->read_from_cache_(buffer, size);
+  storage::StorageError result = this->wait_();
+  if (result != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "read_chunk failed: %s", storage::error_to_string(result));
+    return -1;
+  }
+
+  this->current_position_ += bytes_read;
+  return static_cast<int>(bytes_read);
 }
 
 bool BufferedFileReader::seek(uint64_t position) {
-  if (this->file_handle_ == nullptr) {
+  if (!this->open_) {
     return false;
   }
 
-  // Check if seek target is within current cache
-  if (this->cache_filled_ > 0) {
-    uint64_t cache_start = this->cache_file_pos_;
-    uint64_t cache_end = this->cache_file_pos_ + this->cache_filled_;
-
-    if (position >= cache_start && position < cache_end) {
-      // Target is in cache, just adjust offset
-      this->cache_offset_ = position - cache_start;
-      this->current_position_ = position;
-      ESP_LOGV(TAG, "Seek within cache to %llu (offset: %zu)", position, this->cache_offset_);
-      return true;
-    }
+  storage::StorageError submit =
+      storage::global_storage_worker->seek(this->handle_, static_cast<int64_t>(position),
+                                           storage::SeekMode::SEEK_MODE_SET,
+                                           [this](storage::StorageError e) { this->on_done_(e); });
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "seek failed to submit: %s", storage::error_to_string(submit));
+    return false;
   }
 
-  // Seek outside cache - flush and prepare for aligned read
-  this->flush_cache();
+  storage::StorageError result = this->wait_();
+  if (result != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "seek failed: %s", storage::error_to_string(result));
+    return false;
+  }
 
-  // Set current position (will be adjusted on next read)
   this->current_position_ = position;
-
-  // Calculate aligned position for next read
-  this->align_position_ = ALIGN_DOWN(position, ALIGN_SIZE);
-  this->cache_file_pos_ = this->align_position_;
-
-  // Perform physical seek to aligned position
-  if (std::fseek(this->file_handle_, this->align_position_, SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek to position %llu (aligned: %llu)", position, this->align_position_);
-    return false;
-  }
-
-  ESP_LOGV(TAG, "Seek to %llu (aligned: %llu)", position, this->align_position_);
   return true;
 }
 
 bool BufferedFileReader::get_size(uint64_t *size) {
-  if (this->file_handle_ == nullptr) {
+  if (!this->open_) {
     return false;
   }
 
-  long current = std::ftell(this->file_handle_);
-  if (current < 0) {
+  uint64_t saved_position = this->current_position_;
+
+  // No dedicated stat call on the worker's stream API -- seek to end, tell, then seek back.
+  // (The worker's own SEEK_MODE_END on a network stream already resolves via file size
+  // internally, so this is a worker-native pattern, not a workaround.)
+  storage::StorageError submit =
+      storage::global_storage_worker->seek(this->handle_, 0, storage::SeekMode::SEEK_MODE_END,
+                                           [this](storage::StorageError e) { this->on_done_(e); });
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "get_size: seek(END) failed to submit: %s", storage::error_to_string(submit));
+    return false;
+  }
+  if (this->wait_() != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "get_size: seek(END) failed");
     return false;
   }
 
-  if (std::fseek(this->file_handle_, 0, SEEK_END) != 0) {
+  uint64_t end_position = 0;
+  submit = storage::global_storage_worker->tell(this->handle_, &end_position,
+                                                [this](storage::StorageError e) { this->on_done_(e); });
+  if (submit != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "get_size: tell failed to submit: %s", storage::error_to_string(submit));
+    return false;
+  }
+  if (this->wait_() != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "get_size: tell failed");
     return false;
   }
 
-  long end = std::ftell(this->file_handle_);
-  if (end < 0) {
-    std::fseek(this->file_handle_, current, SEEK_SET);
+  if (!this->seek(saved_position)) {
+    ESP_LOGE(TAG, "get_size: failed to restore position");
     return false;
   }
 
-  // Restore original position
-  if (std::fseek(this->file_handle_, current, SEEK_SET) != 0) {
-    return false;
-  }
-
-  *size = static_cast<uint64_t>(end);
+  *size = end_position;
   return true;
 }
 
