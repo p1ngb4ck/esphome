@@ -864,31 +864,24 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
     return false;
   }
 
-  // Must match whatever byte order LVGL's own RGB565 canvas actually expects, not assume one.
-  // esphome/components/lvgl only defines LV_COLOR_16_SWAP when color_depth is 16 (always true for
-  // RGB565 canvases), from lvgl.byte_order -- which itself DEFAULTS to big_endian when neither
-  // the display nor the lvgl: config sets it explicitly (see lvgl/__init__.py). The driver's own
-  // header documents BGR order as "small endian" and RGB order as "big endian" output -- i.e.
-  // exactly LV_COLOR_16_SWAP's two states -- so select between them at compile time instead of
-  // hardcoding BGR and silently producing byte-swapped (visually near-black/noisy) output
-  // whenever byte_order isn't little_endian.
+  // Same decode_cfg shape as picture_viewer's decode_jpeg_hardware_(): fixed RGB order, conv_std
+  // left at its BT601 default.
   jpeg_decode_cfg_t decode_cfg{};
   decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-#if LV_COLOR_16_SWAP
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
-#else
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-#endif
-  // Explicit, matching tools/video_encode/avi_mjpeg_transcode.py's "-colorspace bt601" -- MJPEG
-  // has no reliable in-band colorspace signaling, so leaving this at whatever conv_std happens to
-  // default to (0, which is BT601, but implicitly) risks a silent mismatch if that default ever
-  // changes upstream. A mismatch shows up as inaccurate (not obviously "broken") colors.
-  decode_cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
 
   uint32_t out_size = 0;
   jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
                        this->output_buffer_[this->current_buffer_index_].get(),
                        static_cast<uint32_t>(this->output_buffer_size_), &out_size);
+
+  // Same post-decode byte-swap as picture_viewer's decode_jpeg_hardware_().
+  uint16_t *pixels = reinterpret_cast<uint16_t *>(this->output_buffer_[this->current_buffer_index_].get());
+  size_t pixel_count = out_size / 2;
+  for (size_t i = 0; i < pixel_count; i++) {
+    pixels[i] = (pixels[i] << 8) | (pixels[i] >> 8);
+  }
+
   return true;
 }
 
