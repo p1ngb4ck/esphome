@@ -399,11 +399,16 @@ class SimpleVideoPlayer : public Component {
   std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
   std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
-  // Both indices are written exclusively by the decode task (Core 0) -- decode_frame_() swaps
-  // the canvas onto the buffer it just finished writing directly, under lvgl_mutex_, rather than
-  // deferring to the VSYNC callback (see decode_frame_()'s comment for why).
-  uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer decode writes into next
-  uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is currently displaying
+  // current_buffer_index_ is written ONLY by the decode task (Core 0); display_buffer_index_ is
+  // written ONLY by on_lvgl_render_complete() (runs on the main loop task, Core 1, synchronously
+  // inside lv_timer_handler()'s call stack -- the only place LVGL APIs are actually safe to call
+  // from, since LvglComponent exposes no lock of its own). pending_display_buffer_index_ is the
+  // one-way handoff: decode sets it (alongside buffer_swap_pending_) to say which buffer it just
+  // finished writing; VSYNC only ever reads it, never writes current_buffer_index_ itself.
+  uint8_t current_buffer_index_{0};          // 0 or 1 - which buffer decode writes into next
+  uint8_t display_buffer_index_{0};          // 0 or 1 - which buffer LVGL is currently displaying
+  uint8_t pending_display_buffer_index_{0};  // 0 or 1 - which buffer decode just finished writing
+  volatile bool buffer_swap_pending_{false};  // True when a decoded buffer is ready for VSYNC to swap in
 
 #if defined(USE_HWJPG)
   // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_

@@ -343,8 +343,10 @@ void SimpleVideoPlayer::playback_loop_() {
   // Initialize double-buffering indices. Safe to write directly here: this runs before the
   // loader task starts, and decode_frame_() (the only other writer of current_buffer_index_)
   // hasn't been called yet either.
-  this->display_buffer_index_ = 0;  // LVGL displays buffer 0 initially
-  this->current_buffer_index_ = 1;  // We decode into buffer 1 first
+  this->display_buffer_index_ = 0;          // LVGL displays buffer 0 initially
+  this->current_buffer_index_ = 1;          // We decode into buffer 1 first
+  this->pending_display_buffer_index_ = 0;  // matches display_buffer_index_ until the first swap
+  this->buffer_swap_pending_ = false;
 
   // Set canvas buffer with aligned dimensions
   // The decoder outputs aligned dimensions, so we must tell LVGL about the actual buffer layout
@@ -556,21 +558,14 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Clear both buffers and the canvas on stop -- same direct, mutex-protected pattern
-  // decode_frame_() uses, since this still runs on the decode/playback task itself.
+  // Clear both buffers and let VSYNC pick up the (now blank) current display buffer -- same
+  // signal-and-defer pattern as decode_frame_(), for the same reason: this runs on the decode/
+  // playback task, and only on_lvgl_render_complete() (LVGL's own thread) can safely touch LVGL.
   if (this->output_buffer_[0] && this->output_buffer_[1]) {
     std::memset(this->output_buffer_[0].get(), 0, this->output_buffer_size_);
     std::memset(this->output_buffer_[1].get(), 0, this->output_buffer_size_);
-    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-      uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-      uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-      lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                           aligned_height, LV_COLOR_FORMAT_RGB565);
-      lv_obj_invalidate(this->canvas_);
-      xSemaphoreGive(this->lvgl_mutex_);
-    } else {
-      ESP_LOGW(TAG, "Failed to acquire LVGL mutex to clear canvas on stop");
-    }
+    this->pending_display_buffer_index_ = this->display_buffer_index_;
+    this->buffer_swap_pending_ = true;
   }
 
   xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
@@ -755,27 +750,18 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
     return false;
   }
 
-  uint8_t just_decoded_index = this->current_buffer_index_;
-  this->current_buffer_index_ = 1 - this->current_buffer_index_;  // next decode targets the other buffer
-
-  // Swap the canvas onto the buffer we just decoded, directly, right here -- not deferred to
-  // on_lvgl_render_complete()/LV_EVENT_REFR_READY. That callback's only proven job was letting
-  // the canvas become visible in the first place, which just needed one normal LVGL render pass
-  // (already confirmed working); relying on that same custom event to ALSO drive every ongoing
-  // frame update added a dependency on a mechanism this component was never able to independently
-  // confirm actually fires on this hardware. A direct, mutex-protected swap only depends on the
-  // already-proven normal render pass to pick up the invalidate.
-  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    this->display_buffer_index_ = just_decoded_index;
-    uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-    uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_COLOR_FORMAT_RGB565);
-    lv_obj_invalidate(this->canvas_);
-    xSemaphoreGive(this->lvgl_mutex_);
-  } else {
-    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for frame swap, dropping this frame's display update");
-  }
+  // Publish which buffer we just finished writing, then toggle to the other one for next time --
+  // both writes happen here, on the decode task, exclusively (see current_buffer_index_'s comment
+  // in the header). The actual canvas swap is NOT done here: LvglComponent exposes no lock at all
+  // (verified -- grepped lvgl_esphome.h for any lock/mutex, found none), and its own loop()
+  // calls lv_timer_handler() without taking one either, so there is no safe way to call LVGL APIs
+  // from this task directly -- a private mutex only this component knows about does not protect
+  // against LvglComponent's own renderer running concurrently on the main loop task/core. The one
+  // genuinely safe place to touch LVGL from here is on_lvgl_render_complete(), which runs
+  // synchronously inside lv_timer_handler()'s own call stack (same task, same core), not this one.
+  this->pending_display_buffer_index_ = this->current_buffer_index_;
+  this->current_buffer_index_ = 1 - this->current_buffer_index_;
+  this->buffer_swap_pending_ = true;
 
   return true;
 }
@@ -1092,10 +1078,30 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(c
 #endif
 
 void SimpleVideoPlayer::on_lvgl_render_complete() {
-  // The buffer swap itself now happens directly in decode_frame_(), immediately after each
-  // successful decode (see its comment for why) -- this callback no longer owns any part of it.
-  // Kept registered only as a supplementary invalidate while playing; harmless if it never fires,
-  // and costs nothing if it does.
+  // VSYNC: this runs synchronously inside lv_timer_handler()'s own call stack (same task/core as
+  // the main loop), which is the ONLY place calling LVGL APIs from outside LVGL's own thread is
+  // actually safe -- LvglComponent exposes no lock, and its loop() calls lv_timer_handler()
+  // without taking one, so a swap done directly from the decode task (a different core) would
+  // race LVGL's own renderer with nothing preventing it. No mutex needed here specifically because
+  // this callback IS running on LVGL's thread already.
+  if (this->buffer_swap_pending_) {
+    // Only reads pending_display_buffer_index_ (published by decode_frame_() on the decode task)
+    // -- never touches current_buffer_index_, which decode owns exclusively.
+    this->display_buffer_index_ = this->pending_display_buffer_index_;
+
+    uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
+    uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
+                         aligned_height, LV_COLOR_FORMAT_RGB565);
+
+    this->buffer_swap_pending_ = false;
+  }
+
+  // Invalidate AFTER any buffer swap above, never before: lv_canvas_set_buffer() does not
+  // schedule its own redraw (confirmed against LVGL's own canvas widget behavior -- see
+  // https://github.com/lvgl/lvgl/issues/6005), so invalidating first would only re-schedule a
+  // redraw of whatever buffer was already showing, not the one just swapped in. This also keeps
+  // VSYNC callbacks flowing continuously while playing, even on cycles with nothing new to swap.
   if (this->state_ == PlayerState::PLAYING) {
     lv_obj_invalidate(this->canvas_);
   }
