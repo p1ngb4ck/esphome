@@ -215,30 +215,19 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
       continue;
     }
 
-    // Active buffer exhausted. A request too large to benefit from double-buffering bypasses it
-    // with its own direct read straight into the caller's buffer (the per-frame JPEG payload
-    // path) -- but the stream must be IDLE first, so any prefetch in flight has to be resolved
-    // (its data isn't lost: it stays valid in its buffer for the next normal-sized read to swap
-    // into, since active_idx_ itself doesn't change here).
-    size_t remaining = size - total_copied;
-    if (remaining >= READ_AHEAD_CAPACITY) {
-      this->resolve_prefetch_();
-      int n = this->read_chunk_(buffer + total_copied, remaining);
-      if (n < 0) {
-        return total_copied > 0 ? static_cast<int>(total_copied) : -1;
-      }
-      this->current_position_ += n;
-      total_copied += n;
-      if (static_cast<size_t>(n) < remaining) {
-        break;  // short read -- EOF
-      }
-      continue;
-    }
-
-    // Swap onto whatever's already been prefetched (blocking only if that fetch genuinely hasn't
-    // finished yet) and kick the next prefetch going. False means EOF.
+    // Active buffer exhausted. Always swap onto whatever's already been prefetched (blocking
+    // only if that fetch genuinely hasn't finished yet) rather than bypassing straight to a raw
+    // direct read here -- a prefetch already in flight has, by definition, advanced the
+    // UNDERLYING stream cursor past data the caller hasn't been given yet (prefetching reads the
+    // bytes into a buffer; current_position_ only advances when they're actually copied out to
+    // the caller). Resolving that prefetch and then reading further directly, without first
+    // draining what it fetched, would silently skip over that whole buffer's worth of the file --
+    // a real, serious bug a prior version of this function had for any request >= 1MB (this
+    // player's own JPEG payload reads can plausibly hit that at this resolution). Requests larger
+    // than one buffer just take multiple loop iterations (swap, drain, swap again) -- a few extra
+    // PSRAM-to-caller memcpys for the rare oversized request, which is nothing next to correctness.
     if (!this->swap_to_prefetched_()) {
-      break;
+      break;  // EOF
     }
   }
 
