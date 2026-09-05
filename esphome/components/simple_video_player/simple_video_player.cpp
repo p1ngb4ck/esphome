@@ -188,19 +188,32 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->last_error_ = PlaybackError::NONE;
   xSemaphoreGive(this->state_mutex_);
 
-  // Create the decode/playback task on Core 0 -- ESPHome's own main loop task (which drives
-  // App.loop() and therefore LvglComponent::loop()/lv_timer_handler(), i.e. the actual LVGL
-  // render/rotate/flush pipeline) is pinned to Core 1 (see esphome/components/esp32/core.cpp's
-  // xTaskCreateStaticPinnedToCore(..., 1)). Running this high-priority decode task on Core 1 too
-  // meant FreeRTOS priority scheduling could starve the main loop task of any CPU time whenever
-  // decode fell behind, which starves LVGL's render pipeline right along with it -- keeping this
-  // off Core 1 entirely removes that contention instead of just mitigating it with yields.
+  // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
+  // App.loop() -> LvglComponent::loop() -> lv_timer_handler(), i.e. the actual LVGL
+  // render/rotate/flush pipeline -- pinned there via esphome/components/esp32/core.cpp's
+  // xTaskCreateStaticPinnedToCore(..., 1)).
+  //
+  // This used to run on Core 0 specifically to get away from the main loop task, to stop
+  // FreeRTOS priority scheduling from starving it of CPU time whenever decode fell behind. That
+  // traded one bug for a worse one: the ESP32-P4 hardware JPEG decoder uses DMA2D internally
+  // (jpeg_decoder_process() -> dma2d_enqueue()), and this board's LVGL rotation uses PPA (also
+  // DMA2D-based -- see lvgl_esphome.cpp's ppa_do_scale_rotate_mirror()). On one core, decode and
+  // LVGL rendering could never truly execute at the same instant, which incidentally prevented
+  // decode and PPA rotation from ever touching DMA2D concurrently. Splitting them across real
+  // cores let that happen for the first time, hitting a real, open ESP-IDF hardware issue
+  // (espressif/esp-idf#18999, "DMA2D dma2d_connect hangs indefinitely on ESP32-P4 ... under
+  // continuous PPA load") -- decode hung forever on its very first call once PPA was actually
+  // active concurrently, which look like "nothing ever decodes" from here.
+  //
+  // Back on Core 1: the per-frame yield fix below (vTaskDelay of at least one tick every cycle,
+  // regardless of pacing) is what actually prevents the original starvation, without needing
+  // physical core isolation that reintroduces a DMA2D hardware race.
   BaseType_t result = xTaskCreatePinnedToCore(playback_task_entry_, "video_player",
                                               8192,  // Stack size
                                               this,
-                                              10,  // Priority (higher than the loader/audio tasks it shares Core 0 with)
+                                              10,  // Priority (higher than main loop and most components)
                                               &this->task_handle_,
-                                              0);  // Core 0
+                                              1);  // Core 1
 
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create playback task");
@@ -388,18 +401,19 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fire started callback
   this->on_started_callbacks_.call();
 
-  // Start the loader task (Core 1, alongside the main loop and audio task): it begins reading
-  // ahead into frame_ring_ immediately, decoupled from this task's decode+pacing work entirely.
-  // Unlike decode, the loader spends most of its time blocked on storage I/O (see
-  // BufferedFileReader), so it naturally yields often and is much less likely to starve the main
-  // loop the way a CPU-bound task pinned to the same core would.
+  // Start the loader task on Core 0: it begins reading ahead into frame_ring_ immediately,
+  // decoupled from this task's decode+pacing work entirely. Unlike decode, the loader is pure
+  // storage I/O -- it never touches DMA2D/PPA/JPEG hardware, so it has no reason to share Core 1
+  // with the main loop/decode the way decode itself now must (see play()'s task-creation comment
+  // for the DMA2D/PPA hardware-serialization reason decode is pinned there). Keeping it on Core 0
+  // instead of piling every task onto Core 1 actually uses both cores.
   this->loader_task_stop_ = false;
   BaseType_t loader_result = xTaskCreatePinnedToCore(loader_task_entry_, "svp_loader",
                                                      8192,  // Stack size
                                                      this,
                                                      9,  // Priority: below decode (10), above default
                                                      &this->loader_task_handle_,
-                                                     1);  // Core 1
+                                                     0);  // Core 0
   if (loader_result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create loader task");
     this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
@@ -1623,11 +1637,9 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     ESP_LOGI(TAG, "Audio decoder initialized successfully");
   }  // End of if (use_decoder)
 
-  // Start audio processing task on Core 1, alongside the main loop and loader task -- decode now
-  // runs alone on Core 0 (see play()'s xTaskCreatePinnedToCore comment). Audio processing
-  // naturally blocks on ring-buffer/speaker availability rather than spinning, so sharing Core 1
-  // with the main loop task doesn't reproduce the starvation risk decode had there; still worth
-  // keeping in mind if audio underrun/main-loop-lag symptoms ever show up together.
+  // Start audio processing task on Core 0, alongside the loader -- like the loader, audio never
+  // touches DMA2D/PPA/JPEG hardware, so unlike decode it has no reason to share Core 1 with the
+  // main loop (see play()'s xTaskCreatePinnedToCore comment for why decode specifically must).
   // For PCM: task handles channel conversion and direct speaker output
   // For MP3/FLAC: task handles decoder + channel conversion + speaker output
   // Audio task priority 10 (same as decode) to prevent audio underruns
@@ -1635,7 +1647,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   BaseType_t result = xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096,  // 4KB stack
                                               this, 10,  // Priority 10 (high - same as decode task)
                                               &this->audio_task_handle_,
-                                              1);  // Core 1
+                                              0);  // Core 0
 
   if (result != pdPASS || this->audio_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create audio processing task");

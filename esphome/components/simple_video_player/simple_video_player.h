@@ -430,11 +430,13 @@ class SimpleVideoPlayer : public Component {
   SemaphoreHandle_t ring_slots_free_{nullptr};   // counts empty slots, initial = prefetch_frames_
   SemaphoreHandle_t ring_slots_ready_{nullptr};  // counts filled slots, initial = 0
 
-  // Loader task (Core 1, alongside the main loop): demuxes and reads ahead into frame_ring_
+  // Loader task (Core 0, pure storage I/O -- no DMA2D/PPA/JPEG hardware involved): demuxes and
+  // reads ahead into frame_ring_
   TaskHandle_t loader_task_handle_{nullptr};
   volatile bool loader_task_stop_{false};
 
-  // FreeRTOS task (decode/playback, Core 0)
+  // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
+  // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
   SemaphoreHandle_t lvgl_mutex_{nullptr};  // Mutex for LVGL thread safety
