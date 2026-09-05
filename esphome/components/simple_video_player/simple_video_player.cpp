@@ -188,16 +188,19 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->last_error_ = PlaybackError::NONE;
   xSemaphoreGive(this->state_mutex_);
 
-  // Create the decode/playback task, pinned to Core 1, high priority so it takes precedence
-  // over the main loop and most other components. It starts the loader task (Core 0, see
-  // playback_loop_) once its one-time setup (open file, probe dimensions, allocate buffers) is
-  // done, then becomes a pure ring-buffer consumer.
+  // Create the decode/playback task on Core 0 -- ESPHome's own main loop task (which drives
+  // App.loop() and therefore LvglComponent::loop()/lv_timer_handler(), i.e. the actual LVGL
+  // render/rotate/flush pipeline) is pinned to Core 1 (see esphome/components/esp32/core.cpp's
+  // xTaskCreateStaticPinnedToCore(..., 1)). Running this high-priority decode task on Core 1 too
+  // meant FreeRTOS priority scheduling could starve the main loop task of any CPU time whenever
+  // decode fell behind, which starves LVGL's render pipeline right along with it -- keeping this
+  // off Core 1 entirely removes that contention instead of just mitigating it with yields.
   BaseType_t result = xTaskCreatePinnedToCore(playback_task_entry_, "video_player",
                                               8192,  // Stack size
                                               this,
-                                              10,  // Priority (higher than main loop and most components)
+                                              10,  // Priority (higher than the loader/audio tasks it shares Core 0 with)
                                               &this->task_handle_,
-                                              1);  // Core 1
+                                              0);  // Core 0
 
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create playback task");
@@ -382,15 +385,18 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fire started callback
   this->on_started_callbacks_.call();
 
-  // Start the loader task (Core 0): it begins reading ahead into frame_ring_ immediately,
-  // decoupled from this task's decode+pacing work entirely.
+  // Start the loader task (Core 1, alongside the main loop and audio task): it begins reading
+  // ahead into frame_ring_ immediately, decoupled from this task's decode+pacing work entirely.
+  // Unlike decode, the loader spends most of its time blocked on storage I/O (see
+  // BufferedFileReader), so it naturally yields often and is much less likely to starve the main
+  // loop the way a CPU-bound task pinned to the same core would.
   this->loader_task_stop_ = false;
   BaseType_t loader_result = xTaskCreatePinnedToCore(loader_task_entry_, "svp_loader",
                                                      8192,  // Stack size
                                                      this,
                                                      9,  // Priority: below decode (10), above default
                                                      &this->loader_task_handle_,
-                                                     0);  // Core 0 (alongside the audio task)
+                                                     1);  // Core 1
   if (loader_result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create loader task");
     this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
@@ -1585,15 +1591,19 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     ESP_LOGI(TAG, "Audio decoder initialized successfully");
   }  // End of if (use_decoder)
 
-  // Start audio processing task on Core 0 (video playback runs on Core 1)
+  // Start audio processing task on Core 1, alongside the main loop and loader task -- decode now
+  // runs alone on Core 0 (see play()'s xTaskCreatePinnedToCore comment). Audio processing
+  // naturally blocks on ring-buffer/speaker availability rather than spinning, so sharing Core 1
+  // with the main loop task doesn't reproduce the starvation risk decode had there; still worth
+  // keeping in mind if audio underrun/main-loop-lag symptoms ever show up together.
   // For PCM: task handles channel conversion and direct speaker output
   // For MP3/FLAC: task handles decoder + channel conversion + speaker output
-  // Audio task priority 10 (same as video) to prevent audio underruns
+  // Audio task priority 10 (same as decode) to prevent audio underruns
   this->audio_task_stop_ = false;
   BaseType_t result = xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096,  // 4KB stack
-                                              this, 10,  // Priority 10 (high - same as video task)
+                                              this, 10,  // Priority 10 (high - same as decode task)
                                               &this->audio_task_handle_,
-                                              0);  // Core 0
+                                              1);  // Core 1
 
   if (result != pdPASS || this->audio_task_handle_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create audio processing task");
