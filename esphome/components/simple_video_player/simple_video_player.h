@@ -331,12 +331,15 @@ class SimpleVideoPlayer : public Component {
   /// picture_viewer's ensure_canvas_buffer_(), using this LVGL fork's real 9.5 getter names.
   void ensure_canvas_buffer_();
 
-  /// (Re)allocate the canvas's buffer in PSRAM for aligned_width x aligned_height RGB565 and hand
-  /// it to LVGL via lv_canvas_set_buffer() -- mirrors picture_viewer's resize_canvas_buffer_(),
-  /// except PSRAM allocation failure here is a hard error (no plain-malloc fallback -- see
-  /// canvas_buffer_'s comment in the header for why). Must be called with lvgl_mutex_ already
-  /// held. Returns false (and leaves canvas_buffer_ready_ false) on allocation failure.
-  bool resize_canvas_buffer_(uint32_t aligned_width, uint32_t aligned_height);
+  /// Allocate the canvas's buffer in PSRAM (fixed at MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT -- this is
+  /// a single fixed-resolution panel, set correctly in YAML from the start; there is no runtime
+  /// "resize" case) and hand it to LVGL via lv_canvas_set_buffer(). Called lazily from play(), on
+  /// the first play() ever and never again (guarded by canvas_buffer_ == nullptr at the call
+  /// site) -- NOT from setup(): this->canvas_ is a widget LVGL itself creates and owns, and
+  /// component setup() order gives no guarantee LVGL has finished building it by the time this
+  /// component's own setup() runs. Must be called with lvgl_mutex_ already held. Returns false
+  /// (and leaves canvas_buffer_ready_ false) on allocation failure.
+  bool setup_canvas_buffer_();
 
   //========================================================================
   // Error Handling
@@ -450,10 +453,10 @@ class SimpleVideoPlayer : public Component {
   size_t output_buffer_size_{0};
 
   // The canvas's own pixel buffer -- mirrors picture_viewer's canvas_buffer_ /
-  // ensure_canvas_buffer_() / resize_canvas_buffer_(), using this LVGL fork's real 9.5 names
+  // ensure_canvas_buffer_() / setup_canvas_buffer_(), using this LVGL fork's real 9.5 names
   // (lv_canvas_get_buf(), lv_canvas_set_buffer() -- both confirmed present in the actual vendored
   // lvgl/lvgl@9.5.0 source, src/widgets/canvas/lv_canvas.h) in place of LVGL 8's
-  // lv_canvas_get_img(). resize_canvas_buffer_() (see .cpp) allocates this via
+  // lv_canvas_get_img(). setup_canvas_buffer_() (see .cpp) allocates this via
   // heap_caps_malloc(..., MALLOC_CAP_SPIRAM) ONLY, with no fallback to plain malloc: P4 has 512KB
   // and S3 384KB of internal RAM total, nowhere near enough for a video frame buffer, so a failed
   // PSRAM allocation here is a hard error, not something to silently degrade from.

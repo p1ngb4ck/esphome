@@ -174,6 +174,14 @@ void SimpleVideoPlayer::setup() {
   }
 #endif
 
+  // Canvas buffer is deliberately NOT touched here: this->canvas_ is a pointer to a widget LVGL
+  // itself creates and owns (from the lvgl: YAML's own canvas: block), and setup() order across
+  // components isn't something this component controls -- LVGL's own widget-tree construction is
+  // not guaranteed to have finished by the time THIS setup() runs. play() is triggered by an
+  // explicit user/automation action well after boot, which is the only point this component can
+  // be sure LVGL has actually finished building that widget -- see setup_canvas_buffer_()'s own
+  // comment for the one-time-only call it makes there instead.
+
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes (PSRAM)", this->prefetch_frames_,
@@ -321,38 +329,13 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
-  // Lock LVGL mutex before calling LVGL APIs from this FreeRTOS task -- same requirement as the
-  // canvas buffer assignment further below (LVGL itself is not thread-safe, and this task is not
-  // LVGL's own thread).
-  if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
-    lv_coord_t canvas_height = lv_obj_get_height(this->canvas_);
-    // Resize/reposition whenever the canvas doesn't already match the video's real size -- not
-    // just when it's larger than needed. A placeholder canvas (e.g. YAML width/height: 8, meant
-    // to be grown into the real size here once it's known) is *smaller* than the video, so a
-    // "shrink to fit" check alone (width < canvas_width) never fires for it.
-    if ((lv_coord_t) width != canvas_width || (lv_coord_t) height != canvas_height) {
-      lv_coord_t canvas_x = lv_obj_get_x(this->canvas_);
-      lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
-      lv_coord_t x_offset = (canvas_width - width) / 2;
-      lv_coord_t y_offset = (canvas_height - height) / 2;
-      ESP_LOGI(TAG, "Resizing canvas from %ldx%ld to %" PRIu32 "x%" PRIu32, static_cast<long>(canvas_width),
-               static_cast<long>(canvas_height), width, height);
-      lv_obj_set_size(this->canvas_, width, height);
-      lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
-    }
-    // Visibility (hidden flag, foreground order, which page/screen is active) is the caller's
-    // job now, not this component's -- expected usage is a dedicated page holding just the video
-    // canvas, switched to by the caller's own action before play() and away from after stop(), so
-    // by the time play() runs the canvas is already visible, on top, and on the active screen.
-    // Trying to guess/fix all three of those from here was both redundant with that and a real
-    // suspect for the video never becoming visible in the first place.
-    lv_obj_invalidate(this->canvas_);
-
-    xSemaphoreGive(this->lvgl_mutex_);
-  } else {
-    ESP_LOGW(TAG, "Failed to acquire LVGL mutex for canvas resize/unhide");
-  }
+  // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
+  // canvas is already the correct size and position from YAML -- there is no placeholder-then-
+  // grow case to support, so touching lv_obj_set_size()/lv_obj_set_pos() here was pure
+  // unnecessary risk (and unnecessary lvgl_mutex_ contention) for a no-op in the common case.
+  // Visibility (hidden flag, foreground order, which page/screen is active) is the caller's job,
+  // not this component's -- expected usage is a dedicated page holding just the video canvas,
+  // switched to by the caller's own action before play() and away from after stop().
 
   // Audio/speaker initialization -- independent of the video ring buffer, runs before the
   // loader/decode pipeline starts.
@@ -375,37 +358,43 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  // The decoder outputs aligned dimensions, so the canvas's own buffer must be sized to match.
-  uint32_t aligned_width = ALIGN_UP(width, 16);
-  uint32_t aligned_height = ALIGN_UP(height, 16);
-
-  // Lock LVGL mutex before calling LVGL APIs from this FreeRTOS task. Every OTHER lvgl_mutex_
-  // site in this file -- and every site in this component's original (pre-rewrite) history --
-  // takes it with a short timeout and skips gracefully on failure, never portMAX_DELAY. This one
-  // call site was the sole exception, added on the (wrong) assumption that an indefinite wait was
-  // safe because it only runs once per play(). It is not safe: this task runs at priority 10,
-  // above the main loop, specifically so decode/pacing can't be starved once playback is running
-  // -- but a portMAX_DELAY wait here means if this task is ever not scheduled back in for any
-  // reason, it never comes back, and nothing else can recover it. Bounded retries (10ms each,
-  // matching every other lvgl_mutex_ site) instead of one indefinite wait -- capped at roughly one
-  // frame period at the configured target_fps_ (the system's own actual time unit, not an
-  // arbitrary constant), enough to absorb ordinary brief contention without ever imposing a
-  // multi-frame stall on top of it. A genuine failure to acquire surfaces as the existing
-  // "Failed to size canvas buffer" error path below instead of hanging the whole player forever.
-  uint32_t frame_period_ms = static_cast<uint32_t>(1000.0f / this->target_fps_);
-  int max_attempts = std::max<int>(1, static_cast<int>(frame_period_ms / 10));
-  bool canvas_ready = false;
-  for (int attempt = 0; attempt < max_attempts && !canvas_ready; attempt++) {
-    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-      canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
-      xSemaphoreGive(this->lvgl_mutex_);
+  if (this->canvas_buffer_ == nullptr) {
+    // First play() ever, and only then: allocate the canvas buffer and hand it to LVGL via
+    // lv_canvas_set_buffer(). this->canvas_ is a pointer to a widget LVGL itself creates and owns
+    // (from the lvgl: YAML's own canvas: block) -- setup() order across components does not
+    // guarantee LVGL has finished building it yet, but by the time a play() action actually runs
+    // (well after boot, triggered explicitly by the user/an automation) it is guaranteed to have.
+    // No static timeout of any duration: xSemaphoreTake(..., 0) is a true non-blocking try-lock,
+    // not a shortened wait -- it returns immediately whether it got the mutex or not. On a miss,
+    // taskYIELD() (not vTaskDelay()) hands the CPU to whatever's holding it with no minimum wait
+    // imposed, then we try again -- bounded by attempt count as a pure safety cap, not a time
+    // budget, so this can never impose a fixed stall on top of real contention.
+    bool canvas_ready = false;
+    for (int attempt = 0; attempt < 1000 && !canvas_ready; attempt++) {
+      if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
+        canvas_ready = this->setup_canvas_buffer_();
+        xSemaphoreGive(this->lvgl_mutex_);
+      } else {
+        taskYIELD();
+      }
     }
-  }
-  if (!canvas_ready) {
-    ESP_LOGE(TAG, "Failed to size canvas buffer for playback");
-    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
-    this->close_file_();
-    return;
+    if (!canvas_ready) {
+      ESP_LOGE(TAG, "Failed to set up canvas buffer for playback");
+      this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
+      this->close_file_();
+      return;
+    }
+  } else if (this->canvas_buffer_ready_) {
+    // Every later play(): the buffer is already allocated and already handed to LVGL (its size
+    // and the pointer LVGL holds never change), so there is nothing left to touch on LVGL's side
+    // at all -- just clear our own private memory back to black for this new session. A raw write
+    // to a buffer we own, not an LVGL API call, needs no lvgl_mutex_/blocking of any kind.
+    // Deliberately NOT calling lv_obj_invalidate() here either: that was tried before and
+    // regressed the cold-start case (no first frame at all) -- decode_frame_()'s own invalidate,
+    // once the first real frame of this session is decoded, is what actually gets this canvas its
+    // next redraw.
+    std::memset(this->canvas_buffer_, 0,
+                static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t));
   }
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
@@ -615,8 +604,10 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // Blank the canvas on stop -- same direct, mutex-protected write as decode_frame_(), since this
-  // still runs on the decode/playback task itself.
-  if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
+  // still runs on the decode/playback task itself. True non-blocking try-lock (0 timeout, not a
+  // shortened wait), skip gracefully on failure: this is a cosmetic best-effort step (the canvas
+  // simply keeps showing the last frame until the next play()), never worth any wait at all.
+  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
     if (this->canvas_buffer_ready_) {
       size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
       std::memset(this->canvas_buffer_, 0, frame_bytes);
@@ -812,11 +803,12 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   // Copy the just-decoded frame into the canvas's own buffer and invalidate -- mirrors
   // picture_viewer's update_canvas_() (ensure_canvas_buffer_() + write_to_canvas_buffer_() +
   // lv_obj_invalidate()), called directly from this task instead of deferred to a VSYNC callback.
-  // lvgl_mutex_ is private to this component (LvglComponent itself never takes it, and nothing
-  // else in this component takes it concurrently with this call), so this practically never
-  // actually blocks -- portMAX_DELAY here is not a fixed/static delay, it's a wait on a mutex that
-  // is uncontended in the steady state.
-  if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
+  // True non-blocking try-lock (0 timeout): this MCU's whole per-frame budget is ~40ms shared
+  // across decode, audio, and storage prefetch, so even a "short" fixed wait here is a large
+  // fraction of it every single frame, not a rounding error -- any wait at all is unaffordable on
+  // this path. Skip gracefully on a miss: a dropped canvas update is one frame not redrawn, not a
+  // stall, and the very next frame gets another chance.
+  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
     if (this->canvas_buffer_ready_) {
       size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
       std::memcpy(this->canvas_buffer_, this->output_buffer_.get(), frame_bytes);
@@ -1378,7 +1370,7 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 #endif
 
-  // canvas_buffer_ is allocated by this component (resize_canvas_buffer_()) and only ever handed
+  // canvas_buffer_ is allocated by this component (setup_canvas_buffer_()) and only ever handed
   // to LVGL as a raw pointer via lv_canvas_set_buffer() -- LVGL does not take ownership or free it
   // (confirmed against the real LVGL 9.5 source), so it's ours to free here.
   if (this->canvas_buffer_ != nullptr) {
@@ -1421,35 +1413,26 @@ void SimpleVideoPlayer::ensure_canvas_buffer_() {
   this->canvas_buffer_ready_ = true;
 }
 
-bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t aligned_height) {
-  // Allocated once (on the first call), sized for the max resolution this player supports, and
-  // reused for every subsequent play() call -- never reallocated. lv_canvas_set_buffer() does not
-  // free whatever buffer it replaces (confirmed against the real LVGL 9.5 source), so allocating a
-  // fresh buffer on every single play() leaked the previous one every time. PSRAM-only, no
-  // plain-malloc fallback: P4 has 512KB and S3 384KB of internal RAM total, nowhere near enough
-  // for a video frame buffer, so a failed PSRAM allocation is a hard error.
-  uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
-  uint32_t aligned_max_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
+bool SimpleVideoPlayer::setup_canvas_buffer_() {
+  // Called lazily from play(), on the first play() ever and never again -- see this function's
+  // header comment for why that's the earliest safe point, not setup(). Fixed at MAX_VIDEO_WIDTH
+  // x MAX_VIDEO_HEIGHT: this is a single, fixed-resolution panel (set correctly in YAML from the
+  // start), never a variable one, so there is no per-play() "resize" case to support -- every
+  // later play() only ever needs to clear this same buffer back to black, not resize or re-hand
+  // it to LVGL again. Caller holds lvgl_mutex_ already.
+  uint32_t aligned_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
+  uint32_t aligned_height = ALIGN_UP(MAX_VIDEO_HEIGHT, 16);
+  const size_t buffer_size = static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t);
 
-  if (aligned_width > aligned_max_width || aligned_height > aligned_max_height) {
-    ESP_LOGE(TAG, "Video %" PRIu32 "x%" PRIu32 " exceeds max supported %" PRIu32 "x%" PRIu32, aligned_width,
-             aligned_height, aligned_max_width, aligned_max_height);
+  // PSRAM-only, no plain-malloc fallback: P4 has 512KB and S3 384KB of internal RAM total,
+  // nowhere near enough for a video frame buffer, so a failed PSRAM allocation is a hard error.
+  auto *new_buffer = static_cast<uint16_t *>(heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM));
+  if (new_buffer == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate canvas buffer in PSRAM: %zu bytes", buffer_size);
     return false;
   }
-
-  if (this->canvas_buffer_ == nullptr) {
-    const size_t max_buffer_size = static_cast<size_t>(aligned_max_width) * aligned_max_height * sizeof(uint16_t);
-    auto *new_buffer = static_cast<uint16_t *>(heap_caps_malloc(max_buffer_size, MALLOC_CAP_SPIRAM));
-    if (new_buffer == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate canvas buffer in PSRAM: %zu bytes", max_buffer_size);
-      return false;
-    }
-    this->canvas_buffer_ = new_buffer;
-    ESP_LOGI(TAG, "Canvas buffer allocated once (PSRAM): %zu bytes, max %" PRIu32 "x%" PRIu32, max_buffer_size,
-             aligned_max_width, aligned_max_height);
-  }
-
-  std::memset(this->canvas_buffer_, 0, static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t));
+  this->canvas_buffer_ = new_buffer;
+  std::memset(this->canvas_buffer_, 0, buffer_size);
 
   lv_canvas_set_buffer(this->canvas_, this->canvas_buffer_, static_cast<int32_t>(aligned_width),
                        static_cast<int32_t>(aligned_height), LV_COLOR_FORMAT_RGB565);
@@ -1458,11 +1441,8 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
   this->canvas_buffer_height_ = static_cast<int>(aligned_height);
   this->ensure_canvas_buffer_();
 
-  // Deliberately NOT calling lv_obj_invalidate() here: it was added to fix the fill-then-play
-  // case, but instead regressed the normal case (no first frame at all), so it's reverted pending
-  // a real understanding of that interaction. decode_frame_()'s own invalidate, once the first
-  // real frame is decoded, is what actually gets this canvas its first redraw.
-  ESP_LOGI(TAG, "Canvas buffer set to %" PRIu32 "x%" PRIu32, aligned_width, aligned_height);
+  ESP_LOGI(TAG, "Canvas buffer allocated (PSRAM): %zu bytes, %" PRIu32 "x%" PRIu32, buffer_size, aligned_width,
+           aligned_height);
   return this->canvas_buffer_ready_;
 }
 
