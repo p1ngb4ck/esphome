@@ -39,11 +39,18 @@ def build_ffmpeg_args(args: argparse.Namespace) -> list[str]:
         # ffmpeg scale filter accepts -1 for "keep aspect ratio" on the other axis.
         ffmpeg_args += ["-vf", f"scale={args.width or -1}:{args.height or -1}"]
 
+    # Explicit stream mapping instead of relying on ffmpeg's automatic "best stream" selection --
+    # a source with embedded cover art (a still-image stream ffmpeg can treat as a second "video"
+    # track), multiple audio tracks, or an unusual stream order can make the implicit choice pick
+    # the wrong one, or drop audio entirely, silently. "0:a:0?" is optional (the trailing '?'), so
+    # a genuinely audio-less source still produces video-only output instead of failing outright.
+    ffmpeg_args += ["-map", "0:v:0"]
+
     # Audio
     if args.audio_codec == "none":
         ffmpeg_args += ["-an"]
     else:
-        ffmpeg_args += ["-ar", str(args.sample_rate), "-ac", str(args.channels)]
+        ffmpeg_args += ["-map", "0:a:0?", "-ar", str(args.sample_rate), "-ac", str(args.channels)]
         if args.audio_codec == "pcm":
             ffmpeg_args += ["-c:a", "pcm_s16le"]
         elif args.audio_codec == "mp3":
