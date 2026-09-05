@@ -863,11 +863,22 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
     return false;
   }
 
-  // Identical decode_cfg to picture_viewer's decode_jpeg_hardware_(): fixed RGB order, conv_std
-  // left unset (defaults to 0 == JPEG_YUV_RGB_CONV_STD_BT601, same as there).
+  // Must match whatever byte order LVGL's own RGB565 canvas actually expects, not assume one --
+  // same requirement, and same LV_COLOR_16_SWAP branch, as the NEW_JPEG and JPEGDEC backends
+  // below (both of which point back to this comment). esphome/components/lvgl only defines
+  // LV_COLOR_16_SWAP when color_depth is 16 (always true for RGB565 canvases), from
+  // lvgl.byte_order -- which itself DEFAULTS to big_endian when neither the display nor the
+  // lvgl: config sets it explicitly (see lvgl/__init__.py). The driver's own header documents BGR
+  // order as "small endian" and RGB order as "big endian" output -- i.e. exactly
+  // LV_COLOR_16_SWAP's two states -- so select between them at compile time instead of hardcoding
+  // one and needing a separate manual byte-swap to compensate for the other.
   jpeg_decode_cfg_t decode_cfg{};
   decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+#if LV_COLOR_16_SWAP
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+#else
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+#endif
 
   // frame_size, not ALIGN_UP(frame_size, 16): picture_viewer passes jpeg_data.size() -- the exact
   // JPEG byte count -- as the input length here, never a padded-up one. The buffer's memory
@@ -880,13 +891,6 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
   jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(frame_size),
                        this->output_buffer_[this->current_buffer_index_].get(),
                        static_cast<uint32_t>(this->output_buffer_size_), &out_size);
-
-  // Same post-decode byte-swap as picture_viewer's decode_jpeg_hardware_().
-  uint16_t *pixels = reinterpret_cast<uint16_t *>(this->output_buffer_[this->current_buffer_index_].get());
-  size_t pixel_count = out_size / 2;
-  for (size_t i = 0; i < pixel_count; i++) {
-    pixels[i] = (pixels[i] << 8) | (pixels[i] >> 8);
-  }
 
   return true;
 }
