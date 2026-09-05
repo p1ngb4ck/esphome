@@ -5,6 +5,7 @@
 
 #include "avi_parser.h"
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -69,11 +70,12 @@ bool AVIParser::open(BufferedFileReader *reader) {
 
   ESP_LOGI(TAG, "AVI file opened successfully");
   if (this->has_video_) {
-    ESP_LOGI(TAG, "  Video: %ux%u, %.2f fps, codec: 0x%08X", this->video_info_.width, this->video_info_.height,
-             (float) this->video_info_.fps_num / this->video_info_.fps_den, this->video_info_.codec);
+    ESP_LOGI(TAG, "  Video: %" PRIu32 "x%" PRIu32 ", %.2f fps, codec: 0x%08" PRIX32, this->video_info_.width,
+             this->video_info_.height, (float) this->video_info_.fps_num / this->video_info_.fps_den,
+             this->video_info_.codec);
   }
   if (this->has_audio_) {
-    ESP_LOGI(TAG, "  Audio: %u Hz, %u channels, codec: 0x%04X", this->audio_info_.sample_rate,
+    ESP_LOGI(TAG, "  Audio: %" PRIu32 " Hz, %u channels, codec: 0x%04" PRIX32, this->audio_info_.sample_rate,
              this->audio_info_.channels, this->audio_info_.codec);
   }
 
@@ -313,7 +315,8 @@ bool AVIParser::parse_stream_header_() {
       // Minimum WAVEFORMATEX: wFormatTag(2) + nChannels(2) + nSamplesPerSec(4) +
       //                       nAvgBytesPerSec(4) + nBlockAlign(2) + wBitsPerSample(2) = 16 bytes
       if (strf_size < 16) {
-        ESP_LOGE(TAG, "AUDIO strf chunk too small: %u bytes (need at least 16 for WAVEFORMATEX)", strf_size);
+        ESP_LOGE(TAG, "AUDIO strf chunk too small: %" PRIu32 " bytes (need at least 16 for WAVEFORMATEX)",
+                 strf_size);
         return false;
       }
 
@@ -415,7 +418,7 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
 
       // Check buffer size
       if (chunk_size > buffer_size) {
-        ESP_LOGE(TAG, "Frame too large: %u > %zu", chunk_size, buffer_size);
+        ESP_LOGE(TAG, "Frame too large: %" PRIu32 " > %zu", chunk_size, buffer_size);
         return -1;
       }
 
