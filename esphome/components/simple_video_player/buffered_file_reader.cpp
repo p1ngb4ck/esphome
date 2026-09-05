@@ -22,6 +22,15 @@ BufferedFileReader::BufferedFileReader() {
 
 BufferedFileReader::~BufferedFileReader() {
   this->close();
+  // Buffers are allocated once (in open(), the first time) and kept for the life of this object
+  // -- close() only ends the stream, it does NOT free them, since this reader is meant to be
+  // held persistently across many open()/close() cycles (one per play()). Actually free the PSRAM
+  // here, at true end-of-life.
+  for (auto &buf : this->read_ahead_buf_) {
+    if (buf) {
+      heap_caps_free(buf.release());
+    }
+  }
 #ifdef USE_ESP32
   if (this->done_sem_ != nullptr) {
     vSemaphoreDelete(this->done_sem_);
