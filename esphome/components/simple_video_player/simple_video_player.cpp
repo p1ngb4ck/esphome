@@ -864,10 +864,21 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
     return false;
   }
 
-  // LVGL uses RGB565 little-endian format, so we need BGR element order to match
+  // Must match whatever byte order LVGL's own RGB565 canvas actually expects, not assume one.
+  // esphome/components/lvgl only defines LV_COLOR_16_SWAP when color_depth is 16 (always true for
+  // RGB565 canvases), from lvgl.byte_order -- which itself DEFAULTS to big_endian when neither
+  // the display nor the lvgl: config sets it explicitly (see lvgl/__init__.py). The driver's own
+  // header documents BGR order as "small endian" and RGB order as "big endian" output -- i.e.
+  // exactly LV_COLOR_16_SWAP's two states -- so select between them at compile time instead of
+  // hardcoding BGR and silently producing byte-swapped (visually near-black/noisy) output
+  // whenever byte_order isn't little_endian.
   jpeg_decode_cfg_t decode_cfg{};
   decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+#if LV_COLOR_16_SWAP
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+#else
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+#endif
 
   uint32_t out_size = 0;
   esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
@@ -893,8 +904,14 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>(
 
   if (this->new_jpeg_decoder_ == nullptr) {
     jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-    // Matches LVGL's RGB565 little-endian canvas format
+    // Must match whatever byte order LVGL's RGB565 canvas actually expects -- see the HW_P4
+    // backend's decode_frame_backend_ for why LV_COLOR_16_SWAP (not a hardcoded assumption) is
+    // the correct thing to branch on here.
+#if LV_COLOR_16_SWAP
+    config.output_type = JPEG_PIXEL_FORMAT_RGB565_BE;
+#else
     config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+#endif
     if (jpeg_dec_open(&config, &this->new_jpeg_decoder_) != JPEG_ERR_OK) {
       ESP_LOGE(TAG, "Could not create esp_new_jpeg decoder");
       return false;
@@ -1053,7 +1070,14 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(c
     return false;
   }
   jpeg.setUserPointer(&ctx);
+  // Must match whatever byte order LVGL's RGB565 canvas actually expects -- see the HW_P4
+  // backend's decode_frame_backend_ for why LV_COLOR_16_SWAP (not a hardcoded assumption) is the
+  // correct thing to branch on here.
+#if LV_COLOR_16_SWAP
+  jpeg.setPixelType(RGB565_BIG_ENDIAN);
+#else
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+#endif
 
   bool ok = jpeg.decode(0, 0, 0);
   jpeg.close();
