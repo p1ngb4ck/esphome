@@ -569,6 +569,10 @@ void SimpleVideoPlayer::playback_loop_() {
     if (this->canvas_buffer_ready_) {
       size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
       std::memset(this->canvas_buffer_, 0, frame_bytes);
+      // Same order lv_canvas_fill_bg() uses: flush the CPU cache for the buffer BEFORE
+      // invalidating, so the render pass reads the just-written bytes rather than stale cache
+      // lines. decode_frame_() was missing this same step.
+      lv_draw_buf_flush_cache(lv_canvas_get_draw_buf(this->canvas_), nullptr);
       lv_obj_invalidate(this->canvas_);
     }
     xSemaphoreGive(this->lvgl_mutex_);
@@ -765,6 +769,10 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
     if (this->canvas_buffer_ready_) {
       size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
       std::memcpy(this->canvas_buffer_, this->output_buffer_.get(), frame_bytes);
+      // Same order lv_canvas_fill_bg() uses (the built-in action that's proven to work): flush
+      // the CPU cache for the buffer BEFORE invalidating, so the render pass reads the just-
+      // written bytes rather than stale cache lines. This was missing here -- every frame.
+      lv_draw_buf_flush_cache(lv_canvas_get_draw_buf(this->canvas_), nullptr);
       lv_obj_invalidate(this->canvas_);
     }
     xSemaphoreGive(this->lvgl_mutex_);
