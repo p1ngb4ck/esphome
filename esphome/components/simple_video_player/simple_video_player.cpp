@@ -841,6 +841,16 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
 template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>() {
   ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (esp_new_jpeg decoder)...");
 
+  if (this->new_jpeg_decoder_ == nullptr) {
+    jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+    // Matches LVGL's RGB565 little-endian canvas format
+    config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    if (jpeg_dec_open(&config, &this->new_jpeg_decoder_) != JPEG_ERR_OK) {
+      ESP_LOGE(TAG, "Could not create esp_new_jpeg decoder");
+      return false;
+    }
+  }
+
   // Compressed-frame input buffers live in frame_ring_ (see allocate_frame_ring_()).
 
   uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
@@ -898,26 +908,16 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(
     return false;
   }
 
-  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-  // Matches LVGL's RGB565 little-endian canvas format
-  config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-  jpeg_dec_handle_t decoder = nullptr;
-  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK) {
-    ESP_LOGW(TAG, "Could not create esp_new_jpeg decoder");
-    return false;
-  }
-
   jpeg_dec_io_t io{};
   io.inbuf = const_cast<uint8_t *>(frame_data);
   io.inbuf_len = static_cast<int>(frame_size);
   io.outbuf = this->output_buffer_[this->current_buffer_index_].get();
 
   jpeg_dec_header_info_t header_info;
-  jpeg_error_t err = jpeg_dec_parse_header(decoder, &io, &header_info);
+  jpeg_error_t err = jpeg_dec_parse_header(this->new_jpeg_decoder_, &io, &header_info);
   if (err == JPEG_ERR_OK) {
-    err = jpeg_dec_process(decoder, &io);
+    err = jpeg_dec_process(this->new_jpeg_decoder_, &io);
   }
-  jpeg_dec_close(decoder);
 
   if (err != JPEG_ERR_OK) {
     ESP_LOGW(TAG, "esp_new_jpeg decode failed: %d", err);
@@ -1281,6 +1281,11 @@ void SimpleVideoPlayer::free_buffers_() {
   if (this->hw_jpeg_decoder_ != nullptr) {
     jpeg_del_decoder_engine(this->hw_jpeg_decoder_);
     this->hw_jpeg_decoder_ = nullptr;
+  }
+#elif defined(USE_NEWJPEG)
+  if (this->new_jpeg_decoder_ != nullptr) {
+    jpeg_dec_close(this->new_jpeg_decoder_);
+    this->new_jpeg_decoder_ = nullptr;
   }
 #endif
 

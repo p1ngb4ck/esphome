@@ -407,6 +407,9 @@ class SimpleVideoPlayer : public Component {
   // call, destroyed in free_buffers_() -- creating/tearing down the hardware JPEG engine per frame
   // (as opposed to per playback session) is far too expensive to do 25+ times a second.
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
+#elif defined(USE_NEWJPEG)
+  // Same reasoning as hw_jpeg_decoder_ above, for esp_new_jpeg's decoder handle.
+  jpeg_dec_handle_t new_jpeg_decoder_{nullptr};
 #endif
 
   // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
