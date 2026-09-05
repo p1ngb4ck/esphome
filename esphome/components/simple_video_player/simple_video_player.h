@@ -378,9 +378,12 @@ class SimpleVideoPlayer : public Component {
   std::unique_ptr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
 
 #ifdef USE_AUDIO
-  // This player commits to ONE fixed audio format for every video, set by the user in YAML
-  // (audio_sample_rate/audio_channels/audio_bits_per_sample/audio_codec -- see __init__.py) and
-  // passed down as SVP_AUDIO_* defines. That's what makes it possible to size the audio ring
+  // This player commits to ONE fixed audio format for every video. sample_rate/channels/
+  // bits_per_sample are resolved from the referenced speaker's own config (a hardware property,
+  // not asked of the user twice -- see __init__.py's _resolve_speaker_audio_format()); audio_codec
+  // is the one piece that's actually a user-facing YAML option, since it's a property of the
+  // video file, not the speaker. All four reach here as SVP_AUDIO_* defines. That's what makes it
+  // possible to size the audio ring
   // buffers/temp buffer once and allocate them once, in setup(), like every other persistent
   // buffer in this component -- instead of recomputing sizes from whatever a given AVI file's
   // audio stream header happens to say and reallocating per play() (AGENTS.md: no heap

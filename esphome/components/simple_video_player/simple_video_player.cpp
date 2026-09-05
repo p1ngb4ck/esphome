@@ -1531,16 +1531,17 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     return false;
   }
 
-  // This player is configured (YAML: audio_sample_rate/audio_channels/audio_bits_per_sample) for
-  // ONE fixed audio format -- validate the file's actual format matches it instead of resizing
-  // anything to fit. source_audio_channels_/audio_sample_rate_/audio_bits_per_sample_ were
-  // already set to the fixed AUDIO_* constants in setup() and never change here.
+  // This player is configured for ONE fixed audio format, resolved from the speaker's own YAML
+  // config (sample_rate/channels/bits_per_sample -- see __init__.py's
+  // _resolve_speaker_audio_format()) -- validate the file's actual format matches it instead of
+  // resizing anything to fit. source_audio_channels_/audio_sample_rate_/audio_bits_per_sample_
+  // were already set to the fixed AUDIO_* constants in setup() and never change here.
   if (audio_info->channels != AUDIO_SOURCE_CHANNELS || audio_info->sample_rate != AUDIO_SAMPLE_RATE ||
       audio_info->bits_per_sample != AUDIO_BITS_PER_SAMPLE) {
     ESP_LOGE(TAG,
-             "Audio format mismatch: file's audio track is %" PRIu32 " Hz, %u ch, %u-bit, but this player is "
-             "configured for %" PRIu32 " Hz, %u ch, %u-bit only -- re-encode the file's audio track to match, or "
-             "change audio_sample_rate/audio_channels/audio_bits_per_sample in YAML. Playing video-only.",
+             "Audio format mismatch: file's audio track is %" PRIu32 " Hz, %u ch, %u-bit, but the speaker is "
+             "configured for %" PRIu32 " Hz, %u ch, %u-bit only -- re-encode the file's audio track to match the "
+             "speaker's sample_rate/channel/bits_per_sample. Playing video-only.",
              audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample, AUDIO_SAMPLE_RATE,
              AUDIO_SOURCE_CHANNELS, AUDIO_BITS_PER_SAMPLE);
     return false;
