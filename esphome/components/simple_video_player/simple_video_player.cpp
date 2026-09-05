@@ -379,27 +379,23 @@ void SimpleVideoPlayer::playback_loop_() {
   uint32_t aligned_width = ALIGN_UP(width, 16);
   uint32_t aligned_height = ALIGN_UP(height, 16);
 
-  // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task (this component's own private
-  // mutex around its own LVGL calls -- see decode_frame_()'s comment on lvgl_mutex_). This is a
-  // one-time, once-per-play() call, not a per-frame one, so blocking (rather than a short timeout
-  // that silently skips setup on contention) is correct here: skipping this on a stray timeout
-  // would leave canvas_buffer_ready_ false for the entire playback session.
-  // This task runs at priority 10 -- above the main loop -- specifically so decode/pacing can't
-  // be starved once playback is running (see this function's task-creation comment above). But
-  // that cuts both ways: everything from open_file_() through here has run at that same priority
-  // with NOT ONE yield point, and the last hardware test showed exactly the failure mode that
-  // invites -- confirmed via uxSemaphoreGetCount() that lvgl_mutex_ was genuinely free (count=1)
-  // right before this take, yet the task never ran again to actually complete it: real CPU
-  // starvation, not a deadlock on this mutex, coinciding with the logger/LVGL themselves reporting
-  // overrun ticks at that exact moment. An explicit yield here before the one long blocking wait
-  // in this whole setup path gives the scheduler a guaranteed chance to run whatever was
-  // contending, instead of relying on this priority-10 task never being CPU-bound long enough to
-  // matter -- the same reasoning the pacing loop's own per-frame yield is already built on.
-  vTaskDelay(pdMS_TO_TICKS(1));
+  // Lock LVGL mutex before calling LVGL APIs from this FreeRTOS task. Every OTHER lvgl_mutex_
+  // site in this file -- and every site in this component's original (pre-rewrite) history --
+  // takes it with a short timeout and skips gracefully on failure, never portMAX_DELAY. This one
+  // call site was the sole exception, added on the (wrong) assumption that an indefinite wait was
+  // safe because it only runs once per play(). It is not safe: this task runs at priority 10,
+  // above the main loop, specifically so decode/pacing can't be starved once playback is running
+  // -- but a portMAX_DELAY wait here means if this task is ever not scheduled back in for any
+  // reason, it never comes back, and nothing else can recover it. Bounded retries (short timeout,
+  // same as everywhere else) instead of one indefinite wait: still generous (0.5s total) for the
+  // ordinary "briefly contended" case, but a genuine failure to acquire surfaces as the existing
+  // "Failed to size canvas buffer" error path below instead of hanging the whole player forever.
   bool canvas_ready = false;
-  if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
-    canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
-    xSemaphoreGive(this->lvgl_mutex_);
+  for (int attempt = 0; attempt < 50 && !canvas_ready; attempt++) {
+    if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+      canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
+      xSemaphoreGive(this->lvgl_mutex_);
+    }
   }
   if (!canvas_ready) {
     ESP_LOGE(TAG, "Failed to size canvas buffer for playback");
