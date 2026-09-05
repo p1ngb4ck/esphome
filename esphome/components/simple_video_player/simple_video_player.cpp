@@ -1711,7 +1711,14 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
     size_t bytes_to_write = complete_frames * bytes_per_frame;
 
     if (bytes_to_write > 0) {
-      this->speaker_->play(data, bytes_to_write);
+      // Explicit ticks_to_wait=0 (best-effort, non-blocking), not the 2-arg overload: this runs
+      // on the loader task, same as the video frame reads -- if the speaker backend's play()
+      // blocks when its internal buffer is full (implementation-defined for the 2-arg overload,
+      // per this class's own doc comment), that stalls video frame delivery too, since audio and
+      // video share this one task reading the same interleaved AVI stream. Matches the same
+      // drop-rather-than-block philosophy the other two audio paths above already get for free
+      // from RingBuffer::write() (discards old data on overflow instead of waiting).
+      this->speaker_->play(data, bytes_to_write, 0);
     }
   }
 }
