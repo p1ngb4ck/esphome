@@ -1373,13 +1373,10 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
   this->canvas_buffer_height_ = static_cast<int>(aligned_height);
   this->ensure_canvas_buffer_();
 
-  // Force a redraw right after the buffer swap, rather than relying solely on decode_frame_()'s
-  // later invalidate calls once real frames start arriving. Needed specifically when the canvas
-  // already had different content actively displayed before this call (e.g. a prior
-  // lvgl.canvas.fill test) -- the handoff from an already-live image source to a freshly-swapped
-  // one is a different case than a canvas that has never been shown anything yet.
-  lv_obj_invalidate(this->canvas_);
-
+  // Deliberately NOT calling lv_obj_invalidate() here: it was added to fix the fill-then-play
+  // case, but instead regressed the normal case (no first frame at all), so it's reverted pending
+  // a real understanding of that interaction. decode_frame_()'s own invalidate, once the first
+  // real frame is decoded, is what actually gets this canvas its first redraw.
   ESP_LOGI(TAG, "Canvas buffer set to %" PRIu32 "x%" PRIu32, aligned_width, aligned_height);
   return this->canvas_buffer_ready_;
 }
