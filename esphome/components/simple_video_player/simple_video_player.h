@@ -402,6 +402,13 @@ class SimpleVideoPlayer : public Component {
   uint8_t current_buffer_index_{0};  // 0 or 1 - which buffer we're decoding into
   uint8_t display_buffer_index_{0};  // 0 or 1 - which buffer LVGL is displaying
 
+#if defined(USE_HWJPG)
+  // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_
+  // call, destroyed in free_buffers_() -- creating/tearing down the hardware JPEG engine per frame
+  // (as opposed to per playback session) is far too expensive to do 25+ times a second.
+  jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
+#endif
+
   // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
   // (Core 1). ring_head_ is loader-owned (next slot to fill), ring_tail_ is decode-owned (next
   // slot to consume); the two semaphores are the only cross-task synchronization needed for a

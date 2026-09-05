@@ -741,12 +741,22 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 
 #if defined(USE_HWJPG)
 
-// ESP32-P4: hardware JPEG codec (esp_driver_jpeg). The engine is opened and torn down per
-// frame (see jpeg_alloc_decoder_mem()'s DMA2D-alignment contract, which our buffers already
-// satisfy) rather than held open for the whole playback session, matching the same per-call
-// lifecycle runtime_image's HW_P4 backend uses.
+// ESP32-P4: hardware JPEG codec (esp_driver_jpeg). Unlike runtime_image's HW_P4 backend (which
+// decodes a single still image and can afford a per-call engine open/close), video needs the
+// engine created once here and held open for the whole playback session -- decode_frame_backend_
+// below just reuses it every frame; creating/tearing it down 25+ times a second was catastrophic.
 template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
   ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (hardware JPEG decoder, ESP32-P4)...");
+
+  if (this->hw_jpeg_decoder_ == nullptr) {
+    jpeg_decode_engine_cfg_t eng_cfg{};
+    eng_cfg.intr_priority = 0;
+    eng_cfg.timeout_ms = 200;
+    if (jpeg_new_decoder_engine(&eng_cfg, &this->hw_jpeg_decoder_) != ESP_OK) {
+      ESP_LOGE(TAG, "Could not create hardware JPEG decoder engine");
+      return false;
+    }
+  }
 
   // Compressed-frame input buffers now live in frame_ring_ (see allocate_frame_ring_()), not a
   // single input_buffer_ -- the ring is what lets the loader task (Core 0) read ahead of the
@@ -804,25 +814,16 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
     return false;
   }
 
-  jpeg_decode_engine_cfg_t eng_cfg{};
-  eng_cfg.intr_priority = 0;
-  eng_cfg.timeout_ms = 200;
-  jpeg_decoder_handle_t decoder = nullptr;
-  if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK) {
-    ESP_LOGW(TAG, "Could not create hardware JPEG decoder engine");
-    return false;
-  }
-
   // LVGL uses RGB565 little-endian format, so we need BGR element order to match
   jpeg_decode_cfg_t decode_cfg{};
   decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
 
   uint32_t out_size = 0;
-  esp_err_t err = jpeg_decoder_process(decoder, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+  esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
+                                       static_cast<uint32_t>(aligned_size),
                                        this->output_buffer_[this->current_buffer_index_].get(),
                                        static_cast<uint32_t>(this->output_buffer_size_), &out_size);
-  jpeg_del_decoder_engine(decoder);
 
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "JPEG decode failed: %d", err);
@@ -1275,6 +1276,13 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 
   this->output_buffer_size_ = 0;
+
+#if defined(USE_HWJPG)
+  if (this->hw_jpeg_decoder_ != nullptr) {
+    jpeg_del_decoder_engine(this->hw_jpeg_decoder_);
+    this->hw_jpeg_decoder_ = nullptr;
+  }
+#endif
 
   this->free_frame_ring_();
 }
