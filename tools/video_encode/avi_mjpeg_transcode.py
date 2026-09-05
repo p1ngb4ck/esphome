@@ -23,7 +23,14 @@ def build_ffmpeg_args(args: argparse.Namespace) -> list[str]:
     ffmpeg_args: list[str] = ["ffmpeg", "-y", "-i", args.input]
 
     # Video: MJPEG, explicit pixel format for determinism, fps and (optional) resolution.
-    ffmpeg_args += ["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-r", str(args.fps)]
+    # -colorspace bt601 pins the YUV<->RGB matrix explicitly: MJPEG has no reliable in-band
+    # colorspace signaling, and without this ffmpeg's own default can vary by resolution (BT.601
+    # for SD-ish content, BT.709 for HD-ish -- and 1280x800 sits right at that boundary). The
+    # ESP32-P4 hardware decoder's jpeg_decode_cfg_t.conv_std is explicitly set to
+    # JPEG_YUV_RGB_CONV_STD_BT601 to match (see decode_frame_backend_<HW_P4> in
+    # simple_video_player.cpp) -- a mismatch here would show up as inaccurate (not necessarily
+    # broken-looking) colors, particularly reds/blues.
+    ffmpeg_args += ["-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-colorspace", "bt601", "-r", str(args.fps)]
     if args.qscale is not None:
         ffmpeg_args += ["-q:v", str(args.qscale)]
     if args.width and args.height:
@@ -83,8 +90,11 @@ def main() -> int:
     parser.add_argument(
         "--qscale",
         type=int,
-        default=5,
-        help="MJPEG quality, ffmpeg -q:v scale 2 (best) - 31 (worst). Default: 5",
+        default=7,
+        help="MJPEG quality, ffmpeg -q:v scale 2 (best) - 31 (worst). Default: 7 -- the HW JPEG "
+        "decoder's per-frame time is resolution-bound (fixed hardware pipeline), not file-size-"
+        "bound, so lower quality here buys smaller storage reads and buffer margin with little "
+        "real downside on a small embedded panel. Raise towards 5 if artifacts are visible.",
     )
     parser.add_argument(
         "--audio-codec",

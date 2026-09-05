@@ -879,6 +879,11 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
 #else
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
 #endif
+  // Explicit, matching tools/video_encode/avi_mjpeg_transcode.py's "-colorspace bt601" -- MJPEG
+  // has no reliable in-band colorspace signaling, so leaving this at whatever conv_std happens to
+  // default to (0, which is BT601, but implicitly) risks a silent mismatch if that default ever
+  // changes upstream. A mismatch shows up as inaccurate (not obviously "broken") colors.
+  decode_cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
 
   uint32_t out_size = 0;
   esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
