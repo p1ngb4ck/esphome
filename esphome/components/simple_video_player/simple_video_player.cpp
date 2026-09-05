@@ -886,15 +886,9 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
   decode_cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
 
   uint32_t out_size = 0;
-  esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
-                                       static_cast<uint32_t>(aligned_size),
-                                       this->output_buffer_[this->current_buffer_index_].get(),
-                                       static_cast<uint32_t>(this->output_buffer_size_), &out_size);
-
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "JPEG decode failed: %d", err);
-    return false;
-  }
+  jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+                       this->output_buffer_[this->current_buffer_index_].get(),
+                       static_cast<uint32_t>(this->output_buffer_size_), &out_size);
   return true;
 }
 
