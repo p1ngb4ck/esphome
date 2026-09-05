@@ -68,14 +68,19 @@ void BufferedFileReader::resolve_prefetch_() {
   if (result != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG, "prefetch read_chunk failed: %s", storage::error_to_string(result));
   }
+  ESP_LOGI(TAG, "resolve_prefetch_: buf[%d] = %zu bytes (result=%s)", this->prefetch_idx_,
+           this->read_ahead_len_[this->prefetch_idx_], storage::error_to_string(result));
   this->prefetch_pending_ = false;
 }
 
 bool BufferedFileReader::swap_to_prefetched_() {
+  int prev_active = this->active_idx_;
   this->resolve_prefetch_();
 
   int other = 1 - this->active_idx_;
   if (this->read_ahead_len_[other] == 0) {
+    ESP_LOGI(TAG, "swap_to_prefetched_: buf[%d] exhausted, buf[%d] is EMPTY -> EOF (current_position_=%llu)",
+             prev_active, other, static_cast<unsigned long long>(this->current_position_));
     return false;  // EOF (or the prefetch failed) -- nothing more buffered to swap to
   }
 
@@ -86,7 +91,11 @@ bool BufferedFileReader::swap_to_prefetched_() {
   // this one, overlapping that fetch with however long the caller takes to consume/decode what
   // we just swapped in. Only worth doing if the buffer we just swapped INTO wasn't already a
   // short read (EOF imminent): a short read means there's nothing beyond it to prefetch for.
-  if (this->read_ahead_len_[other] == READ_AHEAD_CAPACITY) {
+  bool will_prefetch = this->read_ahead_len_[other] == READ_AHEAD_CAPACITY;
+  ESP_LOGI(TAG, "swap_to_prefetched_: %d -> %d (%zu bytes), re-prefetch[%d]=%d, current_position_=%llu", prev_active,
+           other, this->read_ahead_len_[other], prev_active, will_prefetch ? 1 : 0,
+           static_cast<unsigned long long>(this->current_position_));
+  if (will_prefetch) {
     this->start_prefetch_(1 - other);
   }
   return true;
@@ -157,6 +166,9 @@ bool BufferedFileReader::open(const char *path) {
   if (this->read_ahead_len_[0] == READ_AHEAD_CAPACITY) {
     this->start_prefetch_(1);
   }
+
+  ESP_LOGI(TAG, "open('%s'): initial fill buf[0]=%d/%zu bytes, prefetch[1]_started=%d", path, n,
+           READ_AHEAD_CAPACITY, this->prefetch_pending_ ? 1 : 0);
 
   return true;
 }
@@ -284,6 +296,9 @@ bool BufferedFileReader::seek(uint64_t position) {
   if (this->read_ahead_len_[0] == READ_AHEAD_CAPACITY) {
     this->start_prefetch_(1);
   }
+
+  ESP_LOGI(TAG, "seek(%llu): re-prime buf[0]=%d/%zu bytes, prefetch[1]_started=%d",
+           static_cast<unsigned long long>(position), n, READ_AHEAD_CAPACITY, this->prefetch_pending_ ? 1 : 0);
 
   return true;
 }
