@@ -327,19 +327,20 @@ class SimpleVideoPlayer : public Component {
   /// Free all buffers
   void free_buffers_();
 
-  /// Adopt the canvas's own buffer (canvas_buffer_/canvas_buffer_ready_ etc.) -- mirrors
-  /// picture_viewer's ensure_canvas_buffer_(), using this LVGL fork's real 9.5 getter names.
-  void ensure_canvas_buffer_();
-
-  /// Allocate the canvas's buffer in PSRAM (fixed at MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT -- this is
-  /// a single fixed-resolution panel, set correctly in YAML from the start; there is no runtime
-  /// "resize" case) and hand it to LVGL via lv_canvas_set_buffer(). Called lazily from play(), on
-  /// the first play() ever and never again (guarded by canvas_buffer_ == nullptr at the call
-  /// site) -- NOT from setup(): this->canvas_ is a widget LVGL itself creates and owns, and
-  /// component setup() order gives no guarantee LVGL has finished building it by the time this
-  /// component's own setup() runs. Must be called with lvgl_mutex_ already held. Returns false
-  /// (and leaves canvas_buffer_ready_ false) on allocation failure.
+  /// Allocate both canvas_buffer_[2] slots (see header comment there for why two, why
+  /// jpeg_alloc_decoder_mem(), and why here instead of setup()) and build their canvas_draw_buf_[2]
+  /// wrappers via lv_draw_buf_init(), then attach slot 0 via lv_canvas_set_draw_buf(). Must be
+  /// called with lvgl_mutex_ already held. Returns false (and leaves canvas_buffer_ready_ false)
+  /// on allocation failure.
   bool setup_canvas_buffer_();
+
+  /// Attach whichever canvas_buffer_ slot decode_frame_backend_ just finished writing into --
+  /// the ONLY point that actually touches LVGL for a frame update, deliberately deferred here
+  /// (not run immediately after decode) so presentation happens at the paced, precisely-timed
+  /// moment the caller computes, not whenever decode happens to finish. Non-blocking try-lock on
+  /// lvgl_mutex_ (0 timeout): a miss just skips presenting this one frame (decode_frame_backend_
+  /// will overwrite the same undisplayed buffer next cycle), never blocks.
+  void present_frame_();
 
   //========================================================================
   // Error Handling
@@ -445,23 +446,37 @@ class SimpleVideoPlayer : public Component {
 
   // Buffers (allocated on demand)
   std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM (16KB), aligned for DMA
-  // JPEG decode target -- PSRAM only, sized once at setup for MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT.
-  // Not the canvas's own buffer: decode_frame_() copies from here into canvas_buffer_ after each
-  // successful decode, under lvgl_mutex_. Matches picture_viewer's decode_jpeg_hardware_()
-  // (decodes into its own aligned_output) + write_to_canvas_buffer_() (separate copy into the
-  // canvas) split, rather than decoding directly into whatever buffer the canvas widget owns.
-  std::unique_ptr<uint8_t[]> output_buffer_;
-  size_t output_buffer_size_{0};
 
-  // The canvas's own pixel buffer -- mirrors picture_viewer's canvas_buffer_ /
-  // ensure_canvas_buffer_() / setup_canvas_buffer_(), using this LVGL fork's real 9.5 names
-  // (lv_canvas_get_buf(), lv_canvas_set_buffer() -- both confirmed present in the actual vendored
-  // lvgl/lvgl@9.5.0 source, src/widgets/canvas/lv_canvas.h) in place of LVGL 8's
-  // lv_canvas_get_img(). setup_canvas_buffer_() (see .cpp) allocates this via
-  // heap_caps_malloc(..., MALLOC_CAP_SPIRAM) ONLY, with no fallback to plain malloc: P4 has 512KB
-  // and S3 384KB of internal RAM total, nowhere near enough for a video frame buffer, so a failed
-  // PSRAM allocation here is a hard error, not something to silently degrade from.
-  uint16_t *canvas_buffer_{nullptr};
+  // Double-buffered decode target == the canvas's own pixel data, no separate scratch buffer and
+  // no per-frame copy: the JPEG decoder writes straight into whichever of these two isn't
+  // currently attached to LVGL, ping-ponged by present_frame_(). This deliberately reintroduces a
+  // direct-into-canvas-memory decode (once reverted for a genuine cross-core race when decode ran
+  // on Core 0 against LVGL's render on Core 1 -- see git history on b5d550aa37/ab832e02c9) but
+  // that race no longer applies: decode/playback now runs on Core 1, the SAME core as the main
+  // loop/lv_timer_handler(), at higher priority, so LVGL's render can only ever run at a point
+  // this task actually yields/blocks -- never truly concurrently. The one remaining assumption
+  // (deliberate, not an oversight): by the time this task cycles back to decode into a buffer
+  // again, LVGL's render+flush of that buffer from ~2 frames ago has long since finished, since
+  // decode+audio+prefetch dominates the frame budget far more than LVGL's own render pass does.
+  //
+  // Allocated via jpeg_alloc_decoder_mem() (not plain heap_caps_malloc/MALLOC_CAP_SPIRAM): the
+  // hardware decoder's 2D-DMA output write requires both address and size aligned to its own
+  // cache/DMA2D alignment (verified against the real esp_driver_jpeg source, jpeg_common.c) --
+  // undersized alignment here is a real way to corrupt adjacent PSRAM, not just a style choice.
+  // Fixed at MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT: single fixed-resolution panel, set correctly in
+  // YAML from the start, no runtime "resize" case. Allocated lazily from play(), on the first
+  // play() ever and never again (guarded by canvas_buffer_[0] == nullptr at the call site) --
+  // NOT from setup(): this->canvas_ is a widget LVGL itself creates and owns, and component
+  // setup() order gives no guarantee LVGL has finished building it by the time this component's
+  // own setup() runs.
+  uint16_t *canvas_buffer_[2]{nullptr, nullptr};
+  // One lv_draw_buf_t wrapper per canvas_buffer_ slot, built once (in setup_canvas_buffer_()) via
+  // lv_draw_buf_init() and never touched again except by lv_canvas_set_draw_buf() swapping which
+  // one is attached -- the cheap LVGL 9.5 API for this (verified against the real lv_canvas.c
+  // source: lv_canvas_set_draw_buf() is a pointer assignment + cache-drop, lv_canvas_set_buffer()
+  // recomputes stride and reinitializes the whole draw_buf struct every call).
+  lv_draw_buf_t canvas_draw_buf_[2]{};
+  int active_display_idx_{0};  // which of canvas_buffer_[2]/canvas_draw_buf_[2] LVGL currently shows
   int canvas_buffer_width_{0};
   int canvas_buffer_height_{0};
   bool canvas_buffer_ready_{false};
