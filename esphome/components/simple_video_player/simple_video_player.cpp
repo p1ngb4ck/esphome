@@ -492,12 +492,19 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Frame rate control with presentation timestamps: wait until it's time to present this frame
+    // Frame rate control with presentation timestamps: wait until it's time to present this
+    // frame. This task runs at priority 10, pinned to Core 1 -- the SAME core ESPHome's main
+    // loop (and therefore LvglComponent::loop()/lv_timer_handler(), which is what actually
+    // renders, rotates, and flushes to the display) normally runs on. FreeRTOS priority
+    // scheduling means that lower-priority main loop task can only run while THIS task is
+    // genuinely blocked -- skipping the delay entirely whenever we're behind schedule (which
+    // decode-heavy or rotation-heavy frames make common) starves it completely, so LVGL's render
+    // pass (and therefore any actual screen update) never gets a chance to run at all. Always
+    // yield at least one tick so the scheduler can hand the CPU back, even when behind.
     int64_t current_time_us = esp_timer_get_time();
     int64_t wait_time_us = target_present_time_us - current_time_us;
-    if (wait_time_us > 0) {
-      vTaskDelay(pdMS_TO_TICKS(wait_time_us / 1000));
-    }
+    TickType_t delay_ticks = wait_time_us > 0 ? pdMS_TO_TICKS(wait_time_us / 1000) : 0;
+    vTaskDelay(std::max<TickType_t>(delay_ticks, 1));
 
     // Signal VSYNC callback that new frame is ready
     // VSYNC callback runs in LVGL's thread - the ONLY thread allowed to call LVGL APIs
