@@ -369,9 +369,18 @@ void SimpleVideoPlayer::playback_loop_() {
   // Lock LVGL mutex before calling LVGL APIs from FreeRTOS task
   // This prevents crashes from concurrent access to LVGL (not thread-safe)
   if (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Set canvas buffer to display buffer initially (buffer 0)
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_COLOR_FORMAT_RGB565);
+    // Wrap each PSRAM output_buffer_ slot in its own lv_draw_buf_t, once, here -- not
+    // lv_canvas_set_buffer(), which no other canvas user in this codebase calls (see
+    // canvas.py: every canvas is built via lv_draw_buf_init()+lv_canvas_set_draw_buf()). stride 0
+    // means "auto: width * bytes-per-pixel", matching the aligned_width the decoder actually
+    // wrote rows at.
+    for (int i = 0; i < 2; i++) {
+      lv_draw_buf_init(&this->canvas_draw_buf_[i], aligned_width, aligned_height, LV_COLOR_FORMAT_RGB565, 0,
+                       this->output_buffer_[i].get(), static_cast<uint32_t>(this->output_buffer_size_));
+      lv_draw_buf_set_flag(&this->canvas_draw_buf_[i], LV_IMAGE_FLAGS_MODIFIABLE);
+    }
+    // Attach display buffer initially (buffer 0)
+    lv_canvas_set_draw_buf(this->canvas_, &this->canvas_draw_buf_[this->display_buffer_index_]);
 
     xSemaphoreGive(this->lvgl_mutex_);
   } else {
@@ -1105,15 +1114,16 @@ void SimpleVideoPlayer::on_lvgl_render_complete() {
     // -- never touches current_buffer_index_, which decode owns exclusively.
     this->display_buffer_index_ = this->pending_display_buffer_index_;
 
-    uint32_t aligned_width = ALIGN_UP(this->video_width_, 16);
-    uint32_t aligned_height = ALIGN_UP(this->video_height_, 16);
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_[this->display_buffer_index_].get(), aligned_width,
-                         aligned_height, LV_COLOR_FORMAT_RGB565);
+    // canvas_draw_buf_[0] and [1] were both already initialized once in playback_loop_() -- this
+    // is just repointing the canvas at the other already-wrapped slot, no per-frame allocation or
+    // reinitialization (see canvas_draw_buf_'s comment in simple_video_player.h for why this
+    // replaced lv_canvas_set_buffer() here).
+    lv_canvas_set_draw_buf(this->canvas_, &this->canvas_draw_buf_[this->display_buffer_index_]);
 
     this->buffer_swap_pending_ = false;
   }
 
-  // Invalidate AFTER any buffer swap above, never before: lv_canvas_set_buffer() does not
+  // Invalidate AFTER any buffer swap above, never before: lv_canvas_set_draw_buf() does not
   // schedule its own redraw (confirmed against LVGL's own canvas widget behavior -- see
   // https://github.com/lvgl/lvgl/issues/6005), so invalidating first would only re-schedule a
   // redraw of whatever buffer was already showing, not the one just swapped in. This also keeps

@@ -399,6 +399,13 @@ class SimpleVideoPlayer : public Component {
   std::unique_ptr<uint8_t[]> cache_buffer_;      // Internal RAM (16KB), aligned for DMA
   std::unique_ptr<uint8_t[]> output_buffer_[2];  // PSRAM, double-buffered decoded RGB565 frames
   size_t output_buffer_size_{0};
+  // One lv_draw_buf_t wrapper per output_buffer_ slot, each initialized once (in playback_loop_,
+  // when the video's real dimensions are known) to point at that slot's existing PSRAM allocation
+  // -- never reallocated per frame. Every other canvas user in this codebase (see
+  // esphome/components/lvgl/widgets/canvas.py) attaches pixel data to a canvas via
+  // lv_draw_buf_init() + lv_canvas_set_draw_buf(); lv_canvas_set_buffer() (the older, bare-pointer
+  // API this used to call here) isn't used anywhere else in this LVGL fork's canvas path.
+  lv_draw_buf_t canvas_draw_buf_[2]{};
   // current_buffer_index_ is written ONLY by the decode task (Core 0); display_buffer_index_ is
   // written ONLY by on_lvgl_render_complete() (runs on the main loop task, Core 1, synchronously
   // inside lv_timer_handler()'s call stack -- the only place LVGL APIs are actually safe to call
