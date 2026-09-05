@@ -234,10 +234,15 @@ class LvglComponent final : public PollingComponent {
   template<typename F> void add_on_idle_callback(F &&callback) { this->idle_callbacks_.add(std::forward<F>(callback)); }
   void add_on_draw_end_callback(std::function<void()> &&callback) {
     this->draw_end_callbacks_.add(std::move(callback));
-    this->register_monitor_callback();
+    // setup() only wires up the LV_EVENT_REFR_READY listener if draw_end_callback_ (YAML
+    // on_draw_end:) or update_when_display_idle_ was already set at that point -- a lower-
+    // priority consumer calling this after setup() has already run needs to register it itself.
+    // Guarded so it's wired exactly once regardless of which path gets there first.
+    if (!this->draw_end_event_registered_) {
+      lv_display_add_event_cb(this->disp_, render_end_cb, LV_EVENT_REFR_READY, this);
+      this->draw_end_event_registered_ = true;
+    }
   }
-
-  void register_monitor_callback();
 
   static void render_end_cb(lv_event_t *event);
   static void render_start_cb(lv_event_t *event);
@@ -386,6 +391,7 @@ class LvglComponent final : public PollingComponent {
 
   CallbackManager<void(uint32_t)> idle_callbacks_{};
   CallbackManager<void()> draw_end_callbacks_{};
+  bool draw_end_event_registered_{false};
   Trigger<> *pause_callback_{};
   Trigger<> *resume_callback_{};
   Trigger<> *draw_start_callback_{};
