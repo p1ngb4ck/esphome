@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker
@@ -11,8 +9,6 @@ import esphome.config_validation as cv
 from esphome.const import CONF_CHANNEL, CONF_ID, CONF_TRIGGER_ID
 from esphome.core import CORE
 import esphome.final_validate as fv
-
-_LOGGER = logging.getLogger(__name__)
 
 # Import LVGL canvas type for proper widget ID validation
 try:
@@ -69,6 +65,25 @@ CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
 CONF_PREFETCH_FRAMES = "prefetch_frames"
 CONF_TARGET_FPS = "target_fps"
+CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
+CONF_AUDIO_CHANNELS = "audio_channels"
+CONF_AUDIO_BITS_PER_SAMPLE = "audio_bits_per_sample"
+CONF_AUDIO_CODEC = "audio_codec"
+
+# This is an MCU: rather than auto-detecting and reconfiguring buffers per video file (real heap
+# allocation, every play() -- see AGENTS.md), the user commits to ONE fixed audio format up front.
+# Every video's audio track must match it exactly; a mismatch is a hard runtime error for that
+# file (video-only playback), not something this component resizes itself around. Auto-detection
+# of a file's actual format still happens at open time -- but only to validate against this fixed
+# configuration, never to drive allocation.
+AUDIO_CODEC_PCM = "pcm"
+AUDIO_CODEC_MP3 = "mp3"
+AUDIO_CODEC_FLAC = "flac"
+AUDIO_CODECS = (AUDIO_CODEC_PCM, AUDIO_CODEC_MP3, AUDIO_CODEC_FLAC)
+
+ALLOWED_AUDIO_SAMPLE_RATES = (8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
+ALLOWED_AUDIO_CHANNELS = (1, 2)
+ALLOWED_AUDIO_BITS_PER_SAMPLE = (8, 16, 24, 32)
 CONF_ON_PLAYBACK_STARTED = "on_playback_started"
 CONF_ON_PLAYBACK_FINISHED = "on_playback_finished"
 CONF_ON_PLAYBACK_PAUSED = "on_playback_paused"
@@ -94,6 +109,25 @@ MIN_FPS = 1.0
 MAX_FPS = 60.0
 
 
+def _validate_audio_format_required(config):
+    if CONF_SPEAKER_ID not in config:
+        return config
+    required = (
+        CONF_AUDIO_SAMPLE_RATE,
+        CONF_AUDIO_CHANNELS,
+        CONF_AUDIO_BITS_PER_SAMPLE,
+        CONF_AUDIO_CODEC,
+    )
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise cv.Invalid(
+            "speaker_id is set: audio_sample_rate, audio_channels, audio_bits_per_sample and "
+            "audio_codec must all be set too -- this player commits to ONE fixed audio format "
+            f"for every video (missing: {', '.join(missing)})"
+        )
+    return config
+
+
 # Component configuration
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -113,6 +147,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
             ),
+            # Fixed audio format (required together, only when speaker_id is set -- see
+            # AUDIO_CODEC_PCM comment above). Deliberately no defaults: this is a decision the
+            # user has to make explicitly per device, not something to silently default around.
+            cv.Optional(CONF_AUDIO_SAMPLE_RATE): cv.one_of(*ALLOWED_AUDIO_SAMPLE_RATES, int=True),
+            cv.Optional(CONF_AUDIO_CHANNELS): cv.one_of(*ALLOWED_AUDIO_CHANNELS, int=True),
+            cv.Optional(CONF_AUDIO_BITS_PER_SAMPLE): cv.one_of(
+                *ALLOWED_AUDIO_BITS_PER_SAMPLE, int=True
+            ),
+            cv.Optional(CONF_AUDIO_CODEC): cv.one_of(*AUDIO_CODECS, lower=True),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
                 {
@@ -142,17 +185,21 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_audio_format_required,
 )
 
 
 def _final_validate(config):
     # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
-    # simple_video_player itself -- it only checks what's already there and warns. AVIAudioCodec
-    # (avi_parser.h) only ever reports PCM, MP3 or FLAC for an AVI audio track -- WAV isn't a
-    # thing that can occur there (it's a container format, not a distinct codec an AVI stream
-    # carries), so it's not part of this check. Raw PCM needs no decoder at all either.
+    # simple_video_player itself. audio_codec now fixes which ONE codec every video's audio track
+    # must use, so this is a hard requirement for that one codec, not a "some videos might use
+    # this" warning -- catch it here at compile time instead of failing at runtime on the device.
     if CONF_SPEAKER_ID not in config:
         return config
+
+    codec = config.get(CONF_AUDIO_CODEC)
+    if codec not in (AUDIO_CODEC_MP3, AUDIO_CODEC_FLAC):
+        return config  # PCM needs no decoder / no `audio: codecs:` entry at all
 
     full_config = fv.full_config.get()
     audio_config = full_config.get("audio")
@@ -160,23 +207,15 @@ def _final_validate(config):
         # Defensive: audio is documented as single-instance, but don't assume forever.
         audio_config = audio_config[0] if audio_config else None
 
-    enabled = set()
+    codecs_config = None
     if isinstance(audio_config, dict):
         codecs_config = audio_config.get(CONF_CODECS)
-        if isinstance(codecs_config, dict):
-            for name, key in (("flac", CONF_FLAC), ("mp3", CONF_MP3)):
-                if key in codecs_config:
-                    enabled.add(name)
 
-    missing = {"flac", "mp3"} - enabled
-    if missing:
-        missing_str = ", ".join(sorted(missing))
-        _LOGGER.warning(
-            "simple_video_player: an AVI video's audio track can use FLAC, MP3 or raw PCM. "
-            "%s not enabled under `audio: codecs:`. A video whose audio track uses one of those "
-            "will play back with video only (no audio) at runtime -- add it there if your video "
-            "files may use it.",
-            f"{missing_str} {'is' if len(missing) == 1 else 'are'}",
+    key = CONF_MP3 if codec == AUDIO_CODEC_MP3 else CONF_FLAC
+    if not isinstance(codecs_config, dict) or key not in codecs_config:
+        raise cv.Invalid(
+            f"audio_codec: {codec} is configured, but `audio: codecs: {codec}:` is not enabled -- "
+            f"add it, or change audio_codec to match what's actually enabled under `audio:`."
         )
 
     return config
@@ -221,6 +260,15 @@ async def to_code(config):
         cg.add(var.set_speaker(spkr))
         cg.add_define("USE_SPEAKER")
         cg.add_define("USE_AUDIO")
+
+        # Fixed audio format (required together with speaker_id -- see
+        # _validate_audio_format_required above): passed down as defines so the C++ side can
+        # size its permanent audio buffers as compile-time constants in setup(), once, instead of
+        # recomputing them from whatever a given file's audio header says on every play().
+        cg.add_define("SVP_AUDIO_SAMPLE_RATE", config[CONF_AUDIO_SAMPLE_RATE])
+        cg.add_define("SVP_AUDIO_SOURCE_CHANNELS", config[CONF_AUDIO_CHANNELS])
+        cg.add_define("SVP_AUDIO_BITS_PER_SAMPLE", config[CONF_AUDIO_BITS_PER_SAMPLE])
+        cg.add_define(f"SVP_AUDIO_CODEC_{config[CONF_AUDIO_CODEC].upper()}")
 
         # Extract speaker's channel configuration to enable proper audio routing
         # We need to look up the speaker's config to determine its channel mode

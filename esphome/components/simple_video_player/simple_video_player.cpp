@@ -130,12 +130,49 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Audio buffers are now allocated in init_audio_decoder_() when playback starts
+#ifdef USE_AUDIO
+  // Audio ring buffers + temp buffer: allocated ONCE here, sized from the fixed AUDIO_* compile-
+  // time constants (see header) -- not per play(). init_audio_decoder_() only validates each
+  // file's actual audio format against this fixed configuration and resets/reuses these buffers.
+  if (this->speaker_ != nullptr) {
+    this->source_audio_channels_ = AUDIO_SOURCE_CHANNELS;
+    this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
+    this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
+
+    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(AUDIO_INPUT_BUFFER_SIZE);
+    if (this->audio_input_ring_buffer_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", AUDIO_INPUT_BUFFER_SIZE / 1024);
+      this->mark_failed();
+      return;
+    }
+
+    this->audio_decoded_ring_buffer_ = ring_buffer::RingBuffer::create(AUDIO_DECODED_BUFFER_SIZE);
+    if (this->audio_decoded_ring_buffer_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", AUDIO_DECODED_BUFFER_SIZE / 1024);
+      this->mark_failed();
+      return;
+    }
+
+    uint8_t *temp_buf = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_TEMP_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+    if (!temp_buf) {
+      ESP_LOGE(TAG, "Failed to allocate audio temp buffer in PSRAM (%zu KB)", AUDIO_TEMP_BUFFER_SIZE / 1024);
+      this->mark_failed();
+      return;
+    }
+    this->audio_temp_buffer_.reset(temp_buf);
+
+    ESP_LOGI(TAG, "Audio playback enabled with speaker (fixed format: %" PRIu32 " Hz, %u ch, %u-bit)",
+             AUDIO_SAMPLE_RATE, AUDIO_SOURCE_CHANNELS, AUDIO_BITS_PER_SAMPLE);
+  } else {
+    ESP_LOGI(TAG, "Audio playback disabled (no speaker configured)");
+  }
+#else
   if (this->speaker_ != nullptr) {
     ESP_LOGI(TAG, "Audio playback enabled with speaker");
   } else {
     ESP_LOGI(TAG, "Audio playback disabled (no speaker configured)");
   }
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -552,11 +589,13 @@ void SimpleVideoPlayer::playback_loop_() {
       this->speaker_->stop();
     }
 
-    // Cleanup audio resources
+    // audio_decoder_ is the one audio resource still recreated per play() (see header comment on
+    // audio_decoder_) so it's actually freed here. audio_input_ring_buffer_/
+    // audio_decoded_ring_buffer_/audio_temp_buffer_ are permanent (allocated once in setup()) --
+    // deliberately NOT reset()'d here; init_audio_decoder_() clears the ring buffers itself right
+    // before the next session starts, and the temp buffer needs no clearing (it's fully
+    // overwritten before every read).
     this->audio_decoder_.reset();
-    this->audio_input_ring_buffer_.reset();
-    this->audio_decoded_ring_buffer_.reset();
-    this->audio_temp_buffer_.reset();
     this->audio_enabled_ = false;
 
     ESP_LOGI(TAG, "Audio processing stopped");
@@ -1158,11 +1197,19 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   ESP_LOGI(TAG, "Opening file: %s", path.c_str());
 
   // Storage-backed file reader: resolves the path against the storage registry and handles
-  // local (filesystem) vs network storage transparently -- see buffered_file_reader.h.
-  this->file_reader_ = std::make_unique<BufferedFileReader>();
+  // local (filesystem) vs network storage transparently -- see buffered_file_reader.h. Created
+  // once and reused for every play() call, not recreated each time: BufferedFileReader owns two
+  // 1MB PSRAM read-ahead buffers, and destroying+recreating it per play() meant freeing and
+  // fresh-malloc'ing 2MB of PSRAM on every single video start -- the exact "allocate once, reuse"
+  // mistake already fixed for canvas_buffer_/output_buffer_, just not applied here too.
+  // BufferedFileReader::open() already handles being called on an already-open instance (closes
+  // first), and its own buffers are only allocated the first time (if (!buf) ...), so a fresh
+  // open() after a previous close() reuses them rather than reallocating.
+  if (!this->file_reader_) {
+    this->file_reader_ = std::make_unique<BufferedFileReader>();
+  }
   if (!this->file_reader_->open(path.c_str())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
-    this->file_reader_.reset();
     return false;
   }
   this->file_reader_->prefill_cache();
@@ -1182,9 +1229,15 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     return false;
   }
 
-  // Initialize AVI parser if needed
+  // Initialize AVI parser if needed. Created once and reused, same as file_reader_ above:
+  // AVIParser::open() already resets all of its own state at the top (has_video_/has_audio_/
+  // movi_offset_/movi_size_/current_offset_/current_frame_) before parsing, and close() owns no
+  // buffers to free, so it's already fully self-resetting -- safe to keep the same instance
+  // across every play() instead of destroying and reallocating it each time.
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
-    this->avi_parser_ = std::make_unique<AVIParser>();
+    if (!this->avi_parser_) {
+      this->avi_parser_ = std::make_unique<AVIParser>();
+    }
 
     // Seek back to start for parser
     if (!this->seek_to_(0)) {
@@ -1196,7 +1249,6 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     // Open AVI file
     if (!this->avi_parser_->open(this->file_reader_.get())) {
       ESP_LOGE(TAG, "Failed to parse AVI file");
-      this->avi_parser_.reset();
       this->close_file_();
       return false;
     }
@@ -1215,16 +1267,16 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
 }
 
 void SimpleVideoPlayer::close_file_() {
-  // Close AVI parser if open
+  // Close AVI parser if open -- NOT reset()/destroyed, same reasoning as file_reader_ below:
+  // it owns no buffers, and open() already fully re-initializes its own state on the next call.
   if (this->avi_parser_) {
     this->avi_parser_->close();
-    this->avi_parser_.reset();
   }
 
-  // Close file reader
+  // Close file reader -- NOT reset()/destroyed: kept alive so its PSRAM read-ahead buffers are
+  // reused by the next open_file_() instead of being freed and re-malloc'd every play() call.
   if (this->file_reader_) {
     this->file_reader_->close();
-    this->file_reader_.reset();
   }
 
   this->file_size_ = 0;
@@ -1322,6 +1374,19 @@ void SimpleVideoPlayer::free_buffers_() {
     this->canvas_buffer_ = nullptr;
   }
   this->canvas_buffer_ready_ = false;
+
+#ifdef USE_AUDIO
+  // Permanent audio buffers (allocated once in setup(), see there) -- true end-of-life free, same
+  // as output_buffer_/canvas_buffer_ above. audio_temp_buffer_ was heap_caps_malloc()'d (PSRAM),
+  // so it needs heap_caps_free(), not its unique_ptr default deleter. The two ring buffers are
+  // shared_ptr<RingBuffer> -- resetting them is enough, RingBuffer's own destructor frees its
+  // internal storage.
+  if (this->audio_temp_buffer_) {
+    heap_caps_free(this->audio_temp_buffer_.release());
+  }
+  this->audio_input_ring_buffer_.reset();
+  this->audio_decoded_ring_buffer_.reset();
+#endif
 
   this->free_frame_ring_();
 }
@@ -1466,10 +1531,20 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     return false;
   }
 
-  // Store audio parameters
-  this->source_audio_channels_ = audio_info->channels;
-  this->audio_sample_rate_ = audio_info->sample_rate;
-  this->audio_bits_per_sample_ = audio_info->bits_per_sample;
+  // This player is configured (YAML: audio_sample_rate/audio_channels/audio_bits_per_sample) for
+  // ONE fixed audio format -- validate the file's actual format matches it instead of resizing
+  // anything to fit. source_audio_channels_/audio_sample_rate_/audio_bits_per_sample_ were
+  // already set to the fixed AUDIO_* constants in setup() and never change here.
+  if (audio_info->channels != AUDIO_SOURCE_CHANNELS || audio_info->sample_rate != AUDIO_SAMPLE_RATE ||
+      audio_info->bits_per_sample != AUDIO_BITS_PER_SAMPLE) {
+    ESP_LOGE(TAG,
+             "Audio format mismatch: file's audio track is %" PRIu32 " Hz, %u ch, %u-bit, but this player is "
+             "configured for %" PRIu32 " Hz, %u ch, %u-bit only -- re-encode the file's audio track to match, or "
+             "change audio_sample_rate/audio_channels/audio_bits_per_sample in YAML. Playing video-only.",
+             audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample, AUDIO_SAMPLE_RATE,
+             AUDIO_SOURCE_CHANNELS, AUDIO_BITS_PER_SAMPLE);
+    return false;
+  }
 
   // Determine output channel count based on speaker configuration
   this->speaker_audio_channels_ = 1;  // Default to mono
@@ -1489,26 +1564,42 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
                                                                                        : "unknown",
            this->needs_channel_conversion_ ? " [conversion needed]" : "");
 
-  // Determine audio codec type
-  audio::AudioFileType codec_type = audio::AudioFileType::NONE;
-  if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::MP3)) {
-    codec_type = audio::AudioFileType::MP3;
-    ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
-             audio_info->channels, audio_info->bits_per_sample);
-  } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
-    codec_type = audio::AudioFileType::FLAC;
-    ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
-             audio_info->channels, audio_info->bits_per_sample);
-  } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::PCM)) {
-    // PCM audio in AVI is raw samples without WAV header
-    // We'll handle it directly without AudioDecoder
-    ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
-             audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
-    codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
-  } else {
-    ESP_LOGW(TAG, "Unsupported audio codec: 0x%04" PRIX32, audio_info->codec);
+  // Codec is also fixed by YAML (audio_codec) -- SVP_AUDIO_CODEC_{PCM,MP3,FLAC} is the one define
+  // set by codegen, so which branch is "live" is resolved at compile time. A file whose audio
+  // track uses a different codec than configured is a hard mismatch, same as the format checks
+  // above -- never silently reconfigure the decoder per file.
+#if defined(SVP_AUDIO_CODEC_MP3)
+  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::MP3)) {
+    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not MP3 (this player is configured for MP3 only, "
+                  "codec=0x%04" PRIX32 "). Playing video-only.",
+             audio_info->codec);
     return false;
   }
+  audio::AudioFileType codec_type = audio::AudioFileType::MP3;
+  ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+           audio_info->channels, audio_info->bits_per_sample);
+#elif defined(SVP_AUDIO_CODEC_FLAC)
+  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
+    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not FLAC (this player is configured for FLAC only, "
+                  "codec=0x%04" PRIX32 "). Playing video-only.",
+             audio_info->codec);
+    return false;
+  }
+  audio::AudioFileType codec_type = audio::AudioFileType::FLAC;
+  ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+           audio_info->channels, audio_info->bits_per_sample);
+#else  // SVP_AUDIO_CODEC_PCM (default)
+  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::PCM)) {
+    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not raw PCM (this player is configured for PCM "
+                  "only, codec=0x%04" PRIX32 "). Playing video-only.",
+             audio_info->codec);
+    return false;
+  }
+  // PCM audio in AVI is raw samples without WAV header -- handled directly without AudioDecoder.
+  audio::AudioFileType codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
+  ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
+           audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
+#endif
 
   // CRITICAL: Configure speaker's audio stream info based on SPEAKER config, not file
   audio::AudioStreamInfo speaker_stream_info(audio_info->bits_per_sample, this->speaker_audio_channels_,
@@ -1533,96 +1624,24 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
-  // ============================================================================
-  // CORRECT Buffer Size Calculations
-  // ============================================================================
-
-  // Calculate bytes per frame and per second for DECODED PCM audio
-  size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
-  size_t bytes_per_second_decoded = this->audio_sample_rate_ * bytes_per_frame;
-
-  // Target buffering durations (in milliseconds)
-  const uint32_t INPUT_BUFFER_DURATION_MS = 250;    // 250ms of COMPRESSED audio data
-  const uint32_t DECODED_BUFFER_DURATION_MS = 500;  // 500ms of decoded PCM audio
-  const uint32_t TEMP_BUFFER_DURATION_MS = 100;     // 100ms for channel conversion temp buffer
-
-  // Calculate buffer sizes
-  // Input buffer: For COMPRESSED audio (FLAC/MP3)
-  // FLAC: ~50% compression (2x ratio), MP3: ~10% compression (10x ratio)
-  // Use conservative estimate: allocate 250ms of PCM equivalent for compressed data
-  // This gives us ~500ms-2500ms of actual compressed audio depending on codec
-  size_t input_buffer_size = (bytes_per_second_decoded * INPUT_BUFFER_DURATION_MS) / 1000;
-
-  // Decoded buffer: Actual PCM data before channel conversion (500ms of uncompressed audio)
-  size_t decoded_buffer_size = (bytes_per_second_decoded * DECODED_BUFFER_DURATION_MS) / 1000;
-
-  // Temp buffer: For channel conversion processing (100ms of uncompressed audio)
-  this->audio_temp_buffer_size_ = (bytes_per_second_decoded * TEMP_BUFFER_DURATION_MS) / 1000;
-
-  // Ensure minimum sizes for edge cases (low sample rates)
-  input_buffer_size = std::max(input_buffer_size, static_cast<size_t>(32 * 1024));                         // Min 32KB
-  decoded_buffer_size = std::max(decoded_buffer_size, static_cast<size_t>(16 * 1024));                     // Min 16KB
-  this->audio_temp_buffer_size_ = std::max(this->audio_temp_buffer_size_, static_cast<size_t>(8 * 1024));  // Min 8KB
-
-  ESP_LOGI(TAG, "Audio buffer config: PCM data rate = %zu bytes/sec (%.1f KB/s)", bytes_per_second_decoded,
-           bytes_per_second_decoded / 1024.0f);
-  ESP_LOGI(TAG, "  Input buffer: %zu KB (%" PRIu32 " ms)", input_buffer_size / 1024, INPUT_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%" PRIu32 " ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Temp buffer: %zu KB (%" PRIu32 " ms)", this->audio_temp_buffer_size_ / 1024,
-           TEMP_BUFFER_DURATION_MS);
+  // Ring buffers + temp buffer already exist (allocated once in setup(), sized from the fixed
+  // AUDIO_* constants) -- just clear out whatever a previous play() left in them so this session
+  // starts clean. reset() is a cheap FreeRTOS ringbuffer reset, not a reallocation.
+  this->audio_input_ring_buffer_->reset();
+  if (this->audio_decoded_ring_buffer_) {
+    this->audio_decoded_ring_buffer_->reset();
+  }
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
 
+  // Only create the decoder for compressed formats (MP3/FLAC). audio::AudioDecoder's own API has
+  // no reset()/stop() to reuse an instance across files, so this one small control object (not a
+  // PSRAM buffer -- its own internal buffers are sized from the fixed AUDIO_DECODER_* constants,
+  // never recomputed) is still recreated per play(); see the header comment on audio_decoder_.
   if (use_decoder) {
-    // Create ring buffer for encoded audio input (automatically uses PSRAM via RAMAllocator)
-    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(input_buffer_size);
-    if (this->audio_input_ring_buffer_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", input_buffer_size / 1024);
-      return false;
-    }
-
-    // If channel conversion is needed, create intermediate ring buffer for decoded audio
-    if (this->needs_channel_conversion_) {
-      this->audio_decoded_ring_buffer_ = ring_buffer::RingBuffer::create(decoded_buffer_size);
-      if (this->audio_decoded_ring_buffer_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", decoded_buffer_size / 1024);
-        return false;
-      }
-    }
-  }
-
-  // For all codecs (including PCM), allocate temp buffer if channel conversion is needed
-  if (this->needs_channel_conversion_) {
-    // Allocate in PSRAM for optimal DMA performance on ESP32-P4
-    uint8_t *temp_buf = static_cast<uint8_t *>(heap_caps_malloc(this->audio_temp_buffer_size_, MALLOC_CAP_SPIRAM));
-    if (!temp_buf) {
-      ESP_LOGE(TAG, "Failed to allocate audio temp buffer in PSRAM (%zu KB)", this->audio_temp_buffer_size_ / 1024);
-      return false;
-    }
-    this->audio_temp_buffer_.reset(temp_buf);
-    ESP_LOGD(TAG, "Channel conversion temp buffer allocated in PSRAM: %zu KB", this->audio_temp_buffer_size_ / 1024);
-  }
-
-  // Only create decoder for compressed formats (MP3/FLAC)
-  if (use_decoder) {
-    // Calculate AudioDecoder internal buffer sizes based on codec and sample rate
-    // Input buffer: Should hold compressed frames (larger for higher bitrates)
-    // Output buffer: Should hold decoded PCM frames
-    size_t decoder_input_buffer_size = 64 * 1024;   // 64KB for compressed audio frames
-    size_t decoder_output_buffer_size = 32 * 1024;  // 32KB for decoded PCM output
-
-    // Adjust for high sample rates (>48kHz)
-    if (this->audio_sample_rate_ > 48000) {
-      decoder_input_buffer_size = 96 * 1024;   // 96KB for high-quality audio
-      decoder_output_buffer_size = 48 * 1024;  // 48KB output
-    }
-
-    ESP_LOGD(TAG, "AudioDecoder buffers: input=%zu KB, output=%zu KB", decoder_input_buffer_size / 1024,
-             decoder_output_buffer_size / 1024);
-
-    // Create audio decoder with calculated buffer sizes
-    this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(decoder_input_buffer_size, decoder_output_buffer_size);
+    this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(AUDIO_DECODER_INPUT_BUFFER_SIZE,
+                                                                  AUDIO_DECODER_OUTPUT_BUFFER_SIZE);
 
     // Add source ring buffer
     std::weak_ptr<ring_buffer::RingBuffer> source_weak = this->audio_input_ring_buffer_;
@@ -1683,43 +1702,42 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
     return;
   }
 
-  // For compressed audio (MP3/FLAC), write to input ring buffer for decoder
-  if (this->audio_input_ring_buffer_ != nullptr) {
+  // Dispatch by MODE, not by buffer presence: audio_input_ring_buffer_/audio_decoded_ring_buffer_
+  // are both permanent, allocated unconditionally in setup() (see header), so they're non-null
+  // regardless of codec -- audio_decoder_ (only ever created for MP3/FLAC, see
+  // init_audio_decoder_()) and needs_channel_conversion_ are the real mode signals now.
+  if (this->audio_decoder_) {
+    // Compressed audio (MP3/FLAC): feed the decoder's input ring buffer.
     this->audio_input_ring_buffer_->write(data, size);
+    return;
   }
-  // For PCM audio, data is already decoded - write only complete frames to avoid glitches
-  else if (this->audio_decoded_ring_buffer_ != nullptr) {
-    // Calculate frame size in bytes (channels × bytes_per_sample)
-    size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
-    // Only write complete frames to avoid audio corruption
-    size_t complete_frames = size / bytes_per_frame;
-    size_t bytes_to_write = complete_frames * bytes_per_frame;
 
-    if (bytes_to_write > 0) {
-      this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
-    }
+  // PCM: data is already decoded - write only complete frames to avoid glitches.
+  size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
+  size_t complete_frames = size / bytes_per_frame;
+  size_t bytes_to_write = complete_frames * bytes_per_frame;
 
-    // Log warning if we're dropping incomplete frames (shouldn't happen with well-formed AVI)
-    if (size != bytes_to_write) {
-      ESP_LOGW(TAG, "Dropped %zu bytes of incomplete audio frame", size - bytes_to_write);
-    }
+  // Log warning if we're dropping incomplete frames (shouldn't happen with well-formed AVI)
+  if (size != bytes_to_write) {
+    ESP_LOGW(TAG, "Dropped %zu bytes of incomplete audio frame", size - bytes_to_write);
   }
-  // PCM without channel conversion: write only complete frames to speaker
-  else if (this->speaker_) {
-    size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
-    size_t complete_frames = size / bytes_per_frame;
-    size_t bytes_to_write = complete_frames * bytes_per_frame;
+  if (bytes_to_write == 0) {
+    return;
+  }
 
-    if (bytes_to_write > 0) {
-      // Explicit ticks_to_wait=0 (best-effort, non-blocking), not the 2-arg overload: this runs
-      // on the loader task, same as the video frame reads -- if the speaker backend's play()
-      // blocks when its internal buffer is full (implementation-defined for the 2-arg overload,
-      // per this class's own doc comment), that stalls video frame delivery too, since audio and
-      // video share this one task reading the same interleaved AVI stream. Matches the same
-      // drop-rather-than-block philosophy the other two audio paths above already get for free
-      // from RingBuffer::write() (discards old data on overflow instead of waiting).
-      this->speaker_->play(data, bytes_to_write, 0);
-    }
+  if (this->needs_channel_conversion_) {
+    // Buffer PCM for audio_processing_loop_'s channel-conversion step.
+    this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
+  } else if (this->speaker_) {
+    // No conversion needed: straight to speaker. Explicit ticks_to_wait=0 (best-effort,
+    // non-blocking), not the 2-arg overload: this runs on the loader task, same as the video
+    // frame reads -- if the speaker backend's play() blocks when its internal buffer is full
+    // (implementation-defined for the 2-arg overload, per this class's own doc comment), that
+    // stalls video frame delivery too, since audio and video share this one task reading the
+    // same interleaved AVI stream. Matches the same drop-rather-than-block philosophy the other
+    // audio path above already gets for free from RingBuffer::write() (discards old data on
+    // overflow instead of waiting).
+    this->speaker_->play(data, bytes_to_write, 0);
   }
 }
 
@@ -1819,7 +1837,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
         // Calculate how many frames we can process (limit to temp buffer size)
         size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
         size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
-        size_t max_input_bytes = std::min(available, this->audio_temp_buffer_size_);
+        size_t max_input_bytes = std::min(available, AUDIO_TEMP_BUFFER_SIZE);
         size_t frame_count = max_input_bytes / bytes_per_frame_input;
 
         if (frame_count > 0) {

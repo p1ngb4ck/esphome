@@ -378,17 +378,50 @@ class SimpleVideoPlayer : public Component {
   std::unique_ptr<AVIParser> avi_parser_;  // AVI container parser (if AVI format)
 
 #ifdef USE_AUDIO
-  // Audio decoding (for AVI with audio streams)
+  // This player commits to ONE fixed audio format for every video, set by the user in YAML
+  // (audio_sample_rate/audio_channels/audio_bits_per_sample/audio_codec -- see __init__.py) and
+  // passed down as SVP_AUDIO_* defines. That's what makes it possible to size the audio ring
+  // buffers/temp buffer once and allocate them once, in setup(), like every other persistent
+  // buffer in this component -- instead of recomputing sizes from whatever a given AVI file's
+  // audio stream header happens to say and reallocating per play() (AGENTS.md: no heap
+  // allocation after setup()). Per-file auto-detected format info is still read at open time
+  // (init_audio_decoder_()), but only to VALIDATE it matches this fixed format -- a mismatch is
+  // a hard error (no audio for that file), never a reason to resize anything.
+#if defined(SVP_AUDIO_SAMPLE_RATE)
+  static constexpr uint32_t AUDIO_SAMPLE_RATE = SVP_AUDIO_SAMPLE_RATE;
+  static constexpr uint8_t AUDIO_SOURCE_CHANNELS = SVP_AUDIO_SOURCE_CHANNELS;
+  static constexpr uint8_t AUDIO_BITS_PER_SAMPLE = SVP_AUDIO_BITS_PER_SAMPLE;
+  static constexpr size_t AUDIO_BYTES_PER_FRAME =
+      static_cast<size_t>(AUDIO_SOURCE_CHANNELS) * (AUDIO_BITS_PER_SAMPLE / 8);
+  static constexpr size_t AUDIO_BYTES_PER_SEC = static_cast<size_t>(AUDIO_SAMPLE_RATE) * AUDIO_BYTES_PER_FRAME;
+  // Same target durations / minimums init_audio_decoder_() always used -- just resolved at
+  // compile time now instead of recomputed from a parsed file header every play().
+  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE =
+      (AUDIO_BYTES_PER_SEC * 250 / 1000) > (32 * 1024) ? (AUDIO_BYTES_PER_SEC * 250 / 1000) : (32 * 1024);
+  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE =
+      (AUDIO_BYTES_PER_SEC * 500 / 1000) > (16 * 1024) ? (AUDIO_BYTES_PER_SEC * 500 / 1000) : (16 * 1024);
+  static constexpr size_t AUDIO_TEMP_BUFFER_SIZE =
+      (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024) ? (AUDIO_BYTES_PER_SEC * 100 / 1000) : (8 * 1024);
+  static constexpr size_t AUDIO_DECODER_INPUT_BUFFER_SIZE = AUDIO_SAMPLE_RATE > 48000 ? (96 * 1024) : (64 * 1024);
+  static constexpr size_t AUDIO_DECODER_OUTPUT_BUFFER_SIZE = AUDIO_SAMPLE_RATE > 48000 ? (48 * 1024) : (32 * 1024);
+#endif
+
+  // Audio decoding (for AVI with audio streams). audio_input_ring_buffer_/audio_decoded_ring_buffer_/
+  // audio_temp_buffer_ are allocated ONCE in setup() (sized from the AUDIO_* constants above) and
+  // reused for every play() -- only reset()/cleared between sessions, never freed/recreated.
+  // audio_decoder_ is the one remaining exception: audio::AudioDecoder's own public API
+  // (add_source/add_sink/start()) is a one-shot-per-file sequence with no reset()/stop(), so it's
+  // still recreated per play() -- a small control object, not a PSRAM buffer, and fixing that
+  // would mean editing the audio component itself, which is out of scope here.
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
   std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
   std::unique_ptr<uint8_t[]> audio_temp_buffer_;  // Temporary buffer for audio processing (in PSRAM)
-  size_t audio_temp_buffer_size_{0};              // Dynamically calculated based on audio params
-  uint8_t source_audio_channels_{0};              // Number of channels in source audio
+  uint8_t source_audio_channels_{0};              // Fixed source channel count (mirrors AUDIO_SOURCE_CHANNELS)
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
-  uint32_t audio_sample_rate_{0};                 // Audio sample rate
-  uint8_t audio_bits_per_sample_{16};             // Audio bits per sample
+  uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
+  uint8_t audio_bits_per_sample_{16};             // Fixed bits per sample (mirrors AUDIO_BITS_PER_SAMPLE)
   bool needs_channel_conversion_{false};          // Whether channel conversion is needed
   bool audio_enabled_{false};                     // Audio stream available and enabled
   TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
