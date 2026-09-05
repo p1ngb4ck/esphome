@@ -1347,13 +1347,19 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
 
   std::memset(new_buffer, 0, buffer_size);
 
-  // LVGL takes ownership of new_buffer here and frees whatever it previously held.
   lv_canvas_set_buffer(this->canvas_, new_buffer, static_cast<int32_t>(aligned_width),
                        static_cast<int32_t>(aligned_height), LV_COLOR_FORMAT_RGB565);
 
   this->canvas_buffer_width_ = static_cast<int>(aligned_width);
   this->canvas_buffer_height_ = static_cast<int>(aligned_height);
   this->ensure_canvas_buffer_();
+
+  // Force a redraw right after the buffer swap, rather than relying solely on decode_frame_()'s
+  // later invalidate calls once real frames start arriving. Needed specifically when the canvas
+  // already had different content actively displayed before this call (e.g. a prior
+  // lvgl.canvas.fill test) -- the handoff from an already-live image source to a freshly-swapped
+  // one is a different case than a canvas that has never been shown anything yet.
+  lv_obj_invalidate(this->canvas_);
 
   ESP_LOGI(TAG, "Canvas buffer resized to %" PRIu32 "x%" PRIu32 " (%zu bytes, PSRAM)", aligned_width, aligned_height,
            buffer_size);
