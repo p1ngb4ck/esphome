@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -84,7 +85,7 @@ void SimpleVideoPlayer::setup() {
       static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, this->cache_buffer_size_, MALLOC_CAP_INTERNAL)));
 
   if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate cache buffer (%u bytes)", this->cache_buffer_size_);
+    ESP_LOGE(TAG, "Failed to allocate cache buffer (%" PRIu32 " bytes)", this->cache_buffer_size_);
     this->mark_failed();
     return;
   }
@@ -113,8 +114,9 @@ void SimpleVideoPlayer::setup() {
   }
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
-  ESP_LOGCONFIG(TAG, "  Cache buffer: %u bytes (internal RAM)", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Frame ring: %u slots x %u bytes (PSRAM)", this->prefetch_frames_, this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes (PSRAM)", this->prefetch_frames_,
+                this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Output buffer: %zu bytes (PSRAM)", this->output_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 #ifdef USE_AUDIO
@@ -130,13 +132,14 @@ void SimpleVideoPlayer::loop() {
 
 void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
-  ESP_LOGCONFIG(TAG, "  Cache buffer size: %u bytes", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Frame ring: %u slots x %u bytes", this->prefetch_frames_, this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Cache buffer size: %" PRIu32 " bytes", this->cache_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes", this->prefetch_frames_,
+                this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
   if (this->state_ != PlayerState::STOPPED) {
     ESP_LOGCONFIG(TAG, "  Current file: %s", this->video_path_.c_str());
-    ESP_LOGCONFIG(TAG, "  Video size: %ux%u", this->video_width_, this->video_height_);
+    ESP_LOGCONFIG(TAG, "  Video size: %" PRIu32 "x%" PRIu32, this->video_width_, this->video_height_);
   }
 }
 
@@ -239,7 +242,7 @@ void SimpleVideoPlayer::playback_loop_() {
     this->close_file_();
     return;
   }
-  ESP_LOGI(TAG, "Video dimensions: %ux%u", width, height);
+  ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
   {
     lv_coord_t canvas_width = lv_obj_get_width(this->canvas_);
@@ -249,7 +252,7 @@ void SimpleVideoPlayer::playback_loop_() {
       lv_coord_t canvas_y = lv_obj_get_y(this->canvas_);
       lv_coord_t x_offset = (canvas_width - width) / 2;
       lv_coord_t y_offset = (canvas_height - height) / 2;
-      ESP_LOGI(TAG, "Resizing canvas from %ux%u to %ux%u", canvas_width, canvas_height, width, height);
+      ESP_LOGI(TAG, "Resizing canvas from %ux%u to %" PRIu32 "x%" PRIu32, canvas_width, canvas_height, width, height);
       lv_obj_set_size(this->canvas_, width, height);
       lv_obj_set_pos(this->canvas_, canvas_x + x_offset, canvas_y + y_offset);
       lv_obj_invalidate(this->canvas_);
@@ -719,8 +722,8 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
   this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = actual_output_size;
 
-  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", actual_output_size,
-           aligned_max_width, aligned_max_height);
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           actual_output_size, aligned_max_width, aligned_max_height);
   return true;
 }
 
@@ -802,8 +805,8 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>(
   this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = max_output_size;
 
-  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", max_output_size,
-           aligned_max_width, aligned_max_height);
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           max_output_size, aligned_max_width, aligned_max_height);
   return true;
 }
 
@@ -910,8 +913,8 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>()
   this->output_buffer_[1].reset(output_buf_1);
   this->output_buffer_size_ = max_output_size;
 
-  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %ux%u)", max_output_size,
-           aligned_max_width, aligned_max_height);
+  ESP_LOGI(TAG, "Double-buffered output allocated: 2x %zu bytes (PSRAM, max %" PRIu32 "x%" PRIu32 ")",
+           max_output_size, aligned_max_width, aligned_max_height);
   return true;
 }
 
@@ -1000,7 +1003,8 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->video_width_ = width;
     this->video_height_ = height;
 
-    ESP_LOGI(TAG, "AVI video dimensions: %ux%u, FPS: %u/%u", width, height, video_info->fps_num, video_info->fps_den);
+    ESP_LOGI(TAG, "AVI video dimensions: %" PRIu32 "x%" PRIu32 ", FPS: %" PRIu32 "/%" PRIu32, width, height,
+             video_info->fps_num, video_info->fps_den);
     return true;
   } else {
     // Raw MJPEG - read first chunk to get JPEG header
@@ -1173,8 +1177,8 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
   // Calculate required output buffer size (RGB565 = 2 bytes per pixel)
   size_t required_output_size = aligned_width * aligned_height * 2;
 
-  ESP_LOGI(TAG, "Verifying buffers for %ux%u video (aligned: %ux%u)", video_width, video_height, aligned_width,
-           aligned_height);
+  ESP_LOGI(TAG, "Verifying buffers for %" PRIu32 "x%" PRIu32 " video (aligned: %" PRIu32 "x%" PRIu32 ")", video_width,
+           video_height, aligned_width, aligned_height);
   ESP_LOGI(TAG, "Required output buffer: %zu bytes, allocated: %zu bytes", required_output_size,
            this->output_buffer_size_);
 
@@ -1191,14 +1195,16 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
 
   // Check if pre-allocated buffers are large enough
   if (required_output_size > this->output_buffer_size_) {
-    ESP_LOGE(TAG, "Video too large for pre-allocated buffer: %ux%u requires %zu bytes, only %zu bytes available",
+    ESP_LOGE(TAG,
+             "Video too large for pre-allocated buffer: %" PRIu32 "x%" PRIu32
+             " requires %zu bytes, only %zu bytes available",
              aligned_width, aligned_height, required_output_size, this->output_buffer_size_);
     ESP_LOGE(TAG, "Increase max video resolution in setup() or use smaller video");
     return false;
   }
 
-  ESP_LOGI(TAG, "Buffers verified - Input: %u bytes, Output: %zu bytes (using %zu bytes)", this->input_buffer_size_,
-           this->output_buffer_size_, required_output_size);
+  ESP_LOGI(TAG, "Buffers verified - Input: %" PRIu32 " bytes, Output: %zu bytes (using %zu bytes)",
+           this->input_buffer_size_, this->output_buffer_size_, required_output_size);
 
   return true;
 }
@@ -1238,7 +1244,8 @@ bool SimpleVideoPlayer::allocate_frame_ring_() {
     buf = static_cast<uint8_t *>(heap_caps_malloc(this->input_buffer_size_, MALLOC_CAP_SPIRAM));
 #endif
     if (buf == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate frame ring slot %u (%u bytes)", i, this->input_buffer_size_);
+      ESP_LOGE(TAG, "Failed to allocate frame ring slot %" PRIu32 " (%" PRIu32 " bytes)", i,
+               this->input_buffer_size_);
       return false;
     }
     this->frame_ring_[i].data.reset(buf);
@@ -1252,8 +1259,8 @@ bool SimpleVideoPlayer::allocate_frame_ring_() {
   }
 
   double total_mb = (static_cast<double>(this->prefetch_frames_) * this->input_buffer_size_) / (1024.0 * 1024.0);
-  ESP_LOGI(TAG, "Video frame ring buffer: %u slots x %u bytes (%.2f MB total, PSRAM)", this->prefetch_frames_,
-           this->input_buffer_size_, total_mb);
+  ESP_LOGI(TAG, "Video frame ring buffer: %" PRIu32 " slots x %" PRIu32 " bytes (%.2f MB total, PSRAM)",
+           this->prefetch_frames_, this->input_buffer_size_, total_mb);
   return true;
 }
 
@@ -1320,16 +1327,16 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   audio::AudioFileType codec_type = audio::AudioFileType::NONE;
   if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::MP3)) {
     codec_type = audio::AudioFileType::MP3;
-    ESP_LOGI(TAG, "Audio codec: MP3, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-             audio_info->bits_per_sample);
+    ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+             audio_info->channels, audio_info->bits_per_sample);
   } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
     codec_type = audio::AudioFileType::FLAC;
-    ESP_LOGI(TAG, "Audio codec: FLAC, %u Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-             audio_info->bits_per_sample);
+    ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+             audio_info->channels, audio_info->bits_per_sample);
   } else if (audio_info->codec == static_cast<uint32_t>(AVIAudioCodec::PCM)) {
     // PCM audio in AVI is raw samples without WAV header
     // We'll handle it directly without AudioDecoder
-    ESP_LOGI(TAG, "Audio codec: PCM (raw), %u Hz, %u channels, %u bits - will process directly",
+    ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
              audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
     codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
   } else {
@@ -1353,11 +1360,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   if (!this->speaker_->is_running()) {
-    ESP_LOGE(TAG, "Speaker failed to start within %u ms", SPEAKER_INIT_TIMEOUT_MS);
+    ESP_LOGE(TAG, "Speaker failed to start within %" PRIu32 " ms", SPEAKER_INIT_TIMEOUT_MS);
     return false;
   }
 
-  ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %u Hz", audio_info->bits_per_sample,
+  ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
   // ============================================================================
@@ -1393,9 +1400,10 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   ESP_LOGI(TAG, "Audio buffer config: PCM data rate = %zu bytes/sec (%.1f KB/s)", bytes_per_second_decoded,
            bytes_per_second_decoded / 1024.0f);
-  ESP_LOGI(TAG, "  Input buffer: %zu KB (%u ms)", input_buffer_size / 1024, INPUT_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%u ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
-  ESP_LOGI(TAG, "  Temp buffer: %zu KB (%u ms)", this->audio_temp_buffer_size_ / 1024, TEMP_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Input buffer: %zu KB (%" PRIu32 " ms)", input_buffer_size / 1024, INPUT_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Decoded buffer: %zu KB (%" PRIu32 " ms)", decoded_buffer_size / 1024, DECODED_BUFFER_DURATION_MS);
+  ESP_LOGI(TAG, "  Temp buffer: %zu KB (%" PRIu32 " ms)", this->audio_temp_buffer_size_ / 1024,
+           TEMP_BUFFER_DURATION_MS);
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
