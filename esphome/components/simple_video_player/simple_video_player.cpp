@@ -384,21 +384,20 @@ void SimpleVideoPlayer::playback_loop_() {
   // one-time, once-per-play() call, not a per-frame one, so blocking (rather than a short timeout
   // that silently skips setup on contention) is correct here: skipping this on a stray timeout
   // would leave canvas_buffer_ready_ false for the entire playback session.
+  // This task runs at priority 10 -- above the main loop -- specifically so decode/pacing can't
+  // be starved once playback is running (see this function's task-creation comment above). But
+  // that cuts both ways: everything from open_file_() through here has run at that same priority
+  // with NOT ONE yield point, and the last hardware test showed exactly the failure mode that
+  // invites -- confirmed via uxSemaphoreGetCount() that lvgl_mutex_ was genuinely free (count=1)
+  // right before this take, yet the task never ran again to actually complete it: real CPU
+  // starvation, not a deadlock on this mutex, coinciding with the logger/LVGL themselves reporting
+  // overrun ticks at that exact moment. An explicit yield here before the one long blocking wait
+  // in this whole setup path gives the scheduler a guaranteed chance to run whatever was
+  // contending, instead of relying on this priority-10 task never being CPU-bound long enough to
+  // matter -- the same reasoning the pacing loop's own per-frame yield is already built on.
+  vTaskDelay(pdMS_TO_TICKS(1));
   bool canvas_ready = false;
-  ESP_LOGI(TAG, "play(): lvgl_mutex_=%p count=%u before take", (void *) this->lvgl_mutex_,
-           this->lvgl_mutex_ != nullptr ? static_cast<unsigned>(uxSemaphoreGetCount(this->lvgl_mutex_)) : 0xFFu);
-  // Bounded retry loop instead of a single portMAX_DELAY take -- functionally identical (still
-  // blocks until acquired), but logs every 2s so a genuine permanent deadlock is visible as
-  // repeating log lines instead of silence indistinguishable from a hang elsewhere.
-  uint32_t wait_attempts = 0;
-  while (xSemaphoreTake(this->lvgl_mutex_, pdMS_TO_TICKS(2000)) != pdTRUE) {
-    wait_attempts++;
-    ESP_LOGW(TAG, "play(): still waiting for lvgl_mutex_ after %" PRIu32 "s (count=%u)", wait_attempts * 2,
-             static_cast<unsigned>(uxSemaphoreGetCount(this->lvgl_mutex_)));
-  }
-  {
-    ESP_LOGI(TAG, "play(): lvgl_mutex_ acquired after %" PRIu32 " retries, calling resize_canvas_buffer_",
-             wait_attempts);
+  if (xSemaphoreTake(this->lvgl_mutex_, portMAX_DELAY) == pdTRUE) {
     canvas_ready = this->resize_canvas_buffer_(aligned_width, aligned_height);
     xSemaphoreGive(this->lvgl_mutex_);
   }
@@ -1452,16 +1451,12 @@ bool SimpleVideoPlayer::resize_canvas_buffer_(uint32_t aligned_width, uint32_t a
 
   std::memset(this->canvas_buffer_, 0, static_cast<size_t>(aligned_width) * aligned_height * sizeof(uint16_t));
 
-  ESP_LOGI(TAG, "resize_canvas_buffer_: calling lv_canvas_set_buffer(%p, %" PRIu32 "x%" PRIu32 ")",
-           (void *) this->canvas_buffer_, aligned_width, aligned_height);
   lv_canvas_set_buffer(this->canvas_, this->canvas_buffer_, static_cast<int32_t>(aligned_width),
                        static_cast<int32_t>(aligned_height), LV_COLOR_FORMAT_RGB565);
-  ESP_LOGI(TAG, "resize_canvas_buffer_: lv_canvas_set_buffer() returned");
 
   this->canvas_buffer_width_ = static_cast<int>(aligned_width);
   this->canvas_buffer_height_ = static_cast<int>(aligned_height);
   this->ensure_canvas_buffer_();
-  ESP_LOGI(TAG, "resize_canvas_buffer_: ensure_canvas_buffer_() returned, ready=%d", this->canvas_buffer_ready_);
 
   // Deliberately NOT calling lv_obj_invalidate() here: it was added to fix the fill-then-play
   // case, but instead regressed the normal case (no first frame at all), so it's reverted pending
