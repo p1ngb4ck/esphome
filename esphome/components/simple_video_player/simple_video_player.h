@@ -23,6 +23,7 @@
 
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
+#include "esphome/components/ring_buffer/ring_buffer.h"
 #endif
 #include "lvgl.h"
 #include "buffered_file_reader.h"
@@ -371,8 +372,8 @@ class SimpleVideoPlayer : public Component {
 #ifdef USE_AUDIO
   // Audio decoding (for AVI with audio streams)
   std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
-  std::shared_ptr<RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
-  std::shared_ptr<RingBuffer>
+  std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
+  std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
   std::unique_ptr<uint8_t[]> audio_temp_buffer_;  // Temporary buffer for audio processing (in PSRAM)
   size_t audio_temp_buffer_size_{0};              // Dynamically calculated based on audio params

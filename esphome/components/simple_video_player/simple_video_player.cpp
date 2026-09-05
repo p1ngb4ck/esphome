@@ -1402,7 +1402,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   if (use_decoder) {
     // Create ring buffer for encoded audio input (automatically uses PSRAM via RAMAllocator)
-    this->audio_input_ring_buffer_ = RingBuffer::create(input_buffer_size);
+    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(input_buffer_size);
     if (this->audio_input_ring_buffer_ == nullptr) {
       ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", input_buffer_size / 1024);
       return false;
@@ -1410,7 +1410,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
     // If channel conversion is needed, create intermediate ring buffer for decoded audio
     if (this->needs_channel_conversion_) {
-      this->audio_decoded_ring_buffer_ = RingBuffer::create(decoded_buffer_size);
+      this->audio_decoded_ring_buffer_ = ring_buffer::RingBuffer::create(decoded_buffer_size);
       if (this->audio_decoded_ring_buffer_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", decoded_buffer_size / 1024);
         return false;
@@ -1451,7 +1451,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     this->audio_decoder_ = std::make_unique<audio::AudioDecoder>(decoder_input_buffer_size, decoder_output_buffer_size);
 
     // Add source ring buffer
-    std::weak_ptr<RingBuffer> source_weak = this->audio_input_ring_buffer_;
+    std::weak_ptr<ring_buffer::RingBuffer> source_weak = this->audio_input_ring_buffer_;
     if (this->audio_decoder_->add_source(source_weak) != ESP_OK) {
       ESP_LOGE(TAG, "Failed to add audio decoder source");
       return false;
@@ -1460,7 +1460,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     // Add sink based on whether channel conversion is needed
     if (this->needs_channel_conversion_) {
       // Decoder outputs to intermediate buffer (we'll convert in audio task)
-      std::weak_ptr<RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
+      std::weak_ptr<ring_buffer::RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
       if (this->audio_decoder_->add_sink(decoded_weak) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add audio decoder sink (intermediate buffer)");
         return false;
