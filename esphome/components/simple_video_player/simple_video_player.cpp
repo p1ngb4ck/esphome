@@ -386,17 +386,33 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
+  // Buffer before starting the presentation clock: block until the ring is either fully
+  // pre-filled (prefetch_frames_ slots ready) or the loader has already finished producing
+  // everything it ever will (a short video reaching EOF, or a read error) -- whichever comes
+  // first. Starting the clock immediately (as if frame 0's storage read were instant) is what
+  // caused the endless "loader could not keep up" storm: the very first read pays real cold-start
+  // latency (file open, first seek, first chunk parse) that a single frame's presentation budget
+  // never covers, so every early cycle missed its deadline before the loader had a fair chance to
+  // get ahead. No fixed give-up deadline here -- however long the initial fill genuinely takes is
+  // how long we wait; uxSemaphoreGetCount() only queries the ring's real state, it doesn't
+  // consume/perturb it.
+  ESP_LOGI(TAG, "Buffering...");
+  int64_t buffer_wait_start_us = esp_timer_get_time();
+  while (uxSemaphoreGetCount(this->ring_slots_ready_) < this->prefetch_frames_ &&
+         this->loader_task_handle_ != nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  ESP_LOGI(TAG, "Buffered %u/%" PRIu32 " ring slots in %" PRId64 " ms",
+           static_cast<unsigned>(uxSemaphoreGetCount(this->ring_slots_ready_)), this->prefetch_frames_,
+           (esp_timer_get_time() - buffer_wait_start_us) / 1000);
+
   // Initialize frame pacing with presentation timestamps. Frame 0's target presentation time is
-  // "now", so the loop below presents it as soon as it's decoded -- no separate preload dance
-  // needed, the ring buffer (already filling since the loader task started above) is what
-  // removes the old first-frame stall.
+  // "now", so the loop below presents it as soon as it's decoded -- the ring is already
+  // sufficiently full at this point (or the whole video fit in it), removing the first-frame
+  // stall without needing to keep re-deriving it cycle by cycle in the pacing loop itself.
   this->playback_start_time_us_ = esp_timer_get_time();
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
-  TickType_t ring_wait_ticks = pdMS_TO_TICKS(static_cast<uint32_t>(this->frame_duration_us_ / 1000.0f));
-  if (ring_wait_ticks == 0) {
-    ring_wait_ticks = 1;
-  }
 
   while (this->state_ != PlayerState::STOPPED) {
     // Handle pause state
@@ -405,14 +421,12 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Wait for the next ring slot. Bail-out policy: if the loader can't keep up within one
-    // frame's duration, skip this cycle rather than stalling the presentation clock -- the
-    // frame that eventually arrives just gets shown a bit late instead of accumulating debt.
-    if (xSemaphoreTake(this->ring_slots_ready_, ring_wait_ticks) != pdTRUE) {
-      ESP_LOGW(TAG, "Loader could not keep up, skipping this cycle");
-      this->frame_count_++;
-      continue;
-    }
+    // Wait for the next ring slot. No artificial per-cycle deadline here -- matching the
+    // single-task version this replaced, a slow read just means this frame gets presented late
+    // (the "wait only if early" pacing below already handles that gracefully); it must not be
+    // treated as a reason to give up on the frame and spin back around immediately, which only
+    // starves the loader of CPU time and can never actually resolve on its own.
+    xSemaphoreTake(this->ring_slots_ready_, portMAX_DELAY);
 
     VideoFrameSlot &slot = this->frame_ring_[this->ring_tail_];
 
@@ -560,7 +574,14 @@ void SimpleVideoPlayer::loader_loop_() {
     }
 
     VideoFrameSlot &slot = this->frame_ring_[this->ring_head_];
+    // Diagnostic timing: how long a single read_next_frame_() (fourcc/size/payload storage round
+    // trips for one video frame, plus any interleaved audio chunks skipped along the way) actually
+    // takes end-to-end -- needed to tell a genuine storage-throughput ceiling apart from per-call
+    // round-trip latency (the read-ahead cache in BufferedFileReader already addresses the latter).
+    int64_t read_start_us = esp_timer_get_time();
     int n = this->read_next_frame_(slot.data.get(), this->input_buffer_size_);
+    int64_t read_duration_us = esp_timer_get_time() - read_start_us;
+    ESP_LOGD(TAG, "read_next_frame_ took %" PRId64 " us (%d bytes)", read_duration_us, n);
 
     if (n == 0 && this->loop_) {
       // EOF with looping enabled: rewind and retry without publishing a slot -- transparent to

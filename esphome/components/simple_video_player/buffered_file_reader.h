@@ -10,10 +10,12 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "esp_heap_caps.h"
 #endif
 
 namespace esphome {
@@ -102,6 +104,11 @@ class BufferedFileReader {
     return this->last_result_;
   }
 
+  // Issues one direct (uncached) worker read_chunk() into dest -- shared by read()'s large-request
+  // path and the read-ahead refill path. Returns bytes read (0 = EOF, <0 = error), same contract
+  // as read().
+  int read_chunk_(uint8_t *dest, size_t size);
+
   storage::StreamHandle handle_{};
   bool open_{false};
   uint64_t current_position_{0};
@@ -113,6 +120,21 @@ class BufferedFileReader {
   // taking it -- safe with no extra lock since the semaphore itself is the handoff point (the
   // callback always finishes its write before giving, wait_() always reads after taking).
   storage::StorageError last_result_{storage::StorageError::STORAGE_ERROR_OK};
+
+  // Read-ahead cache (PSRAM -- ESP32-P4 only, per project convention: everything but small
+  // DMA-aligned scratch buffers lives in PSRAM). AVIParser issues many small sequential reads per
+  // chunk (4-byte fourcc, 4-byte size, 1-byte alignment pad) on top of the one big per-frame JPEG
+  // payload read -- each call to the worker's read_chunk() pays a full async submit/block round
+  // trip regardless of how few bytes are requested, so without buffering, those small reads pay
+  // that latency individually instead of amortized. 1MB is generous by design against the P4's
+  // 32MB PSRAM: at typical frame sizes (a few hundred KB) this comfortably spans several whole
+  // frames' worth of interleaved video+audio chunk data per single underlying read, not just the
+  // header bytes -- a request that doesn't fit even this (extremely large frame) falls back to
+  // its own direct read_chunk_() call.
+  static constexpr size_t READ_AHEAD_CAPACITY = 1 * 1024 * 1024;
+  std::unique_ptr<uint8_t[]> read_ahead_buf_;
+  size_t read_ahead_len_{0};  // valid bytes currently in read_ahead_buf_
+  size_t read_ahead_pos_{0};  // consumed-so-far offset within read_ahead_buf_
 };
 
 }  // namespace simple_video_player
