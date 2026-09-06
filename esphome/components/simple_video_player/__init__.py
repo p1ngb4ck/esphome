@@ -29,7 +29,7 @@ except ImportError:
     lv_canvas_t = None
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["esp32", "storage"]
+DEPENDENCIES = ["storage"]
 AUTO_LOAD = ["image", "audio"]
 
 # Namespaces
