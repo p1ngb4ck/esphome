@@ -40,11 +40,6 @@ static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
 SimpleVideoPlayer::~SimpleVideoPlayer() {
   this->stop();
   this->free_buffers_();
-
-  if (this->present_timer_ != nullptr) {
-    esp_timer_stop(this->present_timer_);
-    esp_timer_delete(this->present_timer_);
-  }
 }
 
 void SimpleVideoPlayer::setup() {
@@ -62,23 +57,6 @@ void SimpleVideoPlayer::setup() {
   // after -- see canvas_buffer_'s comment in the header.
   if (this->lvgl_component_ == nullptr) {
     ESP_LOGE(TAG, "LVGL component not set");
-    this->mark_failed();
-    return;
-  }
-
-  // One-shot timer that wakes the playback task at each frame's exact presentation instant (see
-  // the pacing loop in playback_loop_()). Task-dispatch, not ISR-dispatch: the callback only does
-  // an xTaskNotifyGive(), and task dispatch has no CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
-  // dependency. Created once, re-armed per frame, deleted in the destructor.
-  const esp_timer_create_args_t present_timer_args = {
-      .callback = &SimpleVideoPlayer::present_timer_cb_,
-      .arg = this,
-      .dispatch_method = ESP_TIMER_TASK,
-      .name = "svp_present",
-      .skip_unhandled_events = true,
-  };
-  if (esp_timer_create(&present_timer_args, &this->present_timer_) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create presentation timer");
     this->mark_failed();
     return;
   }
@@ -291,13 +269,16 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   // continuous PPA load") -- decode hung forever on its very first call once PPA was actually
   // active concurrently, which look like "nothing ever decodes" from here.
   //
-  // Back on Core 1: the per-frame yield fix below (vTaskDelay of at least one tick every cycle,
-  // regardless of pacing) is what actually prevents the original starvation, without needing
-  // physical core isolation that reintroduces a DMA2D hardware race.
+  // Core 1, priority 1 -- the SAME priority as ESPHome's loopTask (esp32/core.cpp creates it at
+  // prio 1, pinned to Core 1). Equal priority means the FreeRTOS tick round-robins the two every
+  // tick, so LVGL and the rest of App.loop() keep running WITHOUT this task ever calling a
+  // blocking yield -- that is what replaces the old per-frame vTaskDelay. It must stay on Core 1
+  // (not 0): the HW JPEG decoder and LVGL's PPA rotate both drive DMA2D, and single-core
+  // execution is what keeps them from touching it concurrently (espressif/esp-idf#18999).
   BaseType_t result = xTaskCreatePinnedToCore(playback_task_entry_, "video_player",
                                               8192,  // Stack size
                                               this,
-                                              10,  // Priority (higher than main loop and most components)
+                                              1,  // Priority == loopTask (round-robin, no yield needed)
                                               &this->task_handle_,
                                               1);  // Core 1
 
@@ -339,14 +320,6 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
   vTaskDelete(nullptr);
 }
 
-void SimpleVideoPlayer::present_timer_cb_(void *arg) {
-  auto *player = static_cast<SimpleVideoPlayer *>(arg);
-  TaskHandle_t task = player->task_handle_;
-  if (task != nullptr) {
-    xTaskNotifyGive(task);
-  }
-}
-
 void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Playback task started (Core 1)");
 
@@ -370,7 +343,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Fresh pacing state for this session.
   this->paused_accum_us_ = 0;
-  this->frames_dropped_ = 0;
   this->decode_fail_count_ = 0;
   this->video_frame_index_ = 0;
 
@@ -430,11 +402,17 @@ void SimpleVideoPlayer::playback_loop_() {
 
   this->on_started_callbacks_.call();
 
-  this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
   // Anchored on the first paced frame in the loop (see there), not here -- so cold-start read
   // latency is not counted as the stream already running late.
   this->playback_start_time_us_ = 0;
+
+  // Core 1, prio 1 (== loopTask). From here the task never sleeps -- the pacing gate is a
+  // wall-clock comparison spin, not a wait -- so it must feed the task WDT itself. loopTask is
+  // round-robined in by the FreeRTOS tick regardless, keeping LVGL and the rest of ESPHome alive.
+  // Subscribed here (not at task entry) so the early-return error paths above never leave a
+  // subscription dangling past vTaskDelete().
+  esp_task_wdt_add(nullptr);
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
@@ -446,11 +424,13 @@ void SimpleVideoPlayer::playback_loop_() {
     // behind (which would trigger a re-sync on resume).
     if (st == PlayerState::PAUSED) {
       const int64_t pause_started_us = esp_timer_get_time();
+      // Zero-wait: spin on the state, never vTaskDelay. This task is prio 1 (== loopTask) and
+      // pinned to Core 1, so the FreeRTOS tick round-robins loopTask in regardless -- LVGL and
+      // the rest of ESPHome still run while we spin here.
       while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_task_wdt_reset();
       }
       this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
-      ulTaskNotifyTake(pdTRUE, 0);  // drop any present-timer notification that landed while parked
       continue;
     }
 
@@ -481,44 +461,27 @@ void SimpleVideoPlayer::playback_loop_() {
     const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
                                            static_cast<int64_t>(frame_index * frame_dur);
 
-    // Sync to the wall clock: wait if this frame's slot is still ahead, otherwise present it now
-    // and move straight on ("bang out"). Never drop -- audio is demuxed by the same loop, so
-    // running flat out when behind is what lets both catch back up to the clock together.
-    ulTaskNotifyTake(pdTRUE, 0);  // drain any stale notification from a prior frame's timer
-    while (true) {
-      const int64_t remaining_us = target_present_time_us - esp_timer_get_time();
-      if (remaining_us <= 0)
-        break;
-      esp_timer_start_once(this->present_timer_, static_cast<uint64_t>(remaining_us));
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
-      esp_timer_stop(this->present_timer_);
+    // Sync to the wall clock by COMPARING it, never sleeping on it. While this frame's slot is
+    // still ahead, spin. The Core 0 audio task drains its own ring independently, so the gap
+    // costs nothing there. Never drop -- running flat out when behind is what lets video and
+    // audio realign to the clock.
+    while (target_present_time_us - esp_timer_get_time() > 0) {
+      esp_task_wdt_reset();
     }
 
     if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
-      // No logging on this priority-10 path (AGENTS.md) -- plain counter, summarised after the loop.
+      // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
       this->decode_fail_count_++;
       continue;
     }
     this->present_frame_();
 
-    // frame_count_ tracks the absolute index of the last presented frame (+1), from the frame tag.
-    this->frame_count_ = frame_index + 1;
-
-    // Feed watchdog periodically to prevent task watchdog timeout during long playback.
-    if (this->frame_count_ % 100 == 0) {
-#ifdef USE_ESP32
-      esp_task_wdt_reset();
-#endif
-    }
+    esp_task_wdt_reset();
   }
 
-  // Disarm the presentation timer in case the loop exited (EOF/error/stop) with it still pending.
-  esp_timer_stop(this->present_timer_);
-
   // One-line playback-health summary -- safe here (the loop has exited, this is not the hot path).
-  if (this->frames_dropped_ > 0 || this->decode_fail_count_ > 0) {
-    ESP_LOGW(TAG, "playback health: %" PRIu32 " frame(s) dropped, %" PRIu32 " decode failures",
-             this->frames_dropped_, this->decode_fail_count_);
+  if (this->decode_fail_count_ > 0) {
+    ESP_LOGW(TAG, "playback health: %" PRIu32 " decode failures", this->decode_fail_count_);
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
@@ -569,6 +532,7 @@ void SimpleVideoPlayer::playback_loop_() {
          !this->state_.compare_exchange_weak(expected, PlayerState::STOPPED, std::memory_order_acq_rel)) {
   }
 
+  esp_task_wdt_delete(nullptr);
   this->task_handle_ = nullptr;
 
   ESP_LOGI(TAG, "Playback task finished");
@@ -579,10 +543,9 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
     return true;
   }
 
-  uint32_t elapsed = 0;
-  while (handle != nullptr && elapsed < timeout_ms) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-    elapsed += 10;
+  const int64_t deadline_us = esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000;
+  while (handle != nullptr && esp_timer_get_time() < deadline_us) {
+    esp_task_wdt_reset();
   }
 
   return handle == nullptr;
@@ -1138,11 +1101,12 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Start the speaker to initialize I2S driver
   this->speaker_->start();
 
-  // Wait for speaker to finish initialization (STATE_STARTING → STATE_RUNNING)
-  uint32_t wait_start = millis();
+  // Spin (never sleep) until the speaker reaches STATE_RUNNING. This runs once at play() startup,
+  // before the frame loop, on the Core 1 playback task -- prio 1, so loopTask still round-robins.
+  const int64_t speaker_deadline_us = esp_timer_get_time() + 1000 * 1000;
   const uint32_t SPEAKER_INIT_TIMEOUT_MS = 1000;
-  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_INIT_TIMEOUT_MS) {
-    vTaskDelay(pdMS_TO_TICKS(10));
+  while (!this->speaker_->is_running() && esp_timer_get_time() < speaker_deadline_us) {
+    esp_task_wdt_reset();
   }
 
   if (!this->speaker_->is_running()) {
@@ -1191,15 +1155,14 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     ESP_LOGI(TAG, "Audio decoder initialized successfully");
   }  // End of if (use_decoder)
 
-  // Start audio processing task on Core 0, alongside the loader -- like the loader, audio never
-  // touches DMA2D/PPA/JPEG hardware, so unlike decode it has no reason to share Core 1 with the
-  // main loop (see play()'s xTaskCreatePinnedToCore comment for why decode specifically must).
-  // For PCM: task handles channel conversion and direct speaker output
-  // For MP3/FLAC: task handles decoder + channel conversion + speaker output
-  // Audio task priority 10 (same as decode) to prevent audio underruns
+  // Audio feed task on Core 0 -- audio never touches DMA2D/PPA/JPEG, so it stays off Core 1
+  // entirely. Priority 1: it never sleeps, so a higher priority would let it starve the storage
+  // worker / system tasks that also live on Core 0. At prio 1 the tick round-robins it with them,
+  // it gets Core 0 whenever they are I/O-blocked (most of the time), and the speaker's own I2S
+  // task drains the DMA in parallel. Fully decoupled from the Core 1 video decode/pace task.
   this->audio_task_stop_ = false;
   BaseType_t result = xTaskCreatePinnedToCore(audio_task_entry_, "svp_audio", 4096,  // 4KB stack
-                                              this, 10,  // Priority 10 (high - same as decode task)
+                                              this, 1,  // Priority 1 (never sleeps; must not starve Core 0)
                                               &this->audio_task_handle_,
                                               0);  // Core 0
 
@@ -1256,6 +1219,13 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
+  // Core 0, prio 1. Never sleeps: no vTaskDelay anywhere in this loop. When there is nothing to
+  // push (ring empty, or speaker DMA full) it simply re-checks. The FreeRTOS tick still lets the
+  // storage worker and system tasks preempt it; the speaker's own I2S task drains its DMA in
+  // parallel. This decouples audio entirely from the Core 1 video decode/pace task -- a multi-ms
+  // jpeg_decoder_process() over there no longer stalls the speaker feed.
+  esp_task_wdt_add(nullptr);
+
   // A single failed decode drops that chunk and the loop keeps going, instead of tearing audio
   // down on the first hiccup. Only give up on audio entirely after this many consecutive failures
   // (a genuinely broken stream).
@@ -1263,8 +1233,9 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   uint32_t audio_decode_failures = 0;
 
   while (!this->audio_task_stop_) {
+    esp_task_wdt_reset();
+
     if (!this->audio_enabled_) {
-      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
@@ -1282,20 +1253,19 @@ void SimpleVideoPlayer::audio_processing_loop_() {
         }
         ESP_LOGW(TAG, "Audio decode error -- dropping chunk (%" PRIu32 "/%" PRIu32 ")", audio_decode_failures,
                  AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES);
-        vTaskDelay(pdMS_TO_TICKS(2));
         continue;
       }
       audio_decode_failures = 0;
     }  // End of if (this->audio_decoder_)
 
-    // Drain the decoded ring to the speaker at a steady rate. Formats already match end to end
-    // (config == file == speaker), so this is a straight byte copy -- no conversion. The blocking
-    // retry keeps the speaker fed instead of dropping a burst like the old direct-from-demux path.
+    // Drain the decoded ring to the speaker. Formats match end to end (config == file == speaker),
+    // so this is a straight byte copy -- no conversion. speaker_->play() is non-blocking and
+    // returns bytes accepted; whatever it can't take this pass we retry next pass -- no wait.
     if (this->audio_decoded_ring_buffer_ && this->speaker_) {
       size_t available = this->audio_decoded_ring_buffer_->available();
       if (available > 0) {
         size_t to_read = std::min(available, AUDIO_TEMP_BUFFER_SIZE);
-        size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), to_read);
+        size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), to_read, 0);
 
         size_t bytes_remaining = bytes_read;
         const uint8_t *write_ptr = this->audio_temp_buffer_.get();
@@ -1305,18 +1275,15 @@ void SimpleVideoPlayer::audio_processing_loop_() {
             bytes_remaining -= written;
             write_ptr += written;
           } else {
-            vTaskDelay(pdMS_TO_TICKS(1));  // speaker buffer full -- wait for it to drain
+            esp_task_wdt_reset();  // speaker DMA full -- spin, never sleep
           }
         }
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(1));  // nothing buffered -- yield
       }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }  // End of while loop
 
   ESP_LOGI(TAG, "Audio processing task stopped");
+  esp_task_wdt_delete(nullptr);
   this->audio_task_handle_ = nullptr;
   vTaskDelete(nullptr);
 }
@@ -1326,11 +1293,10 @@ void SimpleVideoPlayer::stop_audio_task_() {
     ESP_LOGI(TAG, "Stopping audio processing task...");
     this->audio_task_stop_ = true;
 
-    // Wait for task to finish (with timeout)
-    uint32_t timeout_ms = 1000;
-    uint32_t start = millis();
-    while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
-      vTaskDelay(pdMS_TO_TICKS(10));
+    // Spin (never sleep) until the audio task exits or the timeout elapses.
+    const int64_t deadline_us = esp_timer_get_time() + 1000 * 1000;
+    while (this->audio_task_handle_ != nullptr && esp_timer_get_time() < deadline_us) {
+      esp_task_wdt_reset();
     }
 
     if (this->audio_task_handle_ != nullptr) {

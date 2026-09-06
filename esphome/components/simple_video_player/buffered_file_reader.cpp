@@ -48,24 +48,20 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
     this->ring_->write_without_replacement(this->arena_, this->fill_got_, 0, true);
   }
   this->fill_in_flight_.store(false, std::memory_order_release);
-#ifdef USE_ESP32
-  if (this->waiting_task_ != nullptr)
-    xTaskNotifyGive(this->waiting_task_);  // wake a quiesce_fill_() waiter, if any
-#endif
   this->kick_fill_();  // chain the next read
 }
 
 void BufferedFileReader::quiesce_fill_() {
   // No new fill starts from here until draining_ is cleared again (open() / after a seek).
   this->draining_.store(true, std::memory_order_release);
-#ifdef USE_ESP32
-  this->waiting_task_ = xTaskGetCurrentTaskHandle();
-  uint32_t waited = 0;
+  // Zero-wait: spin until the in-flight read_chunk completes (on another task), wall-clock capped.
+  // Never blocks on a notify.
+  const int64_t deadline_us = esp_timer_get_time() + static_cast<int64_t>(WAIT_CAP_MS) * 1000;
   while (this->fill_in_flight_.load(std::memory_order_acquire)) {
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
+    if (esp_timer_get_time() >= deadline_us)
       break;
+    esp_task_wdt_reset();
   }
-#endif
 }
 
 bool BufferedFileReader::open(const char *path) {
@@ -141,13 +137,13 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;
   size_t copied = 0;
-  uint32_t waited = 0;
+  int64_t deadline_us = 0;  // armed on the first empty poll, disarmed whenever bytes arrive
   while (copied < size) {
-    size_t n = this->ring_->read(buffer + copied, size - copied, pdMS_TO_TICKS(WAIT_SLICE_MS));
+    size_t n = this->ring_->read(buffer + copied, size - copied, 0);  // non-blocking
     if (n > 0) {
       copied += n;
       this->current_position_ += n;
-      waited = 0;
+      deadline_us = 0;
       this->kick_fill_();  // made room -- keep the stream fed
       continue;
     }
@@ -158,8 +154,16 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
     if (this->abort_flag_ != nullptr && *this->abort_flag_)
       return copied > 0 ? static_cast<int>(copied) : -1;
     this->kick_fill_();
-    if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
+    // Zero-wait: the ring is momentarily empty. The storage worker + its completion callback run
+    // on other tasks and will refill it; spin (the tick still schedules them) instead of blocking
+    // on a notify or a timed ring read. Wall-clock capped so a stalled stream still returns.
+    const int64_t now = esp_timer_get_time();
+    if (deadline_us == 0) {
+      deadline_us = now + static_cast<int64_t>(WAIT_CAP_MS) * 1000;
+    } else if (now >= deadline_us) {
       return copied > 0 ? static_cast<int>(copied) : -1;
+    }
+    esp_task_wdt_reset();
   }
   return static_cast<int>(copied);
 }

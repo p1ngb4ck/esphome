@@ -31,12 +31,9 @@
 #include <cstdio>
 #include <atomic>
 
-#ifdef USE_ESP32
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
-#include "esp_timer.h"
-#endif
 
 namespace esphome::simple_video_player {
 
@@ -188,11 +185,6 @@ class SimpleVideoPlayer : public Component {
 
   /// Wait for a task to stop
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
-
-  /// esp_timer one-shot callback (task-dispatch context): notifies the playback task so its
-  /// pacing wait resumes exactly at the armed presentation instant. See the pacing loop in
-  /// playback_loop_() for why this replaced a tick-quantised vTaskDelay().
-  static void present_timer_cb_(void *arg);
 
   //========================================================================
   // Frame Processing
@@ -432,24 +424,15 @@ class SimpleVideoPlayer : public Component {
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
   TaskHandle_t task_handle_{nullptr};
 
-  // One-shot high-resolution timer used to wake the playback task at the exact presentation
-  // instant (see the pacing loop in playback_loop_()). Created once in setup(), re-armed per
-  // frame with esp_timer_start_once(), never recreated. systimer-backed: microsecond resolution,
-  // no FreeRTOS-tick quantisation.
-  esp_timer_handle_t present_timer_{nullptr};
-
   // Frame pacing -- wall clock is the master timeline. Each frame's target instant is
-  // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. A frame already a
-  // whole frame past its target is dropped (not decoded); otherwise the task waits out the
-  // remainder and presents. Audio free-runs on the speaker clock; dropping late video frees CPU
-  // for demux, which is what keeps audio fed -- no explicit A/V re-sync.
+  // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. The task spins on a
+  // wall-clock comparison until that instant, then presents; it never drops and never sleeps.
+  // Audio free-runs on the speaker clock on its own Core 0 task -- no explicit A/V re-sync.
   int64_t playback_start_time_us_{0};  // esp_timer_get_time() at frame 0
   int64_t paused_accum_us_{0};         // total wall time spent PAUSED, excluded from media_us
-  uint32_t frame_count_{0};            // absolute index of the next frame to present
   float frame_duration_us_{0};         // duration of one frame in microseconds (1000000/fps)
 
-  // Playback-task counters, summarised once after the loop (no logging on the prio-10 path).
-  uint32_t frames_dropped_{0};      // frames skipped because they were already late
+  // Playback-task counter, summarised once after the loop (no logging on the pacing path).
   uint32_t decode_fail_count_{0};
 
   // Automation callbacks

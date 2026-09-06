@@ -230,6 +230,18 @@ def _resolve_speaker_audio_format(config, fconf):
             "channel) -- simple_video_player needs a speaker platform that fixes this explicitly."
         )
 
+    # The speaker's channel mode is part of the fixed-format lock. Prefer the speaker's own
+    # explicit `channel:` key (mono/left/right/stereo); when the speaker platform only declares
+    # `num_channels:` (no `channel:` key), derive it from the resolved count so to_code() ALWAYS
+    # emits set_speaker_channel_mode() and the C++ side never silently keeps its mono default
+    # while SVP_AUDIO_SOURCE_CHANNELS says 2. No routing or downmix is implied -- source channel
+    # count equals the speaker's by construction (the user transcodes every file to match); this
+    # only selects the one fixed count the speaker stream-info is built with.
+    if CONF_CHANNEL in speaker_conf and speaker_conf[CONF_CHANNEL] in SPEAKER_CHANNEL_MODES:
+        resolved_channel = speaker_conf[CONF_CHANNEL]
+    else:
+        resolved_channel = "stereo" if num_channels == 2 else "mono"
+
     # Stash the resolved values on THIS component's own validated config, the same
     # get_path_for_id()/get_config_for_path() pattern (see mpr121/__init__.py) -- not the `config`
     # parameter directly, since final_validate must not assume that's the live object backing
@@ -239,8 +251,7 @@ def _resolve_speaker_audio_format(config, fconf):
     this_conf[CONF_AUDIO_SAMPLE_RATE] = sample_rate
     this_conf[CONF_AUDIO_BITS_PER_SAMPLE] = bits_per_sample
     this_conf[CONF_AUDIO_CHANNELS] = num_channels
-    if CONF_CHANNEL in speaker_conf:
-        this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = speaker_conf[CONF_CHANNEL]
+    this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = resolved_channel
 
 
 def _final_validate(config):
@@ -327,11 +338,12 @@ async def to_code(config):
         cg.add_define("SVP_AUDIO_BITS_PER_SAMPLE", config[CONF_AUDIO_BITS_PER_SAMPLE])
         cg.add_define(f"SVP_AUDIO_CODEC_{config[CONF_AUDIO_CODEC].upper()}")
 
-        # Speaker's own channel mode (mono/left/right/stereo), resolved the same way -- part of the
-        # fixed-format lock (source channel count must equal the speaker's; no runtime conversion).
-        channel_mode = config.get(CONF_RESOLVED_SPEAKER_CHANNEL)
-        if channel_mode in SPEAKER_CHANNEL_MODES:
-            cg.add(var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode]))
+        # Speaker's channel mode -- always resolved by _final_validate (from the speaker's own
+        # `channel:` key, or derived from its `num_channels:` when it has none), so this is always
+        # emitted and the C++ side never falls back to its mono default. Part of the fixed-format
+        # lock: source channel count equals the speaker's, no runtime conversion.
+        channel_mode = config[CONF_RESOLVED_SPEAKER_CHANNEL]
+        cg.add(var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode]))
 
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
