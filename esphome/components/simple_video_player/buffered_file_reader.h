@@ -41,8 +41,7 @@ class BufferedFileReader {
   void close();
   bool is_open() const { return this->open_; }
 
-  /// Non-blocking drain from the ring. Returns bytes copied (== size in steady state),
-  /// a short count only at EOF, -1 on a mid-stream underrun.
+  /// Drain up to `size` bytes from the ring. Returns bytes read (0 = EOF, -1 = error).
   int read(uint8_t *buffer, size_t size);
 
   bool seek(uint64_t position);
@@ -89,8 +88,6 @@ class BufferedFileReader {
   void on_fill_done_(storage::StorageError err);
   // Wait (bounded, abortable) for any in-flight fill to finish, so a one-shot stream call can run.
   void quiesce_fill_();
-  // Fill the ring completely before returning. Off the hot path only (open()/seek()).
-  void prime_ring_();
 
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
