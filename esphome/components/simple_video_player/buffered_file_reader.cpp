@@ -117,7 +117,16 @@ bool BufferedFileReader::open(const char *path) {
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
   this->draining_.store(false);
-  this->kick_fill_();  // start streaming
+
+  // Prime: fill the ring before playback starts. One-time, before the real-time section -- the
+  // ring must never run dry once playback is running (the MCU cannot catch up).
+  this->waiting_task_ = xTaskGetCurrentTaskHandle();
+  this->kick_fill_();
+  while (this->ring_->free() > 0 && !this->eof_.load(std::memory_order_acquire) &&
+         !this->fill_err_.load(std::memory_order_acquire)) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
+  }
+  this->waiting_task_ = nullptr;
   return true;
 }
 
@@ -140,28 +149,19 @@ void BufferedFileReader::close() {
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;
-  size_t copied = 0;
-  uint32_t waited = 0;
-  while (copied < size) {
-    size_t n = this->ring_->read(buffer + copied, size - copied, pdMS_TO_TICKS(WAIT_SLICE_MS));
-    if (n > 0) {
-      copied += n;
-      this->current_position_ += n;
-      waited = 0;
-      this->kick_fill_();  // made room -- keep the stream fed
-      continue;
-    }
-    if (this->fill_err_.load(std::memory_order_acquire))
-      return copied > 0 ? static_cast<int>(copied) : -1;
-    if (this->eof_.load(std::memory_order_acquire) && this->ring_->available() == 0)
-      break;  // stream ended and ring drained
-    if (this->abort_flag_ != nullptr && *this->abort_flag_)
-      return copied > 0 ? static_cast<int>(copied) : -1;
-    this->kick_fill_();
-    if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
-      return copied > 0 ? static_cast<int>(copied) : -1;
-  }
-  return static_cast<int>(copied);
+
+  // Non-blocking drain. The ring is primed full at open() and the async fill chain keeps it
+  // full (worker completion submits the next read_chunk; the playback task's per-frame present
+  // wait is when the worker runs), so in steady state the bytes are always already here.
+  size_t got = this->ring_->read(buffer, size, 0);
+  this->current_position_ += got;
+  this->kick_fill_();
+
+  if (got == size)
+    return static_cast<int>(got);
+  if (this->eof_.load(std::memory_order_acquire))
+    return static_cast<int>(got);  // legit short tail at end of file
+  return -1;                       // mid-stream underrun: the invariant broke, not recoverable
 }
 
 bool BufferedFileReader::seek(uint64_t position) {

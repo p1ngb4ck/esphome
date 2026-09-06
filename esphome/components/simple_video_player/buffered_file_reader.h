@@ -41,7 +41,8 @@ class BufferedFileReader {
   void close();
   bool is_open() const { return this->open_; }
 
-  /// Drain up to `size` bytes from the ring. Returns bytes read (0 = EOF, -1 = error).
+  /// Non-blocking drain from the ring. Returns bytes copied (== size in steady state),
+  /// a short count only at EOF, -1 on a mid-stream underrun.
   int read(uint8_t *buffer, size_t size);
 
   bool seek(uint64_t position);

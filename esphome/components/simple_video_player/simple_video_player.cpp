@@ -215,11 +215,11 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // LVGL calls for a frame update, on the LVGL thread. The playback task decoded into
-  // canvas_buffer_ in place and already M2C-synced the cache. Re-set the same draw buf so LVGL
-  // re-reads the pixels (invalidate alone leaves the canvas on the first frame), then invalidate.
+  // Playback task decoded into canvas_buffer_ in place and M2C-synced the cache. The draw buf is
+  // fixed from codegen and flagged MODIFIABLE, so a bare invalidate repaints from it -- no
+  // per-frame lv_canvas_set_draw_buf (that re-inits the image descriptor every frame: the "lvgl
+  // reset" flicker, and wasted hot-path cost).
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
     lv_obj_invalidate(this->canvas_);
   }
 }
