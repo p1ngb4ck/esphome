@@ -172,11 +172,12 @@ void BufferedFileReader::close() {
   storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_done_(e); });
   this->wait_();
 
-  for (auto &buf : this->read_ahead_buf_) {
-    if (buf) {
-      heap_caps_free(buf.release());
-    }
-  }
+  // Do NOT free the read-ahead buffers here. This reader is held persistently across many
+  // open()/close() cycles (one per play()); the buffers are allocated once on the first open()
+  // and kept for the life of the object (freed only in the destructor). Freeing + re-malloc'ing
+  // 2 x 1 MB of PSRAM on every play()/stop() churned the heap and, once PSRAM fragmented, made a
+  // later open() fail outright -- which showed up as "no file loads after the first video".
+  // Just mark them empty so the next open() re-primes from byte 0.
   this->read_ahead_len_[0] = 0;
   this->read_ahead_len_[1] = 0;
   this->read_ahead_pos_ = 0;
