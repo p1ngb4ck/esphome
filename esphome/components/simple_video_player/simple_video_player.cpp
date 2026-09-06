@@ -33,6 +33,9 @@ static constexpr size_t DMA_ALIGNMENT = 128;
 static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
 static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
 
+// Hard cap on the compressed-frame ring (I/O-hiccup cushion only, not a decoded-frame queue).
+static constexpr size_t MAX_FRAME_RING_BYTES = 4 * 1024 * 1024;
+
 //========================================================================
 // Component Lifecycle
 //========================================================================
@@ -1396,7 +1399,13 @@ bool SimpleVideoPlayer::allocate_frame_ring_() {
   // that the first attempt WILL succeed, via the same MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT capability
   // set RAMAllocator's external path itself uses, makes the internal-fallback branch provably
   // unreachable for this call, without needing to patch the upstream ring_buffer component itself.
+  // input_buffer_size_ is the single-frame worst case; real MJPEG frames are a fraction of it, so
+  // sizing the ring at prefetch_frames_ * input_buffer_size_ over-allocates ~10x. Cap it: this is
+  // just the I/O-hiccup cushion, not a decoded-frame queue.
   size_t ring_bytes = static_cast<size_t>(this->prefetch_frames_) * (this->input_buffer_size_ + sizeof(uint32_t));
+  if (ring_bytes > MAX_FRAME_RING_BYTES) {
+    ring_bytes = MAX_FRAME_RING_BYTES;
+  }
   size_t psram_largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (psram_largest_block < ring_bytes) {
     ESP_LOGE(TAG,
