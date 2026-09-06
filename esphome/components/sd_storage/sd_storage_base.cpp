@@ -110,8 +110,9 @@ storage::StorageError SdStorageBase::format() {
   // to flush them after f_mount(nullptr) has detached it, which can only produce errors. Logged
   // rather than propagated -- everything on the card is about to be erased anyway.
   storage::StorageError flush_err = this->flush_open_handles_();
-  if (flush_err != storage::StorageError::STORAGE_ERROR_OK)
+  if (flush_err != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGW(TAG_BASE, "Flush before format failed: %s", storage::error_to_string(flush_err));
+  }
 
   // Detach the mounted FATFS volume but keep the diskio drive registered so f_mkfs can reach the
   // medium; then re-register the VFS via mount() to expose the fresh, empty filesystem. The FAT
@@ -131,20 +132,23 @@ storage::StorageError SdStorageBase::format() {
   parm.fmt = FM_FAT | FM_FAT32;
   ESP_LOGI(TAG_BASE, "Formatting '%s' as FAT...", this->fatfs_drive_);
   FRESULT res = f_mkfs(this->fatfs_drive_, &parm, work.get(), FF_MAX_SS);
-  if (res != FR_OK)
+  if (res != FR_OK) {
     ESP_LOGE(TAG_BASE, "f_mkfs failed (%d)", static_cast<int>(res));
+  }
 
   // Re-attach either way: after the f_mount(nullptr) above the card is unusable until it is,
   // so this must also run when f_mkfs failed.
   storage::StorageError unmount_err = this->unmount();
-  if (unmount_err != storage::StorageError::STORAGE_ERROR_OK)
+  if (unmount_err != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGW(TAG_BASE, "Unmount after format failed: %s", storage::error_to_string(unmount_err));
+  }
   storage::StorageError mount_err = this->mount();
-  if (mount_err != storage::StorageError::STORAGE_ERROR_OK)
+  if (mount_err != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGE(TAG_BASE, "Remount after format failed: %s", storage::error_to_string(mount_err));
-
-  if (res != FR_OK)
+  }
+  if (res != FR_OK) {
     return storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+  }
   // A filesystem that cannot be mounted afterwards is not a successful format.
   return mount_err;
 }
@@ -153,14 +157,16 @@ void SdStorageBase::loop_cd_() {
   // No CD pin: card management is boot mount + manual actions only. In particular this
   // must NOT auto-remount after a manual unmount (card_present_() reports always-present
   // without a pin, so any level-based logic would remount on the next poll).
-  if (this->cd_pin_ == nullptr)
+  if (this->cd_pin_ == nullptr){
     return;
+  }
 
   // Debounce tracking must run every loop() iteration (see card_present_()), the
   // mount/unmount reaction only at the poll interval.
   bool present = this->card_present_();
-  if (!this->should_poll_cd_())
+  if (!this->should_poll_cd_()) {
     return;
+  }
 
   if (!this->cd_state_seeded_) {
     // Seed with the current state -- the boot-time mount decision was setup()'s.
@@ -168,8 +174,9 @@ void SdStorageBase::loop_cd_() {
     this->cd_state_seeded_ = true;
     return;
   }
-  if (present == this->cd_last_present_)
+  if (present == this->cd_last_present_) {
     return;  // level unchanged -- edges only
+  }
   this->cd_last_present_ = present;
 
   if (present) {

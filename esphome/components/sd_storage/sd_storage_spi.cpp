@@ -168,8 +168,9 @@ StorageError SdSpi::mount() {
     // card-detect retry re-enters mount() on top of it. Idempotent: sdspi_host_deinit()
     // walks its slot table and returns ESP_OK when esp_vfs_fat_sdspi_mount() already tore
     // the host down on its own failure path.
-    if (sdspi_host_deinit() != ESP_OK)
+    if (sdspi_host_deinit() != ESP_OK) {
       ESP_LOGW(TAG_SPI, "sdspi_host_deinit() after failed mount failed");
+    }
     this->init_error_ = (mount_error == ESP_FAIL || mount_error == ESP_ERR_INVALID_CRC) ? ErrorCode::ERROR_CODE_MOUNT
                                                                                         : ErrorCode::ERROR_CODE_NO_CARD;
     return StorageError::STORAGE_ERROR_NOT_READY;
@@ -192,8 +193,9 @@ StorageError SdSpi::mount() {
 #endif
 
   BYTE pdrv = ff_diskio_get_pdrv_card(this->card_);
-  if (pdrv == 0xFF)
+  if (pdrv == 0xFF) {
     ESP_LOGE(TAG_SPI, "No diskio binding for card (pdrv lookup failed); direct FATFS path operations will fail");
+  }
   this->set_fatfs_drive_(pdrv);
   this->update_card_info();
 
@@ -235,14 +237,17 @@ StorageError SdSpi::unmount() {
   // Closes any handles still open from user/lambda code, while the VFS is still mounted to
   // receive the flush/close calls.
   StorageError flush_err = this->flush_open_handles_();
-  if (flush_err == StorageError::STORAGE_ERROR_OK)
+  if (flush_err == StorageError::STORAGE_ERROR_OK) {
     ESP_LOGD(TAG_SPI, "All data flushed");
-  else
+  }
+  else {
     ESP_LOGW(TAG_SPI, "Flush before unmount failed: %s", storage::error_to_string(flush_err));
+  }
 
   esp_err_t unmount_err = esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
-  if (unmount_err != ESP_OK)
+  if (unmount_err != ESP_OK) {
     ESP_LOGW(TAG_SPI, "esp_vfs_fat_sdcard_unmount failed: %s", esp_err_to_name(unmount_err));
+  }
   this->card_ = nullptr;
   this->is_mounted_ = false;
 #ifdef USE_STORAGE_CHANGE_FEED
@@ -253,8 +258,9 @@ StorageError SdSpi::unmount() {
 #endif
 
   bool deinit_ok = sdspi_host_deinit() == ESP_OK;
-  if (!deinit_ok)
+  if (!deinit_ok) {
     ESP_LOGW(TAG_SPI, "sdspi_host_deinit() failed");
+  }
 
   // Report the flush and teardown results so an unmount that failed does not look clean.
   if (flush_err != StorageError::STORAGE_ERROR_OK)
