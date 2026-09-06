@@ -410,10 +410,18 @@ class SimpleVideoPlayer : public Component {
   // lv_timer_handler(), so LVGL's render only runs when this task blocks, never concurrently with
   // a decode write. No component-owned second buffer.
   lv_draw_buf_t *canvas_draw_buf_{nullptr};  // owned by LVGL; never allocated or freed by us
-  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data, cached for convenience
+  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data at setup, cached
   int canvas_buffer_width_{0};
   int canvas_buffer_height_{0};
   bool canvas_buffer_ready_{false};
+
+  // Double buffering (kills tearing): back_buffer_ is a byte-for-byte copy of the canvas draw buf,
+  // allocated once in setup() (size = canvas_draw_buf_->data_size verbatim, not computed).
+  // decode_frame_() writes decode_target_ (the off-screen one); present_frame_() points
+  // canvas_draw_buf_->data at it (pointer swap only, as youkorr's lvgl_camera_display) so LVGL
+  // never renders a buffer a decode is writing.
+  uint16_t *back_buffer_{nullptr};
+  uint16_t *decode_target_{nullptr};
 
   // Set by present_frame_() (or the stop-blank) once canvas_buffer_ holds a new frame and its
   // cache is synced; consumed by loop() on the LVGL thread for the one lv_obj_invalidate().
