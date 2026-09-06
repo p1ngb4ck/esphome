@@ -65,10 +65,6 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
     esp_timer_stop(this->present_timer_);
     esp_timer_delete(this->present_timer_);
   }
-
-  if (this->state_mutex_ != nullptr) {
-    vSemaphoreDelete(this->state_mutex_);
-  }
 }
 
 void SimpleVideoPlayer::setup() {
@@ -86,14 +82,6 @@ void SimpleVideoPlayer::setup() {
   // after -- see canvas_buffer_'s comment in the header.
   if (this->lvgl_component_ == nullptr) {
     ESP_LOGE(TAG, "LVGL component not set");
-    this->mark_failed();
-    return;
-  }
-
-  // Create state mutex
-  this->state_mutex_ = xSemaphoreCreateMutex();
-  if (this->state_mutex_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create state mutex");
     this->mark_failed();
     return;
   }
@@ -287,12 +275,12 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
     this->wait_for_task_stop_(this->task_handle_, 5000);
   }
 
-  // Update state
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
+  // Update state. video_path_ is written here, before the playback task is created below (the
+  // task creation is a full memory barrier), and only read by that task -- no lock needed.
+  // state_ / last_error_ are atomic.
   this->video_path_ = video_path;
-  this->state_ = PlayerState::PLAYING;
-  this->last_error_ = PlaybackError::NONE;
-  xSemaphoreGive(this->state_mutex_);
+  this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
+  this->state_.store(PlayerState::PLAYING, std::memory_order_release);
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
   // App.loop() -> LvglComponent::loop() -> lv_timer_handler(), i.e. the actual LVGL
@@ -323,41 +311,30 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
 
   if (result != pdPASS) {
     ESP_LOGE(TAG, "Failed to create playback task");
-    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
-    this->state_ = PlayerState::ERROR;
+    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);  // sets state_ = ERROR
   }
 }
 
 void SimpleVideoPlayer::pause() {
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  if (this->state_ == PlayerState::PLAYING) {
+  PlayerState expected = PlayerState::PLAYING;
+  if (this->state_.compare_exchange_strong(expected, PlayerState::PAUSED, std::memory_order_acq_rel)) {
     ESP_LOGI(TAG, "Pausing playback");
-    this->state_ = PlayerState::PAUSED;
-    xSemaphoreGive(this->state_mutex_);
     this->on_paused_callbacks_.call();
-  } else {
-    xSemaphoreGive(this->state_mutex_);
   }
 }
 
 void SimpleVideoPlayer::resume() {
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  if (this->state_ == PlayerState::PAUSED) {
+  PlayerState expected = PlayerState::PAUSED;
+  if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
     ESP_LOGI(TAG, "Resuming playback");
-    this->state_ = PlayerState::PLAYING;
-    xSemaphoreGive(this->state_mutex_);
-  } else {
-    xSemaphoreGive(this->state_mutex_);
   }
 }
 
 void SimpleVideoPlayer::stop() {
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  if (this->state_ != PlayerState::STOPPED) {
+  PlayerState prev = this->state_.exchange(PlayerState::STOPPED, std::memory_order_acq_rel);
+  if (prev != PlayerState::STOPPED) {
     ESP_LOGI(TAG, "Stopping playback");
-    this->state_ = PlayerState::STOPPED;
   }
-  xSemaphoreGive(this->state_mutex_);
 }
 
 //========================================================================
@@ -698,12 +675,11 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   // Don't clobber an ERROR state recorded by set_error_() -- get_state()/get_last_error() must
-  // still report the failure after the task exits.
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  if (this->state_ != PlayerState::ERROR) {
-    this->state_ = PlayerState::STOPPED;
+  // still report the failure after the task exits. CAS from anything-but-ERROR to STOPPED.
+  PlayerState expected = this->state_.load(std::memory_order_acquire);
+  while (expected != PlayerState::ERROR &&
+         !this->state_.compare_exchange_weak(expected, PlayerState::STOPPED, std::memory_order_acq_rel)) {
   }
-  xSemaphoreGive(this->state_mutex_);
 
   this->task_handle_ = nullptr;
 
@@ -2154,10 +2130,9 @@ void SimpleVideoPlayer::stop_audio_task_() {
 //========================================================================
 
 void SimpleVideoPlayer::set_error_(PlaybackError error) {
-  xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  this->last_error_ = error;
-  this->state_ = PlayerState::ERROR;
-  xSemaphoreGive(this->state_mutex_);
+  // Publish last_error_ before state_ so any reader that sees ERROR also sees the reason.
+  this->last_error_.store(error, std::memory_order_relaxed);
+  this->state_.store(PlayerState::ERROR, std::memory_order_release);
 
   this->on_error_callbacks_.call(static_cast<uint8_t>(error));
 }

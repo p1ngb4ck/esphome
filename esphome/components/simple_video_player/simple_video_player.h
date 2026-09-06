@@ -42,7 +42,6 @@
 #ifdef USE_ESP32
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #endif
@@ -404,15 +403,16 @@ class SimpleVideoPlayer : public Component {
   SpeakerChannelMode speaker_channel_mode_{SpeakerChannelMode::SPEAKER_CHANNEL_MONO};  // Channel routing mode
 #endif
 
-  // Playback state. std::atomic because the playback task (Core 1) spins on it while play()/pause()/
-  // resume()/stop()/set_error_() write it from the main-loop core -- a plain field could be hoisted
-  // out of the loop by the compiler and would carry no cross-core visibility guarantee. state_mutex_
-  // is still held by the writers, but only to keep the multi-field updates (state_ + video_path_ +
-  // last_error_) consistent, not for the store itself.
+  // Playback state. std::atomic because the playback task (Core 1) reads it in its loop while
+  // play()/pause()/resume()/stop()/set_error_() write it from the main-loop core -- a plain field
+  // could be hoisted out of the loop by the compiler and carries no cross-core visibility
+  // guarantee. Transitions use compare_exchange/exchange; no mutex.
   std::atomic<PlayerState> state_{PlayerState::STOPPED};
-  PlaybackError last_error_{PlaybackError::NONE};
+  // Atomic for the same cross-core reason; written just before state_ becomes ERROR so a reader
+  // that sees ERROR also sees the reason.
+  std::atomic<PlaybackError> last_error_{PlaybackError::NONE};
   bool loop_{false};
-  std::string video_path_;
+  std::string video_path_;  // written in play() before the task starts, then read only by the task
 
   // File reader (backed by storage::StorageWorker -- handles local/network storage
   // transparently, see buffered_file_reader.h)
@@ -577,7 +577,6 @@ class SimpleVideoPlayer : public Component {
   // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
   TaskHandle_t task_handle_{nullptr};
-  SemaphoreHandle_t state_mutex_{nullptr};
 
   // One-shot high-resolution timer used to wake the playback task at the exact presentation
   // instant (see the pacing loop in playback_loop_()). Created once in setup(), re-armed per
