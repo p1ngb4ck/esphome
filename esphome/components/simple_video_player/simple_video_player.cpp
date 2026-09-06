@@ -110,9 +110,11 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Buffer B: an exact twin of LVGL's canvas buffer (A) -- same byte size -- so decode can
-  // ping-pong A/B and loop() just re-points canvas_draw_buf_->data. HW decoder OUTPUT must come
-  // from jpeg_alloc_decoder_mem(). Seed it with a copy of A (already blanked above).
+  // Buffer B: an exact twin of LVGL's canvas buffer (A) -- same jpeg_alloc_decoder_mem() call on
+  // the same requested size, so B's real (alignment-rounded) size equals A's. jpeg_decoder_process
+  // rejects an output size that isn't alignment-rounded, so from here frame_bytes_ IS that rounded
+  // size (b_actual) -- used for the decode capacity, the A/B blanks, and the cache syncs; both
+  // buffers physically hold that many bytes. Seed B with a copy of A (already blanked above).
   {
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
@@ -124,6 +126,7 @@ void SimpleVideoPlayer::setup() {
       this->mark_failed();
       return;
     }
+    this->frame_bytes_ = b_actual;
     std::memcpy(this->decode_buffer_b_, this->canvas_buffer_, this->frame_bytes_);
   }
 
