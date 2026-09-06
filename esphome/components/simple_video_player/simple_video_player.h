@@ -613,10 +613,11 @@ class SimpleVideoPlayer : public Component {
   // (resync_generation_ bump) fires once at the start of the episode, not once per dropped frame.
   bool resync_active_{false};
   // Playback task only, plain counters (no logging on the priority-10 path): number of re-sync
-  // episodes this session and total frames discarded across them. Summarised in one line after
-  // the playback loop exits.
+  // episodes this session, total frames discarded across them, and decode failures skipped.
+  // Summarised in one line after the playback loop exits.
   uint32_t resync_count_{0};
   uint32_t resync_frames_dropped_{0};
+  uint32_t decode_fail_count_{0};
   // How far behind the wall-clock media time the current frame may fall before the pace controller
   // stops walking frame-by-frame and drops straight to the live edge.
   static constexpr uint32_t RESYNC_LAG_FRAMES = 4;

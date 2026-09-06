@@ -409,6 +409,7 @@ void SimpleVideoPlayer::playback_loop_() {
   this->resync_active_ = false;
   this->resync_count_ = 0;
   this->resync_frames_dropped_ = 0;
+  this->decode_fail_count_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
@@ -588,7 +589,8 @@ void SimpleVideoPlayer::playback_loop_() {
                                            static_cast<int64_t>(frame_index * this->frame_duration_us_);
 
     if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
-      ESP_LOGW(TAG, "Failed to decode frame, skipping");
+      // No logging on this priority-10 path (AGENTS.md) -- plain counter, summarised after the loop.
+      this->decode_fail_count_++;
       continue;
     }
 
@@ -639,10 +641,10 @@ void SimpleVideoPlayer::playback_loop_() {
   // Disarm the presentation timer in case the loop exited (EOF/error/stop) with it still pending.
   esp_timer_stop(this->present_timer_);
 
-  // One-line A/V re-sync summary -- safe here (the loop has exited, this is not the hot path).
-  if (this->resync_count_ > 0) {
-    ESP_LOGW(TAG, "A/V re-sync fired %" PRIu32 " time(s), %" PRIu32 " frames dropped total",
-             this->resync_count_, this->resync_frames_dropped_);
+  // One-line playback-health summary -- safe here (the loop has exited, this is not the hot path).
+  if (this->resync_count_ > 0 || this->decode_fail_count_ > 0) {
+    ESP_LOGW(TAG, "playback health: %" PRIu32 " re-sync(s), %" PRIu32 " frames dropped, %" PRIu32 " decode failures",
+             this->resync_count_, this->resync_frames_dropped_, this->decode_fail_count_);
   }
 
   // Stop the loader task before closing the file -- it must not still be reading via
