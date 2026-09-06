@@ -220,6 +220,7 @@ void SimpleVideoPlayer::loop() {
   // per-frame lv_canvas_set_draw_buf (that re-inits the image descriptor every frame: the "lvgl
   // reset" flicker, and wasted hot-path cost).
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
+    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
     lv_obj_invalidate(this->canvas_);
   }
 }
