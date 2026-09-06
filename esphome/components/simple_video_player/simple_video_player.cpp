@@ -373,14 +373,11 @@ void SimpleVideoPlayer::playback_loop_() {
   // not this component's -- expected usage is a dedicated page holding just the video canvas,
   // switched to by the caller's own action before play() and away from after stop().
 
-  // Audio/speaker initialization -- independent of the video ring buffer, runs before the
-  // loader/decode pipeline starts.
+  // Audio/speaker init -- only when a speaker is configured AND this AVI actually has a matching
+  // audio track. init_audio_decoder_() returns false (quietly, video-only) for no-audio files.
 #ifdef USE_AUDIO
-  if (this->video_format_ == VideoFormat::AVI_MJPEG) {
-    ESP_LOGI(TAG, "Initializing audio decoder and speaker...");
-    if (!this->init_audio_decoder_()) {
-      ESP_LOGW(TAG, "Audio initialization failed, continuing with video only");
-    } else {
+  if (this->speaker_ != nullptr && this->video_format_ == VideoFormat::AVI_MJPEG) {
+    if (this->init_audio_decoder_()) {
       ESP_LOGI(TAG, "Audio system ready");
     }
   }

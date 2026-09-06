@@ -281,6 +281,13 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
+    # Defines USE_HWJPG (P4). Required: the LVGL canvas dma_buffer path allocates its draw buffer
+    # via jpeg_alloc_decoder_mem() only when USE_HWJPG is defined, otherwise falls back to plain
+    # lv_malloc_core() -- which the P4 hardware JPEG decoder rejects as unaligned.
+    from esphome.components.esp32 import require_hw_jpeg
+
+    require_hw_jpeg()
+
     # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
     # blocking main-loop read; request it directly instead of relying on whichever storage
     # device the user happened to configure to have already asked for it.
