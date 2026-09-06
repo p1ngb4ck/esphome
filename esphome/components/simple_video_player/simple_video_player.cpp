@@ -412,21 +412,9 @@ void SimpleVideoPlayer::playback_loop_() {
 
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
-
-  // Prime: demux (feeding audio) a few frames ahead so the speaker starts with a jitter margin.
-  // Those frames' video is skipped; the clock is anchored below so frame `prime` presents "now"
-  // -- audio and video stay aligned.
-  uint32_t prime = 0;
-#ifdef USE_AUDIO
-  if (this->audio_enabled_) {
-    const uint32_t prime_target = static_cast<uint32_t>(0.30f * this->target_fps_) + 1;  // ~300 ms
-    while (prime < prime_target && prime < 15 && this->read_frame_() > 0)
-      prime++;
-  }
-#endif
-  this->video_frame_index_ = prime;
-  this->playback_start_time_us_ =
-      esp_timer_get_time() - static_cast<int64_t>(prime * this->frame_duration_us_);
+  // Anchored on the first paced frame in the loop (see there), not here -- so cold-start read
+  // latency is not counted as the stream already running late.
+  this->playback_start_time_us_ = 0;
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
@@ -462,6 +450,13 @@ void SimpleVideoPlayer::playback_loop_() {
       break;
     }
     const uint32_t frame_index = this->video_frame_index_++;
+
+    // Anchor the wall clock on the first paced frame -- once its payload is actually in hand, so
+    // reader cold-start latency doesn't make every frame look late and get dropped.
+    if (this->playback_start_time_us_ == 0) {
+      this->playback_start_time_us_ =
+          esp_timer_get_time() - static_cast<int64_t>(frame_index * this->frame_duration_us_);
+    }
 
     // Where this frame belongs on the wall clock.
     const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
