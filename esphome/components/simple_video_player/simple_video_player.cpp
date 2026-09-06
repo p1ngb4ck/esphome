@@ -246,7 +246,16 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // Nothing to do in loop - playback runs in separate task
+  // The ONLY LVGL call for a frame update. The decode/playback task decodes into canvas_buffer_
+  // and does the cache maintenance itself (esp_cache_msync -- a pure ESP-IDF op, no LVGL state),
+  // then sets frame_ready_. lv_obj_invalidate() walks the object tree and mutates the display's
+  // invalid-area list, so it MUST run on the LVGL thread (this loop), never from the higher-
+  // priority playback task that would preempt lv_timer_handler() mid-render. Same split
+  // picture_viewer uses: its background task never touches LVGL; the canvas invalidate is on the
+  // main loop.
+  if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
+    lv_obj_invalidate(this->canvas_);
+  }
 }
 
 void SimpleVideoPlayer::dump_config() {
@@ -429,8 +438,11 @@ void SimpleVideoPlayer::playback_loop_() {
         static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
     std::memset(this->canvas_buffer_, 0, buffer_size);
     // Write the zeros back to PSRAM now (CPU->memory) so no dirty cache line can evict over the
-    // first frame's DMA decode later. Flush, not invalidate: the CPU just wrote this buffer.
-    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+    // first frame's DMA decode later. C2M (flush), not M2C: the CPU just wrote this buffer.
+    // esp_cache_msync, not lv_draw_buf_flush_cache(): this runs on the playback task, and the
+    // LVGL cache wrappers must not be called off the LVGL thread.
+    esp_cache_msync(this->canvas_buffer_, buffer_size,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   }
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
@@ -665,16 +677,15 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Blank the canvas on stop -- same direct write as decode_frame_(), on the decode/playback task
-  // itself. Cosmetic best-effort (the canvas otherwise keeps showing the last frame until the next
-  // play()); no lock needed for the same reason as present_frame_() (see its header comment).
+  // Blank the canvas on stop -- runs on the playback task, so same split as present_frame_():
+  // memset + cache flush here (pure ESP-IDF op), and hand the lv_obj_invalidate() to loop() via
+  // frame_ready_. Cosmetic best-effort (the canvas otherwise keeps showing the last frame).
   if (this->canvas_buffer_ready_) {
     size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
     std::memset(this->canvas_buffer_, 0, frame_bytes);
-    // Same order lv_canvas_fill_bg() uses: flush the CPU cache for the buffer BEFORE invalidating,
-    // so the render pass reads the just-written bytes rather than stale cache lines.
-    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
-    lv_obj_invalidate(this->canvas_);
+    esp_cache_msync(this->canvas_buffer_, frame_bytes,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    this->frame_ready_.store(true, std::memory_order_release);
   }
 
   // Don't clobber an ERROR state recorded by set_error_() -- get_state()/get_last_error() must
@@ -1010,18 +1021,19 @@ void SimpleVideoPlayer::present_frame_() {
   if (!this->canvas_buffer_ready_) {
     return;
   }
-  // No lock: this runs on the decode/playback task (Core 1, priority 10), the same core as the
-  // main loop / lv_timer_handler() but at higher priority, so LVGL's render only runs while this
-  // task is blocked -- never concurrently with this write (see canvas_buffer_'s header comment).
+  // Runs on the decode/playback task. Do the cache maintenance here (safe from any task -- pure
+  // ESP-IDF cache op, touches no LVGL state) and hand the actual lv_obj_invalidate() to loop() on
+  // the LVGL thread via frame_ready_.
   //
-  // INVALIDATE, not flush. The hardware JPEG decoder DMA-wrote canvas_buffer_ in PSRAM; the CPU's
-  // cache for that region still holds the PREVIOUS frame's pixels (loaded when LVGL last rendered
-  // the canvas). lv_draw_buf_flush_cache() is a CPU->memory writeback (for when the CPU wrote the
-  // buffer) -- the wrong direction here. lv_draw_buf_invalidate_cache() discards the stale CPU
-  // cache lines so LVGL's next canvas render reads the freshly decoded pixels from PSRAM. Without
-  // this, every frame after the first shows frame 0.
-  lv_draw_buf_invalidate_cache(this->canvas_draw_buf_, nullptr);
-  lv_obj_invalidate(this->canvas_);
+  // INVALIDATE (memory->CPU), not flush. The hardware JPEG decoder DMA-wrote canvas_buffer_ in
+  // PSRAM; the CPU's cache for that region still holds the PREVIOUS frame's pixels (loaded when
+  // LVGL last rendered the canvas). Discard those stale lines so LVGL's next canvas render reads
+  // the freshly decoded pixels. Without this, every frame after the first shows frame 0.
+  const size_t frame_bytes =
+      static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
+  esp_cache_msync(this->canvas_buffer_, frame_bytes,
+                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  this->frame_ready_.store(true, std::memory_order_release);
 }
 
 //========================================================================

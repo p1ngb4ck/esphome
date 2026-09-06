@@ -522,6 +522,11 @@ class SimpleVideoPlayer : public Component {
   int canvas_buffer_height_{0};
   bool canvas_buffer_ready_{false};
 
+  // Set by the decode/playback task (or the stop-blank) once canvas_buffer_ holds a new frame and
+  // its cache has been synced; consumed by loop() on the LVGL thread, which does the one
+  // lv_obj_invalidate() for it. Keeps every LVGL call off the higher-priority playback task.
+  std::atomic<bool> frame_ready_{false};
+
 #if defined(USE_HWJPG)
   // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_
   // call, destroyed in free_buffers_() -- creating/tearing down the hardware JPEG engine per frame
