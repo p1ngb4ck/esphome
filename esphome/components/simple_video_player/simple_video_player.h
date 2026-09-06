@@ -232,17 +232,6 @@ class SimpleVideoPlayer : public Component {
 
   /// Stop audio processing task
   void stop_audio_task_();
-
-  /// Convert audio channels based on speaker configuration
-  /// @param input_data Input PCM audio data
-  /// @param output_data Output buffer for converted audio
-  /// @param frame_count Number of audio frames to convert
-  /// @param input_channels Number of channels in input (e.g., 2 for stereo)
-  /// @param output_channels Number of channels in output (e.g., 1 for mono)
-  /// @param bits_per_sample Bits per sample (must be 16)
-  /// @return true if conversion succeeded, false otherwise
-  bool convert_audio_channels_(const uint8_t *input_data, uint8_t *output_data, size_t frame_count,
-                               uint8_t input_channels, uint8_t output_channels, uint8_t bits_per_sample);
 #endif
 
   //========================================================================

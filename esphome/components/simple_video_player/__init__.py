@@ -327,8 +327,8 @@ async def to_code(config):
         cg.add_define("SVP_AUDIO_BITS_PER_SAMPLE", config[CONF_AUDIO_BITS_PER_SAMPLE])
         cg.add_define(f"SVP_AUDIO_CODEC_{config[CONF_AUDIO_CODEC].upper()}")
 
-        # Speaker's own channel mode (mono/left/right/stereo), resolved the same way -- used for
-        # stereo<->mono downmix routing (see convert_audio_channels_() in the C++ side).
+        # Speaker's own channel mode (mono/left/right/stereo), resolved the same way -- part of the
+        # fixed-format lock (source channel count must equal the speaker's; no runtime conversion).
         channel_mode = config.get(CONF_RESOLVED_SPEAKER_CHANNEL)
         if channel_mode in SPEAKER_CHANNEL_MODES:
             cg.add(var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode]))

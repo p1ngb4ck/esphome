@@ -1262,66 +1262,6 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
 }
 
-bool SimpleVideoPlayer::convert_audio_channels_(const uint8_t *input_data, uint8_t *output_data, size_t frame_count,
-                                                uint8_t input_channels, uint8_t output_channels,
-                                                uint8_t bits_per_sample) {
-  // Only 16-bit audio is supported
-  if (bits_per_sample != 16) {
-    ESP_LOGE(TAG, "Channel conversion only supports 16-bit audio, got %u-bit", bits_per_sample);
-    return false;
-  }
-
-  const int16_t *input = reinterpret_cast<const int16_t *>(input_data);
-  int16_t *output = reinterpret_cast<int16_t *>(output_data);
-
-  // Stereo → Mono conversion
-  if (input_channels == 2 && output_channels == 1) {
-    for (size_t i = 0; i < frame_count; i++) {
-      int16_t left = input[i * 2];
-      int16_t right = input[i * 2 + 1];
-
-      switch (this->speaker_channel_mode_) {
-        case SpeakerChannelMode::SPEAKER_CHANNEL_LEFT:
-          // Use only left channel
-          output[i] = left;
-          break;
-
-        case SpeakerChannelMode::SPEAKER_CHANNEL_RIGHT:
-          // Use only right channel
-          output[i] = right;
-          break;
-
-        case SpeakerChannelMode::SPEAKER_CHANNEL_MONO:
-        default:
-          // Downmix: average both channels (with proper overflow handling)
-          output[i] = (static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2;
-          break;
-      }
-    }
-    return true;
-  }
-
-  // Mono → Stereo conversion
-  if (input_channels == 1 && output_channels == 2) {
-    for (size_t i = 0; i < frame_count; i++) {
-      int16_t sample = input[i];
-      output[i * 2] = sample;      // Left
-      output[i * 2 + 1] = sample;  // Right (duplicate)
-    }
-    return true;
-  }
-
-  // Pass-through (no conversion needed)
-  if (input_channels == output_channels) {
-    size_t bytes = frame_count * input_channels * (bits_per_sample / 8);
-    memcpy(output_data, input_data, bytes);
-    return true;
-  }
-
-  ESP_LOGE(TAG, "Unsupported channel conversion: %u → %u", input_channels, output_channels);
-  return false;
-}
-
 void SimpleVideoPlayer::audio_task_entry_(void *param) {
   SimpleVideoPlayer *player = static_cast<SimpleVideoPlayer *>(param);
   player->audio_processing_loop_();
