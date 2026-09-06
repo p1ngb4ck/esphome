@@ -7,15 +7,10 @@
 
 #include "esphome/components/lvgl/lvgl_esphome.h"
 
-#if defined(USE_HWJPG)
 #include "driver/jpeg_decode.h"
 #include "driver/jpeg_types.h"
-#elif defined(USE_NEWJPEG)
-#include "esp_jpeg_dec.h"
-#include "esp_jpeg_common.h"
-#else
-#include <JPEGDEC.h>
-#endif
+
+// ESP32-P4 hardware JPEG decoder only -- other variants cannot decode fast enough for video.
 
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
@@ -47,21 +42,6 @@
 #endif
 
 namespace esphome::simple_video_player {
-
-/// Which JPEG backend esp32.require_hw_jpeg() selected for this platform.
-enum class JpegBackend {
-  HW_P4,     // ESP32-P4 hardware JPEG codec (esp_driver_jpeg)
-  NEW_JPEG,  // ESP32-S2/S3 esp_new_jpeg (SIMD-optimized software)
-  JPEGDEC,   // Software fallback (bitbank2/JPEGDEC) - other ESP32 variants
-};
-
-#if defined(USE_HWJPG)
-static constexpr JpegBackend JPEG_BACKEND = JpegBackend::HW_P4;
-#elif defined(USE_NEWJPEG)
-static constexpr JpegBackend JPEG_BACKEND = JpegBackend::NEW_JPEG;
-#else
-static constexpr JpegBackend JPEG_BACKEND = JpegBackend::JPEGDEC;
-#endif
 
 /// Speaker channel modes for audio routing
 enum class SpeakerChannelMode : uint8_t {
@@ -278,18 +258,11 @@ class SimpleVideoPlayer : public Component {
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
-  // Backend-specific decode, selected at compile time via JPEG_BACKEND (same dispatch pattern
-  // as runtime_image/jpeg_decoder.h -- only one explicit specialization is ever defined per
-  // build, in simple_video_player.cpp, each behind the #ifdef that also guards its backend's
-  // headers above).
-  template<JpegBackend Backend> bool decode_frame_backend_(const uint8_t *frame_data, size_t frame_size);
-  // Backend-specific decoder/buffer initialization, called once from setup(). Same dispatch
-  // pattern as decode_frame_backend_ above.
-  template<JpegBackend Backend> bool init_decoder_backend_();
-  // Backend-specific header-only parse (width/height, no pixel decode), used by
-  // get_video_dimensions_() for the raw-MJPEG case. Same dispatch pattern as above.
-  template<JpegBackend Backend>
-  bool parse_header_backend_(const uint8_t *buffer, size_t size, uint32_t &width, uint32_t &height);
+  /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
+  bool init_decoder_();
+  /// Header-only parse (width/height, no pixel decode), used by get_video_dimensions_() for the
+  /// raw-MJPEG case.
+  bool parse_header_(const uint8_t *buffer, size_t size, uint32_t &width, uint32_t &height);
 
   /// Get video dimensions from first frame
   bool get_video_dimensions_(uint32_t &width, uint32_t &height);
@@ -369,6 +342,13 @@ class SimpleVideoPlayer : public Component {
   /// priority, so LVGL's render can only run while this task is blocked -- never concurrently with
   /// a decode write or this invalidate (see canvas_buffer_'s header comment).
   void present_frame_();
+
+  // Current decode target (A, or B when it exists), and its LVGL draw buf.
+  bool use_b_() const { return this->decode_slot_ == 1 && this->decode_buffer_b_ != nullptr; }
+  uint16_t *decode_target_() { return this->use_b_() ? this->decode_buffer_b_ : this->canvas_buffer_; }
+  lv_draw_buf_t *decode_target_draw_buf_() {
+    return this->use_b_() ? &this->decode_draw_buf_b_ : this->canvas_draw_buf_;
+  }
 
   //========================================================================
   // Error Handling
@@ -516,26 +496,26 @@ class SimpleVideoPlayer : public Component {
   // Fixed at MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT: single fixed-resolution panel, set correctly in
   // YAML from the start, no runtime "resize" case -- attach_canvas_buffer_() validates the actual
   // buffer it finds is within these bounds, it does not derive them.
-  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // owned by LVGL; never allocated or freed by us
-  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data, cached for convenience
+  // Double buffer: A is LVGL's own canvas draw buf (never freed by us), B is one extra RGB565
+  // buffer we allocate. Decode alternates A/B so the frame LVGL is rendering is never the one
+  // decode is writing, and the src pointer changes every frame (needed for lv_canvas to re-read).
+  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // A, owned by LVGL
+  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data
+  uint16_t *decode_buffer_b_{nullptr};       // B, ours
+  lv_draw_buf_t decode_draw_buf_b_{};        // wraps B, same header as A
   int canvas_buffer_width_{0};
   int canvas_buffer_height_{0};
   bool canvas_buffer_ready_{false};
+  uint8_t decode_slot_{0};  // playback task: 0 -> A, 1 -> B for the next decode
 
-  // Set by the decode/playback task (or the stop-blank) once canvas_buffer_ holds a new frame and
-  // its cache has been synced; consumed by loop() on the LVGL thread, which does the one
-  // lv_obj_invalidate() for it. Keeps every LVGL call off the higher-priority playback task.
+  // present_frame_() publishes the draw buf holding the just-decoded frame; loop() (LVGL thread)
+  // hands it to lv_canvas_set_draw_buf() + lv_obj_invalidate(). All LVGL calls stay off the
+  // higher-priority playback task.
+  std::atomic<lv_draw_buf_t *> ready_draw_buf_{nullptr};
   std::atomic<bool> frame_ready_{false};
 
-#if defined(USE_HWJPG)
-  // Created once in init_decoder_backend_<HW_P4>(), reused for every frame's decode_frame_backend_
-  // call, destroyed in free_buffers_() -- creating/tearing down the hardware JPEG engine per frame
-  // (as opposed to per playback session) is far too expensive to do 25+ times a second.
+  // Created once in init_decoder_(), reused every frame, destroyed in free_buffers_().
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
-#elif defined(USE_NEWJPEG)
-  // Same reasoning as hw_jpeg_decoder_ above, for esp_new_jpeg's decoder handle.
-  jpeg_dec_handle_t new_jpeg_decoder_{nullptr};
-#endif
 
   // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
   // (Core 1). This is esphome::ring_buffer::RingBuffer (a thin wrapper over ESP-IDF's native

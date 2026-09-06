@@ -33,26 +33,6 @@ static constexpr size_t DMA_ALIGNMENT = 128;
 static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
 static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
 
-// Forward-declare the explicit specialization actually compiled for this backend (mirrors the
-// JPEG_BACKEND selection in simple_video_player.h): setup()/playback_loop_() call these via the
-// compile-time-constant JPEG_BACKEND before their out-of-line definitions appear further down in
-// this file, and an explicit specialization must be declared before any implicit instantiation of
-// that same template argument -- without this, the call site implicitly instantiates the
-// (undefined) primary template, making the later explicit-specialization definition an error.
-#if defined(USE_HWJPG)
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>();
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
-                                                                              size_t frame_size);
-#elif defined(USE_NEWJPEG)
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>();
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(const uint8_t *frame_data,
-                                                                                 size_t frame_size);
-#else
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>();
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(const uint8_t *frame_data,
-                                                                                size_t frame_size);
-#endif
-
 //========================================================================
 // Component Lifecycle
 //========================================================================
@@ -132,6 +112,28 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
+  // Buffer B: second RGB565 output, same size/header as LVGL's canvas buffer (A). P4 hardware
+  // JPEG decoder output must come from jpeg_alloc_decoder_mem().
+#if defined(USE_HWJPG)
+  {
+    size_t b_size =
+        static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
+    jpeg_decode_memory_alloc_cfg_t out_cfg{};
+    out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+    size_t b_actual = 0;
+    this->decode_buffer_b_ = static_cast<uint16_t *>(jpeg_alloc_decoder_mem(b_size, &out_cfg, &b_actual));
+    if (this->decode_buffer_b_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate decode buffer B (%zu bytes)", b_size);
+      this->mark_failed();
+      return;
+    }
+    std::memset(this->decode_buffer_b_, 0, b_size);
+    const lv_image_header_t &h = this->canvas_draw_buf_->header;
+    lv_draw_buf_init(&this->decode_draw_buf_b_, h.w, h.h, static_cast<lv_color_format_t>(h.cf), h.stride,
+                     this->decode_buffer_b_, this->canvas_draw_buf_->data_size);
+  }
+#endif
+
   // Allocate cache buffer (internal RAM, aligned for DMA)
   // ESP32-P4 only
   this->cache_buffer_.reset(
@@ -143,10 +145,7 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Pre-allocate the JPEG decoder's input/output buffers during setup (backend-specific: see
-  // init_decoder_backend_ specializations below). This ensures resources are allocated early
-  // and won't fail during playback.
-  if (!this->init_decoder_backend_<JPEG_BACKEND>()) {
+  if (!this->init_decoder_()) {
     ESP_LOGE(TAG, "Failed to initialize JPEG decoder buffers");
     this->mark_failed();
     return;
@@ -246,23 +245,15 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // The ONLY LVGL calls for a frame update, deliberately on the LVGL thread (this loop): the
-  // decode/playback task decodes into canvas_buffer_ and does the cache maintenance itself
-  // (esp_cache_msync -- a pure ESP-IDF op), then sets frame_ready_. lv_* calls mutate LVGL state
-  // and MUST NOT run from the higher-priority playback task that would preempt lv_timer_handler()
-  // mid-render.
-  //
-  // lv_obj_invalidate() ALONE is not enough for a canvas whose pixels change in place: the image
-  // source pointer never changes, so LVGL re-composites its CACHED decoded copy and the canvas
-  // stays on the first frame. Re-setting the SAME draw buf forces the re-read: verified against
-  // LVGL 9.5 lv_canvas.c, lv_canvas_set_draw_buf() is lv_image_cache_drop() + lv_image_set_src()
-  // + lv_image_cache_drop() (lv_image_cache_drop() itself is not in LVGL's public headers). The
-  // canvas_buffer_ pointer is unchanged, so this only flushes the cache + re-asserts the src --
-  // it does NOT tear down the attachment the way swapping to a DIFFERENT lv_draw_buf_t would.
-  // youkorr's lvgl_camera_display does exactly this every frame for the same reason.
+  // Only place LVGL is touched for a frame update, and only on the LVGL thread. present_frame_()
+  // (playback task) publishes the ready buffer; point the canvas at it (A/B alternate, so the src
+  // pointer changes -> lv_canvas re-reads) and invalidate.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
-    lv_obj_invalidate(this->canvas_);
+    lv_draw_buf_t *db = this->ready_draw_buf_.load(std::memory_order_acquire);
+    if (db != nullptr) {
+      lv_canvas_set_draw_buf(this->canvas_, db);
+      lv_obj_invalidate(this->canvas_);
+    }
   }
 }
 
@@ -404,6 +395,7 @@ void SimpleVideoPlayer::playback_loop_() {
   this->resync_count_ = 0;
   this->resync_frames_dropped_ = 0;
   this->decode_fail_count_ = 0;
+  this->decode_slot_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
@@ -625,9 +617,9 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 
     this->present_frame_();
+    this->decode_slot_ ^= 1;  // next frame decodes into the other buffer
 
-    // frame_count_ tracks the absolute index of the last presented frame (+1). It comes from the
-    // frame's own tag, not a blind ++ -- after an A/V re-sync drop it jumps forward with the tag.
+    // frame_count_ tracks the absolute index of the last presented frame (+1), from the frame tag.
     this->frame_count_ = frame_index + 1;
 
     // Feed watchdog periodically to prevent task watchdog timeout during long playback.
@@ -1019,49 +1011,46 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 }
 
 bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
-  // Just decode -- straight into canvas_buffer_, in place (see that member's header comment).
-  // Presentation (cache flush + invalidate) is a separate, deliberately later step: see
-  // present_frame_() and the pacing loop's own comment on why it's timed, not immediate.
-  return this->decode_frame_backend_<JPEG_BACKEND>(frame_data, frame_size);
+  size_t aligned_size = ALIGN_UP(frame_size, 16);  // HW reads up to aligned_size, not frame_size
+  if (aligned_size > this->input_buffer_size_) {
+    return false;
+  }
+
+  jpeg_decode_cfg_t decode_cfg{};
+  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+#if LV_COLOR_16_SWAP
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+#else
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+#endif
+
+  uint16_t *decode_target = this->decode_target_();
+  size_t decode_target_capacity =
+      static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
+
+  // jpeg_decoder_process() is synchronous; its esp_err_t return is the completion status.
+  uint32_t out_size = 0;
+  esp_err_t err = jpeg_decoder_process(
+      this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+      reinterpret_cast<uint8_t *>(decode_target), static_cast<uint32_t>(decode_target_capacity), &out_size);
+
+  return err == ESP_OK && out_size > 0;
 }
 
 void SimpleVideoPlayer::present_frame_() {
   if (!this->canvas_buffer_ready_) {
     return;
   }
-  // Runs on the decode/playback task. Do the cache maintenance here (safe from any task -- pure
-  // ESP-IDF cache op, touches no LVGL state) and hand the actual lv_obj_invalidate() to loop() on
-  // the LVGL thread via frame_ready_.
-  //
-  // INVALIDATE (memory->CPU), not flush. The hardware JPEG decoder DMA-wrote canvas_buffer_ in
-  // PSRAM; the CPU's cache for that region still holds the PREVIOUS frame's pixels (loaded when
-  // LVGL last rendered the canvas). Discard those stale lines so LVGL's next canvas render reads
-  // the freshly decoded pixels. Without this, every frame after the first shows frame 0.
+  // Playback task: M2C-invalidate the just-decoded buffer (decoder DMA-wrote PSRAM) and publish it.
   const size_t frame_bytes =
       static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-  esp_cache_msync(this->canvas_buffer_, frame_bytes,
+  esp_cache_msync(this->decode_target_(), frame_bytes,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  this->ready_draw_buf_.store(this->decode_target_draw_buf_(), std::memory_order_release);
   this->frame_ready_.store(true, std::memory_order_release);
 }
 
-//========================================================================
-// JPEG Backend Implementations
-//
-// Exactly one of the three blocks below is compiled per build, selected by which of
-// USE_HWJPG / USE_NEWJPEG / neither is defined -- the same defines JPEG_BACKEND
-// (simple_video_player.h) is derived from. See runtime_image/jpeg_decoder.cpp for the same
-// pattern applied to image decoding.
-//========================================================================
-
-#if defined(USE_HWJPG)
-
-// ESP32-P4: hardware JPEG codec (esp_driver_jpeg). Unlike runtime_image's HW_P4 backend (which
-// decodes a single still image and can afford a per-call engine open/close), video needs the
-// engine created once here and held open for the whole playback session -- decode_frame_backend_
-// below just reuses it every frame; creating/tearing it down 25+ times a second was catastrophic.
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
-  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (hardware JPEG decoder, ESP32-P4)...");
-
+bool SimpleVideoPlayer::init_decoder_() {
   if (this->hw_jpeg_decoder_ == nullptr) {
     jpeg_decode_engine_cfg_t eng_cfg{};
     eng_cfg.intr_priority = 0;
@@ -1071,23 +1060,10 @@ template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::HW_P4>() {
       return false;
     }
   }
-
-  // Compressed-frame input buffers now live in video_frame_ring_buffer_ (see
-  // allocate_frame_ring_()), not a single input_buffer_ -- the ring is what lets the loader task
-  // (Core 0) read ahead of the decode task (Core 1) instead of serializing I/O with decode+pacing
-  // on one task.
-  //
-  // No decode output buffer allocated here: decode_frame_backend_ below writes directly into
-  // canvas_buffer_, LVGL's own existing canvas pixel buffer (see that member's header comment),
-  // fetched lazily from play() by attach_canvas_buffer_() instead -- this->canvas_ is not
-  // guaranteed to have its buffer built yet at this point (setup() order across components), so
-  // there is nothing to fetch a decode target from here.
   return true;
 }
 
-template<>
-bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::HW_P4>(const uint8_t *buffer, size_t size,
-                                                                   uint32_t &width, uint32_t &height) {
+bool SimpleVideoPlayer::parse_header_(const uint8_t *buffer, size_t size, uint32_t &width, uint32_t &height) {
   jpeg_decode_picture_info_t header;
   if (jpeg_decoder_get_info(buffer, static_cast<uint32_t>(size), &header) != ESP_OK) {
     return false;
@@ -1096,221 +1072,6 @@ bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::HW_P4>(const uint8_t 
   height = header.height;
   return true;
 }
-
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(const uint8_t *frame_data,
-                                                                              size_t frame_size) {
-  // Aligned to 16 bytes (hardware requirement) -- this matches the component's own original,
-  // confirmed-working implementation (checked out separately at commit 54eb52387c for reference),
-  // not picture_viewer's still-image call shape. The two aren't the same call: picture_viewer
-  // decodes one full, standalone JPEG file with real EOF/EOI framing around it; this decodes a
-  // frame carved out of a much larger interleaved AVI stream, and the hardware decoder here reads
-  // up to aligned_size, not frame_size, regardless of what's declared.
-  size_t aligned_size = ALIGN_UP(frame_size, 16);
-  if (aligned_size > this->input_buffer_size_) {
-    return false;
-  }
-
-  // Must match whatever byte order LVGL's own RGB565 canvas actually expects, not assume one --
-  // same requirement, and same LV_COLOR_16_SWAP branch, as the NEW_JPEG and JPEGDEC backends
-  // below (both of which point back to this comment). esphome/components/lvgl only defines
-  // LV_COLOR_16_SWAP when color_depth is 16 (always true for RGB565 canvases), from
-  // lvgl.byte_order -- which itself DEFAULTS to big_endian when neither the display nor the
-  // lvgl: config sets it explicitly (see lvgl/__init__.py). The driver's own header documents BGR
-  // order as "small endian" and RGB order as "big endian" output -- i.e. exactly
-  // LV_COLOR_16_SWAP's two states -- so select between them at compile time instead of hardcoding
-  // one and needing a separate manual byte-swap to compensate for the other.
-  jpeg_decode_cfg_t decode_cfg{};
-  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-#if LV_COLOR_16_SWAP
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
-#else
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-#endif
-
-  // Decode straight into canvas_buffer_ -- LVGL's own existing canvas pixel buffer, in place. See
-  // that member's header comment for why this is safe on this core-pinning and why no extra
-  // scratch buffer/copy is needed.
-  uint16_t *decode_target = this->canvas_buffer_;
-  size_t decode_target_capacity =
-      static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-
-  // jpeg_decoder_process() is synchronous: it blocks until the decode completes or eng_cfg's
-  // timeout_ms elapses, and its esp_err_t return IS the completion status (verified against
-  // esp-idf v5.5 driver/jpeg_decode.h and this repo's own known-working decode_frame_ in
-  // testing_dev_old_ref -- there is no async/callback variant). Ignoring the return meant a failed
-  // or timed-out decode was reported as success and a stale/garbage canvas was presented.
-  uint32_t out_size = 0;
-  esp_err_t err = jpeg_decoder_process(
-      this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
-      reinterpret_cast<uint8_t *>(decode_target), static_cast<uint32_t>(decode_target_capacity), &out_size);
-
-  // No logging on this priority-10 path (AGENTS.md); returning false routes to the pacer's
-  // "Failed to decode frame, skipping" branch, which does not present this frame.
-  return err == ESP_OK && out_size > 0;
-}
-
-#elif defined(USE_NEWJPEG)
-
-// ESP32-S2/S3: esp_new_jpeg (SIMD-optimized software decoder). Decodes directly into
-// canvas_buffer_ (LVGL's own buffer, never allocated or freed by this component -- see that
-// member's header comment), same as every other backend.
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::NEW_JPEG>() {
-  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (esp_new_jpeg decoder)...");
-
-  if (this->new_jpeg_decoder_ == nullptr) {
-    jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-    // Must match whatever byte order LVGL's RGB565 canvas actually expects -- see the HW_P4
-    // backend's decode_frame_backend_ for why LV_COLOR_16_SWAP (not a hardcoded assumption) is
-    // the correct thing to branch on here.
-#if LV_COLOR_16_SWAP
-    config.output_type = JPEG_PIXEL_FORMAT_RGB565_BE;
-#else
-    config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-#endif
-    if (jpeg_dec_open(&config, &this->new_jpeg_decoder_) != JPEG_ERR_OK) {
-      ESP_LOGE(TAG, "Could not create esp_new_jpeg decoder");
-      return false;
-    }
-  }
-
-  // Compressed-frame input buffers live in video_frame_ring_buffer_ (see allocate_frame_ring_()).
-  //
-  // No decode output buffer allocated here: decode_frame_backend_ below writes directly into
-  // canvas_buffer_, LVGL's own existing canvas pixel buffer (see that member's header comment),
-  // fetched lazily from play() by attach_canvas_buffer_() instead.
-  return true;
-}
-
-template<>
-bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::NEW_JPEG>(const uint8_t *buffer, size_t size,
-                                                                      uint32_t &width, uint32_t &height) {
-  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-  jpeg_dec_handle_t decoder = nullptr;
-  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK) {
-    return false;
-  }
-
-  jpeg_dec_io_t io{};
-  io.inbuf = const_cast<uint8_t *>(buffer);
-  io.inbuf_len = static_cast<int>(size);
-
-  jpeg_dec_header_info_t header_info;
-  bool ok = jpeg_dec_parse_header(decoder, &io, &header_info) == JPEG_ERR_OK;
-  jpeg_dec_close(decoder);
-  if (!ok) {
-    return false;
-  }
-  width = header_info.width;
-  height = header_info.height;
-  return true;
-}
-
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::NEW_JPEG>(const uint8_t *frame_data,
-                                                                                size_t frame_size) {
-  if (frame_size > this->input_buffer_size_) {
-    ESP_LOGE(TAG, "Frame too large for input buffer");
-    return false;
-  }
-
-  // Decode straight into canvas_buffer_, in place -- see that member's header comment.
-  jpeg_dec_io_t io{};
-  io.inbuf = const_cast<uint8_t *>(frame_data);
-  io.inbuf_len = static_cast<int>(frame_size);
-  io.outbuf = reinterpret_cast<uint8_t *>(this->canvas_buffer_);
-
-  jpeg_dec_header_info_t header_info;
-  jpeg_error_t err = jpeg_dec_parse_header(this->new_jpeg_decoder_, &io, &header_info);
-  if (err == JPEG_ERR_OK) {
-    err = jpeg_dec_process(this->new_jpeg_decoder_, &io);
-  }
-
-  if (err != JPEG_ERR_OK) {
-    ESP_LOGW(TAG, "esp_new_jpeg decode failed: %d", err);
-    return false;
-  }
-  return true;
-}
-
-#else
-
-// Other ESP32 variants: JPEGDEC (bitbank2, software fallback). JPEGDEC's draw callback has no
-// user-`this` slot beyond setUserPointer(), so the destination buffer/stride is passed through
-// that instead of touching the player instance from the callback.
-struct SvpJpegDrawCtx {
-  uint8_t *out;        // RGB565 destination buffer (canvas_buffer_, in place)
-  uint32_t out_width;  // aligned row width, for stride
-};
-
-static int svp_jpegdec_draw_callback_(JPEGDRAW *jpeg) {
-  auto *ctx = static_cast<SvpJpegDrawCtx *>(jpeg->pUser);
-  for (int y = 0; y < jpeg->iHeight; y++) {
-    uint16_t *dst_row = reinterpret_cast<uint16_t *>(ctx->out) + (jpeg->y + y) * ctx->out_width + jpeg->x;
-    const uint16_t *src_row = jpeg->pPixels + y * jpeg->iWidth;
-    std::memcpy(dst_row, src_row, jpeg->iWidth * sizeof(uint16_t));
-  }
-  return 1;
-}
-
-template<> bool SimpleVideoPlayer::init_decoder_backend_<JpegBackend::JPEGDEC>() {
-  ESP_LOGI(TAG, "Pre-allocating PSRAM buffers (software JPEGDEC decoder)...");
-
-  // Compressed-frame input buffers live in video_frame_ring_buffer_ (see allocate_frame_ring_()).
-  //
-  // No decode output buffer allocated here: decode_frame_backend_ below writes directly into
-  // canvas_buffer_, LVGL's own existing canvas pixel buffer (see that member's header comment),
-  // fetched lazily from play() by attach_canvas_buffer_() instead.
-  return true;
-}
-
-template<>
-bool SimpleVideoPlayer::parse_header_backend_<JpegBackend::JPEGDEC>(const uint8_t *buffer, size_t size,
-                                                                     uint32_t &width, uint32_t &height) {
-  JPEGDEC jpeg;
-  if (!jpeg.openRAM(const_cast<uint8_t *>(buffer), static_cast<int>(size), nullptr)) {
-    return false;
-  }
-  width = jpeg.getWidth();
-  height = jpeg.getHeight();
-  jpeg.close();
-  return true;
-}
-
-template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::JPEGDEC>(const uint8_t *frame_data,
-                                                                               size_t frame_size) {
-  if (frame_size > this->input_buffer_size_) {
-    ESP_LOGE(TAG, "Frame too large for input buffer");
-    return false;
-  }
-
-  // Decode straight into canvas_buffer_, in place -- see that member's header comment.
-  JPEGDEC jpeg;
-  SvpJpegDrawCtx ctx{reinterpret_cast<uint8_t *>(this->canvas_buffer_), ALIGN_UP(this->video_width_, 16)};
-
-  if (!jpeg.openRAM(const_cast<uint8_t *>(frame_data), static_cast<int>(frame_size), svp_jpegdec_draw_callback_)) {
-    ESP_LOGW(TAG, "Could not open frame for decoding: %d", jpeg.getLastError());
-    return false;
-  }
-  jpeg.setUserPointer(&ctx);
-  // Must match whatever byte order LVGL's RGB565 canvas actually expects -- see the HW_P4
-  // backend's decode_frame_backend_ for why LV_COLOR_16_SWAP (not a hardcoded assumption) is the
-  // correct thing to branch on here.
-#if LV_COLOR_16_SWAP
-  jpeg.setPixelType(RGB565_BIG_ENDIAN);
-#else
-  jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-#endif
-
-  bool ok = jpeg.decode(0, 0, 0);
-  jpeg.close();
-
-  if (!ok) {
-    ESP_LOGW(TAG, "JPEGDEC decode failed: %d", jpeg.getLastError());
-    return false;
-  }
-  return true;
-}
-
-#endif
 
 bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height) {
   // ESP32-P4 only: Hardware JPEG decoder
@@ -1343,8 +1104,7 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->cache_buffer_offset_ = 0;
 
     // Parse JPEG header
-    if (!this->parse_header_backend_<JPEG_BACKEND>(this->cache_buffer_.get(), static_cast<size_t>(bytes_read), width,
-                                                    height)) {
+    if (!this->parse_header_(this->cache_buffer_.get(), static_cast<size_t>(bytes_read), width, height)) {
       ESP_LOGE(TAG, "Failed to parse JPEG header");
       return false;
     }
@@ -1542,24 +1302,19 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
 }
 
 void SimpleVideoPlayer::free_buffers_() {
-#if defined(USE_HWJPG)
   if (this->hw_jpeg_decoder_ != nullptr) {
     jpeg_del_decoder_engine(this->hw_jpeg_decoder_);
     this->hw_jpeg_decoder_ = nullptr;
   }
-#elif defined(USE_NEWJPEG)
-  if (this->new_jpeg_decoder_ != nullptr) {
-    jpeg_dec_close(this->new_jpeg_decoder_);
-    this->new_jpeg_decoder_ = nullptr;
-  }
-#endif
 
-  // canvas_buffer_/canvas_draw_buf_ are NOT freed here, or anywhere in this component: they are
-  // LVGL's own, owned by the canvas widget's codegen, never allocated by us in the first place
-  // (see canvas_buffer_'s header comment). Just drop our references to them.
+  // A (canvas_buffer_/canvas_draw_buf_) is LVGL's own -- just drop our references. B is ours.
   this->canvas_draw_buf_ = nullptr;
   this->canvas_buffer_ = nullptr;
   this->canvas_buffer_ready_ = false;
+  if (this->decode_buffer_b_ != nullptr) {
+    heap_caps_free(this->decode_buffer_b_);
+    this->decode_buffer_b_ = nullptr;
+  }
 
 #ifdef USE_AUDIO
   // Permanent audio buffers (allocated once in setup(), see there) -- true end-of-life free, same
@@ -1670,11 +1425,8 @@ bool SimpleVideoPlayer::allocate_frame_ring_() {
     return false;
   }
 
-  // decode_read_buffer_: THIS one is handed to the hardware JPEG decoder as its compressed-input
-  // (bit_stream) argument, which needs the same DMA2D/cache alignment as any other buffer the
-  // decoder touches directly (see decode_frame_backend_<HW_P4>()) -- jpeg_alloc_decoder_mem(), not
-  // plain heap_caps_malloc, same reasoning this component has used for every hardware-facing
-  // buffer all along.
+  // decode_read_buffer_: the hardware JPEG decoder's compressed-input (bit_stream) argument --
+  // needs jpeg_alloc_decoder_mem() alignment, not plain heap_caps_malloc.
   uint8_t *decode_buf = nullptr;
 #if defined(USE_HWJPG)
   jpeg_decode_memory_alloc_cfg_t input_cfg{};
