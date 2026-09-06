@@ -15,7 +15,8 @@ namespace simple_video_player {
 static const char *const TAG = "buffered_file_reader";
 
 void BufferedFileReader::kick_fill_() {
-  if (this->eof_.load(std::memory_order_acquire) || this->fill_err_.load(std::memory_order_acquire))
+  if (this->draining_.load(std::memory_order_acquire) || this->eof_.load(std::memory_order_acquire) ||
+      this->fill_err_.load(std::memory_order_acquire))
     return;
   if (this->fill_in_flight_.exchange(true, std::memory_order_acq_rel))
     return;  // one already in flight
@@ -55,12 +56,12 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
 }
 
 void BufferedFileReader::quiesce_fill_() {
+  // No new fill starts from here until draining_ is cleared again (open() / after a seek).
+  this->draining_.store(true, std::memory_order_release);
 #ifdef USE_ESP32
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   uint32_t waited = 0;
   while (this->fill_in_flight_.load(std::memory_order_acquire)) {
-    if (this->abort_flag_ != nullptr && *this->abort_flag_)
-      break;
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       break;
   }
@@ -115,6 +116,7 @@ bool BufferedFileReader::open(const char *path) {
   this->eof_.store(false);
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
+  this->draining_.store(false);
   this->kick_fill_();  // start streaming
   return true;
 }
@@ -180,6 +182,7 @@ bool BufferedFileReader::seek(uint64_t position) {
     return false;
   }
   this->current_position_ = position;
+  this->draining_.store(false);  // allow fills again
   this->kick_fill_();
   return true;
 }

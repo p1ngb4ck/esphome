@@ -449,24 +449,29 @@ void SimpleVideoPlayer::playback_loop_() {
       break;
     }
     const uint32_t frame_index = this->video_frame_index_++;
+    const int64_t frame_dur = static_cast<int64_t>(this->frame_duration_us_);
 
-    // Anchor the wall clock on the first paced frame -- once its payload is actually in hand, so
-    // reader cold-start latency doesn't make every frame look late and get dropped.
+    // Anchor the wall clock on the first paced frame -- once its payload is in hand, so reader
+    // cold-start latency isn't counted as the stream already running late.
     if (this->playback_start_time_us_ == 0) {
-      this->playback_start_time_us_ =
-          esp_timer_get_time() - static_cast<int64_t>(frame_index * this->frame_duration_us_);
+      this->playback_start_time_us_ = esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur);
     }
 
-    // Where this frame belongs on the wall clock.
-    const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                                           static_cast<int64_t>(frame_index * this->frame_duration_us_);
+    int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                                     static_cast<int64_t>(frame_index * frame_dur);
+    const int64_t behind_us = esp_timer_get_time() - target_present_time_us;
 
-    // Already a whole frame (or more) past its slot -> drop it: don't decode, don't touch the
-    // canvas. Its audio was already demuxed by read_frame_(); skipping the decode is what lets the
-    // rest catch up.
-    if (esp_timer_get_time() - target_present_time_us >= static_cast<int64_t>(this->frame_duration_us_)) {
-      this->frames_dropped_++;
-      continue;
+    if (behind_us >= frame_dur) {
+      // Late. A few frames late -> drop this one (skip decode) to catch up. Many frames late means
+      // the pipeline simply can't sustain real time -- dropping forever would just stick, so snap
+      // the clock to this frame and show it.
+      if (behind_us < 4 * frame_dur) {
+        this->frames_dropped_++;
+        continue;
+      }
+      this->playback_start_time_us_ =
+          esp_timer_get_time() - this->paused_accum_us_ - static_cast<int64_t>(frame_index * frame_dur);
+      target_present_time_us = esp_timer_get_time();
     }
 
     // Wait for this frame's slot BEFORE decoding. While this task is blocked here the main loop

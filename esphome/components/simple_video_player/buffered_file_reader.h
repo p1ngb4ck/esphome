@@ -108,6 +108,7 @@ class BufferedFileReader {
   uint8_t *arena_{nullptr};  // borrowed storage::TransferBuffer -- read_chunk destination
   std::unique_ptr<ring_buffer::RingBuffer> ring_;
   std::atomic<bool> fill_in_flight_{false};
+  std::atomic<bool> draining_{false};   // set during close()/seek(): no new fill may start
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports
   std::atomic<bool> eof_{false};
   std::atomic<bool> fill_err_{false};
