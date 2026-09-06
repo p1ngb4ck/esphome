@@ -44,6 +44,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #endif
 
 namespace esphome::simple_video_player {
@@ -233,6 +234,11 @@ class SimpleVideoPlayer : public Component {
 
   /// Wait for a task to stop (generic: used for both the playback and loader tasks)
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
+
+  /// esp_timer one-shot callback (task-dispatch context): notifies the playback task so its
+  /// pacing wait resumes exactly at the armed presentation instant. See the pacing loop in
+  /// playback_loop_() for why this replaced a tick-quantised vTaskDelay().
+  static void present_timer_cb_(void *arg);
 
   //========================================================================
   // Video Frame Ring Buffer (see video_frame_ring_buffer_)
@@ -554,6 +560,12 @@ class SimpleVideoPlayer : public Component {
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
+
+  // One-shot high-resolution timer used to wake the playback task at the exact presentation
+  // instant (see the pacing loop in playback_loop_()). Created once in setup(), re-armed per
+  // frame with esp_timer_start_once(), never recreated. systimer-backed: microsecond resolution,
+  // no FreeRTOS-tick quantisation.
+  esp_timer_handle_t present_timer_{nullptr};
 
   // Frame pacing: proper timing for video FPS vs display refresh rate
   int64_t playback_start_time_us_{0};  // Microsecond timestamp when playback started

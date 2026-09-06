@@ -1,7 +1,6 @@
 #include "simple_video_player.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
-#include "esphome/core/hal.h"  // delayMicroseconds() -> delay_microseconds_safe(), the sub-ms busy-wait
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -62,6 +61,11 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
   this->stop();
   this->free_buffers_();
 
+  if (this->present_timer_ != nullptr) {
+    esp_timer_stop(this->present_timer_);
+    esp_timer_delete(this->present_timer_);
+  }
+
   if (this->state_mutex_ != nullptr) {
     vSemaphoreDelete(this->state_mutex_);
   }
@@ -90,6 +94,23 @@ void SimpleVideoPlayer::setup() {
   this->state_mutex_ = xSemaphoreCreateMutex();
   if (this->state_mutex_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create state mutex");
+    this->mark_failed();
+    return;
+  }
+
+  // One-shot timer that wakes the playback task at each frame's exact presentation instant (see
+  // the pacing loop in playback_loop_()). Task-dispatch, not ISR-dispatch: the callback only does
+  // an xTaskNotifyGive(), and task dispatch has no CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+  // dependency. Created once, re-armed per frame, deleted in the destructor.
+  const esp_timer_create_args_t present_timer_args = {
+      .callback = &SimpleVideoPlayer::present_timer_cb_,
+      .arg = this,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "svp_present",
+      .skip_unhandled_events = true,
+  };
+  if (esp_timer_create(&present_timer_args, &this->present_timer_) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create presentation timer");
     this->mark_failed();
     return;
   }
@@ -349,6 +370,14 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
   vTaskDelete(nullptr);
 }
 
+void SimpleVideoPlayer::present_timer_cb_(void *arg) {
+  auto *player = static_cast<SimpleVideoPlayer *>(arg);
+  TaskHandle_t task = player->task_handle_;
+  if (task != nullptr) {
+    xTaskNotifyGive(task);
+  }
+}
+
 void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Playback task started (Core 1)");
 
@@ -604,36 +633,27 @@ void SimpleVideoPlayer::playback_loop_() {
     // means the lower-priority main loop task can only run while THIS task is genuinely blocked,
     // so every wait here is also LVGL's only chance to get scheduled.
     //
-    // Two-stage wait, the same pattern the modbus component's send_frame_() uses for its
-    // sub-millisecond frame-gap timing (esphome/components/modbus/modbus.cpp):
+    // Wait out the remainder with a one-shot high-resolution timer, NOT vTaskDelay(): vTaskDelay()
+    // rounds up to a whole 1ms FreeRTOS tick, and on this frame budget that rounding is time the
+    // decode/audio/prefetch pipeline never gets back. esp_timer is systimer-backed (64-bit
+    // microsecond clock, no tick quantisation); its callback notifies this task, which is
+    // genuinely Blocked in the meantime so the lower-priority main loop (LvglComponent::loop() ->
+    // lv_timer_handler(): render, rotate, flush) gets the CPU. The task resumes one esp_timer
+    // dispatch + context switch after the target instant -- far tighter than a tick, and no CPU
+    // burned spinning.
     //
-    //   1. Coarse: while more than a millisecond is owed, vTaskDelay() the whole-millisecond part.
-    //      This puts the task in the real Blocked state -- the ONLY way FreeRTOS priority
-    //      scheduling lets the lower-priority main-loop task (LvglComponent::loop() ->
-    //      lv_timer_handler(), the render/rotate/flush pipeline) run at all. taskYIELD() would not:
-    //      it leaves this task on the Ready list and the scheduler just re-picks it, since it's
-    //      still highest priority (verified against tasks.c/taskSELECT_HIGHEST_PRIORITY_TASK()).
-    //   2. Re-read the clock. vTaskDelay() only guarantees "at least" -- never trust it to have
-    //      landed exactly; recompute the remainder from a fresh esp_timer_get_time().
-    //   3. Fine: delayMicroseconds() the sub-millisecond tail. That resolves to
-    //      delay_microseconds_safe() (esphome/core/helpers.cpp) which busy-spins on micros() for
-    //      the final <5ms -- ~1us accuracy, versus vTaskDelay()'s 1ms tick quantum. This is a
-    //      real CPU busy-wait, deliberately: it is bounded to under one tick, once per frame, and
-    //      only ever entered when we are already within 1ms of the presentation deadline.
-    //
-    // If already behind (remaining <= 0 on the first check) nothing waits and present_frame_()
-    // fires immediately -- fire-and-forget, no catch-up, matching this MCU: there is no slack to
-    // catch up with, only less work to waste.
+    // The loop re-checks because ulTaskNotifyTake() can also return on its 50ms cap (there so a
+    // missed notification / a state change can't wedge the task forever); normally the timer
+    // notification lands first, far inside that. If already behind (remaining <= 0) nothing waits
+    // and present_frame_() fires immediately -- fire-and-forget, no catch-up, matching this MCU.
+    ulTaskNotifyTake(pdTRUE, 0);  // drain any stale notification from a prior frame's timer
     while (true) {
       int64_t remaining_us = target_present_time_us - esp_timer_get_time();
       if (remaining_us <= 0)
         break;
-      if (remaining_us >= 1000) {
-        vTaskDelay(pdMS_TO_TICKS(remaining_us / 1000));
-        continue;  // recompute from a fresh clock -- do not assume the sleep landed exactly
-      }
-      delayMicroseconds(static_cast<uint32_t>(remaining_us));
-      break;
+      esp_timer_start_once(this->present_timer_, static_cast<uint64_t>(remaining_us));
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+      esp_timer_stop(this->present_timer_);  // harmless if it already fired; disarm if we woke early
     }
 
     this->present_frame_();
@@ -648,6 +668,9 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
     }
   }
+
+  // Disarm the presentation timer in case the loop exited (EOF/error/stop) with it still pending.
+  esp_timer_stop(this->present_timer_);
 
   // Stop the loader task before closing the file -- it must not still be reading via
   // file_reader_ once close_file_() tears it down. The loader's own write_without_replacement()
