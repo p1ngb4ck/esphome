@@ -352,16 +352,9 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
-  // Fresh A/V-sync state for this session, set BEFORE the audio task is created (in
-  // init_audio_decoder_()) so that task captures generation 0 as its baseline and only reacts to
-  // real re-syncs afterwards.
-  this->resync_generation_.store(0, std::memory_order_release);
-  this->audio_skip_until_us_.store(0, std::memory_order_release);
-  this->audio_bytes_demuxed_.store(0, std::memory_order_release);
+  // Fresh pacing state for this session.
   this->paused_accum_us_ = 0;
-  this->resync_active_ = false;
-  this->resync_count_ = 0;
-  this->resync_frames_dropped_ = 0;
+  this->frames_dropped_ = 0;
   this->decode_fail_count_ = 0;
   this->video_frame_index_ = 0;
 
@@ -441,13 +434,8 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Pop the next frame to decode. next_frame_to_decode_() applies the A/V re-sync (drop stale
-    // video without decoding, fast-forward audio) when the wall clock has run ahead of the stream;
-    // otherwise it just returns the next frame in order. out_index is that frame's absolute
-    // presentation index -- the pacing timestamp is anchored to it, not to a running counter, so
-    // long-run average fps stays correct even across a drop.
-    uint32_t frame_index = 0;
-    const int payload = this->next_frame_to_decode_(frame_index);
+    // Next frame (demuxes + feeds its audio inline). read_frame_() handles loop rewind and stop.
+    const int payload = this->read_frame_();
     if (payload == -2) {
       break;  // stopped / aborted
     }
@@ -461,12 +449,18 @@ void SimpleVideoPlayer::playback_loop_() {
       this->set_error_(PlaybackError::FILE_READ_ERROR);
       break;
     }
+    const uint32_t frame_index = this->video_frame_index_++;
 
-    // When this frame should be PRESENTED: its nominal 1/fps mark on the master (wall-clock)
-    // timeline, from its absolute index. Decode timing itself is NOT controlled here -- the JPEG
-    // decoder takes however long it takes; only the moment the result is handed to LVGL is paced.
+    // Where this frame belongs on the wall clock.
     const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
                                            static_cast<int64_t>(frame_index * this->frame_duration_us_);
+
+    // Already a whole frame (or more) past its slot -> drop it, don't decode. Its audio was
+    // already demuxed by read_frame_(); freeing decode time is what lets audio catch up.
+    if (esp_timer_get_time() - target_present_time_us >= static_cast<int64_t>(this->frame_duration_us_)) {
+      this->frames_dropped_++;
+      continue;
+    }
 
     if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
       // No logging on this priority-10 path (AGENTS.md) -- plain counter, summarised after the loop.
@@ -521,9 +515,9 @@ void SimpleVideoPlayer::playback_loop_() {
   esp_timer_stop(this->present_timer_);
 
   // One-line playback-health summary -- safe here (the loop has exited, this is not the hot path).
-  if (this->resync_count_ > 0 || this->decode_fail_count_ > 0) {
-    ESP_LOGW(TAG, "playback health: %" PRIu32 " re-sync(s), %" PRIu32 " frames dropped, %" PRIu32 " decode failures",
-             this->resync_count_, this->resync_frames_dropped_, this->decode_fail_count_);
+  if (this->frames_dropped_ > 0 || this->decode_fail_count_ > 0) {
+    ESP_LOGW(TAG, "playback health: %" PRIu32 " frame(s) dropped, %" PRIu32 " decode failures",
+             this->frames_dropped_, this->decode_fail_count_);
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
@@ -616,64 +610,6 @@ int SimpleVideoPlayer::read_frame_() {
   }
 }
 
-int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
-  // want_index() = the frame that should be on screen right now, off the master (wall-clock)
-  // timeline. Recomputed as we go: dropping frames takes real time, so the live edge keeps moving.
-  auto want_index = [this]() -> uint32_t {
-    const int64_t media_us = esp_timer_get_time() - this->playback_start_time_us_ - this->paused_accum_us_;
-    return media_us > 0 ? static_cast<uint32_t>(media_us / this->frame_duration_us_) : 0;
-  };
-
-  int payload = this->read_frame_();
-  if (payload <= 0) {
-    return payload;  // EOF / read error / aborted -- caller handles
-  }
-  out_index = this->video_frame_index_++;
-
-  // No audio -> nothing to re-sync to. Just pace every frame to the wall clock, never drop
-  // (this MCU cannot structurally catch up once behind -- see CLAUDE.md).
-  if (!this->audio_enabled_) {
-    return payload;
-  }
-
-  if (out_index + RESYNC_LAG_FRAMES >= want_index()) {
-    this->resync_active_ = false;  // caught up (or never behind) -- this lag episode, if any, is over
-    return payload;                // pace this frame normally
-  }
-
-  // Fell behind by more than RESYNC_LAG_FRAMES: this MCU cannot catch up by decoding faster, so
-  // read straight through to the live edge without decoding the frames in between. read_frame_()
-  // still demuxes each skipped frame, so audio_skip_until_us_ + resync_generation_ keep audio in
-  // step (bump the generation once per lag episode so a persistently slow decoder does not re-flush
-  // audio every frame). No logging on this priority-10 path (AGENTS.md).
-  if (!this->resync_active_) {
-    this->resync_active_ = true;
-    this->resync_count_++;
-    if (this->audio_enabled_) {
-      this->resync_generation_.fetch_add(1, std::memory_order_acq_rel);
-    }
-  }
-
-  uint32_t dropped = 0;
-  for (uint32_t w = want_index(); out_index < w; w = want_index()) {
-    if (this->audio_enabled_) {
-      this->audio_skip_until_us_.store(static_cast<int64_t>(w * this->frame_duration_us_),
-                                      std::memory_order_release);
-    }
-    if (++dropped > RESYNC_MAX_DROP) {
-      break;
-    }
-    payload = this->read_frame_();
-    if (payload <= 0) {
-      this->resync_frames_dropped_ += dropped;
-      return payload;
-    }
-    out_index = this->video_frame_index_++;
-  }
-  this->resync_frames_dropped_ += dropped;
-  return payload;  // first frame at/after the live edge, already in decode_read_buffer_
-}
-
 int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity) {
   // Read the next VIDEO frame from the file (demuxing + feeding audio inline); runs on the
   // playback task, writing into decode_read_buffer_.
@@ -686,28 +622,14 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
       return bytes_read;  // EOF or error
     }
 
-    // Consume interleaved audio chunks until the next video frame.
+    // Consume interleaved audio chunks until the next video frame -- feed each one straight
+    // through; audio free-runs on the speaker clock.
     while (frame.stream_type != AVIStreamType::VIDEO) {
 #ifdef USE_AUDIO
-      if (frame.stream_type == AVIStreamType::AUDIO) {
-        // Count every audio byte demuxed (fed or skipped) -- / bytes-per-second gives the audio
-        // stream's media time, which is how an A/V re-sync knows how far to fast-forward audio.
-        this->audio_bytes_demuxed_.fetch_add(static_cast<uint32_t>(bytes_read), std::memory_order_relaxed);
-        if (this->audio_enabled_) {
-          const uint64_t bytes_per_sec = static_cast<uint64_t>(this->source_audio_channels_) *
-                                         (this->audio_bits_per_sample_ / 8) * this->audio_sample_rate_;
-          const int64_t audio_media_us =
-              bytes_per_sec > 0 ? static_cast<int64_t>(this->audio_bytes_demuxed_.load(std::memory_order_relaxed) *
-                                                       1000000ULL / bytes_per_sec)
-                                : 0;
-          if (audio_media_us >= this->audio_skip_until_us_.load(std::memory_order_acquire)) {
-            this->process_audio_frame_(frame, dest_buffer, bytes_read);
-          }
-          // else: dropping stale audio while catching up to the re-sync point
-        }
+      if (frame.stream_type == AVIStreamType::AUDIO && this->audio_enabled_) {
+        this->process_audio_frame_(frame, dest_buffer, bytes_read);
       }
 #endif
-      // Skip this frame (audio) and read next frame
       bytes_read = this->avi_parser_->read_next_frame(frame, dest_buffer, dest_capacity);
       if (bytes_read <= 0) {
         return bytes_read;
@@ -1409,33 +1331,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   static constexpr uint32_t AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES = 10;
   uint32_t audio_decode_failures = 0;
 
-  // A/V re-sync: the pace controller bumps resync_generation_ when it drops stale video to the
-  // live edge. On a change, drop everything this side has queued (encoded + decoded audio) -- the
-  // loader is already fast-forwarding the file's audio to the same media time, so what's buffered
-  // here is stale. The MP3/FLAC decoder is left alone: it will consume its partial in-flight frame
-  // then resync on the next frame header on its own (one glitchy frame), which is cheaper than
-  // recreating the sub-decoder (a heap allocation -- AGENTS.md: none after setup()). The speaker
-  // keeps its own small residual (there is no cheap flush for it -- stop()/start() rebuilds the
-  // I2S driver); it drains that and then briefly goes quiet until the skipped audio flows through.
-  uint32_t last_resync_generation = this->resync_generation_.load(std::memory_order_acquire);
-
   while (!this->audio_task_stop_) {
     if (!this->audio_enabled_) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
-    }
-
-    const uint32_t resync_generation = this->resync_generation_.load(std::memory_order_acquire);
-    if (resync_generation != last_resync_generation) {
-      last_resync_generation = resync_generation;
-      // No logging: priority-10 path (AGENTS.md). The video side counts the re-sync.
-      if (this->audio_input_ring_buffer_) {
-        this->audio_input_ring_buffer_->reset();
-      }
-      if (this->audio_decoded_ring_buffer_) {
-        this->audio_decoded_ring_buffer_->reset();
-      }
-      audio_decode_failures = 0;
     }
 
     // Run audio decoder if we have one (MP3/FLAC mode)

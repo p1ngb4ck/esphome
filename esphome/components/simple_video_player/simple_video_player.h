@@ -206,12 +206,6 @@ class SimpleVideoPlayer : public Component {
   /// Returns payload size (> 0), 0 at EOF, -1 on read error, -2 if stopped/aborted.
   int read_frame_();
 
-  /// read_frame_() plus A/V re-sync: if the next frame is more than RESYNC_LAG_FRAMES behind the
-  /// wall-clock media time, skip intervening frames without decoding and fire the audio-side
-  /// re-sync (bump resync_generation_, set audio_skip_until_us_). out_index gets the returned
-  /// frame's absolute index. Return codes match read_frame_().
-  int next_frame_to_decode_(uint32_t &out_index);
-
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
   /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
@@ -448,45 +442,19 @@ class SimpleVideoPlayer : public Component {
   // no FreeRTOS-tick quantisation.
   esp_timer_handle_t present_timer_{nullptr};
 
-  // Frame pacing. The wall clock is the master timeline: media_us = esp_timer_get_time() -
-  // playback_start_time_us_ - paused_accum_us_. Video is paced to it (see playback_loop_()); audio
-  // free-runs on the I2S clock. Neither stream ever waits on the other -- when one falls too far
-  // behind media_us the pace controller fires a single A/V re-sync (drop stale video without
-  // decoding it, skip audio forward to the same media time, flush the audio queues) instead of
-  // stalling or drifting.
+  // Frame pacing -- wall clock is the master timeline. Each frame's target instant is
+  // playback_start_time_us_ + paused_accum_us_ + index * frame_duration_us_. A frame already a
+  // whole frame past its target is dropped (not decoded); otherwise the task waits out the
+  // remainder and presents. Audio free-runs on the speaker clock; dropping late video frees CPU
+  // for demux, which is what keeps audio fed -- no explicit A/V re-sync.
   int64_t playback_start_time_us_{0};  // esp_timer_get_time() at frame 0
   int64_t paused_accum_us_{0};         // total wall time spent PAUSED, excluded from media_us
   uint32_t frame_count_{0};            // absolute index of the next frame to present
   float frame_duration_us_{0};         // duration of one frame in microseconds (1000000/fps)
 
-  // A/V re-sync coordination.
-  //   resync_generation_ : bumped by the pace controller once per lag episode; the audio task
-  //                        watches it and, on a change, flushes audio_input_ring_buffer_ /
-  //                        audio_decoded_ring_buffer_ (the stale audio queued before the skip).
-  //   audio_skip_until_us_ : the loader discards demuxed audio chunks (still counting their bytes)
-  //                          until audio_bytes_demuxed_ corresponds to at least this media time,
-  //                          then resumes feeding process_audio_frame_().
-  //   audio_bytes_demuxed_ : running total of audio payload bytes the loader has pulled from the
-  //                          file (fed or skipped); divided by the fixed bytes-per-second it gives
-  //                          the audio stream's media time.
-  std::atomic<uint32_t> resync_generation_{0};
-  std::atomic<int64_t> audio_skip_until_us_{0};
-  std::atomic<uint64_t> audio_bytes_demuxed_{0};
-  // Playback task only: true while a lag episode is being ridden out, so the audio-queue flush
-  // (resync_generation_ bump) fires once at the start of the episode, not once per dropped frame.
-  bool resync_active_{false};
-  // Playback task only, plain counters (no logging on the priority-10 path): number of re-sync
-  // episodes this session, total frames discarded across them, and decode failures skipped.
-  // Summarised in one line after the playback loop exits.
-  uint32_t resync_count_{0};
-  uint32_t resync_frames_dropped_{0};
+  // Playback-task counters, summarised once after the loop (no logging on the prio-10 path).
+  uint32_t frames_dropped_{0};      // frames skipped because they were already late
   uint32_t decode_fail_count_{0};
-  // How far behind the wall-clock media time the current frame may fall before the pace controller
-  // stops walking frame-by-frame and drops straight to the live edge.
-  static constexpr uint32_t RESYNC_LAG_FRAMES = 4;
-  // Hard cap on frames discarded in one re-sync, so a case where delivery itself is slower than
-  // real time degrades to a low frame rate instead of an unbounded drain loop.
-  static constexpr uint32_t RESYNC_MAX_DROP = 240;
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;
