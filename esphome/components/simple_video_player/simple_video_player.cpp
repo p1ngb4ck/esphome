@@ -630,6 +630,12 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
   }
   out_index = this->video_frame_index_++;
 
+  // No audio -> nothing to re-sync to. Just pace every frame to the wall clock, never drop
+  // (this MCU cannot structurally catch up once behind -- see CLAUDE.md).
+  if (!this->audio_enabled_) {
+    return payload;
+  }
+
   if (out_index + RESYNC_LAG_FRAMES >= want_index()) {
     this->resync_active_ = false;  // caught up (or never behind) -- this lag episode, if any, is over
     return payload;                // pace this frame normally
