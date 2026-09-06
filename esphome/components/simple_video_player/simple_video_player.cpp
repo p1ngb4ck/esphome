@@ -246,14 +246,19 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // The ONLY LVGL call for a frame update. The decode/playback task decodes into canvas_buffer_
-  // and does the cache maintenance itself (esp_cache_msync -- a pure ESP-IDF op, no LVGL state),
-  // then sets frame_ready_. lv_obj_invalidate() walks the object tree and mutates the display's
-  // invalid-area list, so it MUST run on the LVGL thread (this loop), never from the higher-
-  // priority playback task that would preempt lv_timer_handler() mid-render. Same split
-  // picture_viewer uses: its background task never touches LVGL; the canvas invalidate is on the
-  // main loop.
+  // The ONLY LVGL calls for a frame update, deliberately on the LVGL thread (this loop): the
+  // decode/playback task decodes into canvas_buffer_ and does the cache maintenance itself
+  // (esp_cache_msync -- a pure ESP-IDF op), then sets frame_ready_. lv_* calls mutate LVGL state
+  // and MUST NOT run from the higher-priority playback task that would preempt lv_timer_handler()
+  // mid-render.
+  //
+  // lv_obj_invalidate() ALONE is not enough for a canvas whose pixels change in place: the image
+  // source pointer never changes, so LVGL re-composites its CACHED decoded copy and the canvas
+  // stays on the first frame (verified against LVGL 9.5 lv_canvas.c -- lv_canvas_set_draw_buf()
+  // itself is lv_image_cache_drop() + lv_image_set_src() + lv_image_cache_drop()). Drop the cache
+  // entry for this draw buf so the next render re-reads canvas_buffer_.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
+    lv_image_cache_drop(this->canvas_draw_buf_);
     lv_obj_invalidate(this->canvas_);
   }
 }
