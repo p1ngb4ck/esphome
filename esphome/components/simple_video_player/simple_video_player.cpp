@@ -873,23 +873,31 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
   }
 
   // Fell behind by more than RESYNC_LAG_FRAMES: this MCU cannot catch up by decoding faster, so
-  // don't try -- drop straight to the live edge without decoding the frames in between, and point
-  // the audio side at the same media time (the loader skips demuxed audio up to audio_skip_until_us_
-  // without feeding it). The one-time queue flush (resync_generation_ bump, watched by the audio
-  // task) happens only at the START of a lag episode -- a persistently slow decoder must not
-  // re-flush audio every frame, which would leave audio permanently silent. No logging on this
-  // path: it is priority-10 and time-critical (AGENTS.md). resync_count_/resync_frames_dropped_
-  // are plain counters, summarised once after the loop exits.
+  // don't try -- drop straight to the live edge without decoding the frames in between.
+  //
+  // The audio side is only touched when this file actually has playing audio (audio_enabled_):
+  // point it at the same media time via audio_skip_until_us_ (the loader skips demuxed audio up to
+  // it without feeding it), and bump resync_generation_ ONCE per lag episode so the audio task
+  // flushes its stale queues (a persistently slow decoder must not re-flush every frame, which
+  // would leave audio permanently silent). A video-only file does none of this -- there is no
+  // audio to keep in sync; the frame drop below is the whole re-sync.
+  //
+  // No logging on this path: it is priority-10 and time-critical (AGENTS.md).
+  // resync_count_/resync_frames_dropped_ are plain counters, summarised once after the loop exits.
   if (!this->resync_active_) {
     this->resync_active_ = true;
     this->resync_count_++;
-    this->resync_generation_.fetch_add(1, std::memory_order_acq_rel);
+    if (this->audio_enabled_) {
+      this->resync_generation_.fetch_add(1, std::memory_order_acq_rel);
+    }
   }
 
   uint32_t dropped = 0;
   for (uint32_t w = want_index(); out_index < w; w = want_index()) {
-    this->audio_skip_until_us_.store(static_cast<int64_t>(w * this->frame_duration_us_),
-                                    std::memory_order_release);
+    if (this->audio_enabled_) {
+      this->audio_skip_until_us_.store(static_cast<int64_t>(w * this->frame_duration_us_),
+                                      std::memory_order_release);
+    }
     if (++dropped > RESYNC_MAX_DROP) {
       // Delivery itself can't keep up with real time -- stop chasing a target we can't reach and
       // just present what we have. Playback becomes a low frame rate rather than an infinite drain.
@@ -1123,12 +1131,19 @@ template<> bool SimpleVideoPlayer::decode_frame_backend_<JpegBackend::HW_P4>(con
   size_t decode_target_capacity =
       static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
 
+  // jpeg_decoder_process() is synchronous: it blocks until the decode completes or eng_cfg's
+  // timeout_ms elapses, and its esp_err_t return IS the completion status (verified against
+  // esp-idf v5.5 driver/jpeg_decode.h and this repo's own known-working decode_frame_ in
+  // testing_dev_old_ref -- there is no async/callback variant). Ignoring the return meant a failed
+  // or timed-out decode was reported as success and a stale/garbage canvas was presented.
   uint32_t out_size = 0;
-  jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
-                       reinterpret_cast<uint8_t *>(decode_target), static_cast<uint32_t>(decode_target_capacity),
-                       &out_size);
+  esp_err_t err = jpeg_decoder_process(
+      this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
+      reinterpret_cast<uint8_t *>(decode_target), static_cast<uint32_t>(decode_target_capacity), &out_size);
 
-  return true;
+  // No logging on this priority-10 path (AGENTS.md); returning false routes to the pacer's
+  // "Failed to decode frame, skipping" branch, which does not present this frame.
+  return err == ESP_OK && out_size > 0;
 }
 
 #elif defined(USE_NEWJPEG)
