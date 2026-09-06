@@ -1282,20 +1282,11 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
     return;
   }
 
-  if (this->needs_channel_conversion_) {
-    // Buffer PCM for audio_processing_loop_'s channel-conversion step.
-    this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
-  } else if (this->speaker_) {
-    // No conversion needed: straight to speaker. Explicit ticks_to_wait=0 (best-effort,
-    // non-blocking), not the 2-arg overload: this runs on the loader task, same as the video
-    // frame reads -- if the speaker backend's play() blocks when its internal buffer is full
-    // (implementation-defined for the 2-arg overload, per this class's own doc comment), that
-    // stalls video frame delivery too, since audio and video share this one task reading the
-    // same interleaved AVI stream. Matches the same drop-rather-than-block philosophy the other
-    // audio path above already gets for free from RingBuffer::write() (discards old data on
-    // overflow instead of waiting).
-    this->speaker_->play(data, bytes_to_write, 0);
-  }
+  // Always buffer PCM into the decoded ring; the svp_audio task drains it to the speaker at a
+  // steady rate. Feeding speaker->play() directly from here dumped a whole frame's worth of audio
+  // in one burst every ~40 ms and the speaker dropped most of it (non-blocking), which is the
+  // underrun.
+  this->audio_decoded_ring_buffer_->write(data, bytes_to_write);
 }
 
 bool SimpleVideoPlayer::convert_audio_channels_(const uint8_t *input_data, uint8_t *output_data, size_t frame_count,
@@ -1398,60 +1389,30 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       audio_decode_failures = 0;
     }  // End of if (this->audio_decoder_)
 
-    // Channel conversion processing (runs for both decoder mode and PCM mode)
-    // For decoder mode: pulls from decoded_ring_buffer (decoder output)
-    // For PCM mode: pulls from decoded_ring_buffer (direct PCM frames)
-    if (this->needs_channel_conversion_ && this->audio_decoded_ring_buffer_ && this->speaker_) {
+    // Drain the decoded ring to the speaker at a steady rate. Formats already match end to end
+    // (config == file == speaker), so this is a straight byte copy -- no conversion. The blocking
+    // retry keeps the speaker fed instead of dropping a burst like the old direct-from-demux path.
+    if (this->audio_decoded_ring_buffer_ && this->speaker_) {
       size_t available = this->audio_decoded_ring_buffer_->available();
-
       if (available > 0) {
-        // Calculate how many frames we can process (limit to temp buffer size)
-        size_t bytes_per_frame_input = this->source_audio_channels_ * 2;  // 16-bit = 2 bytes per sample
-        size_t bytes_per_frame_output = this->speaker_audio_channels_ * 2;
-        size_t max_input_bytes = std::min(available, AUDIO_TEMP_BUFFER_SIZE);
-        size_t frame_count = max_input_bytes / bytes_per_frame_input;
+        size_t to_read = std::min(available, AUDIO_TEMP_BUFFER_SIZE);
+        size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), to_read);
 
-        if (frame_count > 0) {
-          // Read decoded audio from intermediate buffer
-          size_t bytes_to_read = frame_count * bytes_per_frame_input;
-          size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), bytes_to_read);
-
-          if (bytes_read > 0) {
-            // Perform channel conversion
-            size_t actual_frames = bytes_read / bytes_per_frame_input;
-            size_t output_bytes = actual_frames * bytes_per_frame_output;
-
-            // For in-place conversion when output <= input size, use same buffer
-            // Otherwise we'd need a second buffer (but this shouldn't happen for stereo→mono)
-            if (this->convert_audio_channels_(this->audio_temp_buffer_.get(), this->audio_temp_buffer_.get(),
-                                              actual_frames, this->source_audio_channels_,
-                                              this->speaker_audio_channels_, 16)) {
-              // Write converted audio to speaker
-              // Handle partial writes - speaker might not accept all data if buffer is full
-              size_t bytes_written = 0;
-              size_t bytes_remaining = output_bytes;
-              const uint8_t *write_ptr = this->audio_temp_buffer_.get();
-
-              while (bytes_remaining > 0) {
-                size_t written = this->speaker_->play(write_ptr, bytes_remaining);
-                if (written > 0) {
-                  bytes_written += written;
-                  bytes_remaining -= written;
-                  write_ptr += written;
-                } else {
-                  // Speaker buffer full, yield briefly and retry
-                  vTaskDelay(pdMS_TO_TICKS(1));
-                }
-              }
-            }
+        size_t bytes_remaining = bytes_read;
+        const uint8_t *write_ptr = this->audio_temp_buffer_.get();
+        while (bytes_remaining > 0 && !this->audio_task_stop_) {
+          size_t written = this->speaker_->play(write_ptr, bytes_remaining);
+          if (written > 0) {
+            bytes_remaining -= written;
+            write_ptr += written;
+          } else {
+            vTaskDelay(pdMS_TO_TICKS(1));  // speaker buffer full -- wait for it to drain
           }
         }
       } else {
-        // No data available, yield briefly to other tasks
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(1));  // nothing buffered -- yield
       }
     } else {
-      // No conversion needed - yield briefly to avoid tight loop
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }  // End of while loop
