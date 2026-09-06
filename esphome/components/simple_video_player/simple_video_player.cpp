@@ -478,42 +478,15 @@ void SimpleVideoPlayer::playback_loop_() {
       this->playback_start_time_us_ = esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur);
     }
 
-    int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                                     static_cast<int64_t>(frame_index * frame_dur);
-    const int64_t behind_us = esp_timer_get_time() - target_present_time_us;
+    const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                                           static_cast<int64_t>(frame_index * frame_dur);
 
-    if (behind_us >= frame_dur) {
-      // Late. A few frames late -> drop this one (skip decode) to catch up. Many frames late means
-      // the pipeline simply can't sustain real time -- dropping forever would just stick, so snap
-      // the clock to this frame and show it.
-      if (behind_us < 4 * frame_dur) {
-        this->frames_dropped_++;
-        continue;
-      }
-      this->playback_start_time_us_ =
-          esp_timer_get_time() - this->paused_accum_us_ - static_cast<int64_t>(frame_index * frame_dur);
-      target_present_time_us = esp_timer_get_time();
-
-#ifdef USE_AUDIO
-      // The clock just jumped forward. Drop the buffered-but-unplayed audio so the speaker resyncs
-      // to the stream position we snapped to, instead of playing the backlog late.
-      if (this->audio_enabled_) {
-        if (this->audio_input_ring_buffer_)
-          this->audio_input_ring_buffer_->reset();
-        if (this->audio_decoded_ring_buffer_)
-          this->audio_decoded_ring_buffer_->reset();
-      }
-#endif
-    }
-
-    // Wait for this frame's slot BEFORE decoding. While this task is blocked here the main loop
-    // (LvglComponent::loop() -> lv_timer_handler()) gets the CPU and finishes rendering the
-    // PREVIOUS frame from canvas_buffer_ -- so the decode below never writes the buffer while LVGL
-    // is reading it. esp_timer one-shot + task notification: microsecond wake, no tick rounding,
-    // no spin. The 50 ms cap only guards a lost notification.
+    // Sync to the wall clock: wait if this frame's slot is still ahead, otherwise present it now
+    // and move straight on ("bang out"). Never drop -- audio is demuxed by the same loop, so
+    // running flat out when behind is what lets both catch back up to the clock together.
     ulTaskNotifyTake(pdTRUE, 0);  // drain any stale notification from a prior frame's timer
     while (true) {
-      int64_t remaining_us = target_present_time_us - esp_timer_get_time();
+      const int64_t remaining_us = target_present_time_us - esp_timer_get_time();
       if (remaining_us <= 0)
         break;
       esp_timer_start_once(this->present_timer_, static_cast<uint64_t>(remaining_us));
