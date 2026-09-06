@@ -1085,17 +1085,13 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     this->speaker_audio_channels_ = 2;
   }
 
-  // Check if channel conversion is needed
-  this->needs_channel_conversion_ = (this->source_audio_channels_ != this->speaker_audio_channels_);
-
-  ESP_LOGI(TAG, "Audio routing: %u-channel source → %u-channel speaker (mode: %s)%s", this->source_audio_channels_,
+  ESP_LOGI(TAG, "Audio routing: %u-channel source → %u-channel speaker (mode: %s)", this->source_audio_channels_,
            this->speaker_audio_channels_,
            this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_MONO     ? "mono"
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_LEFT   ? "left"
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_RIGHT  ? "right"
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? "stereo"
-                                                                                       : "unknown",
-           this->needs_channel_conversion_ ? " [conversion needed]" : "");
+                                                                                       : "unknown");
 
   // Codec is also fixed by YAML (audio_codec) -- SVP_AUDIO_CODEC_{PCM,MP3,FLAC} is the one define
   // set by codegen, so which branch is "live" is resolved at compile time. A file whose audio
@@ -1180,20 +1176,10 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
       return false;
     }
 
-    // Add sink based on whether channel conversion is needed
-    if (this->needs_channel_conversion_) {
-      // Decoder outputs to intermediate buffer (we'll convert in audio task)
-      std::weak_ptr<ring_buffer::RingBuffer> decoded_weak = this->audio_decoded_ring_buffer_;
-      if (this->audio_decoder_->add_sink(decoded_weak) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add audio decoder sink (intermediate buffer)");
-        return false;
-      }
-    } else {
-      // No conversion needed, decoder writes directly to speaker
-      if (this->audio_decoder_->add_sink(this->speaker_) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add audio decoder sink (speaker)");
-        return false;
-      }
+    // Formats are locked to match end to end -- decoder writes straight to the speaker.
+    if (this->audio_decoder_->add_sink(this->speaker_) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to add audio decoder sink (speaker)");
+      return false;
     }
 
     // Start audio decoder
@@ -1235,7 +1221,7 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   // Dispatch by MODE, not by buffer presence: audio_input_ring_buffer_/audio_decoded_ring_buffer_
   // are both permanent, allocated unconditionally in setup() (see header), so they're non-null
   // regardless of codec -- audio_decoder_ (only ever created for MP3/FLAC, see
-  // init_audio_decoder_()) and needs_channel_conversion_ are the real mode signals now.
+  // init_audio_decoder_()) is the mode signal.
   if (this->audio_decoder_) {
     // Compressed audio (MP3/FLAC): feed the decoder's input ring buffer.
     this->audio_input_ring_buffer_->write(data, size);

@@ -374,7 +374,6 @@ class SimpleVideoPlayer : public Component {
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
   uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
   uint8_t audio_bits_per_sample_{16};             // Fixed bits per sample (mirrors AUDIO_BITS_PER_SAMPLE)
-  bool needs_channel_conversion_{false};          // Whether channel conversion is needed
   bool audio_enabled_{false};                     // Audio stream available and enabled
   TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
