@@ -937,15 +937,10 @@ VideoFormat SimpleVideoPlayer::detect_format_() {
 bool SimpleVideoPlayer::open_file_(const std::string &path) {
   ESP_LOGI(TAG, "Opening file: %s", path.c_str());
 
-  // Storage-backed file reader: resolves the path against the storage registry and handles
-  // local (filesystem) vs network storage transparently -- see buffered_file_reader.h. Created
-  // once and reused for every play() call, not recreated each time: BufferedFileReader owns two
-  // 1MB PSRAM read-ahead buffers, and destroying+recreating it per play() meant freeing and
-  // fresh-malloc'ing 2MB of PSRAM on every single video start -- the exact "allocate once, reuse"
-  // mistake already fixed for canvas_buffer_/output_buffer_, just not applied here too.
-  // BufferedFileReader::open() already handles being called on an already-open instance (closes
-  // first), and its own buffers are only allocated the first time (if (!buf) ...), so a fresh
-  // open() after a previous close() reuses them rather than reallocating.
+  // Storage-backed file reader (see buffered_file_reader.h): resolves the path against the storage
+  // registry, streams via the storage worker, and its read-ahead window is the shared
+  // storage::TransferBuffer arena -- it allocates nothing. Kept across play() calls; open() closes
+  // any previous stream first.
   if (!this->file_reader_) {
     this->file_reader_ = std::make_unique<BufferedFileReader>();
   }
@@ -956,7 +951,6 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     return false;
   }
-  this->file_reader_->prefill_cache();
 
   // Get file size
   if (!this->file_reader_->get_size(&this->file_size_)) {

@@ -318,7 +318,7 @@ class SimpleVideoPlayer : public Component {
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
-  uint32_t prefetch_duration_ms_{1000};  // file-I/O read-ahead depth hint (BufferedFileReader)
+  uint32_t prefetch_duration_ms_{1000};  // accepted for config compat; read-ahead is the transfer-buffer arena
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
