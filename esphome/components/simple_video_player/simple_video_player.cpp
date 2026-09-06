@@ -410,11 +410,23 @@ void SimpleVideoPlayer::playback_loop_() {
 
   this->on_started_callbacks_.call();
 
-  // Frame 0's target presentation time is "now"; BufferedFileReader's own read-ahead absorbs the
-  // cold-start I/O latency.
-  this->playback_start_time_us_ = esp_timer_get_time();
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
+
+  // Prime: demux (feeding audio) a few frames ahead so the speaker starts with a jitter margin.
+  // Those frames' video is skipped; the clock is anchored below so frame `prime` presents "now"
+  // -- audio and video stay aligned.
+  uint32_t prime = 0;
+#ifdef USE_AUDIO
+  if (this->audio_enabled_) {
+    const uint32_t prime_target = static_cast<uint32_t>(0.30f * this->target_fps_) + 1;  // ~300 ms
+    while (prime < prime_target && prime < 15 && this->read_frame_() > 0)
+      prime++;
+  }
+#endif
+  this->video_frame_index_ = prime;
+  this->playback_start_time_us_ =
+      esp_timer_get_time() - static_cast<int64_t>(prime * this->frame_duration_us_);
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
@@ -455,39 +467,19 @@ void SimpleVideoPlayer::playback_loop_() {
     const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
                                            static_cast<int64_t>(frame_index * this->frame_duration_us_);
 
-    // Already a whole frame (or more) past its slot -> drop it, don't decode. Its audio was
-    // already demuxed by read_frame_(); freeing decode time is what lets audio catch up.
+    // Already a whole frame (or more) past its slot -> drop it: don't decode, don't touch the
+    // canvas. Its audio was already demuxed by read_frame_(); skipping the decode is what lets the
+    // rest catch up.
     if (esp_timer_get_time() - target_present_time_us >= static_cast<int64_t>(this->frame_duration_us_)) {
       this->frames_dropped_++;
       continue;
     }
 
-    if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
-      // No logging on this priority-10 path (AGENTS.md) -- plain counter, summarised after the loop.
-      this->decode_fail_count_++;
-      continue;
-    }
-
-    // Wait until exactly the right moment to present -- not immediately when decode happens to
-    // finish. This task runs at priority 10, pinned to Core 1 -- the SAME core ESPHome's main
-    // loop (and therefore LvglComponent::loop()/lv_timer_handler(), which is what actually
-    // renders, rotates, and flushes to the display) normally runs on; FreeRTOS priority scheduling
-    // means the lower-priority main loop task can only run while THIS task is genuinely blocked,
-    // so every wait here is also LVGL's only chance to get scheduled.
-    //
-    // Wait out the remainder with a one-shot high-resolution timer, NOT vTaskDelay(): vTaskDelay()
-    // rounds up to a whole 1ms FreeRTOS tick, and on this frame budget that rounding is time the
-    // decode/audio/prefetch pipeline never gets back. esp_timer is systimer-backed (64-bit
-    // microsecond clock, no tick quantisation); its callback notifies this task, which is
-    // genuinely Blocked in the meantime so the lower-priority main loop (LvglComponent::loop() ->
-    // lv_timer_handler(): render, rotate, flush) gets the CPU. The task resumes one esp_timer
-    // dispatch + context switch after the target instant -- far tighter than a tick, and no CPU
-    // burned spinning.
-    //
-    // The loop re-checks because ulTaskNotifyTake() can also return on its 50ms cap (there so a
-    // missed notification / a state change can't wedge the task forever); normally the timer
-    // notification lands first, far inside that. If already behind (remaining <= 0) nothing waits
-    // and present_frame_() fires immediately -- fire-and-forget, no catch-up, matching this MCU.
+    // Wait for this frame's slot BEFORE decoding. While this task is blocked here the main loop
+    // (LvglComponent::loop() -> lv_timer_handler()) gets the CPU and finishes rendering the
+    // PREVIOUS frame from canvas_buffer_ -- so the decode below never writes the buffer while LVGL
+    // is reading it. esp_timer one-shot + task notification: microsecond wake, no tick rounding,
+    // no spin. The 50 ms cap only guards a lost notification.
     ulTaskNotifyTake(pdTRUE, 0);  // drain any stale notification from a prior frame's timer
     while (true) {
       int64_t remaining_us = target_present_time_us - esp_timer_get_time();
@@ -495,9 +487,14 @@ void SimpleVideoPlayer::playback_loop_() {
         break;
       esp_timer_start_once(this->present_timer_, static_cast<uint64_t>(remaining_us));
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
-      esp_timer_stop(this->present_timer_);  // harmless if it already fired; disarm if we woke early
+      esp_timer_stop(this->present_timer_);
     }
 
+    if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
+      // No logging on this priority-10 path (AGENTS.md) -- plain counter, summarised after the loop.
+      this->decode_fail_count_++;
+      continue;
+    }
     this->present_frame_();
 
     // frame_count_ tracks the absolute index of the last presented frame (+1), from the frame tag.
