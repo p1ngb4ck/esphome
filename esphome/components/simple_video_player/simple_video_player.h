@@ -333,16 +333,18 @@ class SimpleVideoPlayer : public Component {
 
   /// Fetch the lv_draw_buf_t* LVGL's OWN canvas codegen already built and attached (see
   /// canvas_buffer_'s header comment) -- allocates nothing, just reads the pointer/size/format out
-  /// of the widget and validates them. Must be called with lvgl_mutex_ already held. Returns false
-  /// (and leaves canvas_buffer_ready_ false) if the canvas has no buffer yet or it's not sane.
+  /// of the widget and validates them. Returns false (and leaves canvas_buffer_ready_ false) if the
+  /// canvas has no buffer yet or it's not sane.
   bool attach_canvas_buffer_();
 
   /// Flush the CPU cache for canvas_buffer_ (decode writes it directly, in place -- see that
   /// member's header comment) and invalidate the canvas so LVGL redraws it -- the ONLY point that
   /// actually touches LVGL for a frame update, deliberately deferred here (not run immediately
   /// after decode) so presentation happens at the paced, precisely-timed moment the caller
-  /// computes, not whenever decode happens to finish. Non-blocking try-lock on lvgl_mutex_ (0
-  /// timeout): a miss just skips presenting this one frame, never blocks.
+  /// computes, not whenever decode happens to finish. No lock: this runs on the decode/playback
+  /// task (Core 1, priority 10), the same core as the main loop / lv_timer_handler() but at higher
+  /// priority, so LVGL's render can only run while this task is blocked -- never concurrently with
+  /// a decode write or this invalidate (see canvas_buffer_'s header comment).
   void present_frame_();
 
   //========================================================================
@@ -378,8 +380,12 @@ class SimpleVideoPlayer : public Component {
   SpeakerChannelMode speaker_channel_mode_{SpeakerChannelMode::SPEAKER_CHANNEL_MONO};  // Channel routing mode
 #endif
 
-  // Playback state
-  PlayerState state_{PlayerState::STOPPED};
+  // Playback state. std::atomic because the playback task (Core 1) spins on it while play()/pause()/
+  // resume()/stop()/set_error_() write it from the main-loop core -- a plain field could be hoisted
+  // out of the loop by the compiler and would carry no cross-core visibility guarantee. state_mutex_
+  // is still held by the writers, but only to keep the multi-field updates (state_ + video_path_ +
+  // last_error_) consistent, not for the store itself.
+  std::atomic<PlayerState> state_{PlayerState::STOPPED};
   PlaybackError last_error_{PlaybackError::NONE};
   bool loop_{false};
   std::string video_path_;
@@ -548,7 +554,6 @@ class SimpleVideoPlayer : public Component {
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
   TaskHandle_t task_handle_{nullptr};
   SemaphoreHandle_t state_mutex_{nullptr};
-  SemaphoreHandle_t lvgl_mutex_{nullptr};  // Mutex for LVGL thread safety
 
   // Frame pacing: proper timing for video FPS vs display refresh rate
   int64_t playback_start_time_us_{0};  // Microsecond timestamp when playback started

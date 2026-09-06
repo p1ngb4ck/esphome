@@ -64,10 +64,6 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
   if (this->state_mutex_ != nullptr) {
     vSemaphoreDelete(this->state_mutex_);
   }
-
-  if (this->lvgl_mutex_ != nullptr) {
-    vSemaphoreDelete(this->lvgl_mutex_);
-  }
 }
 
 void SimpleVideoPlayer::setup() {
@@ -80,9 +76,9 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // No VSYNC callback needed: canvas updates happen synchronously in present_frame_(), under
-  // lvgl_mutex_, the same way picture_viewer's update_canvas_() writes into its canvas buffer
-  // directly and invalidates right after -- see canvas_buffer_'s comment in the header.
+  // No VSYNC callback needed: canvas updates happen synchronously in present_frame_(), the same way
+  // picture_viewer's update_canvas_() writes into its canvas buffer directly and invalidates right
+  // after -- see canvas_buffer_'s comment in the header.
   if (this->lvgl_component_ == nullptr) {
     ESP_LOGE(TAG, "LVGL component not set");
     this->mark_failed();
@@ -97,14 +93,6 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Create LVGL mutex for thread-safe LVGL API calls
-  this->lvgl_mutex_ = xSemaphoreCreateMutex();
-  if (this->lvgl_mutex_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create LVGL mutex");
-    this->mark_failed();
-    return;
-  }
-
   // Attach (never allocate -- see canvas_buffer_'s header comment) LVGL's own canvas buffer and
   // blank it, RIGHT HERE in setup(), not deferred to first play(). Verified against ESPHome's own
   // codegen (esphome/writer.py's generated main.cpp: every to_code()-emitted statement, including
@@ -112,8 +100,8 @@ void SimpleVideoPlayer::setup() {
   // is called -- and App.setup() is what dispatches to every Component::setup() override,
   // including this one, in priority order, afterwards). So by the time ANY Component::setup()
   // runs, the canvas widget and its buffer already exist, unconditionally -- no retry loop needed.
-  // xSemaphoreTake(..., 0) here is just consistent style, not a real race: no other task exists
-  // yet at this point in boot (play() hasn't run), so there is no contention to actually wait out.
+  // No lock: no other task exists yet at this point in boot (play() hasn't run), so there is
+  // nothing to serialize against.
   //
   // Why this has to happen at all: LVGL's canvas codegen (canvas.py) allocates its buffer with
   // lv_malloc_core() -> heap_caps_malloc() (verified against the real lvgl_esphome.cpp) -- plain
@@ -121,15 +109,12 @@ void SimpleVideoPlayer::setup() {
   // that PSRAM from the moment it's built (well before any Component::setup() runs) until this
   // component's first play() -- a user/automation-triggered action, potentially a long time after
   // boot. That gap is what showed up as "canvas is garbage/broken at start".
-  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-    if (this->attach_canvas_buffer_()) {
-      size_t buffer_size =
-          static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-      std::memset(this->canvas_buffer_, 0, buffer_size);
-      lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
-      lv_obj_invalidate(this->canvas_);
-    }
-    xSemaphoreGive(this->lvgl_mutex_);
+  if (this->attach_canvas_buffer_()) {
+    size_t buffer_size =
+        static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
+    std::memset(this->canvas_buffer_, 0, buffer_size);
+    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+    lv_obj_invalidate(this->canvas_);
   }
   if (!this->canvas_buffer_ready_) {
     ESP_LOGE(TAG, "Failed to access canvas buffer at setup");
@@ -234,10 +219,9 @@ void SimpleVideoPlayer::setup() {
   }
 #endif
 
-  // Canvas buffer was already attached and blanked earlier in this same setup() (right after
-  // lvgl_mutex_ was created) -- see that block's comment for why setup() itself is a safe, always-
-  // built point to do it (verified against ESPHome's own codegen), not something that needs to
-  // wait for play().
+  // Canvas buffer was already attached and blanked earlier in this same setup() -- see that
+  // block's comment for why setup() itself is a safe, always-built point to do it (verified
+  // against ESPHome's own codegen), not something that needs to wait for play().
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -388,7 +372,7 @@ void SimpleVideoPlayer::playback_loop_() {
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
   // grow case to support, so touching lv_obj_set_size()/lv_obj_set_pos() here was pure
-  // unnecessary risk (and unnecessary lvgl_mutex_ contention) for a no-op in the common case.
+  // unnecessary risk for a no-op in the common case.
   // Visibility (hidden flag, foreground order, which page/screen is active) is the caller's job,
   // not this component's -- expected usage is a dedicated page holding just the video canvas,
   // switched to by the caller's own action before play() and away from after stop().
@@ -417,8 +401,8 @@ void SimpleVideoPlayer::playback_loop_() {
   // Canvas buffer was already attached AND blanked once, in setup() (this component would have
   // mark_failed()'d and never reached play() at all otherwise) -- the pointer never changes since
   // it's LVGL's own. Every play() session just clears it back to black again. A raw write to a
-  // buffer we merely reference, not an LVGL API call, needs no lvgl_mutex_/blocking. Deliberately
-  // NOT calling lv_obj_invalidate() here either: that regressed the cold-start case before --
+  // buffer we merely reference, not an LVGL API call, needs no lock. Deliberately NOT calling
+  // lv_obj_invalidate() here either: that regressed the cold-start case before --
   // present_frame_()'s own invalidate, once the first real frame of this session is decoded, is
   // what actually gets this canvas its next redraw.
   if (this->canvas_buffer_ready_) {
@@ -519,26 +503,40 @@ void SimpleVideoPlayer::playback_loop_() {
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
-  while (this->state_ != PlayerState::STOPPED) {
+  // ERROR is terminal here too, not just STOPPED: set_error_() sets state_ to ERROR, and a fall-
+  // through into the reads below (with a dead loader) would spin/hang. PAUSED keeps the loop alive.
+  while (this->state_ == PlayerState::PLAYING || this->state_ == PlayerState::PAUSED) {
     // Handle pause state
     if (this->state_ == PlayerState::PAUSED) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
 
-    // Wait for the next frame's header. No artificial per-cycle deadline on the overall wait --
-    // matching the single-task version this replaced, a slow read just means this frame gets
+    // Wait for the next frame's 4-byte header. No artificial per-cycle deadline on the overall wait
+    // -- matching the single-task version this replaced, a slow read just means this frame gets
     // presented late (the "wait only if early" pacing below already handles that gracefully); it
     // must not be treated as a reason to give up on the frame and spin back around immediately,
     // which only starves the loader of CPU time and can never actually resolve on its own. The
-    // 50ms poll granularity below is just so this loop still notices state_ becoming STOPPED
-    // promptly -- portMAX_DELAY here would ignore that entirely until the NEXT frame arrived.
+    // 50ms poll granularity is just so this loop still notices state_ leaving PLAYING promptly.
+    //
+    // RingBuffer::read() is byte-stream and returns whatever is available up to the requested
+    // length (verified against ring_buffer.cpp -- xRingbufferReceiveUpTo underneath): a 1-3 byte
+    // short read is possible when the loader had to split the header across two writes under a full
+    // ring (write_without_replacement's partial path). Accumulate to exactly sizeof(header) rather
+    // than treating a partial as a complete size -- the latter desyncs every subsequent frame.
     uint32_t header = 0;
     bool stop_requested = false;
-    while (this->video_frame_ring_buffer_->read(&header, sizeof(header), pdMS_TO_TICKS(50)) == 0) {
-      if (this->state_ == PlayerState::STOPPED) {
-        stop_requested = true;
-        break;
+    {
+      auto *header_bytes = reinterpret_cast<uint8_t *>(&header);
+      size_t offset = 0;
+      while (offset < sizeof(header)) {
+        offset += this->video_frame_ring_buffer_->read(header_bytes + offset, sizeof(header) - offset,
+                                                       pdMS_TO_TICKS(50));
+        if (offset < sizeof(header) &&
+            (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
+          stop_requested = true;
+          break;
+        }
       }
     }
     if (stop_requested) {
@@ -561,6 +559,7 @@ void SimpleVideoPlayer::playback_loop_() {
     // until each fits), so this is expected to be available already or arriving within
     // microseconds, never a real wait -- still using a bounded, real block (not a spin) rather
     // than assuming that.
+    bool frame_incomplete = false;
     {
       size_t offset = 0;
       while (offset < header) {
@@ -568,7 +567,17 @@ void SimpleVideoPlayer::playback_loop_() {
             this->video_frame_ring_buffer_->read(this->decode_read_buffer_.get() + offset, header - offset,
                                                  pdMS_TO_TICKS(50));
         offset += got;
+        // Don't wait here indefinitely for a loader that has stopped or a stop/error that arrived
+        // mid-drain -- the old code could only be broken out of by the 5s wait_for_task_stop_()
+        // timeout in play()/the destructor.
+        if (got == 0 && (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
+          frame_incomplete = true;
+          break;
+        }
       }
+    }
+    if (frame_incomplete) {
+      break;  // ring is now desynced; the next play() drains and reset()s it before priming
     }
     this->frames_in_ring_.fetch_sub(1, std::memory_order_acq_rel);
 
@@ -665,25 +674,24 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Blank the canvas on stop -- same direct, mutex-protected write as decode_frame_(), since this
-  // still runs on the decode/playback task itself. True non-blocking try-lock (0 timeout, not a
-  // shortened wait), skip gracefully on failure: this is a cosmetic best-effort step (the canvas
-  // simply keeps showing the last frame until the next play()), never worth any wait at all.
-  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-    if (this->canvas_buffer_ready_) {
-      size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
-      std::memset(this->canvas_buffer_, 0, frame_bytes);
-      // Same order lv_canvas_fill_bg() uses: flush the CPU cache for the buffer BEFORE
-      // invalidating, so the render pass reads the just-written bytes rather than stale cache
-      // lines.
-      lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
-      lv_obj_invalidate(this->canvas_);
-    }
-    xSemaphoreGive(this->lvgl_mutex_);
+  // Blank the canvas on stop -- same direct write as decode_frame_(), on the decode/playback task
+  // itself. Cosmetic best-effort (the canvas otherwise keeps showing the last frame until the next
+  // play()); no lock needed for the same reason as present_frame_() (see its header comment).
+  if (this->canvas_buffer_ready_) {
+    size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
+    std::memset(this->canvas_buffer_, 0, frame_bytes);
+    // Same order lv_canvas_fill_bg() uses: flush the CPU cache for the buffer BEFORE invalidating,
+    // so the render pass reads the just-written bytes rather than stale cache lines.
+    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+    lv_obj_invalidate(this->canvas_);
   }
 
+  // Don't clobber an ERROR state recorded by set_error_() -- get_state()/get_last_error() must
+  // still report the failure after the task exits.
   xSemaphoreTake(this->state_mutex_, portMAX_DELAY);
-  this->state_ = PlayerState::STOPPED;
+  if (this->state_ != PlayerState::ERROR) {
+    this->state_ = PlayerState::STOPPED;
+  }
   xSemaphoreGive(this->state_mutex_);
 
   this->task_handle_ = nullptr;
@@ -885,21 +893,19 @@ void SimpleVideoPlayer::present_frame_() {
   if (!this->canvas_buffer_ready_) {
     return;
   }
-  // True non-blocking try-lock (0 timeout): this MCU's whole per-frame budget is ~40ms shared
-  // across decode, audio, and storage prefetch, so even a "short" fixed wait here is a large
-  // fraction of it every single frame, not a rounding error -- any wait at all is unaffordable on
-  // this path. Skip gracefully on a miss: this one frame's visual update is dropped, not stalled --
-  // decode_frame_() has already moved on to overwriting the same buffer for the next frame.
-  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-    // Flush the CPU cache for the buffer BEFORE invalidating, so the render pass reads the
-    // just-written bytes rather than stale cache lines -- same order lv_canvas_fill_bg() uses.
-    // No lv_canvas_set_draw_buf()/lv_canvas_set_buffer() call here at all: this is still the same
-    // lv_draw_buf_t LVGL's own codegen attached, never swapped -- see canvas_buffer_'s header
-    // comment for why re-attaching a different buffer broke rendering.
-    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
-    lv_obj_invalidate(this->canvas_);
-    xSemaphoreGive(this->lvgl_mutex_);
-  }
+  // No lock: this runs on the decode/playback task (Core 1, priority 10), the same core as the
+  // main loop / lv_timer_handler() but at higher priority, so LVGL's render only runs while this
+  // task is blocked -- never concurrently with this write (see canvas_buffer_'s header comment).
+  // The removed lvgl_mutex_ here was this component's own mutex, which LVGL's renderer never took,
+  // so it synchronized nothing.
+  //
+  // Flush the CPU cache for the buffer BEFORE invalidating, so the render pass reads the
+  // just-written bytes rather than stale cache lines -- same order lv_canvas_fill_bg() uses. No
+  // lv_canvas_set_draw_buf()/lv_canvas_set_buffer() call here at all: this is still the same
+  // lv_draw_buf_t LVGL's own codegen attached, never swapped -- see canvas_buffer_'s header comment
+  // for why re-attaching a different buffer broke rendering.
+  lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+  lv_obj_invalidate(this->canvas_);
 }
 
 //========================================================================
@@ -1425,11 +1431,10 @@ void SimpleVideoPlayer::free_buffers_() {
 }
 
 bool SimpleVideoPlayer::attach_canvas_buffer_() {
-  // Called lazily from play(), on the first play() ever and never again -- see this function's
-  // header comment for why that's the earliest safe point, not setup(). Nothing is allocated
-  // here: LVGL's own canvas codegen (canvas.py) already built and attached this buffer before
-  // play() could ever run -- this just reads the pointer/size/format back out of the widget.
-  // Caller holds lvgl_mutex_ already.
+  // Called once from setup() -- see this function's header comment for why that's a safe point.
+  // Nothing is allocated here: LVGL's own canvas codegen (canvas.py) already built and attached
+  // this buffer before any Component::setup() runs -- this just reads the pointer/size/format back
+  // out of the widget. No lock needed: no other task exists this early in boot.
   lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(this->canvas_);
   if (draw_buf == nullptr || draw_buf->data == nullptr) {
     ESP_LOGE(TAG, "Canvas has no draw buffer yet (LVGL widget tree not fully built?)");
@@ -1856,6 +1861,13 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
+  // Placeholder failure handling: a single failed decode drops that chunk and the loop keeps
+  // going, instead of tearing audio down on the first hiccup. Only give up on audio entirely
+  // after this many consecutive failures (a genuinely broken stream). The proper re-sync path
+  // (pacing tells both decoders to flush to a target point) replaces this in the A/V-sync work.
+  static constexpr uint32_t AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES = 10;
+  uint32_t audio_decode_failures = 0;
+
   while (!this->audio_task_stop_) {
     if (!this->audio_enabled_) {
       vTaskDelay(pdMS_TO_TICKS(10));
@@ -1868,10 +1880,18 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
-        ESP_LOGE(TAG, "Audio decoding FAILED");
-        this->audio_enabled_ = false;
-        break;
+        if (++audio_decode_failures >= AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES) {
+          ESP_LOGE(TAG, "Audio decode failed %" PRIu32 " times in a row -- disabling audio",
+                   audio_decode_failures);
+          this->audio_enabled_ = false;
+          break;
+        }
+        ESP_LOGW(TAG, "Audio decode error -- dropping chunk (%" PRIu32 "/%" PRIu32 ")", audio_decode_failures,
+                 AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES);
+        vTaskDelay(pdMS_TO_TICKS(2));
+        continue;
       }
+      audio_decode_failures = 0;
     }  // End of if (this->audio_decoder_)
 
     // Channel conversion processing (runs for both decoder mode and PCM mode)
