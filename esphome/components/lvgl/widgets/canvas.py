@@ -66,6 +66,7 @@ CONF_BUFFER_ID = "buffer_id"
 CONF_MAX_WIDTH = "max_width"
 CONF_TRANSPARENT = "transparent"
 CONF_DRAW_BUF_ID = "draw_buf_id"
+CONF_DMA_BUFFER = "dma_buffer"
 
 lv_canvas_t = LvType("lv_canvas_t")
 lv_draw_buf_t = LvType("lv_draw_buf_t")
@@ -82,6 +83,7 @@ class CanvasType(WidgetType):
                     cv.Required(CONF_WIDTH): size,
                     cv.Required(CONF_HEIGHT): size,
                     cv.Optional(CONF_TRANSPARENT, default=False): cv.boolean,
+                    cv.Optional(CONF_DMA_BUFFER, default=False): cv.boolean,
                     cv.GenerateID(CONF_DRAW_BUF_ID): cv.declare_id(lv_draw_buf_t),
                 }
             ),
@@ -105,15 +107,42 @@ class CanvasType(WidgetType):
         # stride is 0 for default (width * bytes_per_pixel)
         draw_buf = cg.new_Pvariable(config[CONF_DRAW_BUF_ID])
         buf_size = literal(f"LV_DRAW_BUF_SIZE({width}, {height}, {color_format})")
-        lv.draw_buf_init(
-            draw_buf,
-            width,
-            height,
-            literal(color_format),
-            0,
-            lv_expr.malloc_core(buf_size),
-            literal(buf_size),
-        )
+        if config[CONF_DMA_BUFFER]:
+            lv.append(cg.RawStatement("#ifdef USE_HWJPG"))
+            lv.append(cg.RawStatement("static constexpr size_t dma_buf_size = " + str(buf_size) + ";"))
+            lv.append(cg.RawStatement("jpeg_decode_memory_alloc_cfg_t dma_buf_cfg{};"))
+            lv.append(cg.RawStatement("dma_buf_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;"))
+            lv.append(cg.RawStatement("size_t dma_buf_actual_size = 0;"))
+            lv.draw_buf_init(
+                draw_buf,
+                width,
+                height,
+                literal(color_format),
+                0,
+                literal("jpeg_alloc_decoder_mem(dma_buf_size, &dma_buf_cfg, &dma_buf_actual_size)"),
+                literal("dma_buf_size"),
+            )
+            lv.append(cg.RawStatement("#else"))
+            lv.draw_buf_init(
+                draw_buf,
+                width,
+                height,
+                literal(color_format),
+                0,
+                lv_expr.malloc_core(buf_size),
+                literal(buf_size),
+            )
+            lv.append(cg.RawStatement("#endif"))
+        else:
+            lv.draw_buf_init(
+                draw_buf,
+                width,
+                height,
+                literal(color_format),
+                0,
+                lv_expr.malloc_core(buf_size),
+                literal(buf_size),
+            )
         lv.draw_buf_set_flag(draw_buf, literal("LV_IMAGE_FLAGS_MODIFIABLE"))
         lv.canvas_set_draw_buf(w.obj, draw_buf)
 
