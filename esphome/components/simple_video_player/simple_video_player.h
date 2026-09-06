@@ -19,10 +19,7 @@
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
 #endif
-// Used for the video frame ring unconditionally (not just USE_AUDIO): ESPHome's own
-// ring_buffer::RingBuffer (a thin wrapper over ESP-IDF's native RingbufHandle_t) replaces what
-// used to be a hand-rolled VideoFrameSlot[] + two raw counting semaphores here -- see
-// video_frame_ring_buffer_'s header comment.
+// ring_buffer::RingBuffer is used for the audio input/decoded rings (see USE_AUDIO members).
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "lvgl.h"
 #include "buffered_file_reader.h"
@@ -77,15 +74,6 @@ enum class VideoFormat : uint8_t {
   AVI_MJPEG = 2,  // AVI container with MJPEG video
 };
 
-// Framing for video_frame_ring_buffer_ (see that member's header comment). A real frame entry is
-//   [uint32_t frame_index][uint32_t payload_size][payload_size bytes]
-// The absolute frame_index (0-based, assigned by the loader in demux order) lets the consumer
-// drop stale frames by tag during an A/V re-sync without any risk of getting out of step with the
-// loader. The two sentinel values below are a lone uint32_t with no index and no payload; they are
-// picked from the top of the range so a real frame_index can never collide with them.
-static constexpr uint32_t VIDEO_FRAME_EOF = 0xFFFFFFFFu;
-static constexpr uint32_t VIDEO_FRAME_READ_ERROR = 0xFFFFFFFEu;
-
 // Forward declarations for automation
 class SimpleVideoPlayer;
 
@@ -133,10 +121,6 @@ class SimpleVideoPlayer : public Component {
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
-  /// How much of the COMPRESSED source stream to keep prefetched, as TIME (see
-  /// video_frame_ring_buffer_) -- prefetch_frames_ (the byte-budget basis, not a real slot count
-  /// any more) is derived from this and target_fps_ once both are known, in setup() (see
-  /// allocate_frame_ring_()).
   void set_prefetch_duration_ms(uint32_t ms) { this->prefetch_duration_ms_ = ms; }
 
 #ifdef USE_SPEAKER
@@ -191,14 +175,9 @@ class SimpleVideoPlayer : public Component {
 
  protected:
   //========================================================================
-  // Playback Task (decode + pacing, Core 1) and Loader Task (I/O + demux, Core 0)
-  //
-  // The loader task reads ahead into video_frame_ring_buffer_ using the same blocking
-  // BufferedFileReader used everywhere else in this component -- blocking is no longer a problem
-  // once it's this task's only job, isolated from decode's presentation deadline. The playback
-  // task does the one-time setup (open file, probe dimensions, allocate buffers) sequentially,
-  // starts the loader, then becomes a pure consumer: pop the next frame (a real, bounded
-  // RingBuffer::read() block, not a spin), decode, pace, present, repeat.
+  // Playback Task (Core 1): open file, probe dimensions, allocate buffers, then loop:
+  // read the next compressed frame (demux + audio feed) straight from BufferedFileReader,
+  // HW-decode into A/B, pace, present.
   //========================================================================
 
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
@@ -207,31 +186,13 @@ class SimpleVideoPlayer : public Component {
   /// Main playback loop (runs in task)
   void playback_loop_();
 
-  /// FreeRTOS task entry point (loader task, pinned to Core 0)
-  static void loader_task_entry_(void *param);
-
-  /// Loader loop: demuxes and reads ahead into video_frame_ring_buffer_ until EOF or stop is
-  /// signaled
-  void loader_loop_();
-
-  /// Wait for a task to stop (generic: used for both the playback and loader tasks)
+  /// Wait for a task to stop
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
 
   /// esp_timer one-shot callback (task-dispatch context): notifies the playback task so its
   /// pacing wait resumes exactly at the armed presentation instant. See the pacing loop in
   /// playback_loop_() for why this replaced a tick-quantised vTaskDelay().
   static void present_timer_cb_(void *arg);
-
-  //========================================================================
-  // Video Frame Ring Buffer (see video_frame_ring_buffer_)
-  //========================================================================
-
-  /// Allocate video_frame_ring_buffer_ and its two scratch read buffers (loader_read_buffer_,
-  /// decode_read_buffer_), sized from prefetch_frames_ * input_buffer_size_.
-  bool allocate_frame_ring_();
-
-  /// Free video_frame_ring_buffer_ and its scratch read buffers.
-  void free_frame_ring_();
 
   //========================================================================
   // Frame Processing
@@ -241,19 +202,14 @@ class SimpleVideoPlayer : public Component {
   /// Returns frame size or 0 if EOF, -1 on error
   int read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity);
 
-  /// Pop one entry from video_frame_ring_buffer_ (see its framing comment). On a real frame,
-  /// writes the payload into dest (capacity dest_cap), sets out_index to its absolute frame index,
-  /// decrements frames_in_ring_, and returns the payload size (> 0). Returns 0 for the EOF
-  /// sentinel, -1 for the READ_ERROR sentinel, -2 if the wait was aborted because state_ became
-  /// STOPPED/ERROR or the payload didn't fit dest_cap. Used by next_frame_to_decode_() and its
-  /// re-sync drop path.
-  int read_ring_entry_(uint32_t &out_index, uint8_t *dest, size_t dest_cap);
+  /// read_next_frame_() into decode_read_buffer_, with loop rewind and a stop check.
+  /// Returns payload size (> 0), 0 at EOF, -1 on read error, -2 if stopped/aborted.
+  int read_frame_();
 
-  /// Pop the next frame the pacing loop should DECODE (into decode_read_buffer_), applying A/V
-  /// re-sync: if the natural next frame is more than RESYNC_LAG_FRAMES behind the wall-clock media
-  /// time, discard intervening frames without decoding and fire the audio-side re-sync (bump
-  /// resync_generation_, set audio_skip_until_us_). out_index gets the returned frame's absolute
-  /// index. Return codes match read_ring_entry_ (>0 size, 0 EOF, -1 error, -2 aborted).
+  /// read_frame_() plus A/V re-sync: if the next frame is more than RESYNC_LAG_FRAMES behind the
+  /// wall-clock media time, skip intervening frames without decoding and fire the audio-side
+  /// re-sync (bump resync_generation_, set audio_skip_until_us_). out_index gets the returned
+  /// frame's absolute index. Return codes match read_frame_().
   int next_frame_to_decode_(uint32_t &out_index);
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
@@ -343,12 +299,8 @@ class SimpleVideoPlayer : public Component {
   /// a decode write or this invalidate (see canvas_buffer_'s header comment).
   void present_frame_();
 
-  // Current decode target (A, or B when it exists), and its LVGL draw buf.
-  bool use_b_() const { return this->decode_slot_ == 1 && this->decode_buffer_b_ != nullptr; }
-  uint16_t *decode_target_() { return this->use_b_() ? this->decode_buffer_b_ : this->canvas_buffer_; }
-  lv_draw_buf_t *decode_target_draw_buf_() {
-    return this->use_b_() ? &this->decode_draw_buf_b_ : this->canvas_draw_buf_;
-  }
+  // Which of the two decoded-frame buffers the next decode writes to (A when decode_slot_ is 0).
+  uint16_t *decode_target_() { return this->decode_slot_ == 1 ? this->decode_buffer_b_ : this->canvas_buffer_; }
 
   //========================================================================
   // Error Handling
@@ -366,17 +318,7 @@ class SimpleVideoPlayer : public Component {
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
-  uint32_t prefetch_duration_ms_{1000};  // How much source stream to keep prefetched, as time
-  // video_frame_ring_buffer_'s byte-budget basis -- derived from prefetch_duration_ms_ and
-  // target_fps_ once both are known (allocate_frame_ring_(), called from setup()), NOT a user-
-  // facing constant: sizing this in frame COUNT made the actual prefetched TIME depend on
-  // target_fps_ in a way the YAML option never expressed, so a given prefetch_frames value meant
-  // something different at 25fps than at 30fps. Sizing by time and deriving this fixes that. No
-  // longer a literal ring slot count since video_frame_ring_buffer_'s buffer is one contiguous
-  // byte stream now, not discrete slots -- this * input_buffer_size_ is the ring's allocated size,
-  // a worst-case bound real (usually smaller) frames pack into more tightly than that many slots
-  // ever could.
-  uint32_t prefetch_frames_{0};
+  uint32_t prefetch_duration_ms_{1000};  // file-I/O read-ahead depth hint (BufferedFileReader)
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -469,95 +411,45 @@ class SimpleVideoPlayer : public Component {
   // Buffers (allocated on demand)
   std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM (16KB), aligned for DMA
 
-  // Decode target == the canvas's OWN existing pixel buffer, in place. This is NOT allocated by
-  // this component at all: LVGL's own canvas widget codegen
-  // (esphome/components/lvgl/widgets/canvas.py) already built one lv_draw_buf_t, sized exactly to
-  // the YAML-declared width/height, via lv_expr.malloc_core() + lv_draw_buf_init(), and attached it
-  // with lv_canvas_set_draw_buf() -- as generated top-level code that runs before ANY
-  // Component::setup() (verified against esphome/writer.py's generated main.cpp), so it already
-  // exists by the time even THIS component's own setup() runs, let alone play(). setup() fetches
-  // it there (attach_canvas_buffer_() only READS the pointer via lv_canvas_get_draw_buf(), never
-  // allocates or replaces it) and blanks it immediately, since lv_malloc_core() doesn't zero its
-  // memory -- left alone, the canvas would show leftover PSRAM garbage from boot until whenever
-  // play() first runs.
-  //
-  // A second, component-owned decode buffer with lv_canvas_set_draw_buf() ping-ponging between the
-  // two was tried this session and rejected: swapping which lv_draw_buf_t is attached tears down
-  // the canvas's existing attachment and breaks rendering outright. The buffering this player
-  // actually needs is upstream, on the COMPRESSED source bytes feeding the decoder (see
-  // video_frame_ring_buffer_), not on the decoded pixel output -- decoding directly, in place, into the one
-  // buffer LVGL already owns and renders from is both simpler and the only approach that doesn't
-  // fight LVGL's own buffer management. This does mean decode and LVGL's render are touching the
-  // same memory without a lock between them; that's accepted the same way the old reference
-  // implementation accepted it (see git history) -- decode/playback runs on Core 1, the SAME core
-  // as the main loop/lv_timer_handler(), at higher priority, so LVGL's render can only ever run at
-  // a point this task actually yields/blocks, never truly concurrently with a decode write.
-  //
-  // Fixed at MAX_VIDEO_WIDTH x MAX_VIDEO_HEIGHT: single fixed-resolution panel, set correctly in
-  // YAML from the start, no runtime "resize" case -- attach_canvas_buffer_() validates the actual
-  // buffer it finds is within these bounds, it does not derive them.
-  // Double buffer: A is LVGL's own canvas draw buf (never freed by us), B is one extra RGB565
-  // buffer we allocate. Decode alternates A/B so the frame LVGL is rendering is never the one
-  // decode is writing, and the src pointer changes every frame (needed for lv_canvas to re-read).
-  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // A, owned by LVGL
-  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data
-  uint16_t *decode_buffer_b_{nullptr};       // B, ours
-  lv_draw_buf_t decode_draw_buf_b_{};        // wraps B, same header as A
+  // Two decoded-frame buffers, RGB565, fixed size. A is LVGL's own canvas draw buf -- built by the
+  // canvas codegen (esphome/components/lvgl/widgets/canvas.py: lv_draw_buf_init() +
+  // LV_IMAGE_FLAGS_MODIFIABLE + lv_canvas_set_draw_buf()) before any Component::setup() runs;
+  // attach_canvas_buffer_() only reads the pointer back via lv_canvas_get_draw_buf(), never
+  // allocates or replaces it. B is one extra buffer we allocate (jpeg_alloc_decoder_mem OUTPUT).
+  // Decode ping-pongs A/B so LVGL never renders the buffer decode is writing; loop() points
+  // canvas_draw_buf_->data at whichever was just filled, then lv_canvas_set_draw_buf() +
+  // lv_obj_invalidate() (the working pattern from youkorr's lvgl_camera_display).
+  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // LVGL's own canvas draw buf
+  uint16_t *canvas_buffer_{nullptr};         // buffer A == canvas_draw_buf_'s original data
+  uint16_t *decode_buffer_b_{nullptr};       // buffer B, ours
   int canvas_buffer_width_{0};
   int canvas_buffer_height_{0};
+  size_t frame_bytes_{0};  // canvas_buffer_width_ * height_ * 2, computed once in attach_canvas_buffer_()
   bool canvas_buffer_ready_{false};
   uint8_t decode_slot_{0};  // playback task: 0 -> A, 1 -> B for the next decode
 
-  // present_frame_() publishes the draw buf holding the just-decoded frame; loop() (LVGL thread)
-  // hands it to lv_canvas_set_draw_buf() + lv_obj_invalidate(). All LVGL calls stay off the
-  // higher-priority playback task.
-  std::atomic<lv_draw_buf_t *> ready_draw_buf_{nullptr};
+  // present_frame_() (playback task) publishes the pixels of the just-decoded frame; loop() (LVGL
+  // thread) points canvas_draw_buf_->data at them and does lv_canvas_set_draw_buf() +
+  // lv_obj_invalidate(). All LVGL calls stay off the higher-priority playback task.
+  std::atomic<uint16_t *> ready_pixels_{nullptr};
   std::atomic<bool> frame_ready_{false};
 
   // Created once in init_decoder_(), reused every frame, destroyed in free_buffers_().
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
+  // Constant for the whole run (output format + compile-time RGB order) -- built once in
+  // init_decoder_(), never per frame.
+  jpeg_decode_cfg_t hw_decode_cfg_{};
 
-  // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
-  // (Core 1). This is esphome::ring_buffer::RingBuffer (a thin wrapper over ESP-IDF's native
-  // RingbufHandle_t, RINGBUF_TYPE_BYTEBUF -- verified against the real ring_buffer.cpp/.h in this
-  // repo, the SAME class already used a few members down for audio), NOT a hand-rolled slot array:
-  // a previous version of this file reinvented a ring buffer from a VideoFrameSlot[] plus two raw
-  // FreeRTOS counting semaphores and manual head/tail indices -- upstream already solves exactly
-  // this, correctly, and this component already depends on it for audio, so there was never a
-  // reason to hand-roll a second implementation for video.
-  //
-  // Framing: RingBuffer is a plain byte stream with no item-boundary concept of its own, so each
-  // variable-length compressed frame is pushed as [4-byte uint32_t size][that many payload bytes]
-  // (VIDEO_FRAME_EOF/VIDEO_FRAME_READ_ERROR are the two header-only sentinel values, no payload
-  // follows them). Sized at allocate_frame_ring_() time from prefetch_frames_ * input_buffer_size_
-  // bytes -- a worst-case bound (every frame at max size), so real (usually much smaller) frames
-  // pack in more tightly than that many discrete slots ever could.
-  //
-  // Both write_without_replacement() and read() take a REAL FreeRTOS tick timeout and block
-  // properly (verified against the real ring_buffer.cpp -- xRingbufferSend()/xRingbufferReceiveUpTo()
-  // underneath), which is exactly the blocking primitive this component's own pacing loop had to
-  // learn to rely on this session (vTaskDelay(), never taskYIELD(), to actually let a
-  // lower-priority task run) -- no separate signaling semaphore needed on top of it.
-  std::shared_ptr<ring_buffer::RingBuffer> video_frame_ring_buffer_;
-  // Loader task's own scratch buffer: read_next_frame_() writes into this (PSRAM,
-  // input_buffer_size_ bytes), then the loader copies it into video_frame_ring_buffer_ --
-  // RingBuffer's write() API only ever copies FROM a caller-supplied buffer, it has no "give me a
-  // pointer to fill" mode the way the old per-slot array did.
-  std::unique_ptr<uint8_t[]> loader_read_buffer_;
-  // Decode/playback task's own scratch buffer: popped out of video_frame_ring_buffer_ via
-  // RingBuffer::read() (PSRAM, input_buffer_size_ bytes), then decode_frame_() reads from this.
+  // The playback task reads each next compressed frame here (jpeg_alloc_decoder_mem INPUT buffer,
+  // input_buffer_size_ bytes); decode_frame_() feeds it to the HW decoder. read_next_frame_()
+  // handles file-I/O read-ahead itself via BufferedFileReader (file_reader_).
   std::unique_ptr<uint8_t[]> decode_read_buffer_;
-  // How many complete frames are sitting in video_frame_ring_buffer_ right now, real frames only
-  // (EOF/error sentinels never counted) -- RingBuffer has no notion of "frame count", only bytes,
-  // so this is tracked separately, purely for the startup pre-buffering heuristic (see
-  // playback_loop_()) and logging. std::atomic, not a plain uint32_t: incremented by the loader
-  // task, decremented by the playback task, from different cores.
-  std::atomic<uint32_t> frames_in_ring_{0};
-
-  // Loader task (Core 0, pure storage I/O -- no DMA2D/PPA/JPEG hardware involved): demuxes and
-  // reads ahead into video_frame_ring_buffer_
-  TaskHandle_t loader_task_handle_{nullptr};
-  volatile bool loader_task_stop_{false};
+  // Absolute presentation index of the last frame read (demux order, monotonic across a loop
+  // rewind). Playback-task-local.
+  uint32_t video_frame_index_{0};
+  // Set true in the teardown of playback_loop_() (and wired to file_reader_'s abort flag) so an
+  // in-flight storage wait returns promptly at end of playback.
+  volatile bool playback_task_stop_{false};
 
   // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)

@@ -49,10 +49,9 @@ class BufferedFileReader {
   BufferedFileReader &operator=(const BufferedFileReader &) = delete;
 
   /**
-   * @brief Point the reader at a stop flag owned by the caller (e.g. the loader task's
-   * loader_task_stop_). While set, a pending wait_() returns STORAGE_ERROR_NOT_READY as soon as
-   * the flag goes true instead of continuing to wait for the storage completion -- so the task
-   * that owns this reader can be stopped promptly at end of playback.
+   * @brief Point the reader at a caller-owned stop flag. While set, a pending wait_() returns
+   * STORAGE_ERROR_NOT_READY as soon as the flag goes true instead of waiting out the storage
+   * completion -- so playback can be stopped promptly.
    */
   void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
 

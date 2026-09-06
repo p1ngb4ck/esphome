@@ -33,9 +33,6 @@ static constexpr size_t DMA_ALIGNMENT = 128;
 static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
 static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
 
-// Hard cap on the compressed-frame ring (I/O-hiccup cushion only, not a decoded-frame queue).
-static constexpr size_t MAX_FRAME_RING_BYTES = 4 * 1024 * 1024;
-
 //========================================================================
 // Component Lifecycle
 //========================================================================
@@ -115,24 +112,21 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Buffer B: second RGB565 output, same size/header as A. HW decoder output must come from
-  // jpeg_alloc_decoder_mem().
+  // Buffer B: second decoded-frame buffer, same size as A. HW decoder OUTPUT must come from
+  // jpeg_alloc_decoder_mem(). loop() only ever swaps canvas_draw_buf_->data between A and B, so B
+  // needs no lv_draw_buf_t of its own.
   {
-    size_t b_size =
-        static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
     size_t b_actual = 0;
-    this->decode_buffer_b_ = static_cast<uint16_t *>(jpeg_alloc_decoder_mem(b_size, &out_cfg, &b_actual));
+    this->decode_buffer_b_ =
+        static_cast<uint16_t *>(jpeg_alloc_decoder_mem(this->frame_bytes_, &out_cfg, &b_actual));
     if (this->decode_buffer_b_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate decode buffer B (%zu bytes)", b_size);
+      ESP_LOGE(TAG, "Failed to allocate decode buffer B (%zu bytes)", this->frame_bytes_);
       this->mark_failed();
       return;
     }
-    std::memset(this->decode_buffer_b_, 0, b_size);
-    const lv_image_header_t &h = this->canvas_draw_buf_->header;
-    lv_draw_buf_init(&this->decode_draw_buf_b_, h.w, h.h, static_cast<lv_color_format_t>(h.cf), h.stride,
-                     this->decode_buffer_b_, this->canvas_draw_buf_->data_size);
+    std::memset(this->decode_buffer_b_, 0, this->frame_bytes_);
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
@@ -152,23 +146,20 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Derive the frame ring's slot count from the configured prefetch TIME and target_fps_ -- both
-  // are already set (codegen's to_code() calls every setter before this component's setup() ever
-  // runs). Rounded up (ceil) so the configured duration is a floor, never short-changed by integer
-  // truncation, and floored at 2 so there is always at least one slot the loader can be filling
-  // while decode holds the other. There's no separate upper cap here: prefetch_duration itself is
-  // already YAML-range-validated (__init__.py), which is what actually bounds PSRAM cost.
-  this->prefetch_frames_ = std::max<uint32_t>(
-      2, static_cast<uint32_t>(std::ceil(
-             (static_cast<double>(this->prefetch_duration_ms_) / 1000.0) * this->target_fps_)));
-  ESP_LOGCONFIG(TAG, "  Prefetching %" PRIu32 "ms of source stream -> %" PRIu32 " ring slots at %.1f fps",
-                this->prefetch_duration_ms_, this->prefetch_frames_, this->target_fps_);
-
-  // Video frame ring buffer: producer (loader task, Core 0) / consumer (decode task, Core 1).
-  if (!this->allocate_frame_ring_()) {
-    ESP_LOGE(TAG, "Failed to allocate video frame ring buffer");
-    this->mark_failed();
-    return;
+  // Compressed-frame input for the HW decoder: one buffer, jpeg_alloc_decoder_mem() INPUT-aligned.
+  // Size rounded up to 16 so decode_frame_()'s ALIGN_UP(frame_size, 16) can never exceed it
+  // (read_next_frame_ already caps frame_size at input_buffer_size_) -- no per-frame bound check.
+  {
+    jpeg_decode_memory_alloc_cfg_t in_cfg{};
+    in_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
+    size_t in_actual = 0;
+    this->decode_read_buffer_.reset(static_cast<uint8_t *>(
+        jpeg_alloc_decoder_mem(ALIGN_UP(this->input_buffer_size_, 16), &in_cfg, &in_actual)));
+    if (!this->decode_read_buffer_) {
+      ESP_LOGE(TAG, "Failed to allocate decode input buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
+      this->mark_failed();
+      return;
+    }
   }
 
 #ifdef USE_AUDIO
@@ -235,8 +226,7 @@ void SimpleVideoPlayer::setup() {
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Frame ring: budgeted for %" PRIu32 " frames x %" PRIu32 " bytes (PSRAM)",
-                this->prefetch_frames_, this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes (PSRAM)", this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
@@ -247,12 +237,14 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {
   // Only place LVGL is touched for a frame update, and only on the LVGL thread. present_frame_()
-  // (playback task) publishes the ready buffer; point the canvas at it (A/B alternate, so the src
-  // pointer changes -> lv_canvas re-reads) and invalidate.
+  // (playback task) publishes the just-decoded pixels; retarget LVGL's own canvas draw buf at them
+  // and re-assert + invalidate (the working youkorr lvgl_camera_display pattern -- the canvas draw
+  // buf has LV_IMAGE_FLAGS_MODIFIABLE from codegen, so LVGL re-reads it).
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_draw_buf_t *db = this->ready_draw_buf_.load(std::memory_order_acquire);
-    if (db != nullptr) {
-      lv_canvas_set_draw_buf(this->canvas_, db);
+    uint16_t *pixels = this->ready_pixels_.load(std::memory_order_acquire);
+    if (pixels != nullptr && this->canvas_draw_buf_ != nullptr) {
+      this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(pixels);
+      lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
       lv_obj_invalidate(this->canvas_);
     }
   }
@@ -261,8 +253,7 @@ void SimpleVideoPlayer::loop() {
 void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
   ESP_LOGCONFIG(TAG, "  Cache buffer size: %" PRIu32 " bytes", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Frame ring: %" PRIu32 " slots x %" PRIu32 " bytes", this->prefetch_frames_,
-                this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes", this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
   if (this->state_ != PlayerState::STOPPED) {
@@ -289,6 +280,7 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   // state_ / last_error_ are atomic.
   this->video_path_ = video_path;
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
+  this->playback_task_stop_ = false;
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
@@ -397,6 +389,7 @@ void SimpleVideoPlayer::playback_loop_() {
   this->resync_frames_dropped_ = 0;
   this->decode_fail_count_ = 0;
   this->decode_slot_ = 0;
+  this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
@@ -453,100 +446,25 @@ void SimpleVideoPlayer::playback_loop_() {
   this->cache_buffer_valid_ = 0;
   this->cache_buffer_offset_ = 0;
 
-  // Reset the frame ring to a clean state (drain any leftover bytes from a previous session --
-  // RingBuffer::reset() discards everything currently in it).
-  this->video_frame_ring_buffer_->reset();
-  this->frames_in_ring_.store(0, std::memory_order_relaxed);
-
-  // Fire started callback
   this->on_started_callbacks_.call();
 
-  // Start the loader task on Core 0: it begins reading ahead into video_frame_ring_buffer_
-  // immediately,
-  // decoupled from this task's decode+pacing work entirely. Unlike decode, the loader is pure
-  // storage I/O -- it never touches DMA2D/PPA/JPEG hardware, so it has no reason to share Core 1
-  // with the main loop/decode the way decode itself now must (see play()'s task-creation comment
-  // for the DMA2D/PPA hardware-serialization reason decode is pinned there). Keeping it on Core 0
-  // instead of piling every task onto Core 1 actually uses both cores.
-  this->loader_task_stop_ = false;
-  BaseType_t loader_result = xTaskCreatePinnedToCore(loader_task_entry_, "svp_loader",
-                                                     8192,  // Stack size
-                                                     this,
-                                                     9,  // Priority: below decode (10), above default
-                                                     &this->loader_task_handle_,
-                                                     0);  // Core 0
-  if (loader_result != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create loader task");
-    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
-    this->close_file_();
-    return;
-  }
-
-#ifdef USE_AUDIO
-  // Wait for audio buffer to have sufficient data -- runs in parallel with the loader task
-  // above, which is already filling the video ring at the same time.
-  if (this->audio_enabled_ && this->speaker_ != nullptr && this->audio_decoded_ring_buffer_) {
-    // Calculate target: 200ms of audio for smooth startup
-    size_t bytes_per_ms = (this->source_audio_channels_ * 2 * this->audio_sample_rate_) / 1000;
-    size_t target_bytes = bytes_per_ms * 200;  // 200ms buffer
-
-    ESP_LOGI(TAG, "Waiting for audio buffer to fill (target: %zu bytes)...", target_bytes);
-    uint32_t wait_start = millis();
-    while (this->audio_decoded_ring_buffer_->available() < target_bytes && (millis() - wait_start) < 1000) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    size_t buffered = this->audio_decoded_ring_buffer_->available();
-    ESP_LOGI(TAG, "Audio buffer ready: %zu bytes (%.1f ms)", buffered, (float) buffered / bytes_per_ms);
-  }
-#endif
-
-  // Buffer before starting the presentation clock: block until a SMALL startup threshold of
-  // frames is ready, or the loader has already finished producing everything it ever will (a
-  // short video reaching EOF, or a read error) -- whichever comes first. Starting the clock
-  // immediately (as if frame 0's storage read were instant) is what caused the endless "loader
-  // could not keep up" storm: the very first read pays real cold-start latency (file open, first
-  // seek, first chunk parse) that a single frame's presentation budget never covers, so every
-  // early cycle missed its deadline before the loader had a fair chance to get ahead.
-  //
-  // Deliberately NOT prefetch_frames_ here: that's the STEADY-STATE ring depth (now derived from
-  // prefetch_duration, which can be several seconds' worth of frames -- see its header comment),
-  // not a startup gate. Requiring the full configured depth to fill before EVER decoding a single
-  // frame regressed this from "starts almost immediately" (the old fixed default of 8 frames) to
-  // "nothing happens for however long dozens of frames take to read" the moment prefetch_duration
-  // was raised past what 8 frames used to represent -- a real bug this session introduced, not a
-  // tradeoff. A handful of frames is enough to absorb the cold-start latency the comment above
-  // describes; the ring still fills to its full configured depth during normal playback, it just
-  // doesn't gate the FIRST frame on that.
-  static constexpr uint32_t STARTUP_FILL_TARGET = 4;
-  uint32_t startup_fill_target = std::min(this->prefetch_frames_, STARTUP_FILL_TARGET);
-  ESP_LOGI(TAG, "Buffering (target: %" PRIu32 " frames)...", startup_fill_target);
-  int64_t buffer_wait_start_us = esp_timer_get_time();
-  while (this->frames_in_ring_.load(std::memory_order_acquire) < startup_fill_target &&
-         this->loader_task_handle_ != nullptr) {
-    vTaskDelay(pdMS_TO_TICKS(5));
-  }
-  ESP_LOGI(TAG, "Buffered %u/%" PRIu32 " frames in %" PRId64 " ms",
-           static_cast<unsigned>(this->frames_in_ring_.load(std::memory_order_relaxed)), startup_fill_target,
-           (esp_timer_get_time() - buffer_wait_start_us) / 1000);
-
-  // Initialize frame pacing with presentation timestamps. Frame 0's target presentation time is
-  // "now", so the loop below presents it as soon as it's decoded -- the ring is already
-  // sufficiently full at this point (or the whole video fit in it), removing the first-frame
-  // stall without needing to keep re-deriving it cycle by cycle in the pacing loop itself.
+  // Frame 0's target presentation time is "now"; BufferedFileReader's own read-ahead absorbs the
+  // cold-start I/O latency.
   this->playback_start_time_us_ = esp_timer_get_time();
   this->frame_count_ = 0;
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
 
-  // ERROR is terminal here too, not just STOPPED: set_error_() sets state_ to ERROR, and a fall-
-  // through into the reads below (with a dead loader) would spin/hang. PAUSED keeps the loop alive.
-  while (this->state_ == PlayerState::PLAYING || this->state_ == PlayerState::PAUSED) {
-    // Handle pause state. Charge the wall time spent parked to paused_accum_us_ so it is excluded
-    // from media_us -- a pause must not look like the stream falling behind and trigger a re-sync
-    // on resume.
-    if (this->state_ == PlayerState::PAUSED) {
+  // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
+  while (true) {
+    const PlayerState st = this->state_.load(std::memory_order_acquire);
+    if (st != PlayerState::PLAYING && st != PlayerState::PAUSED) {
+      break;
+    }
+    // Charge parked wall time to paused_accum_us_ so a pause is not seen as the stream falling
+    // behind (which would trigger a re-sync on resume).
+    if (st == PlayerState::PAUSED) {
       const int64_t pause_started_us = esp_timer_get_time();
-      while (this->state_ == PlayerState::PAUSED) {
+      while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
         vTaskDelay(pdMS_TO_TICKS(50));
       }
       this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
@@ -562,7 +480,7 @@ void SimpleVideoPlayer::playback_loop_() {
     uint32_t frame_index = 0;
     const int payload = this->next_frame_to_decode_(frame_index);
     if (payload == -2) {
-      break;  // stop/error, or an oversized frame -- ring is torn down and re-primed by next play()
+      break;  // stopped / aborted
     }
     if (payload == 0) {
       ESP_LOGI(TAG, "Playback finished");
@@ -640,16 +558,8 @@ void SimpleVideoPlayer::playback_loop_() {
              this->resync_count_, this->resync_frames_dropped_, this->decode_fail_count_);
   }
 
-  // Stop the loader task before closing the file -- it must not still be reading via file_reader_
-  // once close_file_() tears it down. It notices loader_task_stop_ at every push_ring_entry()
-  // retry boundary (bounded) and inside BufferedFileReader::wait_() (via the abort flag); the
-  // notify below wakes it immediately if it is parked in that wait.
-  this->loader_task_stop_ = true;
-  if (this->loader_task_handle_ != nullptr) {
-    xTaskNotifyGive(this->loader_task_handle_);
-  }
-  this->wait_for_task_stop_(this->loader_task_handle_, 5000);
-
+  // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
+  this->playback_task_stop_ = true;
   this->close_file_();
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
   // Buffers are only freed in destructor when component is destroyed
@@ -679,13 +589,14 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // Blank the canvas on stop -- runs on the playback task, so same split as present_frame_():
-  // memset + cache flush here (pure ESP-IDF op), and hand the lv_obj_invalidate() to loop() via
-  // frame_ready_. Cosmetic best-effort (the canvas otherwise keeps showing the last frame).
+  // memset + cache flush here (CPU wrote, so C2M), publish buffer A for loop() to show. Cosmetic
+  // best-effort (the canvas otherwise keeps showing the last frame).
   if (this->canvas_buffer_ready_) {
     size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
     std::memset(this->canvas_buffer_, 0, frame_bytes);
     esp_cache_msync(this->canvas_buffer_, frame_bytes,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    this->ready_pixels_.store(this->canvas_buffer_, std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
   }
 
@@ -716,138 +627,27 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
 }
 
 //========================================================================
-// Loader Task (Core 0): reads ahead into video_frame_ring_buffer_, decoupled from decode/pacing
+// Frame Processing
 //========================================================================
 
-void SimpleVideoPlayer::loader_task_entry_(void *param) {
-  auto *player = static_cast<SimpleVideoPlayer *>(param);
-  player->loader_loop_();
-  player->loader_task_handle_ = nullptr;
-  vTaskDelete(nullptr);
-}
-
-namespace {
-// Pushes one length-prefixed entry (see VIDEO_FRAME_EOF/VIDEO_FRAME_READ_ERROR's header comment)
-// into a RingBuffer, retrying the real, bounded RingBuffer::write_without_replacement() block
-// until it fits or *stop_requested goes true. Real block (a genuine FreeRTOS wait, not a spin) is
-// what actually lets a lower-priority task run while this one waits for the consumer to drain
-// room -- same lesson this component's own pacing loop learned about vTaskDelay() vs taskYIELD()
-// this session, now via RingBuffer's own internal use of it instead of anything hand-rolled here.
-bool push_ring_entry(ring_buffer::RingBuffer &ring, const uint8_t *data, size_t len,
-                     const volatile bool &stop_requested) {
-  size_t offset = 0;
-  while (offset < len) {
-    size_t written =
-        ring.write_without_replacement(data + offset, len - offset, pdMS_TO_TICKS(50), true);
-    if (written == 0) {
-      if (stop_requested)
-        return false;
-      continue;
+int SimpleVideoPlayer::read_frame_() {
+  while (true) {
+    const PlayerState s = this->state_.load(std::memory_order_acquire);
+    if (s != PlayerState::PLAYING && s != PlayerState::PAUSED) {
+      return -2;  // stopped / aborted
     }
-    offset += written;
-  }
-  return true;
-}
-}  // namespace
-
-void SimpleVideoPlayer::loader_loop_() {
-  ESP_LOGI(TAG, "Loader task started (Core 0)");
-
-  // Absolute presentation index of the next video frame this task emits. read_next_frame_() only
-  // ever returns VIDEO frames (it consumes/skips audio internally), one per call, in order -- so
-  // this is exactly the frame's presentation index, and it keeps counting across a loop rewind so
-  // the consumer's monotonic pacing never sees it go backwards.
-  uint32_t video_out_index = 0;
-
-  while (!this->loader_task_stop_) {
-    int n = this->read_next_frame_(this->loader_read_buffer_.get(), this->input_buffer_size_);
-
+    int n = this->read_next_frame_(this->decode_read_buffer_.get(), this->input_buffer_size_);
+    if (n > 0) {
+      return n;
+    }
     if (n == 0 && this->loop_) {
-      // EOF with looping enabled: rewind and retry without publishing anything -- transparent to
-      // the consumer, which never sees an EOF marker for a looping video.
-      ESP_LOGI(TAG, "Looping video");
       this->seek_to_(0);
       this->cache_buffer_valid_ = 0;
       this->cache_buffer_offset_ = 0;
       continue;
     }
-
-    if (n > 0) {
-      // Real frame: [uint32 frame_index][uint32 payload_size] header, then the payload.
-      const uint32_t header[2] = {video_out_index, static_cast<uint32_t>(n)};
-      if (!push_ring_entry(*this->video_frame_ring_buffer_, reinterpret_cast<const uint8_t *>(header),
-                           sizeof(header), this->loader_task_stop_)) {
-        break;  // stop requested while waiting for room for the header
-      }
-      if (!push_ring_entry(*this->video_frame_ring_buffer_, this->loader_read_buffer_.get(),
-                           static_cast<size_t>(n), this->loader_task_stop_)) {
-        break;  // stop requested mid-payload -- the header we already pushed is now a lie, but the
-                // whole ring is drained and reset()'d before the next session (see playback_loop_())
-      }
-      this->frames_in_ring_.fetch_add(1, std::memory_order_release);
-      video_out_index++;
-      continue;
-    }
-
-    // EOF/error: push the lone sentinel (no index, no payload) and stop -- the consumer sees it
-    // via the ring and stops too, and there is nothing more useful for the loader to read.
-    const uint32_t sentinel = (n == 0) ? VIDEO_FRAME_EOF : VIDEO_FRAME_READ_ERROR;
-    push_ring_entry(*this->video_frame_ring_buffer_, reinterpret_cast<const uint8_t *>(&sentinel),
-                    sizeof(sentinel), this->loader_task_stop_);
-    break;
+    return n;  // 0 = EOF, -1 = read error
   }
-
-  ESP_LOGI(TAG, "Loader task finished");
-}
-
-//========================================================================
-// Frame Processing
-//========================================================================
-
-int SimpleVideoPlayer::read_ring_entry_(uint32_t &out_index, uint8_t *dest, size_t dest_cap) {
-  // Accumulate exactly `len` bytes from the ring into `buf`. RingBuffer::read() is a byte stream
-  // and can return a short count (verified against ring_buffer.cpp) -- a 1-3 byte partial happens
-  // when the loader had to split a header across two writes under a full ring. false == aborted
-  // because state_ became STOPPED/ERROR while blocked.
-  auto read_exact = [this](void *buf, size_t len) -> bool {
-    auto *p = static_cast<uint8_t *>(buf);
-    size_t offset = 0;
-    while (offset < len) {
-      offset += this->video_frame_ring_buffer_->read(p + offset, len - offset, pdMS_TO_TICKS(50));
-      if (offset < len && (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  uint32_t first = 0;
-  if (!read_exact(&first, sizeof(first))) {
-    return -2;
-  }
-  if (first == VIDEO_FRAME_EOF) {
-    return 0;
-  }
-  if (first == VIDEO_FRAME_READ_ERROR) {
-    return -1;
-  }
-
-  out_index = first;
-  uint32_t size = 0;
-  if (!read_exact(&size, sizeof(size))) {
-    return -2;
-  }
-  if (size > dest_cap) {
-    // Framing corruption (should be impossible: the loader caps every frame at input_buffer_size_).
-    // Terminal -- record it in the error state, no logging on this priority-10 path.
-    this->set_error_(PlaybackError::DECODE_ERROR);
-    return -2;
-  }
-  if (!read_exact(dest, size)) {
-    return -2;
-  }
-  this->frames_in_ring_.fetch_sub(1, std::memory_order_acq_rel);
-  return static_cast<int>(size);
 }
 
 int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
@@ -858,10 +658,11 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
     return media_us > 0 ? static_cast<uint32_t>(media_us / this->frame_duration_us_) : 0;
   };
 
-  int payload = this->read_ring_entry_(out_index, this->decode_read_buffer_.get(), this->input_buffer_size_);
+  int payload = this->read_frame_();
   if (payload <= 0) {
     return payload;  // EOF / read error / aborted -- caller handles
   }
+  out_index = this->video_frame_index_++;
 
   if (out_index + RESYNC_LAG_FRAMES >= want_index()) {
     this->resync_active_ = false;  // caught up (or never behind) -- this lag episode, if any, is over
@@ -869,17 +670,10 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
   }
 
   // Fell behind by more than RESYNC_LAG_FRAMES: this MCU cannot catch up by decoding faster, so
-  // don't try -- drop straight to the live edge without decoding the frames in between.
-  //
-  // The audio side is only touched when this file actually has playing audio (audio_enabled_):
-  // point it at the same media time via audio_skip_until_us_ (the loader skips demuxed audio up to
-  // it without feeding it), and bump resync_generation_ ONCE per lag episode so the audio task
-  // flushes its stale queues (a persistently slow decoder must not re-flush every frame, which
-  // would leave audio permanently silent). A video-only file does none of this -- there is no
-  // audio to keep in sync; the frame drop below is the whole re-sync.
-  //
-  // No logging on this path: it is priority-10 and time-critical (AGENTS.md).
-  // resync_count_/resync_frames_dropped_ are plain counters, summarised once after the loop exits.
+  // read straight through to the live edge without decoding the frames in between. read_frame_()
+  // still demuxes each skipped frame, so audio_skip_until_us_ + resync_generation_ keep audio in
+  // step (bump the generation once per lag episode so a persistently slow decoder does not re-flush
+  // audio every frame). No logging on this priority-10 path (AGENTS.md).
   if (!this->resync_active_) {
     this->resync_active_ = true;
     this->resync_count_++;
@@ -895,22 +689,22 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
                                       std::memory_order_release);
     }
     if (++dropped > RESYNC_MAX_DROP) {
-      // Delivery itself can't keep up with real time -- stop chasing a target we can't reach and
-      // just present what we have. Playback becomes a low frame rate rather than an infinite drain.
       break;
     }
-    payload = this->read_ring_entry_(out_index, this->decode_read_buffer_.get(), this->input_buffer_size_);
+    payload = this->read_frame_();
     if (payload <= 0) {
       this->resync_frames_dropped_ += dropped;
-      return payload;  // hit EOF / error / abort mid-drop -- report it, caller handles uniformly
+      return payload;
     }
+    out_index = this->video_frame_index_++;
   }
   this->resync_frames_dropped_ += dropped;
   return payload;  // first frame at/after the live edge, already in decode_read_buffer_
 }
 
 int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity) {
-  // Read frame directly from file - runs on the loader task, writing into loader_read_buffer_
+  // Read the next VIDEO frame from the file (demuxing + feeding audio inline); runs on the
+  // playback task, writing into decode_read_buffer_.
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
@@ -1012,46 +806,32 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 }
 
 bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
-  size_t aligned_size = ALIGN_UP(frame_size, 16);  // HW reads up to aligned_size, not frame_size
-  if (aligned_size > this->input_buffer_size_) {
-    return false;
-  }
-
-  jpeg_decode_cfg_t decode_cfg{};
-  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-#if LV_COLOR_16_SWAP
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
-#else
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-#endif
-
-  uint16_t *decode_target = this->decode_target_();
-  size_t decode_target_capacity =
-      static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-
-  // jpeg_decoder_process() is synchronous; its esp_err_t return is the completion status.
+  // Synchronous; the esp_err_t return is the completion status. decode target capacity is the fixed
+  // frame_bytes_. All per-frame config lives in hw_decode_cfg_, built once.
   uint32_t out_size = 0;
-  esp_err_t err = jpeg_decoder_process(
-      this->hw_jpeg_decoder_, &decode_cfg, frame_data, static_cast<uint32_t>(aligned_size),
-      reinterpret_cast<uint8_t *>(decode_target), static_cast<uint32_t>(decode_target_capacity), &out_size);
-
+  esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &this->hw_decode_cfg_, frame_data,
+                                       static_cast<uint32_t>(ALIGN_UP(frame_size, 16)),
+                                       reinterpret_cast<uint8_t *>(this->decode_target_()),
+                                       static_cast<uint32_t>(this->frame_bytes_), &out_size);
   return err == ESP_OK && out_size > 0;
 }
 
 void SimpleVideoPlayer::present_frame_() {
-  if (!this->canvas_buffer_ready_) {
-    return;
-  }
-  // Playback task: M2C-invalidate the just-decoded buffer (decoder DMA-wrote PSRAM) and publish it.
-  const size_t frame_bytes =
-      static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-  esp_cache_msync(this->decode_target_(), frame_bytes,
-                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-  this->ready_draw_buf_.store(this->decode_target_draw_buf_(), std::memory_order_release);
+  // Playback task: M2C-invalidate the just-decoded buffer (decoder DMA-wrote PSRAM) and publish its
+  // pixels for loop() to hand to LVGL.
+  uint16_t *pixels = this->decode_target_();
+  esp_cache_msync(pixels, this->frame_bytes_, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+  this->ready_pixels_.store(pixels, std::memory_order_release);
   this->frame_ready_.store(true, std::memory_order_release);
 }
 
 bool SimpleVideoPlayer::init_decoder_() {
+  this->hw_decode_cfg_.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+#if LV_COLOR_16_SWAP
+  this->hw_decode_cfg_.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+#else
+  this->hw_decode_cfg_.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+#endif
   if (this->hw_jpeg_decoder_ == nullptr) {
     jpeg_decode_engine_cfg_t eng_cfg{};
     eng_cfg.intr_priority = 0;
@@ -1169,10 +949,9 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   if (!this->file_reader_) {
     this->file_reader_ = std::make_unique<BufferedFileReader>();
   }
-  // A wait inside the reader returns early once loader_task_stop_ goes true, so the loader task
-  // (the reader's only user during playback) can be stopped promptly at end of playback instead
-  // of blocking on an outstanding storage completion.
-  this->file_reader_->set_abort_flag(&this->loader_task_stop_);
+  // A wait inside the reader returns early once playback_task_stop_ goes true, so an outstanding
+  // storage completion cannot block the end of playback.
+  this->file_reader_->set_abort_flag(&this->playback_task_stop_);
   if (!this->file_reader_->open(path.c_str())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     return false;
@@ -1274,10 +1053,8 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
 //========================================================================
 
 bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_height) {
-  // Nothing is allocated here at all -- the decode target is canvas_buffer_, LVGL's own existing
-  // canvas pixel buffer (fetched once by attach_canvas_buffer_()), not a separate output_buffer_
-  // sized per call. This just verifies the actual video fits that buffer's fixed capacity and that
-  // the frame ring exists, same checks as before.
+  // Nothing is allocated here -- decode targets are the canvas buffer (A) and decode_buffer_b_ (B),
+  // both fixed-size. This just verifies the actual video fits.
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
   uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
@@ -1285,11 +1062,6 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
 
   ESP_LOGI(TAG, "Verifying buffers for %" PRIu32 "x%" PRIu32 " video (aligned: %" PRIu32 "x%" PRIu32 ")", video_width,
            video_height, aligned_width, aligned_height);
-
-  if (!this->video_frame_ring_buffer_) {
-    ESP_LOGE(TAG, "Video frame ring buffer not pre-allocated (this should not happen)");
-    return false;
-  }
 
   if (aligned_width > aligned_max_width || aligned_height > aligned_max_height) {
     ESP_LOGE(TAG,
@@ -1330,7 +1102,11 @@ void SimpleVideoPlayer::free_buffers_() {
   this->audio_decoded_ring_buffer_.reset();
 #endif
 
-  this->free_frame_ring_();
+  // decode_read_buffer_ came from jpeg_alloc_decoder_mem() -- heap_caps_free(), not unique_ptr's
+  // delete[].
+  if (this->decode_read_buffer_) {
+    heap_caps_free(this->decode_read_buffer_.release());
+  }
 }
 
 bool SimpleVideoPlayer::attach_canvas_buffer_() {
@@ -1364,107 +1140,11 @@ bool SimpleVideoPlayer::attach_canvas_buffer_() {
   this->canvas_buffer_ = reinterpret_cast<uint16_t *>(draw_buf->data);
   this->canvas_buffer_width_ = static_cast<int>(width);
   this->canvas_buffer_height_ = static_cast<int>(height);
+  this->frame_bytes_ = static_cast<size_t>(width) * height * sizeof(uint16_t);
   this->canvas_buffer_ready_ = true;
 
   ESP_LOGI(TAG, "Canvas buffer attached (LVGL-owned): %" PRIu32 "x%" PRIu32, width, height);
   return true;
-}
-
-bool SimpleVideoPlayer::allocate_frame_ring_() {
-  // Defensive only: setup() derives and floors prefetch_frames_ (>= 2) before ever calling this.
-  if (this->prefetch_frames_ == 0) {
-    ESP_LOGE(TAG, "prefetch_frames_ was never derived from prefetch_duration_ms_ (this should not happen)");
-    return false;
-  }
-
-  // Byte budget: worst case, every buffered frame is a full input_buffer_size_, plus one 4-byte
-  // length header per frame -- see video_frame_ring_buffer_'s header comment for why real
-  // (usually smaller) frames pack in more tightly than that in practice. This is easily hundreds
-  // of KB to multiple MB -- MUST be PSRAM. This MCU's internal SRAM is only 512KB total, shared
-  // with the WiFi/BT stacks, every task's own stack, and everything else already resident there --
-  // an allocation this size EVER landing there, even as a "fallback", is a guaranteed crash, not a
-  // degraded-but-working state.
-  //
-  // ring_buffer::RingBuffer::create()'s MemoryPreference has no true "external-only, hard-fail"
-  // mode: verified against the real RAMAllocator source (esphome/core/helpers.h) --
-  // MemoryPreference::EXTERNAL_FIRST maps to RAMAllocator::NONE, whose get_caps_() enables BOTH
-  // regions (external primary, internal SECONDARY) via heap_caps_malloc_prefer(), not
-  // ALLOC_EXTERNAL alone (which RingBuffer's own API never exposes a way to request). So the
-  // fallback this component must never take is reachable through create() itself, silently, if we
-  // just called it and trusted the result.
-  //
-  // Closed by refusing to even ATTEMPT the allocation unless PSRAM already has enough contiguous
-  // free space for it: heap_caps_malloc_prefer() only ever falls through to its second (internal)
-  // capability set when the FIRST (external) attempt fails outright -- so confirming ahead of time
-  // that the first attempt WILL succeed, via the same MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT capability
-  // set RAMAllocator's external path itself uses, makes the internal-fallback branch provably
-  // unreachable for this call, without needing to patch the upstream ring_buffer component itself.
-  // input_buffer_size_ is the single-frame worst case; real MJPEG frames are a fraction of it, so
-  // sizing the ring at prefetch_frames_ * input_buffer_size_ over-allocates ~10x. Cap it: this is
-  // just the I/O-hiccup cushion, not a decoded-frame queue.
-  size_t ring_bytes = static_cast<size_t>(this->prefetch_frames_) * (this->input_buffer_size_ + sizeof(uint32_t));
-  if (ring_bytes > MAX_FRAME_RING_BYTES) {
-    ring_bytes = MAX_FRAME_RING_BYTES;
-  }
-  size_t psram_largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (psram_largest_block < ring_bytes) {
-    ESP_LOGE(TAG,
-             "Refusing to allocate the %zu-byte video frame ring buffer: only %zu bytes of contiguous PSRAM free. "
-             "This MUST come from PSRAM (internal SRAM is only 512KB, shared with everything else) -- lower "
-             "prefetch_duration or input_buffer_size in YAML, or free PSRAM elsewhere.",
-             ring_bytes, psram_largest_block);
-    return false;
-  }
-  this->video_frame_ring_buffer_ =
-      ring_buffer::RingBuffer::create(ring_bytes, ring_buffer::RingBuffer::MemoryPreference::EXTERNAL_FIRST);
-  if (!this->video_frame_ring_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate video frame ring buffer (%zu bytes, PSRAM)", ring_bytes);
-    return false;
-  }
-
-  // loader_read_buffer_: plain PSRAM, no DMA2D alignment needed -- it's only ever memcpy'd out of
-  // (into video_frame_ring_buffer_ by RingBuffer::write_without_replacement()), never handed to
-  // hardware directly.
-  this->loader_read_buffer_.reset(
-      static_cast<uint8_t *>(heap_caps_malloc(this->input_buffer_size_, MALLOC_CAP_SPIRAM)));
-  if (!this->loader_read_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate loader read buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
-    return false;
-  }
-
-  // decode_read_buffer_: the HW JPEG decoder's compressed-input (bit_stream) argument -- needs
-  // jpeg_alloc_decoder_mem() alignment.
-  jpeg_decode_memory_alloc_cfg_t input_cfg{};
-  input_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-  size_t actual_size = 0;
-  uint8_t *decode_buf =
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_size));
-  if (decode_buf == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate decode read buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
-    return false;
-  }
-  // Freed with heap_caps_free() in free_frame_ring_(), not unique_ptr's delete[].
-  this->decode_read_buffer_.reset(decode_buf);
-
-  double total_mb = static_cast<double>(ring_bytes) / (1024.0 * 1024.0);
-  ESP_LOGI(TAG, "Video frame ring buffer: %.2f MB (PSRAM, budgeted for ~%" PRIu32 " frames at %" PRIu32 " bytes each)",
-           total_mb, this->prefetch_frames_, this->input_buffer_size_);
-  return true;
-}
-
-void SimpleVideoPlayer::free_frame_ring_() {
-  this->video_frame_ring_buffer_.reset();
-  // Both scratch buffers came from heap_caps_malloc/jpeg_alloc_decoder_mem, not `new[]` -- release()
-  // + heap_caps_free(), never unique_ptr's own default deleter (delete[], the wrong allocator's
-  // free function). Same reasoning as canvas_buffer_'s allocation used to need before it was
-  // removed in favor of LVGL's own buffer.
-  if (this->loader_read_buffer_) {
-    heap_caps_free(this->loader_read_buffer_.release());
-  }
-  if (this->decode_read_buffer_) {
-    heap_caps_free(this->decode_read_buffer_.release());
-  }
-  this->frames_in_ring_.store(0, std::memory_order_relaxed);
 }
 
 //========================================================================
