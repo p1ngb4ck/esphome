@@ -1,6 +1,7 @@
 #include "simple_video_player.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/core/hal.h"  // delayMicroseconds() -> delay_microseconds_safe(), the sub-ms busy-wait
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -603,27 +604,36 @@ void SimpleVideoPlayer::playback_loop_() {
     // means the lower-priority main loop task can only run while THIS task is genuinely blocked,
     // so every wait here is also LVGL's only chance to get scheduled.
     //
-    // vTaskDelay() ONLY, never taskYIELD(): taskYIELD()/portYIELD() asks the scheduler to
-    // reschedule but does NOT remove this task from the Ready list, so the scheduler just
-    // re-selects it immediately -- it's still the highest-priority ready task. It only rotates
-    // between tasks of the SAME priority; it can never let a lower-priority task (the main
-    // loop/LVGL, here) run at all (verified against the real FreeRTOS scheduler source,
-    // tasks.c/taskSELECT_HIGHEST_PRIORITY_TASK()). vTaskDelay() actually places this task on the
-    // delayed list (real Blocked state), which is the only way the scheduler can pick a
-    // lower-priority task. So this loops on short, real vTaskDelay() calls -- recomputing the
-    // remaining time from a fresh esp_timer_get_time() every iteration (never a cached timestamp:
-    // decode duration is unpredictable, so the remainder must be re-read, not assumed) -- sized
-    // down to whole ticks and floored at 1, until the remainder is gone. At this build's 1000Hz
-    // tick rate that's 1ms granularity, worlds finer than the ~40ms frame budget. If already
-    // behind (elapsed >= required), the loop condition is false on the first check and
-    // present_frame_() fires immediately -- fire-and-forget, no catch-up logic, matching this
-    // MCU's actual constraint: there is no slack to catch up with, only less work to waste.
+    // Two-stage wait, the same pattern the modbus component's send_frame_() uses for its
+    // sub-millisecond frame-gap timing (esphome/components/modbus/modbus.cpp):
+    //
+    //   1. Coarse: while more than a millisecond is owed, vTaskDelay() the whole-millisecond part.
+    //      This puts the task in the real Blocked state -- the ONLY way FreeRTOS priority
+    //      scheduling lets the lower-priority main-loop task (LvglComponent::loop() ->
+    //      lv_timer_handler(), the render/rotate/flush pipeline) run at all. taskYIELD() would not:
+    //      it leaves this task on the Ready list and the scheduler just re-picks it, since it's
+    //      still highest priority (verified against tasks.c/taskSELECT_HIGHEST_PRIORITY_TASK()).
+    //   2. Re-read the clock. vTaskDelay() only guarantees "at least" -- never trust it to have
+    //      landed exactly; recompute the remainder from a fresh esp_timer_get_time().
+    //   3. Fine: delayMicroseconds() the sub-millisecond tail. That resolves to
+    //      delay_microseconds_safe() (esphome/core/helpers.cpp) which busy-spins on micros() for
+    //      the final <5ms -- ~1us accuracy, versus vTaskDelay()'s 1ms tick quantum. This is a
+    //      real CPU busy-wait, deliberately: it is bounded to under one tick, once per frame, and
+    //      only ever entered when we are already within 1ms of the presentation deadline.
+    //
+    // If already behind (remaining <= 0 on the first check) nothing waits and present_frame_()
+    // fires immediately -- fire-and-forget, no catch-up, matching this MCU: there is no slack to
+    // catch up with, only less work to waste.
     while (true) {
       int64_t remaining_us = target_present_time_us - esp_timer_get_time();
       if (remaining_us <= 0)
         break;
-      TickType_t ticks = static_cast<TickType_t>(remaining_us / 1000);
-      vTaskDelay(std::max<TickType_t>(ticks, 1));
+      if (remaining_us >= 1000) {
+        vTaskDelay(pdMS_TO_TICKS(remaining_us / 1000));
+        continue;  // recompute from a fresh clock -- do not assume the sleep landed exactly
+      }
+      delayMicroseconds(static_cast<uint32_t>(remaining_us));
+      break;
     }
 
     this->present_frame_();
