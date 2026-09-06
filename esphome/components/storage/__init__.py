@@ -145,8 +145,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_TASK_STACK_SIZE, default=8192): cv.int_range(
             min=4096, max=32768
         ),
-        # FreeRTOS priority: above idle (0), below networking tasks (typically higher).
-        cv.Optional(CONF_TASK_PRIORITY, default=1): cv.int_range(min=1, max=23),
+        # FreeRTOS priority. Default 9: consumers that block on a worker read from their own
+        # task (e.g. simple_video_player's loader task at priority 9) must not leave the worker
+        # unable to run behind them. At the old default of 1 the worker tied with the main task
+        # and lost to every component task, so a busy consumer would stall waiting on reads that
+        # never got serviced. Still below hard-real-time audio/decode work (typically 10+).
+        cv.Optional(CONF_TASK_PRIORITY, default=9): cv.int_range(min=1, max=23),
         # Fixed request pool/queue depth -- sized exactly at codegen like the storage
         # registry's device count, so the slot itself never allocates at runtime. (The
         # completion callback is a std::function and may allocate for a large lambda capture.)

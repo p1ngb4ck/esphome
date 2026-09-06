@@ -722,7 +722,7 @@ class StorageWorker : public PollingComponent {
   FixedVector<TransferRequest> pool_;
   FixedVector<StreamRequest> stream_pool_;
   uint32_t task_stack_size_{8192};
-  uint8_t task_priority_{1};
+  uint8_t task_priority_{9};  // see CONF_TASK_PRIORITY default in __init__.py for why 9, not 1
   size_t max_pending_{4};
   size_t max_streams_{2};
 
