@@ -82,7 +82,14 @@ static constexpr size_t USB_MAX_PACKET_SIZE = USB_HOST_MAX_PACKET_SIZE;
 static constexpr size_t USB_MIN_TRANSFER_BUFFER = USB_HOST_MAX_PACKET_SIZE;
 static constexpr size_t USB_EVENT_QUEUE_SIZE = 32;
 static constexpr size_t USB_TASK_STACK_SIZE = 4096;
-static constexpr UBaseType_t USB_TASK_PRIORITY = 5;
+// This task only ever blocks in usb_host_client_handle_events() and wakes to service transfer
+// completions / release transfer slots, so it must run PROMPTLY once a transfer finishes -- a
+// caller blocked in a bulk read (e.g. storage_worker -> usb_storage fread) cannot return until
+// this task has processed the completion. At the old value of 5 it sat below application tasks
+// (audio/decode run at 10, storage_worker at 9), so those starved it and the read never
+// completed. 12 keeps it above the application tier and well below the Wi-Fi/RTOS range; it is
+// mostly blocked, so the higher priority costs nothing when idle.
+static constexpr UBaseType_t USB_TASK_PRIORITY = 12;
 
 // Transfer status reported to callback
 struct TransferStatus {
