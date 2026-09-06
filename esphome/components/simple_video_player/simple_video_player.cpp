@@ -215,12 +215,12 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // The only LVGL calls for a frame update, on the LVGL thread. The playback task decodes into
-  // canvas_buffer_ in place and does the cache maintenance itself, then sets frame_ready_.
-  // Re-setting the same draw buf forces LVGL to re-read the in-place pixels; lv_obj_invalidate()
-  // alone is not enough for a canvas whose data pointer never changes.
+  // Only LVGL call for a frame update, on the LVGL thread. The playback task decoded into
+  // canvas_buffer_ in place and already M2C-synced the cache. The canvas draw buf has
+  // LV_IMAGE_FLAGS_MODIFIABLE (canvas.py), so LVGL re-reads it every render -- a plain invalidate
+  // is enough; calling lv_canvas_set_draw_buf() per frame re-runs the canvas src setup and is
+  // what caused the blink.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
     lv_obj_invalidate(this->canvas_);
   }
 }
