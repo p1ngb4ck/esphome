@@ -98,9 +98,12 @@ enum class VideoFormat : uint8_t {
   AVI_MJPEG = 2,  // AVI container with MJPEG video
 };
 
-// Length-prefix framing for video_frame_ring_buffer_ (see that member's header comment): every
-// entry is a 4-byte uint32_t header followed by that many payload bytes, except the two sentinel
-// header values below, which carry no payload.
+// Framing for video_frame_ring_buffer_ (see that member's header comment). A real frame entry is
+//   [uint32_t frame_index][uint32_t payload_size][payload_size bytes]
+// The absolute frame_index (0-based, assigned by the loader in demux order) lets the consumer
+// drop stale frames by tag during an A/V re-sync without any risk of getting out of step with the
+// loader. The two sentinel values below are a lone uint32_t with no index and no payload; they are
+// picked from the top of the range so a real frame_index can never collide with them.
 static constexpr uint32_t VIDEO_FRAME_EOF = 0xFFFFFFFFu;
 static constexpr uint32_t VIDEO_FRAME_READ_ERROR = 0xFFFFFFFEu;
 
@@ -258,6 +261,21 @@ class SimpleVideoPlayer : public Component {
   /// Read the next JPEG frame into dest_buffer (capacity dest_capacity)
   /// Returns frame size or 0 if EOF, -1 on error
   int read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity);
+
+  /// Pop one entry from video_frame_ring_buffer_ (see its framing comment). On a real frame,
+  /// writes the payload into dest (capacity dest_cap), sets out_index to its absolute frame index,
+  /// decrements frames_in_ring_, and returns the payload size (> 0). Returns 0 for the EOF
+  /// sentinel, -1 for the READ_ERROR sentinel, -2 if the wait was aborted because state_ became
+  /// STOPPED/ERROR or the payload didn't fit dest_cap. Used by next_frame_to_decode_() and its
+  /// re-sync drop path.
+  int read_ring_entry_(uint32_t &out_index, uint8_t *dest, size_t dest_cap);
+
+  /// Pop the next frame the pacing loop should DECODE (into decode_read_buffer_), applying A/V
+  /// re-sync: if the natural next frame is more than RESYNC_LAG_FRAMES behind the wall-clock media
+  /// time, discard intervening frames without decoding and fire the audio-side re-sync (bump
+  /// resync_generation_, set audio_skip_until_us_). out_index gets the returned frame's absolute
+  /// index. Return codes match read_ring_entry_ (>0 size, 0 EOF, -1 error, -2 aborted).
+  int next_frame_to_decode_(uint32_t &out_index);
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
@@ -567,10 +585,39 @@ class SimpleVideoPlayer : public Component {
   // no FreeRTOS-tick quantisation.
   esp_timer_handle_t present_timer_{nullptr};
 
-  // Frame pacing: proper timing for video FPS vs display refresh rate
-  int64_t playback_start_time_us_{0};  // Microsecond timestamp when playback started
-  uint32_t frame_count_{0};            // Number of frames decoded so far
-  float frame_duration_us_{0};         // Duration of one frame in microseconds (1000000/fps)
+  // Frame pacing. The wall clock is the master timeline: media_us = esp_timer_get_time() -
+  // playback_start_time_us_ - paused_accum_us_. Video is paced to it (see playback_loop_()); audio
+  // free-runs on the I2S clock. Neither stream ever waits on the other -- when one falls too far
+  // behind media_us the pace controller fires a single A/V re-sync (drop stale video without
+  // decoding it, skip audio forward to the same media time, flush the audio queues) instead of
+  // stalling or drifting.
+  int64_t playback_start_time_us_{0};  // esp_timer_get_time() at frame 0
+  int64_t paused_accum_us_{0};         // total wall time spent PAUSED, excluded from media_us
+  uint32_t frame_count_{0};            // absolute index of the next frame to present
+  float frame_duration_us_{0};         // duration of one frame in microseconds (1000000/fps)
+
+  // A/V re-sync coordination.
+  //   resync_generation_ : bumped by the pace controller once per lag episode; the audio task
+  //                        watches it and, on a change, flushes audio_input_ring_buffer_ /
+  //                        audio_decoded_ring_buffer_ (the stale audio queued before the skip).
+  //   audio_skip_until_us_ : the loader discards demuxed audio chunks (still counting their bytes)
+  //                          until audio_bytes_demuxed_ corresponds to at least this media time,
+  //                          then resumes feeding process_audio_frame_().
+  //   audio_bytes_demuxed_ : running total of audio payload bytes the loader has pulled from the
+  //                          file (fed or skipped); divided by the fixed bytes-per-second it gives
+  //                          the audio stream's media time.
+  std::atomic<uint32_t> resync_generation_{0};
+  std::atomic<int64_t> audio_skip_until_us_{0};
+  std::atomic<uint64_t> audio_bytes_demuxed_{0};
+  // Playback task only: true while a lag episode is being ridden out, so the audio-queue flush
+  // (resync_generation_ bump) fires once at the start of the episode, not once per dropped frame.
+  bool resync_active_{false};
+  // How far behind the wall-clock media time the current frame may fall before the pace controller
+  // stops walking frame-by-frame and drops straight to the live edge.
+  static constexpr uint32_t RESYNC_LAG_FRAMES = 4;
+  // Hard cap on frames discarded in one re-sync, so a case where delivery itself is slower than
+  // real time degrades to a low frame rate instead of an unbounded drain loop.
+  static constexpr uint32_t RESYNC_MAX_DROP = 240;
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

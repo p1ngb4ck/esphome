@@ -399,6 +399,15 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
+  // Fresh A/V-sync state for this session, set BEFORE the audio task is created (in
+  // init_audio_decoder_()) so that task captures generation 0 as its baseline and only reacts to
+  // real re-syncs afterwards.
+  this->resync_generation_.store(0, std::memory_order_release);
+  this->audio_skip_until_us_.store(0, std::memory_order_release);
+  this->audio_bytes_demuxed_.store(0, std::memory_order_release);
+  this->paused_accum_us_ = 0;
+  this->resync_active_ = false;
+
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
   // grow case to support, so touching lv_obj_set_size()/lv_obj_set_pos() here was pure
@@ -536,92 +545,47 @@ void SimpleVideoPlayer::playback_loop_() {
   // ERROR is terminal here too, not just STOPPED: set_error_() sets state_ to ERROR, and a fall-
   // through into the reads below (with a dead loader) would spin/hang. PAUSED keeps the loop alive.
   while (this->state_ == PlayerState::PLAYING || this->state_ == PlayerState::PAUSED) {
-    // Handle pause state
+    // Handle pause state. Charge the wall time spent parked to paused_accum_us_ so it is excluded
+    // from media_us -- a pause must not look like the stream falling behind and trigger a re-sync
+    // on resume.
     if (this->state_ == PlayerState::PAUSED) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      const int64_t pause_started_us = esp_timer_get_time();
+      while (this->state_ == PlayerState::PAUSED) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+      }
+      this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
+      ulTaskNotifyTake(pdTRUE, 0);  // drop any present-timer notification that landed while parked
       continue;
     }
 
-    // Wait for the next frame's 4-byte header. No artificial per-cycle deadline on the overall wait
-    // -- matching the single-task version this replaced, a slow read just means this frame gets
-    // presented late (the "wait only if early" pacing below already handles that gracefully); it
-    // must not be treated as a reason to give up on the frame and spin back around immediately,
-    // which only starves the loader of CPU time and can never actually resolve on its own. The
-    // 50ms poll granularity is just so this loop still notices state_ leaving PLAYING promptly.
-    //
-    // RingBuffer::read() is byte-stream and returns whatever is available up to the requested
-    // length (verified against ring_buffer.cpp -- xRingbufferReceiveUpTo underneath): a 1-3 byte
-    // short read is possible when the loader had to split the header across two writes under a full
-    // ring (write_without_replacement's partial path). Accumulate to exactly sizeof(header) rather
-    // than treating a partial as a complete size -- the latter desyncs every subsequent frame.
-    uint32_t header = 0;
-    bool stop_requested = false;
-    {
-      auto *header_bytes = reinterpret_cast<uint8_t *>(&header);
-      size_t offset = 0;
-      while (offset < sizeof(header)) {
-        offset += this->video_frame_ring_buffer_->read(header_bytes + offset, sizeof(header) - offset,
-                                                       pdMS_TO_TICKS(50));
-        if (offset < sizeof(header) &&
-            (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
-          stop_requested = true;
-          break;
-        }
-      }
+    // Pop the next frame to decode. next_frame_to_decode_() applies the A/V re-sync (drop stale
+    // video without decoding, fast-forward audio) when the wall clock has run ahead of the stream;
+    // otherwise it just returns the next frame in order. out_index is that frame's absolute
+    // presentation index -- the pacing timestamp is anchored to it, not to a running counter, so
+    // long-run average fps stays correct even across a drop.
+    uint32_t frame_index = 0;
+    const int payload = this->next_frame_to_decode_(frame_index);
+    if (payload == -2) {
+      break;  // stop/error, or an oversized frame -- ring is torn down and re-primed by next play()
     }
-    if (stop_requested) {
-      break;
-    }
-
-    if (header == VIDEO_FRAME_EOF) {
+    if (payload == 0) {
       ESP_LOGI(TAG, "Playback finished");
       this->on_finished_callbacks_.call();
       break;
     }
-    if (header == VIDEO_FRAME_READ_ERROR) {
+    if (payload == -1) {
       ESP_LOGE(TAG, "Failed to read frame");
       this->set_error_(PlaybackError::FILE_READ_ERROR);
       break;
     }
 
-    // header is the real payload size -- drain it out of the ring into decode_read_buffer_. The
-    // loader always pushes the full payload right after its header (push_ring_entry() blocks
-    // until each fits), so this is expected to be available already or arriving within
-    // microseconds, never a real wait -- still using a bounded, real block (not a spin) rather
-    // than assuming that.
-    bool frame_incomplete = false;
-    {
-      size_t offset = 0;
-      while (offset < header) {
-        size_t got =
-            this->video_frame_ring_buffer_->read(this->decode_read_buffer_.get() + offset, header - offset,
-                                                 pdMS_TO_TICKS(50));
-        offset += got;
-        // Don't wait here indefinitely for a loader that has stopped or a stop/error that arrived
-        // mid-drain -- the old code could only be broken out of by the 5s wait_for_task_stop_()
-        // timeout in play()/the destructor.
-        if (got == 0 && (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
-          frame_incomplete = true;
-          break;
-        }
-      }
-    }
-    if (frame_incomplete) {
-      break;  // ring is now desynced; the next play() drains and reset()s it before priming
-    }
-    this->frames_in_ring_.fetch_sub(1, std::memory_order_acq_rel);
+    // When this frame should be PRESENTED: its nominal 1/fps mark on the master (wall-clock)
+    // timeline, from its absolute index. Decode timing itself is NOT controlled here -- the JPEG
+    // decoder takes however long it takes; only the moment the result is handed to LVGL is paced.
+    const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                                           static_cast<int64_t>(frame_index * this->frame_duration_us_);
 
-    // Calculate when this frame should be PRESENTED -- its nominal 1/fps mark, anchored to
-    // playback_start_time_us_ (not to "now" or any other running timestamp: an anchored schedule
-    // is what keeps long-run average fps correct even though individual frames land early/late).
-    // Decode timing itself is NOT controlled here -- the hardware/software JPEG decoder takes
-    // however long it takes; only the moment we hand the result to LVGL is paced.
-    int64_t target_present_time_us =
-        this->playback_start_time_us_ + static_cast<int64_t>(this->frame_count_ * this->frame_duration_us_);
-
-    bool decoded = this->decode_frame_(this->decode_read_buffer_.get(), header);
-
-    if (!decoded) {
+    if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
       ESP_LOGW(TAG, "Failed to decode frame, skipping");
       continue;
     }
@@ -658,10 +622,11 @@ void SimpleVideoPlayer::playback_loop_() {
 
     this->present_frame_();
 
-    // Increment frame counter for next frame's presentation timestamp
-    this->frame_count_++;
+    // frame_count_ tracks the absolute index of the last presented frame (+1). It comes from the
+    // frame's own tag, not a blind ++ -- after an A/V re-sync drop it jumps forward with the tag.
+    this->frame_count_ = frame_index + 1;
 
-    // Feed watchdog every 100 frames to prevent task watchdog timeout during long playback
+    // Feed watchdog periodically to prevent task watchdog timeout during long playback.
     if (this->frame_count_ % 100 == 0) {
 #ifdef USE_ESP32
       esp_task_wdt_reset();
@@ -784,6 +749,12 @@ bool push_ring_entry(ring_buffer::RingBuffer &ring, const uint8_t *data, size_t 
 void SimpleVideoPlayer::loader_loop_() {
   ESP_LOGI(TAG, "Loader task started (Core 0)");
 
+  // Absolute presentation index of the next video frame this task emits. read_next_frame_() only
+  // ever returns VIDEO frames (it consumes/skips audio internally), one per call, in order -- so
+  // this is exactly the frame's presentation index, and it keeps counting across a loop rewind so
+  // the consumer's monotonic pacing never sees it go backwards.
+  uint32_t video_out_index = 0;
+
   while (!this->loader_task_stop_) {
     int n = this->read_next_frame_(this->loader_read_buffer_.get(), this->input_buffer_size_);
 
@@ -797,27 +768,29 @@ void SimpleVideoPlayer::loader_loop_() {
       continue;
     }
 
-    uint32_t header = (n > 0) ? static_cast<uint32_t>(n) : (n == 0 ? VIDEO_FRAME_EOF : VIDEO_FRAME_READ_ERROR);
-
-    if (!push_ring_entry(*this->video_frame_ring_buffer_, reinterpret_cast<const uint8_t *>(&header),
-                        sizeof(header), this->loader_task_stop_)) {
-      break;  // stop requested while waiting for room for the header itself
-    }
     if (n > 0) {
+      // Real frame: [uint32 frame_index][uint32 payload_size] header, then the payload.
+      const uint32_t header[2] = {video_out_index, static_cast<uint32_t>(n)};
+      if (!push_ring_entry(*this->video_frame_ring_buffer_, reinterpret_cast<const uint8_t *>(header),
+                           sizeof(header), this->loader_task_stop_)) {
+        break;  // stop requested while waiting for room for the header
+      }
       if (!push_ring_entry(*this->video_frame_ring_buffer_, this->loader_read_buffer_.get(),
-                          static_cast<size_t>(n), this->loader_task_stop_)) {
-        break;  // stop requested mid-payload -- the header we already pushed is now a lie, but
-                // we're tearing the whole ring down right after this anyway (play()/stop() always
-                // drains and re-primes it before the next session, see playback_loop_()).
+                           static_cast<size_t>(n), this->loader_task_stop_)) {
+        break;  // stop requested mid-payload -- the header we already pushed is now a lie, but the
+                // whole ring is drained and reset()'d before the next session (see playback_loop_())
       }
       this->frames_in_ring_.fetch_add(1, std::memory_order_release);
+      video_out_index++;
+      continue;
     }
 
-    // EOF/error is terminal for this task -- the consumer will see the sentinel via the ring and
-    // stop too, and there is nothing more useful for the loader to read.
-    if (n <= 0) {
-      break;
-    }
+    // EOF/error: push the lone sentinel (no index, no payload) and stop -- the consumer sees it
+    // via the ring and stops too, and there is nothing more useful for the loader to read.
+    const uint32_t sentinel = (n == 0) ? VIDEO_FRAME_EOF : VIDEO_FRAME_READ_ERROR;
+    push_ring_entry(*this->video_frame_ring_buffer_, reinterpret_cast<const uint8_t *>(&sentinel),
+                    sizeof(sentinel), this->loader_task_stop_);
+    break;
   }
 
   ESP_LOGI(TAG, "Loader task finished");
@@ -826,6 +799,99 @@ void SimpleVideoPlayer::loader_loop_() {
 //========================================================================
 // Frame Processing
 //========================================================================
+
+int SimpleVideoPlayer::read_ring_entry_(uint32_t &out_index, uint8_t *dest, size_t dest_cap) {
+  // Accumulate exactly `len` bytes from the ring into `buf`. RingBuffer::read() is a byte stream
+  // and can return a short count (verified against ring_buffer.cpp) -- a 1-3 byte partial happens
+  // when the loader had to split a header across two writes under a full ring. false == aborted
+  // because state_ became STOPPED/ERROR while blocked.
+  auto read_exact = [this](void *buf, size_t len) -> bool {
+    auto *p = static_cast<uint8_t *>(buf);
+    size_t offset = 0;
+    while (offset < len) {
+      offset += this->video_frame_ring_buffer_->read(p + offset, len - offset, pdMS_TO_TICKS(50));
+      if (offset < len && (this->state_ == PlayerState::STOPPED || this->state_ == PlayerState::ERROR)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  uint32_t first = 0;
+  if (!read_exact(&first, sizeof(first))) {
+    return -2;
+  }
+  if (first == VIDEO_FRAME_EOF) {
+    return 0;
+  }
+  if (first == VIDEO_FRAME_READ_ERROR) {
+    return -1;
+  }
+
+  out_index = first;
+  uint32_t size = 0;
+  if (!read_exact(&size, sizeof(size))) {
+    return -2;
+  }
+  if (size > dest_cap) {
+    ESP_LOGE(TAG, "Ring frame %" PRIu32 " too large for decode buffer (%" PRIu32 " > %zu)", out_index, size,
+             dest_cap);
+    return -2;
+  }
+  if (!read_exact(dest, size)) {
+    return -2;
+  }
+  this->frames_in_ring_.fetch_sub(1, std::memory_order_acq_rel);
+  return static_cast<int>(size);
+}
+
+int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
+  // want_index() = the frame that should be on screen right now, off the master (wall-clock)
+  // timeline. Recomputed as we go: dropping frames takes real time, so the live edge keeps moving.
+  auto want_index = [this]() -> uint32_t {
+    const int64_t media_us = esp_timer_get_time() - this->playback_start_time_us_ - this->paused_accum_us_;
+    return media_us > 0 ? static_cast<uint32_t>(media_us / this->frame_duration_us_) : 0;
+  };
+
+  int payload = this->read_ring_entry_(out_index, this->decode_read_buffer_.get(), this->input_buffer_size_);
+  if (payload <= 0) {
+    return payload;  // EOF / read error / aborted -- caller handles
+  }
+
+  if (out_index + RESYNC_LAG_FRAMES >= want_index()) {
+    this->resync_active_ = false;  // caught up (or never behind) -- this lag episode, if any, is over
+    return payload;                // pace this frame normally
+  }
+
+  // Fell behind by more than RESYNC_LAG_FRAMES: this MCU cannot catch up by decoding faster, so
+  // don't try -- drop straight to the live edge without decoding the frames in between, and point
+  // the audio side at the same media time (the loader skips demuxed audio up to audio_skip_until_us_
+  // without feeding it). The one-time queue flush (resync_generation_ bump, watched by the audio
+  // task) happens only at the START of a lag episode -- a persistently slow decoder must not
+  // re-flush audio every frame, which would leave audio permanently silent.
+  if (!this->resync_active_) {
+    this->resync_active_ = true;
+    this->resync_generation_.fetch_add(1, std::memory_order_acq_rel);
+    ESP_LOGW(TAG, "A/V re-sync: video at frame %" PRIu32 ", wall clock wants %" PRIu32, out_index, want_index());
+  }
+
+  uint32_t dropped = 0;
+  for (uint32_t w = want_index(); out_index < w; w = want_index()) {
+    this->audio_skip_until_us_.store(static_cast<int64_t>(w * this->frame_duration_us_),
+                                    std::memory_order_release);
+    if (++dropped > RESYNC_MAX_DROP) {
+      // Delivery itself can't keep up with real time -- stop chasing a target we can't reach and
+      // just present what we have. Playback becomes a low frame rate rather than an infinite drain.
+      ESP_LOGW(TAG, "A/V re-sync: gave up after dropping %" PRIu32 " frames, still behind", dropped);
+      break;
+    }
+    payload = this->read_ring_entry_(out_index, this->decode_read_buffer_.get(), this->input_buffer_size_);
+    if (payload <= 0) {
+      return payload;  // hit EOF / error / abort mid-drop -- report it, caller handles uniformly
+    }
+  }
+  return payload;  // first frame at/after the live edge, already in decode_read_buffer_
+}
 
 int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity) {
   // Read frame directly from file - runs on the loader task, writing into loader_read_buffer_
@@ -838,11 +904,25 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
       return bytes_read;  // EOF or error
     }
 
-    // Skip audio frames if no speaker, otherwise process them
+    // Consume interleaved audio chunks until the next video frame.
     while (frame.stream_type != AVIStreamType::VIDEO) {
 #ifdef USE_AUDIO
-      if (frame.stream_type == AVIStreamType::AUDIO && this->audio_enabled_) {
-        this->process_audio_frame_(frame, dest_buffer, bytes_read);
+      if (frame.stream_type == AVIStreamType::AUDIO) {
+        // Count every audio byte demuxed (fed or skipped) -- / bytes-per-second gives the audio
+        // stream's media time, which is how an A/V re-sync knows how far to fast-forward audio.
+        this->audio_bytes_demuxed_.fetch_add(static_cast<uint32_t>(bytes_read), std::memory_order_relaxed);
+        if (this->audio_enabled_) {
+          const uint64_t bytes_per_sec = static_cast<uint64_t>(this->source_audio_channels_) *
+                                         (this->audio_bits_per_sample_ / 8) * this->audio_sample_rate_;
+          const int64_t audio_media_us =
+              bytes_per_sec > 0 ? static_cast<int64_t>(this->audio_bytes_demuxed_.load(std::memory_order_relaxed) *
+                                                       1000000ULL / bytes_per_sec)
+                                : 0;
+          if (audio_media_us >= this->audio_skip_until_us_.load(std::memory_order_acquire)) {
+            this->process_audio_frame_(frame, dest_buffer, bytes_read);
+          }
+          // else: dropping stale audio while catching up to the re-sync point
+        }
       }
 #endif
       // Skip this frame (audio) and read next frame
@@ -1894,17 +1974,39 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
-  // Placeholder failure handling: a single failed decode drops that chunk and the loop keeps
-  // going, instead of tearing audio down on the first hiccup. Only give up on audio entirely
-  // after this many consecutive failures (a genuinely broken stream). The proper re-sync path
-  // (pacing tells both decoders to flush to a target point) replaces this in the A/V-sync work.
+  // A single failed decode drops that chunk and the loop keeps going, instead of tearing audio
+  // down on the first hiccup. Only give up on audio entirely after this many consecutive failures
+  // (a genuinely broken stream).
   static constexpr uint32_t AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES = 10;
   uint32_t audio_decode_failures = 0;
+
+  // A/V re-sync: the pace controller bumps resync_generation_ when it drops stale video to the
+  // live edge. On a change, drop everything this side has queued (encoded + decoded audio) -- the
+  // loader is already fast-forwarding the file's audio to the same media time, so what's buffered
+  // here is stale. The MP3/FLAC decoder is left alone: it will consume its partial in-flight frame
+  // then resync on the next frame header on its own (one glitchy frame), which is cheaper than
+  // recreating the sub-decoder (a heap allocation -- AGENTS.md: none after setup()). The speaker
+  // keeps its own small residual (there is no cheap flush for it -- stop()/start() rebuilds the
+  // I2S driver); it drains that and then briefly goes quiet until the skipped audio flows through.
+  uint32_t last_resync_generation = this->resync_generation_.load(std::memory_order_acquire);
 
   while (!this->audio_task_stop_) {
     if (!this->audio_enabled_) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
+    }
+
+    const uint32_t resync_generation = this->resync_generation_.load(std::memory_order_acquire);
+    if (resync_generation != last_resync_generation) {
+      last_resync_generation = resync_generation;
+      ESP_LOGW(TAG, "A/V re-sync: flushing queued audio");
+      if (this->audio_input_ring_buffer_) {
+        this->audio_input_ring_buffer_->reset();
+      }
+      if (this->audio_decoded_ring_buffer_) {
+        this->audio_decoded_ring_buffer_->reset();
+      }
+      audio_decode_failures = 0;
     }
 
     // Run audio decoder if we have one (MP3/FLAC mode)
