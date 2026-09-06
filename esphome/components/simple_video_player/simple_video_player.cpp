@@ -479,23 +479,11 @@ void SimpleVideoPlayer::playback_loop_() {
       this->playback_start_time_us_ = esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur);
     }
 
-    int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                                     static_cast<int64_t>(frame_index * frame_dur);
-    const int64_t behind_us = esp_timer_get_time() - target_present_time_us;
+    const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                                           static_cast<int64_t>(frame_index * frame_dur);
 
-    if (behind_us >= frame_dur) {
-      // Late. A few frames late -> drop this one (skip decode) to catch up. Many frames late means
-      // the pipeline simply can't sustain real time -- dropping forever would just stick, so snap
-      // the clock to this frame and show it.
-      if (behind_us < 4 * frame_dur) {
-        this->frames_dropped_++;
-        continue;
-      }
-      this->playback_start_time_us_ =
-          esp_timer_get_time() - this->paused_accum_us_ - static_cast<int64_t>(frame_index * frame_dur);
-      target_present_time_us = esp_timer_get_time();
-    }
-
+    // Fire-and-forget at the paced cadence: wait if this frame's slot is still ahead, otherwise
+    // present it now. Never drop -- this MCU cannot catch up, and a skipped present is what sticks.
     // Wait for this frame's slot BEFORE decoding. While this task is blocked here the main loop
     // (LvglComponent::loop() -> lv_timer_handler()) gets the CPU and finishes rendering the
     // PREVIOUS frame from canvas_buffer_ -- so the decode below never writes the buffer while LVGL
