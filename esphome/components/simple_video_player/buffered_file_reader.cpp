@@ -117,17 +117,23 @@ bool BufferedFileReader::open(const char *path) {
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
   this->draining_.store(false);
+  this->prime_ring_();
+  return true;
+}
 
-  // Prime: fill the ring before playback starts. One-time, before the real-time section -- the
-  // ring must never run dry once playback is running (the MCU cannot catch up).
+void BufferedFileReader::prime_ring_() {
+  // Fill the ring before returning to the caller. Only called off the hot path (open()/seek()),
+  // on the playback task -- the main loop keeps turning and delivers the fill completions. The
+  // ring must never run dry once the playback loop is running (the MCU cannot catch up).
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   this->kick_fill_();
   while (this->ring_->free() > 0 && !this->eof_.load(std::memory_order_acquire) &&
          !this->fill_err_.load(std::memory_order_acquire)) {
+    if (this->abort_flag_ != nullptr && *this->abort_flag_)
+      break;
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
   }
   this->waiting_task_ = nullptr;
-  return true;
 }
 
 void BufferedFileReader::close() {
@@ -183,7 +189,7 @@ bool BufferedFileReader::seek(uint64_t position) {
   }
   this->current_position_ = position;
   this->draining_.store(false);  // allow fills again
-  this->kick_fill_();
+  this->prime_ring_();
   return true;
 }
 
