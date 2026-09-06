@@ -112,9 +112,8 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Buffer B: second RGB565 output, same size/header as LVGL's canvas buffer (A). P4 hardware
-  // JPEG decoder output must come from jpeg_alloc_decoder_mem().
-#if defined(USE_HWJPG)
+  // Buffer B: second RGB565 output, same size/header as A. HW decoder output must come from
+  // jpeg_alloc_decoder_mem().
   {
     size_t b_size =
         static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
@@ -132,7 +131,6 @@ void SimpleVideoPlayer::setup() {
     lv_draw_buf_init(&this->decode_draw_buf_b_, h.w, h.h, static_cast<lv_color_format_t>(h.cf), h.stride,
                      this->decode_buffer_b_, this->canvas_draw_buf_->data_size);
   }
-#endif
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
   // ESP32-P4 only
@@ -1425,25 +1423,18 @@ bool SimpleVideoPlayer::allocate_frame_ring_() {
     return false;
   }
 
-  // decode_read_buffer_: the hardware JPEG decoder's compressed-input (bit_stream) argument --
-  // needs jpeg_alloc_decoder_mem() alignment, not plain heap_caps_malloc.
-  uint8_t *decode_buf = nullptr;
-#if defined(USE_HWJPG)
+  // decode_read_buffer_: the HW JPEG decoder's compressed-input (bit_stream) argument -- needs
+  // jpeg_alloc_decoder_mem() alignment.
   jpeg_decode_memory_alloc_cfg_t input_cfg{};
   input_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
   size_t actual_size = 0;
-  decode_buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_size));
-#else
-  decode_buf = static_cast<uint8_t *>(heap_caps_malloc(this->input_buffer_size_, MALLOC_CAP_SPIRAM));
-#endif
+  uint8_t *decode_buf =
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &input_cfg, &actual_size));
   if (decode_buf == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate decode read buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
     return false;
   }
-  // .reset(), not construction via make_unique: this pointer came from heap_caps_malloc/
-  // jpeg_alloc_decoder_mem, not `new[]` -- it must be freed with heap_caps_free() (explicit
-  // release()+heap_caps_free() in free_frame_ring_() below), never left to unique_ptr<uint8_t[]>'s
-  // own default deleter (delete[]), which would be the wrong allocator's free function.
+  // Freed with heap_caps_free() in free_frame_ring_(), not unique_ptr's delete[].
   this->decode_read_buffer_.reset(decode_buf);
 
   double total_mb = static_cast<double>(ring_bytes) / (1024.0 * 1024.0);

@@ -4,6 +4,8 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import speaker
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
+from esphome.components.esp32 import only_on_variant
+from esphome.components.esp32.const import VARIANT_ESP32P4
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
 from esphome.const import (
@@ -27,7 +29,7 @@ except ImportError:
     lv_canvas_t = None
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["storage"]
+DEPENDENCIES = ["esp32", "storage"]
 AUTO_LOAD = ["image", "audio"]
 
 # Namespaces
@@ -190,6 +192,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
+    only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
 
 
@@ -278,12 +281,10 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
-    # Backend selection (USE_HWJPG / USE_NEWJPEG / USE_JPEGDEC) is esp32's job - the single
-    # source of truth also used by runtime_image.
-    if CORE.is_esp32:
-        from esphome.components.esp32 import require_hw_jpeg
+    # P4-only (enforced in CONFIG_SCHEMA): require_hw_jpeg() defines USE_HWJPG on this variant.
+    from esphome.components.esp32 import require_hw_jpeg
 
-        require_hw_jpeg()
+    require_hw_jpeg()
 
     # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
     # blocking main-loop read; request it directly instead of relying on whichever storage
