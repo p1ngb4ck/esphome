@@ -281,11 +281,6 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
-    # P4-only (enforced in CONFIG_SCHEMA): require_hw_jpeg() defines USE_HWJPG on this variant.
-    from esphome.components.esp32 import require_hw_jpeg
-
-    require_hw_jpeg()
-
     # File I/O streams through storage::StorageWorker (see buffered_file_reader.h) rather than a
     # blocking main-loop read; request it directly instead of relying on whichever storage
     # device the user happened to configure to have already asked for it.
