@@ -407,6 +407,8 @@ void SimpleVideoPlayer::playback_loop_() {
   this->audio_bytes_demuxed_.store(0, std::memory_order_release);
   this->paused_accum_us_ = 0;
   this->resync_active_ = false;
+  this->resync_count_ = 0;
+  this->resync_frames_dropped_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
   // canvas is already the correct size and position from YAML -- there is no placeholder-then-
@@ -637,6 +639,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // Disarm the presentation timer in case the loop exited (EOF/error/stop) with it still pending.
   esp_timer_stop(this->present_timer_);
 
+  // One-line A/V re-sync summary -- safe here (the loop has exited, this is not the hot path).
+  if (this->resync_count_ > 0) {
+    ESP_LOGW(TAG, "A/V re-sync fired %" PRIu32 " time(s), %" PRIu32 " frames dropped total",
+             this->resync_count_, this->resync_frames_dropped_);
+  }
+
   // Stop the loader task before closing the file -- it must not still be reading via
   // file_reader_ once close_file_() tears it down. The loader's own write_without_replacement()
   // retries are bounded (50ms each, via push_ring_entry()), so it notices loader_task_stop_
@@ -834,8 +842,9 @@ int SimpleVideoPlayer::read_ring_entry_(uint32_t &out_index, uint8_t *dest, size
     return -2;
   }
   if (size > dest_cap) {
-    ESP_LOGE(TAG, "Ring frame %" PRIu32 " too large for decode buffer (%" PRIu32 " > %zu)", out_index, size,
-             dest_cap);
+    // Framing corruption (should be impossible: the loader caps every frame at input_buffer_size_).
+    // Terminal -- record it in the error state, no logging on this priority-10 path.
+    this->set_error_(PlaybackError::DECODE_ERROR);
     return -2;
   }
   if (!read_exact(dest, size)) {
@@ -868,11 +877,13 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
   // the audio side at the same media time (the loader skips demuxed audio up to audio_skip_until_us_
   // without feeding it). The one-time queue flush (resync_generation_ bump, watched by the audio
   // task) happens only at the START of a lag episode -- a persistently slow decoder must not
-  // re-flush audio every frame, which would leave audio permanently silent.
+  // re-flush audio every frame, which would leave audio permanently silent. No logging on this
+  // path: it is priority-10 and time-critical (AGENTS.md). resync_count_/resync_frames_dropped_
+  // are plain counters, summarised once after the loop exits.
   if (!this->resync_active_) {
     this->resync_active_ = true;
+    this->resync_count_++;
     this->resync_generation_.fetch_add(1, std::memory_order_acq_rel);
-    ESP_LOGW(TAG, "A/V re-sync: video at frame %" PRIu32 ", wall clock wants %" PRIu32, out_index, want_index());
   }
 
   uint32_t dropped = 0;
@@ -882,14 +893,15 @@ int SimpleVideoPlayer::next_frame_to_decode_(uint32_t &out_index) {
     if (++dropped > RESYNC_MAX_DROP) {
       // Delivery itself can't keep up with real time -- stop chasing a target we can't reach and
       // just present what we have. Playback becomes a low frame rate rather than an infinite drain.
-      ESP_LOGW(TAG, "A/V re-sync: gave up after dropping %" PRIu32 " frames, still behind", dropped);
       break;
     }
     payload = this->read_ring_entry_(out_index, this->decode_read_buffer_.get(), this->input_buffer_size_);
     if (payload <= 0) {
+      this->resync_frames_dropped_ += dropped;
       return payload;  // hit EOF / error / abort mid-drop -- report it, caller handles uniformly
     }
   }
+  this->resync_frames_dropped_ += dropped;
   return payload;  // first frame at/after the live edge, already in decode_read_buffer_
 }
 
@@ -1999,7 +2011,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
     const uint32_t resync_generation = this->resync_generation_.load(std::memory_order_acquire);
     if (resync_generation != last_resync_generation) {
       last_resync_generation = resync_generation;
-      ESP_LOGW(TAG, "A/V re-sync: flushing queued audio");
+      // No logging: priority-10 path (AGENTS.md). The video side counts the re-sync.
       if (this->audio_input_ring_buffer_) {
         this->audio_input_ring_buffer_->reset();
       }
