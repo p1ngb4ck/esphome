@@ -456,10 +456,14 @@ class SimpleVideoPlayer : public Component {
   // Decode target == the canvas's OWN existing pixel buffer, in place. This is NOT allocated by
   // this component at all: LVGL's own canvas widget codegen
   // (esphome/components/lvgl/widgets/canvas.py) already built one lv_draw_buf_t, sized exactly to
-  // the YAML-declared width/height, via lv_expr.malloc_core() + lv_draw_buf_init(), and attached
-  // it with lv_canvas_set_draw_buf() before this component's play() ever runs -- attach_canvas_
-  // buffer_() only READS that pointer out of the widget (lv_canvas_get_draw_buf()), never
-  // allocates or replaces it.
+  // the YAML-declared width/height, via lv_expr.malloc_core() + lv_draw_buf_init(), and attached it
+  // with lv_canvas_set_draw_buf() -- as generated top-level code that runs before ANY
+  // Component::setup() (verified against esphome/writer.py's generated main.cpp), so it already
+  // exists by the time even THIS component's own setup() runs, let alone play(). setup() fetches
+  // it there (attach_canvas_buffer_() only READS the pointer via lv_canvas_get_draw_buf(), never
+  // allocates or replaces it) and blanks it immediately, since lv_malloc_core() doesn't zero its
+  // memory -- left alone, the canvas would show leftover PSRAM garbage from boot until whenever
+  // play() first runs.
   //
   // A second, component-owned decode buffer with lv_canvas_set_draw_buf() ping-ponging between the
   // two was tried this session and rejected: swapping which lv_draw_buf_t is attached tears down

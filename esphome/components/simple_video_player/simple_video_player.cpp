@@ -105,6 +105,38 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
+  // Attach (never allocate -- see canvas_buffer_'s header comment) LVGL's own canvas buffer and
+  // blank it, RIGHT HERE in setup(), not deferred to first play(). Verified against ESPHome's own
+  // codegen (esphome/writer.py's generated main.cpp: every to_code()-emitted statement, including
+  // LVGL's widget/buffer construction, runs in the generated top-level setup() BEFORE App.setup()
+  // is called -- and App.setup() is what dispatches to every Component::setup() override,
+  // including this one, in priority order, afterwards). So by the time ANY Component::setup()
+  // runs, the canvas widget and its buffer already exist, unconditionally -- no retry loop needed.
+  // xSemaphoreTake(..., 0) here is just consistent style, not a real race: no other task exists
+  // yet at this point in boot (play() hasn't run), so there is no contention to actually wait out.
+  //
+  // Why this has to happen at all: LVGL's canvas codegen (canvas.py) allocates its buffer with
+  // lv_malloc_core() -> heap_caps_malloc() (verified against the real lvgl_esphome.cpp) -- plain
+  // malloc, NOT zeroed. Left untouched, the canvas shows whatever garbage was already sitting in
+  // that PSRAM from the moment it's built (well before any Component::setup() runs) until this
+  // component's first play() -- a user/automation-triggered action, potentially a long time after
+  // boot. That gap is what showed up as "canvas is garbage/broken at start".
+  if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
+    if (this->attach_canvas_buffer_()) {
+      size_t buffer_size =
+          static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
+      std::memset(this->canvas_buffer_, 0, buffer_size);
+      lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+      lv_obj_invalidate(this->canvas_);
+    }
+    xSemaphoreGive(this->lvgl_mutex_);
+  }
+  if (!this->canvas_buffer_ready_) {
+    ESP_LOGE(TAG, "Failed to access canvas buffer at setup");
+    this->mark_failed();
+    return;
+  }
+
   // Allocate cache buffer (internal RAM, aligned for DMA)
   // ESP32-P4 only
   this->cache_buffer_.reset(
@@ -202,13 +234,10 @@ void SimpleVideoPlayer::setup() {
   }
 #endif
 
-  // Canvas buffer is deliberately NOT touched here: this->canvas_ is a pointer to a widget LVGL
-  // itself creates and owns (from the lvgl: YAML's own canvas: block), and setup() order across
-  // components isn't something this component controls -- LVGL's own widget-tree construction is
-  // not guaranteed to have finished by the time THIS setup() runs. play() is triggered by an
-  // explicit user/automation action well after boot, which is the only point this component can
-  // be sure LVGL has actually finished building that widget -- see attach_canvas_buffer_()'s own
-  // comment for the one-time-only call it makes there instead.
+  // Canvas buffer was already attached and blanked earlier in this same setup() (right after
+  // lvgl_mutex_ was created) -- see that block's comment for why setup() itself is a safe, always-
+  // built point to do it (verified against ESPHome's own codegen), not something that needs to
+  // wait for play().
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -385,48 +414,14 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  if (this->canvas_buffer_ == nullptr) {
-    // First play() ever, and only then: fetch the lv_draw_buf_t* LVGL's OWN canvas codegen
-    // already built and attached (see canvas_buffer_'s header comment) -- nothing is allocated
-    // here. this->canvas_ is a pointer to a widget LVGL itself creates and owns (from the lvgl:
-    // YAML's own canvas: block) -- setup() order across components does not guarantee LVGL has
-    // finished building it yet, but by the time a play() action actually runs (well after boot,
-    // triggered explicitly by the user/an automation) it is guaranteed to have.
-    //
-    // xSemaphoreTake(..., 0) is a true non-blocking try-lock. On a miss we must actually BLOCK for
-    // one real tick (vTaskDelay(1), never taskYIELD()) to give the main-loop task (the only other
-    // owner of lvgl_mutex_, and the ONLY task lower priority than this one) an actual chance to
-    // run and release it. taskYIELD() does not do that from a priority-10 task: the calling task
-    // stays in the Ready state and the scheduler immediately re-selects it, since it's still the
-    // highest-priority ready task -- taskYIELD()/portYIELD() only rotates between tasks of the
-    // SAME priority (verified against the real FreeRTOS scheduler source,
-    // tasks.c/taskSELECT_HIGHEST_PRIORITY_TASK()). Only vTaskDelay() removes this task from the
-    // ready list (real Blocked state), which is the only way the scheduler can pick a
-    // lower-priority task at all. This build's tick rate is 1000Hz, so vTaskDelay(1) is a real,
-    // bounded 1ms wait -- not a guessed magic number, the finest granularity this tick rate can
-    // express. 1000 attempts (~1s worst case) is a pure safety cap, not a designed-for stall.
-    bool canvas_ready = false;
-    for (int attempt = 0; attempt < 1000 && !canvas_ready; attempt++) {
-      if (xSemaphoreTake(this->lvgl_mutex_, 0) == pdTRUE) {
-        canvas_ready = this->attach_canvas_buffer_();
-        xSemaphoreGive(this->lvgl_mutex_);
-      } else {
-        vTaskDelay(1);
-      }
-    }
-    if (!canvas_ready) {
-      ESP_LOGE(TAG, "Failed to access canvas buffer for playback");
-      this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
-      this->close_file_();
-      return;
-    }
-  } else if (this->canvas_buffer_ready_) {
-    // Every later play(): the buffer pointer never changes (still LVGL's own), so there is
-    // nothing left to touch on LVGL's side at all -- just clear it back to black for this new
-    // session. A raw write to a buffer we merely reference, not an LVGL API call, needs no
-    // lvgl_mutex_/blocking. Deliberately NOT calling lv_obj_invalidate() here either: that
-    // regressed the cold-start case before -- present_frame_()'s own invalidate, once the first
-    // real frame of this session is decoded, is what actually gets this canvas its next redraw.
+  // Canvas buffer was already attached AND blanked once, in setup() (this component would have
+  // mark_failed()'d and never reached play() at all otherwise) -- the pointer never changes since
+  // it's LVGL's own. Every play() session just clears it back to black again. A raw write to a
+  // buffer we merely reference, not an LVGL API call, needs no lvgl_mutex_/blocking. Deliberately
+  // NOT calling lv_obj_invalidate() here either: that regressed the cold-start case before --
+  // present_frame_()'s own invalidate, once the first real frame of this session is decoded, is
+  // what actually gets this canvas its next redraw.
+  if (this->canvas_buffer_ready_) {
     size_t buffer_size =
         static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
     std::memset(this->canvas_buffer_, 0, buffer_size);
@@ -494,24 +489,33 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #endif
 
-  // Buffer before starting the presentation clock: block until the ring is either fully
-  // pre-filled (prefetch_frames_ slots ready) or the loader has already finished producing
-  // everything it ever will (a short video reaching EOF, or a read error) -- whichever comes
-  // first. Starting the clock immediately (as if frame 0's storage read were instant) is what
-  // caused the endless "loader could not keep up" storm: the very first read pays real cold-start
-  // latency (file open, first seek, first chunk parse) that a single frame's presentation budget
-  // never covers, so every early cycle missed its deadline before the loader had a fair chance to
-  // get ahead. No fixed give-up deadline here -- however long the initial fill genuinely takes is
-  // how long we wait; uxSemaphoreGetCount() only queries the ring's real state, it doesn't
-  // consume/perturb it.
-  ESP_LOGI(TAG, "Buffering...");
+  // Buffer before starting the presentation clock: block until a SMALL startup threshold of ring
+  // slots is ready, or the loader has already finished producing everything it ever will (a short
+  // video reaching EOF, or a read error) -- whichever comes first. Starting the clock immediately
+  // (as if frame 0's storage read were instant) is what caused the endless "loader could not keep
+  // up" storm: the very first read pays real cold-start latency (file open, first seek, first
+  // chunk parse) that a single frame's presentation budget never covers, so every early cycle
+  // missed its deadline before the loader had a fair chance to get ahead.
+  //
+  // Deliberately NOT prefetch_frames_ here: that's the STEADY-STATE ring depth (now derived from
+  // prefetch_duration, which can be several seconds' worth of slots -- see its header comment),
+  // not a startup gate. Requiring the full configured depth to fill before EVER decoding a single
+  // frame regressed this from "starts almost immediately" (the old fixed default of 8 slots) to
+  // "nothing happens for however long dozens of slots take to read" the moment prefetch_duration
+  // was raised past what 8 slots used to represent -- a real bug this session introduced, not a
+  // tradeoff. A handful of slots is enough to absorb the cold-start latency the comment above
+  // describes; the ring still fills to its full configured depth during normal playback, it just
+  // doesn't gate the FIRST frame on that.
+  static constexpr uint32_t STARTUP_FILL_TARGET = 4;
+  uint32_t startup_fill_target = std::min(this->prefetch_frames_, STARTUP_FILL_TARGET);
+  ESP_LOGI(TAG, "Buffering (target: %" PRIu32 " ring slots)...", startup_fill_target);
   int64_t buffer_wait_start_us = esp_timer_get_time();
-  while (uxSemaphoreGetCount(this->ring_slots_ready_) < this->prefetch_frames_ &&
+  while (uxSemaphoreGetCount(this->ring_slots_ready_) < startup_fill_target &&
          this->loader_task_handle_ != nullptr) {
     vTaskDelay(pdMS_TO_TICKS(5));
   }
   ESP_LOGI(TAG, "Buffered %u/%" PRIu32 " ring slots in %" PRId64 " ms",
-           static_cast<unsigned>(uxSemaphoreGetCount(this->ring_slots_ready_)), this->prefetch_frames_,
+           static_cast<unsigned>(uxSemaphoreGetCount(this->ring_slots_ready_)), startup_fill_target,
            (esp_timer_get_time() - buffer_wait_start_us) / 1000);
 
   // Initialize frame pacing with presentation timestamps. Frame 0's target presentation time is
