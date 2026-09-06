@@ -14,11 +14,7 @@ namespace simple_video_player {
 
 static const char *const TAG = "buffered_file_reader";
 
-BufferedFileReader::BufferedFileReader() {
-#ifdef USE_ESP32
-  this->done_sem_ = xSemaphoreCreateBinary();
-#endif
-}
+BufferedFileReader::BufferedFileReader() = default;
 
 BufferedFileReader::~BufferedFileReader() {
   this->close();
@@ -31,16 +27,12 @@ BufferedFileReader::~BufferedFileReader() {
       heap_caps_free(buf.release());
     }
   }
-#ifdef USE_ESP32
-  if (this->done_sem_ != nullptr) {
-    vSemaphoreDelete(this->done_sem_);
-  }
-#endif
 }
 
 void BufferedFileReader::start_prefetch_(int idx) {
   this->prefetch_idx_ = idx;
   this->prefetch_bytes_ = 0;
+  this->arm_wait_();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, this->read_ahead_buf_[idx].get(), READ_AHEAD_CAPACITY, &this->prefetch_bytes_,
       [this](storage::StorageError e) { this->on_done_(e); });
@@ -110,6 +102,7 @@ bool BufferedFileReader::open(const char *path) {
     return false;
   }
 
+  this->arm_wait_();
   storage::StorageError submit =
       storage::global_storage_worker->begin_read(ps, rel, &this->handle_, [this](storage::StorageError e) {
         this->on_done_(e);
@@ -130,6 +123,7 @@ bool BufferedFileReader::open(const char *path) {
       buf.reset(static_cast<uint8_t *>(heap_caps_malloc(READ_AHEAD_CAPACITY, MALLOC_CAP_SPIRAM)));
       if (!buf) {
         ESP_LOGE(TAG, "Failed to allocate %zu-byte read-ahead buffer (PSRAM)", READ_AHEAD_CAPACITY);
+        this->arm_wait_();
         storage::global_storage_worker->end_read(this->handle_,
                                                  [this](storage::StorageError e) { this->on_done_(e); });
         this->wait_();
@@ -169,6 +163,7 @@ void BufferedFileReader::close() {
   // end_read() needs the stream IDLE, same as any other stream op.
   this->resolve_prefetch_();
 
+  this->arm_wait_();
   storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_done_(e); });
   this->wait_();
 
@@ -189,6 +184,7 @@ void BufferedFileReader::close() {
 
 int BufferedFileReader::read_chunk_(uint8_t *dest, size_t size) {
   size_t bytes_read = 0;
+  this->arm_wait_();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, dest, size, &bytes_read, [this](storage::StorageError e) { this->on_done_(e); });
   if (submit != storage::StorageError::STORAGE_ERROR_OK) {
@@ -252,6 +248,7 @@ bool BufferedFileReader::seek(uint64_t position) {
   // seek() needs the stream IDLE, same as any other stream op.
   this->resolve_prefetch_();
 
+  this->arm_wait_();
   storage::StorageError submit =
       storage::global_storage_worker->seek(this->handle_, static_cast<int64_t>(position),
                                            storage::SeekMode::SEEK_MODE_SET,
@@ -302,6 +299,7 @@ bool BufferedFileReader::get_size(uint64_t *size) {
   // No dedicated stat call on the worker's stream API -- seek to end, tell, then seek back.
   // (The worker's own SEEK_MODE_END on a network stream already resolves via file size
   // internally, so this is a worker-native pattern, not a workaround.)
+  this->arm_wait_();
   storage::StorageError submit =
       storage::global_storage_worker->seek(this->handle_, 0, storage::SeekMode::SEEK_MODE_END,
                                            [this](storage::StorageError e) { this->on_done_(e); });
@@ -315,6 +313,7 @@ bool BufferedFileReader::get_size(uint64_t *size) {
   }
 
   uint64_t end_position = 0;
+  this->arm_wait_();
   submit = storage::global_storage_worker->tell(this->handle_, &end_position,
                                                 [this](storage::StorageError e) { this->on_done_(e); });
   if (submit != storage::StorageError::STORAGE_ERROR_OK) {

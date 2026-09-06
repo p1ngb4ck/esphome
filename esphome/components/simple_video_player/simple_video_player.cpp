@@ -647,11 +647,14 @@ void SimpleVideoPlayer::playback_loop_() {
              this->resync_count_, this->resync_frames_dropped_, this->decode_fail_count_);
   }
 
-  // Stop the loader task before closing the file -- it must not still be reading via
-  // file_reader_ once close_file_() tears it down. The loader's own write_without_replacement()
-  // retries are bounded (50ms each, via push_ring_entry()), so it notices loader_task_stop_
-  // promptly regardless of ring state.
+  // Stop the loader task before closing the file -- it must not still be reading via file_reader_
+  // once close_file_() tears it down. It notices loader_task_stop_ at every push_ring_entry()
+  // retry boundary (bounded) and inside BufferedFileReader::wait_() (via the abort flag); the
+  // notify below wakes it immediately if it is parked in that wait.
   this->loader_task_stop_ = true;
+  if (this->loader_task_handle_ != nullptr) {
+    xTaskNotifyGive(this->loader_task_handle_);
+  }
   this->wait_for_task_stop_(this->loader_task_handle_, 5000);
 
   this->close_file_();
@@ -1407,6 +1410,10 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   if (!this->file_reader_) {
     this->file_reader_ = std::make_unique<BufferedFileReader>();
   }
+  // A wait inside the reader returns early once loader_task_stop_ goes true, so the loader task
+  // (the reader's only user during playback) can be stopped promptly at end of playback instead
+  // of blocking on an outstanding storage completion.
+  this->file_reader_->set_abort_flag(&this->loader_task_stop_);
   if (!this->file_reader_->open(path.c_str())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     return false;

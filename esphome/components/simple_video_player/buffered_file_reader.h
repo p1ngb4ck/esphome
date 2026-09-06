@@ -8,13 +8,14 @@
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/storage_worker.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include "esp_heap_caps.h"
 #endif
 
@@ -46,6 +47,14 @@ class BufferedFileReader {
   // Disable copy/move
   BufferedFileReader(const BufferedFileReader &) = delete;
   BufferedFileReader &operator=(const BufferedFileReader &) = delete;
+
+  /**
+   * @brief Point the reader at a stop flag owned by the caller (e.g. the loader task's
+   * loader_task_stop_). While set, a pending wait_() returns STORAGE_ERROR_NOT_READY as soon as
+   * the flag goes true instead of continuing to wait for the storage completion -- so the task
+   * that owns this reader can be stopped promptly at end of playback.
+   */
+  void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
 
   /**
    * @brief Open a file for buffered reading
@@ -93,23 +102,57 @@ class BufferedFileReader {
   bool prefill_cache() { return true; }
 
  protected:
-  // Completion callback shared by every worker call below: records the result and wakes the
-  // blocked caller. The worker guarantees exactly one completion per submitted request, so
-  // done_sem_ never accumulates more than one pending "give".
+  // Async completion hand-off for every storage-worker call below. The worker delivers exactly
+  // one completion per submitted request, on the main loop; the task that issued the request
+  // waits for it via a task notification (the same primitive the playback pacing loop uses), not
+  // a semaphore, and never blocks unbounded.
+  //
+  // Call once, immediately BEFORE submitting a worker op, on the task that will wait_() for it:
+  // records that task as the one to wake and clears the completion flag. Same task-notification
+  // hand-off the playback pacing loop uses -- no semaphore.
+  void arm_wait_() {
+#ifdef USE_ESP32
+    this->waiting_task_ = xTaskGetCurrentTaskHandle();
+#endif
+    this->done_.store(false, std::memory_order_release);
+  }
+
+  // Storage-worker completion callback (runs on the main loop). Record the result, then wake the
+  // armed task.
   void on_done_(storage::StorageError err) {
     this->last_result_ = err;
+    this->done_.store(true, std::memory_order_release);
 #ifdef USE_ESP32
-    xSemaphoreGive(this->done_sem_);
+    if (this->waiting_task_ != nullptr) {
+      xTaskNotifyGive(this->waiting_task_);
+    }
 #endif
   }
 
-  // Blocks until on_done_() fires for the just-submitted request; returns its StorageError.
+  // Waits for on_done_() of the armed request. Woken by its task notification (precise, no polling
+  // interval); the ulTaskNotifyTake timeout is only a slice for re-checking the abort flag, and
+  // WAIT_CAP_MS bounds the whole wait so a lost completion can never hang the task. Returns the
+  // request's StorageError, or NOT_READY if the caller's abort flag went true, or TIMEOUT.
   storage::StorageError wait_() {
 #ifdef USE_ESP32
-    xSemaphoreTake(this->done_sem_, portMAX_DELAY);
+    uint32_t waited_ms = 0;
+    while (!this->done_.load(std::memory_order_acquire)) {
+      if (this->abort_flag_ != nullptr && *this->abort_flag_) {
+        return storage::StorageError::STORAGE_ERROR_NOT_READY;
+      }
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0) {
+        waited_ms += WAIT_SLICE_MS;
+        if (waited_ms >= WAIT_CAP_MS) {
+          return storage::StorageError::STORAGE_ERROR_TIMEOUT;
+        }
+      }
+    }
 #endif
     return this->last_result_;
   }
+
+  static constexpr uint32_t WAIT_SLICE_MS = 20;
+  static constexpr uint32_t WAIT_CAP_MS = 5000;
 
   // Issues one direct (uncached), BLOCKING worker read_chunk() into dest -- used for requests too
   // large to benefit from the read-ahead buffers (the per-frame JPEG payload path) and for the
@@ -137,11 +180,12 @@ class BufferedFileReader {
   uint64_t current_position_{0};
 
 #ifdef USE_ESP32
-  SemaphoreHandle_t done_sem_{nullptr};
+  TaskHandle_t waiting_task_{nullptr};  // set by arm_wait_(); the task on_done_() notifies
 #endif
-  // Set by the completion callback just before it gives done_sem_; read by wait_() right after
-  // taking it -- safe with no extra lock since the semaphore itself is the handoff point (the
-  // callback always finishes its write before giving, wait_() always reads after taking).
+  std::atomic<bool> done_{false};                     // false from arm_wait_() until on_done_()
+  const volatile bool *abort_flag_{nullptr};          // caller's stop flag, see set_abort_flag()
+  // Written by the completion callback before it sets done_; read by wait_() after it observes
+  // done_ true -- the release/acquire on done_ orders it, no other lock needed.
   storage::StorageError last_result_{storage::StorageError::STORAGE_ERROR_OK};
 
   // Double-buffered read-ahead cache (PSRAM -- ESP32-P4 only, per project convention). AVIParser
