@@ -38,8 +38,9 @@ simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
 # Classes
 SimpleVideoPlayer = simple_video_player_ns.class_("SimpleVideoPlayer", cg.Component)
 
-# Enums for speaker channel configuration
-SpeakerChannelMode = simple_video_player_ns.enum("SpeakerChannelMode")
+# Enums for speaker channel configuration -- is_class=True: the C++ side is a scoped `enum class`,
+# so codegen must emit `SpeakerChannelMode::SPEAKER_CHANNEL_*`, not a bare `SPEAKER_CHANNEL_*`.
+SpeakerChannelMode = simple_video_player_ns.enum("SpeakerChannelMode", is_class=True)
 SPEAKER_CHANNEL_MODES = {
     "mono": SpeakerChannelMode.SPEAKER_CHANNEL_MONO,
     "left": SpeakerChannelMode.SPEAKER_CHANNEL_LEFT,
