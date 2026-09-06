@@ -23,8 +23,12 @@
 
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
-#include "esphome/components/ring_buffer/ring_buffer.h"
 #endif
+// Used for the video frame ring unconditionally (not just USE_AUDIO): ESPHome's own
+// ring_buffer::RingBuffer (a thin wrapper over ESP-IDF's native RingbufHandle_t) replaces what
+// used to be a hand-rolled VideoFrameSlot[] + two raw counting semaphores here -- see
+// video_frame_ring_buffer_'s header comment.
+#include "esphome/components/ring_buffer/ring_buffer.h"
 #include "lvgl.h"
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
@@ -33,6 +37,7 @@
 #include <memory>
 #include <functional>
 #include <cstdio>
+#include <atomic>
 
 #ifdef USE_ESP32
 #include "freertos/FreeRTOS.h"
@@ -92,16 +97,11 @@ enum class VideoFormat : uint8_t {
   AVI_MJPEG = 2,  // AVI container with MJPEG video
 };
 
-/// One slot of the video frame ring buffer: a compressed JPEG frame, read ahead by the loader
-/// task (Core 0) and consumed by the decode/playback task (Core 1). See SimpleVideoPlayer's
-/// frame_ring_ for the synchronization contract.
-struct VideoFrameSlot {
-  enum class Status : uint8_t { FRAME_OK, END_OF_FILE, READ_ERROR };
-
-  std::unique_ptr<uint8_t[]> data;      // PSRAM, input_buffer_size_ bytes
-  size_t size{0};                       // valid compressed bytes; meaningful only if FRAME_OK
-  Status status{Status::FRAME_OK};
-};
+// Length-prefix framing for video_frame_ring_buffer_ (see that member's header comment): every
+// entry is a 4-byte uint32_t header followed by that many payload bytes, except the two sentinel
+// header values below, which carry no payload.
+static constexpr uint32_t VIDEO_FRAME_EOF = 0xFFFFFFFFu;
+static constexpr uint32_t VIDEO_FRAME_READ_ERROR = 0xFFFFFFFEu;
 
 // Forward declarations for automation
 class SimpleVideoPlayer;
@@ -150,10 +150,10 @@ class SimpleVideoPlayer : public Component {
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
-  /// How much of the COMPRESSED source stream to keep prefetched, as TIME (see frame_ring_) --
-  /// the actual slot count (prefetch_frames_) is derived from this and target_fps_ once both are
-  /// known, in setup() (see allocate_frame_ring_()). Each slot costs input_buffer_size_ bytes of
-  /// PSRAM.
+  /// How much of the COMPRESSED source stream to keep prefetched, as TIME (see
+  /// video_frame_ring_buffer_) -- prefetch_frames_ (the byte-budget basis, not a real slot count
+  /// any more) is derived from this and target_fps_ once both are known, in setup() (see
+  /// allocate_frame_ring_()).
   void set_prefetch_duration_ms(uint32_t ms) { this->prefetch_duration_ms_ = ms; }
 
 #ifdef USE_SPEAKER
@@ -210,12 +210,12 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
   // Playback Task (decode + pacing, Core 1) and Loader Task (I/O + demux, Core 0)
   //
-  // The loader task reads ahead into frame_ring_ using the same blocking BufferedFileReader
-  // used everywhere else in this component -- blocking is no longer a problem once it's this
-  // task's only job, isolated from decode's presentation deadline. The playback task does the
-  // one-time setup (open file, probe dimensions, allocate buffers) sequentially, starts the
-  // loader, then becomes a pure consumer: wait for a ready ring slot (bounded by one frame's
-  // duration), decode, pace, swap, repeat.
+  // The loader task reads ahead into video_frame_ring_buffer_ using the same blocking
+  // BufferedFileReader used everywhere else in this component -- blocking is no longer a problem
+  // once it's this task's only job, isolated from decode's presentation deadline. The playback
+  // task does the one-time setup (open file, probe dimensions, allocate buffers) sequentially,
+  // starts the loader, then becomes a pure consumer: pop the next frame (a real, bounded
+  // RingBuffer::read() block, not a spin), decode, pace, present, repeat.
   //========================================================================
 
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
@@ -227,20 +227,22 @@ class SimpleVideoPlayer : public Component {
   /// FreeRTOS task entry point (loader task, pinned to Core 0)
   static void loader_task_entry_(void *param);
 
-  /// Loader loop: demuxes and reads ahead into frame_ring_ until EOF or stop is signaled
+  /// Loader loop: demuxes and reads ahead into video_frame_ring_buffer_ until EOF or stop is
+  /// signaled
   void loader_loop_();
 
   /// Wait for a task to stop (generic: used for both the playback and loader tasks)
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
 
   //========================================================================
-  // Video Frame Ring Buffer (see VideoFrameSlot)
+  // Video Frame Ring Buffer (see video_frame_ring_buffer_)
   //========================================================================
 
-  /// Allocate frame_ring_ (prefetch_frames_ slots of input_buffer_size_ bytes each)
+  /// Allocate video_frame_ring_buffer_ and its two scratch read buffers (loader_read_buffer_,
+  /// decode_read_buffer_), sized from prefetch_frames_ * input_buffer_size_.
   bool allocate_frame_ring_();
 
-  /// Free frame_ring_ and its synchronization primitives
+  /// Free video_frame_ring_buffer_ and its scratch read buffers.
   void free_frame_ring_();
 
   //========================================================================
@@ -357,14 +359,18 @@ class SimpleVideoPlayer : public Component {
   lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (required at construction; not otherwise used)
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
-  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (per ring-buffer slot capacity)
+  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
   uint32_t prefetch_duration_ms_{1000};  // How much source stream to keep prefetched, as time
-  // Depth of frame_ring_ -- derived from prefetch_duration_ms_ and target_fps_ once both are known
-  // (allocate_frame_ring_(), called from setup()), NOT a user-facing constant: sizing this in
-  // frame COUNT made the actual prefetched TIME depend on target_fps_ in a way the YAML option
-  // never expressed, so a given prefetch_frames value meant something different at 25fps than at
-  // 30fps. Sizing by time and deriving the count fixes that.
+  // video_frame_ring_buffer_'s byte-budget basis -- derived from prefetch_duration_ms_ and
+  // target_fps_ once both are known (allocate_frame_ring_(), called from setup()), NOT a user-
+  // facing constant: sizing this in frame COUNT made the actual prefetched TIME depend on
+  // target_fps_ in a way the YAML option never expressed, so a given prefetch_frames value meant
+  // something different at 25fps than at 30fps. Sizing by time and deriving this fixes that. No
+  // longer a literal ring slot count since video_frame_ring_buffer_'s buffer is one contiguous
+  // byte stream now, not discrete slots -- this * input_buffer_size_ is the ring's allocated size,
+  // a worst-case bound real (usually smaller) frames pack into more tightly than that many slots
+  // ever could.
   uint32_t prefetch_frames_{0};
 
 #ifdef USE_SPEAKER
@@ -469,7 +475,7 @@ class SimpleVideoPlayer : public Component {
   // two was tried this session and rejected: swapping which lv_draw_buf_t is attached tears down
   // the canvas's existing attachment and breaks rendering outright. The buffering this player
   // actually needs is upstream, on the COMPRESSED source bytes feeding the decoder (see
-  // frame_ring_), not on the decoded pixel output -- decoding directly, in place, into the one
+  // video_frame_ring_buffer_), not on the decoded pixel output -- decoding directly, in place, into the one
   // buffer LVGL already owns and renders from is both simpler and the only approach that doesn't
   // fight LVGL's own buffer management. This does mean decode and LVGL's render are touching the
   // same memory without a lock between them; that's accepted the same way the old reference
@@ -497,17 +503,44 @@ class SimpleVideoPlayer : public Component {
 #endif
 
   // Video frame ring buffer -- producer: loader task (Core 0), consumer: playback/decode task
-  // (Core 1). ring_head_ is loader-owned (next slot to fill), ring_tail_ is decode-owned (next
-  // slot to consume); the two semaphores are the only cross-task synchronization needed for a
-  // single-producer/single-consumer ring, no additional locking required.
-  std::unique_ptr<VideoFrameSlot[]> frame_ring_;
-  uint32_t ring_head_{0};
-  uint32_t ring_tail_{0};
-  SemaphoreHandle_t ring_slots_free_{nullptr};   // counts empty slots, initial = prefetch_frames_
-  SemaphoreHandle_t ring_slots_ready_{nullptr};  // counts filled slots, initial = 0
+  // (Core 1). This is esphome::ring_buffer::RingBuffer (a thin wrapper over ESP-IDF's native
+  // RingbufHandle_t, RINGBUF_TYPE_BYTEBUF -- verified against the real ring_buffer.cpp/.h in this
+  // repo, the SAME class already used a few members down for audio), NOT a hand-rolled slot array:
+  // a previous version of this file reinvented a ring buffer from a VideoFrameSlot[] plus two raw
+  // FreeRTOS counting semaphores and manual head/tail indices -- upstream already solves exactly
+  // this, correctly, and this component already depends on it for audio, so there was never a
+  // reason to hand-roll a second implementation for video.
+  //
+  // Framing: RingBuffer is a plain byte stream with no item-boundary concept of its own, so each
+  // variable-length compressed frame is pushed as [4-byte uint32_t size][that many payload bytes]
+  // (VIDEO_FRAME_EOF/VIDEO_FRAME_READ_ERROR are the two header-only sentinel values, no payload
+  // follows them). Sized at allocate_frame_ring_() time from prefetch_frames_ * input_buffer_size_
+  // bytes -- a worst-case bound (every frame at max size), so real (usually much smaller) frames
+  // pack in more tightly than that many discrete slots ever could.
+  //
+  // Both write_without_replacement() and read() take a REAL FreeRTOS tick timeout and block
+  // properly (verified against the real ring_buffer.cpp -- xRingbufferSend()/xRingbufferReceiveUpTo()
+  // underneath), which is exactly the blocking primitive this component's own pacing loop had to
+  // learn to rely on this session (vTaskDelay(), never taskYIELD(), to actually let a
+  // lower-priority task run) -- no separate signaling semaphore needed on top of it.
+  std::shared_ptr<ring_buffer::RingBuffer> video_frame_ring_buffer_;
+  // Loader task's own scratch buffer: read_next_frame_() writes into this (PSRAM,
+  // input_buffer_size_ bytes), then the loader copies it into video_frame_ring_buffer_ --
+  // RingBuffer's write() API only ever copies FROM a caller-supplied buffer, it has no "give me a
+  // pointer to fill" mode the way the old per-slot array did.
+  std::unique_ptr<uint8_t[]> loader_read_buffer_;
+  // Decode/playback task's own scratch buffer: popped out of video_frame_ring_buffer_ via
+  // RingBuffer::read() (PSRAM, input_buffer_size_ bytes), then decode_frame_() reads from this.
+  std::unique_ptr<uint8_t[]> decode_read_buffer_;
+  // How many complete frames are sitting in video_frame_ring_buffer_ right now, real frames only
+  // (EOF/error sentinels never counted) -- RingBuffer has no notion of "frame count", only bytes,
+  // so this is tracked separately, purely for the startup pre-buffering heuristic (see
+  // playback_loop_()) and logging. std::atomic, not a plain uint32_t: incremented by the loader
+  // task, decremented by the playback task, from different cores.
+  std::atomic<uint32_t> frames_in_ring_{0};
 
   // Loader task (Core 0, pure storage I/O -- no DMA2D/PPA/JPEG hardware involved): demuxes and
-  // reads ahead into frame_ring_
+  // reads ahead into video_frame_ring_buffer_
   TaskHandle_t loader_task_handle_{nullptr};
   volatile bool loader_task_stop_{false};
 
