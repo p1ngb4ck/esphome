@@ -281,8 +281,9 @@ bool USBClient::process_usb_events_() {
     this->event_pool.release(event);
   }
   uint16_t dropped = this->event_queue.get_and_reset_dropped_count();
-  if (dropped > 0)
+  if (dropped > 0) {
     ESP_LOGW(TAG, "Dropped %u USB events due to queue overflow", dropped);
+  }
   if (this->state_ == USB_CLIENT_OPEN) {
     had_work = true;
     this->handle_open_state_();
@@ -384,8 +385,9 @@ void USBClient::on_removed(usb_device_handle_t handle) {
 void USBClient::disconnect() {
   this->on_disconnected();
   auto err = usb_host_device_close(this->handle_, this->device_handle_);
-  if (err != ESP_OK)
+  if (err != ESP_OK) {
     ESP_LOGE(TAG, "Device close failed: %s", esp_err_to_name(err));
+  }
   this->state_ = USB_CLIENT_INIT;
   this->device_handle_ = nullptr;
   this->device_addr_ = -1;
