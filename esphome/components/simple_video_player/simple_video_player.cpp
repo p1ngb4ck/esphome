@@ -100,9 +100,7 @@ void SimpleVideoPlayer::setup() {
   // component's first play() -- a user/automation-triggered action, potentially a long time after
   // boot. That gap is what showed up as "canvas is garbage/broken at start".
   if (this->attach_canvas_buffer_()) {
-    size_t buffer_size =
-        static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-    std::memset(this->canvas_buffer_, 0, buffer_size);
+    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
     lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
     lv_obj_invalidate(this->canvas_);
   }
@@ -112,9 +110,9 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Buffer B: second decoded-frame buffer, same size as A. HW decoder OUTPUT must come from
-  // jpeg_alloc_decoder_mem(). loop() only ever swaps canvas_draw_buf_->data between A and B, so B
-  // needs no lv_draw_buf_t of its own.
+  // Buffer B: an exact twin of LVGL's canvas buffer (A) -- same byte size -- so decode can
+  // ping-pong A/B and loop() just re-points canvas_draw_buf_->data. HW decoder OUTPUT must come
+  // from jpeg_alloc_decoder_mem(). Seed it with a copy of A (already blanked above).
   {
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
@@ -126,7 +124,7 @@ void SimpleVideoPlayer::setup() {
       this->mark_failed();
       return;
     }
-    std::memset(this->decode_buffer_b_, 0, this->frame_bytes_);
+    std::memcpy(this->decode_buffer_b_, this->canvas_buffer_, this->frame_bytes_);
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
@@ -428,14 +426,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // present_frame_()'s own invalidate, once the first real frame of this session is decoded, is
   // what actually gets this canvas its next redraw.
   if (this->canvas_buffer_ready_) {
-    size_t buffer_size =
-        static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
-    std::memset(this->canvas_buffer_, 0, buffer_size);
+    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
     // Write the zeros back to PSRAM now (CPU->memory) so no dirty cache line can evict over the
     // first frame's DMA decode later. C2M (flush), not M2C: the CPU just wrote this buffer.
     // esp_cache_msync, not lv_draw_buf_flush_cache(): this runs on the playback task, and the
     // LVGL cache wrappers must not be called off the LVGL thread.
-    esp_cache_msync(this->canvas_buffer_, buffer_size,
+    esp_cache_msync(this->canvas_buffer_, this->frame_bytes_,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   }
 
@@ -592,9 +588,8 @@ void SimpleVideoPlayer::playback_loop_() {
   // memset + cache flush here (CPU wrote, so C2M), publish buffer A for loop() to show. Cosmetic
   // best-effort (the canvas otherwise keeps showing the last frame).
   if (this->canvas_buffer_ready_) {
-    size_t frame_bytes = static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * 2;
-    std::memset(this->canvas_buffer_, 0, frame_bytes);
-    esp_cache_msync(this->canvas_buffer_, frame_bytes,
+    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
+    esp_cache_msync(this->canvas_buffer_, this->frame_bytes_,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     this->ready_pixels_.store(this->canvas_buffer_, std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
