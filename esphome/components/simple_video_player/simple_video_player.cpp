@@ -100,7 +100,7 @@ void SimpleVideoPlayer::setup() {
   // component's first play() -- a user/automation-triggered action, potentially a long time after
   // boot. That gap is what showed up as "canvas is garbage/broken at start".
   if (this->attach_canvas_buffer_()) {
-    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
+    std::memset(this->canvas_buffer_, 0, this->canvas_draw_buf_->data_size);
     lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
     lv_obj_invalidate(this->canvas_);
   }
@@ -108,26 +108,6 @@ void SimpleVideoPlayer::setup() {
     ESP_LOGE(TAG, "Failed to access canvas buffer at setup");
     this->mark_failed();
     return;
-  }
-
-  // Buffer B: an exact twin of LVGL's canvas buffer (A) -- same jpeg_alloc_decoder_mem() call on
-  // the same requested size, so B's real (alignment-rounded) size equals A's. jpeg_decoder_process
-  // rejects an output size that isn't alignment-rounded, so from here frame_bytes_ IS that rounded
-  // size (b_actual) -- used for the decode capacity, the A/B blanks, and the cache syncs; both
-  // buffers physically hold that many bytes. Seed B with a copy of A (already blanked above).
-  {
-    jpeg_decode_memory_alloc_cfg_t out_cfg{};
-    out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-    size_t b_actual = 0;
-    this->decode_buffer_b_ =
-        static_cast<uint16_t *>(jpeg_alloc_decoder_mem(this->frame_bytes_, &out_cfg, &b_actual));
-    if (this->decode_buffer_b_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate decode buffer B (%zu bytes)", this->frame_bytes_);
-      this->mark_failed();
-      return;
-    }
-    this->frame_bytes_ = b_actual;
-    std::memcpy(this->decode_buffer_b_, this->canvas_buffer_, this->frame_bytes_);
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
@@ -148,14 +128,12 @@ void SimpleVideoPlayer::setup() {
   }
 
   // Compressed-frame input for the HW decoder: one buffer, jpeg_alloc_decoder_mem() INPUT-aligned.
-  // Size rounded up to 16 so decode_frame_()'s ALIGN_UP(frame_size, 16) can never exceed it
-  // (read_next_frame_ already caps frame_size at input_buffer_size_) -- no per-frame bound check.
   {
     jpeg_decode_memory_alloc_cfg_t in_cfg{};
     in_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
     size_t in_actual = 0;
     this->decode_read_buffer_.reset(static_cast<uint8_t *>(
-        jpeg_alloc_decoder_mem(ALIGN_UP(this->input_buffer_size_, 16), &in_cfg, &in_actual)));
+        jpeg_alloc_decoder_mem(this->input_buffer_size_, &in_cfg, &in_actual)));
     if (!this->decode_read_buffer_) {
       ESP_LOGE(TAG, "Failed to allocate decode input buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
       this->mark_failed();
@@ -237,17 +215,13 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // Only place LVGL is touched for a frame update, and only on the LVGL thread. present_frame_()
-  // (playback task) publishes the just-decoded pixels; retarget LVGL's own canvas draw buf at them
-  // and re-assert + invalidate (the working youkorr lvgl_camera_display pattern -- the canvas draw
-  // buf has LV_IMAGE_FLAGS_MODIFIABLE from codegen, so LVGL re-reads it).
+  // The only LVGL calls for a frame update, on the LVGL thread. The playback task decodes into
+  // canvas_buffer_ in place and does the cache maintenance itself, then sets frame_ready_.
+  // Re-setting the same draw buf forces LVGL to re-read the in-place pixels; lv_obj_invalidate()
+  // alone is not enough for a canvas whose data pointer never changes.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    uint16_t *pixels = this->ready_pixels_.load(std::memory_order_acquire);
-    if (pixels != nullptr && this->canvas_draw_buf_ != nullptr) {
-      this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(pixels);
-      lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
-      lv_obj_invalidate(this->canvas_);
-    }
+    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
+    lv_obj_invalidate(this->canvas_);
   }
 }
 
@@ -389,7 +363,6 @@ void SimpleVideoPlayer::playback_loop_() {
   this->resync_count_ = 0;
   this->resync_frames_dropped_ = 0;
   this->decode_fail_count_ = 0;
-  this->decode_slot_ = 0;
   this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
@@ -429,12 +402,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // present_frame_()'s own invalidate, once the first real frame of this session is decoded, is
   // what actually gets this canvas its next redraw.
   if (this->canvas_buffer_ready_) {
-    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
+    std::memset(this->canvas_buffer_, 0, this->canvas_draw_buf_->data_size);
     // Write the zeros back to PSRAM now (CPU->memory) so no dirty cache line can evict over the
     // first frame's DMA decode later. C2M (flush), not M2C: the CPU just wrote this buffer.
     // esp_cache_msync, not lv_draw_buf_flush_cache(): this runs on the playback task, and the
     // LVGL cache wrappers must not be called off the LVGL thread.
-    esp_cache_msync(this->canvas_buffer_, this->frame_bytes_,
+    esp_cache_msync(this->canvas_buffer_, this->canvas_draw_buf_->data_size,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   }
 
@@ -535,7 +508,6 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 
     this->present_frame_();
-    this->decode_slot_ ^= 1;  // next frame decodes into the other buffer
 
     // frame_count_ tracks the absolute index of the last presented frame (+1), from the frame tag.
     this->frame_count_ = frame_index + 1;
@@ -588,13 +560,12 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // Blank the canvas on stop -- runs on the playback task, so same split as present_frame_():
-  // memset + cache flush here (CPU wrote, so C2M), publish buffer A for loop() to show. Cosmetic
-  // best-effort (the canvas otherwise keeps showing the last frame).
+  // memset + cache flush here (CPU wrote, so C2M), hand the lv_obj_invalidate() to loop() via
+  // frame_ready_. Cosmetic best-effort (the canvas otherwise keeps showing the last frame).
   if (this->canvas_buffer_ready_) {
-    std::memset(this->canvas_buffer_, 0, this->frame_bytes_);
-    esp_cache_msync(this->canvas_buffer_, this->frame_bytes_,
+    std::memset(this->canvas_buffer_, 0, this->canvas_draw_buf_->data_size);
+    esp_cache_msync(this->canvas_buffer_, this->canvas_draw_buf_->data_size,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-    this->ready_pixels_.store(this->canvas_buffer_, std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
   }
 
@@ -804,32 +775,33 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 }
 
 bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
-  // Synchronous; the esp_err_t return is the completion status. decode target capacity is the fixed
-  // frame_bytes_. All per-frame config lives in hw_decode_cfg_, built once.
+  // Decode straight into LVGL's own canvas buffer, as codegen initialised it (dma_buffer: true ->
+  // jpeg_alloc_decoder_mem). No size recompute, no bounds check: the decoder is pointed at the
+  // buffer and told the buffer's own size.
+  jpeg_decode_cfg_t decode_cfg{};
+  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+#if LV_COLOR_16_SWAP
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+#else
+  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+#endif
   uint32_t out_size = 0;
-  esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &this->hw_decode_cfg_, frame_data,
+  esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
                                        static_cast<uint32_t>(ALIGN_UP(frame_size, 16)),
-                                       reinterpret_cast<uint8_t *>(this->decode_target_()),
-                                       static_cast<uint32_t>(this->frame_bytes_), &out_size);
+                                       reinterpret_cast<uint8_t *>(this->canvas_buffer_),
+                                       static_cast<uint32_t>(this->canvas_draw_buf_->data_size), &out_size);
   return err == ESP_OK && out_size > 0;
 }
 
 void SimpleVideoPlayer::present_frame_() {
-  // Playback task: M2C-invalidate the just-decoded buffer (decoder DMA-wrote PSRAM) and publish its
-  // pixels for loop() to hand to LVGL.
-  uint16_t *pixels = this->decode_target_();
-  esp_cache_msync(pixels, this->frame_bytes_, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-  this->ready_pixels_.store(pixels, std::memory_order_release);
+  // Playback task: M2C-invalidate the just-decoded canvas buffer (decoder DMA-wrote it) so LVGL's
+  // next render reads fresh pixels; loop() does the lv_obj_invalidate().
+  esp_cache_msync(this->canvas_buffer_, this->canvas_draw_buf_->data_size,
+                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   this->frame_ready_.store(true, std::memory_order_release);
 }
 
 bool SimpleVideoPlayer::init_decoder_() {
-  this->hw_decode_cfg_.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-#if LV_COLOR_16_SWAP
-  this->hw_decode_cfg_.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
-#else
-  this->hw_decode_cfg_.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-#endif
   if (this->hw_jpeg_decoder_ == nullptr) {
     jpeg_decode_engine_cfg_t eng_cfg{};
     eng_cfg.intr_priority = 0;
@@ -1045,8 +1017,8 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
 //========================================================================
 
 bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_height) {
-  // Nothing is allocated here -- decode targets are the canvas buffer (A) and decode_buffer_b_ (B),
-  // both fixed-size. This just verifies the actual video fits.
+  // Nothing is allocated here -- decode writes straight into LVGL's own canvas buffer. This just
+  // verifies the actual video fits it.
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
   uint32_t aligned_max_width = ALIGN_UP(MAX_VIDEO_WIDTH, 16);
@@ -1072,14 +1044,11 @@ void SimpleVideoPlayer::free_buffers_() {
     this->hw_jpeg_decoder_ = nullptr;
   }
 
-  // A (canvas_buffer_/canvas_draw_buf_) is LVGL's own -- just drop our references. B is ours.
+  // canvas_buffer_/canvas_draw_buf_ are LVGL's own, never allocated or freed by us -- just drop the
+  // references.
   this->canvas_draw_buf_ = nullptr;
   this->canvas_buffer_ = nullptr;
   this->canvas_buffer_ready_ = false;
-  if (this->decode_buffer_b_ != nullptr) {
-    heap_caps_free(this->decode_buffer_b_);
-    this->decode_buffer_b_ = nullptr;
-  }
 
 #ifdef USE_AUDIO
   // Permanent audio buffers (allocated once in setup(), see there) -- true end-of-life free, same
@@ -1132,10 +1101,6 @@ bool SimpleVideoPlayer::attach_canvas_buffer_() {
   this->canvas_buffer_ = reinterpret_cast<uint16_t *>(draw_buf->data);
   this->canvas_buffer_width_ = static_cast<int>(width);
   this->canvas_buffer_height_ = static_cast<int>(height);
-  // Exactly LVGL's own buffer size (LV_DRAW_BUF_SIZE: stride-padded, MCU-aligned). Buffer B is
-  // allocated to this same size and the decoder is given this as its output capacity, so a decode
-  // can never write past either buffer.
-  this->frame_bytes_ = draw_buf->data_size;
   this->canvas_buffer_ready_ = true;
 
   ESP_LOGI(TAG, "Canvas buffer attached (LVGL-owned): %" PRIu32 "x%" PRIu32, width, height);

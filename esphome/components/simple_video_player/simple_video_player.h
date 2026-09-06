@@ -299,9 +299,6 @@ class SimpleVideoPlayer : public Component {
   /// a decode write or this invalidate (see canvas_buffer_'s header comment).
   void present_frame_();
 
-  // Which of the two decoded-frame buffers the next decode writes to (A when decode_slot_ is 0).
-  uint16_t *decode_target_() { return this->decode_slot_ == 1 ? this->decode_buffer_b_ : this->canvas_buffer_; }
-
   //========================================================================
   // Error Handling
   //========================================================================
@@ -411,34 +408,24 @@ class SimpleVideoPlayer : public Component {
   // Buffers (allocated on demand)
   std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM (16KB), aligned for DMA
 
-  // Two decoded-frame buffers, RGB565, fixed size. A is LVGL's own canvas draw buf -- built by the
-  // canvas codegen (esphome/components/lvgl/widgets/canvas.py: lv_draw_buf_init() +
-  // LV_IMAGE_FLAGS_MODIFIABLE + lv_canvas_set_draw_buf()) before any Component::setup() runs;
-  // attach_canvas_buffer_() only reads the pointer back via lv_canvas_get_draw_buf(), never
-  // allocates or replaces it. B is one extra buffer we allocate (jpeg_alloc_decoder_mem OUTPUT).
-  // Decode ping-pongs A/B so LVGL never renders the buffer decode is writing; loop() points
-  // canvas_draw_buf_->data at whichever was just filled, then lv_canvas_set_draw_buf() +
-  // lv_obj_invalidate() (the working pattern from youkorr's lvgl_camera_display).
-  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // LVGL's own canvas draw buf
-  uint16_t *canvas_buffer_{nullptr};         // buffer A == canvas_draw_buf_'s original data
-  uint16_t *decode_buffer_b_{nullptr};       // buffer B, ours
+  // Decode target == the canvas's OWN existing pixel buffer, in place. LVGL's canvas codegen
+  // (esphome/components/lvgl/widgets/canvas.py) built one lv_draw_buf_t before any
+  // Component::setup(); attach_canvas_buffer_() only reads the pointer back via
+  // lv_canvas_get_draw_buf(), never allocates or replaces it, and blanks it once at setup. Decode
+  // writes straight into it -- decode/playback runs on Core 1 above the main loop /
+  // lv_timer_handler(), so LVGL's render only runs when this task blocks, never concurrently with
+  // a decode write. No component-owned second buffer.
+  lv_draw_buf_t *canvas_draw_buf_{nullptr};  // owned by LVGL; never allocated or freed by us
+  uint16_t *canvas_buffer_{nullptr};         // == canvas_draw_buf_->data, cached for convenience
   int canvas_buffer_width_{0};
   int canvas_buffer_height_{0};
-  size_t frame_bytes_{0};  // canvas_buffer_width_ * height_ * 2, computed once in attach_canvas_buffer_()
   bool canvas_buffer_ready_{false};
-  uint8_t decode_slot_{0};  // playback task: 0 -> A, 1 -> B for the next decode
 
-  // present_frame_() (playback task) publishes the pixels of the just-decoded frame; loop() (LVGL
-  // thread) points canvas_draw_buf_->data at them and does lv_canvas_set_draw_buf() +
-  // lv_obj_invalidate(). All LVGL calls stay off the higher-priority playback task.
-  std::atomic<uint16_t *> ready_pixels_{nullptr};
+  // Set by present_frame_() (or the stop-blank) once canvas_buffer_ holds a new frame and its
+  // cache is synced; consumed by loop() on the LVGL thread for the one lv_obj_invalidate().
   std::atomic<bool> frame_ready_{false};
 
-  // Created once in init_decoder_(), reused every frame, destroyed in free_buffers_().
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
-  // Constant for the whole run (output format + compile-time RGB order) -- built once in
-  // init_decoder_(), never per frame.
-  jpeg_decode_cfg_t hw_decode_cfg_{};
 
   // The playback task reads each next compressed frame here (jpeg_alloc_decoder_mem INPUT buffer,
   // input_buffer_size_ bytes); decode_frame_() feeds it to the HW decoder. read_next_frame_()
