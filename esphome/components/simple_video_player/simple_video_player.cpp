@@ -428,6 +428,9 @@ void SimpleVideoPlayer::playback_loop_() {
     size_t buffer_size =
         static_cast<size_t>(this->canvas_buffer_width_) * this->canvas_buffer_height_ * sizeof(uint16_t);
     std::memset(this->canvas_buffer_, 0, buffer_size);
+    // Write the zeros back to PSRAM now (CPU->memory) so no dirty cache line can evict over the
+    // first frame's DMA decode later. Flush, not invalidate: the CPU just wrote this buffer.
+    lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
   }
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
@@ -1010,15 +1013,14 @@ void SimpleVideoPlayer::present_frame_() {
   // No lock: this runs on the decode/playback task (Core 1, priority 10), the same core as the
   // main loop / lv_timer_handler() but at higher priority, so LVGL's render only runs while this
   // task is blocked -- never concurrently with this write (see canvas_buffer_'s header comment).
-  // The removed lvgl_mutex_ here was this component's own mutex, which LVGL's renderer never took,
-  // so it synchronized nothing.
   //
-  // Flush the CPU cache for the buffer BEFORE invalidating, so the render pass reads the
-  // just-written bytes rather than stale cache lines -- same order lv_canvas_fill_bg() uses. No
-  // lv_canvas_set_draw_buf()/lv_canvas_set_buffer() call here at all: this is still the same
-  // lv_draw_buf_t LVGL's own codegen attached, never swapped -- see canvas_buffer_'s header comment
-  // for why re-attaching a different buffer broke rendering.
-  lv_draw_buf_flush_cache(this->canvas_draw_buf_, nullptr);
+  // INVALIDATE, not flush. The hardware JPEG decoder DMA-wrote canvas_buffer_ in PSRAM; the CPU's
+  // cache for that region still holds the PREVIOUS frame's pixels (loaded when LVGL last rendered
+  // the canvas). lv_draw_buf_flush_cache() is a CPU->memory writeback (for when the CPU wrote the
+  // buffer) -- the wrong direction here. lv_draw_buf_invalidate_cache() discards the stale CPU
+  // cache lines so LVGL's next canvas render reads the freshly decoded pixels from PSRAM. Without
+  // this, every frame after the first shows frame 0.
+  lv_draw_buf_invalidate_cache(this->canvas_draw_buf_, nullptr);
   lv_obj_invalidate(this->canvas_);
 }
 
