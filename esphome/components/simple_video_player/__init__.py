@@ -70,7 +70,7 @@ CONF_CANVAS_ID = "canvas_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
-CONF_PREFETCH_FRAMES = "prefetch_frames"
+CONF_PREFETCH_DURATION = "prefetch_duration"
 CONF_TARGET_FPS = "target_fps"
 CONF_AUDIO_CODEC = "audio_codec"
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
@@ -103,10 +103,12 @@ CONF_ON_PLAYBACK_ERROR = "on_playback_error"
 # Default values
 DEFAULT_CACHE_BUFFER_SIZE = 64 * 1024  # 64KB - optimized for better I/O performance
 DEFAULT_INPUT_BUFFER_SIZE = 256 * 1024  # 256KB (per frame-ring-buffer slot)
-# Depth of the video frame ring buffer (loader task prefetch, Core 0 -> decode task, Core 1).
-# Generous by design: this pipeline currently targets ESP32-P4 (32MB PSRAM) with the hardware
-# JPEG decoder; a size-conscious default for smaller/software-JPEG targets is future work.
-DEFAULT_PREFETCH_FRAMES = 8
+# How much of the video's COMPRESSED source stream to keep prefetched (loader task, Core 0 ->
+# decode task, Core 1) at all times, expressed as TIME, not a fixed slot count -- the number of
+# ring slots this actually needs depends on target_fps (resolved in setup(), once both this and
+# target_fps are known: slots = ceil(prefetch_duration * target_fps)). 1s is a sane default that
+# comfortably absorbs real storage-read jitter without over-committing PSRAM.
+DEFAULT_PREFETCH_DURATION = "1s"
 DEFAULT_TARGET_FPS = 30.0
 
 # Validation ranges
@@ -114,8 +116,8 @@ MIN_CACHE_BUFFER_SIZE = 8 * 1024  # 8KB
 MAX_CACHE_BUFFER_SIZE = 128 * 1024  # 128KB - increased for performance
 MIN_INPUT_BUFFER_SIZE = 128 * 1024  # 128KB
 MAX_INPUT_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
-MIN_PREFETCH_FRAMES = 1
-MAX_PREFETCH_FRAMES = 32
+MIN_PREFETCH_DURATION_MS = 100  # below this, storage-read jitter has essentially no headroom
+MAX_PREFETCH_DURATION_MS = 5000  # above this, PSRAM cost stops being worth the extra headroom
 MIN_FPS = 1.0
 MAX_FPS = 60.0
 
@@ -144,8 +146,12 @@ CONFIG_SCHEMA = cv.All(
                 CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
             ): cv.All(cv.validate_bytes, cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE)),
             cv.Optional(
-                CONF_PREFETCH_FRAMES, default=DEFAULT_PREFETCH_FRAMES
-            ): cv.int_range(min=MIN_PREFETCH_FRAMES, max=MAX_PREFETCH_FRAMES),
+                CONF_PREFETCH_DURATION, default=DEFAULT_PREFETCH_DURATION
+            ): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=MIN_PREFETCH_DURATION_MS),
+                         max=cv.TimePeriod(milliseconds=MAX_PREFETCH_DURATION_MS)),
+            ),
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
             ),
@@ -327,7 +333,7 @@ async def to_code(config):
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
-    cg.add(var.set_prefetch_frames(config[CONF_PREFETCH_FRAMES]))
+    cg.add(var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds))
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))

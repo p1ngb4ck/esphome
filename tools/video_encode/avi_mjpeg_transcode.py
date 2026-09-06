@@ -82,7 +82,7 @@ def build_ffmpeg_args(args: argparse.Namespace) -> list[str]:
 
 
 def estimate_buffers(args: argparse.Namespace) -> None:
-    """Rough sizing hints for simple_video_player's input_buffer_size / prefetch_frames."""
+    """Rough sizing hints for simple_video_player's input_buffer_size / prefetch_duration."""
     if not (args.width and args.height):
         return
     # Very rough JPEG size estimate at "reasonable" quality: ~0.15-0.3 bytes/pixel for 4:2:0
