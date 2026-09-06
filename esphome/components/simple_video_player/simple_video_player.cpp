@@ -254,11 +254,14 @@ void SimpleVideoPlayer::loop() {
   //
   // lv_obj_invalidate() ALONE is not enough for a canvas whose pixels change in place: the image
   // source pointer never changes, so LVGL re-composites its CACHED decoded copy and the canvas
-  // stays on the first frame (verified against LVGL 9.5 lv_canvas.c -- lv_canvas_set_draw_buf()
-  // itself is lv_image_cache_drop() + lv_image_set_src() + lv_image_cache_drop()). Drop the cache
-  // entry for this draw buf so the next render re-reads canvas_buffer_.
+  // stays on the first frame. Re-setting the SAME draw buf forces the re-read: verified against
+  // LVGL 9.5 lv_canvas.c, lv_canvas_set_draw_buf() is lv_image_cache_drop() + lv_image_set_src()
+  // + lv_image_cache_drop() (lv_image_cache_drop() itself is not in LVGL's public headers). The
+  // canvas_buffer_ pointer is unchanged, so this only flushes the cache + re-asserts the src --
+  // it does NOT tear down the attachment the way swapping to a DIFFERENT lv_draw_buf_t would.
+  // youkorr's lvgl_camera_display does exactly this every frame for the same reason.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_image_cache_drop(this->canvas_draw_buf_);
+    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
     lv_obj_invalidate(this->canvas_);
   }
 }
