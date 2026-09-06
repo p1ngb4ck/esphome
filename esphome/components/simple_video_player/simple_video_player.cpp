@@ -1134,7 +1134,10 @@ bool SimpleVideoPlayer::attach_canvas_buffer_() {
   this->canvas_buffer_ = reinterpret_cast<uint16_t *>(draw_buf->data);
   this->canvas_buffer_width_ = static_cast<int>(width);
   this->canvas_buffer_height_ = static_cast<int>(height);
-  this->frame_bytes_ = static_cast<size_t>(width) * height * sizeof(uint16_t);
+  // Exactly LVGL's own buffer size (LV_DRAW_BUF_SIZE: stride-padded, MCU-aligned). Buffer B is
+  // allocated to this same size and the decoder is given this as its output capacity, so a decode
+  // can never write past either buffer.
+  this->frame_bytes_ = draw_buf->data_size;
   this->canvas_buffer_ready_ = true;
 
   ESP_LOGI(TAG, "Canvas buffer attached (LVGL-owned): %" PRIu32 "x%" PRIu32, width, height);
