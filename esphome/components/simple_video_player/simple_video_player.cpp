@@ -730,13 +730,9 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 }
 
 void SimpleVideoPlayer::present_frame_() {
-  // Runs on the video task. decode_target_ was just DMA-written -- M2C-invalidate so the LVGL
-  // render (CPU) reads fresh pixels. This buffer is neither shown nor pending, so LVGL is not
-  // touching it. Do NOT write canvas_draw_buf_->data here: that happens on the LVGL thread in
-  // loop(). Never blocks.
+  // Runs on the video task. Do NOT write canvas_draw_buf_->data here: that happens on the LVGL
+  // thread in loop(). Never blocks.
   uint16_t *just_decoded = this->decode_target_;
-  esp_cache_msync(just_decoded, this->canvas_draw_buf_->data_size,
-                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   uint16_t *shown = this->shown_buffer_.load(std::memory_order_acquire);
   this->pending_present_.store(just_decoded, std::memory_order_relaxed);
   this->frame_ready_.store(true, std::memory_order_release);
