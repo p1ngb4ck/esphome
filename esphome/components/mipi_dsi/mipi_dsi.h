@@ -59,6 +59,19 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+  void set_frame_buffers(uint8_t n) { this->num_fbs_ = n; }
+
+  // --- direct DPI framebuffer access for a real-time video client (simple_video_player) ---
+  // Only valid when frame_buffers >= 2. get_dsi_frame_buffers() hands back the driver-owned
+  // framebuffers in native panel orientation; present_dsi_frame_buffer() points the DPI scanout
+  // at one of them and returns after the next VSYNC flip (zero copy). While a client uses these,
+  // LVGL must be paused so its own flushes don't fight the scanout.
+  void get_dsi_frame_buffers(void **out, uint8_t *count) const {
+    *count = this->dsi_fbs_[0] != nullptr ? this->num_fbs_ : 0;
+    for (uint8_t i = 0; i < *count && i < 3; i++)
+      out[i] = this->dsi_fbs_[i];
+  }
+  void present_dsi_frame_buffer(void *fb);
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -95,6 +108,7 @@ class MipiDsi final : public display::Display {
   float pclk_frequency_ = 16;  // in MHz
   float lane_bit_rate_{1500};  // in Mbps
   uint8_t lanes_{2};           // 1, 2, 3 or 4 lanes
+  uint8_t num_fbs_{1};         // DPI frame buffers; >=2 lets the driver flip at VSYNC (anti-tearing)
 
   bool invert_colors_{};
   display::ColorOrder color_mode_{display::COLOR_ORDER_BGR};
@@ -102,6 +116,7 @@ class MipiDsi final : public display::Display {
   uint8_t pixel_mode_{};
 
   esp_lcd_panel_handle_t handle_{};
+  void *dsi_fbs_[3]{};  // driver-owned DPI framebuffers, populated in setup() when num_fbs_ >= 2
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};

@@ -12,6 +12,7 @@
 #include "esp_dma_utils.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
+#include "esp_attr.h"
 
 namespace esphome::simple_video_player {
 
@@ -19,6 +20,16 @@ static const char *const TAG = "simple_video_player";
 
 // JPEG EOI (End of Image) marker
 static const uint16_t JPEG_EOI = 0xd9ff;
+
+#ifdef SVP_DSI_OUTPUT
+// PPA "transaction done" callback (ISR context). user_data is ppa_done_sem_; just release it so the
+// video task's next dsi_sync_prev_rotate_() can consume it. Nothing heavy here.
+static IRAM_ATTR bool svp_ppa_done_cb(ppa_client_handle_t, ppa_event_data_t *, void *user_data) {
+  BaseType_t hp_task_woken = pdFALSE;
+  xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(user_data), &hp_task_woken);
+  return hp_task_woken == pdTRUE;
+}
+#endif
 
 // Alignment helpers
 #define ALIGN_UP(num, align) (((num) + ((align) -1)) & ~((align) -1))
@@ -44,26 +55,41 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 void SimpleVideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
 
-  // Verify canvas is set
-  if (this->canvas_ == nullptr) {
-    ESP_LOGE(TAG, "Canvas not set");
-    this->mark_failed();
-    return;
-  }
-
+  // LVGL is required either way: the canvas-output path renders into an LVGL canvas widget, and the
+  // DSI-output path pauses/resumes LVGL around playback (it owns the panel meanwhile) and reads its
+  // rotation.
   if (this->lvgl_component_ == nullptr) {
     ESP_LOGE(TAG, "LVGL component not set");
     this->mark_failed();
     return;
   }
 
-  // Decoded RGB888 output buffer -- allocated ONCE here, sized for the max resolution
-  // (ALIGN_UP(w,16) * ALIGN_UP(h,16) * 3), and reused for every play(). This buffer IS the LVGL
-  // canvas buffer: playback_loop_() points the canvas at it with lv_canvas_set_buffer(), decode
-  // writes straight into it. RGB888 (not RGB565): the P4 HW JPEG decoder's RGB565 output path is
-  // buggy on some P4 silicon revisions. jpeg_alloc_decoder_mem() gives the 16-byte / DMA alignment
-  // the HW decoder requires and reports the actual (cache-line-rounded) size it allocated.
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ != nullptr) {
+    // Direct mipi_dsi output: no LVGL canvas, no output_buffer_. init_dsi_output_() takes the
+    // driver-owned DPI framebuffers + a PPA client and points decode_target_ at its own decode
+    // buffer (or straight at a framebuffer for the rotation-0 path). `canvas_id` is not set in this
+    // mode (schema makes the two mutually exclusive).
+    if (!this->init_dsi_output_()) {
+      this->mark_failed();
+      return;
+    }
+  } else
+#endif
   {
+    // Verify canvas is set
+    if (this->canvas_ == nullptr) {
+      ESP_LOGE(TAG, "Canvas not set");
+      this->mark_failed();
+      return;
+    }
+
+    // Decoded RGB888 output buffer -- allocated ONCE here, sized for the max resolution
+    // (ALIGN_UP(w,16) * ALIGN_UP(h,16) * 3), and reused for every play(). This buffer IS the LVGL
+    // canvas buffer: playback_loop_() points the canvas at it with lv_canvas_set_buffer(), decode
+    // writes straight into it. RGB888 (not RGB565): the P4 HW JPEG decoder's RGB565 output path is
+    // buggy on some P4 silicon revisions. jpeg_alloc_decoder_mem() gives the 16-byte / DMA alignment
+    // the HW decoder requires and reports the actual (cache-line-rounded) size it allocated.
     const size_t max_output_size = static_cast<size_t>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)) *
                                    ALIGN_UP(MAX_VIDEO_HEIGHT, 16) * 3;
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
@@ -186,6 +212,18 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ != nullptr) {
+    // DSI-direct playback owns the panel; the video task flips framebuffers itself in
+    // present_dsi_(). Nothing to invalidate on the LVGL thread. Hand the panel back to LVGL once
+    // playback has fully stopped.
+    if (this->dsi_lvgl_paused_ && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+      this->lvgl_component_->set_paused(false, false);
+      this->dsi_lvgl_paused_ = false;
+    }
+    return;
+  }
+#endif
   // Runs on the LVGL thread. decode_frame_() (video task) decoded a frame straight into
   // output_buffer_ (== the canvas buffer) and set frame_ready_. Just invalidate the canvas here so
   // LVGL redraws it -- the actual canvas update is triggered from loop(), never from the task.
@@ -228,6 +266,27 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
   this->playback_task_stop_ = false;
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
+
+#ifdef SVP_DSI_OUTPUT
+  // Direct-to-DSI-framebuffer video path: PPA-rotate the decoded frame into a driver-owned DPI
+  // framebuffer (async) and repoint the scanout at it (present_dsi_()). LVGL must be off the
+  // scanout for the duration so its flushes don't fight ours; resumed in loop() once stopped.
+  if (this->dsi_ != nullptr) {
+    if (!this->dsi_lvgl_paused_) {
+      this->lvgl_component_->set_paused(true, false);
+      this->dsi_lvgl_paused_ = true;
+    }
+    // Restart the pipeline from a clean slate (a prior session may have left an undrained
+    // completion / a stale prev-FB).
+    this->dsi_prev_fb_ = nullptr;
+    this->dsi_back_idx_ = 0;
+    if (this->dsi_direct_decode_) {
+      this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
+    } else if (this->ppa_done_sem_ != nullptr) {
+      xSemaphoreTake(this->ppa_done_sem_, 0);
+    }
+  }
+#endif
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
   // App.loop() -> LvglComponent::loop() -> lv_timer_handler(), i.e. the actual LVGL
@@ -318,13 +377,18 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
-  // Point the LVGL canvas at our own output_buffer_ (the decode target), sized to the decoder's
-  // 16-px-padded output layout. RGB888 -- the decoder always outputs RGB888 (RGB565 is buggy on
-  // some P4 revs); LVGL converts RGB888 -> the panel's format on blit (PPA/SW). Done once per
-  // session, from the playback task -- no frame decoded yet, nothing to race.
-  lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), ALIGN_UP(width, 16), ALIGN_UP(height, 16),
-                       LV_COLOR_FORMAT_RGB888);
-  lv_obj_invalidate(this->canvas_);
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ == nullptr)
+#endif
+  {
+    // Point the LVGL canvas at our own output_buffer_ (the decode target), sized to the decoder's
+    // 16-px-padded output layout. RGB888 -- the decoder always outputs RGB888 (RGB565 is buggy on
+    // some P4 revs); LVGL converts RGB888 -> the panel's format on blit (PPA/SW). Done once per
+    // session, from the playback task -- no frame decoded yet, nothing to race.
+    lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), ALIGN_UP(width, 16), ALIGN_UP(height, 16),
+                         LV_COLOR_FORMAT_RGB888);
+    lv_obj_invalidate(this->canvas_);
+  }
 
   // Fresh pacing state for this session.
   this->paused_accum_us_ = 0;
@@ -357,17 +421,20 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  // Clear only the part of the buffer the first decode won't cover (padding / rounding tail, or a
-  // previous larger video's leftover pixels around a smaller new one). The decode overwrites the
-  // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region every frame; setup() already zeroed the whole
-  // buffer once. For a max-resolution video this memset is a no-op.
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ == nullptr)
+#endif
   {
+    // Clear only the part of the buffer the first decode won't cover (padding / rounding tail, or a
+    // previous larger video's leftover pixels around a smaller new one). The decode overwrites the
+    // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region every frame; setup() already zeroed the whole
+    // buffer once. For a max-resolution video this memset is a no-op.
     const size_t covered = static_cast<size_t>(ALIGN_UP(width, 16)) * ALIGN_UP(height, 16) * 3;
     if (covered < this->output_buffer_size_) {
       std::memset(this->output_buffer_.get() + covered, 0, this->output_buffer_size_ - covered);
     }
+    this->frame_ready_.store(true, std::memory_order_release);
   }
-  this->frame_ready_.store(true, std::memory_order_release);
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
   if (this->video_format_ != VideoFormat::AVI_MJPEG) {
@@ -453,8 +520,21 @@ void SimpleVideoPlayer::playback_loop_() {
       this->playback_start_time_us_ = esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur);
     }
 
-    const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                                           static_cast<int64_t>(frame_index * frame_dur);
+    int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                                     static_cast<int64_t>(frame_index * frame_dur);
+
+#ifdef SVP_DSI_OUTPUT
+    // DSI path: if more than one frame BEHIND the file clock, re-anchor the clock to now and carry
+    // on at 1x -- this HW cannot sprint to catch up, and a sprint would run the next decode into
+    // the still-in-flight async PPA rotate (shared DMA2D). Every frame still plays, just shifted
+    // later; audio rides the same feed rate so it stays aligned. Not frame-dropping.
+    if (this->dsi_ != nullptr && (esp_timer_get_time() - target_present_time_us) > frame_dur) {
+      this->playback_start_time_us_ =
+          esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur) - this->paused_accum_us_;
+      target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
+                               static_cast<int64_t>(frame_index * frame_dur);
+    }
+#endif
 
     // Sync to the wall clock by COMPARING it, never sleeping on it. Bare spin -- one storage
     // update() per frame (top of the loop) is enough (each fetched chunk is pre-decode compressed
@@ -462,12 +542,30 @@ void SimpleVideoPlayer::playback_loop_() {
     while (target_present_time_us - esp_timer_get_time() > 0) {
     }
 
+#ifdef SVP_DSI_OUTPUT
+    // Reclaim the previous pass's async PPA rotate before decode reuses the decode buffer.
+    // (No-op on the rotation-0 direct path -- there is no PPA and dsi_prev_fb_ stays null.)
+    if (this->dsi_ != nullptr && !this->dsi_direct_decode_) {
+      this->dsi_sync_prev_rotate_();
+    }
+#endif
+
     if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
       // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
       this->decode_fail_count_++;
       continue;
     }
     // decode_frame_() wrote the frame into output_buffer_ and set frame_ready_; loop() invalidates.
+
+#ifdef SVP_DSI_OUTPUT
+    if (this->dsi_ != nullptr) {
+      if (this->dsi_direct_decode_) {
+        this->present_dsi_direct_();  // rotation 0: decoded straight into the FB, just flip
+      } else {
+        this->present_dsi_();  // present prev frame's FB, then queue this frame's rotate (async)
+      }
+    }
+#endif
 
     esp_task_wdt_reset();
   }
@@ -664,16 +762,176 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
       .output_format = JPEG_DECODE_OUT_FORMAT_RGB888,
       .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
   };
+  uint8_t *out_buf = this->output_buffer_.get();
+  uint32_t out_cap = static_cast<uint32_t>(this->output_buffer_size_);
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ != nullptr) {
+    // DSI mode: decode into decode_target_ -- either a driver framebuffer (rotation 0) or the
+    // dedicated PPA-input buffer (rotation 90/180/270). Both are dsi_fb_bytes_ RGB888 bytes.
+    out_buf = this->decode_target_;
+    out_cap = static_cast<uint32_t>(this->dsi_fb_bytes_);
+  }
+#endif
   uint32_t out_size = 0;
   esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
-                                       static_cast<uint32_t>(ALIGN_UP(frame_size, 16)), this->output_buffer_.get(),
-                                       static_cast<uint32_t>(this->output_buffer_size_), &out_size);
+                                       static_cast<uint32_t>(ALIGN_UP(frame_size, 16)), out_buf, out_cap, &out_size);
   if (err != ESP_OK || out_size == 0)
     return false;
   // Frame is in output_buffer_ -- tell loop() to invalidate the canvas.
   this->frame_ready_.store(true, std::memory_order_release);
   return true;
 }
+
+#ifdef SVP_DSI_OUTPUT
+bool SimpleVideoPlayer::init_dsi_output_() {
+  this->dsi_->get_dsi_frame_buffers(this->dsi_fb_, &this->dsi_fb_count_);
+
+  // Rotation comes from the LVGL component, not the mipi_dsi display: ESPHome forbids `rotation:`
+  // on a display that LVGL drives ("set rotation in the LVGL config instead"), and mipi_dsi has no
+  // hardware rotation, so LVGL's is the only rotation in the system. DisplayRotation's enum values
+  // ARE the degrees (0/90/180/270).
+  this->video_rotation_deg_ = static_cast<uint16_t>(this->lvgl_component_->get_rotation());
+
+  // out_* = the panel's native framebuffer resolution (what we flip in). in_* = the resolution the
+  // user must transcode to: native res with W/H swapped for a 90/270 rotation.
+  this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
+  this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
+  const bool transpose = this->video_rotation_deg_ == 90 || this->video_rotation_deg_ == 270;
+  this->dsi_in_w_ = transpose ? this->dsi_out_h_ : this->dsi_out_w_;
+  this->dsi_in_h_ = transpose ? this->dsi_out_w_ : this->dsi_out_h_;
+  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * 3;  // RGB888
+
+  this->dsi_direct_decode_ = this->video_rotation_deg_ == 0;
+
+  if (this->dsi_direct_decode_) {
+    // Rotation 0: the video is already in panel orientation (user pre-rotated it in the
+    // transcoder). HW-JPEG-decode straight into a DSI framebuffer and flip -- no PPA, no extra
+    // copy, no intermediate buffer. Two framebuffers are enough (one scanning out, one decoding).
+    if (this->dsi_fb_count_ < 2) {
+      ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; need >= 2", this->dsi_fb_count_);
+      return false;
+    }
+    this->dsi_back_idx_ = 0;
+    this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
+    ESP_LOGI(TAG, "DSI direct output (no rotate): %u FBs, video %ux%u == panel", this->dsi_fb_count_,
+             this->dsi_out_w_, this->dsi_out_h_);
+    return true;
+  }
+
+  // Rotation 90/180/270: PPA the decoded frame into a DSI framebuffer. The non-blocking rotate
+  // pipeline needs three FBs (one scanning out, one just presented, one being rotated into).
+  if (this->dsi_fb_count_ < 3) {
+    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; need 3 for rotation (set frame_buffers: 3)",
+             this->dsi_fb_count_);
+    return false;
+  }
+  ppa_client_config_t cfg{};
+  cfg.oper_type = PPA_OPERATION_SRM;
+  cfg.max_pending_trans_num = 4;  // let rotates queue rather than fail-fast when one runs long
+  if (ppa_register_client(&cfg, &this->ppa_client_) != ESP_OK) {
+    ESP_LOGE(TAG, "ppa_register_client(SRM) failed");
+    return false;
+  }
+  this->ppa_done_sem_ = xSemaphoreCreateBinary();
+  if (this->ppa_done_sem_ == nullptr) {
+    ESP_LOGE(TAG, "ppa_done_sem_ create failed");
+    return false;
+  }
+  ppa_event_callbacks_t ppa_cbs{};
+  ppa_cbs.on_trans_done = svp_ppa_done_cb;
+  if (ppa_client_register_event_callbacks(this->ppa_client_, &ppa_cbs) != ESP_OK) {
+    ESP_LOGE(TAG, "ppa_client_register_event_callbacks failed");
+    return false;
+  }
+
+  // Dedicated decode target (JPEG-decoder aligned), sized to the FB byte count -- the in_ and out_
+  // layouts have the same total size.
+  jpeg_decode_memory_alloc_cfg_t db_cfg{};
+  db_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  size_t db_actual = 0;
+  this->dsi_decode_buf_.reset(
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->dsi_fb_bytes_, &db_cfg, &db_actual)));
+  if (!this->dsi_decode_buf_) {
+    ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes, PSRAM)", this->dsi_fb_bytes_);
+    return false;
+  }
+  this->decode_target_ = this->dsi_decode_buf_.get();
+
+  ESP_LOGI(TAG, "DSI direct output: %u FBs, rotation %u deg, video %ux%u -> panel %ux%u", this->dsi_fb_count_,
+           this->video_rotation_deg_, this->dsi_in_w_, this->dsi_in_h_, this->dsi_out_w_, this->dsi_out_h_);
+  return true;
+}
+
+void SimpleVideoPlayer::dsi_sync_prev_rotate_() {
+  // The previous pass queued an async PPA rotate into dsi_prev_fb_. It has had a whole frame period
+  // (decode + pace) to finish -- a full-frame RGB888 rotate is a few ms, so it is always done by
+  // now. Consume its completion so the sem stays balanced; DO NOT wait on it (no portMAX_DELAY, no
+  // fixed timeout -- AGENTS.md hot-path rule; we trust it finished).
+  if (this->dsi_prev_fb_ != nullptr) {
+    xSemaphoreTake(this->ppa_done_sem_, 0);
+  }
+}
+
+void SimpleVideoPlayer::present_dsi_() {
+  // 1. Hand the scanout the frame we rotated on the PREVIOUS pass. Its rotate is finished
+  //    (dsi_sync_prev_rotate_() ran at the top of this loop pass). present_dsi_frame_buffer() only
+  //    repoints the DPI framebuffer for the next scan frame -- it does not block.
+  if (this->dsi_prev_fb_ != nullptr) {
+    this->dsi_->present_dsi_frame_buffer(this->dsi_prev_fb_);
+  }
+
+  // 2. Kick off THIS frame's rotate into the next FB, non-blocking. decode_target_ (the landscape
+  //    decode buffer) stays untouched until the next pass's dsi_sync_prev_rotate_() + decode.
+  void *back = this->dsi_fb_[this->dsi_back_idx_];
+
+  ppa_srm_rotation_angle_t angle;
+  switch (this->video_rotation_deg_) {
+    case 90:
+      angle = PPA_SRM_ROTATION_ANGLE_270;  // display rotated 90 CW == PPA 270 CCW
+      break;
+    case 270:
+      angle = PPA_SRM_ROTATION_ANGLE_90;
+      break;
+    case 180:
+      angle = PPA_SRM_ROTATION_ANGLE_180;
+      break;
+    default:
+      angle = PPA_SRM_ROTATION_ANGLE_0;
+      break;
+  }
+
+  ppa_srm_oper_config_t s{};
+  s.in.buffer = this->decode_target_;
+  s.in.pic_w = this->dsi_in_w_;
+  s.in.pic_h = this->dsi_in_h_;
+  s.in.block_w = this->dsi_in_w_;
+  s.in.block_h = this->dsi_in_h_;
+  s.in.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
+  s.out.buffer = back;
+  s.out.buffer_size = this->dsi_fb_bytes_;
+  s.out.pic_w = this->dsi_out_w_;
+  s.out.pic_h = this->dsi_out_h_;
+  s.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
+  s.rotation_angle = angle;
+  s.scale_x = 1.0f;
+  s.scale_y = 1.0f;
+  s.mode = PPA_TRANS_MODE_NON_BLOCKING;
+  s.user_data = this->ppa_done_sem_;
+  if (ppa_do_scale_rotate_mirror(this->ppa_client_, &s) != ESP_OK) {
+    return;
+  }
+  this->dsi_prev_fb_ = back;
+  this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
+}
+
+void SimpleVideoPlayer::present_dsi_direct_() {
+  // Rotation 0: decode_frame_() just wrote this frame straight into dsi_fb_[dsi_back_idx_].
+  // Repoint the scanout at it (no copy, no wait) and steer the next decode at the next FB.
+  this->dsi_->present_dsi_frame_buffer(this->dsi_fb_[this->dsi_back_idx_]);
+  this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
+  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
+}
+#endif  // SVP_DSI_OUTPUT
 
 bool SimpleVideoPlayer::init_decoder_() {
   if (this->hw_jpeg_decoder_ == nullptr) {
@@ -891,6 +1149,20 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
 //========================================================================
 
 bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_height) {
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ != nullptr) {
+    // DSI direct output: the video must be transcoded to exactly the resolution the panel needs
+    // (native res with W/H swapped for a 90/270 rotation). No scaling -- the user matches it.
+    if (video_width != this->dsi_in_w_ || video_height != this->dsi_in_h_) {
+      ESP_LOGE(TAG, "Video is %" PRIu32 "x%" PRIu32 " but this panel needs exactly %ux%u -- re-transcode.",
+               video_width, video_height, this->dsi_in_w_, this->dsi_in_h_);
+      return false;
+    }
+    ESP_LOGI(TAG, "Buffers verified (DSI): %ux%u -> panel %ux%u", this->dsi_in_w_, this->dsi_in_h_, this->dsi_out_w_,
+             this->dsi_out_h_);
+    return true;
+  }
+#endif
   // output_buffer_ is allocated once in setup() at the max resolution. Just verify this file fits.
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
@@ -936,6 +1208,20 @@ void SimpleVideoPlayer::free_buffers_() {
   if (this->decode_read_buffer_) {
     heap_caps_free(this->decode_read_buffer_.release());
   }
+
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_decode_buf_) {
+    heap_caps_free(this->dsi_decode_buf_.release());  // jpeg_alloc_decoder_mem()
+  }
+  if (this->ppa_client_ != nullptr) {
+    ppa_unregister_client(this->ppa_client_);
+    this->ppa_client_ = nullptr;
+  }
+  if (this->ppa_done_sem_ != nullptr) {
+    vSemaphoreDelete(this->ppa_done_sem_);
+    this->ppa_done_sem_ = nullptr;
+  }
+#endif
 }
 
 //========================================================================

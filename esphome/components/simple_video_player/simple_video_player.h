@@ -12,6 +12,11 @@
 
 // ESP32-P4 hardware JPEG decoder only -- other variants cannot decode fast enough for video.
 
+#ifdef SVP_DSI_OUTPUT
+#include "esphome/components/mipi_dsi/mipi_dsi.h"
+#include "driver/ppa.h"
+#endif
+
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
@@ -33,6 +38,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 
 namespace esphome::simple_video_player {
@@ -125,6 +131,12 @@ class SimpleVideoPlayer : public Component {
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 
+#ifdef SVP_DSI_OUTPUT
+  // Direct render into the mipi_dsi framebuffers (bypasses LVGL for the video path). Wired by the
+  // FINAL codegen coroutine. Rotation is read at setup() from the LVGL component itself.
+  void set_dsi(mipi_dsi::MipiDsi *dsi) { this->dsi_ = dsi; }
+#endif
+
   //========================================================================
   // Playback Control API
   //========================================================================
@@ -200,6 +212,23 @@ class SimpleVideoPlayer : public Component {
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
+
+#ifdef SVP_DSI_OUTPUT
+  /// setup(): register the PPA SRM client + its done callback and fetch the mipi_dsi framebuffers.
+  /// false -> mark_failed.
+  bool init_dsi_output_();
+  /// Drain the previous frame's async PPA-rotate completion. Called once per loop pass BEFORE
+  /// decode_frame_() reuses the decode buffer. Non-blocking (xSemaphoreTake timeout 0): a ~few-ms
+  /// rotate started a full frame period ago is always long done; we trust that, never wait.
+  void dsi_sync_prev_rotate_();
+  /// Present the framebuffer rotated on the PREVIOUS pass (its rotate is now finished), then kick
+  /// off this frame's PPA rotate NON-BLOCKING (decode_target_ -> next DSI back FB). One frame of
+  /// pipeline latency, wall-clock paced.
+  void present_dsi_();
+  /// Rotation-0 fast path: no PPA at all. decode_frame_() writes straight into the next DSI
+  /// framebuffer; this just repoints the scanout at it and advances decode_target_.
+  void present_dsi_direct_();
+#endif
   /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
   bool init_decoder_();
   /// Header-only parse (width/height, no pixel decode), used by get_video_dimensions_() for the
@@ -376,6 +405,26 @@ class SimpleVideoPlayer : public Component {
   // Set by decode_frame_() (video task) after a frame is decoded into output_buffer_; consumed by
   // loop() on the LVGL thread, which then calls lv_obj_invalidate(canvas_).
   std::atomic<bool> frame_ready_{false};
+
+#ifdef SVP_DSI_OUTPUT
+  mipi_dsi::MipiDsi *dsi_{nullptr};   // non-null -> DSI direct output instead of the LVGL canvas
+  uint16_t video_rotation_deg_{0};    // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
+  ppa_client_handle_t ppa_client_{};
+  SemaphoreHandle_t ppa_done_sem_{nullptr};  // given (from ISR) when an async PPA rotate finishes
+  void *dsi_fb_[3]{};                 // the mipi_dsi driver's framebuffers (native orientation)
+  void *dsi_prev_fb_{nullptr};        // FB rotated last pass, presented this pass (1-frame pipeline)
+  uint8_t *decode_target_{nullptr};   // where decode_frame_() writes in DSI mode (RGB888)
+  uint8_t dsi_fb_count_{0};
+  uint8_t dsi_back_idx_{0};           // which dsi_fb_ the next rotate writes / flip presents
+  bool dsi_lvgl_paused_{false};       // LVGL was paused for the duration of DSI-direct playback
+  bool dsi_direct_decode_{false};     // rotation 0: decode straight into dsi_fb_, no PPA at all
+  // Dims derived from the DISPLAY, not the canvas: out_* = native panel res (the FB), in_* = the
+  // video res the user must transcode to (= native res swapped for a 90/270 rotation).
+  uint16_t dsi_out_w_{0}, dsi_out_h_{0};
+  uint16_t dsi_in_w_{0}, dsi_in_h_{0};
+  size_t dsi_fb_bytes_{0};
+  std::unique_ptr<uint8_t[]> dsi_decode_buf_;  // jpeg_alloc_decoder_mem, sized dsi_fb_bytes_ (RGB888)
+#endif
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
 

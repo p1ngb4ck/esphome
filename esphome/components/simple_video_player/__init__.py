@@ -16,7 +16,7 @@ from esphome.const import (
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
 )
-from esphome.core import CORE
+from esphome.core import CORE, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
 
 # Import LVGL canvas type for proper widget ID validation
@@ -27,6 +27,13 @@ try:
 except ImportError:
     LVGL_AVAILABLE = False
     lv_canvas_t = None
+
+# Optional: render straight into the MIPI-DSI panel framebuffers (HW JPEG decode -> PPA rotate ->
+# DSI flip), bypassing LVGL for the video path entirely. Requires the mipi_dsi display component.
+try:
+    from esphome.components.mipi_dsi.display import MipiDsi
+except ImportError:
+    MipiDsi = None
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
@@ -70,6 +77,7 @@ StopAction = simple_video_player_ns.class_("StopAction", automation.Action)
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
+CONF_DISPLAY_ID = "display_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
@@ -135,12 +143,40 @@ def _validate_audio_codec_required(config):
     return config
 
 
+def _validate_output_target(config):
+    # Exactly one output: an LVGL canvas widget (canvas_id) OR a mipi_dsi panel we render straight
+    # into (display_id). They are mutually exclusive -- display_id bypasses LVGL for the video path.
+    has_canvas = CONF_CANVAS_ID in config
+    has_display = CONF_DISPLAY_ID in config
+    if has_canvas and has_display:
+        raise cv.Invalid(
+            f"Use either '{CONF_CANVAS_ID}' (render into an LVGL canvas) or '{CONF_DISPLAY_ID}' "
+            "(render straight into a mipi_dsi panel), not both."
+        )
+    if not has_canvas and not has_display:
+        raise cv.Invalid(
+            f"An output is required: set '{CONF_CANVAS_ID}' to render into an LVGL canvas, or "
+            f"'{CONF_DISPLAY_ID}' to render straight into a mipi_dsi panel."
+        )
+    return config
+
+
 # Component configuration
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SimpleVideoPlayer),
-            cv.Required(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
+            # Output target -- exactly one of these (enforced by _validate_output_target):
+            #   canvas_id  : render into an LVGL canvas widget (the original path)
+            #   display_id : render straight into this mipi_dsi panel's framebuffers (HW JPEG
+            #                decode -> PPA rotate -> DSI VSYNC flip), bypassing LVGL for the video
+            #                path. Rotation is read from the LVGL component at runtime.
+            cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
+            **(
+                {cv.Optional(CONF_DISPLAY_ID): cv.use_id(MipiDsi)}
+                if MipiDsi is not None
+                else {}
+            ),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
@@ -193,6 +229,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
+    _validate_output_target,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
 
@@ -255,11 +292,37 @@ def _resolve_speaker_audio_format(config, fconf):
     this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = resolved_channel
 
 
+def _validate_display_output(config, fconf):
+    """Rendering straight into the mipi_dsi framebuffers needs >= 2 (one scanning out, one being
+    written) so the DPI driver can flip at VSYNC. Rotation (90/180/270) additionally needs a 3rd
+    FB for the non-blocking PPA pipeline -- that's checked at runtime in init_dsi_output_() since
+    the rotation only comes from the LVGL component."""
+    display_id = config[CONF_DISPLAY_ID]
+    try:
+        display_path = fconf.get_path_for_id(display_id)[:-1]
+        display_conf = fconf.get_config_for_path(display_path)
+    except KeyError as err:
+        raise cv.Invalid(
+            f"Could not resolve display_id '{display_id}' to its own config"
+        ) from err
+    fbs = display_conf.get("frame_buffers", 1)
+    if fbs < 2:
+        raise cv.Invalid(
+            f"display_id '{display_id}' has frame_buffers: {fbs}; simple_video_player direct "
+            "output needs frame_buffers: 2 (3 if the video is rotated on-device). Each buffer is "
+            "width*height*bpp in PSRAM."
+        )
+
+
 def _final_validate(config):
+    fconf = fv.full_config.get()
+
+    if CONF_DISPLAY_ID in config:
+        _validate_display_output(config, fconf)
+
     if CONF_SPEAKER_ID not in config:
         return config
 
-    fconf = fv.full_config.get()
     _resolve_speaker_audio_format(config, fconf)
 
     # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
@@ -292,6 +355,17 @@ def _final_validate(config):
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _resolve_display_output(var, display_id):
+    """Runs after every component's to_code(), when the mipi_dsi display variable is guaranteed to
+    exist. Wire it into the player. Rotation is read from the LVGL component at runtime (setup()),
+    not plumbed through here -- ESPHome forbids `rotation:` on an LVGL-driven display, so LVGL's is
+    the authoritative rotation."""
+    disp = await cg.get_variable(display_id)
+    cg.add(var.set_dsi(disp))
+    cg.add_define("SVP_DSI_OUTPUT")
+
+
 async def to_code(config):
     # Defines USE_HWJPG (P4). Required: the LVGL canvas dma_buffer path allocates its draw buffer
     # via jpeg_alloc_decoder_mem() only when USE_HWJPG is defined, otherwise falls back to plain
@@ -318,9 +392,14 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID], lvgl_component)
     await cg.register_component(var, config)
 
-    # Set canvas
-    canvas = await cg.get_variable(config[CONF_CANVAS_ID])
-    cg.add(var.set_canvas(canvas))
+    # Output target: LVGL canvas OR direct mipi_dsi (mutually exclusive, see
+    # _validate_output_target). The mipi_dsi wiring is deferred to a FINAL codegen coroutine so the
+    # display variable is guaranteed to exist by then.
+    if CONF_CANVAS_ID in config:
+        canvas = await cg.get_variable(config[CONF_CANVAS_ID])
+        cg.add(var.set_canvas(canvas))
+    if CONF_DISPLAY_ID in config:
+        CORE.add_job(_resolve_display_output, var, config[CONF_DISPLAY_ID])
 
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:

@@ -73,7 +73,7 @@ void MipiDsi::setup() {
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
 #endif
-                                           .num_fbs = 1,  // number of frame buffers to allocate
+                                           .num_fbs = this->num_fbs_,  // frame buffers (YAML: frame_buffers)
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -172,7 +172,32 @@ void MipiDsi::setup() {
     return;
   }
 
+  // Hand back the driver-owned framebuffers so a direct video client can decode/rotate
+  // straight into them and flip at VSYNC. Only meaningful with >= 2 buffers.
+  if (this->num_fbs_ >= 2) {
+    esp_err_t fberr;
+    if (this->num_fbs_ >= 3) {
+      fberr = esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 3, &this->dsi_fbs_[0], &this->dsi_fbs_[1],
+                                                 &this->dsi_fbs_[2]);
+    } else {
+      fberr = esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 2, &this->dsi_fbs_[0], &this->dsi_fbs_[1]);
+    }
+    if (fberr != ESP_OK) {
+      ESP_LOGW(TAG, "esp_lcd_dpi_panel_get_frame_buffer failed: %s", esp_err_to_name(fberr));
+      this->dsi_fbs_[0] = this->dsi_fbs_[1] = this->dsi_fbs_[2] = nullptr;
+    }
+  }
+
   ESP_LOGCONFIG(TAG, "MIPI DSI setup complete");
+}
+
+void MipiDsi::present_dsi_frame_buffer(void *fb) {
+  // fb must be one of dsi_fbs_ -> esp_lcd_panel_draw_bitmap recognises it as an owned framebuffer
+  // and just repoints the DPI scanout at it for the next scan frame (no copy). The owned-FB path
+  // invokes on_color_trans_done synchronously (IDF esp_lcd_panel_dpi.c), so drain io_lock_
+  // non-blocking -- never wait.
+  esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, fb);
+  xSemaphoreTake(this->io_lock_, 0);
 }
 
 void MipiDsi::update() {
