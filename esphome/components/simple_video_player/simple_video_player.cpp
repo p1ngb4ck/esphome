@@ -227,7 +227,8 @@ void SimpleVideoPlayer::loop() {
     if (p != nullptr) {
       this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(p);
       this->shown_buffer_.store(p, std::memory_order_release);
-      lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
+      // TEST: commented out to check if the per-frame re-attach is the flicker source.
+      // lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
       lv_obj_invalidate(this->canvas_);
     }
   }
