@@ -380,16 +380,14 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
 
   // Search for next frame chunk
   while (this->current_offset_ < this->movi_size_) {
-    uint32_t chunk_id;
-    if (!this->read_fourcc_(chunk_id)) {
-      ESP_LOGW(TAG, "Failed to read chunk_id at offset %llu", this->current_offset_);
+    // Chunk header is fourcc(4) + size(4). One 8-byte read instead of two 4-byte ring ops.
+    uint8_t hdr[8];
+    if (this->reader_->read(hdr, sizeof(hdr)) != static_cast<int>(sizeof(hdr))) {
+      ESP_LOGW(TAG, "Failed to read chunk header at offset %llu", this->current_offset_);
       return -1;
     }
-
-    uint32_t chunk_size;
-    if (!this->read_uint32_(chunk_size)) {
-      return -1;
-    }
+    const uint32_t chunk_id = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (static_cast<uint32_t>(hdr[3]) << 24);
+    const uint32_t chunk_size = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (static_cast<uint32_t>(hdr[7]) << 24);
 
     this->current_offset_ += 8;
 
@@ -545,7 +543,7 @@ bool AVIParser::skip_bytes_(size_t count) {
   // not just wasteful: it'd trigger a full blocking refetch on nearly every AVI chunk boundary.
   // This function is the hot path for AVI parsing (called once per interleaved audio/video
   // chunk, and again for every odd-sized chunk's 1-byte alignment pad).
-  uint8_t scratch[512];
+  uint8_t scratch[2048];
   size_t remaining = count;
   while (remaining > 0) {
     size_t to_read = std::min(remaining, sizeof(scratch));

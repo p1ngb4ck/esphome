@@ -226,7 +226,8 @@ void SimpleVideoPlayer::loop() {
   // never races the render (the video task is prio 1 == loopTask and can run concurrently), then
   // invalidate. No lv_canvas_set_draw_buf() re-attach -- the raw ->data swap + invalidate is
   // enough and the re-attach was per-frame overhead.
-  if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
+  if (this->frame_ready_.load(std::memory_order_acquire) &&
+      this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     uint16_t *p = this->pending_present_.load(std::memory_order_relaxed);
     if (p != nullptr) {
       this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(p);
@@ -429,6 +430,8 @@ void SimpleVideoPlayer::playback_loop_() {
   this->on_started_callbacks_.call();
 
   this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
+  // Fixed for the whole session -- computed once here, not cast from the float every frame.
+  const int64_t frame_dur = static_cast<int64_t>(this->frame_duration_us_);
   // Anchored on the first paced frame in the loop (see there), not here -- so cold-start read
   // latency is not counted as the stream already running late.
   this->playback_start_time_us_ = 0;
@@ -494,7 +497,6 @@ void SimpleVideoPlayer::playback_loop_() {
       break;
     }
     const uint32_t frame_index = this->video_frame_index_++;
-    const int64_t frame_dur = static_cast<int64_t>(this->frame_duration_us_);
 
     // Anchor the wall clock on the first paced frame -- once its payload is in hand, so reader
     // cold-start latency isn't counted as the stream already running late.
