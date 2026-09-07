@@ -109,7 +109,14 @@ class CanvasType(WidgetType):
         buf_size = literal(f"LV_DRAW_BUF_SIZE({width}, {height}, {color_format})")
         if config[CONF_DMA_BUFFER]:
             lv.append(cg.RawStatement("#ifdef USE_HWJPG"))
-            lv.append(cg.RawStatement("static constexpr size_t dma_buf_size = " + str(buf_size) + ";"))
+            # Round the buffer size up to a cache line (64 B on ESP32-P4). LV_DRAW_BUF_SIZE is not
+            # cache-line aligned, and jpeg_alloc_decoder_mem() / the HW decoder's alignment check
+            # require both the pointer and the size to be aligned.
+            lv.append(
+                cg.RawStatement(
+                    "static constexpr size_t dma_buf_size = ((" + str(buf_size) + ") + 63u) & ~size_t(63);"
+                )
+            )
             lv.append(cg.RawStatement("jpeg_decode_memory_alloc_cfg_t dma_buf_cfg{};"))
             lv.append(cg.RawStatement("dma_buf_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;"))
             lv.append(cg.RawStatement("size_t dma_buf_actual_size = 0;"))
