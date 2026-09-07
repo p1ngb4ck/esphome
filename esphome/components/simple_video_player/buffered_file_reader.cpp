@@ -134,6 +134,29 @@ void BufferedFileReader::close() {
   this->current_position_ = 0;
 }
 
+bool BufferedFileReader::prefill_cache() {
+  if (!this->open_)
+    return false;
+  // LOAD context: block (bounded) until the read-ahead ring is full. The kick_fill_ ->
+  // on_fill_done_ chain self-continues; on_fill_done_ notifies waiting_task_ after each chunk.
+  this->waiting_task_ = xTaskGetCurrentTaskHandle();
+  this->kick_fill_();
+  uint32_t waited = 0;
+  while (this->ring_->free() > FILL_CHUNK) {
+    if (this->fill_err_.load(std::memory_order_acquire))
+      return false;
+    if (this->eof_.load(std::memory_order_acquire))
+      break;  // whole file fit in the ring
+    if (this->abort_flag_ != nullptr && *this->abort_flag_)
+      return false;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
+    if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
+      break;
+    this->kick_fill_();
+  }
+  return true;
+}
+
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;

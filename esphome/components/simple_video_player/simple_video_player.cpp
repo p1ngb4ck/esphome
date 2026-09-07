@@ -415,8 +415,11 @@ void SimpleVideoPlayer::playback_loop_() {
   esp_task_wdt_add(nullptr);
 
   // Load is done (headers, dimensions, audio init all read their bytes with the blocking reader).
-  // From here every read is a hot-path frame read: switch the reader to non-blocking single-drain.
+  // Precache: block until the read-ahead ring is full so the first frame reads already have their
+  // bytes. Then switch the reader to non-blocking single-drain -- every read from here is a
+  // hot-path frame read.
   if (this->file_reader_) {
+    this->file_reader_->prefill_cache();
     this->file_reader_->set_streaming(true);
   }
 

@@ -51,7 +51,9 @@ class BufferedFileReader {
   uint64_t tell() const { return this->current_position_; }
   bool get_size(uint64_t *size);
 
-  bool prefill_cache() { return true; }
+  /// LOAD-time: block (bounded) until the read-ahead ring is full, so the first frame reads in
+  /// streaming mode already have their bytes. Uses the existing kick_fill_ -> on_fill_done_ chain.
+  bool prefill_cache();
 
  protected:
   // --- blocking hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) ----------
