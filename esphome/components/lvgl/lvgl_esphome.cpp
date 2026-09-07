@@ -299,7 +299,11 @@ bool LvglComponent::ppa_rotate_(const lv_color_data *src, lv_color_data *dst, ui
 
   // Align buffer size to cache line (LV_DRAW_BUF_ALIGN) as required by PPA DMA
   // the underlying buffer will be large enough as the size is also padded when allocating.
+#if LV_COLOR_DEPTH == 32
+  size_t out_buf_size = static_cast<size_t>(out_w) * out_h * 3;  // RGB888 -- 3 bytes/px on P4
+#else
   size_t out_buf_size = out_w * out_h * sizeof(lv_color_data);
+#endif
   out_buf_size = LV_ROUND_UP(out_buf_size, LV_DRAW_BUF_ALIGN);
 
   ppa_srm_oper_config_t srm_config{};
@@ -311,7 +315,7 @@ bool LvglComponent::ppa_rotate_(const lv_color_data *src, lv_color_data *dst, ui
 #if LV_COLOR_DEPTH == 16
   srm_config.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
 #elif LV_COLOR_DEPTH == 32
-  srm_config.in.srm_cm = PPA_SRM_COLOR_MODE_ARGB8888;
+  srm_config.in.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
 #endif
   srm_config.out.buffer = dst;
   srm_config.out.buffer_size = out_buf_size;
@@ -320,7 +324,7 @@ bool LvglComponent::ppa_rotate_(const lv_color_data *src, lv_color_data *dst, ui
 #if LV_COLOR_DEPTH == 16
   srm_config.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
 #elif LV_COLOR_DEPTH == 32
-  srm_config.out.srm_cm = PPA_SRM_COLOR_MODE_ARGB8888;
+  srm_config.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
 #endif
   srm_config.rotation_angle = angle;
   srm_config.scale_x = 1.0f;
@@ -351,6 +355,44 @@ void LvglComponent::draw_buffer_(const lv_area_t *area, lv_color_data *ptr) {
     if (!ppa_done)
 #endif
     {
+#if LV_COLOR_DEPTH == 32
+      // RGB888: 3 bytes/pixel. dst/ptr are lv_color_data* (uint32_t*) but each pixel is only
+      // 3 bytes, so the rotate copy must step 3 bytes, not sizeof(lv_color_data).
+      auto *dst8 = reinterpret_cast<uint8_t *>(this->rotate_buf_);
+      auto *src8 = reinterpret_cast<const uint8_t *>(ptr);
+      switch (this->rotation_) {
+        case display::DISPLAY_ROTATION_90_DEGREES:
+          for (lv_coord_t x = height; x-- != 0;)
+            for (lv_coord_t y = 0; y != width; y++) {
+              uint8_t *d = dst8 + (static_cast<size_t>(y) * height_rounded + x) * 3;
+              d[0] = *src8++;
+              d[1] = *src8++;
+              d[2] = *src8++;
+            }
+          break;
+        case display::DISPLAY_ROTATION_180_DEGREES:
+          for (lv_coord_t y = height; y-- != 0;)
+            for (lv_coord_t x = width; x-- != 0;) {
+              uint8_t *d = dst8 + (static_cast<size_t>(y) * width + x) * 3;
+              d[0] = *src8++;
+              d[1] = *src8++;
+              d[2] = *src8++;
+            }
+          break;
+        case display::DISPLAY_ROTATION_270_DEGREES:
+          for (lv_coord_t x = 0; x != height; x++)
+            for (lv_coord_t y = width; y-- != 0;) {
+              uint8_t *d = dst8 + (static_cast<size_t>(y) * height_rounded + x) * 3;
+              d[0] = *src8++;
+              d[1] = *src8++;
+              d[2] = *src8++;
+            }
+          break;
+        default:
+          dst = ptr;
+          break;
+      }
+#else
       switch (this->rotation_) {
         case display::DISPLAY_ROTATION_90_DEGREES:
           for (lv_coord_t x = height; x-- != 0;) {
@@ -380,6 +422,7 @@ void LvglComponent::draw_buffer_(const lv_area_t *area, lv_color_data *ptr) {
           dst = ptr;
           break;
       }
+#endif
     }
     // Coordinate adjustments apply regardless of PPA or SW rotation
     switch (this->rotation_) {
@@ -802,7 +845,12 @@ void LvglComponent::setup() {
   auto frac = this->buffer_frac_;
   if (frac == 0)
     frac = 1;
-  auto buf_bytes = clamp_at_least(width * height / frac * LV_COLOR_DEPTH / 8, MIN_BUFFER_SIZE);
+#if LV_COLOR_DEPTH == 32
+  constexpr size_t LV_BYTES_PER_PIXEL = 3;  // RGB888 (not ARGB8888) on ESP32-P4
+#else
+  constexpr size_t LV_BYTES_PER_PIXEL = LV_COLOR_DEPTH / 8;
+#endif
+  auto buf_bytes = clamp_at_least(width * height / frac * LV_BYTES_PER_PIXEL, MIN_BUFFER_SIZE);
   void *buffer = nullptr;
   // for small buffers, try to allocate in internal memory first to improve performance
   if (this->buffer_frac_ >= MIN_BUFFER_FRAC / 2)
@@ -823,7 +871,11 @@ void LvglComponent::setup() {
   }
   this->draw_buf_ = static_cast<uint8_t *>(buffer);
   this->set_resolution_();
+#if LV_COLOR_DEPTH == 32
+  lv_display_set_color_format(this->disp_, LV_COLOR_FORMAT_RGB888);  // 3 bytes/px, PPA-blit friendly
+#else
   lv_display_set_color_format(this->disp_, LV_COLOR_FORMAT_RGB565);
+#endif
   lv_display_set_flush_cb(this->disp_, static_flush_cb);
   lv_display_set_user_data(this->disp_, this);
   lv_display_add_event_cb(this->disp_, rounder_cb, LV_EVENT_INVALIDATE_AREA, this);
