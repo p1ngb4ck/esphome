@@ -424,11 +424,10 @@ void SimpleVideoPlayer::playback_loop_() {
     // behind (which would trigger a re-sync on resume).
     if (st == PlayerState::PAUSED) {
       const int64_t pause_started_us = esp_timer_get_time();
-      // Zero-wait: spin on the state, never vTaskDelay. This task is prio 1 (== loopTask) and
-      // pinned to Core 1, so the FreeRTOS tick round-robins loopTask in regardless -- LVGL and
-      // the rest of ESPHome still run while we spin here.
+      // Paused is not playback -- a coarse sleep here is fine (and correct: it lets the rest of
+      // the system run at full speed). The zero-wait rule is about the active decode/pace path.
       while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
-        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(50));
       }
       this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
       continue;
@@ -543,9 +542,10 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
     return true;
   }
 
-  const int64_t deadline_us = esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000;
-  while (handle != nullptr && esp_timer_get_time() < deadline_us) {
-    esp_task_wdt_reset();
+  uint32_t elapsed = 0;
+  while (handle != nullptr && elapsed < timeout_ms) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    elapsed += 10;
   }
 
   return handle == nullptr;
@@ -1101,12 +1101,12 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Start the speaker to initialize I2S driver
   this->speaker_->start();
 
-  // Spin (never sleep) until the speaker reaches STATE_RUNNING. This runs once at play() startup,
-  // before the frame loop, on the Core 1 playback task -- prio 1, so loopTask still round-robins.
-  const int64_t speaker_deadline_us = esp_timer_get_time() + 1000 * 1000;
+  // Wait for the speaker to reach STATE_RUNNING. This runs once at play() startup, before the
+  // frame loop -- not the zero-wait decode/pace path, so a coarse sleep is fine here.
+  uint32_t wait_start = millis();
   const uint32_t SPEAKER_INIT_TIMEOUT_MS = 1000;
-  while (!this->speaker_->is_running() && esp_timer_get_time() < speaker_deadline_us) {
-    esp_task_wdt_reset();
+  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_INIT_TIMEOUT_MS) {
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 
   if (!this->speaker_->is_running()) {
@@ -1293,10 +1293,11 @@ void SimpleVideoPlayer::stop_audio_task_() {
     ESP_LOGI(TAG, "Stopping audio processing task...");
     this->audio_task_stop_ = true;
 
-    // Spin (never sleep) until the audio task exits or the timeout elapses.
-    const int64_t deadline_us = esp_timer_get_time() + 1000 * 1000;
-    while (this->audio_task_handle_ != nullptr && esp_timer_get_time() < deadline_us) {
-      esp_task_wdt_reset();
+    // Teardown, not the zero-wait path -- a coarse sleep is fine while the audio task exits.
+    uint32_t timeout_ms = 1000;
+    uint32_t start = millis();
+    while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     if (this->audio_task_handle_ != nullptr) {

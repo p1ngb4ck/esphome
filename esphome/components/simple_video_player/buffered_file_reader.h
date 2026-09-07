@@ -17,9 +17,10 @@
 #include <cstdint>
 #include <memory>
 
+#ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
-#include "esp_timer.h"
-#include "esp_task_wdt.h"
+#include <freertos/task.h>
+#endif
 
 namespace esphome {
 namespace simple_video_player {
@@ -50,24 +51,31 @@ class BufferedFileReader {
   bool prefill_cache() { return true; }
 
  protected:
-  // --- spin hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) --------------
-  void arm_wait_() { this->sync_done_.store(false, std::memory_order_release); }
+  // --- blocking hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) ----------
+  void arm_wait_() {
+#ifdef USE_ESP32
+    this->waiting_task_ = xTaskGetCurrentTaskHandle();
+#endif
+    this->sync_done_.store(false, std::memory_order_release);
+  }
   void on_sync_done_(storage::StorageError err) {
     this->sync_result_ = err;
     this->sync_done_.store(true, std::memory_order_release);
+#ifdef USE_ESP32
+    if (this->waiting_task_ != nullptr)
+      xTaskNotifyGive(this->waiting_task_);
+#endif
   }
   storage::StorageError wait_sync_() {
-    // Zero-wait: spin on the completion flag, never block on a notify. The one-shot stream calls
-    // (begin_read/seek/tell/end_read) complete on another task; spinning here just lets the tick
-    // schedule it. Wall-clock capped so a lost completion can't hang forever.
-    const int64_t deadline_us = esp_timer_get_time() + static_cast<int64_t>(WAIT_CAP_MS) * 1000;
+#ifdef USE_ESP32
+    uint32_t waited = 0;
     while (!this->sync_done_.load(std::memory_order_acquire)) {
       if (this->abort_flag_ != nullptr && *this->abort_flag_)
         return storage::StorageError::STORAGE_ERROR_NOT_READY;
-      if (esp_timer_get_time() >= deadline_us)
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
         return storage::StorageError::STORAGE_ERROR_TIMEOUT;
-      esp_task_wdt_reset();
     }
+#endif
     return this->sync_result_;
   }
 
@@ -78,10 +86,11 @@ class BufferedFileReader {
   void kick_fill_();
   // read_chunk completion (main loop): copy what was read into the ring, then chain the next fill.
   void on_fill_done_(storage::StorageError err);
-  // Spin (bounded, abortable) for any in-flight fill to finish, so a one-shot stream call can run.
+  // Wait (bounded, abortable) for any in-flight fill to finish, so a one-shot stream call can run.
   void quiesce_fill_();
 
-  static constexpr uint32_t WAIT_CAP_MS = 5000;     // wall-clock cap on any spin, never a sleep
+  static constexpr uint32_t WAIT_SLICE_MS = 20;
+  static constexpr uint32_t WAIT_CAP_MS = 5000;
   static constexpr size_t RING_BYTES = 512 * 1024;   // the small extra ring
   static constexpr size_t FILL_CHUNK = 128 * 1024;   // per read_chunk into the arena
 
@@ -89,6 +98,9 @@ class BufferedFileReader {
   bool open_{false};
   uint64_t current_position_{0};
 
+#ifdef USE_ESP32
+  TaskHandle_t waiting_task_{nullptr};
+#endif
   std::atomic<bool> sync_done_{false};
   storage::StorageError sync_result_{storage::StorageError::STORAGE_ERROR_OK};
   const volatile bool *abort_flag_{nullptr};
