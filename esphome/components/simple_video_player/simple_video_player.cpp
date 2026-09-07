@@ -507,14 +507,10 @@ void SimpleVideoPlayer::playback_loop_() {
     const int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
                                            static_cast<int64_t>(frame_index * frame_dur);
 
-    // Sync to the wall clock by COMPARING it, never sleeping on it. While this frame's slot is
-    // still ahead, spin -- and spend that spin pumping the storage completion delivery so the
-    // read-ahead ring keeps refilling during the gap.
+    // Sync to the wall clock by COMPARING it, never sleeping on it. Bare spin -- one storage
+    // update() per frame (top of the loop) is enough (each fetched chunk is pre-decode compressed
+    // video), and the per-frame esp_task_wdt_reset() below covers the <=1-frame spin.
     while (target_present_time_us - esp_timer_get_time() > 0) {
-      if (storage::global_storage_worker != nullptr) {
-        storage::global_storage_worker->update();
-      }
-      esp_task_wdt_reset();
     }
 
     if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
