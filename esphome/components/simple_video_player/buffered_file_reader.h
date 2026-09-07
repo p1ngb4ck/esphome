@@ -17,10 +17,8 @@
 #include <cstdint>
 #include <memory>
 
-#ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#endif
 
 namespace esphome {
 namespace simple_video_player {
@@ -53,21 +51,16 @@ class BufferedFileReader {
  protected:
   // --- blocking hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) ----------
   void arm_wait_() {
-#ifdef USE_ESP32
     this->waiting_task_ = xTaskGetCurrentTaskHandle();
-#endif
     this->sync_done_.store(false, std::memory_order_release);
   }
   void on_sync_done_(storage::StorageError err) {
     this->sync_result_ = err;
     this->sync_done_.store(true, std::memory_order_release);
-#ifdef USE_ESP32
     if (this->waiting_task_ != nullptr)
       xTaskNotifyGive(this->waiting_task_);
-#endif
   }
   storage::StorageError wait_sync_() {
-#ifdef USE_ESP32
     uint32_t waited = 0;
     while (!this->sync_done_.load(std::memory_order_acquire)) {
       if (this->abort_flag_ != nullptr && *this->abort_flag_)
@@ -75,7 +68,6 @@ class BufferedFileReader {
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
         return storage::StorageError::STORAGE_ERROR_TIMEOUT;
     }
-#endif
     return this->sync_result_;
   }
 
@@ -98,9 +90,7 @@ class BufferedFileReader {
   bool open_{false};
   uint64_t current_position_{0};
 
-#ifdef USE_ESP32
   TaskHandle_t waiting_task_{nullptr};
-#endif
   std::atomic<bool> sync_done_{false};
   storage::StorageError sync_result_{storage::StorageError::STORAGE_ERROR_OK};
   const volatile bool *abort_flag_{nullptr};

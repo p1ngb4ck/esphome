@@ -48,24 +48,20 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
     this->ring_->write_without_replacement(this->arena_, this->fill_got_, 0, true);
   }
   this->fill_in_flight_.store(false, std::memory_order_release);
-#ifdef USE_ESP32
   if (this->waiting_task_ != nullptr)
     xTaskNotifyGive(this->waiting_task_);  // wake a quiesce_fill_() waiter, if any
-#endif
   this->kick_fill_();  // chain the next read
 }
 
 void BufferedFileReader::quiesce_fill_() {
   // No new fill starts from here until draining_ is cleared again (open() / after a seek).
   this->draining_.store(true, std::memory_order_release);
-#ifdef USE_ESP32
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   uint32_t waited = 0;
   while (this->fill_in_flight_.load(std::memory_order_acquire)) {
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS)) == 0 && (waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       break;
   }
-#endif
 }
 
 bool BufferedFileReader::open(const char *path) {
