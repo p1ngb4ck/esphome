@@ -120,6 +120,10 @@ bool BufferedFileReader::open(const char *path) {
 void BufferedFileReader::close() {
   if (!this->open_)
     return;
+  // The abort flag exists to abandon an in-flight read so playback stops promptly -- it must NOT
+  // short-circuit end_read(), or the storage stream leaks (worker abandons it 30s later -> crash).
+  // Clear it so this final close runs to completion synchronously while the task is still alive.
+  this->abort_flag_ = nullptr;
   this->quiesce_fill_();
   this->arm_wait_();
   storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
