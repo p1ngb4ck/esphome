@@ -382,8 +382,12 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
   while (this->current_offset_ < this->movi_size_) {
     // Chunk header is fourcc(4) + size(4). One 8-byte read instead of two 4-byte ring ops.
     uint8_t hdr[8];
-    if (this->reader_->read(hdr, sizeof(hdr)) != static_cast<int>(sizeof(hdr))) {
-      ESP_LOGW(TAG, "Failed to read chunk header at offset %llu", this->current_offset_);
+    const int hn = this->reader_->read(hdr, sizeof(hdr));
+    if (hn == 0) {
+      return 0;  // no more data at a chunk boundary -> end of stream
+    }
+    if (hn != static_cast<int>(sizeof(hdr))) {
+      ESP_LOGW(TAG, "Short chunk header (%d bytes) at offset %llu", hn, this->current_offset_);
       return -1;
     }
     const uint32_t chunk_id = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (static_cast<uint32_t>(hdr[3]) << 24);
