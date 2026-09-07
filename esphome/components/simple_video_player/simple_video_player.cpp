@@ -1,6 +1,7 @@
 #include "simple_video_player.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/components/storage/storage_worker.h"
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -425,6 +426,16 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
+    // Pump the storage worker's completion delivery ourselves. read_chunk() completions
+    // (on_fill_done_ -> arena copy into the ring -> next kick_fill_) only ever fire from
+    // StorageWorker::update() on the main loop; this task never yields Core 1, so without this
+    // the ring would never refill after the precache drains. (update() also runs from loopTask's
+    // scheduler -- concurrent calls are possible; the completion sweep is short and both are on
+    // Core 1.)
+    if (storage::global_storage_worker != nullptr) {
+      storage::global_storage_worker->update();
+    }
+
     const PlayerState st = this->state_.load(std::memory_order_acquire);
     if (st != PlayerState::PLAYING && st != PlayerState::PAUSED) {
       break;
@@ -470,10 +481,12 @@ void SimpleVideoPlayer::playback_loop_() {
                                            static_cast<int64_t>(frame_index * frame_dur);
 
     // Sync to the wall clock by COMPARING it, never sleeping on it. While this frame's slot is
-    // still ahead, spin. The Core 0 audio task drains its own ring independently, so the gap
-    // costs nothing there. Never drop -- running flat out when behind is what lets video and
-    // audio realign to the clock.
+    // still ahead, spin -- and spend that spin pumping the storage completion delivery so the
+    // read-ahead ring keeps refilling during the gap.
     while (target_present_time_us - esp_timer_get_time() > 0) {
+      if (storage::global_storage_worker != nullptr) {
+        storage::global_storage_worker->update();
+      }
       esp_task_wdt_reset();
     }
 
