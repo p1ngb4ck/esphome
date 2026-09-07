@@ -39,6 +39,11 @@ class BufferedFileReader {
   void close();
   bool is_open() const { return this->open_; }
 
+  /// LOAD uses the default (blocking) read -- header/dimension probe needs the bytes now, before
+  /// the async stream has spun up. The play loop calls set_streaming(true) once, right before its
+  /// frame loop, so from then on read() is a single non-blocking ring drain (no 20ms park).
+  void set_streaming(bool streaming) { this->streaming_ = streaming; }
+
   /// Drain up to `size` bytes from the ring. Returns bytes read (0 = EOF, -1 = error).
   int read(uint8_t *buffer, size_t size);
 
@@ -88,6 +93,7 @@ class BufferedFileReader {
 
   storage::StreamHandle handle_{};
   bool open_{false};
+  bool streaming_{false};  // false = blocking read (LOAD); true = non-blocking single drain (PLAY)
   uint64_t current_position_{0};
 
   TaskHandle_t waiting_task_{nullptr};

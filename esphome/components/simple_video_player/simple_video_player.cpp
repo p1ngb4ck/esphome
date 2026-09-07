@@ -414,6 +414,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // subscription dangling past vTaskDelete().
   esp_task_wdt_add(nullptr);
 
+  // Load is done (headers, dimensions, audio init all read their bytes with the blocking reader).
+  // From here every read is a hot-path frame read: switch the reader to non-blocking single-drain.
+  if (this->file_reader_) {
+    this->file_reader_->set_streaming(true);
+  }
+
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
     const PlayerState st = this->state_.load(std::memory_order_acquire);

@@ -130,25 +130,54 @@ void BufferedFileReader::close() {
   this->arena_ = nullptr;
   this->ring_.reset();
   this->open_ = false;
+  this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
   this->current_position_ = 0;
 }
 
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;
-  // Single non-blocking drain of the ring. The storage worker streams chunks in ahead via the
-  // async read_chunk() completion chain (on_fill_done_ -> kick_fill_), so in normal playback the
-  // ring is already primed and this returns the full `size`. Never parks and never spins.
-  size_t n = this->ring_->read(buffer, size, 0);
-  this->current_position_ += n;
-  this->kick_fill_();  // keep the async stream fed
-  if (n == 0) {
-    if (this->fill_err_.load(std::memory_order_acquire))
-      return -1;
-    if (this->eof_.load(std::memory_order_acquire))
-      return 0;
+
+  if (this->streaming_) {
+    // PLAY path: single non-blocking drain. The storage worker streams chunks in ahead via the
+    // async read_chunk() completion chain (on_fill_done_ -> kick_fill_), so in normal playback the
+    // ring is already primed and this returns the full `size`. Never parks, never spins.
+    size_t n = this->ring_->read(buffer, size, 0);
+    this->current_position_ += n;
+    this->kick_fill_();  // keep the async stream fed
+    if (n == 0) {
+      if (this->fill_err_.load(std::memory_order_acquire))
+        return -1;
+      if (this->eof_.load(std::memory_order_acquire))
+        return 0;
+    }
+    return static_cast<int>(n);
   }
-  return static_cast<int>(n);
+
+  // LOAD path (unchanged): header / dimension probe needs the bytes now, before the async stream
+  // has spun up -- wait them out.
+  size_t copied = 0;
+  uint32_t waited = 0;
+  while (copied < size) {
+    size_t n = this->ring_->read(buffer + copied, size - copied, pdMS_TO_TICKS(WAIT_SLICE_MS));
+    if (n > 0) {
+      copied += n;
+      this->current_position_ += n;
+      waited = 0;
+      this->kick_fill_();  // made room -- keep the stream fed
+      continue;
+    }
+    if (this->fill_err_.load(std::memory_order_acquire))
+      return copied > 0 ? static_cast<int>(copied) : -1;
+    if (this->eof_.load(std::memory_order_acquire) && this->ring_->available() == 0)
+      break;  // stream ended and ring drained
+    if (this->abort_flag_ != nullptr && *this->abort_flag_)
+      return copied > 0 ? static_cast<int>(copied) : -1;
+    this->kick_fill_();
+    if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
+      return copied > 0 ? static_cast<int>(copied) : -1;
+  }
+  return static_cast<int>(copied);
 }
 
 bool BufferedFileReader::seek(uint64_t position) {
