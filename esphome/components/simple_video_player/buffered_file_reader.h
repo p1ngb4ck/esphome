@@ -90,7 +90,7 @@ class BufferedFileReader {
 
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
-  static constexpr size_t RING_BYTES = 512 * 1024;   // the small extra ring
+  static constexpr size_t RING_BYTES = 4 * 1024 * 1024;  // PSRAM read-ahead ring (~4 MB)
   static constexpr size_t FILL_CHUNK = 128 * 1024;   // per read_chunk into the arena
 
   storage::StreamHandle handle_{};
