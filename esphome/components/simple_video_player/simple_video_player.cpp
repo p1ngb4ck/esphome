@@ -222,17 +222,15 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {
   // Runs on the LVGL thread. present_frame_() (video task) published the just-decoded buffer in
-  // pending_present_ and M2C-synced its cache. Do the canvas_draw_buf_->data pointer swap HERE,
-  // on the LVGL thread, so it never races the render (the video task is prio 1 == loopTask and
-  // can run concurrently). Re-set the draw buf so LVGL re-reads the pixels (invalidate alone
-  // leaves the canvas on the first frame), then invalidate.
+  // pending_present_. Do the canvas_draw_buf_->data pointer swap HERE, on the LVGL thread, so it
+  // never races the render (the video task is prio 1 == loopTask and can run concurrently), then
+  // invalidate. No lv_canvas_set_draw_buf() re-attach -- the raw ->data swap + invalidate is
+  // enough and the re-attach was per-frame overhead.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     uint16_t *p = this->pending_present_.load(std::memory_order_relaxed);
     if (p != nullptr) {
       this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(p);
       this->shown_buffer_.store(p, std::memory_order_release);
-      // TEST: commented out to check if the per-frame re-attach is the flicker source.
-      // lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
       lv_obj_invalidate(this->canvas_);
     }
   }
