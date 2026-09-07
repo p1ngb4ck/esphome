@@ -189,7 +189,9 @@ void SimpleVideoPlayer::loop() {
   // Runs on the LVGL thread. decode_frame_() (video task) decoded a frame straight into
   // output_buffer_ (== the canvas buffer) and set frame_ready_. Just invalidate the canvas here so
   // LVGL redraws it -- the actual canvas update is triggered from loop(), never from the task.
-  if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
+  // Cheap load first so the common no-frame path is a plain relaxed read, not an atomic RMW.
+  if (this->frame_ready_.load(std::memory_order_acquire) &&
+      this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     lv_obj_invalidate(this->canvas_);
   }
 }
@@ -355,8 +357,16 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-  // Clear the output buffer to black for this session (garbage otherwise until the first decode).
-  std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
+  // Clear only the part of the buffer the first decode won't cover (padding / rounding tail, or a
+  // previous larger video's leftover pixels around a smaller new one). The decode overwrites the
+  // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region every frame; setup() already zeroed the whole
+  // buffer once. For a max-resolution video this memset is a no-op.
+  {
+    const size_t covered = static_cast<size_t>(ALIGN_UP(width, 16)) * ALIGN_UP(height, 16) * 3;
+    if (covered < this->output_buffer_size_) {
+      std::memset(this->output_buffer_.get() + covered, 0, this->output_buffer_size_ - covered);
+    }
+  }
   this->frame_ready_.store(true, std::memory_order_release);
 
   // Reset file position to start (not needed for AVI - parser is already positioned at movi data)
