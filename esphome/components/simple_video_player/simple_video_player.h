@@ -395,16 +395,27 @@ class SimpleVideoPlayer : public Component {
   int canvas_buffer_height_{0};
   bool canvas_buffer_ready_{false};
 
-  // Double buffering (kills tearing): back_buffer_ is a byte-for-byte copy of the canvas draw buf,
-  // allocated once in setup() (size = canvas_draw_buf_->data_size verbatim, not computed).
-  // decode_frame_() writes decode_target_ (the off-screen one); present_frame_() points
-  // canvas_draw_buf_->data at it (pointer swap only, as youkorr's lvgl_camera_display) so LVGL
-  // never renders a buffer a decode is writing.
+  // Triple buffering. canvas_buffer_ (LVGL's own) + two extra copies allocated once in setup().
+  // At any moment one buffer is on screen (shown_buffer_), one holds the most recently decoded
+  // frame waiting for loop() to show it (pending_present_), and the third is free for
+  // decode_frame_() to write (decode_target_). present_frame_() runs on the video task (prio 1 ==
+  // loopTask, so it can run concurrently with the LVGL render) and must NOT touch
+  // canvas_draw_buf_->data or a buffer LVGL might read -- it only publishes pending_present_ and
+  // never blocks. loop() does the canvas_draw_buf_->data pointer swap on the LVGL thread. With
+  // three buffers present_frame_() always has one free buffer to hand to decode_target_ without
+  // waiting; if loop() ever falls behind, the older pending frame is simply skipped (monotonic
+  // order preserved, no reorder, no wait) -- that only happens when the render can't keep up.
   uint16_t *back_buffer_{nullptr};
+  uint16_t *back_buffer2_{nullptr};
   uint16_t *decode_target_{nullptr};
+  // present_frame_() publishes the just-decoded buffer here (before frame_ready_.store(release));
+  // loop() reads it after frame_ready_.exchange(acquire). shown_buffer_ is what loop() last put on
+  // canvas; present_frame_() reads it to pick a decode_target_ that is neither shown nor pending.
+  std::atomic<uint16_t *> pending_present_{nullptr};
+  std::atomic<uint16_t *> shown_buffer_{nullptr};
 
-  // Set by present_frame_() (or the stop-blank) once canvas_buffer_ holds a new frame and its
-  // cache is synced; consumed by loop() on the LVGL thread for the one lv_obj_invalidate().
+  // Set by present_frame_() (or the stop-blank) once a decoded frame is pending and its cache is
+  // synced; consumed by loop() on the LVGL thread for the pointer swap + lv_obj_invalidate().
   std::atomic<bool> frame_ready_{false};
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};

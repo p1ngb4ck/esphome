@@ -97,13 +97,19 @@ void SimpleVideoPlayer::setup() {
     size_t bb_actual = 0;
     this->back_buffer_ = static_cast<uint16_t *>(
         jpeg_alloc_decoder_mem(this->canvas_draw_buf_->data_size, &bb_cfg, &bb_actual));
-    if (this->back_buffer_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate back buffer (PSRAM)");
+    this->back_buffer2_ = static_cast<uint16_t *>(
+        jpeg_alloc_decoder_mem(this->canvas_draw_buf_->data_size, &bb_cfg, &bb_actual));
+    if (this->back_buffer_ == nullptr || this->back_buffer2_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate back buffers (PSRAM)");
       this->mark_failed();
       return;
     }
     std::memcpy(this->back_buffer_, this->canvas_buffer_, this->canvas_draw_buf_->data_size);
+    std::memcpy(this->back_buffer2_, this->canvas_buffer_, this->canvas_draw_buf_->data_size);
+    // canvas shows canvas_buffer_; decode writes back_buffer_; back_buffer2_ is the spare.
     this->decode_target_ = this->back_buffer_;
+    this->shown_buffer_.store(this->canvas_buffer_, std::memory_order_relaxed);
+    this->pending_present_.store(nullptr, std::memory_order_relaxed);
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
@@ -211,12 +217,19 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
-  // LVGL calls for a frame update, on the LVGL thread. The playback task decoded into
-  // canvas_buffer_ in place and already M2C-synced the cache. Re-set the same draw buf so LVGL
-  // re-reads the pixels (invalidate alone leaves the canvas on the first frame), then invalidate.
+  // Runs on the LVGL thread. present_frame_() (video task) published the just-decoded buffer in
+  // pending_present_ and M2C-synced its cache. Do the canvas_draw_buf_->data pointer swap HERE,
+  // on the LVGL thread, so it never races the render (the video task is prio 1 == loopTask and
+  // can run concurrently). Re-set the draw buf so LVGL re-reads the pixels (invalidate alone
+  // leaves the canvas on the first frame), then invalidate.
   if (this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
-    lv_obj_invalidate(this->canvas_);
+    uint16_t *p = this->pending_present_.load(std::memory_order_relaxed);
+    if (p != nullptr) {
+      this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(p);
+      this->shown_buffer_.store(p, std::memory_order_release);
+      lv_canvas_set_draw_buf(this->canvas_, this->canvas_draw_buf_);
+      lv_obj_invalidate(this->canvas_);
+    }
   }
 }
 
@@ -381,9 +394,16 @@ void SimpleVideoPlayer::playback_loop_() {
   // present_frame_()'s own invalidate, once the first real frame of this session is decoded, is
   // what actually gets this canvas its next redraw.
   if (this->canvas_buffer_ready_) {
-    // Blank both ping-pong buffers so neither shows stale pixels after a swap.
+    // Blank all three buffers so none shows stale pixels after a swap, and reset the triple-buffer
+    // rotation for this session: canvas shows canvas_buffer_, decode writes back_buffer_,
+    // back_buffer2_ is the spare, nothing pending.
+    this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(this->canvas_buffer_);
+    this->decode_target_ = this->back_buffer_;
+    this->shown_buffer_.store(this->canvas_buffer_, std::memory_order_relaxed);
+    this->pending_present_.store(nullptr, std::memory_order_relaxed);
     std::memset(this->canvas_buffer_, 0, this->canvas_draw_buf_->data_size);
     std::memset(this->back_buffer_, 0, this->canvas_draw_buf_->data_size);
+    std::memset(this->back_buffer2_, 0, this->canvas_draw_buf_->data_size);
     // Write the zeros back to PSRAM now (CPU->memory) so no dirty cache line can evict over the
     // first frame's DMA decode later. C2M (flush), not M2C: the CPU just wrote this buffer.
     // esp_cache_msync, not lv_draw_buf_flush_cache(): this runs on the playback task, and the
@@ -391,6 +411,8 @@ void SimpleVideoPlayer::playback_loop_() {
     esp_cache_msync(this->canvas_buffer_, this->canvas_draw_buf_->data_size,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     esp_cache_msync(this->back_buffer_, this->canvas_draw_buf_->data_size,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    esp_cache_msync(this->back_buffer2_, this->canvas_draw_buf_->data_size,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
   }
 
@@ -536,13 +558,15 @@ void SimpleVideoPlayer::playback_loop_() {
 #endif
 
   // Blank the canvas on stop -- runs on the playback task, so same split as present_frame_():
-  // memset + cache flush here (CPU wrote, so C2M), hand the lv_obj_invalidate() to loop() via
-  // frame_ready_. Cosmetic best-effort (the canvas otherwise keeps showing the last frame).
+  // memset + cache flush here (CPU wrote, so C2M), publish that buffer as pending and hand the
+  // pointer swap + invalidate to loop(). Cosmetic best-effort (the canvas otherwise keeps showing
+  // the last frame).
   if (this->canvas_buffer_ready_) {
-    // Blank whichever buffer is on screen after the last swap.
-    std::memset(this->canvas_draw_buf_->data, 0, this->canvas_draw_buf_->data_size);
-    esp_cache_msync(this->canvas_draw_buf_->data, this->canvas_draw_buf_->data_size,
+    uint16_t *shown = this->shown_buffer_.load(std::memory_order_acquire);
+    std::memset(shown, 0, this->canvas_draw_buf_->data_size);
+    esp_cache_msync(shown, this->canvas_draw_buf_->data_size,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    this->pending_present_.store(shown, std::memory_order_relaxed);
     this->frame_ready_.store(true, std::memory_order_release);
   }
 
@@ -706,14 +730,25 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 }
 
 void SimpleVideoPlayer::present_frame_() {
-  // decode_target_ (off-screen) was just DMA-written. M2C-invalidate it, point the draw buf at it
-  // (pointer swap only), hand the redraw to loop(), then flip decode_target_ to the other buffer.
-  esp_cache_msync(this->decode_target_, this->canvas_draw_buf_->data_size,
+  // Runs on the video task. decode_target_ was just DMA-written -- M2C-invalidate so the LVGL
+  // render (CPU) reads fresh pixels. This buffer is neither shown nor pending, so LVGL is not
+  // touching it. Do NOT write canvas_draw_buf_->data here: that happens on the LVGL thread in
+  // loop(). Never blocks.
+  uint16_t *just_decoded = this->decode_target_;
+  esp_cache_msync(just_decoded, this->canvas_draw_buf_->data_size,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-  this->canvas_draw_buf_->data = reinterpret_cast<uint8_t *>(this->decode_target_);
-  this->decode_target_ =
-      (this->decode_target_ == this->back_buffer_) ? this->canvas_buffer_ : this->back_buffer_;
+  uint16_t *shown = this->shown_buffer_.load(std::memory_order_acquire);
+  this->pending_present_.store(just_decoded, std::memory_order_relaxed);
   this->frame_ready_.store(true, std::memory_order_release);
+  // Next decode goes to the one buffer that is neither on screen nor the frame just published.
+  // Three buffers -> exactly one qualifies, so this never waits. If loop() is lagging, `shown`
+  // may be one frame stale, which only steers decode_target_ to the always-safe spare.
+  for (uint16_t *b : {this->canvas_buffer_, this->back_buffer_, this->back_buffer2_}) {
+    if (b != just_decoded && b != shown) {
+      this->decode_target_ = b;
+      break;
+    }
+  }
 }
 
 bool SimpleVideoPlayer::init_decoder_() {
@@ -971,6 +1006,10 @@ void SimpleVideoPlayer::free_buffers_() {
   if (this->back_buffer_ != nullptr) {
     heap_caps_free(this->back_buffer_);
     this->back_buffer_ = nullptr;
+  }
+  if (this->back_buffer2_ != nullptr) {
+    heap_caps_free(this->back_buffer2_);
+    this->back_buffer2_ = nullptr;
   }
   this->decode_target_ = nullptr;
 
