@@ -103,8 +103,9 @@ class CanvasType(WidgetType):
         else:
             color_format = "LV_COLOR_FORMAT_NATIVE"
 
-        # LVGL 9.4: LV_CANVAS_BUF_SIZE(width, height, bits_per_pixel, stride)
-        # stride is 0 for default (width * bytes_per_pixel)
+        # Stride must match the HW JPEG decoder output layout: width aligned up to 16 px.
+        bytes_per_pixel = 4 if config[CONF_TRANSPARENT] else 2
+        stride = literal(f"((((({width}) + 15) / 16) * 16) * {bytes_per_pixel})")
         draw_buf = cg.new_Pvariable(config[CONF_DRAW_BUF_ID])
         buf_size = literal(f"LV_DRAW_BUF_SIZE({width}, {height}, {color_format})")
         lv.append(cg.RawStatement("static constexpr size_t dma_buf_size = " + str(buf_size) + ";"))
@@ -116,7 +117,7 @@ class CanvasType(WidgetType):
             width,
             height,
             literal(color_format),
-            0,
+            stride,
             literal("jpeg_alloc_decoder_mem(dma_buf_size, &dma_buf_cfg, &dma_buf_actual_size)"),
             literal("dma_buf_size"),
         )
