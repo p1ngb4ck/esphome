@@ -576,7 +576,7 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.GenerateID(CONF_ID): cv.declare_id(LvglComponent),
             cv.GenerateID(CONF_ALIGN_TO_LAMBDA_ID): cv.declare_id(lv_lambda_t),
             cv.GenerateID(df.CONF_DISPLAYS): display_schema,
-            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(16, 24),
+            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(16),
             cv.Optional(df.CONF_DEFAULT_FONT, default="montserrat_14"): lvalid.lv_font,
             cv.Optional(df.CONF_FULL_REFRESH, default=False): cv.boolean,
             cv.Optional(df.CONF_UPDATE_WHEN_DISPLAY_IDLE, default=False): cv.boolean,
