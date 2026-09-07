@@ -89,16 +89,20 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Back buffer: an exact copy of LVGL's canvas draw buf. Pointer-swapped in present_frame_() so a
-  // decode never lands in the buffer LVGL is rendering (tearing).
+  // Back buffers: byte-for-byte equivalent to LVGL's canvas draw buf so all three framebuffers
+  // are interchangeable AND valid HW-JPEG decode targets. Size = the canvas draw buf's own
+  // data_size, but at least the JPEG decoder's 16-px-padded output size; jpeg_alloc_decoder_mem
+  // gives the 16-byte / DMA alignment. Stride is a property of the single shared lv_draw_buf_t
+  // (canvas_draw_buf_->header.stride) and therefore already identical for all three.
   {
+    const size_t fb_size = std::max<size_t>(
+        this->canvas_draw_buf_->data_size,
+        ALIGN_UP(this->canvas_draw_buf_->header.w, 16) * ALIGN_UP(this->canvas_draw_buf_->header.h, 16) * 2);
     jpeg_decode_memory_alloc_cfg_t bb_cfg{};
     bb_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
     size_t bb_actual = 0;
-    this->back_buffer_ = static_cast<uint16_t *>(
-        jpeg_alloc_decoder_mem(this->canvas_draw_buf_->data_size, &bb_cfg, &bb_actual));
-    this->back_buffer2_ = static_cast<uint16_t *>(
-        jpeg_alloc_decoder_mem(this->canvas_draw_buf_->data_size, &bb_cfg, &bb_actual));
+    this->back_buffer_ = static_cast<uint16_t *>(jpeg_alloc_decoder_mem(fb_size, &bb_cfg, &bb_actual));
+    this->back_buffer2_ = static_cast<uint16_t *>(jpeg_alloc_decoder_mem(fb_size, &bb_cfg, &bb_actual));
     if (this->back_buffer_ == nullptr || this->back_buffer2_ == nullptr) {
       ESP_LOGE(TAG, "Failed to allocate back buffers (PSRAM)");
       this->mark_failed();
