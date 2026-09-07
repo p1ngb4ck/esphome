@@ -407,12 +407,10 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
     bool is_audio = (chunk_id == FOURCC_01wb);
 
     if (is_video || is_audio) {
-      // Found a frame
+      // Found a frame. Only stream_type (read every frame) and size (read by seek_to_frame) are
+      // set -- offset/keyframe/timestamp_ms were write-only.
       frame.stream_type = is_video ? AVIStreamType::VIDEO : AVIStreamType::AUDIO;
-      frame.offset = this->reader_->tell();
       frame.size = chunk_size;
-      frame.keyframe = true;   // MJPEG frames are all keyframes
-      frame.timestamp_ms = 0;  // TODO: Calculate from frame rate
 
       // Check buffer size
       if (chunk_size > buffer_size) {

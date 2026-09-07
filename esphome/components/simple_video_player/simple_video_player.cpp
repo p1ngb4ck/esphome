@@ -604,15 +604,16 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
 
 int SimpleVideoPlayer::read_frame_() {
   while (true) {
-    const PlayerState s = this->state_.load(std::memory_order_acquire);
-    if (s != PlayerState::PLAYING && s != PlayerState::PAUSED) {
-      return -2;  // stopped / aborted
-    }
     int n = this->read_next_frame_(this->decode_read_buffer_.get(), this->input_buffer_size_);
     if (n > 0) {
       return n;
     }
     if (n == 0 && this->loop_) {
+      // Only re-check state on the rare rewind path; the caller already checked it this iteration.
+      const PlayerState s = this->state_.load(std::memory_order_acquire);
+      if (s != PlayerState::PLAYING && s != PlayerState::PAUSED) {
+        return -2;  // stopped / aborted
+      }
       this->seek_to_(0);
       this->cache_buffer_valid_ = 0;
       this->cache_buffer_offset_ = 0;
@@ -715,13 +716,15 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   // Decode straight into LVGL's own canvas buffer, as codegen initialised it (dma_buffer: true ->
   // jpeg_alloc_decoder_mem). No size recompute, no bounds check: the decoder is pointed at the
   // buffer and told the buffer's own size.
-  jpeg_decode_cfg_t decode_cfg{};
-  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+  // Constant for the whole session -- built once, not per frame.
+  static const jpeg_decode_cfg_t decode_cfg = {
+      .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
 #if LV_COLOR_16_SWAP
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+      .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,
 #else
-  decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
+      .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
 #endif
+  };
   uint32_t out_size = 0;
   esp_err_t err = jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame_data,
                                        static_cast<uint32_t>(ALIGN_UP(frame_size, 16)),
@@ -1235,9 +1238,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 }
 
 void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_t *data, size_t size) {
-  if (!this->audio_enabled_) {
-    return;
-  }
+  // audio_enabled_ was already checked by the caller (read_next_frame_).
 
   // Dispatch by MODE, not by buffer presence: audio_input_ring_buffer_/audio_decoded_ring_buffer_
   // are both permanent, allocated unconditionally in setup() (see header), so they're non-null
@@ -1250,7 +1251,7 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   }
 
   // PCM: data is already decoded - write only complete frames to avoid glitches.
-  size_t bytes_per_frame = this->source_audio_channels_ * (this->audio_bits_per_sample_ / 8);
+  constexpr size_t bytes_per_frame = AUDIO_BYTES_PER_FRAME;  // fixed at compile time
   size_t complete_frames = size / bytes_per_frame;
   size_t bytes_to_write = complete_frames * bytes_per_frame;
 
