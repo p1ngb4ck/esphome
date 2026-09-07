@@ -425,8 +425,13 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
       // Read frame data
       int bytes_read = this->reader_->read(buffer, chunk_size);
       if (bytes_read != static_cast<int>(chunk_size)) {
-        ESP_LOGE(TAG, "Failed to read frame data");
-        return -1;
+        if (bytes_read < 0) {
+          ESP_LOGE(TAG, "Frame data read error");
+          return -1;
+        }
+        // Ran out of data mid-frame (truncated tail / stream ended) -> end of stream.
+        ESP_LOGW(TAG, "Frame payload short (%d/%" PRIu32 ") -- end of stream", bytes_read, chunk_size);
+        return 0;
       }
 
       this->current_offset_ += chunk_size;
