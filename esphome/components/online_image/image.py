@@ -15,8 +15,7 @@ from esphome.const import (
     CONF_TYPE,
     CONF_URL,
 )
-from esphome.core import ID, Lambda
-from esphome.cpp_generator import MockObj, TemplateArgsType
+from esphome.core import Lambda
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@guillempages", "@clydebarrow"]
@@ -70,7 +69,6 @@ ONLINE_IMAGE_SCHEMA = (
             cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
             cv.Optional(CONF_URL): cv.url,
             cv.Optional(CONF_PATH): _validate_local_path,
-            cv.Required(CONF_URL): cv.url,
             # AUTO (Content-Type detection) is online_image specific; not in the shared registry
             cv.Required(CONF_FORMAT): cv.one_of(*IMAGE_FORMATS, "AUTO", upper=True),
             cv.Optional(CONF_BUFFER_SIZE, default=65536): cv.int_range(256, 65536),
@@ -132,31 +130,18 @@ RELEASE_IMAGE_SCHEMA = automation.maybe_simple_id(
 )
 
 
-@automation.register_action(
-    "online_image.set_url", SetUrlAction, SET_URL_SCHEMA, synchronous=True
+automation.register_apply_action(
+    "online_image.set_url",
+    SET_URL_SCHEMA,
+    automation.ApplyField(CONF_URL, "set_url", cg.std_string),
+    automation.ApplyField(CONF_UPDATE, "update_if", cg.bool_),
 )
-@automation.register_action(
-    "online_image.release",
-    ReleaseImageAction,
-    RELEASE_IMAGE_SCHEMA,
-    synchronous=True,
-)
-async def online_image_action_to_code(
-    config: ConfigType,
-    action_id: ID,
-    template_arg: cg.TemplateArguments,
-    args: TemplateArgsType,
-) -> MockObj:
-    paren = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, paren)
 
-    if CONF_URL in config:
-        template_ = await cg.templatable(config[CONF_URL], args, cg.std_string)
-        cg.add(var.set_url(template_))
-    if CONF_UPDATE in config:
-        template_ = await cg.templatable(config[CONF_UPDATE], args, cg.bool_)
-        cg.add(var.set_update(template_))
-    return var
+automation.register_apply_action(
+    "online_image.release",
+    RELEASE_IMAGE_SCHEMA,
+    automation.ApplyCall("release()"),
+)
 
 
 _CALLBACK_AUTOMATIONS = (

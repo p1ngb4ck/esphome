@@ -10,7 +10,7 @@
 
 namespace esphome::uart {
 
-static const char *const TAG = "uart_debug";
+ESPHOME_LOG_TAG(TAG, "uart_debug");
 
 UARTDebugger::UARTDebugger(UARTComponent *parent) {
   this->parent_ = parent;

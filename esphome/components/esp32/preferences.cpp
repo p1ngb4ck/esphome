@@ -16,7 +16,7 @@
 
 namespace esphome::esp32 {
 
-static const char *const TAG = "preferences";
+ESPHOME_LOG_TAG(TAG, "preferences");
 
 #ifdef USE_ESP32_PREFERENCES_STORAGE
 // The esp32 flash preference path routed through the KeyValueStorage interface. The store adopts the

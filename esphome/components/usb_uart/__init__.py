@@ -8,6 +8,7 @@ from esphome.components.usb_host import (
     register_usb_client,
     usb_device_schema,
 )
+from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BAUD_RATE,
@@ -18,7 +19,7 @@ from esphome.const import (
     CONF_ID,
     CONF_TYPE,
 )
-from esphome.core import CORE
+from esphome.core import CORE, ID
 from esphome.cpp_types import Component
 from esphome.types import ConfigType
 
@@ -29,6 +30,15 @@ usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
 CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
+
+
+def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
+    return any(
+        channel[CONF_ID] == uart_id
+        for device in full_config.get("usb_uart") or []
+        for channel in device[CONF_CHANNELS]
+    )
+
 
 UARTParityOptions = usb_uart_ns.enum("UARTParityOptions")
 UART_PARITY_OPTIONS = {
@@ -52,31 +62,37 @@ DEFAULT_BAUD_RATE = 9600
 CH934X_TX_HEADER_SIZE = 3
 CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
+CONF_CLAIM_COMM_INTERFACE = "claim_comm_interface"
 
 
 class Type:
     def __init__(
         self,
-        name,
-        vid,
-        pid,
-        cls,
-        max_channels=1,
-        baud_rate_required=True,
+        name: str,
+        vid: int,
+        pid: int,
+        cls: str | None,
+        max_channels: int = 1,
+        baud_rate_required: bool = True,
         channel_cls=None,
-        max_baud=1_000_000,
-    ):
+        max_baud: int = 1_000_000,
+        has_comm_interface: bool = False,
+    ) -> None:
         self.name = name
         cls = cls or name
         self.cls_name = cls
         self.vid = vid
         self.pid = pid
         self.cls = usb_uart_ns.class_(f"USBUartType{cls}", USBUartComponent)
-        # max_channels may be a callable (evaluated lazily during config validation)
+        # CDC ACM lives in usb_uart.cpp; each vendor driver has its own <cls>.cpp
+        self.driver = None if cls == "CdcAcm" else cls
         self._max_channels = max_channels
         self.baud_rate_required = baud_rate_required
         self.channel_cls = channel_cls or USBUartChannel
         self.max_baud = max_baud
+        # True for types that claim the CDC comm (interrupt) interface; only these
+        # accept the claim_comm_interface option.
+        self.has_comm_interface = has_comm_interface
 
     @property
     def max_channels(self):
@@ -103,11 +119,21 @@ uart_types = (
     MpxType("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     MpxType("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     MpxType("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
-    Type("CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False),
+    Type(
+        "CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False, has_comm_interface=True
+    ),
     Type("CH34X", 0x1A86, 0x55D5, "CH34X", 4, max_baud=2_000_000),
     Type("CH340", 0x1A86, 0x7523, "CH34X", 1, max_baud=2_000_000),
     Type("CP210X", 0x10C4, 0xEA60, "CP210X", 3, max_baud=2_000_000),
-    Type("ESP_JTAG", 0x303A, 0x1001, "CdcAcm", 1, baud_rate_required=False),
+    Type(
+        "ESP_JTAG",
+        0x303A,
+        0x1001,
+        "CdcAcm",
+        1,
+        baud_rate_required=False,
+        has_comm_interface=True,
+    ),
     Type("FT232", 0x0403, 0x6001, "FT23XX", 1, max_baud=3_000_000),
     Type("FT2232", 0x0403, 0x6010, "FT23XX", 2, max_baud=12_000_000),
     Type("FT4232", 0x0403, 0x6011, "FT23XX", 4, max_baud=12_000_000),
@@ -118,7 +144,30 @@ uart_types = (
     Type("PL2303GL", 0x067B, 0x23D3, "PL2303", 1, max_baud=6_000_000),
     Type("PL2303GS", 0x067B, 0x23F3, "PL2303", 1, max_baud=6_000_000),
     Type("PL2303GT", 0x067B, 0x23C3, "PL2303", 1, max_baud=6_000_000),
-    Type("STM32_VCP", 0x0483, 0x5740, "CdcAcm", 1, baud_rate_required=False),
+    Type(
+        "STM32_VCP",
+        0x0483,
+        0x5740,
+        "CdcAcm",
+        1,
+        baud_rate_required=False,
+        has_comm_interface=True,
+    ),
+)
+
+_TYPES_BY_NAME = {it.name: it for it in uart_types}
+
+
+def _driver_define(driver: str) -> str:
+    return f"USE_USB_UART_{driver}"
+
+
+FILTER_SOURCE_FILES = filter_source_files_from_defines(
+    {
+        f"{it.driver.lower()}.cpp": _driver_define(it.driver)
+        for it in uart_types
+        if it.driver is not None
+    }
 )
 
 
@@ -130,9 +179,9 @@ def _validate_debug_add_uart_settings(config):
     return config
 
 
-def channel_schema(type_: "Type", baud_rate_required):
+def channel_schema(type_: "Type", baud_rate_required) -> cv.Schema:
     max_channels = type_.max_channels
-    return cv.Schema(
+    schema = cv.Schema(
         {
             cv.Required(CONF_CHANNELS): cv.All(
                 cv.ensure_list(
@@ -178,9 +227,26 @@ def channel_schema(type_: "Type", baud_rate_required):
                     max=type_.max_channels,
                     msg=f"{type_.name} supports a maximum of {max_channels} channels on this ESP32 variant",
                 ),
-            )
+            ),
         }
     )
+    if type_.has_comm_interface:
+        # The comm (interrupt) interface pins a host hardware channel per device;
+        # disable to save one on channel-poor hosts (some devices may need it
+        # claimed before enabling data flow).
+        schema = schema.extend(
+            {cv.Optional(CONF_CLAIM_COMM_INTERFACE, default=True): cv.boolean}
+        )
+    else:
+        schema = schema.extend(
+            {
+                cv.Optional(CONF_CLAIM_COMM_INTERFACE): cv.invalid(
+                    f"'{CONF_CLAIM_COMM_INTERFACE}' is only supported on device types "
+                    f"that claim the CDC comm interface; {type_.name} never claims it"
+                )
+            }
+        )
+    return schema
 
 
 CONFIG_SCHEMA = cv.ensure_list(
@@ -236,11 +302,16 @@ async def to_code(config: list[ConfigType]) -> None:
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
     for device in config:
+        if (driver := _TYPES_BY_NAME[device[CONF_TYPE]].driver) is not None:
+            cg.add_define(_driver_define(driver))
         var = await register_usb_client(device)
         device_type = type_by_name.get(device[CONF_TYPE])
         if isinstance(device_type, MpxType):
             lanes = min(len(device[CONF_CHANNELS]), max_init_lanes)
             cg.add(var.set_init_lanes(lanes))
+        # The C++ default is true; only emit the override
+        if not device.get(CONF_CLAIM_COMM_INTERFACE, True):
+            cg.add(var.set_claim_comm_interface(False))
         for index, channel in enumerate(device[CONF_CHANNELS]):
             chvar = cg.new_Pvariable(channel[CONF_ID], index, channel[CONF_BUFFER_SIZE])
             await cg.register_parented(chvar, var)

@@ -4,7 +4,7 @@
 
 namespace esphome::ads1115 {
 
-static const char *const TAG = "ads1115.sensor";
+ESPHOME_LOG_TAG(TAG, "ads1115.sensor");
 
 #ifdef USE_ESP32
 void ADS1115Sensor::setup() {

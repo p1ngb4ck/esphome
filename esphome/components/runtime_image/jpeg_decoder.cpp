@@ -15,7 +15,7 @@
 #include "esp_heap_caps.h"
 #endif
 
-static const char *const TAG = "image_decoder.jpeg";
+ESPHOME_LOG_TAG(TAG, "image_decoder.jpeg");
 
 namespace esphome::runtime_image {
 
