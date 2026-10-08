@@ -34,7 +34,7 @@ class IDFOTABackend final {
   OTAResponseTypes write(uint8_t *data, size_t len);
   OTAResponseTypes end();
   void abort();
-  bool supports_compression() { return false; }
+  static constexpr bool supports_compression() { return false; }
 
  protected:
   // Used by every app update, header-routed or plain -- deliberately outside the
