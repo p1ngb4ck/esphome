@@ -39,6 +39,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_heap_caps.h"
 
 namespace esphome::simple_video_player {
@@ -195,6 +196,11 @@ class SimpleVideoPlayer : public Component {
   /// Main playback loop (runs in task)
   void playback_loop_();
 
+  /// Reader/producer task entry point (demux + fill the compressed-frame pre-buffer, pinned to
+  /// Core 0 -- never touches DMA2D, so it cannot race decode/PPA on Core 1, see esp-idf#18999).
+  static void reader_task_entry_(void *param);
+  void reader_loop_();
+
   /// Wait for a task to stop
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
 
@@ -206,9 +212,9 @@ class SimpleVideoPlayer : public Component {
   /// Returns frame size or 0 if EOF, -1 on error
   int read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity);
 
-  /// read_next_frame_() into decode_read_buffer_, with loop rewind and a stop check.
+  /// read_next_frame_() into dest (capacity cap), with loop rewind and a stop check.
   /// Returns payload size (> 0), 0 at EOF, -1 on read error, -2 if stopped/aborted.
-  int read_frame_();
+  int read_frame_(uint8_t *dest, size_t cap);
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
@@ -428,10 +434,22 @@ class SimpleVideoPlayer : public Component {
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
 
-  // The playback task reads each next compressed frame here (jpeg_alloc_decoder_mem INPUT buffer,
-  // input_buffer_size_ bytes); decode_frame_() feeds it to the HW decoder. read_next_frame_()
-  // handles file-I/O read-ahead itself via BufferedFileReader (file_reader_).
-  std::unique_ptr<uint8_t[]> decode_read_buffer_;
+  // Compressed-frame pre-buffer (PORTALL model). The reader task (Core 0) demuxes ahead into these
+  // slots; the playback task (Core 1) decodes from them. Two FreeRTOS queues cycle the
+  // FRAME_SLOT_COUNT pre-allocated jpeg_alloc_decoder_mem INPUT buffers between producer and
+  // consumer, so decode never waits on a file read and the storage ring is drained steadily
+  // (pre-buffering) rather than in bursts. All allocated once in setup(), reused every play().
+  static constexpr uint8_t FRAME_SLOT_COUNT = 4;
+  struct FrameSlot {
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    int size{0};  // payload bytes (> 0); 0 = EOF sentinel; -1 = read-error sentinel
+  };
+  FrameSlot frame_slots_[FRAME_SLOT_COUNT]{};
+  QueueHandle_t empty_queue_{nullptr};   // slots free for the reader to fill
+  QueueHandle_t filled_queue_{nullptr};  // slots filled, waiting for decode
+  TaskHandle_t reader_task_handle_{nullptr};
+  volatile bool reader_task_stop_{false};
   // Absolute presentation index of the last frame read (demux order, monotonic across a loop
   // rewind). Playback-task-local.
   uint32_t video_frame_index_{0};

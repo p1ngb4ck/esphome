@@ -124,17 +124,27 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Compressed-frame input for the HW decoder: one buffer, jpeg_alloc_decoder_mem() INPUT-aligned.
+  // Compressed-frame pre-buffer for the HW decoder: FRAME_SLOT_COUNT INPUT-aligned buffers cycled
+  // between the reader (Core 0) and the decoder (Core 1) through empty_queue_/filled_queue_.
   {
     jpeg_decode_memory_alloc_cfg_t in_cfg{};
     in_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-    size_t in_actual = 0;
-    this->decode_read_buffer_.reset(static_cast<uint8_t *>(
-        jpeg_alloc_decoder_mem(this->input_buffer_size_, &in_cfg, &in_actual)));
-    if (!this->decode_read_buffer_) {
-      ESP_LOGE(TAG, "Failed to allocate decode input buffer (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
+    this->empty_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
+    this->filled_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
+    if (this->empty_queue_ == nullptr || this->filled_queue_ == nullptr) {
+      ESP_LOGE(TAG, "Failed to create frame-slot queues");
       this->mark_failed();
       return;
+    }
+    for (auto &slot : this->frame_slots_) {
+      size_t slot_actual = 0;
+      slot.data = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &in_cfg, &slot_actual));
+      if (slot.data == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate frame slot (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
+        this->mark_failed();
+        return;
+      }
+      slot.capacity = this->input_buffer_size_;
     }
   }
 
@@ -356,6 +366,41 @@ void SimpleVideoPlayer::playback_task_entry_(void *param) {
   vTaskDelete(nullptr);
 }
 
+void SimpleVideoPlayer::reader_task_entry_(void *param) {
+  auto *player = static_cast<SimpleVideoPlayer *>(param);
+  player->reader_loop_();
+  player->reader_task_handle_ = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void SimpleVideoPlayer::reader_loop_() {
+  // Core 0 producer: demux ahead into the compressed-frame slots. Only storage reads + memcpy --
+  // no JPEG decode, no PPA -- so it never drives DMA2D and cannot race the Core 1 decode/PPA
+  // (esp-idf#18999). Backpressure is empty_queue_: it stalls here once FRAME_SLOT_COUNT frames are
+  // read ahead and resumes as the decoder returns slots, so the storage ring is drained steadily.
+  while (!this->reader_task_stop_) {
+    const PlayerState st = this->state_.load(std::memory_order_acquire);
+    if (st != PlayerState::PLAYING && st != PlayerState::PAUSED)
+      break;
+
+    FrameSlot *slot = nullptr;
+    // Short timeout so a stop/stall is noticed promptly without a busy spin.
+    if (xQueueReceive(this->empty_queue_, &slot, pdMS_TO_TICKS(20)) != pdTRUE)
+      continue;
+
+    const int n = this->read_frame_(slot->data, slot->capacity);
+    if (n == -2) {
+      // Stopped/aborted mid-read: return the slot unused, deliver no sentinel.
+      xQueueSend(this->empty_queue_, &slot, 0);
+      break;
+    }
+    slot->size = n;  // > 0 payload, 0 EOF sentinel, -1 read-error sentinel
+    xQueueSend(this->filled_queue_, &slot, portMAX_DELAY);
+    if (n <= 0)
+      break;  // EOF/error sentinel delivered -- nothing left to produce
+  }
+}
+
 void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Playback task started (Core 1)");
 
@@ -468,6 +513,42 @@ void SimpleVideoPlayer::playback_loop_() {
     this->file_reader_->set_streaming(true);
   }
 
+  // Reset the slot queues to a clean start: every slot free in empty_queue_, filled_queue_ empty,
+  // regardless of how a prior session ended.
+  {
+    FrameSlot *s = nullptr;
+    while (xQueueReceive(this->empty_queue_, &s, 0) == pdTRUE) {
+    }
+    while (xQueueReceive(this->filled_queue_, &s, 0) == pdTRUE) {
+    }
+    for (auto &slot : this->frame_slots_) {
+      slot.size = 0;
+      FrameSlot *p = &slot;
+      xQueueSend(this->empty_queue_, &p, 0);
+    }
+  }
+
+  // Start the reader/producer on Core 0 (decode stays on Core 1, see play()'s esp-idf#18999 note).
+  this->reader_task_stop_ = false;
+  xTaskCreatePinnedToCore(reader_task_entry_, "svp_reader", 4096, this, 2, &this->reader_task_handle_, 0);
+
+  // Deep pre-buffer: wait (bounded) until the reader has filled the slot queue before presenting
+  // the first frame, so decode starts from a full compressed buffer and the storage ring stays
+  // primed throughout -- constant pre-buffering, never a mid-frame empty ring. Pumping the worker
+  // here keeps the fill chain advancing while we wait. Not the hot path (nothing presented yet).
+  {
+    uint32_t waited_ms = 0;
+    while (uxQueueMessagesWaiting(this->filled_queue_) < FRAME_SLOT_COUNT - 1) {
+      if (this->state_.load(std::memory_order_acquire) != PlayerState::PLAYING)
+        break;
+      if (storage::global_storage_worker != nullptr)
+        storage::global_storage_worker->update();
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if ((waited_ms += 5) >= 2000)
+        break;
+    }
+  }
+
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
     // Pump the storage worker's completion delivery ourselves. read_chunk() completions
@@ -497,17 +578,22 @@ void SimpleVideoPlayer::playback_loop_() {
       continue;
     }
 
-    // Next frame (demuxes + feeds its audio inline). read_frame_() handles loop rewind and stop.
-    const int payload = this->read_frame_();
-    if (payload == -2) {
-      break;  // stopped / aborted
+    // Pull the next pre-buffered compressed frame from the reader (Core 0). Short timeout so the
+    // loop keeps pumping the storage worker between frames; the reader stays ahead, so in steady
+    // state this returns immediately.
+    FrameSlot *slot = nullptr;
+    if (xQueueReceive(this->filled_queue_, &slot, pdMS_TO_TICKS(20)) != pdTRUE) {
+      continue;
     }
-    if (payload == 0) {
+    const int payload = slot->size;
+    if (payload == 0) {  // EOF sentinel
+      xQueueSend(this->empty_queue_, &slot, 0);
       ESP_LOGI(TAG, "Playback finished");
       this->on_finished_callbacks_.call();
       break;
     }
-    if (payload == -1) {
+    if (payload < 0) {  // read-error sentinel
+      xQueueSend(this->empty_queue_, &slot, 0);
       ESP_LOGE(TAG, "Failed to read frame");
       this->set_error_(PlaybackError::FILE_READ_ERROR);
       break;
@@ -550,15 +636,18 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 #endif
 
-    if (!this->decode_frame_(this->decode_read_buffer_.get(), static_cast<size_t>(payload))) {
+    // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
+    // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
+    // slot->data -- so the slot is returned to the reader right after.
+    const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
+    if (!decoded) {
       // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
       this->decode_fail_count_++;
-      continue;
     }
     // decode_frame_() wrote the frame into output_buffer_ and set frame_ready_; loop() invalidates.
 
 #ifdef SVP_DSI_OUTPUT
-    if (this->dsi_ != nullptr) {
+    if (decoded && this->dsi_ != nullptr) {
       if (this->dsi_direct_decode_) {
         this->present_dsi_direct_();  // rotation 0: decoded straight into the FB, just flip
       } else {
@@ -567,8 +656,16 @@ void SimpleVideoPlayer::playback_loop_() {
     }
 #endif
 
+    xQueueSend(this->empty_queue_, &slot, 0);  // return the slot to the reader
+
     esp_task_wdt_reset();
   }
+
+  // Stop the reader/producer and wait for it to exit before the file reader is torn down.
+  // playback_task_stop_ also aborts any in-flight BufferedFileReader wait the reader is parked in.
+  this->reader_task_stop_ = true;
+  this->playback_task_stop_ = true;
+  this->wait_for_task_stop_(this->reader_task_handle_, 2000);
 
   // One-line playback-health summary -- safe here (the loop has exited, this is not the hot path).
   if (this->decode_fail_count_ > 0) {
@@ -576,7 +673,6 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
-  this->playback_task_stop_ = true;
   this->close_file_();
   // Note: Buffers are NOT freed here - they persist for reuse in next playback
   // Buffers are only freed in destructor when component is destroyed
@@ -643,9 +739,9 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
 // Frame Processing
 //========================================================================
 
-int SimpleVideoPlayer::read_frame_() {
+int SimpleVideoPlayer::read_frame_(uint8_t *dest, size_t cap) {
   while (true) {
-    int n = this->read_next_frame_(this->decode_read_buffer_.get(), this->input_buffer_size_);
+    int n = this->read_next_frame_(dest, cap);
     if (n > 0) {
       return n;
     }
@@ -666,7 +762,7 @@ int SimpleVideoPlayer::read_frame_() {
 
 int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capacity) {
   // Read the next VIDEO frame from the file (demuxing + feeding audio inline); runs on the
-  // playback task, writing into decode_read_buffer_.
+  // reader task (Core 0), writing into the caller-provided frame-slot buffer.
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
@@ -1203,10 +1299,20 @@ void SimpleVideoPlayer::free_buffers_() {
   this->audio_decoded_ring_buffer_.reset();
 #endif
 
-  // decode_read_buffer_ came from jpeg_alloc_decoder_mem() -- heap_caps_free(), not unique_ptr's
-  // delete[].
-  if (this->decode_read_buffer_) {
-    heap_caps_free(this->decode_read_buffer_.release());
+  // Compressed-frame pre-buffer slots (jpeg_alloc_decoder_mem) + their queues.
+  for (auto &slot : this->frame_slots_) {
+    if (slot.data != nullptr) {
+      heap_caps_free(slot.data);
+      slot.data = nullptr;
+    }
+  }
+  if (this->empty_queue_ != nullptr) {
+    vQueueDelete(this->empty_queue_);
+    this->empty_queue_ = nullptr;
+  }
+  if (this->filled_queue_ != nullptr) {
+    vQueueDelete(this->filled_queue_);
+    this->filled_queue_ = nullptr;
   }
 
 #ifdef SVP_DSI_OUTPUT
