@@ -94,9 +94,21 @@ def usb_device_schema(
     )
 
 
+def _matches_by_class_only(config: ConfigType) -> bool:
+    # No vid/pid/manufacturer/product constraint: the client is matched purely by the
+    # device class its C++ subclass claims, which this config-level check cannot see, so
+    # two such clients are told apart at enumeration time rather than here.
+    return all(
+        config.get(key, wildcard) == wildcard
+        for key, wildcard in _FILTER_WILDCARDS.items()
+    )
+
+
 def validate_usb_clients(configs: list[ConfigType]) -> list[ConfigType]:
-    # Two entries overlap when no field they both constrain tells them apart
-    for first, second in combinations(configs, 2):
+    # Two entries overlap when no field they both constrain tells them apart. Fully
+    # wildcard entries are excluded: they match by device class, not by these fields.
+    constrained = [c for c in configs if not _matches_by_class_only(c)]
+    for first, second in combinations(constrained, 2):
         for key, wildcard in _FILTER_WILDCARDS.items():
             a = first.get(key)
             b = second.get(key)
