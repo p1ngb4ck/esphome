@@ -390,6 +390,10 @@ class SimpleVideoPlayer : public Component {
   uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
   uint8_t audio_bits_per_sample_{16};             // Fixed bits per sample (mirrors AUDIO_BITS_PER_SAMPLE)
   bool audio_enabled_{false};                     // Audio stream available and enabled
+  // Whether THIS file's audio track actually uses audio_decoder_ (compressed: MP3/FLAC) vs direct
+  // PCM. In a multi-codec build audio_decoder_ exists regardless, so the object pointer can no
+  // longer signal the per-file mode -- this flag does. Set in init_audio_decoder_() per play().
+  std::atomic<bool> audio_use_decoder_{false};
   TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif

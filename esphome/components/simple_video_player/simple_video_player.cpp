@@ -1486,6 +1486,9 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
+  // Publish the per-file mode for the audio task / process_audio_frame_: in a multi-codec build
+  // audio_decoder_ exists even for a PCM file, so the pointer can't signal the mode anymore.
+  this->audio_use_decoder_.store(use_decoder, std::memory_order_release);
 
   // audio_decoder_ itself is persistent now too (allocated once in setup(), see there) --
   // add_source()/add_sink()/start() are all safe to call again on the same instance for a new
@@ -1540,9 +1543,10 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
 
   // Dispatch by MODE, not by buffer presence: audio_input_ring_buffer_/audio_decoded_ring_buffer_
   // are both permanent, allocated unconditionally in setup() (see header), so they're non-null
-  // regardless of codec -- audio_decoder_ (only ever created for MP3/FLAC, see
-  // init_audio_decoder_()) is the mode signal.
-  if (this->audio_decoder_) {
+  // regardless of codec -- audio_use_decoder_ (set per file in init_audio_decoder_()) is the mode
+  // signal. In a multi-codec build audio_decoder_ exists even for a PCM file, so the pointer can't
+  // signal the mode anymore.
+  if (this->audio_use_decoder_.load(std::memory_order_acquire)) {
     // Compressed audio (MP3/FLAC): feed the decoder's input ring buffer.
     this->audio_input_ring_buffer_->write(data, size);
     return;
@@ -1596,9 +1600,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       continue;
     }
 
-    // Run audio decoder if we have one (MP3/FLAC mode)
-    // For PCM mode, audio_decoder_ is null and we skip decoding
-    if (this->audio_decoder_) {
+    // Run audio decoder only when THIS file is compressed (MP3/FLAC). In a multi-codec build
+    // audio_decoder_ exists even for a PCM file, so gate on the per-file mode, not the pointer --
+    // calling decode() on a decoder that was never start()ed for this file returns FAILED.
+    if (this->audio_use_decoder_.load(std::memory_order_acquire)) {
       audio::AudioDecoderState decode_state = this->audio_decoder_->decode(false);
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
