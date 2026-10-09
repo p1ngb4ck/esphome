@@ -108,7 +108,8 @@ void SimpleVideoPlayer::setup() {
       this->output_buffer_size_ = out_actual;  // same size for both
     }
     ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, max %ux%u)", this->output_buffer_size_,
-             ALIGN_UP(MAX_VIDEO_WIDTH, 16), ALIGN_UP(MAX_VIDEO_HEIGHT, 16));
+             static_cast<unsigned>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)),
+             static_cast<unsigned>(ALIGN_UP(MAX_VIDEO_HEIGHT, 16)));
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)

@@ -13,6 +13,24 @@ static const char *const TAG = "storage_worker";
 
 StorageWorker *global_storage_worker = nullptr;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
+// Single route-selection point for a filesystem read. The worker -- not the driver, not the
+// consumer -- chooses the path from the driver's reported capabilities: a driver advertising
+// STORAGE_CAP_DMA_STREAM goes through read_dma() (device DMAs straight into `buf`, no worker
+// buffer); everyone else, and any driver whose read_dma() still answers NOT_SUPPORTED, falls back
+// to the plain read(). Every worker filesystem read of a real data buffer funnels here so the
+// choice is made once and identically for stream reads, copies and tree walks.
+static StorageError fs_read_(FilesystemStorage *fs, FileHandle *handle, uint8_t *buf, size_t len,
+                             size_t *bytes_transferred) {
+  if ((fs->get_capabilities() & StorageCaps::STORAGE_CAP_DMA_STREAM) != 0) {
+    StorageError err = fs->read_dma(handle, buf, len, bytes_transferred);
+    // A driver advertising the cap is expected to implement read_dma; tolerate a stale driver that
+    // set the bit without the override by falling back to the plain read instead of failing.
+    if (err != StorageError::STORAGE_ERROR_NOT_SUPPORTED)
+      return err;
+  }
+  return fs->read(handle, buf, len, bytes_transferred);
+}
+
 void StorageWorker::setup() {
   // Pool and (on ESP32) task creation are deferred to the first submit_() call -- see
   // ensure_started_() -- so that a driver merely linking in the worker (because it's
@@ -2405,18 +2423,6 @@ static void run_stream_step(StreamRequest &req) {
       // IDLE/FREE/DONE: nothing to do -- shouldn't be dispatched in these states.
       break;
   }
-}
-
-StorageError StorageWorker::fs_read_(storage::FilesystemStorage *fs, storage::FileHandle *handle, uint8_t *buf,
-                                     size_t len, size_t *bytes_transferred) {
-  if ((fs->get_capabilities() & storage::StorageCaps::STORAGE_CAP_DMA_STREAM) != 0) {
-    StorageError err = fs->read_dma(handle, buf, len, bytes_transferred);
-    // A driver advertising the cap is expected to implement read_dma; tolerate a stale driver that
-    // set the bit without the override by falling back to the plain read instead of failing.
-    if (err != StorageError::STORAGE_ERROR_NOT_SUPPORTED)
-      return err;
-  }
-  return fs->read(handle, buf, len, bytes_transferred);
 }
 
 void StorageWorker::run_stream_step_(StreamRequest &req) {
