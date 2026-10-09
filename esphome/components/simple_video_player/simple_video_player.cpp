@@ -249,10 +249,13 @@ void SimpleVideoPlayer::loop() {
     return;
   }
 #endif
+#if LV_USE_CANVAS
   // Runs on the LVGL thread. decode_frame_() (video task) finished a frame in the back buffer and
   // published it via display_buffer_ + frame_ready_. Point the canvas at that completed buffer and
   // invalidate -- all lv_canvas_* happens HERE, never on the video task. Cheap load first so the
-  // common no-frame path is a plain relaxed read, not an atomic RMW.
+  // common no-frame path is a plain relaxed read, not an atomic RMW. Gated on LV_USE_CANVAS:
+  // ESPHome only enables it when a canvas widget is in the YAML, so a DSI-direct config (display_id,
+  // no canvas widget) compiles this out -- there the dsi_ early-return above handles loop() anyway.
   if (this->frame_ready_.load(std::memory_order_acquire) &&
       this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     uint8_t *buf = this->display_buffer_.load(std::memory_order_acquire);
@@ -261,6 +264,7 @@ void SimpleVideoPlayer::loop() {
       lv_obj_invalidate(this->canvas_);
     }
   }
+#endif
 }
 
 void SimpleVideoPlayer::dump_config() {
