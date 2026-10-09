@@ -127,8 +127,12 @@ MIN_CACHE_BUFFER_SIZE = 8 * 1024  # 8KB
 MAX_CACHE_BUFFER_SIZE = 128 * 1024  # 128KB - increased for performance
 MIN_INPUT_BUFFER_SIZE = 128 * 1024  # 128KB
 MAX_INPUT_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
-MIN_PREFETCH_DURATION_MS = 100  # below this, storage-read jitter has essentially no headroom
-MAX_PREFETCH_DURATION_MS = 5000  # above this, PSRAM cost stops being worth the extra headroom
+MIN_PREFETCH_DURATION_MS = (
+    100  # below this, storage-read jitter has essentially no headroom
+)
+MAX_PREFETCH_DURATION_MS = (
+    5000  # above this, PSRAM cost stops being worth the extra headroom
+)
 MIN_FPS = 1.0
 MAX_FPS = 60.0
 
@@ -180,16 +184,24 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
-            ): cv.All(cv.validate_bytes, cv.Range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE)),
+            ): cv.All(
+                cv.validate_bytes,
+                cv.Range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE),
+            ),
             cv.Optional(
                 CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
-            ): cv.All(cv.validate_bytes, cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE)),
+            ): cv.All(
+                cv.validate_bytes,
+                cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE),
+            ),
             cv.Optional(
                 CONF_PREFETCH_DURATION, default=DEFAULT_PREFETCH_DURATION
             ): cv.All(
                 cv.positive_time_period_milliseconds,
-                cv.Range(min=cv.TimePeriod(milliseconds=MIN_PREFETCH_DURATION_MS),
-                         max=cv.TimePeriod(milliseconds=MAX_PREFETCH_DURATION_MS)),
+                cv.Range(
+                    min=cv.TimePeriod(milliseconds=MIN_PREFETCH_DURATION_MS),
+                    max=cv.TimePeriod(milliseconds=MAX_PREFETCH_DURATION_MS),
+                ),
             ),
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
@@ -246,7 +258,9 @@ def _resolve_speaker_audio_format(config, fconf):
         speaker_path = fconf.get_path_for_id(speaker_id)[:-1]
         speaker_conf = fconf.get_config_for_path(speaker_path)
     except KeyError as err:
-        raise cv.Invalid(f"Could not resolve speaker_id '{speaker_id}' to its own config") from err
+        raise cv.Invalid(
+            f"Could not resolve speaker_id '{speaker_id}' to its own config"
+        ) from err
 
     if CONF_SAMPLE_RATE not in speaker_conf or CONF_BITS_PER_SAMPLE not in speaker_conf:
         raise cv.Invalid(
@@ -258,7 +272,10 @@ def _resolve_speaker_audio_format(config, fconf):
 
     if CONF_NUM_CHANNELS in speaker_conf:
         num_channels = speaker_conf[CONF_NUM_CHANNELS]
-    elif CONF_CHANNEL in speaker_conf and speaker_conf[CONF_CHANNEL] in SPEAKER_CHANNEL_MODES:
+    elif (
+        CONF_CHANNEL in speaker_conf
+        and speaker_conf[CONF_CHANNEL] in SPEAKER_CHANNEL_MODES
+    ):
         # mono/left/right all mean "1 channel out"; only stereo is 2 -- same mapping
         # SPEAKER_CHANNEL_MODES itself encodes on the C++ side.
         num_channels = 2 if speaker_conf[CONF_CHANNEL] == "stereo" else 1
@@ -275,7 +292,10 @@ def _resolve_speaker_audio_format(config, fconf):
     # while SVP_AUDIO_SOURCE_CHANNELS says 2. No routing or downmix is implied -- source channel
     # count equals the speaker's by construction (the user transcodes every file to match); this
     # only selects the one fixed count the speaker stream-info is built with.
-    if CONF_CHANNEL in speaker_conf and speaker_conf[CONF_CHANNEL] in SPEAKER_CHANNEL_MODES:
+    if (
+        CONF_CHANNEL in speaker_conf
+        and speaker_conf[CONF_CHANNEL] in SPEAKER_CHANNEL_MODES
+    ):
         resolved_channel = speaker_conf[CONF_CHANNEL]
     else:
         resolved_channel = "stereo" if num_channels == 2 else "mono"
@@ -428,7 +448,9 @@ async def to_code(config):
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
-    cg.add(var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds))
+    cg.add(
+        var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds)
+    )
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))
@@ -468,6 +490,9 @@ SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA = cv.Schema(
             cv.Required("path"): cv.templatable(cv.string),
         }
     ),
+    # play() copies the path into video_path_ and returns before the decode task starts, so the
+    # action completes synchronously (the StringRef path is consumed before the call returns).
+    synchronous=True,
 )
 async def simple_video_player_play_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -481,6 +506,7 @@ async def simple_video_player_play_to_code(config, action_id, template_arg, args
     "simple_video_player.pause",
     PauseAction,
     SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # just sets the atomic state and returns
 )
 async def simple_video_player_pause_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -491,6 +517,7 @@ async def simple_video_player_pause_to_code(config, action_id, template_arg, arg
     "simple_video_player.resume",
     ResumeAction,
     SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # just sets the atomic state and returns
 )
 async def simple_video_player_resume_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
@@ -501,6 +528,7 @@ async def simple_video_player_resume_to_code(config, action_id, template_arg, ar
     "simple_video_player.stop",
     StopAction,
     SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # just sets the atomic state and returns
 )
 async def simple_video_player_stop_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
