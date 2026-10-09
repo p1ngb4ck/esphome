@@ -1584,7 +1584,7 @@ void StorageWorker::run_raw_chunk_(TransferRequest &req, bool on_task) {
   } else {
     size_t got = 0;
     if (file_is_fs) {
-      err = static_cast<FilesystemStorage *>(file_storage)->read(req.src_handle, chunk, want, &got);
+      err = fs_read_(static_cast<FilesystemStorage *>(file_storage), req.src_handle, chunk, want, &got);
     } else {
       err = static_cast<NetworkStorage *>(file_storage)->read_chunk(file_path, chunk, req.offset, want, &got);
     }
@@ -2128,7 +2128,7 @@ void StorageWorker::run_chunk_(TransferRequest &req, bool on_task) {
   size_t bytes_read = 0;
   StorageError err;
   if (req.src_is_fs) {
-    err = static_cast<FilesystemStorage *>(req.src_storage)->read(req.src_handle, chunk, chunk_size, &bytes_read);
+    err = fs_read_(static_cast<FilesystemStorage *>(req.src_storage), req.src_handle, chunk, chunk_size, &bytes_read);
   } else {
     err = static_cast<NetworkStorage *>(req.src_storage)
               ->read_chunk(req.src_path, chunk, req.offset, chunk_size, &bytes_read);
@@ -2321,8 +2321,8 @@ static void run_stream_step(StreamRequest &req) {
     case StreamState::READING: {
       size_t bytes_read = 0;
       if (req.is_fs) {
-        err = static_cast<FilesystemStorage *>(req.storage)
-                  ->read(req.handle, req.pending_read_buf, req.pending_len, &bytes_read);
+        err = fs_read_(static_cast<FilesystemStorage *>(req.storage), req.handle, req.pending_read_buf, req.pending_len,
+                       &bytes_read);
       } else {
         err = static_cast<NetworkStorage *>(req.storage)
                   ->read_chunk(req.path, req.pending_read_buf, req.offset, req.pending_len, &bytes_read);
@@ -2405,6 +2405,18 @@ static void run_stream_step(StreamRequest &req) {
       // IDLE/FREE/DONE: nothing to do -- shouldn't be dispatched in these states.
       break;
   }
+}
+
+StorageError StorageWorker::fs_read_(storage::FilesystemStorage *fs, storage::FileHandle *handle, uint8_t *buf,
+                                     size_t len, size_t *bytes_transferred) {
+  if ((fs->get_capabilities() & storage::StorageCaps::STORAGE_CAP_DMA_STREAM) != 0) {
+    StorageError err = fs->read_dma(handle, buf, len, bytes_transferred);
+    // A driver advertising the cap is expected to implement read_dma; tolerate a stale driver that
+    // set the bit without the override by falling back to the plain read instead of failing.
+    if (err != StorageError::STORAGE_ERROR_NOT_SUPPORTED)
+      return err;
+  }
+  return fs->read(handle, buf, len, bytes_transferred);
 }
 
 void StorageWorker::run_stream_step_(StreamRequest &req) {

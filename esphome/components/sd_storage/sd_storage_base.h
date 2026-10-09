@@ -32,6 +32,13 @@ enum class CardType : uint8_t {
 
 struct SdFileHandle : public storage::FileHandle {
   char path_buf[(ESP_VFS_PATH_MAX + storage::STORAGE_PATH_MAX + 1)]{};
+  // Read handles on a driver that advertises STORAGE_CAP_DMA_STREAM are opened through the native
+  // FatFs API instead of stdio, so a whole-sector read lands in the caller's buffer by DMA (f_read's
+  // direct-to-application-buffer path). use_fatfs selects which member is live: fil when true (base
+  // FileHandle::file stays nullptr), the stdio FILE* otherwise. Write/append/read-write handles, and
+  // every handle on a driver without the cap, keep the stdio path.
+  FIL fil{};
+  bool use_fatfs{false};
 };
 
 template<typename... Ts> class MountCardAction;
@@ -75,6 +82,8 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   storage::StorageError open(const char *path, storage::FileHandle *&handle, storage::OpenMode mode) override;
   storage::StorageError close(storage::FileHandle *handle) override;
   storage::StorageError read(storage::FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) override;
+  storage::StorageError read_dma(storage::FileHandle *handle, uint8_t *buf, size_t len,
+                                 size_t *bytes_transferred) override;
   storage::StorageError write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
                               size_t *bytes_transferred) override;
   storage::StorageError seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) override;

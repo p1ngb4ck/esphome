@@ -162,6 +162,19 @@ enum StorageCaps : uint8_t {
   // calls to this instance are externally serialized. Set only if the I/O path has no hidden
   // main-loop affinity -- NOT safe if the driver shares a bus (SPI/I2C) with main-loop components.
   STORAGE_CAP_IO_TASK_SAFE = 1 << 0,
+
+  // read()/read_chunk() lands bytes in the caller's buffer by DMA (no stdio/driver bounce copy)
+  // when that buffer is DMA-capable. Purely a hint: a consumer that sees this allocates its
+  // destination DMA-capable (alloc_dma_capable / a DMA-capable TransferBuffer) so the driver can
+  // take the zero-bounce path; the driver must still work correctly with a non-DMA buffer. Set
+  // only after verifying the driver actually has such a path (see each driver's get_capabilities()).
+  STORAGE_CAP_DMA_STREAM = 1 << 1,
+
+  // The driver can move bytes device-to-device by DMA with NO intermediate memory buffer -- source
+  // peripheral straight into a caller-provided DMA sink endpoint (DmaEndpoint). Engaged only via the
+  // endpoint read path (read_chunk_to_endpoint); the plain buffer read is unaffected. Set only when
+  // the driver can truly program that link (verified per driver), never from convention.
+  STORAGE_CAP_DMA_D2D = 1 << 2,
 };
 
 // Abstract base -- every driver extends one of the three subclasses below.
@@ -383,6 +396,15 @@ class FilesystemStorage : public PathStorage {
   virtual StorageError close(FileHandle *handle) = 0;
   // Partial-read contract: see RawStorage::read() above.
   virtual StorageError read(FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) = 0;
+  // DMA read variant, same contract and arguments as read(). Only drivers that advertise
+  // STORAGE_CAP_DMA_STREAM override this; the default signals "I have no DMA path" so the worker's
+  // router falls back to read(). `buf` is the DMA destination straight from the caller -- no
+  // intermediate buffer is introduced here. The worker (storage_worker) is the sole chooser between
+  // read() and read_dma() based on the reported capability; consumers always call the worker's
+  // transparent read and never pick a route themselves.
+  virtual StorageError read_dma(FileHandle *handle, uint8_t *buf, size_t len, size_t *bytes_transferred) {
+    return StorageError::STORAGE_ERROR_NOT_SUPPORTED;
+  }
   virtual StorageError write(FileHandle *handle, const uint8_t *buf, size_t len, size_t *bytes_transferred) = 0;
   virtual StorageError seek(FileHandle *handle, int64_t offset, SeekMode mode) = 0;
   StorageError seek(FileHandle *handle, int64_t offset) { return seek(handle, offset, SeekMode::SEEK_MODE_SET); }

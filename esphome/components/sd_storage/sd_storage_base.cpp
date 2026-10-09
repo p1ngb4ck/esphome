@@ -245,7 +245,12 @@ storage::StorageError SdStorageBase::flush_open_handles_() {
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
     if (!pool[i].in_use)
       continue;
-    if (pool[i].file != nullptr) {
+    if (pool[i].use_fatfs) {
+      ESP_LOGW(TAG_BASE, "File still open at unmount, closing: %s", pool[i].path);
+      if (f_close(&pool[i].fil) != FR_OK)
+        err = storage::StorageError::STORAGE_ERROR_READ_ERROR;
+      pool[i].use_fatfs = false;
+    } else if (pool[i].file != nullptr) {
       ESP_LOGW(TAG_BASE, "File still open at unmount, flushing and closing: %s", pool[i].path);
       if (fflush(pool[i].file) != 0 || fsync(fileno(pool[i].file)) != 0)
         err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
@@ -278,6 +283,26 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
   if (!this->build_full_path_(path, h->path_buf, sizeof(h->path_buf)))
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
 
+  // DMA read path: on a driver advertising STORAGE_CAP_DMA_STREAM, open read-only files through the
+  // native FatFs API so f_read lands whole sectors directly in the caller's (DMA-capable) buffer
+  // (ff.c f_read: contiguous sectors go to disk_read(rbuff) with no fs->win bounce). Falls through to
+  // the stdio path if the FATFS-native path cannot be built or f_open fails, which keeps error mapping
+  // identical to the untouched read path.
+  if (mode == storage::OpenMode::OPEN_MODE_READ &&
+      (this->get_capabilities() & storage::StorageCaps::STORAGE_CAP_DMA_STREAM) != 0) {
+    char fatfs_path[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+    if (this->build_fatfs_path_(path, fatfs_path, sizeof(fatfs_path)) &&
+        f_open(&h->fil, fatfs_path, FA_READ | FA_OPEN_EXISTING) == FR_OK) {
+      h->use_fatfs = true;
+      h->in_use = true;
+      h->path = h->path_buf;
+      h->storage = this;
+      h->file = nullptr;
+      handle = h;
+      return storage::StorageError::STORAGE_ERROR_OK;
+    }
+  }
+
   const char *fmode = nullptr;
   switch (mode) {
     case storage::OpenMode::OPEN_MODE_READ:
@@ -299,6 +324,7 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
     return storage::error_from_errno(errno, mode != storage::OpenMode::OPEN_MODE_READ);
   }
 
+  h->use_fatfs = false;
   h->in_use = true;
   h->path = h->path_buf;
   h->storage = this;
@@ -310,34 +336,64 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
 storage::StorageError SdStorageBase::close(storage::FileHandle *handle) {
   if (handle == nullptr || !handle->in_use)
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  auto *h = static_cast<SdFileHandle *>(handle);
   storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
-  if (handle->file != nullptr) {
+  if (h->use_fatfs) {
+    // FatFs read handle (opened read-only): no dirty data to flush, so a close failure is a read-side
+    // fault, not a truncation.
+    if (f_close(&h->fil) != FR_OK)
+      err = storage::StorageError::STORAGE_ERROR_READ_ERROR;
+    h->use_fatfs = false;
+  } else if (h->file != nullptr) {
     // FATFS flushes on close (see the dst-close-error propagation in storage.cpp's copy()) --
     // a failed close here can mean a silently truncated/corrupt file.
-    if (fclose(handle->file) != 0)
+    if (fclose(h->file) != 0)
       err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
-    handle->file = nullptr;
+    h->file = nullptr;
   }
-  handle->in_use = false;
-  handle->path = nullptr;
-  handle->storage = nullptr;
+  h->in_use = false;
+  h->path = nullptr;
+  h->storage = nullptr;
   return err;
 }
 
 storage::StorageError SdStorageBase::read(storage::FileHandle *handle, uint8_t *buf, size_t len,
                                           size_t *bytes_transferred) {
-  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+  if (handle == nullptr || !handle->in_use)
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
-  size_t n = fread(buf, 1, len, handle->file);
+  auto *h = static_cast<SdFileHandle *>(handle);
+  if (h->use_fatfs) {
+    UINT br = 0;
+    FRESULT res = f_read(&h->fil, buf, static_cast<UINT>(len), &br);
+    if (res != FR_OK)
+      return fresult_to_storage_error(res, /*for_rmdir=*/false, /*writing=*/false);
+    // br < len means EOF -- not an error, per the partial-read contract in storage.h.
+    if (bytes_transferred != nullptr)
+      *bytes_transferred = br;
+    return storage::StorageError::STORAGE_ERROR_OK;
+  }
+  if (h->file == nullptr)
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  size_t n = fread(buf, 1, len, h->file);
   if (bytes_transferred != nullptr)
     *bytes_transferred = n;
   // fread() returning less than requested means either EOF (not an error, per the
   // partial-read contract in storage.h) or a real I/O error -- ferror() disambiguates.
-  if (n < len && ferror(handle->file)) {
-    clearerr(handle->file);
+  if (n < len && ferror(h->file)) {
+    clearerr(h->file);
     return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   }
   return storage::StorageError::STORAGE_ERROR_OK;
+}
+
+storage::StorageError SdStorageBase::read_dma(storage::FileHandle *handle, uint8_t *buf, size_t len,
+                                              size_t *bytes_transferred) {
+  // A FatFs-backed read handle (opened on a cap-advertising driver) already takes the DMA-capable
+  // f_read path through read(); any other handle returns NOT_SUPPORTED so the worker's router falls
+  // back to the plain read().
+  if (handle != nullptr && handle->in_use && static_cast<SdFileHandle *>(handle)->use_fatfs)
+    return this->read(handle, buf, len, bytes_transferred);
+  return storage::StorageError::STORAGE_ERROR_NOT_SUPPORTED;
 }
 
 storage::StorageError SdStorageBase::write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
@@ -351,7 +407,33 @@ storage::StorageError SdStorageBase::write(storage::FileHandle *handle, const ui
 }
 
 storage::StorageError SdStorageBase::seek(storage::FileHandle *handle, int64_t offset, storage::SeekMode mode) {
-  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+  if (handle == nullptr || !handle->in_use)
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  auto *h = static_cast<SdFileHandle *>(handle);
+  if (h->use_fatfs) {
+    // f_lseek() is absolute; fold SET/CUR/END into one target off the FIL's own cursor/size.
+    int64_t base;
+    switch (mode) {
+      case storage::SeekMode::SEEK_MODE_SET:
+        base = 0;
+        break;
+      case storage::SeekMode::SEEK_MODE_CUR:
+        base = static_cast<int64_t>(h->fil.fptr);
+        break;
+      case storage::SeekMode::SEEK_MODE_END:
+        base = static_cast<int64_t>(h->fil.obj.objsize);
+        break;
+      default:
+        return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+    }
+    const int64_t target = base + offset;
+    if (target < 0)
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+    FRESULT res = f_lseek(&h->fil, static_cast<FSIZE_t>(target));
+    return res == FR_OK ? storage::StorageError::STORAGE_ERROR_OK
+                        : fresult_to_storage_error(res, /*for_rmdir=*/false, /*writing=*/false);
+  }
+  if (h->file == nullptr)
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   // ESP-IDF's newlib fseek() takes a 32-bit `long` offset -- FATFS/POSIX on this platform can't
   // address beyond that anyway (files >4GB aren't representable here), so reject rather than
@@ -373,15 +455,21 @@ storage::StorageError SdStorageBase::seek(storage::FileHandle *handle, int64_t o
     default:
       return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
-  return fseek(handle->file, static_cast<int32_t>(offset), whence) == 0
-             ? storage::StorageError::STORAGE_ERROR_OK
-             : storage::StorageError::STORAGE_ERROR_READ_ERROR;
+  return fseek(h->file, static_cast<int32_t>(offset), whence) == 0 ? storage::StorageError::STORAGE_ERROR_OK
+                                                                   : storage::StorageError::STORAGE_ERROR_READ_ERROR;
 }
 
 storage::StorageError SdStorageBase::tell(storage::FileHandle *handle, uint64_t *position) {
-  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+  if (handle == nullptr || !handle->in_use)
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
-  int32_t pos = ftell(handle->file);
+  auto *h = static_cast<SdFileHandle *>(handle);
+  if (h->use_fatfs) {
+    *position = static_cast<uint64_t>(h->fil.fptr);
+    return storage::StorageError::STORAGE_ERROR_OK;
+  }
+  if (h->file == nullptr)
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  int32_t pos = ftell(h->file);
   if (pos < 0)
     return storage::StorageError::STORAGE_ERROR_READ_ERROR;
   *position = static_cast<uint64_t>(pos);

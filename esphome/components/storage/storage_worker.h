@@ -665,6 +665,15 @@ class StorageWorker : public PollingComponent {
   // StreamHandle. Every entry point that takes a handle goes through here.
   StreamRequest *stream_for_handle_(const StreamHandle &handle);
 
+  // Single route-selection point for a filesystem read. The worker -- not the driver, not the
+  // consumer -- chooses the path from the driver's reported capabilities: a driver advertising
+  // STORAGE_CAP_DMA_STREAM goes through read_dma() (device DMAs straight into `buf`, no worker
+  // buffer); everyone else, and any driver whose read_dma() still answers NOT_SUPPORTED, falls
+  // back to the plain read(). Every worker filesystem read of a real data buffer funnels here so
+  // the choice is made once and identically for stream reads, copies and tree walks.
+  static StorageError fs_read_(storage::FilesystemStorage *fs, storage::FileHandle *handle, uint8_t *buf, size_t len,
+                               size_t *bytes_transferred);
+
   // True if another request that is currently RUNNING or CANCELLED (i.e. still owned by an
   // engine) shares a storage instance with `candidate`. Used at both dispatch points to
   // uphold the interface's per-instance serialization guarantee across the two engines.

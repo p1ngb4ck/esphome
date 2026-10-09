@@ -42,7 +42,13 @@ class SdMmc : public SdStorageBase {
   // SDMMC has a dedicated hardware controller (SDIO), not a bus shared with other
   // main-loop-driven components (unlike SdSpi, which sits on a shared SPI bus) -- safe for a
   // future async worker to drive from a background task.
-  uint8_t get_capabilities() const override { return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE; }
+  // DMA_STREAM: read handles open through the native FatFs API (SdStorageBase::open), so a
+  // whole-sector f_read lands straight in the caller's buffer and the SDMMC host DMAs into it
+  // (sdmmc_read_sectors direct path; a PSRAM destination is allowed on P4). The worker routes
+  // its reads to read_dma() accordingly; unaligned head/tail bytes still bounce inside FatFs/SDMMC.
+  uint8_t get_capabilities() const override {
+    return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE | storage::StorageCaps::STORAGE_CAP_DMA_STREAM;
+  }
 
  protected:
   SdFileHandle *get_handle_pool() override { return this->handle_pool_; }
