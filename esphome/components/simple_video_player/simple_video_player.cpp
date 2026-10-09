@@ -90,8 +90,18 @@ void SimpleVideoPlayer::setup() {
     // writes straight into it. RGB888 (not RGB565): the P4 HW JPEG decoder's RGB565 output path is
     // buggy on some P4 silicon revisions. jpeg_alloc_decoder_mem() gives the 16-byte / DMA alignment
     // the HW decoder requires and reports the actual (cache-line-rounded) size it allocated.
-    const size_t max_output_size =
-        static_cast<size_t>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)) * ALIGN_UP(MAX_VIDEO_HEIGHT, 16) * 3;
+    // Size the two frame buffers to the ACTUAL LVGL display resolution (derived from LVGL, not a
+    // fixed 1280x800), capped to the MAX_VIDEO_* safety ceiling. Two RGB888 buffers at the real
+    // panel size (e.g. 1024x600 -> ~1.87 MB each) instead of the 1280x800 cap (~3 MB each) is what
+    // keeps the render double-buffer from starving other PSRAM consumers (e.g. a separate
+    // speaker_media_player's pipeline -> ESP_ERR_NO_MEM). Falls back to the cap if LVGL reports 0.
+    uint32_t fb_w = this->lvgl_component_ != nullptr ? this->lvgl_component_->get_width() : 0;
+    uint32_t fb_h = this->lvgl_component_ != nullptr ? this->lvgl_component_->get_height() : 0;
+    if (fb_w == 0 || fb_w > MAX_VIDEO_WIDTH)
+      fb_w = MAX_VIDEO_WIDTH;
+    if (fb_h == 0 || fb_h > MAX_VIDEO_HEIGHT)
+      fb_h = MAX_VIDEO_HEIGHT;
+    const size_t max_output_size = static_cast<size_t>(ALIGN_UP(fb_w, 16)) * ALIGN_UP(fb_h, 16) * 3;
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
     // Two buffers for the canvas double-buffer (decode writes one while LVGL reads the other).
@@ -107,9 +117,8 @@ void SimpleVideoPlayer::setup() {
       std::memset(buf, 0, out_actual);
       this->output_buffer_size_ = out_actual;  // same size for both
     }
-    ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, max %ux%u)", this->output_buffer_size_,
-             static_cast<unsigned>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)),
-             static_cast<unsigned>(ALIGN_UP(MAX_VIDEO_HEIGHT, 16)));
+    ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, %ux%u)", this->output_buffer_size_,
+             static_cast<unsigned>(ALIGN_UP(fb_w, 16)), static_cast<unsigned>(ALIGN_UP(fb_h, 16)));
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
