@@ -193,11 +193,12 @@ void SimpleVideoPlayer::setup() {
     }
     this->audio_temp_buffer_.reset(temp_buf);
 
-#if defined(SVP_AUDIO_CODEC_MP3) || defined(SVP_AUDIO_CODEC_FLAC)
-    // audio_decoder_ itself: allocated ONCE here too, same as everything else above. The codec is
-    // just as fixed by YAML as sample_rate/channels/bits_per_sample are (see __init__.py), so
-    // whether this is ever needed at all is already known at compile time -- PCM mode never
-    // touches it, so it's never constructed there. AudioDecoder's own start() (verified against
+#if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC)
+    // audio_decoder_ itself: allocated ONCE here too, same as everything else above. One
+    // AudioDecoder instance handles whichever supported compressed codec a given file uses -- its
+    // start(AudioFileType) selects the per-file codec path (see init_audio_decoder_), so this is
+    // constructed whenever at least one COMPRESSED codec is supported. A PCM-only build (no
+    // compressed codec listed) never touches it. AudioDecoder's own start() (verified against
     // the real audio component source) already resets its per-file state (potentially_failed_
     // count_, end_of_file_, a fresh per-codec sub-decoder) on every call, and add_source()/
     // add_sink() are safe to call again on the same instance -- init_audio_decoder_() just calls
@@ -1416,45 +1417,40 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? "stereo"
                                                                                        : "unknown");
 
-  // Codec is also fixed by YAML (audio_codec) -- SVP_AUDIO_CODEC_{PCM,MP3,FLAC} is the one define
-  // set by codegen, so which branch is "live" is resolved at compile time. A file whose audio
-  // track uses a different codec than configured is a hard mismatch, same as the format checks
-  // above -- never silently reconfigure the decoder per file.
-#if defined(SVP_AUDIO_CODEC_MP3)
-  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::MP3)) {
-    ESP_LOGE(TAG,
-             "Audio codec mismatch: file's audio track is not MP3 (this player is configured for MP3 only, "
-             "codec=0x%04" PRIX32 "). Playing video-only.",
-             audio_info->codec);
-    return false;
-  }
-  audio::AudioFileType codec_type = audio::AudioFileType::MP3;
-  ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
-           audio_info->bits_per_sample);
-#elif defined(SVP_AUDIO_CODEC_FLAC)
-  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
-    ESP_LOGE(TAG,
-             "Audio codec mismatch: file's audio track is not FLAC (this player is configured for FLAC only, "
-             "codec=0x%04" PRIX32 "). Playing video-only.",
-             audio_info->codec);
-    return false;
-  }
-  audio::AudioFileType codec_type = audio::AudioFileType::FLAC;
-  ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
-           audio_info->channels, audio_info->bits_per_sample);
-#else  // SVP_AUDIO_CODEC_PCM (default)
-  if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::PCM)) {
-    ESP_LOGE(TAG,
-             "Audio codec mismatch: file's audio track is not raw PCM (this player is configured for PCM "
-             "only, codec=0x%04" PRIX32 "). Playing video-only.",
-             audio_info->codec);
-    return false;
-  }
-  // PCM audio in AVI is raw samples without WAV header -- handled directly without AudioDecoder.
-  audio::AudioFileType codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
-  ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
-           audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
+  // audio_codec is a LIST of supported codecs -- each listed one compiles in its decoder path
+  // (SVP_AUDIO_SUPPORT_{PCM,MP3,FLAC}); the AVI parser detected THIS file's actual codec, so pick
+  // the matching path at runtime. A file whose audio track uses a codec not in the supported set
+  // falls through to video-only (same as the format mismatch above) -- never silently reconfigure.
+  audio::AudioFileType codec_type = audio::AudioFileType::NONE;
+  switch (static_cast<AVIAudioCodec>(audio_info->codec)) {
+#ifdef SVP_AUDIO_SUPPORT_PCM
+    case AVIAudioCodec::PCM:
+      // PCM audio in AVI is raw samples without WAV header -- handled directly without AudioDecoder.
+      codec_type = audio::AudioFileType::NONE;  // Signal that we don't need a decoder
+      ESP_LOGI(TAG, "Audio codec: PCM (raw), %" PRIu32 " Hz, %u channels, %u bits - will process directly",
+               audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample);
+      break;
 #endif
+#ifdef SVP_AUDIO_SUPPORT_MP3
+    case AVIAudioCodec::MP3:
+      codec_type = audio::AudioFileType::MP3;
+      ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+               audio_info->channels, audio_info->bits_per_sample);
+      break;
+#endif
+#ifdef SVP_AUDIO_SUPPORT_FLAC
+    case AVIAudioCodec::FLAC:
+      codec_type = audio::AudioFileType::FLAC;
+      ESP_LOGI(TAG, "Audio codec: FLAC, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
+               audio_info->channels, audio_info->bits_per_sample);
+      break;
+#endif
+    default:
+      ESP_LOGE(TAG,
+               "Audio codec 0x%04" PRIX32 " is not in this player's supported audio_codec set. Playing video-only.",
+               audio_info->codec);
+      return false;
+  }
 
   // CRITICAL: Configure speaker's audio stream info based on SPEAKER config, not file
   audio::AudioStreamInfo speaker_stream_info(audio_info->bits_per_sample, this->speaker_audio_channels_,

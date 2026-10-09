@@ -138,11 +138,11 @@ MAX_FPS = 60.0
 
 
 def _validate_audio_codec_required(config):
-    if CONF_SPEAKER_ID in config and CONF_AUDIO_CODEC not in config:
+    if CONF_SPEAKER_ID in config and not config.get(CONF_AUDIO_CODEC):
         raise cv.Invalid(
-            "speaker_id is set: audio_codec must be set too -- it's the one audio format detail "
-            "that can't be read from the speaker's own config (sample_rate/channels/"
-            "bits_per_sample are; see audio_codec's own comment)"
+            "speaker_id is set: audio_codec must list at least one supported codec -- it's the one "
+            "audio format detail that can't be read from the speaker's own config (sample_rate/"
+            "channels/bits_per_sample are; see audio_codec's own comment)"
         )
     return config
 
@@ -210,7 +210,12 @@ CONFIG_SCHEMA = cv.All(
             # speaker_id -- see AUDIO_CODEC_PCM comment above). sample_rate/channels/
             # bits_per_sample are deliberately NOT options here: they're resolved from the
             # referenced speaker's own config in _final_validate, not asked twice.
-            cv.Optional(CONF_AUDIO_CODEC): cv.one_of(*AUDIO_CODECS, lower=True),
+            # Which audio codecs this player is built to support. A list (a single value is
+            # coerced to a one-element list): the AVI parser detects each file's actual codec at
+            # open and the player picks the matching path from this set; a file using a codec not
+            # listed here plays video-only. sample_rate/channels/bits_per_sample are still the
+            # speaker's fixed format (resolved below), not per-codec.
+            cv.Optional(CONF_AUDIO_CODEC): cv.ensure_list(cv.one_of(*AUDIO_CODECS, lower=True)),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
                 {
@@ -346,12 +351,13 @@ def _final_validate(config):
     _resolve_speaker_audio_format(config, fconf)
 
     # Codec support (FLAC/MP3) is enabled by the user's own `audio: codecs:` block, never by
-    # simple_video_player itself. audio_codec now fixes which ONE codec every video's audio track
-    # must use, so this is a hard requirement for that one codec, not a "some videos might use
-    # this" warning -- catch it here at compile time instead of failing at runtime on the device.
-    codec = config.get(CONF_AUDIO_CODEC)
-    if codec not in (AUDIO_CODEC_MP3, AUDIO_CODEC_FLAC):
-        return config  # PCM needs no decoder / no `audio: codecs:` entry at all
+    # simple_video_player itself. audio_codec is the list of codecs this player must support, so
+    # every COMPRESSED codec listed is a hard requirement -- catch a missing `audio: codecs:` entry
+    # here at compile time instead of failing at runtime on the device. PCM needs no decoder / no
+    # `audio: codecs:` entry at all, so it's skipped.
+    compressed = [c for c in config.get(CONF_AUDIO_CODEC, []) if c in (AUDIO_CODEC_MP3, AUDIO_CODEC_FLAC)]
+    if not compressed:
+        return config
 
     audio_config = fconf.get("audio")
     if isinstance(audio_config, list):
@@ -362,12 +368,13 @@ def _final_validate(config):
     if isinstance(audio_config, dict):
         codecs_config = audio_config.get(CONF_CODECS)
 
-    key = CONF_MP3 if codec == AUDIO_CODEC_MP3 else CONF_FLAC
-    if not isinstance(codecs_config, dict) or key not in codecs_config:
-        raise cv.Invalid(
-            f"audio_codec: {codec} is configured, but `audio: codecs: {codec}:` is not enabled -- "
-            f"add it, or change audio_codec to match what's actually enabled under `audio:`."
-        )
+    for codec in compressed:
+        key = CONF_MP3 if codec == AUDIO_CODEC_MP3 else CONF_FLAC
+        if not isinstance(codecs_config, dict) or key not in codecs_config:
+            raise cv.Invalid(
+                f"audio_codec lists {codec}, but `audio: codecs: {codec}:` is not enabled -- "
+                f"add it, or drop {codec} from audio_codec to match what's enabled under `audio:`."
+            )
 
     return config
 
@@ -436,7 +443,11 @@ async def to_code(config):
         cg.add_define("SVP_AUDIO_SAMPLE_RATE", config[CONF_AUDIO_SAMPLE_RATE])
         cg.add_define("SVP_AUDIO_SOURCE_CHANNELS", config[CONF_AUDIO_CHANNELS])
         cg.add_define("SVP_AUDIO_BITS_PER_SAMPLE", config[CONF_AUDIO_BITS_PER_SAMPLE])
-        cg.add_define(f"SVP_AUDIO_CODEC_{config[CONF_AUDIO_CODEC].upper()}")
+        # audio_codec is a list of SUPPORTED codecs: emit one SVP_AUDIO_SUPPORT_<CODEC> define per
+        # entry. The C++ side compiles in the decoder path for each supported codec and picks the
+        # matching one at runtime from the AVI parser's per-file detection.
+        for codec in config[CONF_AUDIO_CODEC]:
+            cg.add_define(f"SVP_AUDIO_SUPPORT_{codec.upper()}")
 
         # Speaker's channel mode -- always resolved by _final_validate (from the speaker's own
         # `channel:` key, or derived from its `num_channels:` when it has none), so this is always
