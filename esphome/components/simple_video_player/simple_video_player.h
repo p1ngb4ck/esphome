@@ -447,12 +447,13 @@ class SimpleVideoPlayer : public Component {
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
 
-  // Compressed-frame pre-buffer (PORTALL model). The reader task (Core 0) demuxes ahead into these
-  // slots; the playback task (Core 1) decodes from them. Two FreeRTOS queues cycle the
-  // FRAME_SLOT_COUNT pre-allocated jpeg_alloc_decoder_mem INPUT buffers between producer and
-  // consumer, so decode never waits on a file read and the storage ring is drained steadily
-  // (pre-buffering) rather than in bursts. All allocated once in setup(), reused every play().
-  static constexpr uint8_t FRAME_SLOT_COUNT = 4;
+  // ONE compressed "storage-load" buffer: the reader task (Core 0) demuxes the next compressed
+  // frame into it, the playback task (Core 1) decodes from it, cycled through two FreeRTOS queues.
+  // This is NOT where pre-buffering/read-jitter absorption happens -- that is the PSRAM ring in the
+  // storage interface (BufferedFileReader), which sits in front of this. The decoded render
+  // double-buffer is output_buffers_[2] (the two frame buffers); this is the single video buffer.
+  // Allocated once in setup(), reused every play().
+  static constexpr uint8_t FRAME_SLOT_COUNT = 1;
   struct FrameSlot {
     uint8_t *data{nullptr};
     size_t capacity{0};
