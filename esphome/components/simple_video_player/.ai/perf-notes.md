@@ -12,8 +12,9 @@ facts from the playback bring-up, kept so they are not re-discovered or re-broke
 - Last known-good before the 09-07 perf series: `a7b5617eb` (revert target of `9cff58090`).
 
 ## Frame budget / pacing
-- ~40 ms/frame total budget, shared by decode + audio + storage prefetch (process_audio_frame ran
-  "every ~40 ms" → ~25 fps; CLAUDE.md states the 40 ms figure). Default target_fps 30 = 33.3 ms.
+- HARD TARGET: 25 fps = 40 ms/frame. The device cannot sustain 30 fps. The 40 ms is the budget for
+  EVERYTHING per frame: HW-JPEG video decode + PPA rotate & render + audio decode (parallel on
+  Core 0) + pacing + video-file read/fetch. Use target_fps: 25, not 30.
 - Pacing is a wall-clock compare spin (esp_timer_get_time vs target). NO vTaskDelay on the play path,
   NO frame-dropping, NO catch-up snap: when behind, present now and move on (`4dc7005aa`).
 
