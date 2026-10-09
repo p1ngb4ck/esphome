@@ -259,10 +259,6 @@ void SimpleVideoPlayer::loop() {
     if (buf != nullptr && this->canvas_ != nullptr) {
       lv_canvas_set_buffer(this->canvas_, buf, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888);
       lv_obj_invalidate(this->canvas_);
-      // Release point for the playback task: from here the canvas shows this buffer, so the OTHER
-      // one is free to decode into. Published after the set_buffer so the task never frees a buffer
-      // still referenced by the canvas.
-      this->canvas_live_buffer_.store(buf, std::memory_order_release);
     }
   }
 }
@@ -504,7 +500,6 @@ void SimpleVideoPlayer::playback_loop_() {
     // Start decoding into buffer 0; show buffer 1 (black) until frame 0 is published. loop() will
     // repoint the canvas when it sees frame_ready_.
     this->decode_buf_idx_ = 0;
-    this->canvas_live_buffer_.store(nullptr, std::memory_order_release);
     this->display_buffer_.store(this->output_buffers_[1], std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
   }
@@ -663,23 +658,6 @@ void SimpleVideoPlayer::playback_loop_() {
       this->dsi_sync_prev_rotate_();
     }
 #endif
-
-    // Canvas path: never decode into the buffer the LVGL canvas is still pointing at. This spins
-    // ONLY when decode has run AHEAD of the renderer -- i.e. the back buffer it is about to reuse
-    // is still the one loop() last showed, because loop() has not yet picked up the frame just
-    // published. The normal case here is the opposite (decode behind): loop() repointed long ago,
-    // target != live, and this falls straight through with no wait. loop() runs on the main thread
-    // at equal priority (tick round-robin), so it always gets to repoint; bounded to one main-loop
-    // pass, so like the pace spin above it needs no inner wdt reset (the per-frame one covers it).
-#ifdef SVP_DSI_OUTPUT
-    if (this->dsi_ == nullptr)
-#endif
-    {
-      uint8_t *target = this->output_buffers_[this->decode_buf_idx_];
-      while (target == this->canvas_live_buffer_.load(std::memory_order_acquire) &&
-             this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING) {
-      }
-    }
 
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not

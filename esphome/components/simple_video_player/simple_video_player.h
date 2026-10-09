@@ -429,13 +429,6 @@ class SimpleVideoPlayer : public Component {
   // Set by decode_frame_() after a frame is decoded; consumed by loop() on the LVGL thread.
   std::atomic<bool> frame_ready_{false};
 
-  // The output buffer loop() currently has the LVGL canvas pointing at (the frame being shown).
-  // Set by loop() (main thread) right after lv_canvas_set_buffer(); read by the playback task
-  // (Core 1) to avoid decoding into a buffer the renderer is still showing. loop() and the LVGL
-  // render run sequentially on the same main-loop thread, so once this changes, no render of the
-  // previous buffer can still be in flight -- the repoint itself is the release point.
-  std::atomic<uint8_t *> canvas_live_buffer_{nullptr};
-
 #ifdef SVP_DSI_OUTPUT
   mipi_dsi::MipiDsi *dsi_{nullptr};  // non-null -> DSI direct output instead of the LVGL canvas
   uint16_t video_rotation_deg_{0};   // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
