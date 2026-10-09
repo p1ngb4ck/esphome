@@ -293,7 +293,6 @@ class SimpleVideoPlayer : public Component {
   /// Free all buffers
   void free_buffers_();
 
-
   //========================================================================
   // Error Handling
   //========================================================================
@@ -305,12 +304,13 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
 
   // Configuration
-  lvgl::LvglComponent *lvgl_component_{nullptr};  // Parent LVGL component (required at construction; not otherwise used)
+  lvgl::LvglComponent *lvgl_component_{
+      nullptr};  // Parent LVGL component (required at construction; not otherwise used)
   lv_obj_t *canvas_{nullptr};
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
-  uint32_t prefetch_duration_ms_{1000};  // accepted for config compat; read-ahead is the transfer-buffer arena
+  uint32_t prefetch_duration_ms_{1000};     // accepted for config compat; read-ahead is the transfer-buffer arena
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -359,12 +359,15 @@ class SimpleVideoPlayer : public Component {
   static constexpr size_t AUDIO_BYTES_PER_SEC = static_cast<size_t>(AUDIO_SAMPLE_RATE) * AUDIO_BYTES_PER_FRAME;
   // Same target durations / minimums init_audio_decoder_() always used -- just resolved at
   // compile time now instead of recomputed from a parsed file header every play().
-  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE =
-      (AUDIO_BYTES_PER_SEC * 250 / 1000) > (32 * 1024) ? (AUDIO_BYTES_PER_SEC * 250 / 1000) : (32 * 1024);
-  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE =
-      (AUDIO_BYTES_PER_SEC * 500 / 1000) > (16 * 1024) ? (AUDIO_BYTES_PER_SEC * 500 / 1000) : (16 * 1024);
-  static constexpr size_t AUDIO_TEMP_BUFFER_SIZE =
-      (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024) ? (AUDIO_BYTES_PER_SEC * 100 / 1000) : (8 * 1024);
+  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 250 / 1000) > (32 * 1024)
+                                                        ? (AUDIO_BYTES_PER_SEC * 250 / 1000)
+                                                        : (32 * 1024);
+  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 500 / 1000) > (16 * 1024)
+                                                          ? (AUDIO_BYTES_PER_SEC * 500 / 1000)
+                                                          : (16 * 1024);
+  static constexpr size_t AUDIO_TEMP_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024)
+                                                       ? (AUDIO_BYTES_PER_SEC * 100 / 1000)
+                                                       : (8 * 1024);
   static constexpr size_t AUDIO_DECODER_INPUT_BUFFER_SIZE = AUDIO_SAMPLE_RATE > 48000 ? (96 * 1024) : (64 * 1024);
   static constexpr size_t AUDIO_DECODER_OUTPUT_BUFFER_SIZE = AUDIO_SAMPLE_RATE > 48000 ? (48 * 1024) : (32 * 1024);
 #endif
@@ -377,7 +380,7 @@ class SimpleVideoPlayer : public Component {
   // Verified against the real audio component source: AudioDecoder::start() already resets its
   // own per-file state (potentially_failed_count_, end_of_file_, a fresh per-codec sub-decoder)
   // on every call, so calling it again on a persistent instance is exactly what it's for.
-  std::unique_ptr<audio::AudioDecoder> audio_decoder_;   // Audio decoder (MP3/FLAC/PCM)
+  std::unique_ptr<audio::AudioDecoder> audio_decoder_;                // Audio decoder (MP3/FLAC/PCM)
   std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
@@ -400,30 +403,40 @@ class SimpleVideoPlayer : public Component {
   uint32_t video_height_{0};
 
   // Buffers -- allocated ONCE in setup(), sized for the max resolution, reused every play().
-  std::unique_ptr<uint8_t[]> cache_buffer_;   // Internal RAM, aligned for DMA
-  // Decoded RGB888 frame buffer (PSRAM, jpeg_alloc_decoder_mem). This buffer IS the LVGL canvas
-  // buffer -- playback_loop_() points the canvas at it once per session via lv_canvas_set_buffer(),
-  // decode_frame_() writes straight into it, then loop() invalidates the canvas. Single buffer,
-  // as in the original working implementation.
-  std::unique_ptr<uint8_t[]> output_buffer_;
+  std::unique_ptr<uint8_t[]> cache_buffer_;  // Internal RAM, aligned for DMA
+  // Decoded RGB888 double-buffer for the LVGL-canvas path (PSRAM). The P4 HW JPEG decoder
+  // DMA2D-writes the next frame into the back buffer while LVGL's PPA reads the front buffer to
+  // blit/rotate it, so neither side ever sees a half-written frame -- the former single buffer tore
+  // because decode could be tick-preempted mid-write while LVGL blitted it. BOTH buffers come from
+  // jpeg_alloc_decoder_mem: the 16-byte/DMA/cache-line alignment is required because the decoder
+  // (writer) AND LVGL's PPA (reader) are both DMA engines. Allocated once in setup(), freed via
+  // heap_caps_free (NOT delete[]). Not used in the DSI path (that renders into driver FBs).
+  uint8_t *output_buffers_[2]{};
   size_t output_buffer_size_{0};
+  uint8_t decode_buf_idx_{0};  // which output buffer decode_frame_() writes next (playback-task-local)
 
-  // Set by decode_frame_() (video task) after a frame is decoded into output_buffer_; consumed by
-  // loop() on the LVGL thread, which then calls lv_obj_invalidate(canvas_).
+  // Published by decode_frame_() (video task, Core 1) once a frame is complete; consumed by loop()
+  // (LVGL thread, Core 1) which points the canvas at it and invalidates. All lv_canvas_* calls
+  // happen on the LVGL thread only -- never from the video task (LVGL is not thread-safe).
+  std::atomic<uint8_t *> display_buffer_{nullptr};
+  uint32_t canvas_w_{0};  // ALIGN_UP(width,16) for lv_canvas_set_buffer, set once per session
+  uint32_t canvas_h_{0};  // ALIGN_UP(height,16)
+
+  // Set by decode_frame_() after a frame is decoded; consumed by loop() on the LVGL thread.
   std::atomic<bool> frame_ready_{false};
 
 #ifdef SVP_DSI_OUTPUT
-  mipi_dsi::MipiDsi *dsi_{nullptr};   // non-null -> DSI direct output instead of the LVGL canvas
-  uint16_t video_rotation_deg_{0};    // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
+  mipi_dsi::MipiDsi *dsi_{nullptr};  // non-null -> DSI direct output instead of the LVGL canvas
+  uint16_t video_rotation_deg_{0};   // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
   ppa_client_handle_t ppa_client_{};
   SemaphoreHandle_t ppa_done_sem_{nullptr};  // given (from ISR) when an async PPA rotate finishes
-  void *dsi_fb_[3]{};                 // the mipi_dsi driver's framebuffers (native orientation)
-  void *dsi_prev_fb_{nullptr};        // FB rotated last pass, presented this pass (1-frame pipeline)
-  uint8_t *decode_target_{nullptr};   // where decode_frame_() writes in DSI mode (RGB888)
+  void *dsi_fb_[3]{};                        // the mipi_dsi driver's framebuffers (native orientation)
+  void *dsi_prev_fb_{nullptr};               // FB rotated last pass, presented this pass (1-frame pipeline)
+  uint8_t *decode_target_{nullptr};          // where decode_frame_() writes in DSI mode (RGB888)
   uint8_t dsi_fb_count_{0};
-  uint8_t dsi_back_idx_{0};           // which dsi_fb_ the next rotate writes / flip presents
-  bool dsi_lvgl_paused_{false};       // LVGL was paused for the duration of DSI-direct playback
-  bool dsi_direct_decode_{false};     // rotation 0: decode straight into dsi_fb_, no PPA at all
+  uint8_t dsi_back_idx_{0};        // which dsi_fb_ the next rotate writes / flip presents
+  bool dsi_lvgl_paused_{false};    // LVGL was paused for the duration of DSI-direct playback
+  bool dsi_direct_decode_{false};  // rotation 0: decode straight into dsi_fb_, no PPA at all
   // Dims derived from the DISPLAY, not the canvas: out_* = native panel res (the FB), in_* = the
   // video res the user must transcode to (= native res swapped for a 90/270 rotation).
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};

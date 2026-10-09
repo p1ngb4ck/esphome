@@ -39,7 +39,7 @@ static IRAM_ATTR bool svp_ppa_done_cb(ppa_client_handle_t, ppa_event_data_t *, v
 static constexpr size_t CACHE_ALIGNMENT = 1024;
 static constexpr size_t DMA_ALIGNMENT = 128;
 
-// Max resolution the output_buffer_ (allocated once in setup()) is sized for. ESP32-P4 panel.
+// Max resolution the output double-buffer (allocated once in setup()) is sized for. ESP32-P4 panel.
 static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
 static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
 
@@ -66,7 +66,7 @@ void SimpleVideoPlayer::setup() {
 
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // Direct mipi_dsi output: no LVGL canvas, no output_buffer_. init_dsi_output_() takes the
+    // Direct mipi_dsi output: no LVGL canvas, no output buffers. init_dsi_output_() takes the
     // driver-owned DPI framebuffers + a PPA client and points decode_target_ at its own decode
     // buffer (or straight at a framebuffer for the rotation-0 path). `canvas_id` is not set in this
     // mode (schema makes the two mutually exclusive).
@@ -90,20 +90,24 @@ void SimpleVideoPlayer::setup() {
     // writes straight into it. RGB888 (not RGB565): the P4 HW JPEG decoder's RGB565 output path is
     // buggy on some P4 silicon revisions. jpeg_alloc_decoder_mem() gives the 16-byte / DMA alignment
     // the HW decoder requires and reports the actual (cache-line-rounded) size it allocated.
-    const size_t max_output_size = static_cast<size_t>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)) *
-                                   ALIGN_UP(MAX_VIDEO_HEIGHT, 16) * 3;
+    const size_t max_output_size =
+        static_cast<size_t>(ALIGN_UP(MAX_VIDEO_WIDTH, 16)) * ALIGN_UP(MAX_VIDEO_HEIGHT, 16) * 3;
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-    size_t out_actual = 0;
-    this->output_buffer_.reset(static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &out_cfg, &out_actual)));
-    if (!this->output_buffer_) {
-      ESP_LOGE(TAG, "Failed to allocate output buffer (%zu bytes, PSRAM)", max_output_size);
-      this->mark_failed();
-      return;
+    // Two buffers for the canvas double-buffer (decode writes one while LVGL reads the other).
+    // jpeg_alloc_decoder_mem gives the decoder/PPA alignment both DMA engines need.
+    for (auto &buf : this->output_buffers_) {
+      size_t out_actual = 0;
+      buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &out_cfg, &out_actual));
+      if (buf == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate output buffer (%zu bytes, PSRAM)", max_output_size);
+        this->mark_failed();
+        return;
+      }
+      std::memset(buf, 0, out_actual);
+      this->output_buffer_size_ = out_actual;  // same size for both
     }
-    this->output_buffer_size_ = out_actual;
-    std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
-    ESP_LOGI(TAG, "Output buffer allocated: %zu bytes (PSRAM, max %ux%u)", this->output_buffer_size_,
+    ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, max %ux%u)", this->output_buffer_size_,
              ALIGN_UP(MAX_VIDEO_WIDTH, 16), ALIGN_UP(MAX_VIDEO_HEIGHT, 16));
   }
 
@@ -234,13 +238,17 @@ void SimpleVideoPlayer::loop() {
     return;
   }
 #endif
-  // Runs on the LVGL thread. decode_frame_() (video task) decoded a frame straight into
-  // output_buffer_ (== the canvas buffer) and set frame_ready_. Just invalidate the canvas here so
-  // LVGL redraws it -- the actual canvas update is triggered from loop(), never from the task.
-  // Cheap load first so the common no-frame path is a plain relaxed read, not an atomic RMW.
+  // Runs on the LVGL thread. decode_frame_() (video task) finished a frame in the back buffer and
+  // published it via display_buffer_ + frame_ready_. Point the canvas at that completed buffer and
+  // invalidate -- all lv_canvas_* happens HERE, never on the video task. Cheap load first so the
+  // common no-frame path is a plain relaxed read, not an atomic RMW.
   if (this->frame_ready_.load(std::memory_order_acquire) &&
       this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
-    lv_obj_invalidate(this->canvas_);
+    uint8_t *buf = this->display_buffer_.load(std::memory_order_acquire);
+    if (buf != nullptr && this->canvas_ != nullptr) {
+      lv_canvas_set_buffer(this->canvas_, buf, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888);
+      lv_obj_invalidate(this->canvas_);
+    }
   }
 }
 
@@ -426,13 +434,13 @@ void SimpleVideoPlayer::playback_loop_() {
   if (this->dsi_ == nullptr)
 #endif
   {
-    // Point the LVGL canvas at our own output_buffer_ (the decode target), sized to the decoder's
-    // 16-px-padded output layout. RGB888 -- the decoder always outputs RGB888 (RGB565 is buggy on
-    // some P4 revs); LVGL converts RGB888 -> the panel's format on blit (PPA/SW). Done once per
-    // session, from the playback task -- no frame decoded yet, nothing to race.
-    lv_canvas_set_buffer(this->canvas_, this->output_buffer_.get(), ALIGN_UP(width, 16), ALIGN_UP(height, 16),
-                         LV_COLOR_FORMAT_RGB888);
-    lv_obj_invalidate(this->canvas_);
+    // Record the canvas dimensions for loop() to pass to lv_canvas_set_buffer. The canvas is pointed
+    // at the freshly decoded buffer from loop() (the LVGL thread) -- NEVER from this video task, since
+    // LVGL is not thread-safe and loopTask runs the render/rotate/flush pipeline on the same core.
+    // RGB888: the decoder always outputs RGB888 (RGB565 is buggy on some P4 revs); LVGL converts
+    // RGB888 -> the panel's format on blit (PPA/SW).
+    this->canvas_w_ = ALIGN_UP(width, 16);
+    this->canvas_h_ = ALIGN_UP(height, 16);
   }
 
   // Fresh pacing state for this session.
@@ -470,14 +478,18 @@ void SimpleVideoPlayer::playback_loop_() {
   if (this->dsi_ == nullptr)
 #endif
   {
-    // Clear only the part of the buffer the first decode won't cover (padding / rounding tail, or a
-    // previous larger video's leftover pixels around a smaller new one). The decode overwrites the
-    // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region every frame; setup() already zeroed the whole
-    // buffer once. For a max-resolution video this memset is a no-op.
+    // Clear the region the decode won't cover (padding / rounding tail, or a previous larger video's
+    // leftover pixels around a smaller new one) in BOTH buffers; the decode overwrites the
+    // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region. For a max-resolution video this is a no-op.
     const size_t covered = static_cast<size_t>(ALIGN_UP(width, 16)) * ALIGN_UP(height, 16) * 3;
     if (covered < this->output_buffer_size_) {
-      std::memset(this->output_buffer_.get() + covered, 0, this->output_buffer_size_ - covered);
+      for (auto *buf : this->output_buffers_)
+        std::memset(buf + covered, 0, this->output_buffer_size_ - covered);
     }
+    // Start decoding into buffer 0; show buffer 1 (black) until frame 0 is published. loop() will
+    // repoint the canvas when it sees frame_ready_.
+    this->decode_buf_idx_ = 0;
+    this->display_buffer_.store(this->output_buffers_[1], std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
   }
 
@@ -606,8 +618,8 @@ void SimpleVideoPlayer::playback_loop_() {
       this->playback_start_time_us_ = esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur);
     }
 
-    int64_t target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                                     static_cast<int64_t>(frame_index * frame_dur);
+    int64_t target_present_time_us =
+        this->playback_start_time_us_ + this->paused_accum_us_ + static_cast<int64_t>(frame_index * frame_dur);
 
 #ifdef SVP_DSI_OUTPUT
     // DSI path: if more than one frame BEHIND the file clock, re-anchor the clock to now and carry
@@ -617,8 +629,8 @@ void SimpleVideoPlayer::playback_loop_() {
     if (this->dsi_ != nullptr && (esp_timer_get_time() - target_present_time_us) > frame_dur) {
       this->playback_start_time_us_ =
           esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur) - this->paused_accum_us_;
-      target_present_time_us = this->playback_start_time_us_ + this->paused_accum_us_ +
-                               static_cast<int64_t>(frame_index * frame_dur);
+      target_present_time_us =
+          this->playback_start_time_us_ + this->paused_accum_us_ + static_cast<int64_t>(frame_index * frame_dur);
     }
 #endif
 
@@ -644,7 +656,7 @@ void SimpleVideoPlayer::playback_loop_() {
       // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
       this->decode_fail_count_++;
     }
-    // decode_frame_() wrote the frame into output_buffer_ and set frame_ready_; loop() invalidates.
+    // decode_frame_() wrote the frame into the back buffer and published it; loop() points the canvas at it.
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && this->dsi_ != nullptr) {
@@ -703,8 +715,10 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Blank the canvas on stop -- cosmetic best-effort (it otherwise keeps showing the last frame).
   // memset here on the playback task, invalidate from loop() via frame_ready_.
-  if (this->output_buffer_) {
-    std::memset(this->output_buffer_.get(), 0, this->output_buffer_size_);
+  if (this->output_buffers_[0] != nullptr) {
+    for (auto *buf : this->output_buffers_)
+      std::memset(buf, 0, this->output_buffer_size_);
+    this->display_buffer_.store(this->output_buffers_[0], std::memory_order_release);
     this->frame_ready_.store(true, std::memory_order_release);
   }
 
@@ -850,15 +864,16 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 }
 
 bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
-  // Decode straight into output_buffer_ (== the LVGL canvas buffer). RGB888 output -- the P4 HW
+  // Decode into the canvas back buffer (or the DSI decode target). RGB888 output -- the P4 HW
   // JPEG decoder's RGB565 path is buggy on some silicon revs. BGR element order so the in-memory
   // byte order (B,G,R) matches LVGL's LV_COLOR_FORMAT_RGB888. Frame size padded to 16 (HW
-  // requirement); the decoder is told output_buffer_'s own size.
+  // requirement); the decoder is told the target buffer's own size.
   static const jpeg_decode_cfg_t decode_cfg = {
       .output_format = JPEG_DECODE_OUT_FORMAT_RGB888,
       .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
   };
-  uint8_t *out_buf = this->output_buffer_.get();
+  // Canvas path: decode into the back buffer (the one loop() is NOT currently showing).
+  uint8_t *out_buf = this->output_buffers_[this->decode_buf_idx_];
   uint32_t out_cap = static_cast<uint32_t>(this->output_buffer_size_);
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
@@ -873,7 +888,18 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
                                        static_cast<uint32_t>(ALIGN_UP(frame_size, 16)), out_buf, out_cap, &out_size);
   if (err != ESP_OK || out_size == 0)
     return false;
-  // Frame is in output_buffer_ -- tell loop() to invalidate the canvas.
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ == nullptr)
+#endif
+  {
+    // Publish the just-decoded buffer for loop() and flip the decode target to the other buffer, so
+    // the next decode never writes the buffer LVGL is about to blit (the paced decode + frequent
+    // loop() guarantee loop() repoints before the buffer is reused -- same 2-buffer invariant the
+    // DSI direct path relies on).
+    this->display_buffer_.store(out_buf, std::memory_order_release);
+    this->decode_buf_idx_ ^= 1;
+  }
+  // Tell loop() a frame is ready (consumed only on the canvas path; harmless in DSI mode).
   this->frame_ready_.store(true, std::memory_order_release);
   return true;
 }
@@ -909,8 +935,8 @@ bool SimpleVideoPlayer::init_dsi_output_() {
     }
     this->dsi_back_idx_ = 0;
     this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
-    ESP_LOGI(TAG, "DSI direct output (no rotate): %u FBs, video %ux%u == panel", this->dsi_fb_count_,
-             this->dsi_out_w_, this->dsi_out_h_);
+    ESP_LOGI(TAG, "DSI direct output (no rotate): %u FBs, video %ux%u == panel", this->dsi_fb_count_, this->dsi_out_w_,
+             this->dsi_out_h_);
     return true;
   }
 
@@ -945,8 +971,7 @@ bool SimpleVideoPlayer::init_dsi_output_() {
   jpeg_decode_memory_alloc_cfg_t db_cfg{};
   db_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
   size_t db_actual = 0;
-  this->dsi_decode_buf_.reset(
-      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->dsi_fb_bytes_, &db_cfg, &db_actual)));
+  this->dsi_decode_buf_.reset(static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->dsi_fb_bytes_, &db_cfg, &db_actual)));
   if (!this->dsi_decode_buf_) {
     ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes, PSRAM)", this->dsi_fb_bytes_);
     return false;
@@ -1250,8 +1275,8 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
     // DSI direct output: the video must be transcoded to exactly the resolution the panel needs
     // (native res with W/H swapped for a 90/270 rotation). No scaling -- the user matches it.
     if (video_width != this->dsi_in_w_ || video_height != this->dsi_in_h_) {
-      ESP_LOGE(TAG, "Video is %" PRIu32 "x%" PRIu32 " but this panel needs exactly %ux%u -- re-transcode.",
-               video_width, video_height, this->dsi_in_w_, this->dsi_in_h_);
+      ESP_LOGE(TAG, "Video is %" PRIu32 "x%" PRIu32 " but this panel needs exactly %ux%u -- re-transcode.", video_width,
+               video_height, this->dsi_in_w_, this->dsi_in_h_);
       return false;
     }
     ESP_LOGI(TAG, "Buffers verified (DSI): %ux%u -> panel %ux%u", this->dsi_in_w_, this->dsi_in_h_, this->dsi_out_w_,
@@ -1259,7 +1284,7 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
     return true;
   }
 #endif
-  // output_buffer_ is allocated once in setup() at the max resolution. Just verify this file fits.
+  // output_buffers_ are allocated once in setup() at the max resolution. Just verify this file fits.
   uint32_t aligned_width = ALIGN_UP(video_width, 16);
   uint32_t aligned_height = ALIGN_UP(video_height, 16);
   size_t required = static_cast<size_t>(aligned_width) * aligned_height * 3;  // RGB888
@@ -1267,7 +1292,7 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
   ESP_LOGI(TAG, "Verifying buffers for %" PRIu32 "x%" PRIu32 " video (aligned: %" PRIu32 "x%" PRIu32 ", %zu bytes)",
            video_width, video_height, aligned_width, aligned_height, required);
 
-  if (!this->output_buffer_ || required > this->output_buffer_size_) {
+  if (this->output_buffers_[0] == nullptr || required > this->output_buffer_size_) {
     ESP_LOGE(TAG, "Video too large for the output buffer: %" PRIu32 "x%" PRIu32 " needs %zu bytes, have %zu",
              aligned_width, aligned_height, required, this->output_buffer_size_);
     return false;
@@ -1281,11 +1306,15 @@ void SimpleVideoPlayer::free_buffers_() {
     this->hw_jpeg_decoder_ = nullptr;
   }
 
-  // output_buffer_ came from jpeg_alloc_decoder_mem() -- heap_caps_free(), not unique_ptr delete[].
-  if (this->output_buffer_) {
-    heap_caps_free(this->output_buffer_.release());
+  // output_buffers_ came from jpeg_alloc_decoder_mem() -- heap_caps_free().
+  for (auto *&buf : this->output_buffers_) {
+    if (buf != nullptr) {
+      heap_caps_free(buf);
+      buf = nullptr;
+    }
   }
   this->output_buffer_size_ = 0;
+  this->display_buffer_.store(nullptr, std::memory_order_release);
 
 #ifdef USE_AUDIO
   // Permanent audio buffers (allocated once in setup(), see there) -- true end-of-life free.
@@ -1383,18 +1412,20 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // above -- never silently reconfigure the decoder per file.
 #if defined(SVP_AUDIO_CODEC_MP3)
   if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::MP3)) {
-    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not MP3 (this player is configured for MP3 only, "
-                  "codec=0x%04" PRIX32 "). Playing video-only.",
+    ESP_LOGE(TAG,
+             "Audio codec mismatch: file's audio track is not MP3 (this player is configured for MP3 only, "
+             "codec=0x%04" PRIX32 "). Playing video-only.",
              audio_info->codec);
     return false;
   }
   audio::AudioFileType codec_type = audio::AudioFileType::MP3;
-  ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate,
-           audio_info->channels, audio_info->bits_per_sample);
+  ESP_LOGI(TAG, "Audio codec: MP3, %" PRIu32 " Hz, %u channels, %u bits", audio_info->sample_rate, audio_info->channels,
+           audio_info->bits_per_sample);
 #elif defined(SVP_AUDIO_CODEC_FLAC)
   if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::FLAC)) {
-    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not FLAC (this player is configured for FLAC only, "
-                  "codec=0x%04" PRIX32 "). Playing video-only.",
+    ESP_LOGE(TAG,
+             "Audio codec mismatch: file's audio track is not FLAC (this player is configured for FLAC only, "
+             "codec=0x%04" PRIX32 "). Playing video-only.",
              audio_info->codec);
     return false;
   }
@@ -1403,8 +1434,9 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
            audio_info->channels, audio_info->bits_per_sample);
 #else  // SVP_AUDIO_CODEC_PCM (default)
   if (audio_info->codec != static_cast<uint32_t>(AVIAudioCodec::PCM)) {
-    ESP_LOGE(TAG, "Audio codec mismatch: file's audio track is not raw PCM (this player is configured for PCM "
-                  "only, codec=0x%04" PRIX32 "). Playing video-only.",
+    ESP_LOGE(TAG,
+             "Audio codec mismatch: file's audio track is not raw PCM (this player is configured for PCM "
+             "only, codec=0x%04" PRIX32 "). Playing video-only.",
              audio_info->codec);
     return false;
   }
@@ -1565,8 +1597,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 
       if (decode_state == audio::AudioDecoderState::FAILED) {
         if (++audio_decode_failures >= AUDIO_MAX_CONSECUTIVE_DECODE_FAILURES) {
-          ESP_LOGE(TAG, "Audio decode failed %" PRIu32 " times in a row -- disabling audio",
-                   audio_decode_failures);
+          ESP_LOGE(TAG, "Audio decode failed %" PRIu32 " times in a row -- disabling audio", audio_decode_failures);
           this->audio_enabled_ = false;
           break;
         }
