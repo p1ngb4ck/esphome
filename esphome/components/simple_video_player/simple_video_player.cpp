@@ -910,12 +910,13 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   if (this->dsi_ != nullptr) {
     // DSI direct mode: decode straight into the driver-owned framebuffer in the panel's own pixel
     // format (derived from the display config in init_dsi_output_). RGB565 panels get an RGB565
-    // decode so the output fits the FB; RGB888 panels keep the RGB888/BGR config above.
+    // decode so the output fits the FB; RGB888 keeps the format above. BGR element order stays for
+    // BOTH: it puts the lowest-addressed byte at blue, which is the little-endian layout esp_lcd's
+    // RGB565 and RGB888 framebuffers both read -- RGB here comes out byte-swapped (grey -> green).
     out_buf = this->decode_target_;
     out_cap = static_cast<uint32_t>(this->dsi_fb_bytes_);
     if (this->dsi_fb_bpp_ == 2) {
       decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
-      decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
     }
   }
 #endif
