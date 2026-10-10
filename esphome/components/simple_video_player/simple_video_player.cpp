@@ -284,6 +284,10 @@ void SimpleVideoPlayer::dump_config() {
 //========================================================================
 
 void SimpleVideoPlayer::play(const std::string &video_path) {
+  if (this->is_failed()) {
+    ESP_LOGE(TAG, "Cannot play: component failed to initialize (see setup logs)");
+    return;
+  }
   ESP_LOGI(TAG, "Playing video: %s", video_path.c_str());
 
   // Stop any existing playback
@@ -446,7 +450,21 @@ void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ == nullptr)
+  if (this->dsi_ != nullptr) {
+    // DSI direct output presents the decoded frame straight into the panel's native framebuffer --
+    // no scaling, no rotation. The transcoded video must therefore match the panel framebuffer
+    // exactly (the user transposes at transcode to the panel's native orientation). A mismatch would
+    // decode out of bounds, so abort cleanly instead of running into it.
+    if (width != this->dsi_out_w_ || height != this->dsi_out_h_) {
+      ESP_LOGE(TAG,
+               "Video %" PRIu32 "x%" PRIu32 " does not match panel framebuffer %ux%u -- transcode to the "
+               "panel's native resolution/orientation. Aborting playback.",
+               width, height, this->dsi_out_w_, this->dsi_out_h_);
+      this->set_error_(PlaybackError::INVALID_VIDEO_FORMAT);
+      this->close_file_();
+      return;
+    }
+  } else
 #endif
   {
     // Record the canvas dimensions for loop() to pass to lv_canvas_set_buffer. The canvas is pointed
@@ -879,11 +897,9 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
 }
 
 bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_size) {
-  // Decode into the canvas back buffer (or the DSI decode target). RGB888 output -- the P4 HW
-  // JPEG decoder's RGB565 path is buggy on some silicon revs. BGR element order so the in-memory
-  // byte order (B,G,R) matches LVGL's LV_COLOR_FORMAT_RGB888. Frame size padded to 16 (HW
-  // requirement); the decoder is told the target buffer's own size.
-  static const jpeg_decode_cfg_t decode_cfg = {
+  // Canvas path: RGB888/BGR so the in-memory byte order (B,G,R) matches LVGL's LV_COLOR_FORMAT_RGB888.
+  // Frame size padded to 16 (HW requirement); the decoder is told the target buffer's own size.
+  jpeg_decode_cfg_t decode_cfg = {
       .output_format = JPEG_DECODE_OUT_FORMAT_RGB888,
       .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
   };
@@ -892,10 +908,15 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   uint32_t out_cap = static_cast<uint32_t>(this->output_buffer_size_);
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // DSI mode: decode into decode_target_ -- either a driver framebuffer (rotation 0) or the
-    // dedicated PPA-input buffer (rotation 90/180/270). Both are dsi_fb_bytes_ RGB888 bytes.
+    // DSI direct mode: decode straight into the driver-owned framebuffer in the panel's own pixel
+    // format (derived from the display config in init_dsi_output_). RGB565 panels get an RGB565
+    // decode so the output fits the FB; RGB888 panels keep the RGB888/BGR config above.
     out_buf = this->decode_target_;
     out_cap = static_cast<uint32_t>(this->dsi_fb_bytes_);
+    if (this->dsi_fb_bpp_ == 2) {
+      decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+      decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB;
+    }
   }
 #endif
   uint32_t out_size = 0;
@@ -923,78 +944,40 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 bool SimpleVideoPlayer::init_dsi_output_() {
   this->dsi_->get_dsi_frame_buffers(this->dsi_fb_, &this->dsi_fb_count_);
 
-  // Rotation comes from the LVGL component, not the mipi_dsi display: ESPHome forbids `rotation:`
-  // on a display that LVGL drives ("set rotation in the LVGL config instead"), and mipi_dsi has no
-  // hardware rotation, so LVGL's is the only rotation in the system. DisplayRotation's enum values
-  // ARE the degrees (0/90/180/270).
-  this->video_rotation_deg_ = static_cast<uint16_t>(this->lvgl_component_->get_rotation());
-
-  // out_* = the panel's native framebuffer resolution (what we flip in). in_* = the resolution the
-  // user must transcode to: native res with W/H swapped for a 90/270 rotation.
-  this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
-  this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
-  const bool transpose = this->video_rotation_deg_ == 90 || this->video_rotation_deg_ == 270;
-  this->dsi_in_w_ = transpose ? this->dsi_out_h_ : this->dsi_out_w_;
-  this->dsi_in_h_ = transpose ? this->dsi_out_w_ : this->dsi_out_h_;
-  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * 3;  // RGB888
-
-  this->dsi_direct_decode_ = this->video_rotation_deg_ == 0;
-
-  if (this->dsi_direct_decode_) {
-    // Rotation 0: the video is already in panel orientation (user pre-rotated it in the
-    // transcoder). HW-JPEG-decode straight into a DSI framebuffer and flip -- no PPA, no extra
-    // copy, no intermediate buffer. Two framebuffers are enough (one scanning out, one decoding).
-    if (this->dsi_fb_count_ < 2) {
-      ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; need >= 2", this->dsi_fb_count_);
-      return false;
-    }
-    this->dsi_back_idx_ = 0;
-    this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
-    ESP_LOGI(TAG, "DSI direct output (no rotate): %u FBs, video %ux%u == panel", this->dsi_fb_count_, this->dsi_out_w_,
-             this->dsi_out_h_);
-    return true;
-  }
-
-  // Rotation 90/180/270: PPA the decoded frame into a DSI framebuffer. The non-blocking rotate
-  // pipeline needs three FBs (one scanning out, one just presented, one being rotated into).
-  if (this->dsi_fb_count_ < 3) {
-    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; need 3 for rotation (set frame_buffers: 3)",
+  // Everything here is derived from the mipi_dsi display config -- no rotation, no PPA, no scaling.
+  // The HW JPEG decoder writes straight into a driver-owned framebuffer in the panel's own pixel
+  // format, which is then flipped at VSYNC. The video must therefore already be authored in the
+  // panel's native orientation + resolution (the user transposes at transcode); a mismatch is
+  // caught at play() and aborts cleanly.
+  if (this->dsi_fb_count_ < 2) {
+    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; direct video output needs >= 2 (set frame_buffers: 2)",
              this->dsi_fb_count_);
     return false;
   }
-  ppa_client_config_t cfg{};
-  cfg.oper_type = PPA_OPERATION_SRM;
-  cfg.max_pending_trans_num = 4;  // let rotates queue rather than fail-fast when one runs long
-  if (ppa_register_client(&cfg, &this->ppa_client_) != ESP_OK) {
-    ESP_LOGE(TAG, "ppa_register_client(SRM) failed");
-    return false;
-  }
-  this->ppa_done_sem_ = xSemaphoreCreateBinary();
-  if (this->ppa_done_sem_ == nullptr) {
-    ESP_LOGE(TAG, "ppa_done_sem_ create failed");
-    return false;
-  }
-  ppa_event_callbacks_t ppa_cbs{};
-  ppa_cbs.on_trans_done = svp_ppa_done_cb;
-  if (ppa_client_register_event_callbacks(this->ppa_client_, &ppa_cbs) != ESP_OK) {
-    ESP_LOGE(TAG, "ppa_client_register_event_callbacks failed");
-    return false;
-  }
 
-  // Dedicated decode target (JPEG-decoder aligned), sized to the FB byte count -- the in_ and out_
-  // layouts have the same total size.
-  jpeg_decode_memory_alloc_cfg_t db_cfg{};
-  db_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-  size_t db_actual = 0;
-  this->dsi_decode_buf_.reset(static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->dsi_fb_bytes_, &db_cfg, &db_actual)));
-  if (!this->dsi_decode_buf_) {
-    ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes, PSRAM)", this->dsi_fb_bytes_);
+  this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
+  this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
+  this->dsi_in_w_ = this->dsi_out_w_;  // no rotation: decode resolution == panel resolution
+  this->dsi_in_h_ = this->dsi_out_h_;
+  this->video_rotation_deg_ = 0;
+
+  // Framebuffer byte size AND the JPEG decoder output format (chosen in decode_frame_) both follow
+  // the panel's color depth: RGB888 -> 3 bytes, RGB565 -> 2 bytes. Decoding into the FB in the
+  // panel's own format needs no conversion. Narrower formats (e.g. RGB332) aren't supported here.
+  this->dsi_fb_bpp_ = this->dsi_->get_bytes_per_pixel();
+  if (this->dsi_fb_bpp_ != 3 && this->dsi_fb_bpp_ != 2) {
+    ESP_LOGE(TAG, "mipi_dsi color depth is %u bytes/pixel; direct video needs RGB888 (3) or RGB565 (2)",
+             this->dsi_fb_bpp_);
     return false;
   }
-  this->decode_target_ = this->dsi_decode_buf_.get();
+  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
 
-  ESP_LOGI(TAG, "DSI direct output: %u FBs, rotation %u deg, video %ux%u -> panel %ux%u", this->dsi_fb_count_,
-           this->video_rotation_deg_, this->dsi_in_w_, this->dsi_in_h_, this->dsi_out_w_, this->dsi_out_h_);
+  this->dsi_direct_decode_ = true;
+  this->dsi_back_idx_ = 0;
+  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
+
+  ESP_LOGI(TAG, "DSI direct output: %u FBs, panel %ux%u, %u bytes/pixel (%s)", this->dsi_fb_count_, this->dsi_out_w_,
+           this->dsi_out_h_, this->dsi_fb_bpp_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
   return true;
 }
 

@@ -446,6 +446,7 @@ class SimpleVideoPlayer : public Component {
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};
   uint16_t dsi_in_w_{0}, dsi_in_h_{0};
   size_t dsi_fb_bytes_{0};
+  uint8_t dsi_fb_bpp_{3};  // panel framebuffer bytes/pixel from the display config (RGB888=3, RGB565=2)
   std::unique_ptr<uint8_t[]> dsi_decode_buf_;  // jpeg_alloc_decoder_mem, sized dsi_fb_bytes_ (RGB888)
 #endif
 

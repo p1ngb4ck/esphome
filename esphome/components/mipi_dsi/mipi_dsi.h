@@ -49,6 +49,10 @@ class MipiDsi final : public display::Display {
   void set_pclk_frequency(float pclk_frequency) { this->pclk_frequency_ = pclk_frequency; }
   int get_width_internal() override { return this->width_; }
   int get_height_internal() override { return this->height_; }
+  // Bytes per pixel of the panel framebuffers, derived from the configured color depth (same
+  // expression write_to_display_() uses): RGB888 -> 3, RGB565 -> 2. Lets a direct-framebuffer
+  // client size and format its output from the display config instead of hardcoding RGB888.
+  uint8_t get_bytes_per_pixel() const { return 3 - static_cast<uint8_t>(this->color_depth_); }
   void set_hsync_back_porch(uint16_t hsync_back_porch) { this->hsync_back_porch_ = hsync_back_porch; }
   void set_hsync_front_porch(uint16_t hsync_front_porch) { this->hsync_front_porch_ = hsync_front_porch; }
   void set_hsync_pulse_width(uint16_t hsync_pulse_width) { this->hsync_pulse_width_ = hsync_pulse_width; }
