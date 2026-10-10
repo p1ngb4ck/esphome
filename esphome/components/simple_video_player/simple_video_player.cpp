@@ -798,6 +798,17 @@ void SimpleVideoPlayer::playback_loop_() {
              static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
              this->decode_fail_count_, this->bad_payload_count_);
   }
+  if (this->file_reader_ != nullptr && stat_frames > 0) {
+    const auto &fs = this->file_reader_->fill_stats();
+    const float play_us = static_cast<float>(stat_frames) * this->frame_duration_us_;
+    ESP_LOGI(TAG,
+             "read stats: %" PRIu32 " underruns, min ring %u KB, %" PRIu32 " chunks, chunk avg %" PRIu32
+             " / max %" PRIu32 " us, fill %.2f MB/s, video needs %.2f MB/s",
+             fs.underruns, static_cast<unsigned>(fs.min_avail / 1024), fs.chunks,
+             fs.chunks ? static_cast<uint32_t>(fs.chunk_us / fs.chunks) : 0u, fs.chunk_us_max,
+             fs.chunk_us ? static_cast<float>(fs.bytes_filled) / static_cast<float>(fs.chunk_us) : 0.0f,
+             play_us > 0 ? static_cast<float>(this->file_reader_->tell()) / play_us : 0.0f);
+  }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
   this->close_file_();

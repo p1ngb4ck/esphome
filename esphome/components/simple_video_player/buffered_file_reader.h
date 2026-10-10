@@ -55,6 +55,18 @@ class BufferedFileReader {
   /// streaming mode already have their bytes. Uses the existing kick_fill_ -> on_fill_done_ chain.
   bool prefill_cache();
 
+  /// Fill-path counters for the end-of-playback stats (plain counters, reset per open()).
+  struct FillStats {
+    uint32_t underruns{0};      // streaming reads that found the ring short of the request
+    size_t min_avail{0};        // lowest ring fill seen by a streaming read
+    bool min_set{false};
+    uint32_t chunks{0};         // read_chunk completions delivered into the ring
+    uint64_t chunk_us{0};       // sum of submit -> delivered time
+    uint32_t chunk_us_max{0};
+    uint64_t bytes_filled{0};
+  };
+  const FillStats &fill_stats() const { return this->stats_; }
+
  protected:
   // --- blocking hand-off for the one-shot stream calls (begin_read/seek/tell/end_read) ----------
   void arm_wait_() {
@@ -110,6 +122,8 @@ class BufferedFileReader {
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports
   std::atomic<bool> eof_{false};
   std::atomic<bool> fill_err_{false};
+  uint32_t fill_submit_us_{0};
+  FillStats stats_{};
 };
 
 }  // namespace simple_video_player

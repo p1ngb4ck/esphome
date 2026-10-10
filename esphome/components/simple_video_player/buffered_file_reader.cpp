@@ -4,6 +4,7 @@
  */
 
 #include "buffered_file_reader.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include <algorithm>
@@ -28,6 +29,7 @@ void BufferedFileReader::kick_fill_() {
   }
   size_t want = std::min(FILL_CHUNK, room);
   this->fill_got_ = 0;
+  this->fill_submit_us_ = micros();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
       this->handle_, this->arena_, want, &this->fill_got_,
       [this](storage::StorageError e) { this->on_fill_done_(e); });
@@ -46,6 +48,12 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   } else {
     // want was <= ring free space and read() only frees more, so this always fits whole.
     this->ring_->write_without_replacement(this->arena_, this->fill_got_, 0, true);
+    const uint32_t dt = micros() - this->fill_submit_us_;
+    this->stats_.chunks++;
+    this->stats_.chunk_us += dt;
+    if (dt > this->stats_.chunk_us_max)
+      this->stats_.chunk_us_max = dt;
+    this->stats_.bytes_filled += this->fill_got_;
   }
   this->fill_in_flight_.store(false, std::memory_order_release);
   if (this->waiting_task_ != nullptr)
@@ -113,6 +121,7 @@ bool BufferedFileReader::open(const char *path) {
   this->fill_err_.store(false);
   this->fill_in_flight_.store(false);
   this->draining_.store(false);
+  this->stats_ = FillStats{};
   this->kick_fill_();  // start streaming
   return true;
 }
@@ -169,7 +178,14 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
     // PLAY path: single non-blocking drain. The storage worker streams chunks in ahead via the
     // async read_chunk() completion chain (on_fill_done_ -> kick_fill_), so in normal playback the
     // ring is already primed and this returns the full `size`. Never parks, never spins.
+    const size_t avail = this->ring_->available();
+    if (!this->stats_.min_set || avail < this->stats_.min_avail) {
+      this->stats_.min_avail = avail;
+      this->stats_.min_set = true;
+    }
     size_t n = this->ring_->read(buffer, size, 0);
+    if (n < size && !this->eof_.load(std::memory_order_acquire))
+      this->stats_.underruns++;
     this->current_position_ += n;
     this->kick_fill_();  // keep the async stream fed
     if (n == 0) {
