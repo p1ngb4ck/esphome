@@ -78,9 +78,6 @@ static void hold_wifi_for_stream(bool &held, bool want) {
 #endif
   }
   held = want;
-  ESP_LOGD(TAG, "%s",
-           want ? "Streaming: Wi-Fi roaming scans and power saving held off"
-                : "Idle: Wi-Fi roaming scans and power saving allowed again");
 #else
   (void) held;
   (void) want;
@@ -202,6 +199,12 @@ void SimpleVideoPlayer::stream_net_loop_() {
         xQueueReset(this->stream_touch_q_);
       this->stream_last_touch_valid_ = false;
 #endif
+      this->stream_stats_since_ms_ = millis();
+      this->stream_drawn_ = 0;
+      this->stream_draw_us_ = 0;
+      this->stream_draw_us_max_ = 0;
+      this->stream_dropped_no_buffer_ = 0;
+      this->stream_dropped_decode_ = 0;
       this->stream_connected_.store(true, std::memory_order_release);
 
       uint32_t last_recv = millis();
@@ -239,6 +242,18 @@ void SimpleVideoPlayer::stream_net_loop_() {
       }
 
       hold_wifi_for_stream(wifi_held, false);
+      // The stream is over; only logged when no file plays either.
+      const uint32_t dropped = this->stream_dropped_no_buffer_ + this->stream_dropped_decode_;
+      if ((this->stream_drawn_ > 0 || dropped > 0) &&
+          this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+        const float secs = (millis() - this->stream_stats_since_ms_) / 1000.0f;
+        ESP_LOGI(TAG,
+                 "stream stats: %" PRIu32 " frames drawn in %.1f s (%.1f fps), draw avg %" PRIu32 " / max %" PRIu32
+                 " us, %" PRIu32 " dropped (%" PRIu32 " no buffer, %" PRIu32 " decode)",
+                 this->stream_drawn_, secs, secs > 0 ? this->stream_drawn_ / secs : 0.0f,
+                 this->stream_drawn_ ? static_cast<uint32_t>(this->stream_draw_us_ / this->stream_drawn_) : 0u,
+                 this->stream_draw_us_max_, dropped, this->stream_dropped_no_buffer_, this->stream_dropped_decode_);
+      }
       this->stream_connected_.store(false, std::memory_order_release);
       if (this->stream_current_ != nullptr) {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);
@@ -336,6 +351,7 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     // rectangle is counted out so the next header is found.
     StreamFrame *frame = nullptr;
     if (xQueueReceive(this->stream_empty_q_, &frame, pdMS_TO_TICKS(STREAM_FRAME_WAIT_MS)) != pdTRUE) {
+      this->stream_dropped_no_buffer_++;
       this->stream_skip_ = total;
       continue;
     }
@@ -421,8 +437,16 @@ void SimpleVideoPlayer::stream_draw_loop_() {
           out_size > 0) {
         // Decoded rows are padded to 16; x_pad skips the padding at the end of each row.
         const uint16_t padded_w = (frame->w + 15) & ~15;
+        const uint32_t start = micros();
         this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, this->decode_target_,
                                    display::COLOR_ORDER_RGB, bitness, false, 0, 0, padded_w - frame->w);
+        const uint32_t took = micros() - start;
+        this->stream_draw_us_ += took;
+        if (took > this->stream_draw_us_max_)
+          this->stream_draw_us_max_ = took;
+        this->stream_drawn_++;
+      } else {
+        this->stream_dropped_decode_++;
       }
       xSemaphoreGive(this->output_lock_);
     }

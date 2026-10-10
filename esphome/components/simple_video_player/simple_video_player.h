@@ -540,6 +540,14 @@ class SimpleVideoPlayer : public Component {
   std::atomic<bool> stream_awake_{true};
   std::atomic<bool> stream_status_pending_{false};
   std::atomic<bool> stream_depth_pending_{false};
+  // Stream statistics (Portall's): plain counters while a sender is connected, each written by one
+  // task only, logged once by the network task after the sender has gone.
+  uint32_t stream_stats_since_ms_{0};
+  uint32_t stream_drawn_{0};
+  uint64_t stream_draw_us_{0};
+  uint32_t stream_draw_us_max_{0};
+  uint32_t stream_dropped_no_buffer_{0};
+  uint32_t stream_dropped_decode_{0};
 #ifdef SVP_STREAM_TOUCH
   static constexpr uint8_t STREAM_TOUCH_MAX = 5;
   struct StreamTouch {
