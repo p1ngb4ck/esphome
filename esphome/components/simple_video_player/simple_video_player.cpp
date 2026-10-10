@@ -673,14 +673,6 @@ void SimpleVideoPlayer::playback_loop_() {
     while (target_present_time_us - esp_timer_get_time() > 0) {
     }
 
-#ifdef SVP_DSI_OUTPUT
-    // Reclaim the previous pass's async PPA rotate before decode reuses the decode buffer.
-    // (No-op on the rotation-0 direct path -- there is no PPA and dsi_prev_fb_ stays null.)
-    if (this->dsi_ != nullptr && !this->dsi_direct_decode_) {
-      this->dsi_sync_prev_rotate_();
-    }
-#endif
-
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
@@ -693,11 +685,14 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && this->dsi_ != nullptr) {
-      if (this->dsi_direct_decode_) {
-        this->present_dsi_direct_();  // rotation 0: decoded straight into the FB, just flip
-      } else {
-        this->present_dsi_();  // present prev frame's FB, then queue this frame's rotate (async)
-      }
+      // Portall-style present: hand the decoded frame to the mipi_dsi display. x_pad skips the
+      // 16-pixel decode padding at the end of each line (zero when the panel width is a multiple
+      // of 16). The video is the panel's native size (enforced at play()), so it draws at 0,0.
+      const int x_pad = static_cast<int>(((this->dsi_out_w_ + 15) & ~15) - this->dsi_out_w_);
+      const display::ColorBitness bitness =
+          this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
+      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_,
+                                 display::COLOR_ORDER_RGB, bitness, false, 0, 0, x_pad);
     }
 #endif
 
@@ -943,42 +938,42 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 
 #ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::init_dsi_output_() {
-  this->dsi_->get_dsi_frame_buffers(this->dsi_fb_, &this->dsi_fb_count_);
-
-  // Everything here is derived from the mipi_dsi display config -- no rotation, no PPA, no scaling.
-  // The HW JPEG decoder writes straight into a driver-owned framebuffer in the panel's own pixel
-  // format, which is then flipped at VSYNC. The video must therefore already be authored in the
-  // panel's native orientation + resolution (the user transposes at transcode); a mismatch is
-  // caught at play() and aborts cleanly.
-  if (this->dsi_fb_count_ < 2) {
-    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; direct video output needs >= 2 (set frame_buffers: 2)",
-             this->dsi_fb_count_);
-    return false;
-  }
-
+  // Portall-style presentation: the frame is decoded into an RGB buffer in the panel's own pixel
+  // format and handed to the mipi_dsi display with draw_pixels_at() -- the display does the
+  // framebuffer write. No owned-framebuffer flip and no PPA here: the video is authored in the
+  // panel's native orientation and resolution (the user transposes at transcode), and a size
+  // mismatch is caught at play() and aborts cleanly.
   this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
   this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
-  this->dsi_in_w_ = this->dsi_out_w_;  // no rotation: decode resolution == panel resolution
+  this->dsi_in_w_ = this->dsi_out_w_;
   this->dsi_in_h_ = this->dsi_out_h_;
   this->video_rotation_deg_ = 0;
 
-  // Framebuffer byte size AND the JPEG decoder output format (chosen in decode_frame_) both follow
-  // the panel's color depth: RGB888 -> 3 bytes, RGB565 -> 2 bytes. Decoding into the FB in the
-  // panel's own format needs no conversion. Narrower formats (e.g. RGB332) aren't supported here.
+  // Bytes per pixel from the display's own color-depth config: RGB888 -> 3, RGB565 -> 2. The
+  // decoder writes this format (BGR element order, see decode_frame_) so the display copies it as is.
   this->dsi_fb_bpp_ = this->dsi_->get_bytes_per_pixel();
   if (this->dsi_fb_bpp_ != 3 && this->dsi_fb_bpp_ != 2) {
     ESP_LOGE(TAG, "mipi_dsi color depth is %u bytes/pixel; direct video needs RGB888 (3) or RGB565 (2)",
              this->dsi_fb_bpp_);
     return false;
   }
-  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
 
-  this->dsi_direct_decode_ = true;
-  this->dsi_back_idx_ = 0;
-  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
+  // The HW JPEG decoder rounds each axis up to a multiple of 16; size the buffer for the padded
+  // panel resolution and let draw_pixels_at() skip the padding (x_pad) at the end of each line.
+  const uint16_t padded_w = (this->dsi_out_w_ + 15) & ~15;
+  const uint16_t padded_h = (this->dsi_out_h_ + 15) & ~15;
+  jpeg_decode_memory_alloc_cfg_t out_cfg = {};
+  out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  const size_t want = static_cast<size_t>(padded_w) * padded_h * this->dsi_fb_bpp_;
+  this->dsi_decode_buf_.reset(static_cast<uint8_t *>(jpeg_alloc_decoder_mem(want, &out_cfg, &this->dsi_fb_bytes_)));
+  if (this->dsi_decode_buf_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes, PSRAM)", want);
+    return false;
+  }
+  this->decode_target_ = this->dsi_decode_buf_.get();
 
-  ESP_LOGI(TAG, "DSI direct output: %u FBs, panel %ux%u, %u bytes/pixel (%s)", this->dsi_fb_count_, this->dsi_out_w_,
-           this->dsi_out_h_, this->dsi_fb_bpp_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
+  ESP_LOGI(TAG, "DSI output: panel %ux%u, %u bytes/pixel (%s), draw_pixels_at", this->dsi_out_w_, this->dsi_out_h_,
+           this->dsi_fb_bpp_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
   return true;
 }
 
