@@ -19,6 +19,10 @@
 #include "esphome/components/display/display.h"
 #endif
 
+#ifdef SVP_STREAM_TOUCH
+#include "esphome/components/touchscreen/touchscreen.h"
+#endif
+
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
@@ -106,6 +110,19 @@ class PlaybackErrorTrigger : public Trigger<uint8_t> {
   explicit PlaybackErrorTrigger(SimpleVideoPlayer *parent);
 };
 
+#ifdef SVP_STREAM_TOUCH
+/// Forwards the touchscreen to the network stream sender ('T' messages).
+class StreamTouchListener : public touchscreen::TouchListener {
+ public:
+  explicit StreamTouchListener(SimpleVideoPlayer *parent) : parent_(parent) {}
+  void update(const touchscreen::TouchPoints_t &points) override;
+  void release() override;
+
+ protected:
+  SimpleVideoPlayer *parent_;
+};
+#endif
+
 /// Main video player component
 class SimpleVideoPlayer : public Component {
  public:
@@ -140,6 +157,17 @@ class SimpleVideoPlayer : public Component {
   // codegen coroutine together with the display's color_depth (16 or 24).
   void set_dsi(display::Display *dsi) { this->dsi_ = dsi; }
   void set_dsi_color_depth(uint8_t bits) { this->dsi_fb_bpp_ = bits == 24 ? 3 : 2; }
+#endif
+
+#ifdef SVP_STREAM
+  // Portall-style network receiver (udisp protocol over TCP): JPEG rectangles drawn onto the display
+  // while no file is playing.
+  void set_stream_port(uint16_t port) { this->stream_port_ = port; }
+  void set_stream_max_frame_bytes(uint32_t bytes) { this->stream_max_frame_bytes_ = bytes; }
+#ifdef SVP_STREAM_TOUCH
+  void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
+  void stream_on_touch(const touchscreen::TouchPoints_t &points);
+#endif
 #endif
 
   //========================================================================
@@ -226,6 +254,17 @@ class SimpleVideoPlayer : public Component {
 #ifdef SVP_DSI_OUTPUT
   /// setup(): read the panel size and allocate the decode buffer. false -> mark_failed.
   bool init_dsi_output_();
+#endif
+#ifdef SVP_STREAM
+  bool setup_stream_();
+  static void stream_net_task_entry_(void *param);
+  void stream_net_loop_();
+  static void stream_draw_task_entry_(void *param);
+  void stream_draw_loop_();
+  void stream_feed_(const uint8_t *data, size_t len);
+  void stream_send_pending_(int client);
+  /// Tell the sender whether the panel shows its picture (false while a file plays).
+  void stream_set_awake_(bool awake);
 #endif
   /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
   bool init_decoder_();
@@ -438,6 +477,51 @@ class SimpleVideoPlayer : public Component {
   uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
   uint8_t *decode_target_{nullptr};       // own decode buffer (jpeg_alloc_decoder_mem, PSRAM)
   size_t decode_target_len_{0};
+#endif
+
+#ifdef SVP_STREAM
+  struct StreamFrame {
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    uint16_t x{0}, y{0}, w{0}, h{0};
+    uint32_t total{0};
+    uint32_t received{0};
+  };
+  static constexpr uint8_t STREAM_FRAME_COUNT = 3;
+  uint16_t stream_port_{0};
+  uint32_t stream_max_frame_bytes_{256 * 1024};
+  StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
+  QueueHandle_t stream_empty_q_{nullptr};
+  QueueHandle_t stream_filled_q_{nullptr};
+  TaskHandle_t stream_draw_task_{nullptr};
+  // Held by the file playback for its whole session and by the stream draw per rectangle: both use
+  // decode_target_ and the display, and the file has priority.
+  SemaphoreHandle_t output_lock_{nullptr};
+  // Parser state (network task only).
+  StreamFrame *stream_current_{nullptr};
+  uint8_t stream_hdr_[16]{};
+  size_t stream_hdr_len_{0};
+  uint32_t stream_skip_{0};
+  bool stream_logged_bad_header_{false};
+  std::atomic<bool> stream_connected_{false};
+  std::atomic<bool> stream_output_ok_{false};  // loop(): connected and LVGL (if any) paused
+  std::atomic<bool> stream_awake_{true};
+  std::atomic<bool> stream_status_pending_{false};
+  std::atomic<bool> stream_depth_pending_{false};
+#ifdef SVP_STREAM_TOUCH
+  static constexpr uint8_t STREAM_TOUCH_MAX = 5;
+  struct StreamTouch {
+    uint8_t count;
+    uint8_t id[STREAM_TOUCH_MAX];
+    uint16_t x[STREAM_TOUCH_MAX];
+    uint16_t y[STREAM_TOUCH_MAX];
+  };
+  touchscreen::Touchscreen *stream_touchscreen_{nullptr};
+  StreamTouchListener stream_touch_listener_{this};
+  QueueHandle_t stream_touch_q_{nullptr};
+  StreamTouch stream_last_touch_{};
+  bool stream_last_touch_valid_{false};
+#endif
 #endif
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};

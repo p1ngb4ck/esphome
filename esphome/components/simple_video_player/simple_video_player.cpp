@@ -206,6 +206,11 @@ void SimpleVideoPlayer::setup() {
   // block's comment for why setup() itself is a safe, always-built point to do it (verified
   // against ESPHome's own codegen), not something that needs to wait for play().
 
+#ifdef SVP_STREAM
+  if (this->dsi_ != nullptr && this->stream_port_ != 0 && !this->setup_stream_())
+    ESP_LOGE(TAG, "Network stream receiver disabled");
+#endif
+
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes (PSRAM)", this->input_buffer_size_);
@@ -232,11 +237,35 @@ void SimpleVideoPlayer::loop() {
   if (this->dsi_ != nullptr) {
     // Direct playback owns the panel; the video task draws each frame itself. Nothing to
     // invalidate on the LVGL thread. Hand the panel back to LVGL once playback has fully stopped.
+#ifdef SVP_STREAM
+    const bool streaming = this->stream_connected_.load(std::memory_order_acquire);
+#else
+    const bool streaming = false;
+#endif
 #ifdef SVP_USE_LVGL
-    if (this->dsi_lvgl_paused_ && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+    if (streaming && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
+      this->lvgl_component_->set_paused(true, false);
+      this->dsi_lvgl_paused_ = true;
+    }
+    if (this->dsi_lvgl_paused_ && !streaming &&
+        this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
     }
+    const bool lvgl_off = this->lvgl_component_ == nullptr || this->dsi_lvgl_paused_;
+#else
+    const bool lvgl_off = true;
+#endif
+#ifdef SVP_STREAM
+    const bool output_ok = streaming && lvgl_off;
+    if (output_ok != this->stream_output_ok_.load(std::memory_order_acquire)) {
+      this->stream_output_ok_.store(output_ok, std::memory_order_release);
+      if (this->stream_draw_task_ != nullptr)
+        xTaskNotifyGive(this->stream_draw_task_);
+    }
+#else
+    (void) streaming;
+    (void) lvgl_off;
 #endif
     return;
   }
@@ -585,6 +614,14 @@ void SimpleVideoPlayer::playback_loop_() {
   // Preloaded: ring full and the first compressed frame queued. Only now ask the main thread to
   // start (pause LVGL for DSI output, fire on_playback_started) and wait for it -- still before the
   // first frame, so nothing is rendered, presented or played earlier. Audio drains from here on.
+#ifdef SVP_STREAM
+  // File playback has priority over the network stream: hold the output for the whole session and
+  // tell a connected sender to pause until it ends.
+  if (this->output_lock_ != nullptr) {
+    xSemaphoreTake(this->output_lock_, portMAX_DELAY);
+    this->stream_set_awake_(false);
+  }
+#endif
   this->start_req_.store(1, std::memory_order_release);
   {
     uint32_t waited_ms = 0;
@@ -769,6 +806,13 @@ void SimpleVideoPlayer::playback_loop_() {
 
     esp_task_wdt_reset();
   }
+
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr) {
+    xSemaphoreGive(this->output_lock_);
+    this->stream_set_awake_(true);  // a connected sender redraws the whole page
+  }
+#endif
 
   // Stop the reader/producer and wait for it to exit before the file reader is torn down.
   // playback_task_stop_ also aborts any in-flight BufferedFileReader wait the reader is parked in.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import display, speaker
+from esphome.components import display, speaker, touchscreen
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.esp32 import only_on_variant
 from esphome.components.esp32.const import VARIANT_ESP32P4
@@ -76,6 +76,9 @@ CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
 CONF_PREFETCH_DURATION = "prefetch_duration"
 CONF_TARGET_FPS = "target_fps"
+CONF_STREAM_PORT = "stream_port"
+CONF_STREAM_MAX_FRAME_BYTES = "stream_max_frame_bytes"
+CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_AUDIO_CODEC = "audio_codec"
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
 # referenced speaker's own config and stashes them here for to_code() to read back.
@@ -158,6 +161,14 @@ def _validate_output_target(config):
     return config
 
 
+def _validate_stream(config):
+    if CONF_STREAM_PORT in config and CONF_DISPLAY_ID not in config:
+        raise cv.Invalid(f"'{CONF_STREAM_PORT}' draws onto the display: it needs '{CONF_DISPLAY_ID}'.")
+    if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config:
+        raise cv.Invalid(f"'{CONF_TOUCHSCREEN_ID}' sends touches to a stream sender: it needs '{CONF_STREAM_PORT}'.")
+    return config
+
+
 # Component configuration
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -169,6 +180,14 @@ CONFIG_SCHEMA = cv.All(
             #                LVGL is paused (Portall's way); the video must match the panel exactly.
             cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
             cv.Optional(CONF_DISPLAY_ID): cv.use_id(display.Display),
+            # Portall-style network receiver (udisp over TCP, e.g. Portall's ha_send.py): draws the
+            # sender's JPEG rectangles while no file plays. Needs display_id.
+            cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
+            cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=262144): cv.int_range(
+                min=16384, max=1048576
+            ),
+            # Touches go back to the stream sender, which replays them into its page.
+            cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
@@ -235,6 +254,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
     _validate_output_target,
+    _validate_stream,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
 
@@ -320,6 +340,16 @@ def _display_depth(full_config, display_id):
 def _final_validate(config):
     fconf = fv.full_config.get()
 
+    # While a sender is connected LVGL is paused; a touch would resume it on top of the stream.
+    if CONF_STREAM_PORT in config:
+        for block in fconf.get("lvgl") or []:
+            if block.get("resume_on_input", True):
+                raise cv.Invalid(
+                    f"{CONF_STREAM_PORT}: LVGL is paused while a stream sender is connected, and a "
+                    "touch would resume it on top of the stream. Add `resume_on_input: false` to the "
+                    "lvgl: block."
+                )
+
     if CONF_SPEAKER_ID not in config:
         return config
 
@@ -397,6 +427,15 @@ async def to_code(config):
         cg.add(var.set_canvas(canvas))
     if CONF_DISPLAY_ID in config:
         CORE.add_job(_resolve_display_output, var, config[CONF_DISPLAY_ID])
+
+    if CONF_STREAM_PORT in config:
+        cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
+        cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
+        cg.add_define("SVP_STREAM")
+        if CONF_TOUCHSCREEN_ID in config:
+            ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
+            cg.add(var.set_stream_touchscreen(ts))
+            cg.add_define("SVP_STREAM_TOUCH")
 
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:
