@@ -692,6 +692,11 @@ void SimpleVideoPlayer::playback_loop_() {
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
+#ifdef SVP_DSI_OUTPUT
+    if (this->dsi_ != nullptr) {
+      this->dsi_sync_prev_rotate_();
+    }
+#endif
     const uint32_t dec_start = micros();
     const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
     if (decoded) {
@@ -712,13 +717,7 @@ void SimpleVideoPlayer::playback_loop_() {
       // at the next frame boundary (no copy, no tearing). Then steer the next decode at the other
       // framebuffer. Panel dims are multiples of 16 (checked in init_dsi_output_), so no x_pad.
       const uint32_t present_start = micros();
-      const display::ColorBitness bitness =
-          this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_,
-                                 reinterpret_cast<const uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]),
-                                 display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
-      this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
-      this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
+      this->present_dsi_();
       const uint32_t present_us = micros() - present_start;
       this->present_us_sum_ += present_us;
       if (present_us > this->present_us_max_)
@@ -1016,13 +1015,42 @@ bool SimpleVideoPlayer::init_dsi_output_() {
   }
   this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
 
-  this->dsi_direct_decode_ = true;
-  this->dsi_back_idx_ = 0;
-  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
+  // Decoding straight into a driver-owned framebuffer showed single-colour frames; decode into the
+  // JPEG driver's own allocator (as Portall does) and let the PPA copy into the back framebuffer,
+  // which is then flipped. The async PPA pipeline needs three framebuffers.
+  if (this->dsi_fb_count_ < 3) {
+    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; video output needs 3 (set frame_buffers: 3)",
+             this->dsi_fb_count_);
+    return false;
+  }
+  jpeg_decode_memory_alloc_cfg_t db_cfg{};
+  db_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  size_t db_actual = 0;
+  this->dsi_decode_buf_.reset(
+      static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->dsi_fb_bytes_, &db_cfg, &db_actual)));
+  if (!this->dsi_decode_buf_) {
+    ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes)", this->dsi_fb_bytes_);
+    return false;
+  }
+  ppa_client_config_t cfg{};
+  cfg.oper_type = PPA_OPERATION_SRM;
+  cfg.max_pending_trans_num = 4;
+  this->ppa_done_sem_ = xSemaphoreCreateBinary();
+  ppa_event_callbacks_t ppa_cbs{};
+  ppa_cbs.on_trans_done = svp_ppa_done_cb;
+  if (this->ppa_done_sem_ == nullptr || ppa_register_client(&cfg, &this->ppa_client_) != ESP_OK ||
+      ppa_client_register_event_callbacks(this->ppa_client_, &ppa_cbs) != ESP_OK) {
+    ESP_LOGE(TAG, "PPA setup failed");
+    return false;
+  }
 
-  ESP_LOGI(TAG, "DSI output: %u FBs, panel %ux%u, %u bytes/pixel (%s), VSYNC flip via draw_pixels_at",
-           this->dsi_fb_count_, this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_,
-           this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
+  this->dsi_direct_decode_ = false;
+  this->dsi_back_idx_ = 0;
+  this->dsi_prev_fb_ = nullptr;
+  this->decode_target_ = this->dsi_decode_buf_.get();
+
+  ESP_LOGI(TAG, "DSI output: %u FBs, panel %ux%u, %u bytes/pixel (%s), PPA copy + flip", this->dsi_fb_count_,
+           this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
   return true;
 }
 
@@ -1070,12 +1098,13 @@ void SimpleVideoPlayer::present_dsi_() {
   s.in.pic_h = this->dsi_in_h_;
   s.in.block_w = this->dsi_in_w_;
   s.in.block_h = this->dsi_in_h_;
-  s.in.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
+  const ppa_srm_color_mode_t cm = this->dsi_fb_bpp_ == 2 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888;
+  s.in.srm_cm = cm;
   s.out.buffer = back;
   s.out.buffer_size = this->dsi_fb_bytes_;
   s.out.pic_w = this->dsi_out_w_;
   s.out.pic_h = this->dsi_out_h_;
-  s.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
+  s.out.srm_cm = cm;
   s.rotation_angle = angle;
   s.scale_x = 1.0f;
   s.scale_y = 1.0f;
