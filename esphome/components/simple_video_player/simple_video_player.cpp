@@ -598,7 +598,7 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 #ifdef USE_AUDIO
   if (this->audio_enabled_)
-    this->start_speaker_();
+    this->wait_speaker_running_();
 #endif
   this->av_started_.store(true, std::memory_order_release);
 #ifdef USE_AUDIO
@@ -1452,8 +1452,6 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   audio::AudioStreamInfo speaker_stream_info(audio_info->bits_per_sample, this->speaker_audio_channels_,
                                              audio_info->sample_rate);
   this->speaker_->set_audio_stream_info(speaker_stream_info);
-  // Started in start_speaker_() together with the first video frame, not here: during preload it
-  // would only run empty.
   ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
@@ -1514,6 +1512,9 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     return false;
   }
 
+  // Speaker starts up in parallel with the video buffering; feeding it begins at the first frame
+  // (wait_speaker_running_() + av_started_).
+  this->speaker_->start();
   this->audio_enabled_ = true;
   ESP_LOGI(TAG, "Audio processing initialized successfully (%s mode)", use_decoder ? "decoder" : "direct PCM");
   return true;
@@ -1632,10 +1633,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   vTaskDelete(nullptr);
 }
 
-void SimpleVideoPlayer::start_speaker_() {
-  // Runs once on the playback task right before the first frame (not the per-frame path).
+void SimpleVideoPlayer::wait_speaker_running_() {
+  // Runs once on the playback task right before the first frame (not the per-frame path). The
+  // speaker was started at audio init, so after the buffering this normally returns at once.
   static constexpr uint32_t SPEAKER_START_TIMEOUT_MS = 1000;
-  this->speaker_->start();
   const uint32_t wait_start = millis();
   while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_START_TIMEOUT_MS)
     vTaskDelay(pdMS_TO_TICKS(1));
