@@ -210,6 +210,10 @@ void SimpleVideoPlayer::setup() {
   if (this->dsi_ != nullptr && this->stream_port_ != 0 && !this->setup_stream_())
     ESP_LOGE(TAG, "Network stream receiver disabled");
 #endif
+#ifdef SVP_CHANNEL_LIST
+  if (this->channel_widget_ != nullptr && !this->setup_channel_list_())
+    ESP_LOGE(TAG, "Channel list disabled");
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -223,6 +227,9 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
+#ifdef SVP_CHANNEL_LIST
+  this->channel_loop_();
+#endif
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
     if (this->dsi_ != nullptr && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {

@@ -170,6 +170,16 @@ class SimpleVideoPlayer : public Component {
 #endif
 #endif
 
+#ifdef SVP_CHANNEL_LIST
+  // Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown; picking a
+  // channel asks the relay to stream it to stream_port.
+  void set_channel_url(const std::string &url) { this->channel_url_ = url; }
+  void set_channel_token(const std::string &token) { this->channel_token_ = token; }
+  void set_channel_widget(lvgl::LvDropdownType *widget) { this->channel_widget_ = widget; }
+  void channel_list_refresh() { this->channel_request_(CHANNEL_CMD_REFRESH, 0); }
+  void channel_stop() { this->channel_request_(CHANNEL_CMD_STOP, 0); }
+#endif
+
   //========================================================================
   // Playback Control API
   //========================================================================
@@ -265,6 +275,21 @@ class SimpleVideoPlayer : public Component {
   void stream_send_pending_(int client);
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
+#ifdef SVP_CHANNEL_LIST
+  enum : uint8_t { CHANNEL_CMD_REFRESH, CHANNEL_CMD_PLAY, CHANNEL_CMD_STOP };
+  struct ChannelCmd {
+    uint8_t cmd;
+    uint16_t index;
+  };
+  bool setup_channel_list_();
+  void channel_request_(uint8_t cmd, uint16_t index);
+  void channel_loop_();
+  static void channel_selected_cb_(lv_event_t *e);
+  static void channel_task_entry_(void *param);
+  void channel_task_loop_();
+  /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees.
+  bool channel_http_(const char *path, const char *body, char **response, size_t *response_len);
+#endif
 #ifdef USE_AUDIO
   /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
   /// played in 10 ms blocks; dropped while a file plays.
@@ -546,6 +571,19 @@ class SimpleVideoPlayer : public Component {
 #endif
 #endif
 
+#ifdef SVP_CHANNEL_LIST
+  std::string channel_url_;
+  std::string channel_token_;
+  lvgl::LvDropdownType *channel_widget_{nullptr};
+  QueueHandle_t channel_q_{nullptr};
+  SemaphoreHandle_t channel_lock_{nullptr};
+  // Shown in the dropdown (LVGL holds pointers into channel_names_) / next list from the task.
+  std::vector<std::string> channel_names_, channel_refs_;
+  std::vector<std::string> channel_new_names_, channel_new_refs_;
+  std::atomic<bool> channel_new_{false};
+  bool channel_requested_once_{false};
+#endif
+
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
 
   // ONE compressed "storage-load" buffer: the reader task (Core 0) demuxes the next compressed
@@ -643,6 +681,26 @@ template<typename... Ts> class ResumeAction : public Action<Ts...> {
  protected:
   SimpleVideoPlayer *player_;
 };
+
+#ifdef SVP_CHANNEL_LIST
+template<typename... Ts> class ChannelRefreshAction : public Action<Ts...> {
+ public:
+  explicit ChannelRefreshAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(Ts... x) override { this->player_->channel_list_refresh(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class ChannelStopAction : public Action<Ts...> {
+ public:
+  explicit ChannelStopAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(Ts... x) override { this->player_->channel_stop(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+#endif
 
 template<typename... Ts> class StopAction : public Action<Ts...> {
  public:

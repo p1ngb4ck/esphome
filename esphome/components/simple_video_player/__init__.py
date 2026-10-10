@@ -4,7 +4,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import display, speaker, touchscreen
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
-from esphome.components.esp32 import only_on_variant
+from esphome.components.esp32 import only_on_variant, request_http_client
 from esphome.components.esp32.const import VARIANT_ESP32P4
 from esphome.components.storage import request_storage_worker
 import esphome.config_validation as cv
@@ -15,6 +15,7 @@ from esphome.const import (
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
+    CONF_URL,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
@@ -28,9 +29,14 @@ except ImportError:
     LVGL_AVAILABLE = False
     lv_canvas_t = None
 
+try:
+    from esphome.components.lvgl.widgets.dropdown import lv_dropdown_t
+except ImportError:
+    lv_dropdown_t = None
+
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
-AUTO_LOAD = ["image", "audio"]
+AUTO_LOAD = ["image", "audio", "json"]
 
 # Namespaces
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
@@ -67,6 +73,8 @@ PlayAction = simple_video_player_ns.class_("PlayAction", automation.Action)
 PauseAction = simple_video_player_ns.class_("PauseAction", automation.Action)
 ResumeAction = simple_video_player_ns.class_("ResumeAction", automation.Action)
 StopAction = simple_video_player_ns.class_("StopAction", automation.Action)
+ChannelRefreshAction = simple_video_player_ns.class_("ChannelRefreshAction", automation.Action)
+ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automation.Action)
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
@@ -79,6 +87,9 @@ CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_MAX_FRAME_BYTES = "stream_max_frame_bytes"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
+CONF_CHANNEL_LIST = "channel_list"
+CONF_TOKEN = "token"
+CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
 # referenced speaker's own config and stashes them here for to_code() to read back.
@@ -164,6 +175,8 @@ def _validate_output_target(config):
 def _validate_stream(config):
     if CONF_STREAM_PORT in config and CONF_DISPLAY_ID not in config:
         raise cv.Invalid(f"'{CONF_STREAM_PORT}' draws onto the display: it needs '{CONF_DISPLAY_ID}'.")
+    if CONF_CHANNEL_LIST in config and CONF_STREAM_PORT not in config:
+        raise cv.Invalid(f"'{CONF_CHANNEL_LIST}' plays channels through the stream: it needs '{CONF_STREAM_PORT}'.")
     if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_TOUCHSCREEN_ID}' sends touches to a stream sender: it needs '{CONF_STREAM_PORT}'.")
     return config
@@ -188,6 +201,21 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
+            # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
+            # choosing a channel asks the relay to stream it to stream_port.
+            **(
+                {
+                    cv.Optional(CONF_CHANNEL_LIST): cv.Schema(
+                        {
+                            cv.Required(CONF_URL): cv.url,
+                            cv.Optional(CONF_TOKEN): cv.string,
+                            cv.Required(CONF_WIDGET_ID): cv.use_id(lv_dropdown_t),
+                        }
+                    )
+                }
+                if lv_dropdown_t is not None
+                else {}
+            ),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
@@ -436,6 +464,14 @@ async def to_code(config):
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
             cg.add(var.set_stream_touchscreen(ts))
             cg.add_define("SVP_STREAM_TOUCH")
+        if channels := config.get(CONF_CHANNEL_LIST):
+            request_http_client()
+            cg.add(var.set_channel_url(channels[CONF_URL].rstrip("/")))
+            if CONF_TOKEN in channels:
+                cg.add(var.set_channel_token(channels[CONF_TOKEN]))
+            widget = await cg.get_variable(channels[CONF_WIDGET_ID])
+            cg.add(var.set_channel_widget(widget))
+            cg.add_define("SVP_CHANNEL_LIST")
 
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:
@@ -551,5 +587,27 @@ async def simple_video_player_resume_to_code(config, action_id, template_arg, ar
     synchronous=True,  # just sets the atomic state and returns
 )
 async def simple_video_player_stop_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "simple_video_player.channels.refresh",
+    ChannelRefreshAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # queues the request for the channel task
+)
+async def simple_video_player_channels_refresh_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "simple_video_player.channels.stop",
+    ChannelStopAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # queues the request for the channel task
+)
+async def simple_video_player_channels_stop_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
