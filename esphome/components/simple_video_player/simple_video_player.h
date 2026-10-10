@@ -504,6 +504,7 @@ class SimpleVideoPlayer : public Component {
   uint32_t decode_us_max_{0};
   uint64_t present_us_sum_{0};     // time in the DSI present (draw_pixels_at) -- DSI path only
   uint32_t present_us_max_{0};
+  uint32_t bad_payload_count_{0};  // frame payloads without JPEG SOI/EOI (fetch-path corruption)
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

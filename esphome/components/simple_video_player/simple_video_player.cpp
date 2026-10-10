@@ -496,6 +496,7 @@ void SimpleVideoPlayer::playback_loop_() {
   this->decode_us_max_ = 0;
   this->present_us_sum_ = 0;
   this->present_us_max_ = 0;
+  this->bad_payload_count_ = 0;
   this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
@@ -724,6 +725,21 @@ void SimpleVideoPlayer::playback_loop_() {
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
+    {
+      const uint8_t *d = slot->data;
+      bool ok = payload >= 4 && d[0] == 0xFF && d[1] == 0xD8;
+      if (ok) {
+        ok = false;
+        for (int i = payload - 2; i >= 0 && i >= payload - 16; i--) {
+          if (d[i] == 0xFF && d[i + 1] == 0xD9) {
+            ok = true;
+            break;
+          }
+        }
+      }
+      if (!ok)
+        this->bad_payload_count_++;
+    }
     const uint32_t dec_start = micros();
     const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
     if (decoded) {
@@ -776,11 +792,11 @@ void SimpleVideoPlayer::playback_loop_() {
     const float late_pct = 100.0f * this->late_frame_count_ / stat_frames;
     ESP_LOGI(TAG,
              "playback stats: %" PRIu32 " frames, %" PRIu32 " late (%.1f%%), decode avg %" PRIu32 " / max %" PRIu32
-             " us, present avg %" PRIu32 " / max %" PRIu32 " us, %" PRIu32 " decode failures",
+             " us, present avg %" PRIu32 " / max %" PRIu32 " us, %" PRIu32 " decode failures, %" PRIu32 " bad payloads (no SOI/EOI)",
              stat_frames, this->late_frame_count_, late_pct,
              static_cast<uint32_t>(this->decode_us_sum_ / stat_frames), this->decode_us_max_,
              static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
-             this->decode_fail_count_);
+             this->decode_fail_count_, this->bad_payload_count_);
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.
