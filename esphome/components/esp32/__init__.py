@@ -2914,12 +2914,15 @@ async def _reconcile_vfs_fatfs_sdkconfig(
             set_idf_sdkconfig_default("CONFIG_FATFS_MAX_LFN", 255)
         set_idf_sdkconfig_default("CONFIG_FATFS_VOLUME_COUNT", 4)
         # Long filenames are a hard requirement of exFAT and are already set right above;
-        # the FatFs #defines themselves come via a patched project-local component copy.
-        _sync_exfat_fatfs_override(
+        # the FatFs #defines themselves come via a patched component copy, declared in the
+        # manifest so it replaces the built-in fatfs and lands in src's REQUIRES.
+        exfat_override = _sync_exfat_fatfs_override(
             enable_exfat,
             str(CORE.data[KEY_ESP32][KEY_IDF_VERSION]),
             get_esp32_variant(),
         )
+        if exfat_override is not None:
+            add_idf_component(name="fatfs", override_path=exfat_override)
     elif enable_exfat:
         raise cv.Invalid(
             f"'{CONF_ENABLE_EXFAT}' has no effect here: no component in this configuration "
@@ -3618,31 +3621,38 @@ _EXFAT_PATCHES = (
 _EXFAT_MARKER = ".esphome_exfat_override"
 
 
-def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> None:
-    """Patch a project-local copy of FatFs so exFAT is compiled in.
+def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> str | None:
+    """Patch a copy of FatFs so exFAT is compiled in; return its path when enabled.
 
     exFAT is a plain #define in FatFs (no Kconfig symbol), so the only way to turn it on is a
-    patched copy of the component. ESP-IDF auto-discovers <project>/components with the
-    highest precedence (project components override same-named IDF components), and the
-    generated project root is the build dir — so a patched copy at
-    <build>/components/fatfs/ wins, with zero cmake anywhere and nothing outside this build
-    directory touched. Synced every codegen: created/refreshed when enabled (stamped with
-    the IDF version so an IDF switch re-copies), removed when disabled — a stale copy would
-    keep exFAT on silently."""
+    patched copy of the component. The copy sits outside every component search path
+    (<build>/components-src/fatfs, like the usb_host override) and the caller declares it via
+    add_idf_component(override_path=...). The component manager then registers it as a
+    project-managed component -- added after the IDF built-ins, so it replaces the built-in
+    fatfs -- and injects it into src's REQUIRES from the manifest, which is what puts ff.h
+    on the include path of the storage drivers. The directory name must stay "fatfs": IDF
+    names a component after its directory. Synced every codegen and stamped with the IDF
+    version so an IDF switch re-copies; a copy nobody points at is inert."""
     import shutil
 
     from esphome.espidf.framework import _get_framework_path, check_esp_idf_install
 
-    dest = Path(CORE.build_path) / "components" / "fatfs"
+    # Earlier revisions kept the copy in <build>/components, which IDF scans on its own and
+    # which outranks the manifest; a copy left there would shadow this one or keep exFAT on.
+    legacy = Path(CORE.build_path) / "components" / "fatfs"
+    if (legacy / _EXFAT_MARKER).is_file():
+        shutil.rmtree(legacy)
+
+    dest = Path(CORE.build_path) / "components-src" / "fatfs"
     marker = dest / _EXFAT_MARKER
     stamp = f"v4:{idf_ver}:" + ",".join(f"{k}={v}" for k, v in _EXFAT_PATCHES)
     if not enabled:
         # Only remove what is provably ours.
         if marker.is_file():
             shutil.rmtree(dest)
-        return
+        return None
     if marker.is_file() and marker.read_text() == stamp:
-        return  # current copy is up to date
+        return str(dest)  # current copy is up to date
     src = _get_framework_path(idf_ver) / "components" / "fatfs"
     if not src.is_dir():
         # First-ever build: the toolchain would install the IDF minutes from now anyway —
@@ -3706,6 +3716,7 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> Non
     )
     ffconf.write_text(text)
     marker.write_text(stamp)
+    return str(dest)
 
 
 @dataclass
