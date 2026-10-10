@@ -1108,7 +1108,7 @@ void SimpleVideoPlayer::present_dsi_() {
   s.rotation_angle = angle;
   s.scale_x = 1.0f;
   s.scale_y = 1.0f;
-  s.mode = PPA_TRANS_MODE_NON_BLOCKING;
+  s.mode = PPA_TRANS_MODE_BLOCKING;  // never overlap the next JPEG decode on DMA2D (esp-idf#18999)
   s.user_data = this->ppa_done_sem_;
   if (ppa_do_scale_rotate_mirror(this->ppa_client_, &s) != ESP_OK) {
     return;
