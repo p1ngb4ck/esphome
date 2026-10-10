@@ -574,11 +574,12 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Load is done (headers, dimensions, audio init all read their bytes with the blocking reader).
   // Precache: block until the read-ahead ring is full so the first frame reads already have their
-  // bytes. Then switch the reader to non-blocking single-drain -- every read from here is a
-  // hot-path frame read.
+  // bytes. The reader stays in BLOCKING mode: only the dedicated reader task (Core 0) reads from
+  // here on, so it may wait for the ring. The non-blocking streaming drain returned 0 / partial
+  // counts on a momentary ring underrun, which the AVI parser took as end of stream (early end) or
+  // left it misaligned after a short skip (corrupted frames).
   if (this->file_reader_) {
     this->file_reader_->prefill_cache();
-    this->file_reader_->set_streaming(true);
   }
 
   // Reset the slot queues to a clean start: every slot free in empty_queue_, filled_queue_ empty,
