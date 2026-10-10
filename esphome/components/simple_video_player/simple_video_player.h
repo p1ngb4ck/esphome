@@ -653,7 +653,7 @@ template<typename... Ts> class PlayAction : public Action<Ts...> {
 
   TEMPLATABLE_VALUE(std::string, path)
 
-  void play(Ts... x) override {
+  void play(const Ts &...x) override {
     auto path = this->path_.value(x...);
     this->player_->play(path);
   }
@@ -666,7 +666,7 @@ template<typename... Ts> class PauseAction : public Action<Ts...> {
  public:
   explicit PauseAction(SimpleVideoPlayer *player) : player_(player) {}
 
-  void play(Ts... x) override { this->player_->pause(); }
+  void play(const Ts &...x) override { this->player_->pause(); }
 
  protected:
   SimpleVideoPlayer *player_;
@@ -676,7 +676,7 @@ template<typename... Ts> class ResumeAction : public Action<Ts...> {
  public:
   explicit ResumeAction(SimpleVideoPlayer *player) : player_(player) {}
 
-  void play(Ts... x) override { this->player_->resume(); }
+  void play(const Ts &...x) override { this->player_->resume(); }
 
  protected:
   SimpleVideoPlayer *player_;
@@ -686,7 +686,7 @@ template<typename... Ts> class ResumeAction : public Action<Ts...> {
 template<typename... Ts> class ChannelRefreshAction : public Action<Ts...> {
  public:
   explicit ChannelRefreshAction(SimpleVideoPlayer *player) : player_(player) {}
-  void play(Ts... x) override { this->player_->channel_list_refresh(); }
+  void play(const Ts &...x) override { this->player_->channel_list_refresh(); }
 
  protected:
   SimpleVideoPlayer *player_;
@@ -695,7 +695,7 @@ template<typename... Ts> class ChannelRefreshAction : public Action<Ts...> {
 template<typename... Ts> class ChannelStopAction : public Action<Ts...> {
  public:
   explicit ChannelStopAction(SimpleVideoPlayer *player) : player_(player) {}
-  void play(Ts... x) override { this->player_->channel_stop(); }
+  void play(const Ts &...x) override { this->player_->channel_stop(); }
 
  protected:
   SimpleVideoPlayer *player_;
@@ -706,7 +706,7 @@ template<typename... Ts> class StopAction : public Action<Ts...> {
  public:
   explicit StopAction(SimpleVideoPlayer *player) : player_(player) {}
 
-  void play(Ts... x) override { this->player_->stop(); }
+  void play(const Ts &...x) override { this->player_->stop(); }
 
  protected:
   SimpleVideoPlayer *player_;
