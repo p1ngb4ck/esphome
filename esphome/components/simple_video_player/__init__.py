@@ -380,17 +380,14 @@ async def to_code(config):
     request_storage_worker()
 
     cg.add_define("USE_STORAGE")
-    cg.add_define("USE_LVGL")
 
-    # Get the single LVGL component instance (required for VSYNC callbacks)
-    lvgl_configs = CORE.config.get("lvgl", [])
-    if not lvgl_configs:
-        raise cv.Invalid("LVGL component is required for simple_video_player")
-    lvgl_id = lvgl_configs[0][CONF_ID]
-    lvgl_component = await cg.get_variable(lvgl_id)
-
-    var = cg.new_Pvariable(config[CONF_ID], lvgl_component)
+    var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+
+    # Optional for display_id (paused while a video plays), required by canvas_id via its widget id.
+    if lvgl_configs := CORE.config.get("lvgl"):
+        cg.add(var.set_lvgl(await cg.get_variable(lvgl_configs[0][CONF_ID])))
+        cg.add_define("SVP_USE_LVGL")
 
     # Output target: LVGL canvas OR direct mipi_dsi (mutually exclusive, see
     # _validate_output_target). The mipi_dsi wiring is deferred to a FINAL codegen coroutine so the

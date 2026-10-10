@@ -45,15 +45,6 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 void SimpleVideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
 
-  // LVGL is required either way: the canvas-output path renders into an LVGL canvas widget, and the
-  // DSI-output path pauses/resumes LVGL around playback (it owns the panel meanwhile) and reads its
-  // rotation.
-  if (this->lvgl_component_ == nullptr) {
-    ESP_LOGE(TAG, "LVGL component not set");
-    this->mark_failed();
-    return;
-  }
-
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
     // Direct display output: no LVGL canvas, no canvas output buffers. `canvas_id` is not set in
@@ -65,6 +56,7 @@ void SimpleVideoPlayer::setup() {
   } else
 #endif
   {
+#ifdef SVP_USE_LVGL
     // Verify canvas is set
     if (this->canvas_ == nullptr) {
       ESP_LOGE(TAG, "Canvas not set");
@@ -107,6 +99,7 @@ void SimpleVideoPlayer::setup() {
     }
     ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, %ux%u)", this->output_buffer_size_,
              static_cast<unsigned>(ALIGN_UP(fb_w, 16)), static_cast<unsigned>(ALIGN_UP(fb_h, 16)));
+#endif
   }
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
@@ -226,8 +219,8 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
-#ifdef SVP_DSI_OUTPUT
-    if (this->dsi_ != nullptr && !this->dsi_lvgl_paused_) {
+#if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
+    if (this->dsi_ != nullptr && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
       this->dsi_lvgl_paused_ = true;
     }
@@ -239,14 +232,16 @@ void SimpleVideoPlayer::loop() {
   if (this->dsi_ != nullptr) {
     // Direct playback owns the panel; the video task draws each frame itself. Nothing to
     // invalidate on the LVGL thread. Hand the panel back to LVGL once playback has fully stopped.
+#ifdef SVP_USE_LVGL
     if (this->dsi_lvgl_paused_ && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
     }
+#endif
     return;
   }
 #endif
-#if LV_USE_CANVAS
+#if defined(SVP_USE_LVGL) && LV_USE_CANVAS
   // Runs on the LVGL thread. decode_frame_() (video task) finished a frame in the back buffer and
   // published it via display_buffer_ + frame_ready_. Point the canvas at that completed buffer and
   // invalidate -- all lv_canvas_* happens HERE, never on the video task. Cheap load first so the

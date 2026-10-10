@@ -5,7 +5,10 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/helpers.h"
 
+#ifdef SVP_USE_LVGL
 #include "esphome/components/lvgl/lvgl_esphome.h"
+#include "lvgl.h"
+#endif
 
 #include "driver/jpeg_decode.h"
 #include "driver/jpeg_types.h"
@@ -25,7 +28,6 @@
 #endif
 // ring_buffer::RingBuffer is used for the audio input/decoded rings (see USE_AUDIO members).
 #include "esphome/components/ring_buffer/ring_buffer.h"
-#include "lvgl.h"
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
 #include <string>
@@ -107,7 +109,6 @@ class PlaybackErrorTrigger : public Trigger<uint8_t> {
 /// Main video player component
 class SimpleVideoPlayer : public Component {
  public:
-  explicit SimpleVideoPlayer(lvgl::LvglComponent *lvgl_component) { this->lvgl_component_ = lvgl_component; }
   ~SimpleVideoPlayer();
 
   // Component lifecycle
@@ -120,7 +121,10 @@ class SimpleVideoPlayer : public Component {
   // Configuration (called from codegen)
   //========================================================================
 
+#ifdef SVP_USE_LVGL
+  void set_lvgl(lvgl::LvglComponent *lvgl_component) { this->lvgl_component_ = lvgl_component; }
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
+#endif
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
@@ -292,9 +296,10 @@ class SimpleVideoPlayer : public Component {
   //========================================================================
 
   // Configuration
-  lvgl::LvglComponent *lvgl_component_{
-      nullptr};  // Parent LVGL component (required at construction; not otherwise used)
+#ifdef SVP_USE_LVGL
+  lvgl::LvglComponent *lvgl_component_{nullptr};
   lv_obj_t *canvas_{nullptr};
+#endif
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
