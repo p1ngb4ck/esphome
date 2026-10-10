@@ -143,6 +143,18 @@ void SimpleVideoPlayer::setup() {
     }
   }
 
+  // Read-ahead ring shared by file playback and the network stream. Too large for internal RAM, so
+  // PSRAM must hold it: checked first so it can never land anywhere else.
+  {
+    constexpr size_t ring_bytes = BufferedFileReader::RING_BYTES;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < ring_bytes ||
+        (this->read_ring_ = ring_buffer::RingBuffer::create(ring_bytes)) == nullptr) {
+      ESP_LOGE(TAG, "Failed to allocate the %u KB read-ahead ring (PSRAM)", static_cast<unsigned>(ring_bytes / 1024));
+      this->mark_failed();
+      return;
+    }
+  }
+
 #ifdef USE_AUDIO
   // Audio ring buffers + temp buffer: allocated ONCE here, sized from the fixed AUDIO_* compile-
   // time constants (see header) -- not per play(). init_audio_decoder_() only validates each
@@ -276,8 +288,8 @@ void SimpleVideoPlayer::loop() {
     const bool output_ok = streaming && lvgl_off;
     if (output_ok != this->stream_output_ok_.load(std::memory_order_acquire)) {
       this->stream_output_ok_.store(output_ok, std::memory_order_release);
-      if (this->stream_draw_task_ != nullptr)
-        xTaskNotifyGive(this->stream_draw_task_);
+      if (this->stream_present_task_ != nullptr)
+        xTaskNotifyGive(this->stream_present_task_);
     }
 #else
     (void) streaming;
@@ -447,6 +459,18 @@ void SimpleVideoPlayer::reader_loop_() {
 }
 
 void SimpleVideoPlayer::playback_loop_() {
+#ifdef SVP_STREAM
+  // File playback has priority: the stream lets go of the shared ring/slot/decoder/panel before the
+  // file reader touches the ring, and gets them back once the session is fully torn down.
+  this->stream_claim_output_();
+#endif
+  this->playback_session_();
+#ifdef SVP_STREAM
+  this->stream_return_output_();
+#endif
+}
+
+void SimpleVideoPlayer::playback_session_() {
   ESP_LOGI(TAG, "Playback task started (Core 1)");
 
   // Open file
@@ -630,14 +654,6 @@ void SimpleVideoPlayer::playback_loop_() {
   // Preloaded: ring full and the first compressed frame queued. Only now ask the main thread to
   // start (pause LVGL for DSI output, fire on_playback_started) and wait for it -- still before the
   // first frame, so nothing is rendered, presented or played earlier. Audio drains from here on.
-#ifdef SVP_STREAM
-  // File playback has priority over the network stream: hold the output for the whole session and
-  // tell a connected sender to pause until it ends.
-  if (this->output_lock_ != nullptr) {
-    xSemaphoreTake(this->output_lock_, portMAX_DELAY);
-    this->stream_set_awake_(false);
-  }
-#endif
   this->start_req_.store(1, std::memory_order_release);
   {
     uint32_t waited_ms = 0;
@@ -822,13 +838,6 @@ void SimpleVideoPlayer::playback_loop_() {
 
     esp_task_wdt_reset();
   }
-
-#ifdef SVP_STREAM
-  if (this->output_lock_ != nullptr) {
-    xSemaphoreGive(this->output_lock_);
-    this->stream_set_awake_(true);  // a connected sender redraws the whole page
-  }
-#endif
 
   // Stop the reader/producer and wait for it to exit before the file reader is torn down.
   // playback_task_stop_ also aborts any in-flight BufferedFileReader wait the reader is parked in.
@@ -1244,7 +1253,7 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   // A wait inside the reader returns early once playback_task_stop_ goes true, so an outstanding
   // storage completion cannot block the end of playback.
   this->file_reader_->set_abort_flag(&this->playback_task_stop_);
-  if (!this->file_reader_->open(path.c_str())) {
+  if (!this->file_reader_->open(path.c_str(), this->read_ring_.get())) {
     ESP_LOGE(TAG, "Failed to open file: %s", path.c_str());
     return false;
   }

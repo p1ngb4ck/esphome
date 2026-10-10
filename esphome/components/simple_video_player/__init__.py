@@ -86,7 +86,6 @@ CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
 CONF_PREFETCH_DURATION = "prefetch_duration"
 CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
-CONF_STREAM_MAX_FRAME_BYTES = "stream_max_frame_bytes"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_CHANNEL_LIST = "channel_list"
 CONF_TOKEN = "token"
@@ -196,10 +195,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DISPLAY_ID): cv.use_id(display.Display),
             # Portall-style network receiver (udisp over TCP, e.g. Portall's ha_send.py): draws the
             # sender's JPEG rectangles while no file plays. Needs display_id.
+            # Stream frames go through the same decoder input slot as file playback, so
+            # input_buffer_size also bounds the size of one streamed JPEG.
             cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
-            cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=262144): cv.int_range(
-                min=16384, max=1048576
-            ),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
@@ -459,7 +457,6 @@ async def to_code(config):
 
     if CONF_STREAM_PORT in config:
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
-        cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
         cg.add_define("SVP_STREAM")
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])

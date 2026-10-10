@@ -78,9 +78,13 @@ void BufferedFileReader::quiesce_fill_() {
   }
 }
 
-bool BufferedFileReader::open(const char *path) {
+bool BufferedFileReader::open(const char *path, ring_buffer::RingBuffer *ring) {
   if (this->open_)
     this->close();
+  if (ring == nullptr) {
+    ESP_LOGE(TAG, "no read-ahead ring");
+    return false;
+  }
   if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr ||
       storage::global_transfer_buffer == nullptr) {
     ESP_LOGE(TAG, "storage worker / transfer buffer not available");
@@ -110,16 +114,8 @@ bool BufferedFileReader::open(const char *path) {
     this->wait_sync_();
     return false;
   }
-  this->ring_ = ring_buffer::RingBuffer::create(RING_BYTES);
-  if (this->ring_ == nullptr) {
-    ESP_LOGE(TAG, "could not create %zu-byte ring buffer", RING_BYTES);
-    storage::global_transfer_buffer->release();
-    this->arena_ = nullptr;
-    this->arm_wait_();
-    storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
-    this->wait_sync_();
-    return false;
-  }
+  this->ring_ = ring;
+  this->ring_->reset();  // whatever the previous borrower left behind
 
   this->open_ = true;
   this->current_position_ = 0;
@@ -147,7 +143,7 @@ void BufferedFileReader::close() {
   if (storage::global_transfer_buffer != nullptr)
     storage::global_transfer_buffer->release();
   this->arena_ = nullptr;
-  this->ring_.reset();
+  this->ring_ = nullptr;  // borrowed: the player keeps it
   this->open_ = false;
   this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
   this->current_position_ = 0;
