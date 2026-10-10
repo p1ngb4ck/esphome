@@ -21,16 +21,6 @@ static const char *const TAG = "simple_video_player";
 // JPEG EOI (End of Image) marker
 static const uint16_t JPEG_EOI = 0xd9ff;
 
-#ifdef SVP_DSI_OUTPUT
-// PPA "transaction done" callback (ISR context). user_data is ppa_done_sem_; just release it so the
-// video task's next dsi_sync_prev_rotate_() can consume it. Nothing heavy here.
-static IRAM_ATTR bool svp_ppa_done_cb(ppa_client_handle_t, ppa_event_data_t *, void *user_data) {
-  BaseType_t hp_task_woken = pdFALSE;
-  xSemaphoreGiveFromISR(static_cast<SemaphoreHandle_t>(user_data), &hp_task_woken);
-  return hp_task_woken == pdTRUE;
-}
-#endif
-
 // Alignment helpers
 #define ALIGN_UP(num, align) (((num) + ((align) -1)) & ~((align) -1))
 #define ALIGN_DOWN(num, align) ((num) & ~((align) -1))
@@ -66,10 +56,8 @@ void SimpleVideoPlayer::setup() {
 
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // Direct mipi_dsi output: no LVGL canvas, no output buffers. init_dsi_output_() takes the
-    // driver-owned DPI framebuffers + a PPA client and points decode_target_ at its own decode
-    // buffer (or straight at a framebuffer for the rotation-0 path). `canvas_id` is not set in this
-    // mode (schema makes the two mutually exclusive).
+    // Direct display output: no LVGL canvas, no canvas output buffers. `canvas_id` is not set in
+    // this mode (schema makes the two mutually exclusive).
     if (!this->init_dsi_output_()) {
       this->mark_failed();
       return;
@@ -249,9 +237,8 @@ void SimpleVideoPlayer::loop() {
   }
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // DSI-direct playback owns the panel; the video task flips framebuffers itself in
-    // present_dsi_(). Nothing to invalidate on the LVGL thread. Hand the panel back to LVGL once
-    // playback has fully stopped.
+    // Direct playback owns the panel; the video task draws each frame itself. Nothing to
+    // invalidate on the LVGL thread. Hand the panel back to LVGL once playback has fully stopped.
     if (this->dsi_lvgl_paused_ && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
@@ -315,24 +302,6 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->start_req_.store(0, std::memory_order_release);
   this->av_started_.store(false, std::memory_order_release);
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
-
-#ifdef SVP_DSI_OUTPUT
-  // Direct-to-DSI-framebuffer video path: PPA-rotate the decoded frame into a driver-owned DPI
-  // framebuffer (async) and repoint the scanout at it (present_dsi_()). LVGL must be off the
-  // scanout for the duration so its flushes don't fight ours; resumed in loop() once stopped.
-  if (this->dsi_ != nullptr) {
-    // LVGL is paused only once the video is preloaded and about to start (loop(), start_req_).
-    // Restart the pipeline from a clean slate (a prior session may have left an undrained
-    // completion / a stale prev-FB).
-    this->dsi_prev_fb_ = nullptr;
-    this->dsi_back_idx_ = 0;
-    if (this->dsi_direct_decode_) {
-      this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
-    } else if (this->ppa_done_sem_ != nullptr) {
-      xSemaphoreTake(this->ppa_done_sem_, 0);
-    }
-  }
-#endif
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
   // App.loop() -> LvglComponent::loop() -> lv_timer_handler(), i.e. the actual LVGL
@@ -694,9 +663,8 @@ void SimpleVideoPlayer::playback_loop_() {
         this->playback_start_time_us_ + this->paused_accum_us_ + static_cast<int64_t>(frame_index * frame_dur);
 
 #ifdef SVP_DSI_OUTPUT
-    // DSI path: if more than one frame BEHIND the file clock, re-anchor the clock to now and carry
-    // on at 1x -- this HW cannot sprint to catch up, and a sprint would run the next decode into
-    // the still-in-flight async PPA rotate (shared DMA2D). Every frame still plays, just shifted
+    // Direct path: if more than one frame BEHIND the file clock, re-anchor the clock to now and
+    // carry on at 1x -- this HW cannot sprint to catch up. Every frame still plays, just shifted
     // later; audio rides the same feed rate so it stays aligned. Not frame-dropping.
     if (this->dsi_ != nullptr && (esp_timer_get_time() - target_present_time_us) > frame_dur) {
       this->playback_start_time_us_ =
@@ -755,18 +723,13 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && this->dsi_ != nullptr) {
-      // Tear-free present: the frame was decoded into the owned framebuffer dsi_fb_[dsi_back_idx_].
-      // Handing that owned pointer to draw_pixels_at() makes the DPI driver flip the scanout to it
-      // at the next frame boundary (no copy, no tearing). Then steer the next decode at the other
-      // framebuffer. Panel dims are multiples of 16 (checked in init_dsi_output_), so no x_pad.
+      // Portall's plain mode: the frame was decoded into our own buffer in the display's depth; the
+      // display copies it in. Panel dims are multiples of 16 (init_dsi_output_), so no x_pad.
       const uint32_t present_start = micros();
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_,
-                                 reinterpret_cast<const uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]),
+      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_,
                                  display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
-      this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
-      this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
       const uint32_t present_us = micros() - present_start;
       this->present_us_sum_ += present_us;
       if (present_us > this->present_us_max_)
@@ -1001,13 +964,11 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   uint32_t out_cap = static_cast<uint32_t>(this->output_buffer_size_);
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // DSI direct mode: decode straight into the driver-owned framebuffer in the panel's own pixel
-    // format (derived from the display config in init_dsi_output_). RGB565 panels get an RGB565
-    // decode so the output fits the FB; RGB888 keeps the format above. BGR element order stays for
-    // BOTH: it puts the lowest-addressed byte at blue, which is the little-endian layout esp_lcd's
-    // RGB565 and RGB888 framebuffers both read -- RGB here comes out byte-swapped (grey -> green).
+    // Direct mode: decode into our own buffer in the display's depth (color_depth from the YAML).
+    // BGR element order for BOTH depths: it puts the lowest-addressed byte at blue, which is the
+    // little-endian layout esp_lcd's RGB565 and RGB888 framebuffers both read.
     out_buf = this->decode_target_;
-    out_cap = static_cast<uint32_t>(this->dsi_fb_bytes_);
+    out_cap = static_cast<uint32_t>(this->decode_target_len_);
     if (this->dsi_fb_bpp_ == 2) {
       decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
     }
@@ -1036,123 +997,33 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 
 #ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::init_dsi_output_() {
-  // Tear-free Portall-style present: the frame is decoded straight into the panel's own back
-  // framebuffer, and that owned pointer is handed to the mipi_dsi display with draw_pixels_at().
-  // The esp_lcd DPI driver recognises an owned framebuffer and flips the scanout to it at the next
-  // frame boundary instead of copying into the live one -- so no tearing. The two framebuffers are
-  // alternated each frame (double buffer), which needs frame_buffers: 2. The video is authored in
-  // the panel's native orientation + resolution (the user transposes at transcode); a size mismatch
-  // is caught at play().
-  this->dsi_->get_dsi_frame_buffers(this->dsi_fb_, &this->dsi_fb_count_);
-  if (this->dsi_fb_count_ < 2) {
-    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; tear-free video needs >= 2 (set frame_buffers: 2)",
-             this->dsi_fb_count_);
+  // Portall's plain mode: decode into our own buffer in the display's depth, then draw_pixels_at()
+  // copies it in. The video is authored in the panel's native orientation + resolution (the user
+  // transposes at transcode); a size mismatch is caught at play().
+  this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_native_width());
+  this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_native_height());
+
+  // The HW JPEG decoder writes whole 16x16 units; with a panel that is a multiple of 16 the decoded
+  // rows have no padding, so draw_pixels_at() stays a single transfer (no per-line x_pad copy).
+  if (this->dsi_out_w_ == 0 || this->dsi_out_h_ == 0 || (this->dsi_out_w_ & 15) != 0 || (this->dsi_out_h_ & 15) != 0) {
+    ESP_LOGE(TAG, "panel %ux%u is not a multiple of 16 on both axes; direct video needs that", this->dsi_out_w_,
+             this->dsi_out_h_);
     return false;
   }
 
-  this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
-  this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
-  this->dsi_in_w_ = this->dsi_out_w_;
-  this->dsi_in_h_ = this->dsi_out_h_;
-  this->video_rotation_deg_ = 0;
-
-  // The HW JPEG decoder writes whole 16x16 units, so it can only decode straight into a framebuffer
-  // whose dimensions are already multiples of 16 -- otherwise the padded output overflows the
-  // exactly-sized driver framebuffer. 800x1280 and most panel sizes qualify.
-  if ((this->dsi_out_w_ & 15) != 0 || (this->dsi_out_h_ & 15) != 0) {
-    ESP_LOGE(TAG, "panel %ux%u is not a multiple of 16 on both axes; direct-to-framebuffer video needs that",
-             this->dsi_out_w_, this->dsi_out_h_);
+  const size_t wanted = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
+  jpeg_decode_memory_alloc_cfg_t out_cfg{};
+  out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+  this->decode_target_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(wanted, &out_cfg, &this->decode_target_len_));
+  if (this->decode_target_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate the %zu-byte decode buffer (PSRAM)", wanted);
+    this->decode_target_len_ = 0;
     return false;
   }
 
-  // Bytes per pixel from the display's own color-depth config: RGB888 -> 3, RGB565 -> 2. The
-  // decoder writes this format (BGR element order, see decode_frame_) straight into the framebuffer.
-  this->dsi_fb_bpp_ = this->dsi_->get_bytes_per_pixel();
-  if (this->dsi_fb_bpp_ != 3 && this->dsi_fb_bpp_ != 2) {
-    ESP_LOGE(TAG, "mipi_dsi color depth is %u bytes/pixel; direct video needs RGB888 (3) or RGB565 (2)",
-             this->dsi_fb_bpp_);
-    return false;
-  }
-  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
-
-  this->dsi_direct_decode_ = true;
-  this->dsi_back_idx_ = 0;
-  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
-
-  ESP_LOGI(TAG, "DSI output: %u FBs, panel %ux%u, %u bytes/pixel (%s), VSYNC flip via draw_pixels_at",
-           this->dsi_fb_count_, this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_,
-           this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
+  ESP_LOGI(TAG, "Direct output: panel %ux%u, %s, decode buffer %zu bytes (PSRAM), drawn with draw_pixels_at",
+           this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565", this->decode_target_len_);
   return true;
-}
-
-void SimpleVideoPlayer::dsi_sync_prev_rotate_() {
-  // The previous pass queued an async PPA rotate into dsi_prev_fb_. It has had a whole frame period
-  // (decode + pace) to finish -- a full-frame RGB888 rotate is a few ms, so it is always done by
-  // now. Consume its completion so the sem stays balanced; DO NOT wait on it (no portMAX_DELAY, no
-  // fixed timeout -- AGENTS.md hot-path rule; we trust it finished).
-  if (this->dsi_prev_fb_ != nullptr) {
-    xSemaphoreTake(this->ppa_done_sem_, 0);
-  }
-}
-
-void SimpleVideoPlayer::present_dsi_() {
-  // 1. Hand the scanout the frame we rotated on the PREVIOUS pass. Its rotate is finished
-  //    (dsi_sync_prev_rotate_() ran at the top of this loop pass). present_dsi_frame_buffer() only
-  //    repoints the DPI framebuffer for the next scan frame -- it does not block.
-  if (this->dsi_prev_fb_ != nullptr) {
-    this->dsi_->present_dsi_frame_buffer(this->dsi_prev_fb_);
-  }
-
-  // 2. Kick off THIS frame's rotate into the next FB, non-blocking. decode_target_ (the landscape
-  //    decode buffer) stays untouched until the next pass's dsi_sync_prev_rotate_() + decode.
-  void *back = this->dsi_fb_[this->dsi_back_idx_];
-
-  ppa_srm_rotation_angle_t angle;
-  switch (this->video_rotation_deg_) {
-    case 90:
-      angle = PPA_SRM_ROTATION_ANGLE_270;  // display rotated 90 CW == PPA 270 CCW
-      break;
-    case 270:
-      angle = PPA_SRM_ROTATION_ANGLE_90;
-      break;
-    case 180:
-      angle = PPA_SRM_ROTATION_ANGLE_180;
-      break;
-    default:
-      angle = PPA_SRM_ROTATION_ANGLE_0;
-      break;
-  }
-
-  ppa_srm_oper_config_t s{};
-  s.in.buffer = this->decode_target_;
-  s.in.pic_w = this->dsi_in_w_;
-  s.in.pic_h = this->dsi_in_h_;
-  s.in.block_w = this->dsi_in_w_;
-  s.in.block_h = this->dsi_in_h_;
-  s.in.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
-  s.out.buffer = back;
-  s.out.buffer_size = this->dsi_fb_bytes_;
-  s.out.pic_w = this->dsi_out_w_;
-  s.out.pic_h = this->dsi_out_h_;
-  s.out.srm_cm = PPA_SRM_COLOR_MODE_RGB888;
-  s.rotation_angle = angle;
-  s.scale_x = 1.0f;
-  s.scale_y = 1.0f;
-  s.mode = PPA_TRANS_MODE_NON_BLOCKING;
-  s.user_data = this->ppa_done_sem_;
-  if (ppa_do_scale_rotate_mirror(this->ppa_client_, &s) != ESP_OK) {
-    return;
-  }
-  this->dsi_prev_fb_ = back;
-  this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
-}
-
-void SimpleVideoPlayer::present_dsi_direct_() {
-  // Rotation 0: decode_frame_() just wrote this frame straight into dsi_fb_[dsi_back_idx_].
-  // Repoint the scanout at it (no copy, no wait) and steer the next decode at the next FB.
-  this->dsi_->present_dsi_frame_buffer(this->dsi_fb_[this->dsi_back_idx_]);
-  this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
-  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
 }
 #endif  // SVP_DSI_OUTPUT
 
@@ -1378,13 +1249,12 @@ bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_h
   if (this->dsi_ != nullptr) {
     // DSI direct output: the video must be transcoded to exactly the resolution the panel needs
     // (native res with W/H swapped for a 90/270 rotation). No scaling -- the user matches it.
-    if (video_width != this->dsi_in_w_ || video_height != this->dsi_in_h_) {
+    if (video_width != this->dsi_out_w_ || video_height != this->dsi_out_h_) {
       ESP_LOGE(TAG, "Video is %" PRIu32 "x%" PRIu32 " but this panel needs exactly %ux%u -- re-transcode.", video_width,
-               video_height, this->dsi_in_w_, this->dsi_in_h_);
+               video_height, this->dsi_out_w_, this->dsi_out_h_);
       return false;
     }
-    ESP_LOGI(TAG, "Buffers verified (DSI): %ux%u -> panel %ux%u", this->dsi_in_w_, this->dsi_in_h_, this->dsi_out_w_,
-             this->dsi_out_h_);
+    ESP_LOGI(TAG, "Buffers verified (direct): %ux%u", this->dsi_out_w_, this->dsi_out_h_);
     return true;
   }
 #endif
@@ -1449,16 +1319,10 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_decode_buf_) {
-    heap_caps_free(this->dsi_decode_buf_.release());  // jpeg_alloc_decoder_mem()
-  }
-  if (this->ppa_client_ != nullptr) {
-    ppa_unregister_client(this->ppa_client_);
-    this->ppa_client_ = nullptr;
-  }
-  if (this->ppa_done_sem_ != nullptr) {
-    vSemaphoreDelete(this->ppa_done_sem_);
-    this->ppa_done_sem_ = nullptr;
+  if (this->decode_target_ != nullptr) {
+    heap_caps_free(this->decode_target_);  // jpeg_alloc_decoder_mem()
+    this->decode_target_ = nullptr;
+    this->decode_target_len_ = 0;
   }
 #endif
 }

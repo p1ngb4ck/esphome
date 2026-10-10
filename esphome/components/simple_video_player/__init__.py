@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import speaker
+from esphome.components import display, speaker
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.esp32 import only_on_variant
 from esphome.components.esp32.const import VARIANT_ESP32P4
@@ -27,13 +27,6 @@ try:
 except ImportError:
     LVGL_AVAILABLE = False
     lv_canvas_t = None
-
-# Optional: render straight into the MIPI-DSI panel framebuffers (HW JPEG decode -> PPA rotate ->
-# DSI flip), bypassing LVGL for the video path entirely. Requires the mipi_dsi display component.
-try:
-    from esphome.components.mipi_dsi.display import MipiDsi
-except ImportError:
-    MipiDsi = None
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
@@ -172,15 +165,10 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(SimpleVideoPlayer),
             # Output target -- exactly one of these (enforced by _validate_output_target):
             #   canvas_id  : render into an LVGL canvas widget (the original path)
-            #   display_id : render straight into this mipi_dsi panel's framebuffers (HW JPEG
-            #                decode -> PPA rotate -> DSI VSYNC flip), bypassing LVGL for the video
-            #                path. Rotation is read from the LVGL component at runtime.
+            #   display_id : draw each decoded frame onto this display with draw_pixels_at() while
+            #                LVGL is paused (Portall's way); the video must match the panel exactly.
             cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
-            **(
-                {cv.Optional(CONF_DISPLAY_ID): cv.use_id(MipiDsi)}
-                if MipiDsi is not None
-                else {}
-            ),
+            cv.Optional(CONF_DISPLAY_ID): cv.use_id(display.Display),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
@@ -317,33 +305,20 @@ def _resolve_speaker_audio_format(config, fconf):
     this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = resolved_channel
 
 
-def _validate_display_output(config, fconf):
-    """Rendering straight into the mipi_dsi framebuffers needs >= 2 (one scanning out, one being
-    written) so the DPI driver can flip at VSYNC. Rotation (90/180/270) additionally needs a 3rd
-    FB for the non-blocking PPA pipeline -- that's checked at runtime in init_dsi_output_() since
-    the rotation only comes from the LVGL component."""
-    display_id = config[CONF_DISPLAY_ID]
-    try:
-        display_path = fconf.get_path_for_id(display_id)[:-1]
-        display_conf = fconf.get_config_for_path(display_path)
-    except KeyError as err:
-        raise cv.Invalid(
-            f"Could not resolve display_id '{display_id}' to its own config"
-        ) from err
-    fbs = display_conf.get("frame_buffers", 1)
-    if fbs < 2:
-        raise cv.Invalid(
-            f"display_id '{display_id}' has frame_buffers: {fbs}; simple_video_player direct "
-            "output needs frame_buffers: 2 (3 if the video is rotated on-device). Each buffer is "
-            "width*height*bpp in PSRAM."
-        )
+def _display_depth(full_config, display_id):
+    """16 or 24: the display's own `color_depth:` (Portall's display_depth). draw_pixels_at() copies
+    straight in only when the picture is in the display's depth, so the decoder must output it."""
+    wanted = getattr(display_id, "id", display_id)
+    for block in full_config.get("display") or []:
+        if getattr(block.get(CONF_ID), "id", None) != wanted:
+            continue
+        depth = str(block.get("color_depth", "16")).lower().removesuffix("bit")
+        return 24 if depth == "24" else 16
+    return 16
 
 
 def _final_validate(config):
     fconf = fv.full_config.get()
-
-    if CONF_DISPLAY_ID in config:
-        _validate_display_output(config, fconf)
 
     if CONF_SPEAKER_ID not in config:
         return config
@@ -384,12 +359,10 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 @coroutine_with_priority(CoroPriority.FINAL)
 async def _resolve_display_output(var, display_id):
-    """Runs after every component's to_code(), when the mipi_dsi display variable is guaranteed to
-    exist. Wire it into the player. Rotation is read from the LVGL component at runtime (setup()),
-    not plumbed through here -- ESPHome forbids `rotation:` on an LVGL-driven display, so LVGL's is
-    the authoritative rotation."""
+    """Runs after every component's to_code(), when the display variable is guaranteed to exist."""
     disp = await cg.get_variable(display_id)
     cg.add(var.set_dsi(disp))
+    cg.add(var.set_dsi_color_depth(_display_depth(CORE.config, display_id)))
     cg.add_define("SVP_DSI_OUTPUT")
 
 

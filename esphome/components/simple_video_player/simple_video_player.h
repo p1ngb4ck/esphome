@@ -13,8 +13,7 @@
 // ESP32-P4 hardware JPEG decoder only -- other variants cannot decode fast enough for video.
 
 #ifdef SVP_DSI_OUTPUT
-#include "esphome/components/mipi_dsi/mipi_dsi.h"
-#include "driver/ppa.h"
+#include "esphome/components/display/display.h"
 #endif
 
 #ifdef USE_SPEAKER
@@ -133,9 +132,10 @@ class SimpleVideoPlayer : public Component {
 #endif
 
 #ifdef SVP_DSI_OUTPUT
-  // Direct render into the mipi_dsi framebuffers (bypasses LVGL for the video path). Wired by the
-  // FINAL codegen coroutine. Rotation is read at setup() from the LVGL component itself.
-  void set_dsi(mipi_dsi::MipiDsi *dsi) { this->dsi_ = dsi; }
+  // Direct output onto a display with draw_pixels_at() while LVGL is paused. Wired by the FINAL
+  // codegen coroutine together with the display's color_depth (16 or 24).
+  void set_dsi(display::Display *dsi) { this->dsi_ = dsi; }
+  void set_dsi_color_depth(uint8_t bits) { this->dsi_fb_bpp_ = bits == 24 ? 3 : 2; }
 #endif
 
   //========================================================================
@@ -220,20 +220,8 @@ class SimpleVideoPlayer : public Component {
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
 
 #ifdef SVP_DSI_OUTPUT
-  /// setup(): register the PPA SRM client + its done callback and fetch the mipi_dsi framebuffers.
-  /// false -> mark_failed.
+  /// setup(): read the panel size and allocate the decode buffer. false -> mark_failed.
   bool init_dsi_output_();
-  /// Drain the previous frame's async PPA-rotate completion. Called once per loop pass BEFORE
-  /// decode_frame_() reuses the decode buffer. Non-blocking (xSemaphoreTake timeout 0): a ~few-ms
-  /// rotate started a full frame period ago is always long done; we trust that, never wait.
-  void dsi_sync_prev_rotate_();
-  /// Present the framebuffer rotated on the PREVIOUS pass (its rotate is now finished), then kick
-  /// off this frame's PPA rotate NON-BLOCKING (decode_target_ -> next DSI back FB). One frame of
-  /// pipeline latency, wall-clock paced.
-  void present_dsi_();
-  /// Rotation-0 fast path: no PPA at all. decode_frame_() writes straight into the next DSI
-  /// framebuffer; this just repoints the scanout at it and advances decode_target_.
-  void present_dsi_direct_();
 #endif
   /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
   bool init_decoder_();
@@ -437,24 +425,12 @@ class SimpleVideoPlayer : public Component {
   uint32_t avi_fps_den_{0};
 
 #ifdef SVP_DSI_OUTPUT
-  mipi_dsi::MipiDsi *dsi_{nullptr};  // non-null -> DSI direct output instead of the LVGL canvas
-  uint16_t video_rotation_deg_{0};   // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
-  ppa_client_handle_t ppa_client_{};
-  SemaphoreHandle_t ppa_done_sem_{nullptr};  // given (from ISR) when an async PPA rotate finishes
-  void *dsi_fb_[3]{};                        // the mipi_dsi driver's framebuffers (native orientation)
-  void *dsi_prev_fb_{nullptr};               // FB rotated last pass, presented this pass (1-frame pipeline)
-  uint8_t *decode_target_{nullptr};          // where decode_frame_() writes in DSI mode (RGB888)
-  uint8_t dsi_fb_count_{0};
-  uint8_t dsi_back_idx_{0};        // which dsi_fb_ the next rotate writes / flip presents
-  bool dsi_lvgl_paused_{false};    // LVGL was paused for the duration of DSI-direct playback
-  bool dsi_direct_decode_{false};  // rotation 0: decode straight into dsi_fb_, no PPA at all
-  // Dims derived from the DISPLAY, not the canvas: out_* = native panel res (the FB), in_* = the
-  // video res the user must transcode to (= native res swapped for a 90/270 rotation).
-  uint16_t dsi_out_w_{0}, dsi_out_h_{0};
-  uint16_t dsi_in_w_{0}, dsi_in_h_{0};
-  size_t dsi_fb_bytes_{0};
-  uint8_t dsi_fb_bpp_{3};  // panel framebuffer bytes/pixel from the display config (RGB888=3, RGB565=2)
-  std::unique_ptr<uint8_t[]> dsi_decode_buf_;  // jpeg_alloc_decoder_mem, sized dsi_fb_bytes_ (RGB888)
+  display::Display *dsi_{nullptr};  // non-null -> direct display output instead of the LVGL canvas
+  bool dsi_lvgl_paused_{false};     // LVGL was paused for the duration of direct playback
+  uint16_t dsi_out_w_{0}, dsi_out_h_{0};  // panel native resolution; the video must match it
+  uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
+  uint8_t *decode_target_{nullptr};       // own decode buffer (jpeg_alloc_decoder_mem, PSRAM)
+  size_t decode_target_len_{0};
 #endif
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
