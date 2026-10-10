@@ -486,6 +486,9 @@ class SimpleVideoPlayer : public Component {
   uint64_t present_us_sum_{0};     // time in the DSI present (draw_pixels_at) -- DSI path only
   uint32_t present_us_max_{0};
   uint32_t bad_payload_count_{0};  // frame payloads without JPEG SOI/EOI (fetch-path corruption)
+  static constexpr uint32_t SOLID_FRAME_LOG_MAX = 8;
+  uint32_t solid_frame_count_{0};                      // decoded frames whose 4x4 sample grid is one colour
+  uint32_t solid_frame_idx_[SOLID_FRAME_LOG_MAX]{};    // frame indices of the first of them
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;

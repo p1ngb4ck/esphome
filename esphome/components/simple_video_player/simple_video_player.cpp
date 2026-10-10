@@ -461,6 +461,7 @@ void SimpleVideoPlayer::playback_loop_() {
   this->present_us_sum_ = 0;
   this->present_us_max_ = 0;
   this->bad_payload_count_ = 0;
+  this->solid_frame_count_ = 0;
   this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
@@ -720,6 +721,30 @@ void SimpleVideoPlayer::playback_loop_() {
     if (decoded && this->dsi_ != nullptr) {
       // Portall's plain mode: the frame was decoded into our own buffer in the display's depth; the
       // display copies it in. Panel dims are multiples of 16 (init_dsi_output_), so no x_pad.
+      {
+        // 4x4 sample grid; all 16 identical -> the decoder produced a single-colour frame.
+        const uint8_t bpp = this->dsi_fb_bpp_;
+        const size_t stride = static_cast<size_t>(this->dsi_out_w_) * bpp;
+        const uint8_t *first = nullptr;
+        bool solid = true;
+        for (uint32_t gy = 0; gy < 4 && solid; gy++) {
+          const size_t y = (2 * gy + 1) * this->dsi_out_h_ / 8;
+          for (uint32_t gx = 0; gx < 4; gx++) {
+            const uint8_t *px = this->decode_target_ + y * stride + ((2 * gx + 1) * this->dsi_out_w_ / 8) * bpp;
+            if (first == nullptr) {
+              first = px;
+            } else if (std::memcmp(px, first, bpp) != 0) {
+              solid = false;
+              break;
+            }
+          }
+        }
+        if (solid) {
+          if (this->solid_frame_count_ < SOLID_FRAME_LOG_MAX)
+            this->solid_frame_idx_[this->solid_frame_count_] = frame_index;
+          this->solid_frame_count_++;
+        }
+      }
       const uint32_t present_start = micros();
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
@@ -755,6 +780,17 @@ void SimpleVideoPlayer::playback_loop_() {
              static_cast<uint32_t>(this->decode_us_sum_ / stat_frames), this->decode_us_max_,
              static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
              this->decode_fail_count_, this->bad_payload_count_);
+#ifdef SVP_DSI_OUTPUT
+    if (this->dsi_ != nullptr) {
+      char idx[SOLID_FRAME_LOG_MAX * 11 + 1] = "";
+      size_t pos = 0;
+      const uint32_t shown = std::min<uint32_t>(this->solid_frame_count_, SOLID_FRAME_LOG_MAX);
+      for (uint32_t i = 0; i < shown && pos < sizeof(idx); i++)
+        pos += snprintf(idx + pos, sizeof(idx) - pos, " %" PRIu32, this->solid_frame_idx_[i]);
+      ESP_LOGI(TAG, "decoded single-colour frames: %" PRIu32 "%s%s", this->solid_frame_count_, shown ? ", first at:" : "",
+               idx);
+    }
+#endif
   }
   if (this->file_reader_ != nullptr && stat_frames > 0) {
     const auto &fs = this->file_reader_->fill_stats();
