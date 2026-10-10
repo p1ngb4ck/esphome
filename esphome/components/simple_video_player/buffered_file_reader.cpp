@@ -22,12 +22,14 @@ void BufferedFileReader::kick_fill_() {
   if (this->fill_in_flight_.exchange(true, std::memory_order_acq_rel))
     return;  // one already in flight
 
+  // Only whole chunks: a request occupies the single in-flight slot for a full worker round trip,
+  // so topping up a few bytes after every small read() halved the fill rate.
   size_t room = this->ring_->free();
-  if (room == 0) {
-    this->fill_in_flight_.store(false, std::memory_order_release);  // ring full -- read() re-kicks after draining
+  if (room < FILL_CHUNK) {
+    this->fill_in_flight_.store(false, std::memory_order_release);  // read() re-kicks after draining
     return;
   }
-  size_t want = std::min(FILL_CHUNK, room);
+  size_t want = FILL_CHUNK;
   this->fill_got_ = 0;
   this->fill_submit_us_ = micros();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(

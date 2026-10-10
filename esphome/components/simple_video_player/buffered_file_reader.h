@@ -103,7 +103,7 @@ class BufferedFileReader {
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
   static constexpr size_t RING_BYTES = 4 * 1024 * 1024;  // PSRAM read-ahead ring (~4 MB)
-  static constexpr size_t FILL_CHUNK = 128 * 1024;   // per read_chunk into the arena
+  static constexpr size_t FILL_CHUNK = 256 * 1024;   // per read_chunk into the arena
   static constexpr size_t RING_WRITE_SLICE = 16 * 1024;  // per xRingbufferSend (copy runs with IRQs masked)
 
   storage::StreamHandle handle_{};
