@@ -479,6 +479,12 @@ void SimpleVideoPlayer::playback_loop_() {
   // Fresh pacing state for this session.
   this->paused_accum_us_ = 0;
   this->decode_fail_count_ = 0;
+  this->late_frame_count_ = 0;
+  this->last_present_us_ = 0;
+  this->decode_us_sum_ = 0;
+  this->decode_us_max_ = 0;
+  this->present_us_sum_ = 0;
+  this->present_us_max_ = 0;
   this->video_frame_index_ = 0;
 
   // No canvas widget resize/reposition here: this is a single, fixed-resolution panel, and the
@@ -673,11 +679,27 @@ void SimpleVideoPlayer::playback_loop_() {
     while (target_present_time_us - esp_timer_get_time() > 0) {
     }
 
+    // Late-frame accounting (plain counter, summarised after the loop; no logging here). The
+    // achieved interval between paced releases: when decode kept up, the spin above aligned it to
+    // ~frame_dur, so a longer interval means the previous frame overran the budget. >10% over
+    // filters out sub-ms wall-clock jitter.
+    const int64_t present_now = esp_timer_get_time();
+    if (this->last_present_us_ != 0 && (present_now - this->last_present_us_) > frame_dur + frame_dur / 10) {
+      this->late_frame_count_++;
+    }
+    this->last_present_us_ = present_now;
+
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
     // slot->data -- so the slot is returned to the reader right after.
+    const uint32_t dec_start = micros();
     const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(payload));
-    if (!decoded) {
+    if (decoded) {
+      const uint32_t dec_us = micros() - dec_start;
+      this->decode_us_sum_ += dec_us;
+      if (dec_us > this->decode_us_max_)
+        this->decode_us_max_ = dec_us;
+    } else {
       // No logging on this pacing path (AGENTS.md) -- plain counter, summarised after the loop.
       this->decode_fail_count_++;
     }
@@ -689,6 +711,7 @@ void SimpleVideoPlayer::playback_loop_() {
       // Handing that owned pointer to draw_pixels_at() makes the DPI driver flip the scanout to it
       // at the next frame boundary (no copy, no tearing). Then steer the next decode at the other
       // framebuffer. Panel dims are multiples of 16 (checked in init_dsi_output_), so no x_pad.
+      const uint32_t present_start = micros();
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
       this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_,
@@ -696,6 +719,10 @@ void SimpleVideoPlayer::playback_loop_() {
                                  display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
       this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
       this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
+      const uint32_t present_us = micros() - present_start;
+      this->present_us_sum_ += present_us;
+      if (present_us > this->present_us_max_)
+        this->present_us_max_ = present_us;
     }
 #endif
 
@@ -710,9 +737,18 @@ void SimpleVideoPlayer::playback_loop_() {
   this->playback_task_stop_ = true;
   this->wait_for_task_stop_(this->reader_task_handle_, 2000);
 
-  // One-line playback-health summary -- safe here (the loop has exited, this is not the hot path).
-  if (this->decode_fail_count_ > 0) {
-    ESP_LOGW(TAG, "playback health: %" PRIu32 " decode failures", this->decode_fail_count_);
+  // One-line playback analysis summary -- safe here (the loop has exited, not the hot path). All
+  // figures came from plain per-frame counters/micros() on the pacing path, never logging there.
+  const uint32_t stat_frames = this->video_frame_index_;
+  if (stat_frames > 0) {
+    const float late_pct = 100.0f * this->late_frame_count_ / stat_frames;
+    ESP_LOGI(TAG,
+             "playback stats: %" PRIu32 " frames, %" PRIu32 " late (%.1f%%), decode avg %" PRIu32 " / max %" PRIu32
+             " us, present avg %" PRIu32 " / max %" PRIu32 " us, %" PRIu32 " decode failures",
+             stat_frames, this->late_frame_count_, late_pct,
+             static_cast<uint32_t>(this->decode_us_sum_ / stat_frames), this->decode_us_max_,
+             static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
+             this->decode_fail_count_);
   }
 
   // Release any in-flight BufferedFileReader wait before close_file_() tears the reader down.

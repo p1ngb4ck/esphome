@@ -488,8 +488,15 @@ class SimpleVideoPlayer : public Component {
   int64_t paused_accum_us_{0};         // total wall time spent PAUSED, excluded from media_us
   float frame_duration_us_{0};         // duration of one frame in microseconds (1000000/fps)
 
-  // Playback-task counter, summarised once after the loop (no logging on the pacing path).
+  // Playback-task analysis counters, summarised once after the loop (no logging on the pacing
+  // path; only cheap micros()/adds per frame, so no runtime regression). Reset per play().
   uint32_t decode_fail_count_{0};
+  uint32_t late_frame_count_{0};   // frames whose achieved present interval blew the frame budget
+  int64_t last_present_us_{0};     // previous paced-release timestamp, to measure the interval
+  uint64_t decode_us_sum_{0};      // time in decode_frame_ (JPEG decode)
+  uint32_t decode_us_max_{0};
+  uint64_t present_us_sum_{0};     // time in the DSI present (draw_pixels_at) -- DSI path only
+  uint32_t present_us_max_{0};
 
   // Automation callbacks
   CallbackManager<void()> on_started_callbacks_;
