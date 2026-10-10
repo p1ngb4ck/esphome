@@ -237,6 +237,16 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
+  if (this->start_req_.load(std::memory_order_acquire) == 1) {
+#ifdef SVP_DSI_OUTPUT
+    if (this->dsi_ != nullptr && !this->dsi_lvgl_paused_) {
+      this->lvgl_component_->set_paused(true, false);
+      this->dsi_lvgl_paused_ = true;
+    }
+#endif
+    this->on_started_callbacks_.call();
+    this->start_req_.store(2, std::memory_order_release);
+  }
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
     // DSI-direct playback owns the panel; the video task flips framebuffers itself in
@@ -302,6 +312,8 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   this->video_path_ = video_path;
   this->last_error_.store(PlaybackError::NONE, std::memory_order_relaxed);
   this->playback_task_stop_ = false;
+  this->start_req_.store(0, std::memory_order_release);
+  this->av_started_.store(false, std::memory_order_release);
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
 
 #ifdef SVP_DSI_OUTPUT
@@ -309,10 +321,7 @@ void SimpleVideoPlayer::play(const std::string &video_path) {
   // framebuffer (async) and repoint the scanout at it (present_dsi_()). LVGL must be off the
   // scanout for the duration so its flushes don't fight ours; resumed in loop() once stopped.
   if (this->dsi_ != nullptr) {
-    if (!this->dsi_lvgl_paused_) {
-      this->lvgl_component_->set_paused(true, false);
-      this->dsi_lvgl_paused_ = true;
-    }
+    // LVGL is paused only once the video is preloaded and about to start (loop(), start_req_).
     // Restart the pipeline from a clean slate (a prior session may have left an undrained
     // completion / a stale prev-FB).
     this->dsi_prev_fb_ = nullptr;
@@ -438,6 +447,8 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
+  this->avi_fps_num_ = 0;
+  this->avi_fps_den_ = 0;
   // Get video dimensions from first frame
   uint32_t width = 0;
   uint32_t height = 0;
@@ -539,9 +550,14 @@ void SimpleVideoPlayer::playback_loop_() {
   this->cache_buffer_valid_ = 0;
   this->cache_buffer_offset_ = 0;
 
-  this->on_started_callbacks_.call();
-
-  this->frame_duration_us_ = 1000000.0f / this->target_fps_;  // e.g., 40000us for 25fps
+  // Frame rate from the AVI header (dwRate/dwScale); target_fps is only the fallback for raw MJPEG
+  // or a header without a usable rate.
+  if (this->video_format_ == VideoFormat::AVI_MJPEG && this->avi_fps_num_ != 0 && this->avi_fps_den_ != 0) {
+    this->frame_duration_us_ = 1000000.0f * this->avi_fps_den_ / this->avi_fps_num_;
+  } else {
+    this->frame_duration_us_ = 1000000.0f / this->target_fps_;
+  }
+  ESP_LOGI(TAG, "Frame interval: %.0f us (%.2f fps)", this->frame_duration_us_, 1000000.0f / this->frame_duration_us_);
   // Fixed for the whole session -- computed once here, not cast from the float every frame.
   const int64_t frame_dur = static_cast<int64_t>(this->frame_duration_us_);
   // Anchored on the first paced frame in the loop (see there), not here -- so cold-start read
@@ -589,7 +605,7 @@ void SimpleVideoPlayer::playback_loop_() {
   // here keeps the fill chain advancing while we wait. Not the hot path (nothing presented yet).
   {
     uint32_t waited_ms = 0;
-    while (uxQueueMessagesWaiting(this->filled_queue_) < FRAME_SLOT_COUNT - 1) {
+    while (uxQueueMessagesWaiting(this->filled_queue_) < FRAME_SLOT_COUNT) {
       if (this->state_.load(std::memory_order_acquire) != PlayerState::PLAYING)
         break;
       if (storage::global_storage_worker != nullptr)
@@ -599,6 +615,22 @@ void SimpleVideoPlayer::playback_loop_() {
         break;
     }
   }
+
+  // Preloaded: ring full and the first compressed frame queued. Only now ask the main thread to
+  // start (pause LVGL for DSI output, fire on_playback_started) and wait for it -- still before the
+  // first frame, so nothing is rendered, presented or played earlier. Audio drains from here on.
+  this->start_req_.store(1, std::memory_order_release);
+  {
+    uint32_t waited_ms = 0;
+    while (this->start_req_.load(std::memory_order_acquire) != 2 &&
+           this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING && waited_ms < 2000) {
+      if (storage::global_storage_worker != nullptr)
+        storage::global_storage_worker->update();
+      vTaskDelay(pdMS_TO_TICKS(1));
+      waited_ms++;
+    }
+  }
+  this->av_started_.store(true, std::memory_order_release);
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
@@ -1137,6 +1169,8 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     this->video_width_ = width;
     this->video_height_ = height;
 
+    this->avi_fps_num_ = video_info->fps_num;
+    this->avi_fps_den_ = video_info->fps_den;
     ESP_LOGI(TAG, "AVI video dimensions: %" PRIu32 "x%" PRIu32 ", FPS: %" PRIu32 "/%" PRIu32, width, height,
              video_info->fps_num, video_info->fps_den);
     return true;
@@ -1628,7 +1662,7 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   while (!this->audio_task_stop_) {
     esp_task_wdt_reset();
 
-    if (!this->audio_enabled_) {
+    if (!this->audio_enabled_ || !this->av_started_.load(std::memory_order_acquire)) {
       continue;
     }
 

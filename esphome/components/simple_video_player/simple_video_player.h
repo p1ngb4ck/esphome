@@ -429,6 +429,13 @@ class SimpleVideoPlayer : public Component {
   // Set by decode_frame_() after a frame is decoded; consumed by loop() on the LVGL thread.
   std::atomic<bool> frame_ready_{false};
 
+  // Start handshake: the playback task sets 1 once preload is done; loop() (main thread) pauses LVGL
+  // for DSI output, fires on_playback_started and sets 2. Nothing is presented or played before that.
+  std::atomic<uint8_t> start_req_{0};
+  std::atomic<bool> av_started_{false};
+  uint32_t avi_fps_num_{0};
+  uint32_t avi_fps_den_{0};
+
 #ifdef SVP_DSI_OUTPUT
   mipi_dsi::MipiDsi *dsi_{nullptr};  // non-null -> DSI direct output instead of the LVGL canvas
   uint16_t video_rotation_deg_{0};   // LVGL's rotation (0/90/180/270), read at setup(); applied by PPA
