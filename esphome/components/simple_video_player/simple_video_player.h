@@ -171,12 +171,13 @@ class SimpleVideoPlayer : public Component {
 #endif
 
 #ifdef SVP_CHANNEL_LIST
-  // Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown; picking a
-  // channel asks the relay to stream it to stream_port.
+  // Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
+  // channel_play() asks the relay to stream the selected channel to stream_port.
   void set_channel_url(const std::string &url) { this->channel_url_ = url; }
   void set_channel_token(const std::string &token) { this->channel_token_ = token; }
   void set_channel_widget(lvgl::LvDropdownType *widget) { this->channel_widget_ = widget; }
   void channel_list_refresh() { this->channel_request_(CHANNEL_CMD_REFRESH, 0); }
+  void channel_play();
   void channel_stop() { this->channel_request_(CHANNEL_CMD_STOP, 0); }
 #endif
 
@@ -284,7 +285,6 @@ class SimpleVideoPlayer : public Component {
   bool setup_channel_list_();
   void channel_request_(uint8_t cmd, uint16_t index);
   void channel_loop_();
-  static void channel_selected_cb_(lv_event_t *e);
   static void channel_task_entry_(void *param);
   void channel_task_loop_();
   /// Blocking HTTP to the relay (channel task only). response: PSRAM buffer, caller frees.
@@ -687,6 +687,15 @@ template<typename... Ts> class ChannelRefreshAction : public Action<Ts...> {
  public:
   explicit ChannelRefreshAction(SimpleVideoPlayer *player) : player_(player) {}
   void play(const Ts &...x) override { this->player_->channel_list_refresh(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class ChannelPlayAction : public Action<Ts...> {
+ public:
+  explicit ChannelPlayAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->channel_play(); }
 
  protected:
   SimpleVideoPlayer *player_;

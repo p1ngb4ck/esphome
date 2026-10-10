@@ -74,6 +74,7 @@ PauseAction = simple_video_player_ns.class_("PauseAction", automation.Action)
 ResumeAction = simple_video_player_ns.class_("ResumeAction", automation.Action)
 StopAction = simple_video_player_ns.class_("StopAction", automation.Action)
 ChannelRefreshAction = simple_video_player_ns.class_("ChannelRefreshAction", automation.Action)
+ChannelPlayAction = simple_video_player_ns.class_("ChannelPlayAction", automation.Action)
 ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automation.Action)
 
 # Configuration keys
@@ -202,7 +203,7 @@ CONFIG_SCHEMA = cv.All(
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
-            # choosing a channel asks the relay to stream it to stream_port.
+            # channels.play asks the relay to stream the selected channel to stream_port.
             **(
                 {
                     cv.Optional(CONF_CHANNEL_LIST): cv.Schema(
@@ -598,6 +599,17 @@ async def simple_video_player_stop_to_code(config, action_id, template_arg, args
     synchronous=True,  # queues the request for the channel task
 )
 async def simple_video_player_channels_refresh_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "simple_video_player.channels.play",
+    ChannelPlayAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,  # queues the request for the channel task
+)
+async def simple_video_player_channels_play_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
 

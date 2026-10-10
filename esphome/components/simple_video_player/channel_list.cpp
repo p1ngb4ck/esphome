@@ -1,5 +1,5 @@
 // Channel list for the network stream: fetched from the svp_relay Home Assistant integration into an
-// LVGL dropdown; choosing a channel asks the relay to stream it to this panel's stream_port.
+// LVGL dropdown; channels.play asks the relay to stream the selected one to this panel's stream_port.
 
 #include "simple_video_player.h"
 
@@ -29,7 +29,6 @@ bool SimpleVideoPlayer::setup_channel_list_() {
     ESP_LOGE(TAG, "Failed to start the channel list task");
     return false;
   }
-  lv_obj_add_event_cb(this->channel_widget_->obj, channel_selected_cb_, LV_EVENT_VALUE_CHANGED, this);
   return true;
 }
 
@@ -40,9 +39,8 @@ void SimpleVideoPlayer::channel_request_(uint8_t cmd, uint16_t index) {
   xQueueSend(this->channel_q_, &request, 0);
 }
 
-void SimpleVideoPlayer::channel_selected_cb_(lv_event_t *e) {
-  auto *self = static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(e));
-  self->channel_request_(CHANNEL_CMD_PLAY, static_cast<uint16_t>(self->channel_widget_->get_selected_index()));
+void SimpleVideoPlayer::channel_play() {
+  this->channel_request_(CHANNEL_CMD_PLAY, static_cast<uint16_t>(this->channel_widget_->get_selected_index()));
 }
 
 void SimpleVideoPlayer::channel_loop_() {
