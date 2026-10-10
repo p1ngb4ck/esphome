@@ -251,6 +251,8 @@ class SimpleVideoPlayer : public Component {
 
   /// Stop audio processing task
   void stop_audio_task_();
+  /// Start the speaker right before the first video frame (audio and video start together).
+  void start_speaker_();
 #endif
 
   //========================================================================

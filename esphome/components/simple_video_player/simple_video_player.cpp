@@ -596,7 +596,15 @@ void SimpleVideoPlayer::playback_loop_() {
       waited_ms++;
     }
   }
+#ifdef USE_AUDIO
+  if (this->audio_enabled_)
+    this->start_speaker_();
+#endif
   this->av_started_.store(true, std::memory_order_release);
+#ifdef USE_AUDIO
+  if (this->audio_task_handle_ != nullptr)
+    xTaskNotifyGive(this->audio_task_handle_);
+#endif
 
   // One state load per iteration. Anything but PLAYING/PAUSED (STOPPED, ERROR) ends the loop.
   while (true) {
@@ -1444,24 +1452,9 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   audio::AudioStreamInfo speaker_stream_info(audio_info->bits_per_sample, this->speaker_audio_channels_,
                                              audio_info->sample_rate);
   this->speaker_->set_audio_stream_info(speaker_stream_info);
-
-  // Start the speaker to initialize I2S driver
-  this->speaker_->start();
-
-  // Wait for the speaker to reach STATE_RUNNING. This runs once at play() startup, before the
-  // frame loop -- not the zero-wait decode/pace path, so a coarse sleep is fine here.
-  uint32_t wait_start = millis();
-  const uint32_t SPEAKER_INIT_TIMEOUT_MS = 1000;
-  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_INIT_TIMEOUT_MS) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-
-  if (!this->speaker_->is_running()) {
-    ESP_LOGE(TAG, "Speaker failed to start within %" PRIu32 " ms", SPEAKER_INIT_TIMEOUT_MS);
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Speaker initialized: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
+  // Started in start_speaker_() together with the first video frame, not here: during preload it
+  // would only run empty.
+  ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
            this->speaker_audio_channels_, audio_info->sample_rate);
 
   // Ring buffers + temp buffer already exist (allocated once in setup(), sized from the fixed
@@ -1573,6 +1566,9 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   // storage worker and system tasks preempt it; the speaker's own I2S task drains its DMA in
   // parallel. This decouples audio entirely from the Core 1 video decode/pace task -- a multi-ms
   // jpeg_decoder_process() over there no longer stalls the speaker feed.
+  // Parked until the playback task releases it at the first video frame (or stop_audio_task_()).
+  while (!this->audio_task_stop_ && !this->av_started_.load(std::memory_order_acquire))
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   esp_task_wdt_add(nullptr);
 
   // A single failed decode drops that chunk and the loop keeps going, instead of tearing audio
@@ -1584,9 +1580,8 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   while (!this->audio_task_stop_) {
     esp_task_wdt_reset();
 
-    if (!this->audio_enabled_ || !this->av_started_.load(std::memory_order_acquire)) {
-      continue;
-    }
+    if (!this->audio_enabled_)
+      break;
 
     // Run audio decoder only when THIS file is compressed (MP3/FLAC). In a multi-codec build
     // audio_decoder_ exists even for a PCM file, so gate on the per-file mode, not the pointer --
@@ -1637,10 +1632,25 @@ void SimpleVideoPlayer::audio_processing_loop_() {
   vTaskDelete(nullptr);
 }
 
+void SimpleVideoPlayer::start_speaker_() {
+  // Runs once on the playback task right before the first frame (not the per-frame path).
+  static constexpr uint32_t SPEAKER_START_TIMEOUT_MS = 1000;
+  this->speaker_->start();
+  const uint32_t wait_start = millis();
+  while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_START_TIMEOUT_MS)
+    vTaskDelay(pdMS_TO_TICKS(1));
+  if (!this->speaker_->is_running()) {
+    ESP_LOGE(TAG, "Speaker failed to start within %" PRIu32 " ms -- playing video-only", SPEAKER_START_TIMEOUT_MS);
+    this->speaker_->stop();
+    this->audio_enabled_ = false;
+  }
+}
+
 void SimpleVideoPlayer::stop_audio_task_() {
   if (this->audio_task_handle_ != nullptr) {
     ESP_LOGI(TAG, "Stopping audio processing task...");
     this->audio_task_stop_ = true;
+    xTaskNotifyGive(this->audio_task_handle_);
 
     // Teardown, not the zero-wait path -- a coarse sleep is fine while the audio task exits.
     uint32_t timeout_ms = 1000;
