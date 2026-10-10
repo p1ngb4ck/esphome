@@ -685,14 +685,17 @@ void SimpleVideoPlayer::playback_loop_() {
 
 #ifdef SVP_DSI_OUTPUT
     if (decoded && this->dsi_ != nullptr) {
-      // Portall-style present: hand the decoded frame to the mipi_dsi display. x_pad skips the
-      // 16-pixel decode padding at the end of each line (zero when the panel width is a multiple
-      // of 16). The video is the panel's native size (enforced at play()), so it draws at 0,0.
-      const int x_pad = static_cast<int>(((this->dsi_out_w_ + 15) & ~15) - this->dsi_out_w_);
+      // Tear-free present: the frame was decoded into the owned framebuffer dsi_fb_[dsi_back_idx_].
+      // Handing that owned pointer to draw_pixels_at() makes the DPI driver flip the scanout to it
+      // at the next frame boundary (no copy, no tearing). Then steer the next decode at the other
+      // framebuffer. Panel dims are multiples of 16 (checked in init_dsi_output_), so no x_pad.
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_,
-                                 display::COLOR_ORDER_RGB, bitness, false, 0, 0, x_pad);
+      this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_,
+                                 reinterpret_cast<const uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]),
+                                 display::COLOR_ORDER_RGB, bitness, false, 0, 0, 0);
+      this->dsi_back_idx_ = static_cast<uint8_t>((this->dsi_back_idx_ + 1) % this->dsi_fb_count_);
+      this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[this->dsi_back_idx_]);
     }
 #endif
 
@@ -938,42 +941,52 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
 
 #ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::init_dsi_output_() {
-  // Portall-style presentation: the frame is decoded into an RGB buffer in the panel's own pixel
-  // format and handed to the mipi_dsi display with draw_pixels_at() -- the display does the
-  // framebuffer write. No owned-framebuffer flip and no PPA here: the video is authored in the
-  // panel's native orientation and resolution (the user transposes at transcode), and a size
-  // mismatch is caught at play() and aborts cleanly.
+  // Tear-free Portall-style present: the frame is decoded straight into the panel's own back
+  // framebuffer, and that owned pointer is handed to the mipi_dsi display with draw_pixels_at().
+  // The esp_lcd DPI driver recognises an owned framebuffer and flips the scanout to it at the next
+  // frame boundary instead of copying into the live one -- so no tearing. The two framebuffers are
+  // alternated each frame (double buffer), which needs frame_buffers: 2. The video is authored in
+  // the panel's native orientation + resolution (the user transposes at transcode); a size mismatch
+  // is caught at play().
+  this->dsi_->get_dsi_frame_buffers(this->dsi_fb_, &this->dsi_fb_count_);
+  if (this->dsi_fb_count_ < 2) {
+    ESP_LOGE(TAG, "mipi_dsi display has %u framebuffers; tear-free video needs >= 2 (set frame_buffers: 2)",
+             this->dsi_fb_count_);
+    return false;
+  }
+
   this->dsi_out_w_ = static_cast<uint16_t>(this->dsi_->get_width_internal());
   this->dsi_out_h_ = static_cast<uint16_t>(this->dsi_->get_height_internal());
   this->dsi_in_w_ = this->dsi_out_w_;
   this->dsi_in_h_ = this->dsi_out_h_;
   this->video_rotation_deg_ = 0;
 
+  // The HW JPEG decoder writes whole 16x16 units, so it can only decode straight into a framebuffer
+  // whose dimensions are already multiples of 16 -- otherwise the padded output overflows the
+  // exactly-sized driver framebuffer. 800x1280 and most panel sizes qualify.
+  if ((this->dsi_out_w_ & 15) != 0 || (this->dsi_out_h_ & 15) != 0) {
+    ESP_LOGE(TAG, "panel %ux%u is not a multiple of 16 on both axes; direct-to-framebuffer video needs that",
+             this->dsi_out_w_, this->dsi_out_h_);
+    return false;
+  }
+
   // Bytes per pixel from the display's own color-depth config: RGB888 -> 3, RGB565 -> 2. The
-  // decoder writes this format (BGR element order, see decode_frame_) so the display copies it as is.
+  // decoder writes this format (BGR element order, see decode_frame_) straight into the framebuffer.
   this->dsi_fb_bpp_ = this->dsi_->get_bytes_per_pixel();
   if (this->dsi_fb_bpp_ != 3 && this->dsi_fb_bpp_ != 2) {
     ESP_LOGE(TAG, "mipi_dsi color depth is %u bytes/pixel; direct video needs RGB888 (3) or RGB565 (2)",
              this->dsi_fb_bpp_);
     return false;
   }
+  this->dsi_fb_bytes_ = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
 
-  // The HW JPEG decoder rounds each axis up to a multiple of 16; size the buffer for the padded
-  // panel resolution and let draw_pixels_at() skip the padding (x_pad) at the end of each line.
-  const uint16_t padded_w = (this->dsi_out_w_ + 15) & ~15;
-  const uint16_t padded_h = (this->dsi_out_h_ + 15) & ~15;
-  jpeg_decode_memory_alloc_cfg_t out_cfg = {};
-  out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-  const size_t want = static_cast<size_t>(padded_w) * padded_h * this->dsi_fb_bpp_;
-  this->dsi_decode_buf_.reset(static_cast<uint8_t *>(jpeg_alloc_decoder_mem(want, &out_cfg, &this->dsi_fb_bytes_)));
-  if (this->dsi_decode_buf_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate DSI decode buffer (%zu bytes, PSRAM)", want);
-    return false;
-  }
-  this->decode_target_ = this->dsi_decode_buf_.get();
+  this->dsi_direct_decode_ = true;
+  this->dsi_back_idx_ = 0;
+  this->decode_target_ = reinterpret_cast<uint8_t *>(this->dsi_fb_[0]);
 
-  ESP_LOGI(TAG, "DSI output: panel %ux%u, %u bytes/pixel (%s), draw_pixels_at", this->dsi_out_w_, this->dsi_out_h_,
-           this->dsi_fb_bpp_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
+  ESP_LOGI(TAG, "DSI output: %u FBs, panel %ux%u, %u bytes/pixel (%s), VSYNC flip via draw_pixels_at",
+           this->dsi_fb_count_, this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_,
+           this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
   return true;
 }
 
