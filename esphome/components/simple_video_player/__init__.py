@@ -183,6 +183,29 @@ def _validate_stream(config):
     return config
 
 
+def _request_fast_network(config):
+    # As Portall does whenever it receives over the network: ESPHome's high-performance networking
+    # (TCP window, Wi-Fi buffers), and the runtime controls stream_receiver.cpp uses to hold off
+    # Wi-Fi roaming scans and power saving while a stream is arriving.
+    if CONF_STREAM_PORT not in config:
+        return config
+    try:
+        from esphome.components import network
+
+        network.require_high_performance_networking()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from esphome.components import wifi
+    except ImportError:
+        wifi = None
+    for enable in ("enable_runtime_roaming_suppression", "enable_runtime_power_save_control"):
+        request = getattr(wifi, enable, None)
+        if request is not None:
+            request()
+    return config
+
+
 # Component configuration
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
@@ -197,7 +220,7 @@ CONFIG_SCHEMA = cv.All(
             # Portall-style network receiver (udisp over TCP, e.g. Portall's ha_send.py): draws the
             # sender's JPEG rectangles while no file plays. Needs display_id.
             cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
-            cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=262144): cv.int_range(
+            cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=131072): cv.int_range(
                 min=16384, max=1048576
             ),
             # Touches go back to the stream sender, which replays them into its page.
@@ -284,6 +307,7 @@ CONFIG_SCHEMA = cv.All(
     _validate_audio_codec_required,
     _validate_output_target,
     _validate_stream,
+    _request_fast_network,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
 

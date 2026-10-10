@@ -13,6 +13,18 @@
 #endif
 #include "esp_heap_caps.h"
 
+// Present only when the wifi component was built with the runtime controls __init__.py asks for
+// whenever stream_port is set (as Portall's network.cpp).
+#if defined(USE_ESP32) && defined(USE_WIFI) && defined(USE_WIFI_RUNTIME_ROAMING_SUPPRESSION)
+#define SVP_HOLDS_ROAMING 1
+#endif
+#if defined(USE_ESP32) && defined(USE_WIFI) && defined(USE_WIFI_RUNTIME_POWER_SAVE)
+#define SVP_HOLDS_POWER_SAVE 1
+#endif
+#if defined(SVP_HOLDS_ROAMING) || defined(SVP_HOLDS_POWER_SAVE)
+#include "esphome/components/wifi/wifi_component.h"
+#endif
+
 #include <lwip/sockets.h>
 
 #include <algorithm>
@@ -29,7 +41,12 @@ static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
 static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
 static constexpr uint32_t STREAM_AUDIO_BLOCK_MS = 10;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
-static constexpr size_t STREAM_RECV_BYTES = 16 * 1024;
+static constexpr size_t STREAM_RECV_BYTES = 32768;
+// Wi-Fi roaming scans and power saving are held off while pictures or sound arrive, and allowed
+// again once only heartbeats have arrived for this long. A read no longer than one header is a
+// heartbeat (Portall's network.cpp).
+static constexpr uint32_t ROAM_QUIET_MS = 15000;
+static constexpr int HEARTBEAT_BYTES = 16;
 static constexpr uint32_t STREAM_RECV_TIMEOUT_MS = 30000;
 static constexpr uint32_t STREAM_FRAME_WAIT_MS = 250;
 
@@ -37,6 +54,37 @@ static inline uint16_t rd16(const uint8_t *p) { return static_cast<uint16_t>(p[0
 static inline uint32_t rd32(const uint8_t *p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
          (static_cast<uint32_t>(p[3]) << 24);
+}
+
+static void hold_wifi_for_stream(bool &held, bool want) {
+#if defined(SVP_HOLDS_ROAMING) || defined(SVP_HOLDS_POWER_SAVE)
+  if (held == want || wifi::global_wifi_component == nullptr)
+    return;
+  // Both are counted by the wifi component: every request is released exactly once, including on
+  // every way out of a connection.
+  if (want) {
+#ifdef SVP_HOLDS_ROAMING
+    wifi::global_wifi_component->request_roaming_suppression();
+#endif
+#ifdef SVP_HOLDS_POWER_SAVE
+    wifi::global_wifi_component->request_high_performance();
+#endif
+  } else {
+#ifdef SVP_HOLDS_ROAMING
+    wifi::global_wifi_component->release_roaming_suppression();
+#endif
+#ifdef SVP_HOLDS_POWER_SAVE
+    wifi::global_wifi_component->release_high_performance();
+#endif
+  }
+  held = want;
+  ESP_LOGD(TAG, "%s",
+           want ? "Streaming: Wi-Fi roaming scans and power saving held off"
+                : "Idle: Wi-Fi roaming scans and power saving allowed again");
+#else
+  (void) held;
+  (void) want;
+#endif
 }
 
 bool SimpleVideoPlayer::setup_stream_() {
@@ -101,9 +149,9 @@ void SimpleVideoPlayer::stream_set_awake_(bool awake) {
 void SimpleVideoPlayer::stream_net_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->stream_net_loop_(); }
 
 void SimpleVideoPlayer::stream_net_loop_() {
-  auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(STREAM_RECV_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(STREAM_RECV_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (buffer == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate the %u-byte receive buffer (PSRAM)", static_cast<unsigned>(STREAM_RECV_BYTES));
+    ESP_LOGE(TAG, "Failed to allocate the %u-byte receive buffer", static_cast<unsigned>(STREAM_RECV_BYTES));
     vTaskDelete(nullptr);
     return;
   }
@@ -157,6 +205,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_connected_.store(true, std::memory_order_release);
 
       uint32_t last_recv = millis();
+      uint32_t last_stream = last_recv;
+      bool wifi_held = false;
       while (true) {
         fd_set readable;
         FD_ZERO(&readable);
@@ -164,6 +214,8 @@ void SimpleVideoPlayer::stream_net_loop_() {
         struct timeval slice = {.tv_sec = 0, .tv_usec = 5000};
         const int ready = ::select(client + 1, &readable, nullptr, nullptr, &slice);
         this->stream_send_pending_(client);
+        if (wifi_held && millis() - last_stream > ROAM_QUIET_MS)
+          hold_wifi_for_stream(wifi_held, false);
         if (ready == 0) {
           if (millis() - last_recv > STREAM_RECV_TIMEOUT_MS) {
             ESP_LOGW(TAG, "Sender silent for %u s, disconnecting", static_cast<unsigned>(STREAM_RECV_TIMEOUT_MS / 1000));
@@ -179,9 +231,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
           break;
         }
         last_recv = millis();
+        if (received > HEARTBEAT_BYTES) {
+          last_stream = last_recv;
+          hold_wifi_for_stream(wifi_held, true);
+        }
         this->stream_feed_(buffer, static_cast<size_t>(received));
       }
 
+      hold_wifi_for_stream(wifi_held, false);
       this->stream_connected_.store(false, std::memory_order_release);
       if (this->stream_current_ != nullptr) {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);

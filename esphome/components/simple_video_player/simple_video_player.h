@@ -519,9 +519,9 @@ class SimpleVideoPlayer : public Component {
     uint32_t total{0};
     uint32_t received{0};
   };
-  static constexpr uint8_t STREAM_FRAME_COUNT = 3;
+  static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   uint16_t stream_port_{0};
-  uint32_t stream_max_frame_bytes_{256 * 1024};
+  uint32_t stream_max_frame_bytes_{128 * 1024};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
   QueueHandle_t stream_empty_q_{nullptr};
   QueueHandle_t stream_filled_q_{nullptr};
