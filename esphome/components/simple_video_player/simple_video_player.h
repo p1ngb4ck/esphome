@@ -163,6 +163,7 @@ class SimpleVideoPlayer : public Component {
   // Portall-style network receiver (udisp protocol over TCP): JPEG rectangles drawn onto the display
   // while no file is playing.
   void set_stream_port(uint16_t port) { this->stream_port_ = port; }
+  void set_stream_max_frame_bytes(uint32_t bytes) { this->stream_max_frame_bytes_ = bytes; }
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
@@ -235,9 +236,8 @@ class SimpleVideoPlayer : public Component {
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
   static void playback_task_entry_(void *param);
 
-  /// Main playback loop (runs in task): takes the shared output from the stream, runs the session.
+  /// Main playback loop (runs in task)
   void playback_loop_();
-  void playback_session_();
 
   /// Reader/producer task entry point (demux + fill the compressed-frame pre-buffer, pinned to
   /// Core 0 -- never touches DMA2D, so it cannot race decode/PPA on Core 1, see esp-idf#18999).
@@ -270,19 +270,12 @@ class SimpleVideoPlayer : public Component {
   bool setup_stream_();
   static void stream_net_task_entry_(void *param);
   void stream_net_loop_();
-  static void stream_present_task_entry_(void *param);
-  void stream_present_loop_();
-  /// Network task: queue JPEG/PCM packets verbatim into read_ring_ (caller holds stream_ring_mutex_).
+  static void stream_draw_task_entry_(void *param);
+  void stream_draw_loop_();
   void stream_feed_(const uint8_t *data, size_t len);
   void stream_send_pending_(int client);
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
-  /// Stop the network task from writing into read_ring_ (waits out a write in progress).
-  void stream_ring_off_();
-  /// File playback start/end: the stream lets go of / gets back read_ring_, the decoder input slot,
-  /// the decoder and the panel (all guarded by output_lock_).
-  void stream_claim_output_();
-  void stream_return_output_();
 #ifdef SVP_CHANNEL_LIST
   enum : uint8_t { CHANNEL_CMD_REFRESH, CHANNEL_CMD_PLAY, CHANNEL_CMD_STOP };
   struct ChannelCmd {
@@ -298,8 +291,8 @@ class SimpleVideoPlayer : public Component {
   bool channel_http_(const char *path, const char *body, char **response, size_t *response_len);
 #endif
 #ifdef USE_AUDIO
-  /// PCM payload bytes from the sender (present task): converted to the speaker's channel count and
-  /// played in 10 ms blocks.
+  /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
+  /// played in 10 ms blocks; dropped while a file plays.
   void stream_on_audio_(const uint8_t *data, size_t len);
   void stream_emit_audio_frames_(const uint8_t *src, size_t frames);
   void stream_flush_audio_block_();
@@ -404,9 +397,6 @@ class SimpleVideoPlayer : public Component {
   // File reader (backed by storage::StorageWorker -- handles local/network storage
   // transparently, see buffered_file_reader.h)
   std::unique_ptr<BufferedFileReader> file_reader_;
-  // PSRAM read-ahead ring (BufferedFileReader::RING_BYTES), allocated once in setup(): lent to the
-  // file reader for a file session, and holds the network stream's queued packets otherwise.
-  std::unique_ptr<ring_buffer::RingBuffer> read_ring_;
   uint64_t file_size_{0};
 
   // Video format and container parser
@@ -522,25 +512,28 @@ class SimpleVideoPlayer : public Component {
 #endif
 
 #ifdef SVP_STREAM
+  struct StreamFrame {
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    uint16_t x{0}, y{0}, w{0}, h{0};
+    uint32_t total{0};
+    uint32_t received{0};
+  };
+  static constexpr uint8_t STREAM_FRAME_COUNT = 3;
   uint16_t stream_port_{0};
-  TaskHandle_t stream_present_task_{nullptr};
-  // Owner of read_ring_, frame_slots_[0], the decoder, decode_target_ and the panel: a file session
-  // holds it for its whole run, the stream present task while it streams. The file has priority.
+  uint32_t stream_max_frame_bytes_{256 * 1024};
+  StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
+  QueueHandle_t stream_empty_q_{nullptr};
+  QueueHandle_t stream_filled_q_{nullptr};
+  TaskHandle_t stream_draw_task_{nullptr};
+  // Held by the file playback for its whole session and by the stream draw per rectangle: both use
+  // decode_target_ and the display, and the file has priority.
   SemaphoreHandle_t output_lock_{nullptr};
-  // Held by the network task while it writes into read_ring_, and by stream_ring_off_().
-  SemaphoreHandle_t stream_ring_mutex_{nullptr};
-  std::atomic<bool> stream_ring_on_{false};       // network task may write into read_ring_
-  std::atomic<uint32_t> stream_ring_epoch_{0};    // bumped on every reset of read_ring_ by the stream
-  std::atomic<int> stream_file_claims_{0};        // file sessions holding or waiting for the output
-  std::atomic<uint32_t> stream_frames_queued_{0}; // complete JPEG packets in read_ring_
-  std::atomic<uint32_t> stream_frame_us_{0};      // sender's frame period (0: draw on arrival)
   // Parser state (network task only).
+  StreamFrame *stream_current_{nullptr};
   uint8_t stream_hdr_[16]{};
   size_t stream_hdr_len_{0};
-  uint32_t stream_skip_{0};      // payload bytes to discard
-  uint32_t stream_copy_{0};      // payload bytes to queue into read_ring_
-  bool stream_copy_jpg_{false};  // the packet being queued is a JPEG
-  uint32_t stream_copy_epoch_{0};
+  uint32_t stream_skip_{0};
   bool stream_logged_bad_header_{false};
   std::atomic<bool> stream_connected_{false};
   std::atomic<bool> stream_output_ok_{false};  // loop(): connected and LVGL (if any) paused
@@ -562,7 +555,9 @@ class SimpleVideoPlayer : public Component {
   bool stream_last_touch_valid_{false};
 #endif
 #ifdef USE_AUDIO
+  uint32_t stream_audio_left_{0};  // PCM payload bytes still to come (network task)
   uint8_t stream_audio_src_ch_{1};
+  uint32_t stream_audio_rate_{0};
   uint8_t stream_audio_carry_[4]{};  // a sample frame split across two reads
   size_t stream_audio_carry_len_{0};
   uint8_t *stream_audio_block_{nullptr};

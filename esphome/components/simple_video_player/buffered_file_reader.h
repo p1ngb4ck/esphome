@@ -35,12 +35,7 @@ class BufferedFileReader {
   /// completion -- so playback can be stopped promptly.
   void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
 
-  /// PSRAM read-ahead ring size; the player allocates one ring of this size at setup and lends it to
-  /// open() (and to the network stream while no file plays).
-  static constexpr size_t RING_BYTES = 4 * 1024 * 1024;
-
-  /// `ring` is borrowed for the open session (reset here, never freed by the reader).
-  bool open(const char *path, ring_buffer::RingBuffer *ring);
+  bool open(const char *path);
   void close();
   bool is_open() const { return this->open_; }
 
@@ -107,6 +102,7 @@ class BufferedFileReader {
 
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
+  static constexpr size_t RING_BYTES = 4 * 1024 * 1024;  // PSRAM read-ahead ring (~4 MB)
   static constexpr size_t FILL_CHUNK = 256 * 1024;   // per read_chunk into the arena
   static constexpr size_t RING_WRITE_SLICE = 16 * 1024;  // per xRingbufferSend (copy runs with IRQs masked)
 
@@ -121,7 +117,7 @@ class BufferedFileReader {
   const volatile bool *abort_flag_{nullptr};
 
   uint8_t *arena_{nullptr};  // borrowed storage::TransferBuffer -- read_chunk destination
-  ring_buffer::RingBuffer *ring_{nullptr};  // borrowed from the player, see open()
+  std::unique_ptr<ring_buffer::RingBuffer> ring_;
   std::atomic<bool> fill_in_flight_{false};
   std::atomic<bool> draining_{false};   // set during close()/seek(): no new fill may start
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports
