@@ -256,6 +256,15 @@ void SimpleVideoPlayer::loop() {
 #else
     const bool lvgl_off = true;
 #endif
+#if defined(SVP_STREAM) && defined(USE_AUDIO)
+    // Stream sound stopped arriving: let the speaker go (a playing file manages it itself).
+    if (this->stream_audio_on_.load(std::memory_order_acquire) &&
+        millis() - this->stream_last_audio_ms_.load(std::memory_order_acquire) > 500) {
+      this->stream_audio_on_.store(false, std::memory_order_release);
+      if (this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED)
+        this->speaker_->stop();
+    }
+#endif
 #ifdef SVP_STREAM
     const bool output_ok = streaming && lvgl_off;
     if (output_ok != this->stream_output_ok_.load(std::memory_order_acquire)) {

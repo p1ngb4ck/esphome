@@ -8,6 +8,9 @@
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#ifdef USE_AUDIO
+#include "esphome/components/audio/audio.h"
+#endif
 #include "esp_heap_caps.h"
 
 #include <lwip/sockets.h>
@@ -22,6 +25,9 @@ namespace esphome::simple_video_player {
 static const char *const TAG = "simple_video_player.stream";
 
 static constexpr uint8_t UDISP_TYPE_JPG = 3;
+static constexpr uint8_t UDISP_TYPE_PCM = 0x10;
+static constexpr uint32_t STREAM_AUDIO_DEFAULT_RATE = 48000;
+static constexpr uint32_t STREAM_AUDIO_BLOCK_MS = 10;
 static constexpr size_t UDISP_HEADER_BYTES = 16;
 static constexpr size_t STREAM_RECV_BYTES = 16 * 1024;
 static constexpr uint32_t STREAM_RECV_TIMEOUT_MS = 30000;
@@ -54,6 +60,18 @@ bool SimpleVideoPlayer::setup_stream_() {
     StreamFrame *p = &frame;
     xQueueSend(this->stream_empty_q_, &p, 0);
   }
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr) {
+    this->stream_audio_out_ch_ = this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? 2 : 1;
+    this->stream_audio_block_size_ = static_cast<size_t>(AUDIO_SAMPLE_RATE) * STREAM_AUDIO_BLOCK_MS / 1000 *
+                                     this->stream_audio_out_ch_ * sizeof(int16_t);
+    this->stream_audio_block_ = static_cast<uint8_t *>(
+        heap_caps_malloc(this->stream_audio_block_size_, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (this->stream_audio_block_ == nullptr)
+      ESP_LOGW(TAG, "No memory for the %u-byte audio block: stream plays without sound",
+               static_cast<unsigned>(this->stream_audio_block_size_));
+  }
+#endif
 #ifdef SVP_STREAM_TOUCH
   if (this->stream_touchscreen_ != nullptr) {
     this->stream_touch_q_ = xQueueCreate(8, sizeof(StreamTouch));
@@ -124,6 +142,11 @@ void SimpleVideoPlayer::stream_net_loop_() {
       this->stream_hdr_len_ = 0;
       this->stream_skip_ = 0;
       this->stream_current_ = nullptr;
+#ifdef USE_AUDIO
+      this->stream_audio_left_ = 0;
+      this->stream_audio_carry_len_ = 0;
+      this->stream_rate_pending_.store(this->stream_audio_block_ != nullptr, std::memory_order_release);
+#endif
       this->stream_depth_pending_.store(true, std::memory_order_release);
       this->stream_status_pending_.store(true, std::memory_order_release);
 #ifdef SVP_STREAM_TOUCH
@@ -180,6 +203,17 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       continue;
     }
 
+#ifdef USE_AUDIO
+    if (this->stream_audio_left_ > 0) {
+      const size_t take = std::min<size_t>(this->stream_audio_left_, len);
+      this->stream_on_audio_(data, take);
+      this->stream_audio_left_ -= take;
+      data += take;
+      len -= take;
+      continue;
+    }
+#endif
+
     if (this->stream_current_ != nullptr) {
       StreamFrame *frame = this->stream_current_;
       const size_t take = std::min<size_t>(frame->total - frame->received, len);
@@ -211,7 +245,16 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     const uint16_t h = rd16(this->stream_hdr_ + 10);
     const uint32_t total = rd32(this->stream_hdr_ + 12) >> 10;
 
-    // Heartbeats/END and sound (not played here) are counted out like any payload.
+#ifdef USE_AUDIO
+    // Sound: width carries the channel count (0 = 1), height the rate (0 = 48000).
+    if (type == UDISP_TYPE_PCM && this->stream_audio_block_ != nullptr) {
+      this->stream_audio_src_ch_ = w == 0 ? 1 : static_cast<uint8_t>(w);
+      this->stream_audio_rate_ = h == 0 ? STREAM_AUDIO_DEFAULT_RATE : h;
+      this->stream_audio_left_ = total;
+      continue;
+    }
+#endif
+    // Heartbeats/END (and sound without a speaker) are counted out like any payload.
     if (type != UDISP_TYPE_JPG) {
       this->stream_skip_ = total;
       continue;
@@ -255,6 +298,15 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
       this->stream_depth_pending_.store(true, std::memory_order_release);
   }
+#ifdef USE_AUDIO
+  // 'A': the rate this panel's speaker runs at (kHz, then 50 Hz steps), so the sender captures at it.
+  if (this->stream_rate_pending_.exchange(false, std::memory_order_acq_rel)) {
+    const uint8_t message[3] = {'A', static_cast<uint8_t>(AUDIO_SAMPLE_RATE / 1000),
+                                static_cast<uint8_t>((AUDIO_SAMPLE_RATE % 1000) / 50)};
+    if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
+      this->stream_rate_pending_.store(true, std::memory_order_release);
+  }
+#endif
   if (this->stream_status_pending_.exchange(false, std::memory_order_acq_rel)) {
     const uint8_t message[2] = {'S', static_cast<uint8_t>(this->stream_awake_.load(std::memory_order_acquire) ? 1 : 0)};
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
@@ -320,6 +372,89 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     xQueueSend(this->stream_empty_q_, &frame, 0);
   }
 }
+
+#ifdef USE_AUDIO
+void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
+  // A playing file owns the speaker.
+  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
+    return;
+  if (AUDIO_BITS_PER_SAMPLE != 16 || this->stream_audio_rate_ != AUDIO_SAMPLE_RATE || this->stream_audio_src_ch_ > 2) {
+    if (!this->stream_logged_audio_format_) {
+      this->stream_logged_audio_format_ = true;
+      ESP_LOGW(TAG, "Sound of %u Hz, %u channel(s) does not fit the speaker (%u Hz, %u bit): not played",
+               static_cast<unsigned>(this->stream_audio_rate_), this->stream_audio_src_ch_,
+               static_cast<unsigned>(AUDIO_SAMPLE_RATE), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
+    }
+    return;
+  }
+  if (!this->speaker_->is_running()) {
+    this->speaker_->set_audio_stream_info(
+        audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, AUDIO_SAMPLE_RATE));
+    this->speaker_->start();
+  }
+  this->stream_last_audio_ms_.store(millis(), std::memory_order_release);
+  this->stream_audio_on_.store(true, std::memory_order_release);
+
+  const size_t in_frame = static_cast<size_t>(this->stream_audio_src_ch_) * sizeof(int16_t);
+  while (len > 0) {
+    if (this->stream_audio_carry_len_ > 0 || len < in_frame) {
+      const size_t take = std::min(in_frame - this->stream_audio_carry_len_, len);
+      std::memcpy(this->stream_audio_carry_ + this->stream_audio_carry_len_, data, take);
+      this->stream_audio_carry_len_ += take;
+      data += take;
+      len -= take;
+      if (this->stream_audio_carry_len_ < in_frame)
+        return;
+      this->stream_emit_audio_frames_(this->stream_audio_carry_, 1);
+      this->stream_audio_carry_len_ = 0;
+      continue;
+    }
+    const size_t frames = len / in_frame;
+    this->stream_emit_audio_frames_(data, frames);
+    data += frames * in_frame;
+    len -= frames * in_frame;
+  }
+}
+
+void SimpleVideoPlayer::stream_emit_audio_frames_(const uint8_t *src, size_t frames) {
+  const uint8_t in_ch = this->stream_audio_src_ch_;
+  const uint8_t out_ch = this->stream_audio_out_ch_;
+  const size_t out_frame = static_cast<size_t>(out_ch) * sizeof(int16_t);
+  for (size_t i = 0; i < frames; i++) {
+    int16_t in[2] = {0, 0};
+    std::memcpy(in, src + i * in_ch * sizeof(int16_t), in_ch * sizeof(int16_t));
+    int16_t out[2] = {0, 0};
+    if (in_ch == out_ch) {
+      out[0] = in[0];
+      out[1] = in_ch == 2 ? in[1] : 0;
+    } else if (in_ch == 1) {
+      out[0] = out[1] = in[0];
+    } else {
+      out[0] = static_cast<int16_t>((static_cast<int32_t>(in[0]) + in[1]) / 2);
+    }
+    std::memcpy(this->stream_audio_block_ + this->stream_audio_block_used_, out, out_frame);
+    this->stream_audio_block_used_ += out_frame;
+    if (this->stream_audio_block_used_ + out_frame > this->stream_audio_block_size_)
+      this->stream_flush_audio_block_();
+  }
+}
+
+void SimpleVideoPlayer::stream_flush_audio_block_() {
+  // Non-blocking: what the speaker does not take now is carried; a full block it refuses is dropped.
+  const size_t length = this->stream_audio_block_used_;
+  const size_t written = this->speaker_->play(this->stream_audio_block_, length);
+  if (written >= length) {
+    this->stream_audio_block_used_ = 0;
+    return;
+  }
+  if (written == 0) {
+    this->stream_audio_block_used_ = 0;
+    return;
+  }
+  std::memmove(this->stream_audio_block_, this->stream_audio_block_ + written, length - written);
+  this->stream_audio_block_used_ = length - written;
+}
+#endif
 
 #ifdef SVP_STREAM_TOUCH
 void StreamTouchListener::update(const touchscreen::TouchPoints_t &points) { this->parent_->stream_on_touch(points); }

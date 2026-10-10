@@ -265,6 +265,13 @@ class SimpleVideoPlayer : public Component {
   void stream_send_pending_(int client);
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
+#ifdef USE_AUDIO
+  /// PCM payload bytes from the sender (network task): converted to the speaker's channel count and
+  /// played in 10 ms blocks; dropped while a file plays.
+  void stream_on_audio_(const uint8_t *data, size_t len);
+  void stream_emit_audio_frames_(const uint8_t *src, size_t frames);
+  void stream_flush_audio_block_();
+#endif
 #endif
   /// Create the ESP32-P4 hardware JPEG decoder engine, called once from setup().
   bool init_decoder_();
@@ -521,6 +528,21 @@ class SimpleVideoPlayer : public Component {
   QueueHandle_t stream_touch_q_{nullptr};
   StreamTouch stream_last_touch_{};
   bool stream_last_touch_valid_{false};
+#endif
+#ifdef USE_AUDIO
+  uint32_t stream_audio_left_{0};  // PCM payload bytes still to come (network task)
+  uint8_t stream_audio_src_ch_{1};
+  uint32_t stream_audio_rate_{0};
+  uint8_t stream_audio_carry_[4]{};  // a sample frame split across two reads
+  size_t stream_audio_carry_len_{0};
+  uint8_t *stream_audio_block_{nullptr};
+  size_t stream_audio_block_size_{0};
+  size_t stream_audio_block_used_{0};
+  uint8_t stream_audio_out_ch_{1};
+  bool stream_logged_audio_format_{false};
+  std::atomic<bool> stream_rate_pending_{false};
+  std::atomic<bool> stream_audio_on_{false};
+  std::atomic<uint32_t> stream_last_audio_ms_{0};
 #endif
 #endif
 
