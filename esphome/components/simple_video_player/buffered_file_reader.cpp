@@ -46,8 +46,12 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   } else if (this->fill_got_ == 0) {
     this->eof_.store(true, std::memory_order_release);
   } else {
-    // want was <= ring free space and read() only frees more, so this always fits whole.
-    this->ring_->write_without_replacement(this->arena_, this->fill_got_, 0, true);
+    // want was <= ring free space and read() only frees more, so this always fits whole. Written in
+    // slices: xRingbufferSend copies with interrupts masked on this core.
+    for (size_t off = 0; off < this->fill_got_; off += RING_WRITE_SLICE) {
+      const size_t n = std::min(RING_WRITE_SLICE, this->fill_got_ - off);
+      this->ring_->write_without_replacement(this->arena_ + off, n, 0, true);
+    }
     const uint32_t dt = micros() - this->fill_submit_us_;
     this->stats_.chunks++;
     this->stats_.chunk_us += dt;
