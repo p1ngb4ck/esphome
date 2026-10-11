@@ -1,6 +1,8 @@
-// Portall-style network receiver: Espressif's udisp protocol over TCP (as sent by Portall's
-// udisp_send.py / ha_send.py). JPEG rectangles are decoded into decode_target_ and drawn onto the
-// display with draw_pixels_at(); touches go back over the same socket. File playback has priority.
+// Network receiver. An AVI (svp_relay) is played through the file playback, into either output.
+// With direct display output also Portall-style senders: Espressif's udisp protocol over TCP (as
+// sent by Portall's udisp_send.py / ha_send.py), JPEG rectangles decoded into decode_target_ and
+// drawn onto the display with draw_pixels_at(). Touches go back over the same socket. File playback
+// has priority.
 
 #include "simple_video_player.h"
 
@@ -86,9 +88,14 @@ static void hold_wifi_for_stream(bool &held, bool want) {
 
 bool SimpleVideoPlayer::setup_stream_() {
   this->output_lock_ = xSemaphoreCreateMutex();
+  if (this->output_lock_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create the stream lock");
+    return false;
+  }
+#ifdef SVP_DSI_OUTPUT
   this->stream_empty_q_ = xQueueCreate(STREAM_FRAME_COUNT, sizeof(StreamFrame *));
   this->stream_filled_q_ = xQueueCreate(STREAM_FRAME_COUNT, sizeof(StreamFrame *));
-  if (this->output_lock_ == nullptr || this->stream_empty_q_ == nullptr || this->stream_filled_q_ == nullptr) {
+  if (this->stream_empty_q_ == nullptr || this->stream_filled_q_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create stream queues");
     return false;
   }
@@ -117,6 +124,7 @@ bool SimpleVideoPlayer::setup_stream_() {
                static_cast<unsigned>(this->stream_audio_block_size_));
   }
 #endif
+#endif  // SVP_DSI_OUTPUT
 #ifdef SVP_STREAM_TOUCH
   if (this->stream_touchscreen_ != nullptr) {
     this->stream_touch_q_ = xQueueCreate(8, sizeof(StreamTouch));
@@ -124,15 +132,25 @@ bool SimpleVideoPlayer::setup_stream_() {
       this->stream_touchscreen_->register_listener(&this->stream_touch_listener_);
   }
 #endif
+#ifdef SVP_DSI_OUTPUT
   if (xTaskCreatePinnedToCore(stream_draw_task_entry_, "svp_stream_draw", 4096, this, 2, &this->stream_draw_task_, 1) !=
-          pdPASS ||
-      xTaskCreatePinnedToCore(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, tskNO_AFFINITY) !=
-          pdPASS) {
-    ESP_LOGE(TAG, "Failed to create stream tasks");
+      pdPASS) {
+    ESP_LOGE(TAG, "Failed to create the stream draw task");
     return false;
   }
-  ESP_LOGCONFIG(TAG, "Listening on port %u for udisp frames (%ux%u, %u-bit)", this->stream_port_, this->dsi_out_w_,
-                this->dsi_out_h_, this->dsi_fb_bpp_ * 8);
+#endif
+  if (xTaskCreatePinnedToCore(stream_net_task_entry_, "svp_stream_net", 4096, this, 4, nullptr, tskNO_AFFINITY) !=
+      pdPASS) {
+    ESP_LOGE(TAG, "Failed to create the stream network task");
+    return false;
+  }
+#ifdef SVP_DSI_OUTPUT
+  ESP_LOGCONFIG(TAG, "Listening on port %u for AVI streams and udisp frames (%ux%u, %u-bit)", this->stream_port_,
+                this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_ * 8);
+#else
+  ESP_LOGCONFIG(TAG, "Listening on port %u for AVI streams (canvas %ux%u)", this->stream_port_, this->stream_pic_w_,
+                this->stream_pic_h_);
+#endif
   return true;
 }
 
@@ -184,13 +202,17 @@ void SimpleVideoPlayer::stream_net_loop_() {
       ::inet_ntoa_r(peer.sin_addr, peer_text, sizeof(peer_text));
       ESP_LOGI(TAG, "Sender connected from %s", peer_text);
 
+#ifdef SVP_DSI_OUTPUT
       this->stream_hdr_len_ = 0;
       this->stream_skip_ = 0;
       this->stream_current_ = nullptr;
 #ifdef USE_AUDIO
       this->stream_audio_left_ = 0;
       this->stream_audio_carry_len_ = 0;
-      this->stream_rate_pending_.store(this->stream_audio_block_ != nullptr, std::memory_order_release);
+#endif
+#endif
+#ifdef USE_AUDIO
+      this->stream_rate_pending_.store(this->speaker_ != nullptr, std::memory_order_release);
 #endif
       this->stream_depth_pending_.store(true, std::memory_order_release);
       this->stream_status_pending_.store(true, std::memory_order_release);
@@ -268,6 +290,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
             this->stream_connected_.store(false, std::memory_order_release);
             continue;
           }
+#ifndef SVP_DSI_OUTPUT
+          ESP_LOGW(TAG, "Only an AVI plays into the canvas: disconnecting the sender");
+          break;
+#endif
         }
         const int received = ::recv(client, buffer, STREAM_RECV_BYTES, 0);
         if (received <= 0) {
@@ -282,8 +308,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
         }
         if (sink != nullptr) {
           sink->push(buffer, static_cast<size_t>(received));
+#ifdef SVP_DSI_OUTPUT
         } else {
           this->stream_feed_(buffer, static_cast<size_t>(received));
+#endif
         }
       }
 
@@ -294,6 +322,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
           sink->end_stream();
       }
       hold_wifi_for_stream(wifi_held, false);
+#ifdef SVP_DSI_OUTPUT
       // The stream is over; only logged when no file plays either.
       const uint32_t dropped = this->stream_dropped_no_buffer_ + this->stream_dropped_decode_;
       if ((this->stream_drawn_ > 0 || dropped > 0) &&
@@ -306,17 +335,19 @@ void SimpleVideoPlayer::stream_net_loop_() {
                  this->stream_drawn_ ? static_cast<uint32_t>(this->stream_draw_us_ / this->stream_drawn_) : 0u,
                  this->stream_draw_us_max_, dropped, this->stream_dropped_no_buffer_, this->stream_dropped_decode_);
       }
-      this->stream_connected_.store(false, std::memory_order_release);
       if (this->stream_current_ != nullptr) {
         xQueueSend(this->stream_empty_q_, &this->stream_current_, 0);
         this->stream_current_ = nullptr;
       }
+#endif
+      this->stream_connected_.store(false, std::memory_order_release);
       ::close(client);
     }
     ::close(listener);
   }
 }
 
+#ifdef SVP_DSI_OUTPUT
 void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
   while (len > 0) {
     if (this->stream_skip_ > 0) {
@@ -416,11 +447,44 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     this->stream_current_ = frame;
   }
 }
+#endif  // SVP_DSI_OUTPUT
 
 void SimpleVideoPlayer::stream_send_pending_(int client) {
   if (this->stream_depth_pending_.exchange(false, std::memory_order_acq_rel)) {
-    const uint8_t message[2] = {'C', static_cast<uint8_t>(this->dsi_fb_bpp_ * 8)};
-    if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
+    // 'C': the display's depth (udisp senders). 'V': the picture to send -- width, height, the
+    // quarter turns clockwise from the source onto it, and the largest JPEG still a udisp sender
+    // may send (0: none, canvas output).
+    uint8_t message[12];
+    size_t at = 0;
+#ifdef SVP_DSI_OUTPUT
+    message[at++] = 'C';
+    message[at++] = static_cast<uint8_t>(this->dsi_fb_bpp_ * 8);
+    const uint16_t width = this->dsi_out_w_;
+    const uint16_t height = this->dsi_out_h_;
+    display::DisplayRotation rotation = this->dsi_->get_rotation();
+#ifdef SVP_USE_LVGL
+    // With LVGL the rotation is LVGL's own (ESPHome rejects a display rotation under LVGL).
+    if (this->lvgl_component_ != nullptr)
+      rotation = this->lvgl_component_->get_rotation();
+#endif
+    const uint8_t turns = static_cast<uint8_t>(static_cast<int>(rotation) / 90);
+    const uint32_t still = static_cast<uint32_t>(this->stream_frames_[0].capacity);
+#else
+    // The canvas turns with LVGL's own rotation: the picture goes in upright.
+    const uint16_t width = this->stream_pic_w_;
+    const uint16_t height = this->stream_pic_h_;
+    const uint8_t turns = 0;
+    const uint32_t still = 0;
+#endif
+    message[at++] = 'V';
+    message[at++] = static_cast<uint8_t>(width & 0xFF);
+    message[at++] = static_cast<uint8_t>(width >> 8);
+    message[at++] = static_cast<uint8_t>(height & 0xFF);
+    message[at++] = static_cast<uint8_t>(height >> 8);
+    message[at++] = turns;
+    for (int shift = 0; shift < 32; shift += 8)
+      message[at++] = static_cast<uint8_t>(still >> shift);
+    if (::send(client, message, at, MSG_DONTWAIT) != static_cast<int>(at))
       this->stream_depth_pending_.store(true, std::memory_order_release);
   }
 #ifdef USE_AUDIO
@@ -461,6 +525,7 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 #endif
 }
 
+#ifdef SVP_DSI_OUTPUT
 void SimpleVideoPlayer::stream_draw_task_entry_(void *param) {
   static_cast<SimpleVideoPlayer *>(param)->stream_draw_loop_();
 }
@@ -588,7 +653,8 @@ void SimpleVideoPlayer::stream_flush_audio_block_() {
   std::memmove(this->stream_audio_block_, this->stream_audio_block_ + written, length - written);
   this->stream_audio_block_used_ = length - written;
 }
-#endif
+#endif  // USE_AUDIO
+#endif  // SVP_DSI_OUTPUT
 
 #ifdef SVP_STREAM_TOUCH
 void StreamTouchListener::update(const touchscreen::TouchPoints_t &points) { this->parent_->stream_on_touch(points); }

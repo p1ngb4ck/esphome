@@ -160,10 +160,15 @@ class SimpleVideoPlayer : public Component {
 #endif
 
 #ifdef SVP_STREAM
-  // Portall-style network receiver (udisp protocol over TCP): JPEG rectangles drawn onto the display
-  // while no file is playing.
+  // Network receiver: an AVI (svp_relay) plays like a file; with direct display output also
+  // Portall-style udisp JPEG rectangles, drawn while no file is playing.
   void set_stream_port(uint16_t port) { this->stream_port_ = port; }
   void set_stream_max_frame_bytes(uint32_t bytes) { this->stream_max_frame_bytes_ = bytes; }
+  // Canvas output: the canvas widget's size, the picture a sender is asked for.
+  void set_stream_picture_size(uint16_t width, uint16_t height) {
+    this->stream_pic_w_ = width;
+    this->stream_pic_h_ = height;
+  }
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
@@ -529,6 +534,7 @@ class SimpleVideoPlayer : public Component {
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   uint16_t stream_port_{0};
   uint32_t stream_max_frame_bytes_{128 * 1024};
+  uint16_t stream_pic_w_{0}, stream_pic_h_{0};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
   QueueHandle_t stream_empty_q_{nullptr};
   QueueHandle_t stream_filled_q_{nullptr};

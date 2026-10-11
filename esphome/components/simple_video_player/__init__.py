@@ -11,11 +11,13 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
     CONF_CHANNEL,
+    CONF_HEIGHT,
     CONF_ID,
     CONF_NUM_CHANNELS,
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
     CONF_URL,
+    CONF_WIDTH,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
 import esphome.final_validate as fv
@@ -98,6 +100,8 @@ CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_AUDIO_CHANNELS = "audio_channels"
 CONF_AUDIO_BITS_PER_SAMPLE = "audio_bits_per_sample"
 CONF_RESOLVED_SPEAKER_CHANNEL = "resolved_speaker_channel"
+# The canvas widget's own width/height, for the picture size the stream port asks a sender for.
+CONF_RESOLVED_CANVAS_SIZE = "resolved_canvas_size"
 
 # This is an MCU: rather than auto-detecting and reconfiguring buffers per video file (real heap
 # allocation, every play() -- see AGENTS.md), the user commits to ONE fixed audio format up front.
@@ -174,8 +178,6 @@ def _validate_output_target(config):
 
 
 def _validate_stream(config):
-    if CONF_STREAM_PORT in config and CONF_DISPLAY_ID not in config:
-        raise cv.Invalid(f"'{CONF_STREAM_PORT}' draws onto the display: it needs '{CONF_DISPLAY_ID}'.")
     if CONF_CHANNEL_LIST in config and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_CHANNEL_LIST}' plays channels through the stream: it needs '{CONF_STREAM_PORT}'.")
     if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config:
@@ -217,8 +219,8 @@ CONFIG_SCHEMA = cv.All(
             #                LVGL is paused (Portall's way); the video must match the panel exactly.
             cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
             cv.Optional(CONF_DISPLAY_ID): cv.use_id(display.Display),
-            # Portall-style network receiver (udisp over TCP, e.g. Portall's ha_send.py): draws the
-            # sender's JPEG rectangles while no file plays. Needs display_id.
+            # Network receiver: an AVI (svp_relay) plays like a file, into either output. With
+            # display_id also Portall-style udisp JPEG rectangles, drawn while no file plays.
             cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
             cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=131072): cv.int_range(
                 min=16384, max=1048576
@@ -390,11 +392,30 @@ def _display_depth(full_config, display_id):
     return 16
 
 
+def _resolve_canvas_size(config, fconf):
+    """The canvas widget's size in pixels: a sender on the stream port is asked for exactly that."""
+    canvas_id = config[CONF_CANVAS_ID]
+    try:
+        canvas_conf = fconf.get_config_for_path(fconf.get_path_for_id(canvas_id)[:-1])
+    except KeyError as err:
+        raise cv.Invalid(f"Could not resolve canvas_id '{canvas_id}' to its own config") from err
+    width = canvas_conf.get(CONF_WIDTH)
+    height = canvas_conf.get(CONF_HEIGHT)
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        raise cv.Invalid(
+            f"{CONF_STREAM_PORT}: canvas '{canvas_id}' needs its width and height in pixels -- a "
+            "stream sender is asked for a picture of exactly that size."
+        )
+    this_conf = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_ID])[:-1])
+    this_conf[CONF_RESOLVED_CANVAS_SIZE] = (width, height)
+
+
 def _final_validate(config):
     fconf = fv.full_config.get()
 
-    # While a sender is connected LVGL is paused; a touch would resume it on top of the stream.
-    if CONF_STREAM_PORT in config:
+    # With display_id, LVGL is paused while a sender is connected; a touch would resume it on top
+    # of the stream.
+    if CONF_STREAM_PORT in config and CONF_DISPLAY_ID in config:
         for block in fconf.get("lvgl") or []:
             if block.get("resume_on_input", True):
                 raise cv.Invalid(
@@ -402,6 +423,9 @@ def _final_validate(config):
                     "touch would resume it on top of the stream. Add `resume_on_input: false` to the "
                     "lvgl: block."
                 )
+
+    if CONF_STREAM_PORT in config and CONF_CANVAS_ID in config:
+        _resolve_canvas_size(config, fconf)
 
     if CONF_SPEAKER_ID not in config:
         return config
@@ -484,6 +508,8 @@ async def to_code(config):
     if CONF_STREAM_PORT in config:
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
         cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
+        if canvas_size := config.get(CONF_RESOLVED_CANVAS_SIZE):
+            cg.add(var.set_stream_picture_size(*canvas_size))
         cg.add_define("SVP_STREAM")
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])

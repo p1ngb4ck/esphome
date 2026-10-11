@@ -207,7 +207,7 @@ void SimpleVideoPlayer::setup() {
   // against ESPHome's own codegen), not something that needs to wait for play().
 
 #ifdef SVP_STREAM
-  if (this->dsi_ != nullptr && this->stream_port_ != 0 && !this->setup_stream_())
+  if (this->stream_port_ != 0 && !this->setup_stream_())
     ESP_LOGE(TAG, "Network stream receiver disabled");
 #endif
 #ifdef SVP_CHANNEL_LIST
