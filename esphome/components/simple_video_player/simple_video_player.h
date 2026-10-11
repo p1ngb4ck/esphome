@@ -236,6 +236,9 @@ class SimpleVideoPlayer : public Component {
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
   static void playback_task_entry_(void *param);
 
+  /// play() for a file, and for the network stream (net_session_ set first).
+  void start_playback_(const std::string &video_path);
+
   /// Main playback loop (runs in task)
   void playback_loop_();
 
@@ -338,6 +341,10 @@ class SimpleVideoPlayer : public Component {
 
   /// Close file
   void close_file_();
+#ifdef SVP_STREAM
+  /// open_file_() for the network stream: an AVI pushed into file_reader_ by the network task.
+  bool open_stream_source_();
+#endif
 
   /// Read data from file (handles both local and network)
   int read_data_(uint8_t *buffer, size_t size);
@@ -540,6 +547,11 @@ class SimpleVideoPlayer : public Component {
   std::atomic<bool> stream_awake_{true};
   std::atomic<bool> stream_status_pending_{false};
   std::atomic<bool> stream_depth_pending_{false};
+  // The sender streams an AVI (svp_relay) rather than udisp rectangles: it plays through the file
+  // playback path, fed from the network task through stream_sink_.
+  bool net_session_{false};                                // set before start_playback_()
+  std::atomic<bool> stream_avi_{false};                    // an AVI connection is up
+  std::atomic<BufferedFileReader *> stream_sink_{nullptr};  // open network source, or none
   // Stream statistics (Portall's): plain counters while a sender is connected, each written by one
   // task only, logged once by the network task after the sender has gone.
   uint32_t stream_stats_since_ms_{0};

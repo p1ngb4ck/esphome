@@ -18,6 +18,7 @@
 #include <memory>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 namespace esphome {
@@ -38,6 +39,16 @@ class BufferedFileReader {
   bool open(const char *path);
   void close();
   bool is_open() const { return this->open_; }
+
+  /// Network source: the same read-ahead ring and the same read() path as a file, filled by push()
+  /// from the network task instead of the storage worker. seek() only goes forward.
+  bool open_stream();
+  /// Bytes push() takes right now (0 when not open for a stream).
+  size_t stream_room();
+  /// Network task: append received bytes, at most stream_room() of them.
+  void push(const uint8_t *data, size_t len);
+  /// Network task: the sender is gone; read() reports the end once the ring is drained.
+  void end_stream();
 
   /// LOAD uses the default (blocking) read -- header/dimension probe needs the bytes now, before
   /// the async stream has spun up. The play loop calls set_streaming(true) once, right before its
@@ -108,6 +119,8 @@ class BufferedFileReader {
 
   storage::StreamHandle handle_{};
   bool open_{false};
+  bool network_{false};                       // open_stream(): filled by push(), not the storage worker
+  SemaphoreHandle_t stream_lock_{nullptr};    // push()/end_stream() vs close() of a network source
   bool streaming_{false};  // false = blocking read (LOAD); true = non-blocking single drain (PLAY)
   uint64_t current_position_{0};
 

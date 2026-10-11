@@ -16,6 +16,8 @@ namespace simple_video_player {
 static const char *const TAG = "buffered_file_reader";
 
 void BufferedFileReader::kick_fill_() {
+  if (this->network_)
+    return;  // filled by push()
   if (this->draining_.load(std::memory_order_acquire) || this->eof_.load(std::memory_order_acquire) ||
       this->fill_err_.load(std::memory_order_acquire))
     return;
@@ -135,6 +137,16 @@ bool BufferedFileReader::open(const char *path) {
 void BufferedFileReader::close() {
   if (!this->open_)
     return;
+  if (this->network_) {
+    xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
+    this->open_ = false;
+    this->network_ = false;
+    this->ring_.reset();
+    xSemaphoreGive(this->stream_lock_);
+    this->streaming_ = false;
+    this->current_position_ = 0;
+    return;
+  }
   // The abort flag exists to abandon an in-flight read so playback stops promptly -- it must NOT
   // short-circuit end_read(), or the storage stream leaks (worker abandons it 30s later -> crash).
   // Clear it so this final close runs to completion synchronously while the task is still alive.
@@ -151,6 +163,62 @@ void BufferedFileReader::close() {
   this->open_ = false;
   this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
   this->current_position_ = 0;
+}
+
+bool BufferedFileReader::open_stream() {
+  if (this->open_)
+    this->close();
+  if (this->stream_lock_ == nullptr && (this->stream_lock_ = xSemaphoreCreateMutex()) == nullptr) {
+    ESP_LOGE(TAG, "could not create the stream lock");
+    return false;
+  }
+  auto ring = ring_buffer::RingBuffer::create(RING_BYTES);
+  if (ring == nullptr) {
+    ESP_LOGE(TAG, "could not create %zu-byte ring buffer", RING_BYTES);
+    return false;
+  }
+  xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
+  this->ring_ = std::move(ring);
+  this->network_ = true;
+  this->current_position_ = 0;
+  this->eof_.store(false);
+  this->fill_err_.store(false);
+  this->fill_in_flight_.store(false);
+  this->draining_.store(false);
+  this->stats_ = FillStats{};
+  this->open_ = true;
+  xSemaphoreGive(this->stream_lock_);
+  return true;
+}
+
+size_t BufferedFileReader::stream_room() {
+  if (this->stream_lock_ == nullptr)
+    return 0;
+  xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
+  const size_t room = this->open_ && this->network_ ? this->ring_->free() : 0;
+  xSemaphoreGive(this->stream_lock_);
+  return room;
+}
+
+void BufferedFileReader::push(const uint8_t *data, size_t len) {
+  if (this->stream_lock_ == nullptr)
+    return;
+  xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
+  if (this->open_ && this->network_) {
+    // In slices, as on_fill_done_ writes: xRingbufferSend copies with interrupts masked.
+    for (size_t off = 0; off < len; off += RING_WRITE_SLICE) {
+      const size_t n = std::min(RING_WRITE_SLICE, len - off);
+      this->ring_->write_without_replacement(data + off, n, 0, true);
+    }
+    this->stats_.chunks++;
+    this->stats_.bytes_filled += len;
+  }
+  xSemaphoreGive(this->stream_lock_);
+}
+
+void BufferedFileReader::end_stream() {
+  if (this->network_)
+    this->eof_.store(true, std::memory_order_release);
 }
 
 bool BufferedFileReader::prefill_cache() {
@@ -232,6 +300,18 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
 bool BufferedFileReader::seek(uint64_t position) {
   if (!this->open_)
     return false;
+  if (this->network_) {
+    // A stream only goes forward: what lies before the read position is gone.
+    if (position < this->current_position_)
+      return false;
+    uint8_t scratch[64];
+    while (this->current_position_ < position) {
+      const size_t want = static_cast<size_t>(std::min<uint64_t>(sizeof(scratch), position - this->current_position_));
+      if (this->read(scratch, want) <= 0)
+        return false;
+    }
+    return true;
+  }
   this->quiesce_fill_();
   this->ring_->reset();
   this->eof_.store(false);
@@ -253,7 +333,7 @@ bool BufferedFileReader::seek(uint64_t position) {
 }
 
 bool BufferedFileReader::get_size(uint64_t *size) {
-  if (!this->open_)
+  if (!this->open_ || this->network_)
     return false;
   uint64_t saved = this->current_position_;
   this->quiesce_fill_();

@@ -321,6 +321,13 @@ void SimpleVideoPlayer::dump_config() {
 //========================================================================
 
 void SimpleVideoPlayer::play(const std::string &video_path) {
+#ifdef SVP_STREAM
+  this->net_session_ = false;
+#endif
+  this->start_playback_(video_path);
+}
+
+void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   if (this->is_failed()) {
     ESP_LOGE(TAG, "Cannot play: component failed to initialize (see setup logs)");
     return;
@@ -947,7 +954,12 @@ int SimpleVideoPlayer::read_frame_(uint8_t *dest, size_t cap) {
     if (n > 0) {
       return n;
     }
-    if (n == 0 && this->loop_) {
+#ifdef SVP_STREAM
+    const bool can_rewind = !this->net_session_;
+#else
+    const bool can_rewind = true;
+#endif
+    if (n == 0 && this->loop_ && can_rewind) {
       // Only re-check state on the rare rewind path; the caller already checked it this iteration.
       const PlayerState s = this->state_.load(std::memory_order_acquire);
       if (s != PlayerState::PLAYING && s != PlayerState::PAUSED) {
@@ -1232,6 +1244,10 @@ VideoFormat SimpleVideoPlayer::detect_format_() {
 }
 
 bool SimpleVideoPlayer::open_file_(const std::string &path) {
+#ifdef SVP_STREAM
+  if (this->net_session_)
+    return this->open_stream_source_();
+#endif
   ESP_LOGI(TAG, "Opening file: %s", path.c_str());
 
   // Storage-backed file reader (see buffered_file_reader.h): resolves the path against the storage
@@ -1308,6 +1324,10 @@ void SimpleVideoPlayer::close_file_() {
     this->avi_parser_->close();
   }
 
+#ifdef SVP_STREAM
+  // The network task stops pushing (and drops the connection) once this is gone.
+  this->stream_sink_.store(nullptr, std::memory_order_release);
+#endif
   // Close file reader -- NOT reset()/destroyed: kept alive so its PSRAM read-ahead buffers are
   // reused by the next open_file_() instead of being freed and re-malloc'd every play() call.
   if (this->file_reader_) {
@@ -1317,6 +1337,33 @@ void SimpleVideoPlayer::close_file_() {
   this->file_size_ = 0;
   this->video_format_ = VideoFormat::UNKNOWN;
 }
+
+#ifdef SVP_STREAM
+bool SimpleVideoPlayer::open_stream_source_() {
+  // An AVI arriving on the stream port (svp_relay): read through the same reader and ring as a
+  // file, which the network task fills instead of the storage worker.
+  if (!this->file_reader_) {
+    this->file_reader_ = std::make_unique<BufferedFileReader>();
+  }
+  this->file_reader_->set_abort_flag(&this->playback_task_stop_);
+  if (!this->file_reader_->open_stream()) {
+    ESP_LOGE(TAG, "Failed to open the network stream");
+    return false;
+  }
+  this->stream_sink_.store(this->file_reader_.get(), std::memory_order_release);
+  this->file_size_ = 0;
+  this->video_format_ = VideoFormat::AVI_MJPEG;
+  if (!this->avi_parser_) {
+    this->avi_parser_ = std::make_unique<AVIParser>();
+  }
+  if (!this->avi_parser_->open(this->file_reader_.get())) {
+    ESP_LOGE(TAG, "Network stream is not an AVI this player reads");
+    this->close_file_();
+    return false;
+  }
+  return true;
+}
+#endif
 
 int SimpleVideoPlayer::read_data_(uint8_t *buffer, size_t size) {
   if (!this->file_reader_ || !this->file_reader_->is_open()) {

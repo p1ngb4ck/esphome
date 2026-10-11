@@ -189,7 +189,9 @@ bool AVIParser::parse_headers_() {
         // Movie data chunk
         found_movi = true;
         this->movi_offset_ = this->reader_->tell();
-        this->movi_size_ = chunk_size - 4;
+        // 0xFFFFFFFF is AVI for "size not known" (a live stream, ffmpeg writing to a pipe): read
+        // until the data ends.
+        this->movi_size_ = chunk_size == 0xFFFFFFFFu ? UINT64_MAX : chunk_size - 4;
 
         // We're now positioned at the start of movi data - ready for read_next_frame()
         // Break immediately - if we continue the loop, it will read the first frame chunk as a fourcc!

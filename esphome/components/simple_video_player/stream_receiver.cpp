@@ -210,7 +210,27 @@ void SimpleVideoPlayer::stream_net_loop_() {
       uint32_t last_recv = millis();
       uint32_t last_stream = last_recv;
       bool wifi_held = false;
+      bool kind_known = false;
+      bool sink_seen = false;
       while (true) {
+        BufferedFileReader *sink = nullptr;
+        if (this->stream_avi_.load(std::memory_order_relaxed)) {
+          // An AVI goes into the file reader's ring; leaving the socket unread while it is full is
+          // the flow control. The connection ends with the playback session.
+          sink = this->stream_sink_.load(std::memory_order_acquire);
+          const PlayerState st = this->state_.load(std::memory_order_acquire);
+          if (sink != nullptr) {
+            sink_seen = true;
+          } else if (sink_seen || (st != PlayerState::PLAYING && st != PlayerState::PAUSED)) {
+            break;
+          }
+          if (sink == nullptr || sink->stream_room() < STREAM_RECV_BYTES) {
+            this->stream_send_pending_(client);
+            vTaskDelay(pdMS_TO_TICKS(5));
+            last_recv = millis();
+            continue;
+          }
+        }
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(client, &readable);
@@ -228,9 +248,31 @@ void SimpleVideoPlayer::stream_net_loop_() {
         }
         if (ready < 0)
           break;
+        if (!kind_known) {
+          uint8_t magic[4];
+          const int peeked = ::recv(client, magic, sizeof(magic), MSG_PEEK);
+          if (peeked <= 0)
+            break;
+          if (peeked < static_cast<int>(sizeof(magic))) {
+            vTaskDelay(1);
+            continue;
+          }
+          kind_known = true;
+          if (std::memcmp(magic, "RIFF", sizeof(magic)) == 0) {
+            // An AVI (svp_relay): played like a file from SD. Not while something else plays.
+            if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
+              break;
+            this->net_session_ = true;
+            this->start_playback_("network stream");
+            this->stream_avi_.store(true, std::memory_order_release);
+            this->stream_connected_.store(false, std::memory_order_release);
+            continue;
+          }
+        }
         const int received = ::recv(client, buffer, STREAM_RECV_BYTES, 0);
         if (received <= 0) {
-          ESP_LOGI(TAG, "Sender disconnected");
+          if (sink == nullptr)
+            ESP_LOGI(TAG, "Sender disconnected");
           break;
         }
         last_recv = millis();
@@ -238,9 +280,19 @@ void SimpleVideoPlayer::stream_net_loop_() {
           last_stream = last_recv;
           hold_wifi_for_stream(wifi_held, true);
         }
-        this->stream_feed_(buffer, static_cast<size_t>(received));
+        if (sink != nullptr) {
+          sink->push(buffer, static_cast<size_t>(received));
+        } else {
+          this->stream_feed_(buffer, static_cast<size_t>(received));
+        }
       }
 
+      if (this->stream_avi_.exchange(false, std::memory_order_acq_rel)) {
+        // The rest of the ring still plays; the reader reports the end once it is drained.
+        BufferedFileReader *sink = this->stream_sink_.load(std::memory_order_acquire);
+        if (sink != nullptr)
+          sink->end_stream();
+      }
       hold_wifi_for_stream(wifi_held, false);
       // The stream is over; only logged when no file plays either.
       const uint32_t dropped = this->stream_dropped_no_buffer_ + this->stream_dropped_decode_;
@@ -373,9 +425,10 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
   }
 #ifdef USE_AUDIO
   // 'A': the rate this panel's speaker runs at (kHz, then 50 Hz steps), so the sender captures at it.
+  // 'N': the channel count a played AVI's sound must have (the speaker's, see init_audio_decoder_).
   if (this->stream_rate_pending_.exchange(false, std::memory_order_acq_rel)) {
-    const uint8_t message[3] = {'A', static_cast<uint8_t>(AUDIO_SAMPLE_RATE / 1000),
-                                static_cast<uint8_t>((AUDIO_SAMPLE_RATE % 1000) / 50)};
+    const uint8_t message[5] = {'A', static_cast<uint8_t>(AUDIO_SAMPLE_RATE / 1000),
+                                static_cast<uint8_t>((AUDIO_SAMPLE_RATE % 1000) / 50), 'N', AUDIO_SOURCE_CHANNELS};
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
       this->stream_rate_pending_.store(true, std::memory_order_release);
   }
@@ -546,8 +599,12 @@ void StreamTouchListener::release() {
 }
 
 void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points) {
-  if (this->stream_touch_q_ == nullptr || !this->stream_connected_.load(std::memory_order_acquire) ||
-      !this->stream_awake_.load(std::memory_order_acquire))
+  if (this->stream_touch_q_ == nullptr)
+    return;
+  // Touches go to a udisp sender whose picture is shown, and to an AVI sender while it plays.
+  const bool udisp_shown =
+      this->stream_connected_.load(std::memory_order_acquire) && this->stream_awake_.load(std::memory_order_acquire);
+  if (!udisp_shown && !this->stream_avi_.load(std::memory_order_acquire))
     return;
   StreamTouch event{};
   for (const auto &point : points) {
