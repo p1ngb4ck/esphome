@@ -159,6 +159,7 @@ class SimpleVideoPlayer : public Component {
     if (this->speaker_ != nullptr)
       this->speaker_->set_volume(volume);
   }
+  float get_volume() { return this->speaker_ != nullptr ? this->speaker_->get_volume() : 0.0f; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 
