@@ -624,6 +624,8 @@ class USBHost final : public Component {
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
   bool full_speed_only_{false};
   bool log_low_speed_hub_errors_{false};
+  uint32_t ls_hub_records_seen_{0};
+  void log_low_speed_hub_records_();
 #endif
 };
 

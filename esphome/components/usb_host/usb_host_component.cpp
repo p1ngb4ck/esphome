@@ -92,6 +92,31 @@ void USBHost::setup() {
   usb_host_ref() = this;
 }
 
+#ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
+// Records of the patched host controller driver's low-speed hub diagnostic, written from its
+// interrupt.
+void USBHost::log_low_speed_hub_records_() {
+  const uint32_t count = __atomic_load_n(&usb_host_ls_hub_debug_count, __ATOMIC_ACQUIRE);
+  if (count - this->ls_hub_records_seen_ > USB_HOST_LS_HUB_DEBUG_ENTRIES) {
+    ESP_LOGW(TAG, "LS hub: %" PRIu32 " records lost",
+             count - this->ls_hub_records_seen_ - USB_HOST_LS_HUB_DEBUG_ENTRIES);
+    this->ls_hub_records_seen_ = count - USB_HOST_LS_HUB_DEBUG_ENTRIES;
+  }
+  for (; this->ls_hub_records_seen_ != count; this->ls_hub_records_seen_++) {
+    const usb_host_ls_hub_debug_entry_t e =
+        usb_host_ls_hub_debug_entries[this->ls_hub_records_seen_ % USB_HOST_LS_HUB_DEBUG_ENTRIES];
+    if (e.kind == 0) {
+      ESP_LOGW(TAG, "LS hub pipe: addr=%u ep=0x%02X type=%u mps=%u, PREamble on", e.dev_addr, e.ep, e.xfer_type, e.mps);
+    } else {
+      ESP_LOGW(TAG,
+               "LS hub error: addr=%u ep=0x%02X type=%u stage=%d err=%u retry=%u frame=%" PRIu32 " HCINT=0x%08" PRIX32
+               " HCCHAR=0x%08" PRIX32 " HCTSIZ=0x%08" PRIX32 " QTD=0x%08" PRIX32,
+               e.dev_addr, e.ep, e.xfer_type, e.stage, e.err, e.retry, e.frame, e.hcint, e.hcchar, e.hctsiz, e.qtd);
+    }
+  }
+}
+#endif
+
 void USBHost::loop() {
   int err;
   // usb_host_lib_handle_events() does not write event_flags on ESP_ERR_TIMEOUT, which is
@@ -105,6 +130,10 @@ void USBHost::loop() {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
   }
   usb_host_client_handle_events(this->client_handle_, 0);
+#ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
+  if (this->log_low_speed_hub_errors_)
+    this->log_low_speed_hub_records_();
+#endif
   if (this->reroute_) {
     this->reroute_ = false;
     for (auto &dev : this->devices_)

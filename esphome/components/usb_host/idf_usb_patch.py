@@ -575,6 +575,99 @@ _LS_DEBUG_ERROR_REPLACEMENT = """        usb_dwc_hal_chan_error_t chan_error = u
         }
         if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&"""
 
+# The diagnostic printed from the interrupt with ESP_EARLY_LOGE, which goes straight to the ROM
+# console (esp_rom_printf) and never through the vprintf hook ESPHome's logger installs, so it
+# was invisible in ESPHome's log. It now records into a ring the application drains and logs,
+# plus a record when a pipe to a low-speed device behind a hub opens with PREamble set.
+_LS_DEBUG_RING_PUBLIC_ANCHOR = """extern bool usb_host_ls_hub_debug;"""
+
+_LS_DEBUG_RING_PUBLIC_REPLACEMENT = """extern bool usb_host_ls_hub_debug;
+
+/**
+ * @brief One record of that diagnostic, read by the application
+ */
+typedef struct {
+    uint8_t kind;       /**< 0: pipe opened with PREamble, 1: channel error */
+    uint8_t dev_addr;
+    uint8_t ep;
+    uint8_t xfer_type;
+    int8_t stage;       /**< Control stage, -1 if not a control transfer */
+    uint8_t err;        /**< usb_dwc_hal_chan_error_t */
+    uint8_t retry;
+    uint8_t mps;
+    uint32_t frame;
+    uint32_t hcint;     /**< Read before the HAL clears it */
+    uint32_t hcchar;
+    uint32_t hctsiz;
+    uint32_t qtd;       /**< The stage's descriptor word */
+} usb_host_ls_hub_debug_entry_t;
+
+#define USB_HOST_LS_HUB_DEBUG_ENTRIES 16
+extern usb_host_ls_hub_debug_entry_t usb_host_ls_hub_debug_entries[USB_HOST_LS_HUB_DEBUG_ENTRIES];
+/** Records written so far; entry n is at n % USB_HOST_LS_HUB_DEBUG_ENTRIES. */
+extern volatile uint32_t usb_host_ls_hub_debug_count;"""
+
+_LS_DEBUG_RING_DEF_ANCHOR = """bool usb_host_ls_hub_debug = false;
+
+static void _ls_hub_debug_log("""
+
+_LS_DEBUG_RING_DEF_REPLACEMENT = """#include "usb/usb_host.h"
+
+bool usb_host_ls_hub_debug = false;
+usb_host_ls_hub_debug_entry_t usb_host_ls_hub_debug_entries[USB_HOST_LS_HUB_DEBUG_ENTRIES];
+volatile uint32_t usb_host_ls_hub_debug_count = 0;
+static uint32_t s_ls_hub_debug_reserved = 0;
+
+static void _ls_hub_debug_record(const usb_host_ls_hub_debug_entry_t *entry)
+{
+    const uint32_t index = __atomic_fetch_add(&s_ls_hub_debug_reserved, 1, __ATOMIC_RELAXED);
+    usb_host_ls_hub_debug_entries[index % USB_HOST_LS_HUB_DEBUG_ENTRIES] = *entry;
+    __atomic_fetch_add(&usb_host_ls_hub_debug_count, 1, __ATOMIC_RELEASE);
+}
+
+static void _ls_hub_debug_log("""
+
+_LS_DEBUG_RING_LOG_ANCHOR = """    ESP_EARLY_LOGE(HCD_DWC_TAG, "LS hub error: addr=%u ep=0x%02x type=%u stage=%d err=%d retry=%u frame=%u "
+                   "HCINT=0x%08x HCCHAR=0x%08x HCTSIZ=0x%08x QTD=0x%08x",
+                   (unsigned)pipe->ep_char.dev_addr, (unsigned)pipe->ep_char.bEndpointAddress, (unsigned)pipe->ep_char.type,
+                   stage, (int)chan_error, (unsigned)pipe->ls_ctrl_retry_count,
+                   (unsigned)usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal), (unsigned)raw_chan_intrs,
+                   (unsigned)chan_obj->regs->hcchar_reg.val, (unsigned)chan_obj->regs->hctsiz_reg.val, (unsigned)qtd);"""
+
+_LS_DEBUG_RING_LOG_REPLACEMENT = """    const usb_host_ls_hub_debug_entry_t entry = {
+        .kind = 1,
+        .dev_addr = (uint8_t)pipe->ep_char.dev_addr,
+        .ep = (uint8_t)pipe->ep_char.bEndpointAddress,
+        .xfer_type = (uint8_t)pipe->ep_char.type,
+        .stage = (int8_t)stage,
+        .err = (uint8_t)chan_error,
+        .retry = pipe->ls_ctrl_retry_count,
+        .mps = (uint8_t)(pipe->ep_char.mps > 255 ? 255 : pipe->ep_char.mps),
+        .frame = usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal),
+        .hcint = raw_chan_intrs,
+        .hcchar = chan_obj->regs->hcchar_reg.val,
+        .hctsiz = chan_obj->regs->hctsiz_reg.val,
+        .qtd = qtd,
+    };
+    _ls_hub_debug_record(&entry);"""
+
+_LS_DEBUG_RING_ALLOC_ANCHOR = """    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
+    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
+
+_LS_DEBUG_RING_ALLOC_REPLACEMENT = """    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
+    if (usb_host_ls_hub_debug && pipe->ep_char.ls_via_fs_hub) {
+        const usb_host_ls_hub_debug_entry_t entry = {
+            .kind = 0,
+            .dev_addr = (uint8_t)pipe->ep_char.dev_addr,
+            .ep = (uint8_t)pipe->ep_char.bEndpointAddress,
+            .xfer_type = (uint8_t)pipe->ep_char.type,
+            .stage = -1,
+            .mps = (uint8_t)(pipe->ep_char.mps > 255 ? 255 : pipe->ep_char.mps),
+        };
+        _ls_hub_debug_record(&entry);
+    }
+    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -607,6 +700,14 @@ PATCHES = (
     ("include/usb/usb_host.h", _LS_DEBUG_PUBLIC_ANCHOR, _LS_DEBUG_PUBLIC_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_DEBUG_CHAN_ANCHOR, _LS_DEBUG_CHAN_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_DEBUG_ERROR_ANCHOR, _LS_DEBUG_ERROR_REPLACEMENT),
+    (
+        "include/usb/usb_host.h",
+        _LS_DEBUG_RING_PUBLIC_ANCHOR,
+        _LS_DEBUG_RING_PUBLIC_REPLACEMENT,
+    ),
+    ("src/hcd_dwc.c", _LS_DEBUG_RING_DEF_ANCHOR, _LS_DEBUG_RING_DEF_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_DEBUG_RING_LOG_ANCHOR, _LS_DEBUG_RING_LOG_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_DEBUG_RING_ALLOC_ANCHOR, _LS_DEBUG_RING_ALLOC_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
