@@ -353,6 +353,118 @@ reset_err:
         break;
     }"""
 
+# A low-speed device behind a full-speed hub: the controller can lose a PRE-qualified
+# transaction with a transaction error, most often the first one a new pipe launches, right
+# after the hub's port reset. From NonaSuomy's ESP32-P4 USB host work: the first launch of a
+# pipe waits for a frame boundary, and a control stage that fails that way is run again on a
+# later frame with a rebuilt descriptor (the controller writes the descriptor back in place),
+# a bounded number of times before the error reaches the transfer.
+_LS_PIPE_FIELDS_ANCHOR = """    usb_dwc_hal_ep_char_t ep_char;
+    // Port related"""
+
+_LS_PIPE_FIELDS_REPLACEMENT = """    usb_dwc_hal_ep_char_t ep_char;
+    uint8_t ls_ctrl_retry_count;            // Retries of the current control stage (LS via FS hub)
+    bool ls_first_launch_pending;           // First PRE-qualified launch waits for a frame boundary
+    // Port related"""
+
+_LS_PIPE_ALLOC_ANCHOR = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
+    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
+
+_LS_PIPE_ALLOC_REPLACEMENT = """    memcpy(&pipe->ep_char, &ep_char, sizeof(usb_dwc_hal_ep_char_t));
+    pipe->ls_first_launch_pending = pipe->ep_char.ls_via_fs_hub;
+    pipe->state = HCD_PIPE_STATE_ACTIVE;"""
+
+_LS_EXEC_ANCHOR = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe->multi_buffer_control.rd_idx];
+    assert(buffer_to_exec->urb != NULL);
+
+    uint32_t start_idx;"""
+
+_LS_EXEC_REPLACEMENT = """    dma_buffer_block_t *buffer_to_exec = pipe->buffers[pipe->multi_buffer_control.rd_idx];
+    assert(buffer_to_exec->urb != NULL);
+    pipe->ls_ctrl_retry_count = 0;
+    if (pipe->ls_first_launch_pending) {
+        pipe->ls_first_launch_pending = false;
+        _wait_next_preamble_frame(pipe);
+    }
+
+    uint32_t start_idx;"""
+
+_LS_EXEC_CONT_ANCHOR = """    // Continue the control transfer
+    usb_dwc_hal_chan_set_dir(pipe->chan_obj, next_dir_is_in);"""
+
+_LS_EXEC_CONT_REPLACEMENT = """    // Continue the control transfer
+    pipe->ls_ctrl_retry_count = 0;
+    usb_dwc_hal_chan_set_dir(pipe->chan_obj, next_dir_is_in);"""
+
+_LS_RETRY_HELPER_ANCHOR = """/**
+ * @brief Handles a HAL channel interrupt
+"""
+
+_LS_RETRY_HELPER_REPLACEMENT = """#define LS_CTRL_RETRY_MAX 3
+
+/**
+ * @brief Run the current stage of a control transfer again, on a later frame
+ *
+ * Descriptor DMA writes the stage's descriptor back in place before it reports the error,
+ * so it is rebuilt from the URB, as _buffer_fill_ctrl() built it.
+ */
+static inline void _ls_ctrl_retry(pipe_t *pipe)
+{
+    dma_buffer_block_t *buffer = pipe->buffers[pipe->multi_buffer_control.rd_idx];
+    usb_transfer_t *transfer = &buffer->urb->transfer;
+    const int stage = buffer->flags.ctrl.cur_stg;
+    bool is_in;
+    int pid;
+    uint8_t *data;
+    int len;
+    uint32_t flags = USB_DWC_HAL_XFER_DESC_FLAG_HOC;
+    if (stage == 0) {
+        is_in = false;
+        pid = 0;
+        data = transfer->data_buffer;
+        len = sizeof(usb_setup_packet_t);
+        flags |= USB_DWC_HAL_XFER_DESC_FLAG_SETUP;
+    } else if (stage == 1) {
+        is_in = buffer->flags.ctrl.data_stg_in;
+        pid = 1;
+        data = transfer->data_buffer + sizeof(usb_setup_packet_t);
+        len = transfer->num_bytes - sizeof(usb_setup_packet_t);
+    } else {
+        is_in = !(buffer->flags.ctrl.data_stg_in && !buffer->flags.ctrl.data_stg_skip);
+        pid = 1;
+        data = NULL;
+        len = 0;
+    }
+    if (is_in) {
+        flags |= USB_DWC_HAL_XFER_DESC_FLAG_IN;
+    }
+    usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, stage, data, len, flags);
+    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
+    usb_dwc_hal_chan_set_dir(pipe->chan_obj, is_in);
+    usb_dwc_hal_chan_set_pid(pipe->chan_obj, pid);
+    _wait_next_preamble_frame(pipe);
+    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, XFER_LIST_LEN_CTRL, stage);
+}
+
+/**
+ * @brief Handles a HAL channel interrupt
+"""
+
+_LS_RETRY_ANCHOR = """        // Get and store the pipe error event
+        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
+
+_LS_RETRY_REPLACEMENT = """        // Get and store the pipe error event
+        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
+        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&
+                chan_error == USB_DWC_HAL_CHAN_ERROR_XCS_XACT && pipe->ls_ctrl_retry_count < LS_CTRL_RETRY_MAX &&
+                pipe->port->flags.conn_dev_ena && !pipe->cs_flags.waiting_halt) {
+            pipe->ls_ctrl_retry_count++;
+            _ls_ctrl_retry(pipe);
+            break;
+        }
+        pipe->last_event = pipe_decode_error_event(chan_error);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -364,6 +476,12 @@ PATCHES = (
     ("src/hcd_dwc.c", _HCD_CALL_ANCHOR, _HCD_CALL_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_PREAMBLE_ANCHOR, _LS_PREAMBLE_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_EP0_ANCHOR, _LS_EP0_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PIPE_FIELDS_ANCHOR, _LS_PIPE_FIELDS_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_PIPE_ALLOC_ANCHOR, _LS_PIPE_ALLOC_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_EXEC_ANCHOR, _LS_EXEC_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_EXEC_CONT_ANCHOR, _LS_EXEC_CONT_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_RETRY_HELPER_ANCHOR, _LS_RETRY_HELPER_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_RETRY_ANCHOR, _LS_RETRY_REPLACEMENT),
     ("src/hcd_dwc.c", _RESET_BAILOUT_ANCHOR, _RESET_BAILOUT_REPLACEMENT),
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
     ("src/hub.c", _HUB_RESET_ERR_ANCHOR, _HUB_RESET_ERR_REPLACEMENT),
