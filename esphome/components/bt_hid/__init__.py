@@ -35,12 +35,16 @@ AUTO_LOAD = ["hid", "bt_pairing", "bt_classic"]
 MULTI_CONF = True
 
 CONF_ON_PASSKEY = "on_passkey"
+CONF_ON_PIN_REQUEST = "on_pin_request"
 CONF_AUTO_CONNECT = "auto_connect"
 
 bt_hid_ns = cg.esphome_ns.namespace("bt_hid")
 BTHIDDevice = bt_hid_ns.class_("BTHIDDevice", cg.Component, HIDInput)
 PasskeyTrigger = bt_hid_ns.class_(
     "PasskeyTrigger", automation.Trigger.template(cg.uint32)
+)
+PinRequestTrigger = bt_hid_ns.class_(
+    "PinRequestTrigger", automation.Trigger.template(cg.std_string)
 )
 ConnectTrigger = bt_hid_ns.class_("ConnectTrigger", automation.Trigger.template())
 DisconnectTrigger = bt_hid_ns.class_("DisconnectTrigger", automation.Trigger.template())
@@ -81,6 +85,10 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(HID_INPUT_SCHEMA).extend(
         # Simple pairing with a keyboard: the passkey to type on it, then Enter.
         cv.Optional(CONF_ON_PASSKEY): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(PasskeyTrigger)}
+        ),
+        # Legacy pairing: the device asks for the PIN, which is typed on it, then Enter.
+        cv.Optional(CONF_ON_PIN_REQUEST): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(PinRequestTrigger)}
         ),
     }
 )
@@ -133,6 +141,9 @@ async def to_code(config):
     for conf in config.get(CONF_ON_PASSKEY, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [(cg.uint32, "passkey")], conf)
+    for conf in config.get(CONF_ON_PIN_REQUEST, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [(cg.std_string, "pin")], conf)
     for key in (CONF_ON_CONNECT, CONF_ON_DISCONNECT):
         for conf in config.get(key, []):
             trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

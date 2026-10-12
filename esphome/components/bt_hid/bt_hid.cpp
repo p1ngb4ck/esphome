@@ -358,9 +358,8 @@ void handle_event(HostEvent &e) {
         dev->on_report(e.data);
       break;
     case HostEvent::PIN:
-      format_mac_addr_upper(e.bda, mac);
       if (BTHIDDevice *dev = find_by_address(e.bda))
-        ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, dev->pin().c_str());
+        dev->on_pin_request();
       break;
     case HostEvent::PASSKEY:
       if (BTHIDDevice *dev = find_by_address(e.bda))
@@ -395,10 +394,8 @@ void handle_event(HostEvent &e) {
       if (e.status == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "[%s] Paired", mac);
       } else {
-        ESP_LOGW(TAG, "[%s] Pairing failed: %d", mac, e.status);
-        BTHIDDevice *dev = find_by_address(e.bda);
-        if (dev != nullptr && dev == h.pairing)
-          dev->end_pairing(false, "authentication failed");
+        // The pairing window stays open: the device may still pair (a stale key fails first).
+        ESP_LOGW(TAG, "[%s] Authentication failed: %d", mac, e.status);
       }
       break;
   }
@@ -625,6 +622,9 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
       return;
     }
     this->candidate_name_.clear();
+    // A device in pairing mode has dropped the old key: a bond kept here would only fail.
+    if (is_bonded(this->bda_))
+      esp_bt_gap_remove_bond_device(this->bda_);
     set_pairing_window(this);
     h.pairing_until = millis() + duration_ms;
     ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
@@ -674,6 +674,8 @@ void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(bda, mac);
   ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
+  if (is_bonded(bda))
+    esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
   this->set_bda_(bda);
   this->candidate_class_ = device_class;
   this->candidate_name_ = name;
@@ -802,6 +804,13 @@ void BTHIDDevice::on_report(const std::vector<uint8_t> &report) {
     length--;
   }
   this->process_hid_values(this->map_->parse(source, data, length));
+}
+
+void BTHIDDevice::on_pin_request() {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(this->bda_, mac);
+  ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, this->pin_.c_str());
+  this->pin_cb_.call(this->pin_);
 }
 
 void BTHIDDevice::on_passkey(uint32_t passkey) {

@@ -45,6 +45,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   void set_pin(const std::string &pin) { this->pin_ = pin; }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
   template<typename F> void add_on_passkey_callback(F &&cb) { this->passkey_cb_.add(std::forward<F>(cb)); }
+  template<typename F> void add_on_pin_request_callback(F &&cb) { this->pin_cb_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_connect_callback(F &&cb) { this->connect_cb_.add(std::forward<F>(cb)); }
   template<typename F> void add_on_disconnect_callback(F &&cb) { this->disconnect_cb_.add(std::forward<F>(cb)); }
 
@@ -75,6 +76,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   void on_descriptor(const std::vector<uint8_t> &descriptor);
   void on_report(const std::vector<uint8_t> &report);
   void on_passkey(uint32_t passkey);
+  void on_pin_request();
   uint8_t handle() const { return this->handle_; }
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }
   void connect_attempted(uint32_t now);
@@ -97,6 +99,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   std::string (*address_get_)(){nullptr};
   void (*address_set_)(const std::string &){nullptr};
   CallbackManager<void(uint32_t)> passkey_cb_;
+  CallbackManager<void(const std::string &)> pin_cb_;
   CallbackManager<void()> connect_cb_;
   CallbackManager<void()> disconnect_cb_;
   uint32_t next_connect_ms_{0};
@@ -114,6 +117,13 @@ class PasskeyTrigger : public Trigger<uint32_t> {
  public:
   explicit PasskeyTrigger(BTHIDDevice *parent) {
     parent->add_on_passkey_callback([this](uint32_t passkey) { this->trigger(passkey); });
+  }
+};
+
+class PinRequestTrigger : public Trigger<std::string> {
+ public:
+  explicit PinRequestTrigger(BTHIDDevice *parent) {
+    parent->add_on_pin_request_callback([this](const std::string &pin) { this->trigger(pin); });
   }
 };
 
