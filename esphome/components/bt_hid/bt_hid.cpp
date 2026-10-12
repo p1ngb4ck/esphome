@@ -72,7 +72,7 @@ BTHIDDevice *find_by_address(const uint8_t *bda) {
 }
 
 // The pairing window is opened and closed on the main loop and read on the BTC task.
-void set_pairing(BTHIDDevice *dev) {
+void set_pairing_window(BTHIDDevice *dev) {
   LockGuard guard(host().lock);
   host().pairing = dev;
 }
@@ -625,7 +625,7 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
       return;
     }
     this->candidate_name_.clear();
-    set_pairing(this);
+    set_pairing_window(this);
     h.pairing_until = millis() + duration_ms;
     ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
     this->connect();
@@ -655,7 +655,7 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
   this->auto_connect_ = true;
   this->candidate_name_.clear();
   this->candidate_class_ = 0;
-  set_pairing(this);
+  set_pairing_window(this);
   h.pairing_until = millis() + units * 1280 + CONNECT_TIMEOUT_MS;
   ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
 }
@@ -686,7 +686,7 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
   Host &h = host();
   if (h.pairing != this)
     return;
-  set_pairing(nullptr);
+  set_pairing_window(nullptr);
   if (h.discovering)
     esp_bt_gap_cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
