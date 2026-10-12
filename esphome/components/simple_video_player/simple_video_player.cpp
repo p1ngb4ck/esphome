@@ -40,6 +40,16 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 
 void SimpleVideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
+#if defined(USE_AUDIO) && defined(SVP_AUDIO_SAMPLE_RATE)
+  this->wanted_audio_rate_.store(AUDIO_SAMPLE_RATE, std::memory_order_release);
+  this->wanted_audio_channels_.store(AUDIO_SOURCE_CHANNELS, std::memory_order_release);
+#ifdef SVP_AUDIO_ROUTER
+  if (this->audio_router_ != nullptr) {
+    this->audio_router_->add_on_output_callback([this](size_t) { this->on_audio_output_changed_(); });
+    this->on_audio_output_changed_();
+  }
+#endif
+#endif
 #ifdef SVP_MEDIA_PLAYER
   this->setup_media_player_();
 #endif
@@ -142,6 +152,7 @@ void SimpleVideoPlayer::setup() {
     this->source_audio_channels_ = AUDIO_SOURCE_CHANNELS;
     this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
     this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
+    this->audio_frame_bytes_ = AUDIO_BYTES_PER_FRAME;
 
     this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(AUDIO_INPUT_BUFFER_SIZE);
     if (this->audio_input_ring_buffer_ == nullptr) {
@@ -1534,6 +1545,28 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // Bits per sample only for PCM: a compressed track's header carries none (ffmpeg writes 0 for
   // MP3, libavformat/riffenc.c), its decoder produces them.
   const bool pcm = static_cast<AVIAudioCodec>(audio_info->codec) == AVIAudioCodec::PCM;
+#ifdef SVP_AUDIO_ROUTER
+  // Through an audio router: the file's own format goes to the router, which converts channels and
+  // width to the selected output's (senders send that output's rate and channels). Bounded only by
+  // the buffers, which are sized for the largest output.
+  const uint8_t file_bits = pcm ? static_cast<uint8_t>(audio_info->bits_per_sample) : 16;
+  const size_t file_bytes_per_sec =
+      static_cast<size_t>(audio_info->sample_rate) * audio_info->channels * (file_bits / 8);
+  if (audio_info->channels == 0 || audio_info->channels > 8 || audio_info->sample_rate == 0 ||
+      (file_bits != 16 && file_bits != 24 && file_bits != 32) || file_bytes_per_sec > AUDIO_BYTES_PER_SEC) {
+    ESP_LOGE(TAG,
+             "Audio format not playable: %" PRIu32 " Hz, %u ch, %u-bit (at most %zu bytes/s, 16/24/32-bit, "
+             "up to 8 channels). Playing video-only.",
+             audio_info->sample_rate, audio_info->channels, audio_info->bits_per_sample, AUDIO_BYTES_PER_SEC);
+    return false;
+  }
+  this->source_audio_channels_ = static_cast<uint8_t>(audio_info->channels);
+  this->audio_sample_rate_ = audio_info->sample_rate;
+  this->audio_bits_per_sample_ = file_bits;
+  this->audio_frame_bytes_ = static_cast<size_t>(audio_info->channels) * (file_bits / 8);
+  this->speaker_audio_channels_ = this->source_audio_channels_;
+  ESP_LOGI(TAG, "Audio: %u-channel source to the audio router", this->source_audio_channels_);
+#else
   if (audio_info->channels != AUDIO_SOURCE_CHANNELS || audio_info->sample_rate != AUDIO_SAMPLE_RATE ||
       (pcm && audio_info->bits_per_sample != AUDIO_BITS_PER_SAMPLE)) {
     ESP_LOGE(TAG,
@@ -1558,6 +1591,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_RIGHT  ? "right"
            : this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? "stereo"
                                                                                        : "unknown");
+#endif
 
   // audio_codec is a LIST of supported codecs -- each listed one compiles in its decoder path
   // (SVP_AUDIO_SUPPORT_{PCM,MP3,FLAC}); the AVI parser detected THIS file's actual codec, so pick
@@ -1595,10 +1629,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   // CRITICAL: Configure speaker's audio stream info based on SPEAKER config, not file
-  audio::AudioStreamInfo speaker_stream_info(AUDIO_BITS_PER_SAMPLE, this->speaker_audio_channels_,
+  audio::AudioStreamInfo speaker_stream_info(this->audio_bits_per_sample_, this->speaker_audio_channels_,
                                              audio_info->sample_rate);
   this->speaker_->set_audio_stream_info(speaker_stream_info);
-  ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz", static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE),
+  ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz",
+           static_cast<unsigned>(this->audio_bits_per_sample_),
            this->speaker_audio_channels_, audio_info->sample_rate);
 
   // Ring buffers + temp buffer already exist (allocated once in setup(), sized from the fixed
@@ -1694,7 +1729,7 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   }
 
   // PCM: data is already decoded - write only complete frames to avoid glitches.
-  constexpr size_t bytes_per_frame = AUDIO_BYTES_PER_FRAME;  // fixed at compile time
+  const size_t bytes_per_frame = this->audio_frame_bytes_;
   size_t complete_frames = size / bytes_per_frame;
   size_t bytes_to_write = complete_frames * bytes_per_frame;
 

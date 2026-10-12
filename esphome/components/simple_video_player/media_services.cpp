@@ -1,5 +1,6 @@
 #include "simple_video_player.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -74,25 +75,39 @@ void SimpleVideoPlayer::setup_media_player_() {
   this->register_service(&SimpleVideoPlayer::on_svp_play_audio, "svp_play_audio", {"url", "announce"});
   this->register_service(&SimpleVideoPlayer::on_svp_audio_command, "svp_audio_command", {"command"});
   this->register_service(&SimpleVideoPlayer::on_svp_set_volume, "svp_set_volume", {"volume"});
+  this->build_media_traits_();
+  this->media_player_->add_on_state_callback(
+      [this](media_player::MediaPlayerState) { this->status_callbacks_.call(); });
+  this->status_callbacks_.call();  // whatever published the status before this setup
+}
+
+void SimpleVideoPlayer::build_media_traits_() {
+  if (this->media_player_ == nullptr)
+    return;
   // Pause, and the formats the media player decodes, [format, rate, channels, sample bytes, purpose]: svp_relay
   // converts what it plays to one of them (Home Assistant's ESPHome ffmpeg proxy), as Home Assistant
-  // does for an ESPHome media player it sees.
+  // does for an ESPHome media player it sees. Through an audio router: in its selected output's rate and
+  // channel count, which the player passes on as it is.
   auto traits = this->media_player_->get_traits();
   std::string formats = traits.get_supports_pause() ? "\"pause\":true,\"formats\":[" : "\"pause\":false,\"formats\":[";
   const size_t start = formats.size();
   for (const auto &format : traits.get_supported_formats()) {
+    uint32_t rate = format.sample_rate;
+    uint32_t channels = format.num_channels;
+#ifdef SVP_AUDIO_ROUTER
+    if (this->audio_router_ != nullptr) {
+      rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
+      channels = this->wanted_audio_channels_.load(std::memory_order_acquire);
+    }
+#endif
     char entry[64];
     snprintf(entry, sizeof(entry), "%s[\"%s\",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%u]", formats.size() > start ? "," : "",
-             format.format.c_str(), format.sample_rate, format.num_channels, format.sample_bytes,
-             static_cast<unsigned>(format.purpose));
+             format.format.c_str(), rate, channels, format.sample_bytes, static_cast<unsigned>(format.purpose));
     if (formats.size() + strlen(entry) > 140)
       break;  // the status must stay within Home Assistant's 255 characters
     formats += entry;
   }
   this->media_traits_json_ = formats + "]";
-  this->media_player_->add_on_state_callback(
-      [this](media_player::MediaPlayerState) { this->status_callbacks_.call(); });
-  this->status_callbacks_.call();  // whatever published the status before this setup
 }
 
 void SimpleVideoPlayer::on_svp_play_audio(std::string url, bool announce) {
@@ -115,6 +130,24 @@ void SimpleVideoPlayer::on_svp_audio_command(std::string command) {
 }
 
 void SimpleVideoPlayer::on_svp_set_volume(float volume) { this->set_volume(clamp(volume, 0.0f, 1.0f)); }
+#endif
+
+#ifdef SVP_AUDIO_ROUTER
+void SimpleVideoPlayer::on_audio_output_changed_() {
+  // Main loop: the router switched outputs. Senders are told the new output's format; the relay
+  // plays on in it.
+  const audio::AudioStreamInfo &format = this->audio_router_->active_format();
+  this->wanted_audio_rate_.store(format.get_sample_rate(), std::memory_order_release);
+  this->wanted_audio_channels_.store(std::min<uint8_t>(format.get_channels(), AUDIO_SOURCE_CHANNELS),
+                                     std::memory_order_release);
+#ifdef SVP_STREAM
+  this->stream_rate_pending_.store(this->speaker_ != nullptr, std::memory_order_release);
+#endif
+#ifdef SVP_MEDIA_PLAYER
+  this->build_media_traits_();
+#endif
+  this->status_callbacks_.call();
+}
 #endif
 
 }  // namespace esphome::simple_video_player

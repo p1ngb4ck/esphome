@@ -515,9 +515,15 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
 #ifdef SVP_AUDIO_SUPPORT_FLAC
     codecs |= 4;
 #endif
-    const uint8_t message[7] = {'A', static_cast<uint8_t>(AUDIO_SAMPLE_RATE / 1000),
-                                static_cast<uint8_t>((AUDIO_SAMPLE_RATE % 1000) / 50),
-                                'N', AUDIO_SOURCE_CHANNELS, 'F', codecs};
+    // Sent again whenever an audio router's selection changes them.
+    const uint32_t rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
+    const uint8_t message[7] = {'A',
+                                static_cast<uint8_t>(rate / 1000),
+                                static_cast<uint8_t>((rate % 1000) / 50),
+                                'N',
+                                this->wanted_audio_channels_.load(std::memory_order_acquire),
+                                'F',
+                                codecs};
     if (::send(client, message, sizeof(message), MSG_DONTWAIT) != static_cast<int>(sizeof(message)))
       this->stream_rate_pending_.store(true, std::memory_order_release);
   }
@@ -658,19 +664,24 @@ void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
   // A playing file owns the speaker.
   if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
     return;
-  if (AUDIO_BITS_PER_SAMPLE != 16 || this->stream_audio_rate_ != AUDIO_SAMPLE_RATE || this->stream_audio_src_ch_ > 2) {
+  const uint32_t rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
+  if (AUDIO_BITS_PER_SAMPLE != 16 || this->stream_audio_rate_ != rate || this->stream_audio_src_ch_ > 2) {
     if (!this->stream_logged_audio_format_) {
       this->stream_logged_audio_format_ = true;
       ESP_LOGW(TAG, "Sound of %u Hz, %u channel(s) does not fit the speaker (%u Hz, %u bit): not played",
                static_cast<unsigned>(this->stream_audio_rate_), this->stream_audio_src_ch_,
-               static_cast<unsigned>(AUDIO_SAMPLE_RATE), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
+               static_cast<unsigned>(rate), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
     }
     return;
   }
+  this->stream_logged_audio_format_ = false;
+  if (this->speaker_->is_running() && this->stream_speaker_rate_ != rate)
+    this->speaker_->stop();  // the sender follows an audio router's new output: started again in its rate
   if (!this->speaker_->is_running()) {
     this->speaker_->set_audio_stream_info(
-        audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, AUDIO_SAMPLE_RATE));
+        audio::AudioStreamInfo(AUDIO_BITS_PER_SAMPLE, this->stream_audio_out_ch_, rate));
     this->speaker_->start();
+    this->stream_speaker_rate_ = rate;
   }
   this->stream_last_audio_ms_.store(millis(), std::memory_order_release);
   this->stream_audio_on_.store(true, std::memory_order_release);

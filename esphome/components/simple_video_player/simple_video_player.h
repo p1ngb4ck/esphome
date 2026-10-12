@@ -30,6 +30,9 @@
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
 #endif
+#ifdef SVP_AUDIO_ROUTER
+#include "esphome/components/audio_router/speaker/audio_router.h"
+#endif
 
 #ifdef SVP_MEDIA_PLAYER
 #include "esphome/components/api/custom_api_device.h"
@@ -164,6 +167,10 @@ class SimpleVideoPlayer : public Component
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
+#endif
+#ifdef SVP_AUDIO_ROUTER
+  /// The speaker is this router: sound is wanted in its selected output's rate and channel count.
+  void set_audio_router(audio_router::AudioRouter *router) { this->audio_router_ = router; }
 #endif
   // The device's one volume, 0..1: this player's speaker and, with media_player_id, the media player's.
   void set_volume(float volume);
@@ -502,6 +509,15 @@ class SimpleVideoPlayer : public Component
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
   uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
   uint8_t audio_bits_per_sample_{16};             // Fixed bits per sample (mirrors AUDIO_BITS_PER_SAMPLE)
+  size_t audio_frame_bytes_{0};                   // This file's PCM frame
+  // The rate and channel count sound is wanted in, reported to senders: the speaker's, or with an
+  // audio router its selected output's (they change with the selection).
+  std::atomic<uint32_t> wanted_audio_rate_{0};
+  std::atomic<uint8_t> wanted_audio_channels_{0};
+#ifdef SVP_AUDIO_ROUTER
+  audio_router::AudioRouter *audio_router_{nullptr};
+  void on_audio_output_changed_();
+#endif
   bool audio_enabled_{false};                     // Audio stream available and enabled
   // Whether THIS file's audio track actually uses audio_decoder_ (compressed: MP3/FLAC) vs direct
   // PCM. In a multi-codec build audio_decoder_ exists regardless, so the object pointer can no
@@ -634,6 +650,7 @@ class SimpleVideoPlayer : public Component
   uint8_t stream_audio_out_ch_{1};
   bool stream_logged_audio_format_{false};
   std::atomic<bool> stream_rate_pending_{false};
+  uint32_t stream_speaker_rate_{0};  // the rate the speaker was started in for a sender's sound
   std::atomic<bool> stream_audio_on_{false};
   std::atomic<uint32_t> stream_last_audio_ms_{0};
 #endif
@@ -713,6 +730,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_MEDIA_PLAYER
   media_player::MediaPlayer *media_player_{nullptr};
   void setup_media_player_();
+  void build_media_traits_();
   std::string media_traits_json_;  // "pause":..,"formats":[..] of the status
 #endif
 };

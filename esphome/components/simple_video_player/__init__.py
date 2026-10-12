@@ -14,6 +14,7 @@ from esphome.const import (
     CONF_HEIGHT,
     CONF_ID,
     CONF_NUM_CHANNELS,
+    CONF_PLATFORM,
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
     CONF_URL,
@@ -105,6 +106,7 @@ CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_AUDIO_CHANNELS = "audio_channels"
 CONF_AUDIO_BITS_PER_SAMPLE = "audio_bits_per_sample"
 CONF_RESOLVED_SPEAKER_CHANNEL = "resolved_speaker_channel"
+CONF_AUDIO_ROUTER = "audio_router"
 # The canvas widget's own width/height: the size of the output buffers and of the picture a
 # stream sender is asked for (the device never scales).
 CONF_RESOLVED_CANVAS_SIZE = "resolved_canvas_size"
@@ -341,6 +343,27 @@ def _resolve_speaker_audio_format(config, fconf):
             f"Could not resolve speaker_id '{speaker_id}' to its own config"
         ) from err
 
+    this_path = fconf.get_path_for_id(config[CONF_ID])[:-1]
+    this_conf = fconf.get_config_for_path(this_path)
+
+    if speaker_conf.get(CONF_PLATFORM) == CONF_AUDIO_ROUTER:
+        # The selected output's format, at runtime: the panel reports it and plays what comes in
+        # (the router converts channels and width). Buffers are sized for the largest output, at
+        # least 48 kHz stereo; sound reaches the router 16-bit (the relay sends no other).
+        from esphome.components.audio_router.speaker import output_formats
+
+        formats = output_formats(fconf, speaker_conf)
+        this_conf[CONF_AUDIO_SAMPLE_RATE] = max(
+            [48000] + [f[CONF_SAMPLE_RATE] for f in formats]
+        )
+        this_conf[CONF_AUDIO_BITS_PER_SAMPLE] = 16
+        this_conf[CONF_AUDIO_CHANNELS] = max(
+            [2] + [f[CONF_NUM_CHANNELS] for f in formats]
+        )
+        this_conf[CONF_RESOLVED_SPEAKER_CHANNEL] = "stereo"
+        this_conf[CONF_AUDIO_ROUTER] = True
+        return
+
     if CONF_SAMPLE_RATE not in speaker_conf or CONF_BITS_PER_SAMPLE not in speaker_conf:
         raise cv.Invalid(
             f"speaker '{speaker_id}' does not declare both sample_rate and bits_per_sample -- "
@@ -383,8 +406,6 @@ def _resolve_speaker_audio_format(config, fconf):
     # get_path_for_id()/get_config_for_path() pattern (see mpr121/__init__.py) -- not the `config`
     # parameter directly, since final_validate must not assume that's the live object backing
     # full_config. to_code() reads these back out below.
-    this_path = fconf.get_path_for_id(config[CONF_ID])[:-1]
-    this_conf = fconf.get_config_for_path(this_path)
     this_conf[CONF_AUDIO_SAMPLE_RATE] = sample_rate
     this_conf[CONF_AUDIO_BITS_PER_SAMPLE] = bits_per_sample
     this_conf[CONF_AUDIO_CHANNELS] = num_channels
@@ -550,6 +571,9 @@ async def to_code(config):
         cg.add(var.set_speaker(spkr))
         cg.add_define("USE_SPEAKER")
         cg.add_define("USE_AUDIO")
+        if config.get(CONF_AUDIO_ROUTER):
+            cg.add_define("SVP_AUDIO_ROUTER")
+            cg.add(var.set_audio_router(spkr))
 
         # Fixed audio format: sample_rate/channels/bits_per_sample were resolved from the
         # speaker's own config by _final_validate above (not asked of the user twice) and
