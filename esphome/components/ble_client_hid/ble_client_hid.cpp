@@ -185,6 +185,7 @@ namespace {
 
 constexpr uint32_t PAIRING_CONNECT_GRACE_MS = 30000;
 // GAP appearance category 0x00F: HID (keyboard, mouse, joystick, gamepad, ...).
+constexpr uint16_t APPEARANCE_KEYBOARD = 0x03C1;
 constexpr uint16_t APPEARANCE_HID_FIRST = 0x03C0;
 constexpr uint16_t APPEARANCE_HID_LAST = 0x03FF;
 
@@ -1705,14 +1706,52 @@ void BLEClientHID::write_leds_(uint8_t leds) {
 
 // -- GAP events --------------------------------------------------------------------------
 
-// A device without pairing support is used unencrypted, now and on every reconnect.
 void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  if (event != ESP_GAP_BLE_AUTH_CMPL_EVT || param->ble_security.auth_cmpl.success ||
-      param->ble_security.auth_cmpl.fail_reason != ESP_AUTH_SMP_PAIR_NOT_SUPPORT ||
+  if (event != ESP_GAP_BLE_AUTH_CMPL_EVT ||
       memcmp(param->ble_security.auth_cmpl.bd_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) != 0)
+    return;
+  this->restore_io_capability_();
+  // A device without pairing support is used unencrypted, now and on every reconnect.
+  if (param->ble_security.auth_cmpl.success ||
+      param->ble_security.auth_cmpl.fail_reason != ESP_AUTH_SMP_PAIR_NOT_SUPPORT)
     return;
   this->plain_address_ = this->parent()->get_address();
   ESP_LOGI(TAG, "[%s] Pairing not supported by the device, continuing unencrypted", this->parent()->address_str());
+}
+
+// Bluedroid reads the IO capability when a pairing starts (bta_dm_co_ble_io_req). The configured
+// one is offered to a keyboard, which can type a passkey; any other device (a remote, a mouse)
+// pairs as with no input and output, since it may report keys it cannot type a passkey with.
+void BLEClientHID::apply_io_capability_() {
+  if (esp32_ble::global_ble == nullptr)
+    return;
+  const esp_ble_io_cap_t configured = esp32_ble::global_ble->get_io_capability();
+  if (configured == ESP_IO_CAP_NONE)
+    return;
+  uint16_t appearance = 0;
+  if (this->pairing_active_ && this->candidate_selected_) {
+    appearance = this->candidate_appearance_;
+#ifdef USE_BT_PAIRING
+  } else if (this->pairing_ != nullptr) {
+    if (const auto *record = this->pairing_->find_slot(this->slot_); record != nullptr)
+      appearance = static_cast<uint16_t>(record->device_class);
+#endif
+  }
+  if (appearance == APPEARANCE_KEYBOARD)
+    return;
+  esp_ble_io_cap_t none = ESP_IO_CAP_NONE;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &none, sizeof(none));
+  this->io_cap_lowered_ = true;
+  ESP_LOGD(TAG, "[%s] Not a keyboard (appearance 0x%04X): pairing without passkey", this->parent()->address_str(),
+           appearance);
+}
+
+void BLEClientHID::restore_io_capability_() {
+  if (!this->io_cap_lowered_ || esp32_ble::global_ble == nullptr)
+    return;
+  this->io_cap_lowered_ = false;
+  esp_ble_io_cap_t configured = esp32_ble::global_ble->get_io_capability();
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &configured, sizeof(configured));
 }
 
 // -- GATT events -------------------------------------------------------------------------
@@ -1727,12 +1766,16 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         break;
       this->reset_connection_state_();
       this->transition_(SetupPhase::WAITING_FOR_DISCOVERY);
-      if (!this->plain_() && esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
-        ESP_LOGW(TAG, "HID_CONNECTION security=request_failed");
+      if (!this->plain_()) {
+        this->apply_io_capability_();
+        if (esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
+          ESP_LOGW(TAG, "HID_CONNECTION security=request_failed");
+      }
       break;
     case ESP_GATTC_DISCONNECT_EVT: {
       if (memcmp(param->disconnect.remote_bda, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) != 0)
         break;
+      this->restore_io_capability_();
       // A peripheral that is allowed to sleep drops the link; that is normal operation. Only a
       // disconnect while nothing lets it sleep is a fault.
       const bool expected = this->keepalive_interval_ms_ != 0 && !this->keepalive_enabled_;

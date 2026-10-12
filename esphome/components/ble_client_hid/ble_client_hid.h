@@ -258,6 +258,8 @@ class BLEClientHID : public Component,
 
  protected:
   void write_leds_(uint8_t leds) override;
+  void apply_io_capability_();
+  void restore_io_capability_();
   /// Unencrypted: by configuration, or a device that refused pairing.
   bool plain_() const { return !this->encryption_ || this->plain_address_ == this->parent_->get_address(); }
   esp_gatt_auth_req_t read_auth_() const { return this->plain_() ? ESP_GATT_AUTH_REQ_NONE : ESP_GATT_AUTH_REQ_NO_MITM; }
@@ -402,6 +404,7 @@ class BLEClientHID : public Component,
   bool has_conn_latency_{false};
   bool encryption_{true};
   uint64_t plain_address_{0};
+  bool io_cap_lowered_{false};
 
   OrderedEventBuffer sampled_events_{16};
   uint32_t sampling_window_started_us_{0};
