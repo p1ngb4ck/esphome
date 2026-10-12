@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
 namespace esphome::bt_pairing {

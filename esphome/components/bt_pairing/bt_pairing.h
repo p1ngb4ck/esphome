@@ -169,7 +169,6 @@ class BTPairing : public Component
   bool list_broadcast_{false};
   std::atomic<bool> scanning_{false};
   std::atomic<bool> classic_discovering_{false};
-  bool gap_registered_{false};
   ESPPreferenceObject pref_;
   uint32_t preference_key_{0};
   uint32_t next_attempt_ms_{0};

@@ -337,7 +337,8 @@ void BLEClientHID::pair_with(size_t index) {
 bool BLEClientHID::is_free() const {
   if (!this->dynamic_ || this->pairing_active_)
     return false;
-  return this->pending_address_valid_ ? this->pending_address_ == 0 : this->parent_->get_address() == 0;
+  return this->pending_address_valid_ ? this->pending_address_ == 0
+                                      : this->ble_client::BLEClientNode::parent_->get_address() == 0;
 }
 
 bool BLEClientHID::pair_device(const bt_pairing::ScannedDevice &device) {

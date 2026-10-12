@@ -261,7 +261,9 @@ class BLEClientHID : public Component,
   void apply_io_capability_();
   void restore_io_capability_();
   /// Unencrypted: by configuration, or a device that refused pairing.
-  bool plain_() const { return !this->encryption_ || this->plain_address_ == this->parent_->get_address(); }
+  bool plain_() const {
+    return !this->encryption_ || this->plain_address_ == this->ble_client::BLEClientNode::parent_->get_address();
+  }
   esp_gatt_auth_req_t read_auth_() const { return this->plain_() ? ESP_GATT_AUTH_REQ_NONE : ESP_GATT_AUTH_REQ_NO_MITM; }
 
   void reset_connection_state_();
