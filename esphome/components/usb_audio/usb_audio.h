@@ -101,7 +101,7 @@ class USBAudioClient : public usb_host::USBClient {
   // matches anything that enumerates, including hubs and mass storage, and takes the first
   // device it sees. vid and pid stay 0 by default, which the host reads as "any", and are
   // narrowed from the config when the user names a specific device.
-  USBAudioClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_AUDIO); }
+  USBAudioClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_AUDIO); }
 
   void set_vid(uint16_t vid) { this->vid_ = vid; }
   void set_pid(uint16_t pid) { this->pid_ = pid; }

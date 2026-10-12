@@ -23,7 +23,8 @@ import esphome.final_validate as fv
 from . import realtek
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["usb_host", "esp32"]
+DEPENDENCIES = ["esp32"]
+AUTO_LOAD = ["usb_host"]
 
 CONF_BLUEDROID = "bluedroid"
 CONF_FIRMWARE = "firmware"
@@ -53,9 +54,8 @@ def _validate_firmware(config):
 
 
 # A USB Bluetooth dongle (HCI over USB) as a usb_host client, next to every other client.
-# Without vid/pid it takes any device with a Bluetooth controller interface (class E0). A
-# dongle that hides that interface behind the vendor class (FF/01/01, as Broadcom's do) is
-# named by vid/pid.
+# Routed by class E0/01/01, and Broadcom/Apple controllers behind the vendor class FF/01/01.
+# vid/pid name one dongle instead, whatever its class.
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {

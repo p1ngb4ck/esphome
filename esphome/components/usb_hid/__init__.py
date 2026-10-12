@@ -6,7 +6,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["usb_host", "esp32"]
+DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["usb_host"]
 # One instance per device: a keyboard and the HID interface of a sound card are two
 # separate clients, each attached to its own device by vid and pid.
@@ -97,9 +97,9 @@ CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(USBHIDClient),
-            # Which device this instance attaches to. 0 matches anything, which is fine for
-            # a single HID device on the bus but not once a keyboard and a sound card are
-            # both attached -- give each instance the vid and pid of its own device then.
+            # Which device this instance attaches to. 0 routes by class: any HID device.
+            # With a keyboard and a sound card both attached, give each instance the vid
+            # and pid of its own device.
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_KEYBOARD): cv.Schema(

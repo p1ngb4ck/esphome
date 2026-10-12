@@ -10,7 +10,8 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["usb_host", "esp32"]
+DEPENDENCIES = ["esp32"]
+AUTO_LOAD = ["usb_host"]
 
 CONF_FORMAT = "format"
 CONF_WIDTH = "width"

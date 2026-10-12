@@ -429,7 +429,8 @@ class USBUartComponent : public usb_host::USBClient {
 
 class USBUartTypeCdcAcm : public USBUartComponent {
  public:
-  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) {}
+  // Without vid/pid: any device with a CDC ACM communication interface (class 02/02).
+  USBUartTypeCdcAcm(uint16_t vid, uint16_t pid) : USBUartComponent(vid, pid) { this->add_class_match(0x02, 0x02); }
   void set_claim_comm_interface(bool claim) { this->claim_comm_interface_ = claim; }
 
  protected:

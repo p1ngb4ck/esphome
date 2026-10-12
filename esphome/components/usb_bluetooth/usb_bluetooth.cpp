@@ -91,9 +91,6 @@ bool USBBluetooth::find_interface_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)
     return false;
-  // FF/01/01 is accepted only for a dongle named by vid/pid: the vendor class says nothing
-  // about Bluetooth on its own.
-  const bool vendor_allowed = this->vid_ != 0 || this->pid_ != 0;
   this->intf_ = 0xFF;
   this->evt_ep_ = this->acl_in_ep_ = this->acl_out_ep_ = 0;
 
@@ -107,7 +104,10 @@ bool USBBluetooth::find_interface_() {
       if (this->intf_ != 0xFF || intf->bAlternateSetting != 0 || intf->bInterfaceSubClass != 0x01 ||
           intf->bInterfaceProtocol != 0x01)
         continue;
-      if (intf->bInterfaceClass == HCI_CLASS || (vendor_allowed && intf->bInterfaceClass == 0xFF)) {
+      // FF/01/01 only where routing handed it over: a vendor match or a dongle named by
+      // vid/pid. The vendor class says nothing about Bluetooth on its own.
+      if (intf->bInterfaceClass == HCI_CLASS ||
+          (intf->bInterfaceClass == 0xFF && this->interface_routed_(intf->bInterfaceNumber))) {
         this->intf_ = intf->bInterfaceNumber;
         this->vendor_class_ = intf->bInterfaceClass == 0xFF;
         in_hci = true;

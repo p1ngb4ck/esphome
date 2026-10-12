@@ -2,6 +2,7 @@
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3) || \
     defined(USE_ESP32_VARIANT_ESP32S31) || defined(USE_ESP32_VARIANT_ESP32H4)
 #include "usb_host.h"
+#include <algorithm>
 #include <cinttypes>
 #include "esphome/core/log.h"
 #if defined(USE_ESP32_VARIANT_ESP32P4)
@@ -10,6 +11,9 @@
 #endif
 
 namespace esphome::usb_host {
+
+// Routing client events; a hub brings up several devices at once.
+static constexpr int HOST_EVENT_QUEUE_SIZE = 16;
 
 static USBHost *&usb_host_ref() {
   static USBHost *instance = nullptr;
@@ -60,6 +64,17 @@ void USBHost::setup() {
     this->mark_failed();
     return;
   }
+  // The routing client: it opens every new device to read its descriptors, and its events
+  // are handled from loop(), so it needs no task of its own.
+  usb_host_client_config_t client_config{
+      .is_synchronous = false,
+      .max_num_event_msg = HOST_EVENT_QUEUE_SIZE,
+      .async = {.client_event_callback = USBHost::host_event_cb, .callback_arg = this}};
+  if (usb_host_client_register(&client_config, &this->client_handle_) != ESP_OK) {
+    this->status_set_error(LOG_STR("Routing client register failed"));
+    this->mark_failed();
+    return;
+  }
   usb_host_ref() = this;
 }
 
@@ -74,6 +89,126 @@ void USBHost::loop() {
   }
   if (event_flags != 0) {
     ESP_LOGD(TAG, "Event flags %" PRIu32 "X", event_flags);
+  }
+  usb_host_client_handle_events(this->client_handle_, 0);
+  if (this->reroute_) {
+    this->reroute_ = false;
+    for (auto &dev : this->devices_)
+      this->route_(dev);
+  }
+}
+
+// -- Routing -------------------------------------------------------------------
+
+void USBHost::register_client(USBClient *client) {
+  this->clients_.push_back(client);
+  // A device that came up before this driver did is offered to it now.
+  this->reroute_ = true;
+}
+
+// Main loop: called from usb_host_client_handle_events() in loop().
+void USBHost::host_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
+  auto *host = static_cast<USBHost *>(arg);
+  switch (event_msg->event) {
+    case USB_HOST_CLIENT_EVENT_NEW_DEV:
+      host->device_new_(event_msg->new_dev.address);
+      break;
+    case USB_HOST_CLIENT_EVENT_DEV_GONE:
+      host->device_gone_(event_msg->dev_gone.dev_hdl);
+      break;
+    default:
+      break;
+  }
+}
+
+void USBHost::device_new_(uint8_t addr) {
+  RoutedDevice dev;
+  dev.addr = addr;
+  esp_err_t err = usb_host_device_open(this->client_handle_, addr, &dev.handle);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device %u open failed: %s", addr, esp_err_to_name(err));
+    return;
+  }
+  if ((err = usb_host_get_device_descriptor(dev.handle, &dev.desc)) != ESP_OK ||
+      (err = usb_host_get_active_config_descriptor(dev.handle, &dev.config)) != ESP_OK ||
+      (err = usb_host_device_info(dev.handle, &dev.info)) != ESP_OK) {
+    ESP_LOGW(TAG, "Device %u descriptors unavailable: %s", addr, esp_err_to_name(err));
+    usb_host_device_close(this->client_handle_, dev.handle);
+    return;
+  }
+  ESP_LOGD(TAG, "Device %u: %04X:%04X", addr, dev.desc->idVendor, dev.desc->idProduct);
+  this->devices_.push_back(std::move(dev));
+  this->route_(this->devices_.back());
+}
+
+void USBHost::device_gone_(usb_device_handle_t handle) {
+  for (auto it = this->devices_.begin(); it != this->devices_.end(); ++it) {
+    if (it->handle != handle)
+      continue;
+    ESP_LOGD(TAG, "Device %u gone", it->addr);
+    usb_host_device_close(this->client_handle_, it->handle);
+    this->devices_.erase(it);
+    return;
+  }
+}
+
+void USBHost::client_released(USBClient *client, int addr) {
+  for (auto &dev : this->devices_) {
+    if (dev.addr != addr)
+      continue;
+    auto bound = std::find(dev.bound.begin(), dev.bound.end(), client);
+    if (bound != dev.bound.end()) {
+      dev.bound.erase(bound);
+      dev.declined.push_back(client);
+    }
+    // Recomputed rather than subtracted: interfaces can overlap between drivers' masks.
+    dev.assigned = 0;
+    for (auto *other : dev.bound)
+      dev.assigned |= other->routed_interfaces_;
+    break;
+  }
+  // The driver is free again, and so are the interfaces it held.
+  this->reroute_ = true;
+}
+
+void USBHost::route_(RoutedDevice &dev) {
+  auto listed = [](const std::vector<USBClient *> &list, USBClient *client) {
+    return std::find(list.begin(), list.end(), client) != list.end();
+  };
+  // A device that a driver names is reserved for the drivers that name it, busy or not.
+  bool named = false;
+  uint32_t interfaces;
+  for (auto *client : this->clients_) {
+    if (!listed(dev.declined, client) && client->match_(dev, interfaces) == MatchTier::NAMED)
+      named = true;
+  }
+  bool routed = false;
+  for (MatchTier tier : {MatchTier::NAMED, MatchTier::VENDOR, MatchTier::CLASS}) {
+    if (named && tier != MatchTier::NAMED)
+      break;
+    for (auto *client : this->clients_) {
+      if (!client->is_free_() || listed(dev.bound, client) || listed(dev.declined, client))
+        continue;
+      if (client->match_(dev, interfaces) != tier)
+        continue;
+      const uint32_t free_interfaces = interfaces & ~dev.assigned;
+      if (free_interfaces == 0)
+        continue;
+      ESP_LOGI(TAG, "%04X:%04X interfaces 0x%02" PRIX32 " -> %s", dev.desc->idVendor, dev.desc->idProduct,
+               free_interfaces, LOG_STR_ARG(client->get_component_log_str()));
+      dev.assigned |= free_interfaces;
+      dev.bound.push_back(client);
+      client->bind_(dev.addr, free_interfaces);
+      routed = true;
+    }
+  }
+  if (!routed && dev.bound.empty() && !dev.reported_unrouted) {
+    dev.reported_unrouted = true;
+    if (named) {
+      ESP_LOGI(TAG, "%04X:%04X waits for the driver that names it", dev.desc->idVendor, dev.desc->idProduct);
+    } else {
+      ESP_LOGI(TAG, "%04X:%04X: no driver", dev.desc->idVendor, dev.desc->idProduct);
+    }
   }
 }
 

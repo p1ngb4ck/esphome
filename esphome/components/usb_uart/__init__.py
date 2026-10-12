@@ -7,6 +7,7 @@ from esphome.components.usb_host import (
     get_max_transfer_requests,
     register_usb_client,
     usb_device_schema,
+    validate_usb_clients,
 )
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
@@ -249,16 +250,19 @@ def channel_schema(type_: "Type", baud_rate_required) -> cv.Schema:
     return schema
 
 
-CONFIG_SCHEMA = cv.ensure_list(
-    cv.typed_schema(
-        {
-            it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
-                channel_schema(it, it.baud_rate_required)
-            )
-            for it in uart_types
-        },
-        upper=True,
-    )
+CONFIG_SCHEMA = cv.All(
+    cv.ensure_list(
+        cv.typed_schema(
+            {
+                it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
+                    channel_schema(it, it.baud_rate_required)
+                )
+                for it in uart_types
+            },
+            upper=True,
+        )
+    ),
+    validate_usb_clients,
 )
 
 

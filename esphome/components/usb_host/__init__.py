@@ -16,12 +16,11 @@ from esphome.components.esp32 import (
     only_on_variant,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_DEVICES, CONF_ID
+from esphome.const import CONF_ID
 from esphome.core import CORE
 from esphome.coroutine import CoroPriority, coroutine_with_priority
 from esphome.cpp_generator import MockObj
 from esphome.cpp_types import Component
-import esphome.final_validate as fv
 from esphome.helpers import cpp_u16string_escape
 from esphome.types import ConfigType
 
@@ -88,14 +87,16 @@ def usb_device_schema(
             cv.GenerateID(): cv.declare_id(cls),
         }
     )
+    # Without vid/pid the driver is routed by device class; with them it takes that device,
+    # whatever its class.
     if vid:
         schema = schema.extend({cv.Optional(CONF_VID, default=vid): cv.hex_uint16_t})
     else:
-        schema = schema.extend({cv.Required(CONF_VID): cv.hex_uint16_t})
+        schema = schema.extend({cv.Optional(CONF_VID): cv.hex_uint16_t})
     if pid:
         schema = schema.extend({cv.Optional(CONF_PID, default=pid): cv.hex_uint16_t})
     else:
-        schema = schema.extend({cv.Required(CONF_PID): cv.hex_uint16_t})
+        schema = schema.extend({cv.Optional(CONF_PID): cv.hex_uint16_t})
 
     return schema.extend(
         {
@@ -130,18 +131,6 @@ def validate_usb_clients(configs: list[ConfigType]) -> list[ConfigType]:
                 f"USB configs overlap: {first[CONF_ID]}, {second[CONF_ID]}"
             )
     return configs
-
-
-def _final_validate(config: ConfigType) -> ConfigType:
-    # Every USB client on the bus, whichever component configured it: any two could
-    # otherwise open the same device
-    clients = list(config.get(CONF_DEVICES) or ())
-    clients.extend(fv.full_config.get().get("usb_uart") or ())
-    validate_usb_clients(clients)
-    return config
-
-
-FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 def _store_host_options(config: dict) -> dict:
@@ -358,7 +347,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DUAL_HOST, default=False): cv.boolean,
             cv.Optional(CONF_CONTROLLERS): cv.one_of(*_PERIPHERAL_MAPS, lower=True),
             cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
-            cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
     ),
     only_on_variant(
@@ -444,7 +432,9 @@ def _sync_usb_component_override() -> str:
 
 
 async def register_usb_client(config: ConfigType) -> MockObj:
-    var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
+    var = cg.new_Pvariable(
+        config[CONF_ID], config.get(CONF_VID, 0), config.get(CONF_PID, 0)
+    )
     await cg.register_component(var, config)
     # UTF-16 literals, the encoding the descriptors use, so the device compares code units
     if (manufacturer := config.get(CONF_MANUFACTURER)) is not None:
@@ -488,14 +478,6 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_peripheral_map(_PERIPHERAL_MAPS[controllers]))
     cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
 
-    devices = config.get(CONF_DEVICES)
-    if devices:
-        # A bare devices: entry has no driver component behind it to request transfer
-        # classes, so it is only useful through lambdas. Give it the standard pair rather
-        # than a USBClient that cannot transfer anything at all.
-        require_bulk_transfers()
-        require_control_transfers()
-
     # FINAL: require_*() calls arrive from consumer to_code() at higher priorities, so
     # turn the collected set into defines once after every job ran. Emitting per call
     # instead would make the result depend on component iteration order.
@@ -505,6 +487,3 @@ async def to_code(config: ConfigType) -> None:
     # priority, and reading the record here would depend on component iteration order.
     if per_port_fifo_bias_available():
         CORE.add_job(_emit_port_fifo_bias, var)
-
-    for device in devices or ():
-        await register_usb_client(device)

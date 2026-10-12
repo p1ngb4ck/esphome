@@ -24,8 +24,8 @@ import esphome.final_validate as fv
 _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["usb_host", "esp32"]
-AUTO_LOAD = ["audio"]
+DEPENDENCIES = ["esp32"]
+AUTO_LOAD = ["audio", "usb_host"]
 MULTI_CONF = False
 
 usb_audio_ns = cg.esphome_ns.namespace("usb_audio")

@@ -115,8 +115,9 @@ struct TransferRequest {
   USBClient *client;
 };
 
+// A client only hears about the devices it opened: which device a driver gets is decided
+// by USBHost, not by the driver's own IDF client.
 enum EventType : uint8_t {
-  EVENT_DEVICE_NEW,
   EVENT_DEVICE_GONE,
 };
 
@@ -124,13 +125,44 @@ struct UsbEvent {
   EventType type;
   union {
     struct {
-      uint8_t address;
-    } device_new;
-    struct {
       usb_device_handle_t handle;
     } device_gone;
   } data;
   void release() {}
+};
+
+// One entry of a driver's match table, in the manner of Linux's usb_device_id. -1 (or 0
+// for vid/pid) matches anything.
+struct UsbMatch {
+  uint16_t vid;
+  uint16_t pid;
+  int16_t cls;
+  int16_t subclass;
+  int16_t protocol;
+};
+
+// How a driver matched a device. Higher wins, and a device that a driver names by its
+// filters (vid/pid/manufacturer/product from the YAML) is reserved for such drivers.
+enum class MatchTier : uint8_t {
+  NONE,
+  CLASS,   // one of its class patterns matches an interface
+  VENDOR,  // its built-in table names the device (devices that cannot be routed by class)
+  NAMED,   // its configured filters name the device
+};
+
+// A device USBHost has open, from enumeration until it is gone.
+struct RoutedDevice {
+  uint8_t addr{0};
+  usb_device_handle_t handle{nullptr};
+  const usb_device_desc_t *desc{nullptr};
+  const usb_config_desc_t *config{nullptr};
+  usb_device_info_t info{};
+  // Interfaces handed to drivers, one bit per bInterfaceNumber.
+  uint32_t assigned{0};
+  std::vector<USBClient *> bound{};
+  // Drivers that let the device go again; not offered it until it is plugged in anew.
+  std::vector<USBClient *> declined{};
+  bool reported_unrouted{false};
 };
 
 // USB string descriptors hold at most 126 characters; one more for the terminator
@@ -245,11 +277,12 @@ class USBClient : public Component {
   friend class USBHost;
 
  public:
+  // vid/pid (and the manufacturer/product filters) name one device from the YAML. Nonzero,
+  // they override routing by class: the driver takes that device and only that device.
   USBClient(uint16_t vid, uint16_t pid) : trq_in_use_(0), vid_(vid), pid_(pid) {}
   void setup() override;
   void loop() override;
   float get_setup_priority() const override { return setup_priority::IO; }
-  void on_opened(uint8_t addr);
   virtual void on_removed(usb_device_handle_t handle);
   void dump_config() override;
   // THREAD CONTEXT: both the USB task and the main loop
@@ -257,9 +290,14 @@ class USBClient : public Component {
   // - Main loop: when a transfer submission failed
   void release_trq(TransferRequest *trq);
   trq_bitmask_t get_trq_in_use() const { return trq_in_use_; }
-  void set_required_interface_class(uint8_t cls) {
-    this->match_any_interface_class_ = false;
-    this->required_interface_class_ = cls;
+  /// Interfaces of this class (and subclass/protocol, -1 for any) are routed to this driver.
+  void add_class_match(uint8_t cls, int16_t subclass = -1, int16_t protocol = -1) {
+    this->class_matches_.push_back({0, 0, cls, subclass, protocol});
+  }
+  /// A device this driver serves although its class does not say so. pid 0 is any product
+  /// of the vendor; cls -1 is the whole device, otherwise only interfaces of that class.
+  void add_vendor_match(uint16_t vid, uint16_t pid, int16_t cls = -1, int16_t subclass = -1, int16_t protocol = -1) {
+    this->vendor_matches_.push_back({vid, pid, cls, subclass, protocol});
   }
   void set_manufacturer_filter(const char16_t *manufacturer) { this->manufacturer_filter_ = manufacturer; }
   void set_product_filter(const char16_t *product) { this->product_filter_ = product; }
@@ -369,6 +407,20 @@ class USBClient : public Component {
   }
 
  protected:
+  // Routing, called by USBHost on the main loop.
+  bool has_id_filter_() const {
+    return this->vid_ != 0 || this->pid_ != 0 || this->manufacturer_filter_ != nullptr ||
+           this->product_filter_ != nullptr;
+  }
+  bool is_free_() const { return this->state_ == USB_CLIENT_INIT; }
+  // How this driver matches the device, and which of its interfaces it would serve.
+  MatchTier match_(const RoutedDevice &dev, uint32_t &interfaces) const;
+  void bind_(uint8_t addr, uint32_t interfaces);
+  /// Whether routing handed this interface of the current device to this driver.
+  bool interface_routed_(uint8_t interface_num) const {
+    return interface_num < 32 && (this->routed_interfaces_ & (1u << interface_num)) != 0;
+  }
+
   bool process_usb_events_();
   void handle_open_state_();
   // Largest transfer buffer this device can need: the widest wMaxPacketSize it declares,
@@ -408,8 +460,9 @@ class USBClient : public Component {
   const char16_t *product_filter_{nullptr};
   uint16_t vid_{};
   uint16_t pid_{};
-  bool match_any_interface_class_{true};
-  uint8_t required_interface_class_{0};
+  std::vector<UsbMatch> class_matches_{};
+  std::vector<UsbMatch> vendor_matches_{};
+  uint32_t routed_interfaces_{0};
   // Resolved once in setup(); the forwarders below would otherwise dereference the global
   // accessor unchecked on every call, including on the RX hot path.
   USBHost *host_{nullptr};
@@ -496,8 +549,23 @@ class USBHost final : public Component {
   static void isoc_cb(usb_transfer_t *xfer);
 #endif
 
+  // -- Routing ------------------------------------------------------------------
+  // Every driver registers in its setup(). USBHost opens each new device once, reads its
+  // descriptors and hands it, interface by interface, to the drivers that match it.
+  void register_client(USBClient *client);
+  // A driver let its device go: declined it, lost it, or failed to open it.
+  void client_released(USBClient *client, int addr);
+
  protected:
+  static void host_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
+  void device_new_(uint8_t addr);
+  void device_gone_(usb_device_handle_t handle);
+  void route_(RoutedDevice &dev);
+
   std::vector<USBClient *> clients_{};
+  usb_host_client_handle_t client_handle_{nullptr};
+  std::vector<RoutedDevice> devices_{};
+  bool reroute_{false};
   uint8_t peripheral_map_{0};  // 0: ESP-IDF's default, the high-speed controller
   uint8_t fs_phy_index_{1};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS

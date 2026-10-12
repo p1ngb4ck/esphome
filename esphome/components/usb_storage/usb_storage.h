@@ -51,7 +51,7 @@ class USBStorageClient : public usb_host::USBClient {
   // path is gone from the VFS entirely; the next physical (re)insertion runs the
   // normal connect flow and mounts again.
   void unmount_filesystem();
-  USBStorageClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_MASS_STORAGE); }
+  USBStorageClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_MASS_STORAGE); }
 
   void setup() override;
   void loop() override;

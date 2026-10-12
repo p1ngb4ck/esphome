@@ -14,7 +14,8 @@ namespace esphome::usb_bluetooth {
 
 // A USB Bluetooth dongle as a usb_host client (Bluetooth Core Specification, USB transport):
 // HCI commands as class requests on endpoint 0, events on the interrupt IN endpoint, ACL data
-// on the bulk pair of the controller interface (E0/01/01, or FF/01/01 with vid/pid).
+// on the bulk pair of the controller interface (E0/01/01, or FF/01/01 for a vendor-class
+// controller from the match table or named by vid/pid).
 //
 // Reads are one wMaxPacketSize packet each and reassembled by the packet's own length field:
 // an event or ACL packet whose length is a whole number of USB packets ends without a short
@@ -27,8 +28,10 @@ namespace esphome::usb_bluetooth {
 class USBBluetooth : public usb_host::USBClient {
  public:
   USBBluetooth(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {
-    if (vid == 0 && pid == 0)
-      this->set_required_interface_class(HCI_CLASS);
+    this->add_class_match(HCI_CLASS, 0x01, 0x01);
+    // Controllers behind the vendor class, as Linux btusb.c matches them.
+    this->add_vendor_match(0x0A5C, 0, 0xFF, 0x01, 0x01);  // Broadcom
+    this->add_vendor_match(0x05AC, 0, 0xFF, 0x01, 0x01);  // Apple
   }
 
   /// An HCI command: opcode (little endian), parameter length, parameters.

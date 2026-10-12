@@ -31,6 +31,10 @@ void USBHIDClient::start_in_transfer_(HIDDevice *dev, uint8_t ep, uint16_t mps, 
 }
 
 void USBHIDClient::setup() {
+  this->add_class_match(USB_CLASS_HID);
+  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRED, 0xFF);
+  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRELESS, 0xFF);
+  this->add_vendor_match(BITDO_VID, 0, 0xFF);
   register_all_drivers(this);
   ESP_LOGI(TAG, "Registered %zu device drivers", this->drivers_.size());
   usb_host::USBClient::setup();

@@ -258,17 +258,15 @@ static void transfer_callback(usb_transfer_t *xfer) {
 
 void USBClient::client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
   auto *client = static_cast<USBClient *>(arg);
+  // Every client hears of every new device; USBHost decides which driver gets it.
+  if (event_msg->event == USB_HOST_CLIENT_EVENT_NEW_DEV)
+    return;
   UsbEvent *event = client->event_pool.allocate();
   if (event == nullptr) {
     client->event_queue.increment_dropped_count();
     return;
   }
   switch (event_msg->event) {
-    case USB_HOST_CLIENT_EVENT_NEW_DEV:
-      ESP_LOGD(TAG, "New device %d", event_msg->new_dev.address);
-      event->type = EVENT_DEVICE_NEW;
-      event->data.device_new.address = event_msg->new_dev.address;
-      break;
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
       ESP_LOGD(TAG, "Device gone");
       event->type = EVENT_DEVICE_GONE;
@@ -304,6 +302,7 @@ void USBClient::setup() {
     this->mark_failed();
     return;
   }
+  this->host_->register_client(this);
   // The transfer buffers are not allocated here. Their size depends on the device, and no
   // device is attached yet: a client that ends up on the high-speed controller sees 512 byte
   // bulk packets where one on the full-speed controller sees 64, and both run at the same
@@ -329,9 +328,6 @@ bool USBClient::process_usb_events_() {
   while ((event = this->event_queue.pop()) != nullptr) {
     had_work = true;
     switch (event->type) {
-      case EVENT_DEVICE_NEW:
-        this->on_opened(event->data.device_new.address);
-        break;
       case EVENT_DEVICE_GONE:
         this->on_removed(event->data.device_gone.handle);
         break;
@@ -354,12 +350,14 @@ void USBClient::loop() {
 }
 
 void USBClient::handle_open_state_() {
-  int err;
-  ESP_LOGD(TAG, "Open device %d", this->device_addr_);
-  err = usb_host_device_open(this->handle_, this->device_addr_, &this->device_handle_);
+  const int addr = this->device_addr_;
+  esp_err_t err = usb_host_device_open(this->handle_, addr, &this->device_handle_);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Device open failed: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "Device %d open failed: %s", addr, esp_err_to_name(err));
     this->state_ = USB_CLIENT_INIT;
+    this->device_addr_ = -1;
+    this->routed_interfaces_ = 0;
+    this->host_->client_released(this, addr);
     return;
   }
   const usb_device_desc_t *desc;
@@ -370,39 +368,14 @@ void USBClient::handle_open_state_() {
     return;
   }
   this->device_desc_ = desc;
-  ESP_LOGD(TAG, "Device descriptor: vid %X pid %X", desc->idVendor, desc->idProduct);
-  if ((this->vid_ != 0 && desc->idVendor != this->vid_) || (this->pid_ != 0 && desc->idProduct != this->pid_)) {
-    ESP_LOGD(TAG, "Not our device, closing");
+  const usb_config_desc_t *cfg_desc;
+  err = usb_host_get_active_config_descriptor(this->device_handle_, &cfg_desc);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Device get_config_desc failed: %s", esp_err_to_name(err));
     this->disconnect();
     return;
   }
-  {
-    const usb_config_desc_t *cfg_desc;
-    err = usb_host_get_active_config_descriptor(this->device_handle_, &cfg_desc);
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Device get_config_desc failed: %s", esp_err_to_name(err));
-      this->disconnect();
-      return;
-    }
-    this->config_desc_ = cfg_desc;
-  }
-  if (!this->match_any_interface_class_) {
-    bool found = false;
-    int offset = 0;
-    const usb_standard_desc_t *next = reinterpret_cast<const usb_standard_desc_t *>(this->config_desc_);
-    while ((next = usb_parse_next_descriptor_of_type(next, this->config_desc_->wTotalLength, USB_W_VALUE_DT_INTERFACE,
-                                                     &offset)) != nullptr) {
-      if (reinterpret_cast<const usb_intf_desc_t *>(next)->bInterfaceClass == this->required_interface_class_) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      ESP_LOGD(TAG, "Device has no interface class 0x%02X, closing", this->required_interface_class_);
-      this->disconnect();
-      return;
-    }
-  }
+  this->config_desc_ = cfg_desc;
   usb_device_info_t dev_info;
   err = usb_host_device_info(this->device_handle_, &dev_info);
   if (err != ESP_OK) {
@@ -414,21 +387,9 @@ void USBClient::handle_open_state_() {
     this->disconnect();
     return;
   }
+  this->state_ = USB_CLIENT_CONNECTED;
   char buf_manuf[DESC_STRING_BUF_SIZE];
   char buf_product[DESC_STRING_BUF_SIZE];
-  const bool manufacturer_matches =
-      this->manufacturer_filter_ == nullptr ||
-      descriptor_string_equals(dev_info.str_desc_manufacturer, this->manufacturer_filter_);
-  const bool product_matches =
-      this->product_filter_ == nullptr || descriptor_string_equals(dev_info.str_desc_product, this->product_filter_);
-  if (!manufacturer_matches || !product_matches) {
-    ESP_LOGD(TAG, "Device does not match filter, closing. Manuf: %s; Prod: %s",
-             get_descriptor_string(dev_info.str_desc_manufacturer, buf_manuf),
-             get_descriptor_string(dev_info.str_desc_product, buf_product));
-    this->disconnect();
-    return;
-  }
-  this->state_ = USB_CLIENT_CONNECTED;
   char buf_serial[DESC_STRING_BUF_SIZE];
   ESP_LOGD(TAG, "Device connected: Manuf: %s; Prod: %s; Serial: %s",
            get_descriptor_string(dev_info.str_desc_manufacturer, buf_manuf),
@@ -509,11 +470,65 @@ void USBClient::free_transfer_pool_() {
   this->trq_in_use_.store(0);
 }
 
-void USBClient::on_opened(uint8_t addr) {
-  if (this->state_ == USB_CLIENT_INIT) {
-    this->device_addr_ = addr;
-    this->state_ = USB_CLIENT_OPEN;
+// Bit per bInterfaceNumber of every interface (any alt-setting) the pattern matches.
+static uint32_t interfaces_matching(const usb_config_desc_t *cfg, const UsbMatch &m) {
+  uint32_t mask = 0;
+  int offset = 0;
+  const auto *next = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  while ((next = usb_parse_next_descriptor_of_type(next, cfg->wTotalLength, USB_W_VALUE_DT_INTERFACE, &offset)) !=
+         nullptr) {
+    const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(next);
+    if (intf->bInterfaceNumber >= 32)
+      continue;
+    if ((m.cls < 0 || intf->bInterfaceClass == m.cls) && (m.subclass < 0 || intf->bInterfaceSubClass == m.subclass) &&
+        (m.protocol < 0 || intf->bInterfaceProtocol == m.protocol))
+      mask |= 1u << intf->bInterfaceNumber;
   }
+  return mask;
+}
+
+MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const {
+  interfaces = 0;
+  const uint32_t all = interfaces_matching(dev.config, {0, 0, -1, -1, -1});
+  uint32_t by_class = 0;
+  for (const auto &m : this->class_matches_)
+    by_class |= interfaces_matching(dev.config, m);
+  uint32_t by_vendor = 0;
+  for (const auto &m : this->vendor_matches_) {
+    if (m.vid != dev.desc->idVendor || (m.pid != 0 && m.pid != dev.desc->idProduct))
+      continue;
+    by_vendor |= m.cls < 0 ? all : interfaces_matching(dev.config, m);
+  }
+  if (this->has_id_filter_()) {
+    // Named: this device and no other, whatever its class says.
+    if ((this->vid_ != 0 && dev.desc->idVendor != this->vid_) || (this->pid_ != 0 && dev.desc->idProduct != this->pid_))
+      return MatchTier::NONE;
+    if (this->manufacturer_filter_ != nullptr &&
+        !descriptor_string_equals(dev.info.str_desc_manufacturer, this->manufacturer_filter_))
+      return MatchTier::NONE;
+    if (this->product_filter_ != nullptr && !descriptor_string_equals(dev.info.str_desc_product, this->product_filter_))
+      return MatchTier::NONE;
+    // Its own interfaces where its tables say which those are, so two drivers named to one
+    // composite device (sound card with buttons) each get theirs; the whole device otherwise.
+    interfaces = (by_class | by_vendor) != 0 ? (by_class | by_vendor) : all;
+    return MatchTier::NAMED;
+  }
+  if (by_vendor != 0) {
+    interfaces = by_vendor;
+    return MatchTier::VENDOR;
+  }
+  if (by_class != 0) {
+    interfaces = by_class;
+    return MatchTier::CLASS;
+  }
+  return MatchTier::NONE;
+}
+
+void USBClient::bind_(uint8_t addr, uint32_t interfaces) {
+  this->device_addr_ = addr;
+  this->routed_interfaces_ = interfaces;
+  this->state_ = USB_CLIENT_OPEN;
+  this->enable_loop();
 }
 
 void USBClient::on_removed(usb_device_handle_t handle) {
@@ -533,18 +548,28 @@ void USBClient::disconnect() {
   // After the close, so nothing is still in flight against these buffers. The next device
   // this client picks up gets a pool sized for itself.
   this->free_transfer_pool_();
+  const int addr = this->device_addr_;
   this->state_ = USB_CLIENT_INIT;
   this->device_handle_ = nullptr;
   this->device_addr_ = -1;
   this->device_desc_ = nullptr;
   this->config_desc_ = nullptr;
+  this->routed_interfaces_ = 0;
   if (was_reported) {
     this->connection_callback_.call(false);
   }
+  if (addr >= 0)
+    this->host_->client_released(this, addr);
 }
 
 void USBClient::dump_config() {
-  ESP_LOGCONFIG(TAG, "USBClient\n  Vendor id %04X\n  Product id %04X", this->vid_, this->pid_);
+  ESP_LOGCONFIG(TAG, "USBClient %s", LOG_STR_ARG(this->get_component_log_str()));
+  if (this->vid_ != 0 || this->pid_ != 0)
+    ESP_LOGCONFIG(TAG, "  Vendor id %04X\n  Product id %04X", this->vid_, this->pid_);
+  for (const auto &m : this->class_matches_)
+    ESP_LOGCONFIG(TAG, "  Class %02X/%d/%d", m.cls, m.subclass, m.protocol);
+  for (const auto &m : this->vendor_matches_)
+    ESP_LOGCONFIG(TAG, "  Vendor %04X:%04X class %d", m.vid, m.pid, m.cls);
   char buf[DESC_STRING_BUF_SIZE];
   if (this->manufacturer_filter_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Manufacturer %s", filter_string(this->manufacturer_filter_, buf));

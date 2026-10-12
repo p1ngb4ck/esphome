@@ -64,10 +64,8 @@ class USBHIDClient : public usb_host::USBClient {
   void loop() override;
   float get_setup_priority() const override { return setup_priority::IO; }
 
-  // No interface-class filter is set: USBClient matches any class unless
-  // set_required_interface_class() is called, and vendor-specific devices such as the
-  // Xbox360 pads would be rejected by one. The class check happens in
-  // parse_hid_interface_() instead, where the vendor exceptions can be applied.
+  // Routed by class 03; the vendor-class pads parse_hid_interface_() knows are added as
+  // vendor matches in setup().
 
   void register_device_driver(HIDDeviceDriver *driver) { this->drivers_.push_back(driver); }
   // Kept separately from the list above so codegen can reach it to attach buttons and

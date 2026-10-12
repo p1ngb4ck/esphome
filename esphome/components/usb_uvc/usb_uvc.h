@@ -25,7 +25,7 @@ using frame_cb_t = std::function<void(const uint8_t *data, size_t len, UvcFormat
 // handed to the main loop, while the other buffer takes the next one.
 class UVCClient : public usb_host::USBClient {
  public:
-  UVCClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_VIDEO); }
+  UVCClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_VIDEO); }
 
   void loop() override;
 

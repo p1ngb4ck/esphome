@@ -30,8 +30,8 @@ import esphome.config_validation as cv
 from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["usb_host", "esp32"]
-AUTO_LOAD = ["storage"]
+DEPENDENCIES = ["esp32"]
+AUTO_LOAD = ["storage", "usb_host"]
 
 CONF_VID = "vid"
 CONF_PID = "pid"
