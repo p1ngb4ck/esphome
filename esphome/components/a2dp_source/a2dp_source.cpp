@@ -1,6 +1,8 @@
 #include "a2dp_source.h"
 
+#ifdef USE_A2DP_SOURCE_SELECT
 #include "select/a2dp_device_select.h"
+#endif
 
 #if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
@@ -250,10 +252,10 @@ bool A2DPSource::pair_with_name(const std::string &name) {
 }
 
 void A2DPSource::publish_device_list_() {
-  if (this->device_select_ == nullptr) {
-    return;
-  }
-  this->device_select_->set_devices(this->devices_);
+#ifdef USE_A2DP_SOURCE_SELECT
+  if (this->device_select_ != nullptr)
+    this->device_select_->set_devices(this->devices_);
+#endif
 }
 
 void A2DPSource::stop_pairing() {

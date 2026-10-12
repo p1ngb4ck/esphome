@@ -32,3 +32,4 @@ async def to_code(config):
     parent = await cg.get_variable(config[CONF_A2DP_SOURCE_ID])
     cg.add(var.set_parent(parent))
     cg.add(parent.set_device_select(var))
+    cg.add_define("USE_A2DP_SOURCE_SELECT")
