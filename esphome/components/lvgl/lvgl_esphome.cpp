@@ -7,6 +7,7 @@
 #include "core/lv_global.h"
 #include "core/lv_obj_class_private.h"
 
+#include <algorithm>
 #include <numeric>
 
 static void *lv_alloc_draw_buf(size_t size, bool internal);
@@ -631,6 +632,197 @@ LVEncoderListener::LVEncoderListener(lv_indev_type_t type, uint16_t long_press_t
   });
 }
 #endif  // USE_LVGL_KEY_LISTENER
+
+#ifdef USE_LVGL_HID
+// The LVGL key a HID navigation key stands for, or 0 for a key that types a character.
+static uint32_t lv_key_for(uint16_t page, uint16_t usage, uint8_t modifiers) {
+  if (page == hid::PAGE_KEYBOARD) {
+    switch (usage) {
+      case 0x52:
+        return LV_KEY_UP;
+      case 0x51:
+        return LV_KEY_DOWN;
+      case 0x50:
+        return LV_KEY_LEFT;
+      case 0x4F:
+        return LV_KEY_RIGHT;
+      case 0x29:
+        return LV_KEY_ESC;
+      case 0x4C:
+        return LV_KEY_DEL;
+      case 0x2A:
+        return LV_KEY_BACKSPACE;
+      case 0x28:
+      case 0x58:
+        return LV_KEY_ENTER;
+      case 0x2B:
+        return (modifiers & (hid::MOD_LEFT_SHIFT | hid::MOD_RIGHT_SHIFT)) != 0 ? LV_KEY_PREV : LV_KEY_NEXT;
+      case 0x4A:
+        return LV_KEY_HOME;
+      case 0x4D:
+        return LV_KEY_END;
+      default:
+        return 0;
+    }
+  }
+  if (page == hid::PAGE_CONSUMER) {
+    switch (usage) {
+      case 0x42:
+        return LV_KEY_UP;
+      case 0x43:
+        return LV_KEY_DOWN;
+      case 0x44:
+        return LV_KEY_LEFT;
+      case 0x45:
+        return LV_KEY_RIGHT;
+      case 0x41:
+        return LV_KEY_ENTER;
+      case 0x46:
+      case 0x224:
+        return LV_KEY_ESC;
+      case 0x223:
+        return LV_KEY_HOME;
+      default:
+        return 0;
+    }
+  }
+  // Game pad D-pad.
+  if (page == hid::PAGE_GENERIC_DESKTOP) {
+    switch (usage) {
+      case 0x90:
+        return LV_KEY_UP;
+      case 0x91:
+        return LV_KEY_DOWN;
+      case 0x92:
+        return LV_KEY_RIGHT;
+      case 0x93:
+        return LV_KEY_LEFT;
+      default:
+        return 0;
+    }
+  }
+  return 0;
+}
+
+LVHIDKeypadListener::LVHIDKeypadListener(hid::HIDInput *input, uint16_t long_press_time,
+                                         uint16_t long_press_repeat_time) {
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_KEYPAD);
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    auto *l = static_cast<LVHIDKeypadListener *>(lv_indev_get_user_data(d));
+    if (l->count_ != 0) {
+      const KeyEvent &event = l->queue_[l->head_];
+      l->key_ = event.key;
+      l->pressed_ = event.pressed;
+      l->head_ = (l->head_ + 1) % QUEUE_SIZE;
+      l->count_--;
+    }
+    data->key = l->key_;
+    data->state = l->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->continue_reading = l->count_ != 0;
+  });
+  input->add_on_key_event_callback([this, input](uint16_t page, uint16_t usage, bool pressed) {
+    const uint32_t key = lv_key_for(page, usage, input->get_modifiers());
+    if (key != 0)
+      this->push_(key, pressed);
+  });
+  // Typed characters; Enter and Tab come as keys above.
+  input->add_on_text_callback([this](const std::string &text) {
+    for (size_t i = 0; i < text.size();) {
+      const auto lead = static_cast<uint8_t>(text[i]);
+      const size_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+      uint32_t c = n == 1 ? lead : lead & (0x7F >> n);
+      for (size_t j = 1; j < n && i + j < text.size(); j++)
+        c = (c << 6) | (static_cast<uint8_t>(text[i + j]) & 0x3F);
+      i += n;
+      if (c == '\n' || c == '\t')
+        continue;
+      this->push_(c, true);
+      this->push_(c, false);
+    }
+  });
+}
+
+void LVHIDKeypadListener::push_(uint32_t key, bool pressed) {
+  if (this->parent_->is_paused()) {
+    if (!pressed)
+      this->parent_->maybe_wakeup();
+    return;
+  }
+  if (this->count_ == QUEUE_SIZE)
+    return;
+  this->queue_[(this->head_ + this->count_) % QUEUE_SIZE] = {key, pressed};
+  this->count_++;
+}
+
+LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_press_time,
+                                           uint16_t long_press_repeat_time, LvglComponent *parent) {
+  this->set_parent(parent);
+  this->drv_ = lv_indev_create();
+  lv_indev_set_type(this->drv_, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_display(this->drv_, parent->get_disp());
+  lv_indev_set_long_press_time(this->drv_, long_press_time);
+  lv_indev_set_long_press_repeat_time(this->drv_, long_press_repeat_time);
+  lv_indev_set_user_data(this->drv_, this);
+  lv_indev_set_read_cb(this->drv_, [](lv_indev_t *d, lv_indev_data_t *data) {
+    auto *l = static_cast<LVHIDPointerListener *>(lv_indev_get_user_data(d));
+    data->point.x = l->x_;
+    data->point.y = l->y_;
+    data->state = l->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  });
+  input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+    this->move_(dx, dy, wheel, pan, buttons);
+  });
+}
+
+#ifdef USE_LVGL_IMAGE
+void LVHIDPointerListener::set_cursor_image(const void *src) {
+  lv_obj_t *cursor = lv_image_create(lv_layer_sys());
+  lv_image_set_src(cursor, src);
+  lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICKABLE);
+  lv_indev_set_cursor(this->drv_, cursor);
+}
+#endif
+
+void LVHIDPointerListener::set_default_cursor() {
+  lv_obj_t *cursor = lv_obj_create(lv_layer_sys());
+  lv_obj_remove_style_all(cursor);
+  lv_obj_set_size(cursor, 12, 12);
+  lv_obj_set_style_radius(cursor, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(cursor, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
+  lv_obj_set_style_border_width(cursor, 2, 0);
+  lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
+  lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICKABLE);
+  lv_indev_set_cursor(this->drv_, cursor);
+}
+
+void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+  if (this->parent_->is_paused()) {
+    if (buttons == 0)
+      this->parent_->maybe_wakeup();
+    return;
+  }
+  lv_display_t *disp = this->parent_->get_disp();
+  this->x_ = std::clamp<int32_t>(this->x_ + dx, 0, lv_display_get_horizontal_resolution(disp) - 1);
+  this->y_ = std::clamp<int32_t>(this->y_ + dy, 0, lv_display_get_vertical_resolution(disp) - 1);
+  this->pressed_ = (buttons & 0x01) != 0;
+  if (wheel == 0 && pan == 0)
+    return;
+  lv_point_t point{this->x_, this->y_};
+  for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)) {
+      // One wheel step scrolls about a line of text.
+      static constexpr int32_t STEP = 40;
+      lv_obj_scroll_by_bounded(obj, -pan * STEP, wheel * STEP, LV_ANIM_ON);
+      break;
+    }
+  }
+}
+#endif  // USE_LVGL_HID
 
 #if defined(USE_LVGL_DROPDOWN) || defined(LV_USE_ROLLER)
 std::string LvSelectable::get_selected_text() {

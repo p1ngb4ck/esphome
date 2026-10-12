@@ -70,6 +70,13 @@ from .encoders import (
     initial_focus_to_code,
 )
 from .gradient import GRADIENT_SCHEMA, gradients_to_code
+from .hid_input import (
+    CONF_HID_KEYBOARDS,
+    CONF_HID_POINTERS,
+    HID_KEYBOARDS_CONFIG,
+    HID_POINTERS_CONFIG,
+    hid_inputs_to_code,
+)
 from .keypads import KEYPADS_CONFIG, keypads_to_code
 from .lv_validation import lv_bool
 from .lvcode import LvContext, LvglComponent, lv_event_t_ptr, lvgl_static
@@ -214,7 +221,7 @@ def multi_conf_validate(configs: list[dict]):
     if len(display_list) != len(set(display_list)):
         raise cv.Invalid("A display ID may be used in only one LVGL instance")
     for config in configs:
-        for item in (df.CONF_ENCODERS, df.CONF_KEYPADS):
+        for item in (df.CONF_ENCODERS, df.CONF_KEYPADS, CONF_HID_KEYBOARDS):
             for enc in config.get(item, ()):
                 if CONF_GROUP not in enc:
                     raise cv.Invalid(
@@ -454,6 +461,7 @@ async def to_code(configs):
             await touchscreens_to_code(lv_component, config)
             await encoders_to_code(lv_component, config, default_group)
             await keypads_to_code(lv_component, config, default_group)
+            await hid_inputs_to_code(lv_component, config, default_group)
             await gradients_to_code(config)
             await styles_to_code(config)
             await set_obj_properties(lv_scr_act, config)
@@ -584,7 +592,9 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.GenerateID(CONF_ID): cv.declare_id(LvglComponent),
             cv.GenerateID(CONF_ALIGN_TO_LAMBDA_ID): cv.declare_id(lv_lambda_t),
             cv.GenerateID(df.CONF_DISPLAYS): display_schema,
-            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(16, 32),  # 32 = RGB888 (3 bytes/px) on ESP32-P4
+            cv.Optional(CONF_COLOR_DEPTH, default=16): cv.one_of(
+                16, 32
+            ),  # 32 = RGB888 (3 bytes/px) on ESP32-P4
             cv.Optional(df.CONF_DEFAULT_FONT, default="montserrat_14"): lvalid.lv_font,
             cv.Optional(df.CONF_FULL_REFRESH, default=False): cv.boolean,
             cv.Optional(df.CONF_UPDATE_WHEN_DISPLAY_IDLE, default=False): cv.boolean,
@@ -632,6 +642,8 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(df.CONF_TOUCHSCREENS, default=None): touchscreen_schema,
             cv.Optional(df.CONF_ENCODERS, default=None): ENCODERS_CONFIG,
             cv.Optional(df.CONF_KEYPADS, default=None): KEYPADS_CONFIG,
+            cv.Optional(CONF_HID_KEYBOARDS): HID_KEYBOARDS_CONFIG,
+            cv.Optional(CONF_HID_POINTERS): HID_POINTERS_CONFIG,
             cv.GenerateID(df.CONF_DEFAULT_GROUP): cv.declare_id(lv_group_t),
             cv.Optional(df.CONF_RESUME_ON_INPUT, default=True): cv.boolean,
             cv.Optional(df.CONF_PAUSED, default=False): cv.boolean,

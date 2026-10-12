@@ -40,6 +40,9 @@
 #if defined(USE_LVGL_BUTTONMATRIX) || defined(USE_LVGL_KEYBOARD)
 #include "esphome/components/key_provider/key_provider.h"
 #endif  // USE_LVGL_BUTTONMATRIX
+#ifdef USE_LVGL_HID
+#include "esphome/components/hid/hid_input.h"
+#endif  // USE_LVGL_HID
 
 namespace esphome::lvgl {
 
@@ -515,6 +518,52 @@ class LVEncoderListener final : public Parented<LvglComponent> {
   int key_{};
 };
 #endif  //  USE_LVGL_KEY_LISTENER
+
+#ifdef USE_LVGL_HID
+// A HID keyboard or remote as an LVGL keypad: navigation keys as LV_KEY_*, typed text as
+// characters. Key changes are queued, so a press and release between two reads is not lost.
+class LVHIDKeypadListener final : public Parented<LvglComponent> {
+ public:
+  LVHIDKeypadListener(hid::HIDInput *input, uint16_t long_press_time, uint16_t long_press_repeat_time);
+  lv_indev_t *get_drv() { return this->drv_; }
+
+ protected:
+  struct KeyEvent {
+    uint32_t key;
+    bool pressed;
+  };
+  static constexpr uint8_t QUEUE_SIZE = 16;
+  void push_(uint32_t key, bool pressed);
+
+  KeyEvent queue_[QUEUE_SIZE]{};
+  uint8_t head_{0};
+  uint8_t count_{0};
+  uint32_t key_{0};
+  bool pressed_{false};
+  lv_indev_t *drv_{};
+};
+
+// A HID mouse as an LVGL pointer with a cursor: motion moves it, the left button presses,
+// the wheel scrolls whatever is under it.
+class LVHIDPointerListener final : public Parented<LvglComponent> {
+ public:
+  LVHIDPointerListener(hid::HIDInput *input, uint16_t long_press_time, uint16_t long_press_repeat_time,
+                       LvglComponent *parent);
+#ifdef USE_LVGL_IMAGE
+  void set_cursor_image(const void *src);
+#endif
+  void set_default_cursor();
+  lv_indev_t *get_drv() { return this->drv_; }
+
+ protected:
+  void move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
+
+  int32_t x_{0};
+  int32_t y_{0};
+  bool pressed_{false};
+  lv_indev_t *drv_{};
+};
+#endif  // USE_LVGL_HID
 
 #ifdef USE_LVGL_LINE
 class LvLineType : public LvCompound {
