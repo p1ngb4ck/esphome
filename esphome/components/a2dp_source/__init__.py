@@ -84,16 +84,32 @@ CONFIG_SCHEMA = cv.All(
                 }
             ),
             cv.Optional(CONF_ON_CONNECTED): automation.validate_automation(
-                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        automation.Trigger.template()
+                    )
+                }
             ),
             cv.Optional(CONF_ON_DISCONNECTED): automation.validate_automation(
-                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        automation.Trigger.template()
+                    )
+                }
             ),
             cv.Optional(CONF_ON_STREAMING_START): automation.validate_automation(
-                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        automation.Trigger.template()
+                    )
+                }
             ),
             cv.Optional(CONF_ON_STREAMING_STOP): automation.validate_automation(
-                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)}
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        automation.Trigger.template()
+                    )
+                }
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
@@ -156,23 +172,23 @@ async def to_code(config):
     cg.add(var.set_pair_on_boot_if_empty(config[CONF_PAIR_ON_BOOT_IF_EMPTY]))
 
     for conf in config.get(CONF_ON_PAIRED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [(cg.std_string, "name")], conf)
         cg.add(var.add_on_paired_trigger(trigger))
     for conf in config.get(CONF_ON_CONNECTED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_connected_trigger(trigger))
     for conf in config.get(CONF_ON_DISCONNECTED, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_disconnected_trigger(trigger))
     for conf in config.get(CONF_ON_STREAMING_START, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_start_trigger(trigger))
     for conf in config.get(CONF_ON_STREAMING_STOP, []):
-        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_stop_trigger(trigger))
 
