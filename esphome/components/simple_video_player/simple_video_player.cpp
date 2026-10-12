@@ -1601,6 +1601,16 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   if (this->audio_decoded_ring_buffer_) {
     this->audio_decoded_ring_buffer_->reset();
   }
+#ifdef SVP_AUDIO_SUPPORT_FLAC
+  // FLAC from an AVI: the decoder needs the native stream header ahead of the bare frames.
+  if (codec_type == audio::AudioFileType::FLAC) {
+    if (audio_info->stream_header_len == 0) {
+      ESP_LOGE(TAG, "FLAC track without STREAMINFO in its format header. Playing video-only.");
+      return false;
+    }
+    this->audio_input_ring_buffer_->write(audio_info->stream_header, audio_info->stream_header_len);
+  }
+#endif
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);

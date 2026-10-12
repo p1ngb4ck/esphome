@@ -78,6 +78,10 @@ struct AVIStreamInfo {
   uint16_t channels;         // Audio only
   uint16_t bits_per_sample;  // Audio only
   uint32_t total_frames;     // Total number of frames
+  // FLAC only: the native stream header ("fLaC", STREAMINFO block header, STREAMINFO) built from the
+  // STREAMINFO an AVI keeps in its WAVEFORMATEX extra data; the chunks are bare frames.
+  uint8_t stream_header[42];
+  uint8_t stream_header_len;
 };
 
 /**

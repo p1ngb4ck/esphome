@@ -354,9 +354,35 @@ bool AVIParser::parse_stream_header_() {
         return false;
       }
 
+      info->stream_header_len = 0;
+      size_t used = 16;
+      // FLAC: cbSize then the 34-byte STREAMINFO (ffmpeg: flacenc.c extradata, riffenc.c
+      // ff_put_wav_header writes it after cbSize).
+      static constexpr size_t STREAMINFO_SIZE = 34;
+      if (info->codec == static_cast<uint32_t>(AVIAudioCodec::FLAC) && strf_size >= 18 + STREAMINFO_SIZE) {
+        uint16_t cb_size;
+        if (!this->read_uint16_(cb_size))
+          return false;
+        used += 2;
+        if (cb_size >= STREAMINFO_SIZE) {
+          uint8_t *header = info->stream_header;
+          header[0] = 'f';
+          header[1] = 'L';
+          header[2] = 'a';
+          header[3] = 'C';
+          header[4] = 0x80;  // last metadata block, type 0 (STREAMINFO)
+          header[5] = 0;
+          header[6] = 0;
+          header[7] = STREAMINFO_SIZE;
+          if (this->reader_->read(header + 8, STREAMINFO_SIZE) != static_cast<int>(STREAMINFO_SIZE))
+            return false;
+          used += STREAMINFO_SIZE;
+          info->stream_header_len = 8 + STREAMINFO_SIZE;
+        }
+      }
       // Skip rest of WAVEFORMATEX if there's extra data (cbSize + extra format data)
-      if (strf_size > 16) {
-        if (!this->skip_bytes_(strf_size - 16)) {
+      if (strf_size > used) {
+        if (!this->skip_bytes_(strf_size - used)) {
           ESP_LOGE(TAG, "Failed to skip extra WAVEFORMATEX data");
           return false;
         }
