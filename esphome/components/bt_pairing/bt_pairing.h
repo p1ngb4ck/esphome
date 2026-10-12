@@ -39,7 +39,13 @@ struct PairingRecord {
 };
 static_assert(sizeof(PairingRecord) == 48, "PairingRecord is a storage format");
 
-enum class DeviceKind : uint8_t { HID = 0, AUDIO = 1 };
+// BROADCAST: a BLE device that only advertises (buttons, remotes), heard without a connection.
+enum class DeviceKind : uint8_t { HID = 0, AUDIO = 1, BROADCAST = 2 };
+
+#ifdef USE_BT_PAIRING_LE
+/// FNV-1a over the manufacturer and service data of an advertisement.
+uint32_t advertisement_hash(const ble_device_base::ESPBTDevice &device);
+#endif
 
 /// A device the pairing scan found.
 struct ScannedDevice {
@@ -159,6 +165,8 @@ class BTPairing : public Component
   ScannedDevice pending_{};
   PairingTarget *pending_target_{nullptr};
   uint32_t scan_until_{0};
+  std::vector<std::pair<uint64_t, uint32_t>> adv_hashes_;  // first payload heard per address
+  bool list_broadcast_{false};
   std::atomic<bool> scanning_{false};
   std::atomic<bool> classic_discovering_{false};
   bool gap_registered_{false};

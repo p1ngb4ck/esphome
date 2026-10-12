@@ -60,7 +60,7 @@ static const char *transport_str(uint8_t transport) {
 
 static const char *kind_str(const ScannedDevice &device) {
   if (device.transport == Transport::LE)
-    return "BLE HID";
+    return device.kind == DeviceKind::BROADCAST ? "BLE broadcast" : "BLE HID";
   return device.kind == DeviceKind::AUDIO ? "BT audio" : "BT HID";
 }
 
@@ -328,6 +328,39 @@ static constexpr uint16_t APPEARANCE_HID_FIRST = 0x03C0;
 static constexpr uint16_t APPEARANCE_HID_LAST = 0x03FF;
 static constexpr uint16_t UUID_HID_SERVICE = 0x1812;
 
+uint32_t advertisement_hash(const ble_device_base::ESPBTDevice &device) {
+  uint32_t hash = 2166136261UL;
+  auto mix = [&hash](const std::vector<uint8_t> &data) {
+    for (uint8_t b : data) {
+      hash ^= b;
+      hash *= 16777619UL;
+    }
+  };
+  for (const auto &data : device.get_manufacturer_datas())
+    mix(data.data);
+  for (const auto &data : device.get_service_datas())
+    mix(data.data);
+  return hash;
+}
+
+// A device whose advertised data changes while the scan runs (a button pressed) is a
+// broadcast device; one that only repeats itself is not listed.
+static bool payload_changed(std::vector<std::pair<uint64_t, uint32_t>> &seen,
+                            const ble_device_base::ESPBTDevice &device) {
+  static constexpr size_t MAX_TRACKED = 64;
+  if (device.get_manufacturer_datas().empty() && device.get_service_datas().empty())
+    return false;
+  const uint64_t address = device.address_uint64();
+  const uint32_t hash = advertisement_hash(device);
+  for (const auto &entry : seen) {
+    if (entry.first == address)
+      return entry.second != hash;
+  }
+  if (seen.size() < MAX_TRACKED)
+    seen.emplace_back(address, hash);
+  return false;
+}
+
 bool BTPairing::parse_device(const ble_device_base::ESPBTDevice &device) {
   if (!this->scanning_.load())
     return false;
@@ -338,12 +371,16 @@ bool BTPairing::parse_device(const ble_device_base::ESPBTDevice &device) {
   const auto &appearance = device.get_appearance();
   if (appearance.has_value() && *appearance >= APPEARANCE_HID_FIRST && *appearance <= APPEARANCE_HID_LAST)
     hid = true;
-  if (!hid)
-    return false;
+  DeviceKind kind = DeviceKind::HID;
+  if (!hid) {
+    if (!this->list_broadcast_ || !payload_changed(this->adv_hashes_, device))
+      return false;
+    kind = DeviceKind::BROADCAST;
+  }
   ScannedDevice found{};
   memcpy(found.address, device.address(), sizeof(found.address));
   found.transport = Transport::LE;
-  found.kind = DeviceKind::HID;
+  found.kind = kind;
   found.address_type = static_cast<uint8_t>(device.get_address_type());
   found.device_class = appearance.has_value() ? *appearance : 0;
   const StringRef name = device.get_name();
@@ -361,6 +398,10 @@ void BTPairing::scan(uint32_t duration_ms) {
   }
   this->pending_target_ = nullptr;
   this->scanned_.clear();
+  this->adv_hashes_.clear();
+  this->list_broadcast_ = false;
+  for (auto *target : this->targets_)
+    this->list_broadcast_ = this->list_broadcast_ || target->pairs(Transport::LE, DeviceKind::BROADCAST);
   {
     LockGuard guard(this->found_lock_);
     this->found_.clear();
@@ -396,7 +437,9 @@ void BTPairing::scan(uint32_t duration_ms) {
   this->scan_until_ = millis() + duration_ms;
   this->publish_scanned_();
   this->enable_loop();
-  this->status_("Scanning for Bluetooth devices in pairing mode");
+  this->status_(this->list_broadcast_
+                    ? "Scanning for Bluetooth devices in pairing mode; press a button on a BLE broadcast device"
+                    : "Scanning for Bluetooth devices in pairing mode");
 }
 
 void BTPairing::cancel_scan() {

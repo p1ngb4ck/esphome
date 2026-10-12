@@ -9,6 +9,7 @@ namespace esphome::ble_client_hid {
 
 static const char *const TAG = "ble_client_hid.select";
 static const char *const NO_DEVICES = "(no devices found)";
+static const char *const PICK = "(pick a device)";
 
 void BLEHIDDeviceSelect::setup() {
   this->option_storage_.reserve(BLEClientHID::MAX_FOUND + 1);
@@ -20,8 +21,10 @@ void BLEHIDDeviceSelect::set_devices(const std::vector<FoundBLEDevice> &devices)
   if (this->option_storage_.capacity() == 0)
     return;
   this->option_storage_.clear();
+  // Option 0 is a placeholder, so even a single device is a change to pick.
+  this->option_storage_.emplace_back(devices.empty() ? NO_DEVICES : PICK);
   for (const auto &device : devices) {
-    if (this->option_storage_.size() >= BLEClientHID::MAX_FOUND)
+    if (this->option_storage_.size() > BLEClientHID::MAX_FOUND)
       break;
     uint8_t bda[6];
     for (int i = 0; i < 6; i++)
@@ -30,8 +33,6 @@ void BLEHIDDeviceSelect::set_devices(const std::vector<FoundBLEDevice> &devices)
     format_mac_addr_upper(bda, mac);
     this->option_storage_.push_back(device.name.empty() ? std::string(mac) : device.name + " (" + mac + ")");
   }
-  if (this->option_storage_.empty())
-    this->option_storage_.emplace_back(NO_DEVICES);
   this->publish_options_();
 }
 
@@ -45,14 +46,15 @@ void BLEHIDDeviceSelect::publish_options_() {
 }
 
 void BLEHIDDeviceSelect::control(const std::string &value) {
-  if (this->parent_ == nullptr || value == NO_DEVICES)
+  if (this->parent_ == nullptr)
     return;
-  for (size_t i = 0; i < this->option_storage_.size(); i++) {
+  for (size_t i = 1; i < this->option_storage_.size(); i++) {
     if (this->option_storage_[i] != value)
       continue;
     ESP_LOGI(TAG, "Pairing with %s", value.c_str());
-    this->publish_state(value);
-    this->parent_->pair_with(i);
+    // Back to the placeholder, so the same device can be picked again.
+    this->publish_state(this->option_storage_[0]);
+    this->parent_->pair_with(i - 1);
     return;
   }
 }

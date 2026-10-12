@@ -27,9 +27,10 @@ void BTPairingSelect::set_devices(const std::vector<ScannedDevice> &devices) {
       break;
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(device.address, mac);
-    const char *kind = device.transport == Transport::LE  ? "[BLE HID] "
-                       : device.kind == DeviceKind::AUDIO ? "[BT audio] "
-                                                          : "[BT HID] ";
+    const char *kind = device.kind == DeviceKind::BROADCAST ? "[BLE broadcast] "
+                       : device.transport == Transport::LE  ? "[BLE HID] "
+                       : device.kind == DeviceKind::AUDIO   ? "[BT audio] "
+                                                            : "[BT HID] ";
     this->option_storage_.push_back(kind + (device.name.empty() ? std::string(mac) : device.name + " (" + mac + ")"));
   }
   this->publish_options_();
@@ -52,7 +53,8 @@ void BTPairingSelect::control(const std::string &value) {
     if (this->option_storage_[i] != value)
       continue;
     ESP_LOGI(TAG, "Picked %s", value.c_str());
-    this->publish_state(value);
+    // Back to the placeholder, so the same device can be picked again.
+    this->publish_state(this->option_storage_[0]);
     this->parent_->pair_with(i - 1);
     return;
   }
