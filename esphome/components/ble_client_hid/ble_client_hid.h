@@ -181,6 +181,7 @@ class BLEClientHID : public Component,
  public:
   void loop() override;
   void dump_config() override;
+  void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }
@@ -257,9 +258,9 @@ class BLEClientHID : public Component,
 
  protected:
   void write_leds_(uint8_t leds) override;
-  esp_gatt_auth_req_t read_auth_() const {
-    return this->encryption_ ? ESP_GATT_AUTH_REQ_NO_MITM : ESP_GATT_AUTH_REQ_NONE;
-  }
+  /// Unencrypted: by configuration, or a device that refused pairing.
+  bool plain_() const { return !this->encryption_ || this->plain_address_ == this->parent_->get_address(); }
+  esp_gatt_auth_req_t read_auth_() const { return this->plain_() ? ESP_GATT_AUTH_REQ_NONE : ESP_GATT_AUTH_REQ_NO_MITM; }
 
   void reset_connection_state_();
   void transition_(SetupPhase phase);
@@ -400,6 +401,7 @@ class BLEClientHID : public Component,
   uint16_t conn_latency_{0};
   bool has_conn_latency_{false};
   bool encryption_{true};
+  uint64_t plain_address_{0};
 
   OrderedEventBuffer sampled_events_{16};
   uint32_t sampling_window_started_us_{0};

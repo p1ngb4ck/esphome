@@ -1703,6 +1703,18 @@ void BLEClientHID::write_leds_(uint8_t leds) {
   }
 }
 
+// -- GAP events --------------------------------------------------------------------------
+
+// A device without pairing support is used unencrypted, now and on every reconnect.
+void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (event != ESP_GAP_BLE_AUTH_CMPL_EVT || param->ble_security.auth_cmpl.success ||
+      param->ble_security.auth_cmpl.fail_reason != ESP_AUTH_SMP_PAIR_NOT_SUPPORT ||
+      memcmp(param->ble_security.auth_cmpl.bd_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) != 0)
+    return;
+  this->plain_address_ = this->parent()->get_address();
+  ESP_LOGI(TAG, "[%s] Pairing not supported by the device, continuing unencrypted", this->parent()->address_str());
+}
+
 // -- GATT events -------------------------------------------------------------------------
 
 void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -1715,7 +1727,7 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         break;
       this->reset_connection_state_();
       this->transition_(SetupPhase::WAITING_FOR_DISCOVERY);
-      if (this->encryption_ && esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
+      if (!this->plain_() && esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
         ESP_LOGW(TAG, "HID_CONNECTION security=request_failed");
       break;
     case ESP_GATTC_DISCONNECT_EVT: {
