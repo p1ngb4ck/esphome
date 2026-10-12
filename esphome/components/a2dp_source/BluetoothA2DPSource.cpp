@@ -452,10 +452,10 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
           esp_a2d_connect(peer_bd_addr);
         } else {
           // not discovered, continue to discover
-          if (!is_end){
+          if (!is_end && s_a2d_state == APP_AV_STATE_DISCOVERING){
             ESP_LOGI(BT_AV_TAG,
                     "Device discovery failed, continue to discover...");
-            esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+            start_discovery();
           }
         }
       } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
@@ -626,7 +626,7 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       } else {
         ESP_LOGI(BT_AV_TAG, "Starting device discovery...");
         s_a2d_state = APP_AV_STATE_DISCOVERING;
-        esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+        start_discovery();
       }
       // create and start heart beat timer
       int tmr_id = 0;
@@ -768,6 +768,23 @@ void BluetoothA2DPSource::bt_app_av_state_unconnected_hdlr(uint16_t event,
   }
 }
 
+// ESPHome: discovery holds the radio's inquiry for everyone; it runs only while the gate
+// (the pairing window) allows it, and resume_discovery() picks it up once it opens.
+void BluetoothA2DPSource::start_discovery() {
+  if (discovery_gate != nullptr && !discovery_gate()) {
+    ESP_LOGD(BT_AV_TAG, "Discovery waits for the pairing window");
+    return;
+  }
+  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+}
+
+void BluetoothA2DPSource::resume_discovery() {
+  if (is_end || discovery_active || is_connected())
+    return;
+  s_a2d_state = APP_AV_STATE_DISCOVERING;
+  start_discovery();
+}
+
 bool BluetoothA2DPSource::handle_reconnect_logic() {
   if (!is_autoreconnect_allowed){
     ESP_LOGI(BT_AV_TAG, "Auto-reconnect disabled, not attempting to reconnect");
@@ -779,11 +796,17 @@ bool BluetoothA2DPSource::handle_reconnect_logic() {
     connect_to(last_connection);
     return true;
   } else if (reconnect_status == AutoReconnect) {
+    reconnect_retries = max_reconnect_retries;
+    // ESPHome: outside a pairing window the stored device is paged on every heartbeat
+    // instead, so it connects whenever it is switched on.
+    if (discovery_gate != nullptr && !discovery_gate() && has_last_connection()) {
+      connect_to(last_connection);
+      return true;
+    }
     ESP_LOGI(BT_AV_TAG, "Auto-reconnect retries exhausted, starting device discovery");
     reconnect_status = NoReconnect;
-    reconnect_retries = max_reconnect_retries;
     s_a2d_state = APP_AV_STATE_DISCOVERING;
-    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+    start_discovery();
     return false;
   }
   return false;

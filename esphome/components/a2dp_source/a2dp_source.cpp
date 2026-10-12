@@ -70,6 +70,10 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
   }
 }
 
+bool A2DPSource::discovery_gate_() {
+  return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load();
+}
+
 bool A2DPSource::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
   return static_cast<A2DPSource *>(arg)->source_.handle_gap_event(event, param);
 }
@@ -127,6 +131,7 @@ void A2DPSource::setup() {
       A2DPSource::authentication_complete_);
   
   this->source_.set_auto_reconnect(true);
+  this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
 
   bool stored = this->has_stored_device();
@@ -178,6 +183,8 @@ void A2DPSource::start_pairing() {
   this->settle_until_ms_ = now + this->settle_seconds_ * 1000;
   this->fallback_after_ms_ = this->settle_until_ms_ + this->fallback_seconds_ * 1000;
   this->pairing_mode_.store(true);
+  if (this->started_.load())
+    this->source_.resume_discovery();
 
   ESP_LOGI(TAG, "Pairing window open");
   if (this->device_select_ != nullptr) {
@@ -193,6 +200,8 @@ bool A2DPSource::pair_with_name(const std::string &name) {
     memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
     this->chosen_valid_ = true;
     this->pairing_mode_.store(true);
+    if (this->started_.load())
+      this->source_.resume_discovery();
     ESP_LOGI(TAG, "Pairing with %s on its next sighting", name.c_str());
     return true;
   }
