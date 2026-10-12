@@ -1,0 +1,14 @@
+bt_pairing:
+  id: pairing
+  max_devices: 4
+
+button:
+  - platform: template
+    name: "Pairing database"
+    on_press:
+      - bt_pairing.log: pairing
+      - bt_pairing.forget:
+          address: "AA:BB:CC:DD:EE:01"
+      - bt_pairing.forget:
+          address: !lambda 'return std::string("AA:BB:CC:DD:EE:02");'
+      - bt_pairing.forget_all: pairing
