@@ -109,6 +109,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// ESPHome: one event of the shared Classic GAP callback (bt_classic). True when it
   /// answered a pairing request for this source's peer.
   bool handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+  /// ESPHome: a pairing request no other component claimed (bt_classic fallback).
+  bool handle_unclaimed_pairing(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
   /// ESPHome: discovery only while this returns true; nullptr allows it always.
   void set_discovery_gate(bool (*gate)()) { discovery_gate = gate; }
   /// ESPHome: start discovery now, unless connected or already discovering.
@@ -298,6 +300,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   // initialization
   bool reset_ble = false;
   bool (*discovery_gate)() = nullptr;
+  bool incoming_pairing = false;
   void start_discovery();
   bool discovery_active = false;
   uint16_t valid_cod_services = ESP_BT_COD_SRVC_RENDERING |

@@ -360,12 +360,6 @@ void host_loop() {
   }
   if (!h.started) {
     h.started = true;
-    // DisplayOnly: a keyboard gets a passkey to type, everything else pairs with Just Works.
-    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_OUT;
-    esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
-    // Variable: legacy pairing asks through ESP_BT_GAP_PIN_REQ_EVT, per device.
-    esp_bt_pin_code_t unused{};
-    esp_bt_gap_set_pin(ESP_BT_PIN_TYPE_VARIABLE, 0, unused);
     esp_bt_hid_host_register_callback(hh_cb);
     if (esp_err_t err = esp_bt_hid_host_init(); err != ESP_OK)
       ESP_LOGE(TAG, "HID host init failed: %s", esp_err_to_name(err));

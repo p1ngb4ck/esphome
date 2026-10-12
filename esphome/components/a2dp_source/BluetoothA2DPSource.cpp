@@ -163,18 +163,8 @@ void BluetoothA2DPSource::start(std::vector<const char *> names) {
     }
   }
 
-  if (ssp_enabled) {
-    /* Set default parameters for Secure Simple Pairing */
-    esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
-    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;
-    esp_bt_gap_set_security_param(param_type, &iocap, sizeof(uint8_t));
-  }
-
-  /*
-   * Set default parameters for Legacy Pairing
-   * Use variable pin, input pin code when pairing
-   */
-  esp_bt_gap_set_pin(pin_type, 0, pin_code);
+  // ESPHome: the IO capability (DisplayYesNo) and the variable PIN type are bt_classic's,
+  // shared by every Classic component; the PIN itself is still answered from pin_code.
 
   /* create application task */
   app_task_start_up();
@@ -428,7 +418,35 @@ bool BluetoothA2DPSource::handle_gap_event(esp_bt_gap_cb_event_t event,
       memcmp(bda, last_connection, ESP_BD_ADDR_LEN) != 0)
     return false;
   app_gap_callback(event, param);
+  if (event == ESP_BT_GAP_AUTH_CMPL_EVT && incoming_pairing) {
+    // Paired from the device's side: connect to it as if discovery had picked it.
+    incoming_pairing = false;
+    if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS && s_a2d_state == APP_AV_STATE_DISCOVERING) {
+      s_a2d_state = APP_AV_STATE_DISCOVERED;
+      if (discovery_active) {
+        esp_bt_gap_cancel_discovery();
+      } else {
+        s_a2d_state = APP_AV_STATE_CONNECTING;
+        esp_a2d_connect(peer_bd_addr);
+      }
+    }
+  }
   return answers;
+}
+
+// ESPHome: a pairing request no component claimed, so a device pairing from its own side.
+// Taken only while discovering in the pairing window; that device becomes the peer.
+bool BluetoothA2DPSource::handle_unclaimed_pairing(esp_bt_gap_cb_event_t event,
+                                                   esp_bt_gap_cb_param_t *param) {
+  if (event == ESP_BT_GAP_KEY_REQ_EVT || s_a2d_state != APP_AV_STATE_DISCOVERING ||
+      (discovery_gate != nullptr && !discovery_gate()))
+    return false;
+  const uint8_t *bda = event == ESP_BT_GAP_PIN_REQ_EVT ? param->pin_req.bda : param->cfm_req.bda;
+  ESP_LOGI(BT_AV_TAG, "Pairing requested by %s", to_str((uint8_t *) bda));
+  memcpy(peer_bd_addr, bda, ESP_BD_ADDR_LEN);
+  incoming_pairing = true;
+  app_gap_callback(event, param);
+  return true;
 }
 
 void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,

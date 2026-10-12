@@ -25,14 +25,27 @@ std::vector<Handler> &handlers() {
   return list;
 }
 
+std::vector<Handler> &fallbacks() {
+  static std::vector<Handler> list;
+  return list;
+}
+
+bool is_pairing_request(esp_bt_gap_cb_event_t event) {
+  return event == ESP_BT_GAP_PIN_REQ_EVT || event == ESP_BT_GAP_CFM_REQ_EVT || event == ESP_BT_GAP_KEY_REQ_EVT;
+}
+
 bool registered = false;
 
 void dispatch(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
   bool answered = false;
   for (const auto &h : handlers())
     answered = h.handler(event, param, h.arg) || answered;
-  if (answered)
+  if (answered || !is_pairing_request(event))
     return;
+  for (const auto &h : fallbacks()) {
+    if (h.handler(event, param, h.arg))
+      return;
+  }
   switch (event) {
     case ESP_BT_GAP_PIN_REQ_EVT: {
       esp_bt_pin_code_t code{};
@@ -54,6 +67,8 @@ void dispatch(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
 
 void add_gap_handler(GapHandler handler, void *arg) { handlers().push_back({handler, arg}); }
 
+void add_gap_fallback(GapHandler handler, void *arg) { fallbacks().push_back({handler, arg}); }
+
 bool ensure_gap_callback() {
   if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
     registered = false;
@@ -65,6 +80,14 @@ bool ensure_gap_callback() {
       return false;
     }
     registered = true;
+    // One setting for every component. DisplayYesNo: a keyboard types the passkey shown in
+    // the log (passkey entry), a device with a display is confirmed (numeric comparison),
+    // and one without input or output pairs with Just Works.
+    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_IO;
+    esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
+    // Variable: legacy PIN pairing asks through ESP_BT_GAP_PIN_REQ_EVT, per device.
+    esp_bt_pin_code_t unused{};
+    esp_bt_gap_set_pin(ESP_BT_PIN_TYPE_VARIABLE, 0, unused);
   }
   return true;
 }

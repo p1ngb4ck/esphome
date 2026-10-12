@@ -74,6 +74,10 @@ bool A2DPSource::discovery_gate_() {
   return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load();
 }
 
+bool A2DPSource::gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
+  return static_cast<A2DPSource *>(arg)->source_.handle_unclaimed_pairing(event, param);
+}
+
 bool A2DPSource::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
   return static_cast<A2DPSource *>(arg)->source_.handle_gap_event(event, param);
 }
@@ -84,6 +88,8 @@ void A2DPSource::authentication_complete_(esp_bt_status_t status) {
   }
 
   global_a2dp_source->paired_pending_.store(status == ESP_BT_STATUS_SUCCESS);
+  if (status == ESP_BT_STATUS_SUCCESS)
+    global_a2dp_source->pairing_mode_.store(false);
 }
 
 void A2DPSource::setup() {
@@ -133,6 +139,7 @@ void A2DPSource::setup() {
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
+  bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
 
   bool stored = this->has_stored_device();
   if (!stored && this->pair_on_boot_if_empty_) {
