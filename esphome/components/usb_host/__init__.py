@@ -229,14 +229,12 @@ _FIFO_BIAS_VALUES = {
 
 
 def per_port_fifo_bias_available() -> bool:
-    """Whether the build can bias a single port rather than all of them.
+    """Whether the build uses the patched espressif/usb component (IDF >= 5.4, its minimum).
 
-    The patched component replaces the one pulled from the registry, and that only happens
-    where the registry component is used at all: from IDF 6.0 the USB host left the IDF
-    tree. On an older IDF the host is an IDF built-in and the Kconfig option is the only
-    lever there is.
+    From IDF 6.0 it is the USB host; on IDF 5.x it replaces the IDF built-in of the same
+    name. Older IDFs keep the built-in and only the global Kconfig bias.
     """
-    return idf_version() >= cv.Version(6, 0, 0)
+    return idf_version() >= cv.Version(5, 4, 0)
 
 
 def fs_peripheral_index() -> int | None:
@@ -314,13 +312,13 @@ def _default_max_packet_size() -> int:
 
 
 def _dual_host_validator(value):
-    """dual_host requires ESP32-P4 and IDF >= 6.0 (needs espressif/usb 1.4.1)."""
+    """dual_host requires ESP32-P4 and the patched espressif/usb component (IDF >= 5.4)."""
     value = cv.boolean(value)
     if value:
         if get_esp32_variant() != VARIANT_ESP32P4:
             raise cv.Invalid("dual_host is only supported on ESP32-P4")
-        if idf_version() < cv.Version(6, 0, 0):
-            raise cv.Invalid("dual_host requires IDF >= 6.0.0")
+        if not per_port_fifo_bias_available():
+            raise cv.Invalid("dual_host requires IDF >= 5.4.0")
     return value
 
 
@@ -382,7 +380,10 @@ def _sync_usb_component_override() -> str:
 
     from . import idf_usb_patch as patch
 
-    dest = Path(CORE.build_path) / "components-src" / "espressif__usb"
+    # ESP-IDF names a component after its directory. On IDF 5.x it has to be "usb" to replace
+    # the built-in one; the component's CMake expects exactly that there.
+    dir_name = "espressif__usb" if idf_version() >= cv.Version(6, 0, 0) else "usb"
+    dest = Path(CORE.build_path) / "components-src" / dir_name
     marker = dest / _USB_OVERRIDE_MARKER
     if marker.is_file() and marker.read_text() == patch.PATCH_STAMP:
         return str(dest)
@@ -434,9 +435,8 @@ async def register_usb_client(config: ConfigType) -> MockObj:
 
 
 async def to_code(config: ConfigType) -> None:
-    # IDF 6.0 moved USB host to an external component; 1.4.1 requires IDF >= 6.0.
-    # It is built from a patched copy so each host controller can take its own FIFO
-    # division -- see idf_usb_patch.py for why one division cannot serve two controllers.
+    # Built from a patched copy so each host controller can take its own FIFO division -- see
+    # idf_usb_patch.py for why one division cannot serve two controllers.
     if per_port_fifo_bias_available():
         from . import idf_usb_patch as idf_usb_patch_mod
 
