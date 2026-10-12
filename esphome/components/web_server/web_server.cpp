@@ -1469,11 +1469,11 @@ void WebServer::select_json_(select::Select *obj, StringRef value, JsonDetail st
 
   // value points to null-terminated string literals from codegen (via current_option())
   set_json_icon_state_value(root, obj, "select", value.c_str(), value.c_str(), start_config);
+  JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
+  for (auto &option : obj->traits.get_options()) {
+    opt.add(option);
+  }
   if (start_config == DETAIL_ALL) {
-    JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
-    for (auto &option : obj->traits.get_options()) {
-      opt.add(option);
-    }
     this->add_sorting_info_(root, obj);
   }
 }
