@@ -17,6 +17,7 @@ from esphome.const import (
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
     CONF_URL,
+    CONF_VOLUME,
     CONF_WIDTH,
 )
 from esphome.core import CORE, CoroPriority, coroutine_with_priority
@@ -78,6 +79,9 @@ StopAction = simple_video_player_ns.class_("StopAction", automation.Action)
 ChannelRefreshAction = simple_video_player_ns.class_("ChannelRefreshAction", automation.Action)
 ChannelPlayAction = simple_video_player_ns.class_("ChannelPlayAction", automation.Action)
 ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automation.Action)
+StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automation.Action)
+StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
+SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
@@ -100,7 +104,8 @@ CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
 CONF_AUDIO_CHANNELS = "audio_channels"
 CONF_AUDIO_BITS_PER_SAMPLE = "audio_bits_per_sample"
 CONF_RESOLVED_SPEAKER_CHANNEL = "resolved_speaker_channel"
-# The canvas widget's own width/height, for the picture size the stream port asks a sender for.
+# The canvas widget's own width/height: the size of the output buffers and of the picture a
+# stream sender is asked for (the device never scales).
 CONF_RESOLVED_CANVAS_SIZE = "resolved_canvas_size"
 
 # This is an MCU: rather than auto-detecting and reconfiguring buffers per video file (real heap
@@ -393,7 +398,7 @@ def _display_depth(full_config, display_id):
 
 
 def _resolve_canvas_size(config, fconf):
-    """The canvas widget's size in pixels: a sender on the stream port is asked for exactly that."""
+    """The canvas widget's size in pixels: the output buffers' size, and what a stream sender is asked for."""
     canvas_id = config[CONF_CANVAS_ID]
     try:
         canvas_conf = fconf.get_config_for_path(fconf.get_path_for_id(canvas_id)[:-1])
@@ -403,8 +408,8 @@ def _resolve_canvas_size(config, fconf):
     height = canvas_conf.get(CONF_HEIGHT)
     if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
         raise cv.Invalid(
-            f"{CONF_STREAM_PORT}: canvas '{canvas_id}' needs its width and height in pixels -- a "
-            "stream sender is asked for a picture of exactly that size."
+            f"canvas '{canvas_id}' needs its width and height in pixels -- the video and a stream "
+            "sender's picture are made exactly that size."
         )
     this_conf = fconf.get_config_for_path(fconf.get_path_for_id(config[CONF_ID])[:-1])
     this_conf[CONF_RESOLVED_CANVAS_SIZE] = (width, height)
@@ -424,7 +429,7 @@ def _final_validate(config):
                     "lvgl: block."
                 )
 
-    if CONF_STREAM_PORT in config and CONF_CANVAS_ID in config:
+    if CONF_CANVAS_ID in config:
         _resolve_canvas_size(config, fconf)
 
     if CONF_SPEAKER_ID not in config:
@@ -502,14 +507,13 @@ async def to_code(config):
     if CONF_CANVAS_ID in config:
         canvas = await cg.get_variable(config[CONF_CANVAS_ID])
         cg.add(var.set_canvas(canvas))
+        cg.add(var.set_canvas_size(*config[CONF_RESOLVED_CANVAS_SIZE]))
     if CONF_DISPLAY_ID in config:
         CORE.add_job(_resolve_display_output, var, config[CONF_DISPLAY_ID])
 
     if CONF_STREAM_PORT in config:
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
         cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
-        if canvas_size := config.get(CONF_RESOLVED_CANVAS_SIZE):
-            cg.add(var.set_stream_picture_size(*canvas_size))
         cg.add_define("SVP_STREAM")
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
@@ -673,3 +677,47 @@ async def simple_video_player_channels_play_to_code(config, action_id, template_
 async def simple_video_player_channels_stop_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# As Portall's portall.sleep / portall.wake: the stream sender stops drawing for a panel nobody can
+# see (backlight off) and redraws once it is awake again.
+@automation.register_action(
+    "simple_video_player.stream.sleep",
+    StreamSleepAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_stream_sleep_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
+    "simple_video_player.stream.wake",
+    StreamWakeAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_stream_wake_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# The volume of what this player plays: the speaker's own set_volume() (a template number can drive it).
+@automation.register_action(
+    "simple_video_player.set_volume",
+    SetVolumeAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_VOLUME): cv.templatable(cv.percentage),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_set_volume_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    volume = await cg.templatable(config[CONF_VOLUME], args, float)
+    cg.add(var.set_volume(volume))
+    return var

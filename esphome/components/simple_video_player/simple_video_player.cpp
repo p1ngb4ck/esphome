@@ -29,10 +29,6 @@ static const uint16_t JPEG_EOI = 0xd9ff;
 static constexpr size_t CACHE_ALIGNMENT = 1024;
 static constexpr size_t DMA_ALIGNMENT = 128;
 
-// Max resolution the output double-buffer (allocated once in setup()) is sized for. ESP32-P4 panel.
-static constexpr uint32_t MAX_VIDEO_WIDTH = 1280;
-static constexpr uint32_t MAX_VIDEO_HEIGHT = 800;
-
 //========================================================================
 // Component Lifecycle
 //========================================================================
@@ -64,23 +60,15 @@ void SimpleVideoPlayer::setup() {
       return;
     }
 
-    // Decoded RGB888 output buffer -- allocated ONCE here, sized for the max resolution
-    // (ALIGN_UP(w,16) * ALIGN_UP(h,16) * 3), and reused for every play(). This buffer IS the LVGL
-    // canvas buffer: playback_loop_() points the canvas at it with lv_canvas_set_buffer(), decode
-    // writes straight into it. RGB888 (not RGB565): the P4 HW JPEG decoder's RGB565 output path is
-    // buggy on some P4 silicon revisions. jpeg_alloc_decoder_mem() gives the 16-byte / DMA alignment
-    // the HW decoder requires and reports the actual (cache-line-rounded) size it allocated.
-    // Size the two frame buffers to the ACTUAL LVGL display resolution (derived from LVGL, not a
-    // fixed 1280x800), capped to the MAX_VIDEO_* safety ceiling. Two RGB888 buffers at the real
-    // panel size (e.g. 1024x600 -> ~1.87 MB each) instead of the 1280x800 cap (~3 MB each) is what
-    // keeps the render double-buffer from starving other PSRAM consumers (e.g. a separate
-    // speaker_media_player's pipeline -> ESP_ERR_NO_MEM). Falls back to the cap if LVGL reports 0.
-    uint32_t fb_w = this->lvgl_component_ != nullptr ? this->lvgl_component_->get_width() : 0;
-    uint32_t fb_h = this->lvgl_component_ != nullptr ? this->lvgl_component_->get_height() : 0;
-    if (fb_w == 0 || fb_w > MAX_VIDEO_WIDTH)
-      fb_w = MAX_VIDEO_WIDTH;
-    if (fb_h == 0 || fb_h > MAX_VIDEO_HEIGHT)
-      fb_h = MAX_VIDEO_HEIGHT;
+    // Decoded RGB888 output double-buffer -- allocated ONCE here (ALIGN_UP(w,16) * ALIGN_UP(h,16) * 3)
+    // and reused for every play(); loop() points the canvas at the finished one. RGB888 (not RGB565):
+    // the P4 HW JPEG decoder's RGB565 output path is buggy on some P4 silicon revisions.
+    // jpeg_alloc_decoder_mem() gives the alignment the HW decoder requires and reports the actual
+    // (cache-line-rounded) size it allocated.
+    // Sized to the canvas widget itself (its YAML width/height): the canvas never changes size and
+    // shows nothing beyond it, so nothing larger is played. Portrait and window canvases included.
+    uint32_t fb_w = this->canvas_size_w_;
+    uint32_t fb_h = this->canvas_size_h_;
     const size_t max_output_size = static_cast<size_t>(ALIGN_UP(fb_w, 16)) * ALIGN_UP(fb_h, 16) * 3;
     jpeg_decode_memory_alloc_cfg_t out_cfg{};
     out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
@@ -293,11 +281,52 @@ void SimpleVideoPlayer::loop() {
   // common no-frame path is a plain relaxed read, not an atomic RMW. Gated on LV_USE_CANVAS:
   // ESPHome only enables it when a canvas widget is in the YAML, so a DSI-direct config (display_id,
   // no canvas widget) compiles this out -- there the dsi_ early-return above handles loop() anyway.
+#if defined(SVP_STREAM) && !defined(SVP_DSI_OUTPUT)
+  // udisp rectangles copied into the page (stream_copy_to_canvas_): show the page if a file showed
+  // something else, and tell LVGL which part changed.
+  {
+    bool dirty;
+    lv_area_t area;
+    portENTER_CRITICAL(&this->stream_dirty_lock_);
+    dirty = this->stream_dirty_;
+    area = {this->stream_dirty_x1_, this->stream_dirty_y1_, this->stream_dirty_x2_, this->stream_dirty_y2_};
+    this->stream_dirty_ = false;
+    portEXIT_CRITICAL(&this->stream_dirty_lock_);
+    if (dirty && this->canvas_ != nullptr && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+      if (this->display_buffer_.load(std::memory_order_acquire) != this->output_buffers_[0]) {
+        this->canvas_w_ = (this->canvas_size_w_ + 15) & ~15;
+        this->canvas_h_ = (this->canvas_size_h_ + 15) & ~15;
+        this->display_buffer_.store(this->output_buffers_[0], std::memory_order_release);
+        this->frame_ready_.store(true, std::memory_order_release);
+      } else {
+        lv_area_t at;
+        lv_obj_get_coords(this->canvas_, &at);
+        area.x1 += at.x1;
+        area.x2 += at.x1;
+        area.y1 += at.y1;
+        area.y2 += at.y1;
+        lv_obj_invalidate_area(this->canvas_, &area);
+      }
+    }
+  }
+#endif
   if (this->frame_ready_.load(std::memory_order_acquire) &&
       this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     uint8_t *buf = this->display_buffer_.load(std::memory_order_acquire);
     if (buf != nullptr && this->canvas_ != nullptr) {
-      lv_canvas_set_buffer(this->canvas_, buf, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888);
+      lv_draw_buf_t *shown = lv_canvas_get_draw_buf(this->canvas_);
+      if (shown != nullptr && shown == this->canvas_shown_ && shown->header.w == this->canvas_w_ &&
+          shown->header.h == this->canvas_h_) {
+        // Same buffer object, same size: only the pixels move. LVGL 9.5 reads an uncompressed
+        // variable image straight from draw_buf->data at every draw and never caches it
+        // (lv_bin_decoder.c "Do not put image to cache if it can be used directly"), and
+        // lv_draw_buf_init() sets data and unaligned_data alike (lv_draw_buf.c).
+        shown->data = buf;
+        shown->unaligned_data = buf;
+      } else {
+        lv_canvas_set_buffer(this->canvas_, buf, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888);
+        this->canvas_shown_ = lv_canvas_get_draw_buf(this->canvas_);
+      }
       lv_obj_invalidate(this->canvas_);
     }
   }
@@ -1495,8 +1524,11 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // _resolve_speaker_audio_format()) -- validate the file's actual format matches it instead of
   // resizing anything to fit. source_audio_channels_/audio_sample_rate_/audio_bits_per_sample_
   // were already set to the fixed AUDIO_* constants in setup() and never change here.
+  // Bits per sample only for PCM: a compressed track's header carries none (ffmpeg writes 0 for
+  // MP3, libavformat/riffenc.c), its decoder produces them.
+  const bool pcm = static_cast<AVIAudioCodec>(audio_info->codec) == AVIAudioCodec::PCM;
   if (audio_info->channels != AUDIO_SOURCE_CHANNELS || audio_info->sample_rate != AUDIO_SAMPLE_RATE ||
-      audio_info->bits_per_sample != AUDIO_BITS_PER_SAMPLE) {
+      (pcm && audio_info->bits_per_sample != AUDIO_BITS_PER_SAMPLE)) {
     ESP_LOGE(TAG,
              "Audio format mismatch: file's audio track is %" PRIu32 " Hz, %u ch, %u-bit, but the speaker is "
              "configured for %" PRIu32 " Hz, %u ch, %u-bit only -- re-encode the file's audio track to match the "
@@ -1556,10 +1588,10 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   }
 
   // CRITICAL: Configure speaker's audio stream info based on SPEAKER config, not file
-  audio::AudioStreamInfo speaker_stream_info(audio_info->bits_per_sample, this->speaker_audio_channels_,
+  audio::AudioStreamInfo speaker_stream_info(AUDIO_BITS_PER_SAMPLE, this->speaker_audio_channels_,
                                              audio_info->sample_rate);
   this->speaker_->set_audio_stream_info(speaker_stream_info);
-  ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz", audio_info->bits_per_sample,
+  ESP_LOGI(TAG, "Speaker configured: %u-bit, %u-channel, %" PRIu32 " Hz", static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE),
            this->speaker_audio_channels_, audio_info->sample_rate);
 
   // Ring buffers + temp buffer already exist (allocated once in setup(), sized from the fixed

@@ -61,8 +61,9 @@ infrastructure.
 - No blocking waits of any fixed duration in a hot path, however short. `xSemaphoreTake(h, 0)` is a
   real non-blocking try; any nonzero `pdMS_TO_TICKS(N)` is a real wait and eats directly into the
   ~40ms/frame total budget shared by decode + audio + storage prefetch.
-- The video panel is one fixed resolution, compiled once from one YAML per device. Never write
-  runtime resize/reflow logic for it — there is no case where it changes.
+- The device never resizes, rescales or reflows anything at runtime. Its picture size is fixed in
+  the YAML (the panel, or a canvas/window smaller than full screen — smaller is fine), compiled once
+  per device; the panel reports it to the relay ('V'), and only the relay fits pictures to it.
 - Never implement frame-dropping/catch-up-on-lag logic for video playback. This MCU cannot
   structurally catch up once behind; the only correct strategy is fire-and-forget at the paced,
   correct cadence and letting decode take however long it takes, optimizing everything upstream of

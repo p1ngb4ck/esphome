@@ -141,6 +141,11 @@ class SimpleVideoPlayer : public Component {
 #ifdef SVP_USE_LVGL
   void set_lvgl(lvgl::LvglComponent *lvgl_component) { this->lvgl_component_ = lvgl_component; }
   void set_canvas(lv_obj_t *canvas) { this->canvas_ = canvas; }
+  // The canvas widget's size (YAML): the output buffers are made for it, and nothing larger plays.
+  void set_canvas_size(uint16_t width, uint16_t height) {
+    this->canvas_size_w_ = width;
+    this->canvas_size_h_ = height;
+  }
 #endif
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
@@ -149,6 +154,11 @@ class SimpleVideoPlayer : public Component {
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+  // Volume of the sound this player plays (files, streams): the speaker's own volume, 0..1.
+  void set_volume(float volume) {
+    if (this->speaker_ != nullptr)
+      this->speaker_->set_volume(volume);
+  }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 
@@ -164,11 +174,9 @@ class SimpleVideoPlayer : public Component {
   // Portall-style udisp JPEG rectangles, drawn while no file is playing.
   void set_stream_port(uint16_t port) { this->stream_port_ = port; }
   void set_stream_max_frame_bytes(uint32_t bytes) { this->stream_max_frame_bytes_ = bytes; }
-  // Canvas output: the canvas widget's size, the picture a sender is asked for.
-  void set_stream_picture_size(uint16_t width, uint16_t height) {
-    this->stream_pic_w_ = width;
-    this->stream_pic_h_ = height;
-  }
+  // Tell the sender the panel sleeps (it stops drawing) or is awake again (it redraws), as Portall's
+  // portall.sleep / portall.wake.
+  void stream_sleep(bool asleep);
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
@@ -281,6 +289,10 @@ class SimpleVideoPlayer : public Component {
   static void stream_draw_task_entry_(void *param);
   void stream_draw_loop_();
   void stream_feed_(const uint8_t *data, size_t len);
+#ifndef SVP_DSI_OUTPUT
+  /// Canvas output: copy one decoded udisp rectangle into the page buffer the canvas shows.
+  void stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h);
+#endif
   void stream_send_pending_(int client);
   /// Tell the sender whether the panel shows its picture (false while a file plays).
   void stream_set_awake_(bool awake);
@@ -384,6 +396,8 @@ class SimpleVideoPlayer : public Component {
 #ifdef SVP_USE_LVGL
   lvgl::LvglComponent *lvgl_component_{nullptr};
   lv_obj_t *canvas_{nullptr};
+  uint16_t canvas_size_w_{0}, canvas_size_h_{0};
+  lv_draw_buf_t *canvas_shown_{nullptr};  // the canvas's draw buffer as lv_canvas_set_buffer() left it
 #endif
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
@@ -534,7 +548,6 @@ class SimpleVideoPlayer : public Component {
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   uint16_t stream_port_{0};
   uint32_t stream_max_frame_bytes_{128 * 1024};
-  uint16_t stream_pic_w_{0}, stream_pic_h_{0};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
   QueueHandle_t stream_empty_q_{nullptr};
   QueueHandle_t stream_filled_q_{nullptr};
@@ -550,7 +563,8 @@ class SimpleVideoPlayer : public Component {
   bool stream_logged_bad_header_{false};
   std::atomic<bool> stream_connected_{false};
   std::atomic<bool> stream_output_ok_{false};  // loop(): connected and LVGL (if any) paused
-  std::atomic<bool> stream_awake_{true};
+  std::atomic<bool> stream_awake_{true};   // false while a file plays
+  std::atomic<bool> stream_asleep_{false};  // stream_sleep()
   std::atomic<bool> stream_status_pending_{false};
   std::atomic<bool> stream_depth_pending_{false};
   // The sender streams an AVI (svp_relay) rather than udisp rectangles: it plays through the file
@@ -558,6 +572,12 @@ class SimpleVideoPlayer : public Component {
   bool net_session_{false};                                // set before start_playback_()
   std::atomic<bool> stream_avi_{false};                    // an AVI connection is up
   std::atomic<BufferedFileReader *> stream_sink_{nullptr};  // open network source, or none
+#ifndef SVP_DSI_OUTPUT
+  // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.
+  portMUX_TYPE stream_dirty_lock_ = portMUX_INITIALIZER_UNLOCKED;
+  bool stream_dirty_{false};
+  int32_t stream_dirty_x1_{0}, stream_dirty_y1_{0}, stream_dirty_x2_{0}, stream_dirty_y2_{0};
+#endif
   // Stream statistics (Portall's): plain counters while a sender is connected, each written by one
   // task only, logged once by the network task after the sender has gone.
   uint32_t stream_stats_since_ms_{0};
@@ -731,6 +751,38 @@ template<typename... Ts> class ChannelStopAction : public Action<Ts...> {
  public:
   explicit ChannelStopAction(SimpleVideoPlayer *player) : player_(player) {}
   void play(const Ts &...x) override { this->player_->channel_stop(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+#endif
+
+#ifdef SVP_STREAM
+template<typename... Ts> class StreamSleepAction : public Action<Ts...> {
+ public:
+  explicit StreamSleepAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->stream_sleep(true); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class StreamWakeAction : public Action<Ts...> {
+ public:
+  explicit StreamWakeAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->stream_sleep(false); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+#endif
+
+#ifdef USE_SPEAKER
+template<typename... Ts> class SetVolumeAction : public Action<Ts...> {
+ public:
+  explicit SetVolumeAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(float, volume)
+  void play(const Ts &...x) override { this->player_->set_volume(this->volume_.value(x...)); }
 
  protected:
   SimpleVideoPlayer *player_;
