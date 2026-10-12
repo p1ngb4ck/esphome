@@ -2,153 +2,97 @@
 
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 
-#include "esphome/core/defines.h"
-#include "esphome/core/component.h"
+#include "esphome/components/hid/hid_input.h"
+#include "esphome/components/hid/hid_parser.h"
 #include "esphome/components/usb_host/usb_host.h"
+#include "esphome/core/component.h"
+#include "esphome/core/defines.h"
+#include "esphome/core/event_pool.h"
+#include "esphome/core/lock_free_queue.h"
 #include "hid_types.h"
-#include <map>
+
+#include <atomic>
+#include <memory>
 #include <vector>
 
-#ifdef USE_BINARY_SENSOR
-#include "esphome/components/binary_sensor/binary_sensor.h"
-#endif
 #ifdef USE_TEXT_SENSOR
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
-#ifdef USE_SENSOR
-#include "esphome/components/sensor/sensor.h"
-#endif
 
-namespace esphome {
-namespace usb_hid {
-
-class HIDDeviceDriver;
-class USBHIDClient;
-
-// Tracks one connected HID device (one interface → one interrupt IN transfer slot)
-struct HIDDevice {
-  usb_device_handle_t dev_hdl{nullptr};
-  uint8_t interface_num{0};
-  uint8_t in_ep{0};
-  uint8_t out_ep{0};
-  uint8_t media_in_ep{0};
-  uint8_t dev_addr{0};
-  uint16_t vid{0};
-  uint16_t pid{0};
-  uint8_t protocol{0};
-  bool active{false};
-  bool media_active{false};
-  HIDDeviceDriver *driver{nullptr};
-};
-
-// Pluggable driver interface — implement to handle a specific HID device class
-class HIDDeviceDriver {
- public:
-  virtual ~HIDDeviceDriver() = default;
-  virtual bool match_device(uint8_t protocol, uint16_t vid, uint16_t pid) = 0;
-  virtual void process_report(const uint8_t *data, size_t len, HIDDevice *device) = 0;
-  virtual const char *get_name() = 0;
-};
+namespace esphome::usb_hid {
 
 class RawHIDDriver;
 
-class USBHIDClient : public usb_host::USBClient {
+// A USB HID device: every HID interface of it, each read through its own report descriptor
+// (keyboards, mice, remotes, gamepads, and receivers that put several of them on one
+// interface), into the shared hid::HIDInput. Xbox 360 pads, which are not HID, are decoded
+// as Linux xpad.c does.
+class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
  public:
-  // vid and pid select which device this client attaches to, in the same way as every other
-  // USB client here; 0/0 keeps the previous behaviour of taking whatever appears. It matters
-  // for a HID interface that sits on a composite device such as a sound card, where a second
-  // client for the audio interfaces is attached to the same device at the same time.
   USBHIDClient(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {}
 
   void setup() override;
   void loop() override;
+  void dump_config() override;
   float get_setup_priority() const override { return setup_priority::IO; }
 
-  // Routed by class 03; the vendor-class pads parse_hid_interface_() knows are added as
-  // vendor matches in setup().
-
-  void register_device_driver(HIDDeviceDriver *driver) { this->drivers_.push_back(driver); }
-  // Kept separately from the list above so codegen can reach it to attach buttons and
-  // triggers, and so it is only consulted once the protocol-specific drivers have declined.
   void register_raw_driver(RawHIDDriver *driver) { this->raw_driver_ = driver; }
-  RawHIDDriver *get_raw_driver() { return this->raw_driver_; }
-
 #ifdef USE_TEXT_SENSOR
-  void register_keyboard_sensor(text_sensor::TextSensor *sensor) { this->keyboard_sensor_ = sensor; }
-  text_sensor::TextSensor *get_keyboard_sensor() { return this->keyboard_sensor_; }
   void register_device_name_sensor(text_sensor::TextSensor *sensor) { this->device_name_sensor_ = sensor; }
-  text_sensor::TextSensor *get_device_name_sensor() { return this->device_name_sensor_; }
 #endif
-
-#ifdef USE_BINARY_SENSOR
-  void register_keyboard_key_sensor(binary_sensor::BinarySensor *sensor, uint8_t keycode);
-  std::map<uint8_t, binary_sensor::BinarySensor *> &get_keyboard_key_sensors() {
-    return this->keyboard_key_sensors_;
-  }
-  void register_mouse_left_sensor(binary_sensor::BinarySensor *sensor) { this->mouse_left_sensor_ = sensor; }
-  void register_mouse_right_sensor(binary_sensor::BinarySensor *sensor) { this->mouse_right_sensor_ = sensor; }
-  void register_mouse_middle_sensor(binary_sensor::BinarySensor *sensor) { this->mouse_middle_sensor_ = sensor; }
-  binary_sensor::BinarySensor *get_mouse_left_sensor() { return this->mouse_left_sensor_; }
-  binary_sensor::BinarySensor *get_mouse_right_sensor() { return this->mouse_right_sensor_; }
-  binary_sensor::BinarySensor *get_mouse_middle_sensor() { return this->mouse_middle_sensor_; }
-#endif
-
-#ifdef USE_SENSOR
-  void register_mouse_x_sensor(sensor::Sensor *sensor) { this->mouse_x_sensor_ = sensor; }
-  void register_mouse_y_sensor(sensor::Sensor *sensor) { this->mouse_y_sensor_ = sensor; }
-  void register_mouse_wheel_sensor(sensor::Sensor *sensor) { this->mouse_wheel_sensor_ = sensor; }
-  sensor::Sensor *get_mouse_x_sensor() { return this->mouse_x_sensor_; }
-  sensor::Sensor *get_mouse_y_sensor() { return this->mouse_y_sensor_; }
-  sensor::Sensor *get_mouse_wheel_sensor() { return this->mouse_wheel_sensor_; }
-#endif
-
-  // LED / output report helpers (called from drivers, safe from main-loop context)
-  void update_keyboard_leds(HIDDevice *device, uint8_t led_state);
-  void send_output_report(HIDDevice *device, const uint8_t *data, size_t len);
 
  protected:
+  static constexpr size_t MAX_INTERFACES = 4;
+  static constexpr size_t REPORT_MAX = 64;
+  static constexpr size_t QUEUE_SIZE = 32;
+
+  struct Interface {
+    uint8_t number{0};
+    uint8_t in_ep{0};
+    uint16_t in_mps{0};
+    uint8_t out_ep{0};
+    uint16_t descriptor_length{0};
+    bool xbox{false};
+    bool xbox_wireless{false};
+    std::unique_ptr<hid::HIDReportMap> map{};
+    uint8_t xbox_last[14]{};
+  };
+
+  // One interrupt IN report, from the USB task to the main loop.
+  struct Report {
+    uint8_t interface;
+    uint8_t length;
+    uint8_t data[REPORT_MAX];
+    void release() {}
+  };
+
   void on_connected() override;
   void on_disconnected() override;
+  bool reports_connection_itself() const override { return true; }
+  void write_leds_(uint8_t leds) override;
 
-  bool parse_hid_interface_();
-  bool setup_media_interface_(HIDDevice *dev);
-  void on_transfer_in_(uint8_t ep, const uint8_t *data, size_t len, bool media);
-  void start_in_transfer_(HIDDevice *dev, uint8_t ep, uint16_t mps, bool media);
+  bool find_interfaces_();
+  void fetch_descriptor_(size_t index);
+  void descriptor_done_(size_t index, const uint8_t *data, size_t length);
+  void start_reading_();
+  void read_(size_t index, uint32_t generation);
+  void report_(Interface &intf, const uint8_t *data, size_t length);
+  void xbox360_(Interface &intf, const uint8_t *data, size_t length);
 
-  // One device, not an array of them. USBClient holds a single device_handle_ and its state
-  // machine runs INIT -> OPEN -> CONNECTED for that one device; a NEW_DEV event arriving
-  // while the client is CONNECTED is never opened. A second HID device therefore means a
-  // second usb_hid instance, which is what MULTI_CONF is for.
-  HIDDevice device_{};
-
-  std::vector<HIDDeviceDriver *> drivers_;
+  std::vector<Interface> interfaces_{};
+  std::atomic<uint32_t> generation_{0};
+  LockFreeQueue<Report, QUEUE_SIZE> reports_{};
+  EventPool<Report, QUEUE_SIZE - 1> report_pool_{};
   RawHIDDriver *raw_driver_{nullptr};
-
 #ifdef USE_TEXT_SENSOR
-  text_sensor::TextSensor *keyboard_sensor_{nullptr};
   text_sensor::TextSensor *device_name_sensor_{nullptr};
-#endif
-#ifdef USE_BINARY_SENSOR
-  std::map<uint8_t, binary_sensor::BinarySensor *> keyboard_key_sensors_;
-  binary_sensor::BinarySensor *mouse_left_sensor_{nullptr};
-  binary_sensor::BinarySensor *mouse_right_sensor_{nullptr};
-  binary_sensor::BinarySensor *mouse_middle_sensor_{nullptr};
-#endif
-#ifdef USE_SENSOR
-  sensor::Sensor *mouse_x_sensor_{nullptr};
-  sensor::Sensor *mouse_y_sensor_{nullptr};
-  sensor::Sensor *mouse_wheel_sensor_{nullptr};
 #endif
 };
 
-}  // namespace usb_hid
-}  // namespace esphome
+}  // namespace esphome::usb_hid
 
-// After the declarations above, so the driver can derive from HIDDeviceDriver. Only built in
-// where a raw section in the configuration asked for it. See driver_registry.h for why it
-// sits next to this header rather than under devices/.
 #ifdef USB_HID_ENABLE_RAW
 #include "raw_driver.h"
 #endif
 
-#endif  // USE_ESP32_VARIANT_*
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

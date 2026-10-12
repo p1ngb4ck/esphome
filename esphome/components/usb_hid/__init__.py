@@ -1,13 +1,18 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, text_sensor
-from esphome.components.usb_host import USBClient
+from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
+from esphome.components.usb_host import (
+    USBClient,
+    require_bulk_transfers,
+    require_control_transfers,
+)
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["usb_host"]
+AUTO_LOAD = ["usb_host", "hid"]
 # One instance per device: a keyboard and the HID interface of a sound card are two
 # separate clients, each attached to its own device by vid and pid.
 MULTI_CONF = True
@@ -18,11 +23,6 @@ SUPPORTED_VARIANTS = [
     esp32.const.VARIANT_ESP32P4,
 ]
 
-CONF_USB_HID_ID = "usb_hid_id"
-CONF_KEYBOARD = "keyboard"
-CONF_MOUSE = "mouse"
-CONF_GAMEPAD = "gamepad"
-CONF_LAYOUT = "layout"
 CONF_DEVICE_NAME = "device_name"
 
 CONF_VID = "vid"
@@ -38,7 +38,7 @@ CONF_ON_SHORT_PRESS = "on_short_press"
 CONF_ON_LONG_PRESS = "on_long_press"
 
 usb_hid_ns = cg.esphome_ns.namespace("usb_hid")
-USBHIDClient = usb_hid_ns.class_("USBHIDClient", USBClient, cg.Component)
+USBHIDClient = usb_hid_ns.class_("USBHIDClient", USBClient, HIDInput, cg.Component)
 RawHIDDriver = usb_hid_ns.class_("RawHIDDriver")
 HIDRawButton = usb_hid_ns.struct("HIDRawButton")
 
@@ -93,24 +93,17 @@ RAW_SCHEMA = cv.Schema(
     }
 )
 
+# Keys, text, pointer and controls of any USB HID device: see hid.HID_INPUT_SCHEMA. Its
+# entities (keys as binary sensors or events, typed text) are the hid platforms, given this
+# instance's id as hid_id.
 CONFIG_SCHEMA = cv.All(
-    cv.COMPONENT_SCHEMA.extend(
+    cv.COMPONENT_SCHEMA.extend(HID_INPUT_SCHEMA).extend(
         {
             cv.GenerateID(): cv.declare_id(USBHIDClient),
-            # Which device this instance attaches to. 0 routes by class: any HID device.
-            # With a keyboard and a sound card both attached, give each instance the vid
-            # and pid of its own device.
+            # Without vid/pid any HID device; with them this one device. Several devices
+            # at once are several usb_hid entries.
             cv.Optional(CONF_VID, default=0x0000): cv.hex_uint16_t,
             cv.Optional(CONF_PID, default=0x0000): cv.hex_uint16_t,
-            cv.Optional(CONF_KEYBOARD): cv.Schema(
-                {
-                    cv.Optional(CONF_LAYOUT, default="us"): cv.one_of(
-                        "us", "uk", "de", "fr", "es", lower=True
-                    ),
-                }
-            ),
-            cv.Optional(CONF_MOUSE): cv.Schema({}),
-            cv.Optional(CONF_GAMEPAD): cv.Schema({}),
             cv.Optional(CONF_RAW): RAW_SCHEMA,
             cv.Optional(CONF_DEVICE_NAME): text_sensor.text_sensor_schema(),
         }
@@ -123,23 +116,7 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_VID], config[CONF_PID])
     await cg.register_component(var, config)
 
-    if CONF_KEYBOARD in config:
-        cg.add_build_flag("-DUSB_HID_ENABLE_KEYBOARD")
-        layout = config[CONF_KEYBOARD].get(CONF_LAYOUT, "us")
-        layout_map = {
-            "us": "KEYBOARD_LAYOUT_US",
-            "uk": "KEYBOARD_LAYOUT_UK",
-            "de": "KEYBOARD_LAYOUT_DE",
-            "fr": "KEYBOARD_LAYOUT_FR",
-            "es": "KEYBOARD_LAYOUT_ES",
-        }
-        cg.add_define(layout_map[layout])
-
-    if CONF_MOUSE in config:
-        cg.add_build_flag("-DUSB_HID_ENABLE_MOUSE")
-
-    if CONF_GAMEPAD in config:
-        cg.add_build_flag("-DUSB_HID_ENABLE_GAMEPAD")
+    await setup_hid_input(var, config)
 
     if (raw := config.get(CONF_RAW)) is not None:
         # Constructed here rather than fetched from the client. register_all_drivers() runs
@@ -178,5 +155,5 @@ async def to_code(config):
         cg.add(var.register_device_name_sensor(sens))
 
     # Interrupt transfers share the bulk transfer path in ESP-IDF
-    cg.add_define("USE_USB_BULK_TRANSFERS")
-    cg.add_define("USE_USB_CONTROL_TRANSFERS")
+    require_bulk_transfers()
+    require_control_transfers()

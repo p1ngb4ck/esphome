@@ -9,15 +9,10 @@
 #include <string>
 #include <vector>
 
-namespace esphome {
-namespace usb_hid {
+namespace esphome::usb_hid {
 
-// One button, identified by a bit in the interrupt IN report.
-//
-// Which byte and which bit that is comes from the configuration rather than from the report
-// descriptor. Parsing the descriptor properly means implementing the HID item parser, and
-// for a handful of buttons on one known device the byte and mask are quicker to read off the
-// log than to derive -- which is what log_reports is for.
+// One button, identified by a bit in the interrupt IN report, for a device whose report
+// descriptor says nothing useful about it. Turn on log_reports and read byte and mask off the log.
 //
 // Short and long are decided on release, not on press. While a button is held nothing is
 // known yet, so acting on the press would fire the short action first and the long one after
@@ -36,29 +31,17 @@ struct HIDRawButton {
   Trigger<> *on_long_press{nullptr};
 };
 
-// Handles any device the client has opened, because which device that is has already been
-// settled by the vid and pid on the client itself. Linux binds usbhid to every interface of
-// class 0x03 with no vendor filter at all and leaves the meaning of the reports to the
-// descriptor; this stops one step short of that and takes the meaning from the configuration.
-class RawHIDDriver : public HIDDeviceDriver {
+// Every report of the device, as it arrives, beside what its report descriptor makes of it.
+class RawHIDDriver {
  public:
   explicit RawHIDDriver(USBHIDClient *parent) : parent_(parent) {}
-
-  bool match_device(uint8_t /*protocol*/, uint16_t /*vid*/, uint16_t /*pid*/) override { return true; }
-  const char *get_name() override { return "Raw HID"; }
 
   void set_log_reports(bool log_reports) { this->log_reports_ = log_reports; }
   void set_long_press_time(uint32_t ms) { this->long_press_time_ = ms; }
   void set_on_report(Trigger<std::vector<uint8_t>> *trigger) { this->on_report_ = trigger; }
   void add_button(HIDRawButton *button) { this->buttons_.push_back(button); }
 
-  void process_report(const uint8_t *data, size_t len, HIDDevice * /*device*/) override {
-    // The media-interface marker is prepended by USBHIDClient::on_transfer_in_(); strip it so
-    // byte indices in the configuration count from the start of the report either way.
-    if (len >= 2 && data[0] == HID_MEDIA_REPORT_MARKER) {
-      data++;
-      len--;
-    }
+  void process_report(const uint8_t *data, size_t len) {
     if (len == 0)
       return;
 
@@ -96,8 +79,7 @@ class RawHIDDriver : public HIDDeviceDriver {
         continue;
       }
       const uint32_t held = now - button->pressed_at_ms;
-      Trigger<> *trigger =
-          held >= this->long_press_time_ ? button->on_long_press : button->on_short_press;
+      Trigger<> *trigger = held >= this->long_press_time_ ? button->on_long_press : button->on_short_press;
       ESP_LOGD("usb_hid", "button byte %u mask 0x%02X held %ums -> %s", button->byte_index, button->mask,
                static_cast<unsigned>(held), held >= this->long_press_time_ ? "long" : "short");
       if (trigger != nullptr)
@@ -114,5 +96,4 @@ class RawHIDDriver : public HIDDeviceDriver {
   std::vector<uint8_t> last_logged_;
 };
 
-}  // namespace usb_hid
-}  // namespace esphome
+}  // namespace esphome::usb_hid

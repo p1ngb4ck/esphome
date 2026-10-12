@@ -3,336 +3,402 @@
 #if defined(USE_ESP32_VARIANT_ESP32P4) || defined(USE_ESP32_VARIANT_ESP32S2) || defined(USE_ESP32_VARIANT_ESP32S3)
 
 #include "esphome/core/log.h"
-#include "driver_registry.h"
 
+#include <algorithm>
 #include <cstring>
-#include <map>
 
-namespace esphome {
-namespace usb_hid {
+namespace esphome::usb_hid {
 
 static const char *const TAG = "usb_hid";
 
-// ── Per-endpoint persistent transfer helper ──────────────────────────────────
-// Submits a new transfer_in and, in the callback, dispatches + resubmits.
-// Using a plain member function avoids unbounded lambda nesting.
-
-void USBHIDClient::start_in_transfer_(HIDDevice *dev, uint8_t ep, uint16_t mps, bool media) {
-  this->transfer_in(
-      ep,
-      [this, dev, ep, mps, media](const usb_host::TransferStatus &ts) {
-        if (ts.success && ts.data_len > 0)
-          this->on_transfer_in_(ep, ts.data, ts.data_len, media);
-        // Resubmit while the device is still active
-        if (dev->active && (media ? dev->media_active : true))
-          this->start_in_transfer_(dev, ep, mps, media);
-      },
-      mps);
-}
+static constexpr uint8_t USB_DESC_HID = 0x21;
+static constexpr uint8_t USB_DESC_HID_REPORT = 0x22;
+static constexpr uint8_t USB_REQ_GET_DESCRIPTOR = 0x06;
+static constexpr uint8_t REQ_TYPE_STD_INTERFACE_IN = 0x81;
+// Xbox 360 pads: vendor class, subclass 0x5D; protocol 0x01 wired, 0x81 on the wireless receiver.
+static constexpr uint8_t XBOX_SUBCLASS = 0x5D;
+static constexpr uint8_t XBOX_PROTOCOL_WIRED = 0x01;
+static constexpr uint8_t XBOX_PROTOCOL_WIRELESS = 0x81;
 
 void USBHIDClient::setup() {
   this->add_class_match(USB_CLASS_HID);
-  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRED, 0xFF);
-  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRELESS, 0xFF);
-  this->add_vendor_match(BITDO_VID, 0, 0xFF);
-  register_all_drivers(this);
-  ESP_LOGI(TAG, "Registered %zu device drivers", this->drivers_.size());
+  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRED, 0xFF, XBOX_SUBCLASS);
+  this->add_vendor_match(XBOX360_VID, XBOX360_PID_WIRELESS, 0xFF, XBOX_SUBCLASS);
+  this->add_vendor_match(BITDO_VID, BITDO_PID_XBOX, 0xFF, XBOX_SUBCLASS);
   usb_host::USBClient::setup();
 }
 
+void USBHIDClient::dump_config() {
+  usb_host::USBClient::dump_config();
+  ESP_LOGCONFIG(TAG, "  Num Lock at start: %s", YESNO((this->leds_ & hid::LED_NUM_LOCK) != 0));
+}
+
 void USBHIDClient::loop() {
+  Report *report;
+  while ((report = this->reports_.pop()) != nullptr) {
+    if (report->interface < this->interfaces_.size())
+      this->report_(this->interfaces_[report->interface], report->data, report->length);
+    this->report_pool_.release(report);
+  }
   usb_host::USBClient::loop();
 }
 
-#ifdef USE_BINARY_SENSOR
-void USBHIDClient::register_keyboard_key_sensor(binary_sensor::BinarySensor *sensor, uint8_t keycode) {
-  this->keyboard_key_sensors_[keycode] = sensor;
-}
-#endif
-
-// ── on_connected ────────────────────────────────────────────────────────────
+// -- Connection ----------------------------------------------------------------------------
 
 void USBHIDClient::on_connected() {
-  if (!this->parse_hid_interface_()) {
-    ESP_LOGD(TAG, "Not a HID device or no usable interface, closing");
+  this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  this->interfaces_.clear();
+  if (!this->find_interfaces_()) {
+    ESP_LOGW(TAG, "No usable HID interface on this device");
     this->disconnect();
-  }
-}
-
-// ── parse_hid_interface_ ─────────────────────────────────────────────────────
-
-bool USBHIDClient::parse_hid_interface_() {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
-  const usb_device_desc_t *dev_desc = this->get_device_desc_();
-  if (!cfg || !dev_desc)
-    return false;
-
-  uint16_t vid = dev_desc->idVendor;
-  uint16_t pid = dev_desc->idProduct;
-
-  bool is_xbox360 = (vid == XBOX360_VID && (pid == XBOX360_PID_WIRED || pid == XBOX360_PID_WIRELESS)) ||
-                    (vid == BITDO_VID && pid == BITDO_PID_XBOX);
-  bool is_8bitdo = (vid == BITDO_VID && pid != BITDO_PID_XBOX);
-
-  ESP_LOGI(TAG, "USB device VID:PID = %04X:%04X DevClass=0x%02X", vid, pid, dev_desc->bDeviceClass);
-
-  // bDeviceClass is deliberately not a precondition. A composite device declares its classes
-  // per interface and puts 0x00 or, with an Interface Association Descriptor, 0xEF in the
-  // device descriptor -- a sound card with front-panel buttons is exactly that. Gating on the
-  // device descriptor contradicted the interface search below, which is the one that decides,
-  // and turned away devices whose HID interface is right there in the configuration.
-
-  const usb_intf_desc_t *hid_intf = nullptr;
-  const usb_ep_desc_t *in_ep_desc = nullptr;
-  const usb_ep_desc_t *out_ep_desc = nullptr;
-  uint8_t out_ep = 0;
-  int offset = 0;
-
-  // Find a usable interface.
-  //
-  // Linux binds usbhid to every interface of class 0x03 and looks at nothing else --
-  // hid_usb_ids[] carries USB_DEVICE_ID_MATCH_INT_CLASS and no interface number -- and only
-  // then reads bInterfaceNumber to address its control requests. Restricting the search to
-  // interface 0 kept this from ever seeing the HID interface of a composite device such as a
-  // sound card, where interface 0 is AudioControl and the buttons sit further down.
-  //
-  // The vendor-class exception stays on interface 0: those devices are not HID at all and
-  // are recognised by their vid and pid, so widening the search would only make an unrelated
-  // vendor interface look like one of them.
-  while (offset < cfg->wTotalLength) {
-    const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(
-        reinterpret_cast<const uint8_t *>(cfg) + offset);
-
-    if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
-      const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
-      bool cls_ok = intf->bInterfaceClass == USB_CLASS_HID ||
-                    ((is_xbox360 || is_8bitdo) && intf->bInterfaceClass == 0xFF &&
-                     intf->bInterfaceNumber == 0);
-      if (cls_ok && hid_intf == nullptr)
-        hid_intf = intf;
-    }
-    offset += desc->bLength;
-  }
-
-  if (!hid_intf) {
-    ESP_LOGW(TAG, "No HID or vendor interface on this device");
-    return false;
-  }
-
-  // Scan endpoints for this interface
-  offset = reinterpret_cast<const uint8_t *>(hid_intf) - reinterpret_cast<const uint8_t *>(cfg) +
-           hid_intf->bLength;
-  while (offset < cfg->wTotalLength) {
-    const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(
-        reinterpret_cast<const uint8_t *>(cfg) + offset);
-
-    if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE)
-      break;
-
-    if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT) {
-      const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
-      if ((ep->bmAttributes & EP_TYPE_MASK) == EP_TYPE_INTERRUPT) {
-        if (ep->bEndpointAddress & EP_DIR_IN) {
-          in_ep_desc = ep;
-          ESP_LOGI(TAG, "INT IN ep 0x%02X mps=%d", ep->bEndpointAddress, ep->wMaxPacketSize);
-        } else {
-          out_ep_desc = ep;
-          out_ep = ep->bEndpointAddress;
-          ESP_LOGI(TAG, "INT OUT ep 0x%02X", ep->bEndpointAddress);
-        }
-      }
-    }
-    offset += desc->bLength;
-  }
-
-  if (!in_ep_desc) {
-    ESP_LOGW(TAG, "No interrupt IN endpoint found");
-    return false;
-  }
-
-  // bInterval 0 is not a legal value for an interrupt endpoint, and the pipe the host
-  // allocates on claim is built from these descriptors, so a device that declares it has to
-  // be corrected before the claim. The buffer belongs to the host library and every client
-  // attached to this device reads the same one -- usb_audio among them on a sound card --
-  // so the correction is applied here, to the two endpoints this client is about to take,
-  // rather than to every interrupt endpoint the scan walked past. A device rejected above is
-  // handed back untouched.
-  for (const usb_ep_desc_t *ep : {in_ep_desc, out_ep_desc}) {
-    if (ep != nullptr && ep->bInterval == 0) {
-      ESP_LOGW(TAG, "Endpoint 0x%02X declares bInterval 0; using 1", ep->bEndpointAddress);
-      const_cast<usb_ep_desc_t *>(ep)->bInterval = 1;
-    }
-  }
-
-  if (!this->claim_interface(hid_intf->bInterfaceNumber)) {
-    ESP_LOGE(TAG, "Failed to claim HID interface %d", hid_intf->bInterfaceNumber);
-    return false;
-  }
-
-  HIDDevice *d = &this->device_;
-  d->dev_hdl = this->device_handle_;
-  d->dev_addr = static_cast<uint8_t>(this->device_addr_);
-  d->vid = vid;
-  d->pid = pid;
-  d->protocol = hid_intf->bInterfaceProtocol;
-  d->interface_num = hid_intf->bInterfaceNumber;
-  d->in_ep = in_ep_desc->bEndpointAddress;
-  d->out_ep = out_ep;
-  d->active = true;
-
-  // Match driver
-  for (auto *drv : this->drivers_) {
-    if (drv->match_device(d->protocol, d->vid, d->pid)) {
-      d->driver = drv;
-      ESP_LOGI(TAG, "Matched to driver: %s", drv->get_name());
-      break;
-    }
-  }
-  if (!d->driver && this->raw_driver_ != nullptr) {
-    d->driver = this->raw_driver_;
-    ESP_LOGI(TAG, "Matched to driver: %s", this->raw_driver_->get_name());
-  }
-  if (!d->driver)
-    ESP_LOGW(TAG, "No driver for protocol=%d VID=%04X PID=%04X", d->protocol, d->vid, d->pid);
-
-  this->start_in_transfer_(d, d->in_ep, in_ep_desc->wMaxPacketSize, false);
-
-  ESP_LOGI(TAG, "HID device ready on interface %d (protocol %d)", d->interface_num, d->protocol);
-
-  if (d->protocol == HID_PROTO_KEYBOARD && !is_xbox360)
-    this->setup_media_interface_(d);
-
-#ifdef USE_TEXT_SENSOR
-  if (this->device_name_sensor_ != nullptr)
-    this->device_name_sensor_->publish_state(d->driver != nullptr ? d->driver->get_name() : "Unknown");
-#endif
-
-  return true;
-}
-
-// ── setup_media_interface_ ───────────────────────────────────────────────────
-
-bool USBHIDClient::setup_media_interface_(HIDDevice *dev) {
-  const usb_config_desc_t *cfg = this->get_config_desc_();
-  if (!cfg)
-    return false;
-
-  // The second HID interface of a keyboard, the one that carries the media keys. Found by
-  // the same rule as the first -- any interface of class 0x03 -- rather than by assuming it
-  // is number 1: that only holds for a plain keyboard, and the main search stopped assuming
-  // it when it was widened to composite devices.
-  const usb_intf_desc_t *media_intf = nullptr;
-  const usb_ep_desc_t *media_ep = nullptr;
-  int offset = 0;
-
-  while (offset < cfg->wTotalLength) {
-    const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(
-        reinterpret_cast<const uint8_t *>(cfg) + offset);
-
-    if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
-      const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
-      if (media_intf != nullptr)
-        break;  // Endpoints of the interface after it are not ours.
-      if (intf->bInterfaceClass == USB_CLASS_HID && intf->bInterfaceNumber != dev->interface_num)
-        media_intf = intf;
-    } else if (desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT && media_intf) {
-      const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
-      if ((ep->bEndpointAddress & EP_DIR_IN) && (ep->bmAttributes & EP_TYPE_MASK) == EP_TYPE_INTERRUPT) {
-        media_ep = ep;
-        break;
-      }
-    }
-    offset += desc->bLength;
-  }
-
-  if (!media_intf || !media_ep) {
-    ESP_LOGD(TAG, "No media interface found");
-    return false;
-  }
-
-  if (!this->claim_interface(media_intf->bInterfaceNumber)) {
-    ESP_LOGW(TAG, "Failed to claim media interface %d", media_intf->bInterfaceNumber);
-    return false;
-  }
-
-  dev->media_in_ep = media_ep->bEndpointAddress;
-  dev->media_active = true;
-
-  this->start_in_transfer_(dev, dev->media_in_ep, media_ep->wMaxPacketSize, true);
-  ESP_LOGI(TAG, "Media interface %d ready on ep 0x%02X", media_intf->bInterfaceNumber, dev->media_in_ep);
-  return true;
-}
-
-// ── on_transfer_in_ ──────────────────────────────────────────────────────────
-
-void USBHIDClient::on_transfer_in_(uint8_t ep, const uint8_t *data, size_t len, bool media) {
-  // Both endpoints belong to the one device this client serves, so which of them a report
-  // arrived on says nothing that the media flag does not already say.
-  (void) ep;
-  HIDDevice *dev = &this->device_;
-  if (!dev->active || dev->driver == nullptr)
     return;
-
-  if (media) {
-    uint8_t buf[65];
-    buf[0] = HID_MEDIA_REPORT_MARKER;
-    size_t copy = (len > 64) ? 64 : len;
-    memcpy(&buf[1], data, copy);
-    dev->driver->process_report(buf, copy + 1, dev);
-  } else {
-    dev->driver->process_report(data, len, dev);
   }
+  for (auto &intf : this->interfaces_) {
+    if (!this->claim_interface(intf.number, 0)) {
+      ESP_LOGE(TAG, "Claiming interface %u failed", intf.number);
+      intf.in_ep = 0;
+    }
+  }
+  this->fetch_descriptor_(0);
 }
-
-// ── on_disconnected ───────────────────────────────────────────────────────────
 
 void USBHIDClient::on_disconnected() {
-  this->device_ = HIDDevice{};
-
+  this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  for (auto &intf : this->interfaces_) {
+    if (intf.in_ep != 0)
+      this->release_interface(intf.number);
+  }
+  this->interfaces_.clear();
+  this->release_all_hid();
 #ifdef USE_TEXT_SENSOR
-  if (this->device_name_sensor_)
-    this->device_name_sensor_->publish_state("None");
+  if (this->device_name_sensor_ != nullptr)
+    this->device_name_sensor_->publish_state("");
 #endif
-
   usb_host::USBClient::on_disconnected();
 }
 
-// ── LED / output helpers ─────────────────────────────────────────────────────
-
-void USBHIDClient::update_keyboard_leds(HIDDevice *device, uint8_t led_state) {
-  if (!device || !device->dev_hdl)
-    return;
-  std::vector<uint8_t> payload{led_state};
-  this->control_transfer(
-      HID_REQ_TYPE_HOST_TO_DEV,
-      HID_REQ_SET_REPORT,
-      static_cast<uint16_t>((HID_REPORT_TYPE_OUTPUT << 8) | 0),
-      static_cast<uint16_t>(device->interface_num),
-      [](const usb_host::TransferStatus &) {},
-      payload);
+bool USBHIDClient::find_interfaces_() {
+  const usb_config_desc_t *cfg = this->get_config_desc_();
+  if (cfg == nullptr)
+    return false;
+  Interface *current = nullptr;
+  int offset = 0;
+  const auto *desc = reinterpret_cast<const usb_standard_desc_t *>(cfg);
+  while ((desc = usb_parse_next_descriptor(desc, cfg->wTotalLength, &offset)) != nullptr) {
+    if (desc->bDescriptorType == USB_W_VALUE_DT_INTERFACE) {
+      const auto *intf = reinterpret_cast<const usb_intf_desc_t *>(desc);
+      current = nullptr;
+      if (intf->bAlternateSetting != 0 || !this->interface_routed_(intf->bInterfaceNumber) ||
+          this->interfaces_.size() >= MAX_INTERFACES)
+        continue;
+      const bool xbox =
+          intf->bInterfaceClass == 0xFF && intf->bInterfaceSubClass == XBOX_SUBCLASS &&
+          (intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRED || intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRELESS);
+      if (intf->bInterfaceClass != USB_CLASS_HID && !xbox)
+        continue;
+      // The wireless receiver has a data and a headset interface per pad: the first pad only.
+      if (xbox && !this->interfaces_.empty())
+        continue;
+      Interface entry;
+      entry.number = intf->bInterfaceNumber;
+      entry.xbox = xbox;
+      entry.xbox_wireless = xbox && intf->bInterfaceProtocol == XBOX_PROTOCOL_WIRELESS;
+      this->interfaces_.push_back(std::move(entry));
+      current = &this->interfaces_.back();
+      continue;
+    }
+    if (current == nullptr)
+      continue;
+    if (desc->bDescriptorType == USB_DESC_HID && desc->bLength >= 9) {
+      // bcdHID, bCountryCode, bNumDescriptors, then (type, length) pairs.
+      const auto *hid = reinterpret_cast<const uint8_t *>(desc);
+      for (uint8_t i = 0; i < hid[5] && 6u + 3u * i + 2u < desc->bLength; i++) {
+        if (hid[6 + 3 * i] == USB_DESC_HID_REPORT) {
+          current->descriptor_length = static_cast<uint16_t>(hid[7 + 3 * i] | (hid[8 + 3 * i] << 8));
+          break;
+        }
+      }
+      continue;
+    }
+    if (desc->bDescriptorType != USB_W_VALUE_DT_ENDPOINT)
+      continue;
+    const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(desc);
+    if (USB_EP_DESC_GET_XFERTYPE(ep) != USB_BM_ATTRIBUTES_XFER_INT)
+      continue;
+    // bInterval 0 is not legal for an interrupt endpoint and the pipe is built from it.
+    if (ep->bInterval == 0) {
+      ESP_LOGW(TAG, "Endpoint 0x%02X declares bInterval 0; using 1", ep->bEndpointAddress);
+      const_cast<usb_ep_desc_t *>(ep)->bInterval = 1;
+    }
+    if (USB_EP_DESC_GET_EP_DIR(ep)) {
+      if (current->in_ep == 0) {
+        current->in_ep = ep->bEndpointAddress;
+        current->in_mps = USB_EP_DESC_GET_MPS(ep);
+      }
+    } else if (current->out_ep == 0) {
+      current->out_ep = ep->bEndpointAddress;
+    }
+  }
+  return !this->interfaces_.empty();
 }
 
-void USBHIDClient::send_output_report(HIDDevice *device, const uint8_t *data, size_t len) {
-  if (!device || !device->dev_hdl || len == 0)
+// -- Report descriptors (one at a time, each continued from the last one's completion) -----
+
+struct DescriptorRequest {
+  USBHIDClient *client;
+  size_t index;
+  uint32_t generation;
+};
+
+void USBHIDClient::fetch_descriptor_(size_t index) {
+  while (index < this->interfaces_.size() &&
+         (this->interfaces_[index].xbox || this->interfaces_[index].descriptor_length == 0 ||
+          this->interfaces_[index].in_ep == 0))
+    index++;
+  if (index >= this->interfaces_.size()) {
+    this->start_reading_();
     return;
-  if (device->out_ep != 0) {
-    this->transfer_out(
-        device->out_ep,
-        [](const usb_host::TransferStatus &) {},
-        data, static_cast<uint16_t>(len));
-  } else {
-    std::vector<uint8_t> payload(data, data + len);
-    this->control_transfer(
-        HID_REQ_TYPE_HOST_TO_DEV,
-        HID_REQ_SET_REPORT,
-        static_cast<uint16_t>((HID_REPORT_TYPE_OUTPUT << 8) | 0),
-        static_cast<uint16_t>(device->interface_num),
-        [](const usb_host::TransferStatus &) {},
-        payload);
+  }
+  const Interface &intf = this->interfaces_[index];
+  // A control read of the whole descriptor, which can be larger than the client's transfer
+  // buffers: its own transfer, sized for it and whole packets of the control endpoint.
+  const uint16_t mps0 = this->get_device_desc_()->bMaxPacketSize0;
+  const size_t data = (intf.descriptor_length + mps0 - 1) / mps0 * mps0;
+  usb_transfer_t *xfer = nullptr;
+  if (usb_host_transfer_alloc(usb_host::SETUP_PACKET_SIZE + data, 0, &xfer) != ESP_OK) {
+    ESP_LOGE(TAG, "No buffer for the report descriptor of interface %u", intf.number);
+    this->fetch_descriptor_(index + 1);
+    return;
+  }
+  auto *setup = reinterpret_cast<usb_setup_packet_t *>(xfer->data_buffer);
+  setup->bmRequestType = REQ_TYPE_STD_INTERFACE_IN;
+  setup->bRequest = USB_REQ_GET_DESCRIPTOR;
+  setup->wValue = USB_DESC_HID_REPORT << 8;
+  setup->wIndex = intf.number;
+  setup->wLength = intf.descriptor_length;
+  xfer->num_bytes = static_cast<int>(usb_host::SETUP_PACKET_SIZE + data);
+  xfer->device_handle = this->device_handle_;
+  xfer->bEndpointAddress = 0;
+  xfer->context = new DescriptorRequest{this, index, this->generation_.load(std::memory_order_acquire)};
+  // USB task.
+  xfer->callback = [](usb_transfer_t *t) {
+    auto *req = static_cast<DescriptorRequest *>(t->context);
+    std::vector<uint8_t> copy;
+    if (t->status == USB_TRANSFER_STATUS_COMPLETED &&
+        t->actual_num_bytes > static_cast<int>(usb_host::SETUP_PACKET_SIZE))
+      copy.assign(t->data_buffer + usb_host::SETUP_PACKET_SIZE, t->data_buffer + t->actual_num_bytes);
+    usb_host_transfer_free(t);
+    USBHIDClient *client = req->client;
+    const size_t index = req->index;
+    const uint32_t generation = req->generation;
+    delete req;
+    client->defer([client, index, generation, copy = std::move(copy)]() {
+      if (generation == client->generation_.load(std::memory_order_acquire))
+        client->descriptor_done_(index, copy.data(), copy.size());
+    });
+  };
+  if (usb_host_transfer_submit_control(this->handle_, xfer) != ESP_OK) {
+    delete static_cast<DescriptorRequest *>(xfer->context);
+    usb_host_transfer_free(xfer);
+    ESP_LOGE(TAG, "Report descriptor request of interface %u not submitted", intf.number);
+    this->fetch_descriptor_(index + 1);
   }
 }
 
-}  // namespace usb_hid
-}  // namespace esphome
+void USBHIDClient::descriptor_done_(size_t index, const uint8_t *data, size_t length) {
+  Interface &intf = this->interfaces_[index];
+  if (length == 0) {
+    ESP_LOGW(TAG, "Interface %u: no report descriptor", intf.number);
+  } else {
+    intf.map.reset(hid::HIDReportMap::parse_report_map_data(data, length));
+    if (intf.map == nullptr) {
+      ESP_LOGW(TAG, "Interface %u: report descriptor (%u bytes) not understood", intf.number,
+               static_cast<unsigned>(length));
+    } else {
+      ESP_LOGD(TAG, "Interface %u: %u input reports, %u fields", intf.number,
+               static_cast<unsigned>(intf.map->reports().size()), static_cast<unsigned>(intf.map->fields().size()));
+    }
+  }
+  this->fetch_descriptor_(index + 1);
+}
 
-#endif  // USE_ESP32_VARIANT_*
+void USBHIDClient::start_reading_() {
+  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < this->interfaces_.size(); i++) {
+    if (this->interfaces_[i].in_ep != 0)
+      this->read_(i, generation);
+  }
+  ESP_LOGI(TAG, "HID device ready (%u interfaces)", static_cast<unsigned>(this->interfaces_.size()));
+  this->write_leds_(this->leds_);
+#ifdef USE_TEXT_SENSOR
+  if (this->device_name_sensor_ != nullptr) {
+    usb_host::UsbDeviceInfo info;
+    this->report_connected_();
+    if (this->get_device_info(info))
+      this->device_name_sensor_->publish_state(info.product);
+    return;
+  }
+#endif
+  this->report_connected_();
+}
+
+// USB task (and the main loop for the first read).
+void USBHIDClient::read_(size_t index, uint32_t generation) {
+  const Interface &intf = this->interfaces_[index];
+  const bool submitted = this->transfer_in(
+      intf.in_ep,
+      [this, index, generation](const usb_host::TransferStatus &status) {
+        if (generation != this->generation_.load(std::memory_order_acquire))
+          return;
+        if (!status.success) {
+          ESP_LOGW(TAG, "Interface %u stopped (status %u)", this->interfaces_[index].number, status.error_code);
+          return;
+        }
+        if (status.data_len > 0) {
+          Report *report = this->report_pool_.allocate();
+          if (report != nullptr) {
+            report->interface = static_cast<uint8_t>(index);
+            report->length = static_cast<uint8_t>(std::min(status.data_len, REPORT_MAX));
+            memcpy(report->data, status.data, report->length);
+            this->reports_.push(report);
+            this->enable_loop_soon_any_context();
+          }
+        }
+        this->read_(index, generation);
+      },
+      intf.in_mps);
+  if (!submitted)
+    ESP_LOGE(TAG, "Read on interface %u not submitted", intf.number);
+}
+
+// -- Reports (main loop) -------------------------------------------------------------------
+
+void USBHIDClient::report_(Interface &intf, const uint8_t *data, size_t length) {
+#ifdef USB_HID_ENABLE_RAW
+  if (this->raw_driver_ != nullptr)
+    this->raw_driver_->process_report(data, length);
+#endif
+  if (intf.xbox) {
+    this->xbox360_(intf, data, length);
+    return;
+  }
+  if (intf.map == nullptr || length == 0)
+    return;
+  hid::HIDReportSource source;
+  source.characteristic_handle = intf.number;
+  if (intf.map->uses_report_ids()) {
+    source.has_report_id = true;
+    source.report_id = data[0];
+    data++;
+    length--;
+  }
+  this->process_hid_values(intf.map->parse(source, data, length));
+}
+
+// Linux xpad.c, xpad360_process_packet() and xpad360w_process_packet().
+void USBHIDClient::xbox360_(Interface &intf, const uint8_t *data, size_t length) {
+  if (intf.xbox_wireless) {
+    if (length < 4 + 14 || data[1] != 0x01)
+      return;
+    data += 4;
+    length -= 4;
+  }
+  if (length < 14 || data[0] != 0x00)
+    return;
+  const hid::HIDUsage gamepad(0x05, hid::PAGE_GENERIC_DESKTOP);
+  std::vector<hid::HIDReportItemValue> values;
+  auto add = [&](uint16_t page, uint16_t usage, int64_t value) {
+    hid::HIDReportItemValue v(hid::HIDUsage(usage, page), value, value);
+    v.application_usage = gamepad;
+    values.push_back(v);
+  };
+  // Buttons: (byte, bit, page, usage). D-pad as the Generic Desktop D-pad usages.
+  static constexpr struct {
+    uint8_t byte, bit;
+    uint16_t page, usage;
+  } BUTTONS[] = {
+      {2, 0, hid::PAGE_GENERIC_DESKTOP, 0x90},
+      {2, 1, hid::PAGE_GENERIC_DESKTOP, 0x91},
+      {2, 2, hid::PAGE_GENERIC_DESKTOP, 0x93},
+      {2, 3, hid::PAGE_GENERIC_DESKTOP, 0x92},
+      {2, 4, hid::PAGE_BUTTON, 8},   // Start
+      {2, 5, hid::PAGE_BUTTON, 7},   // Back
+      {2, 6, hid::PAGE_BUTTON, 9},   // left stick
+      {2, 7, hid::PAGE_BUTTON, 10},  // right stick
+      {3, 0, hid::PAGE_BUTTON, 5},   // LB
+      {3, 1, hid::PAGE_BUTTON, 6},   // RB
+      {3, 2, hid::PAGE_BUTTON, 11},  // Guide
+      {3, 4, hid::PAGE_BUTTON, 1},   // A
+      {3, 5, hid::PAGE_BUTTON, 2},   // B
+      {3, 6, hid::PAGE_BUTTON, 3},   // X
+      {3, 7, hid::PAGE_BUTTON, 4},   // Y
+  };
+  for (const auto &b : BUTTONS) {
+    const bool now = (data[b.byte] >> b.bit) & 1;
+    if (now != ((intf.xbox_last[b.byte] >> b.bit) & 1))
+      add(b.page, b.usage, now ? 1 : 0);
+  }
+  auto s16 = [](const uint8_t *p) { return static_cast<int16_t>(p[0] | (p[1] << 8)); };
+  static constexpr struct {
+    uint8_t offset;
+    uint16_t usage;
+    bool invert;
+  } STICKS[] = {{6, 0x30, false}, {8, 0x31, true}, {10, 0x33, false}, {12, 0x34, true}};
+  for (const auto &s : STICKS) {
+    if (s16(data + s.offset) != s16(intf.xbox_last + s.offset)) {
+      const int16_t v = s16(data + s.offset);
+      add(hid::PAGE_GENERIC_DESKTOP, s.usage, s.invert ? ~v : v);
+    }
+  }
+  if (data[4] != intf.xbox_last[4])
+    add(hid::PAGE_GENERIC_DESKTOP, 0x32, data[4]);  // left trigger
+  if (data[5] != intf.xbox_last[5])
+    add(hid::PAGE_GENERIC_DESKTOP, 0x35, data[5]);  // right trigger
+  memcpy(intf.xbox_last, data, sizeof(intf.xbox_last));
+  if (!values.empty())
+    this->process_hid_values(values);
+}
+
+// -- Lock LEDs -----------------------------------------------------------------------------
+
+void USBHIDClient::write_leds_(uint8_t leds) {
+  for (auto &intf : this->interfaces_) {
+    if (intf.map == nullptr)
+      continue;
+    for (const auto &report : intf.map->reports()) {
+      if (report.kind != hid::HIDReportKind::OUTPUT)
+        continue;
+      std::vector<uint8_t> payload(report.byte_size(), 0);
+      bool has_led = false;
+      for (const uint16_t id : report.field_ids) {
+        const hid::HIDFieldSchema *field = intf.map->find_field(id);
+        if (field == nullptr || field->is_constant() || !field->is_variable() || field->report_size != 1)
+          continue;
+        for (uint32_t i = 0; i < field->report_count; i++) {
+          const hid::HIDUsage usage = field->usage_at(i, true);
+          if (usage.page != hid::PAGE_LED || usage.usage < 1 || usage.usage > 3)
+            continue;
+          has_led = true;
+          if ((leds & (1u << (usage.usage - 1))) == 0)
+            continue;
+          const uint32_t bit = field->bit_offset + i;
+          if (bit / 8 < payload.size())
+            payload[bit / 8] |= 1u << (bit % 8);
+        }
+      }
+      if (!has_led)
+        continue;
+      if (intf.map->uses_report_ids())
+        payload.insert(payload.begin(), report.report_id);
+      this->control_transfer(
+          HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT,
+          static_cast<uint16_t>(HID_REPORT_TYPE_OUTPUT << 8 | report.report_id), intf.number,
+          [](const usb_host::TransferStatus &) {}, payload);
+      return;
+    }
+  }
+}
+
+}  // namespace esphome::usb_hid
+
+#endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

@@ -52,6 +52,3 @@ static constexpr uint8_t EP_DIR_MASK = 0x80;
 // Endpoint transfer type
 static constexpr uint8_t EP_TYPE_MASK = 0x03;
 static constexpr uint8_t EP_TYPE_INTERRUPT = 0x03;
-
-// Media interface marker byte (prepended to reports from media/secondary interface)
-static constexpr uint8_t HID_MEDIA_REPORT_MARKER = 0xFF;
