@@ -59,6 +59,8 @@ class BTPairing : public Component {
   bool forget_address(const uint8_t *address);
   void forget_all();
   void log_records() const;
+  /// Deletes Bluedroid's bond with the device, without touching the database.
+  static void delete_bond(const uint8_t *address, Transport transport);
 
   /// Called for every forgotten record, before its bond is deleted.
   template<typename F> void add_on_forget_callback(F &&callback) {

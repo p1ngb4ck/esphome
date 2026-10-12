@@ -541,33 +541,26 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
     ESP_LOGW(TAG, "A scan is running, pair once it has finished");
     return;
   }
-  bool forgotten = false;
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ != nullptr) {
-    if (!this->pairing_->is_loaded()) {
-      ESP_LOGW(TAG, "Pairing database not loaded yet");
-      return;
-    }
-    // The device paired so far is replaced; forgetting it also unplugs it if connected.
-    if (this->pairing_->find_slot(this->slot_) != nullptr) {
-      this->pairing_->forget_slot(this->slot_);
-      forgotten = true;
-    }
+  if (this->pairing_ != nullptr && !this->pairing_->is_loaded()) {
+    ESP_LOGW(TAG, "Pairing database not loaded yet");
+    return;
   }
 #endif
-  if (!forgotten && this->connected_)
-    esp_bt_hid_host_disconnect(this->bda_);
-  this->set_bda_(nullptr);
-  this->restored_ = true;
-  this->auto_connect_ = true;
-  this->candidate_name_.clear();
-  this->candidate_class_ = 0;
   const uint32_t units =
       std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
   if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
     ESP_LOGW(TAG, "Pairing scan failed to start: %s", esp_err_to_name(err));
     return;
   }
+  // The device paired so far stays stored until another one has paired.
+  if (this->connected_)
+    esp_bt_hid_host_disconnect(this->bda_);
+  this->set_bda_(nullptr);
+  this->restored_ = true;
+  this->auto_connect_ = true;
+  this->candidate_name_.clear();
+  this->candidate_class_ = 0;
   h.pairing = this;
   h.pairing_until = millis() + units * 1280 + CONNECT_TIMEOUT_MS;
   ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
@@ -577,8 +570,12 @@ void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   if (this->has_address())
     return;
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ != nullptr && this->pairing_->find_address(bda) != nullptr)
-    return;
+  // Another slot's device; this slot's own may pair again.
+  if (this->pairing_ != nullptr) {
+    const auto *record = this->pairing_->find_address(bda);
+    if (record != nullptr && record->slot != this->slot_)
+      return;
+  }
 #endif
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(bda, mac);
@@ -600,15 +597,30 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
     esp_bt_gap_cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
+#ifdef USE_BT_PAIRING
+  const bt_pairing::PairingRecord *previous =
+      this->pairing_ != nullptr ? this->pairing_->find_slot(this->slot_) : nullptr;
+#endif
   if (!success) {
     ESP_LOGW(TAG, "Pairing failed: %s", reason);
-    if (!this->connected_)
-      this->set_bda_(nullptr);
+    if (this->connected_)
+      esp_bt_hid_host_disconnect(this->bda_);
+#ifdef USE_BT_PAIRING
+    // A bond the failed attempt may have left goes; the device paired before comes back.
+    if (this->has_address() && (previous == nullptr || memcmp(previous->address, this->bda_, ESP_BD_ADDR_LEN) != 0))
+      bt_pairing::BTPairing::delete_bond(this->bda_, bt_pairing::Transport::CLASSIC);
+    this->set_bda_(previous != nullptr ? previous->address : nullptr);
+#else
+    this->set_bda_(nullptr);
+#endif
     return;
   }
   ESP_LOGI(TAG, "[%s] Paired with '%s'", mac, this->candidate_name_.c_str());
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
+    // The device it replaces loses its bond.
+    if (previous != nullptr && memcmp(previous->address, this->bda_, ESP_BD_ADDR_LEN) != 0)
+      bt_pairing::BTPairing::delete_bond(previous->address, bt_pairing::Transport::CLASSIC);
     bt_pairing::PairingRecord record{};
     memcpy(record.address, this->bda_, sizeof(record.address));
     record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);

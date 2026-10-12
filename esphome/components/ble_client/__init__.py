@@ -17,6 +17,7 @@ from esphome.const import (
     CONF_VALUE,
 )
 from esphome.core import ID
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 AUTO_LOAD = ["esp32_ble_client"]
@@ -159,6 +160,21 @@ CONFIG_SCHEMA = cv.All(
 )
 
 CONF_BLE_CLIENT_ID = "ble_client_id"
+
+
+def _final_validate(config):
+    if CONF_MAC_ADDRESS in config:
+        return
+    # Only a ble_client_hid slot sets the address at runtime.
+    for hid in fv.full_config.get().get("ble_client_hid") or []:
+        if str(hid.get(CONF_BLE_CLIENT_ID)) == str(config[CONF_ID]):
+            return
+    raise cv.Invalid(
+        f"{CONF_MAC_ADDRESS} is required unless a ble_client_hid pairs this client"
+    )
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 BLE_CLIENT_SCHEMA = cv.Schema(
     {

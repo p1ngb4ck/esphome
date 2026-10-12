@@ -269,6 +269,7 @@ class BLEClientHID : public Component,
   void request_rediscovery_();
   void restore_paired_();
   void end_pairing_(bool success, const char *reason);
+  void schedule_address_(uint64_t address, esp_ble_addr_type_t type, bool auto_connect);
 
   const GattCharacteristicInfo *find_characteristic_(uint16_t handle) const;
   const GattDescriptorInfo *find_descriptor_(const GattCharacteristicInfo &characteristic, uint16_t uuid) const;
@@ -338,7 +339,12 @@ class BLEClientHID : public Component,
   bool dynamic_{false};
   bool restored_{false};
   bool pairing_active_{false};
-  bool address_clear_pending_{false};
+  bool candidate_selected_{false};
+  uint64_t candidate_address_{0};
+  uint64_t pending_address_{0};
+  esp_ble_addr_type_t pending_address_type_{BLE_ADDR_TYPE_PUBLIC};
+  bool pending_address_valid_{false};
+  bool pending_auto_connect_{false};
 
   bool publish_to_ha_{true};
   uint32_t keepalive_interval_ms_{0};

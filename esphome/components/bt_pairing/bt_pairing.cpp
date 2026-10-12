@@ -25,6 +25,9 @@ static const char *const TAG = "bt_pairing";
 static constexpr uint32_t MAGIC = 0x44505442;  // "BTPD"
 static constexpr uint8_t VERSION = 1;
 static constexpr uint32_t RETRY_MS = 5000;
+// The preferences blob has room for the most max_devices allows, so changing max_devices
+// keeps the stored devices.
+static constexpr size_t PREFERENCE_RECORDS = 32;
 
 struct Header {
   uint32_t magic;
@@ -51,7 +54,7 @@ static const char *transport_str(uint8_t transport) {
 }
 
 void BTPairing::setup() {
-  this->pref_ = global_preferences->make_preference(sizeof(Header) + this->max_devices_ * sizeof(PairingRecord),
+  this->pref_ = global_preferences->make_preference(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord),
                                                     this->preference_key_);
 }
 
@@ -147,7 +150,7 @@ bool BTPairing::store(const PairingRecord &record) {
   format_mac_addr_upper(copy.address, mac);
   ESP_LOGI(TAG, "Stored %s %s '%s'", transport_str(copy.transport), mac, copy.name);
   this->dirty_ = true;
-  this->next_attempt_ms_ = 0;
+  this->next_attempt_ms_ = millis();
   this->enable_loop();
   return true;
 }
@@ -159,26 +162,34 @@ void BTPairing::forget_index_(size_t index) {
   format_mac_addr_upper(record.address, mac);
   ESP_LOGI(TAG, "Forgetting %s %s '%s'", transport_str(record.transport), mac, record.name);
   this->forget_callbacks_.call(record);
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
-  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) {
-    uint8_t bda[6];
-    memcpy(bda, record.address, sizeof(bda));
-    if (record.transport == static_cast<uint8_t>(Transport::LE)) {
-#ifdef CONFIG_BT_BLE_ENABLED
-      esp_ble_remove_bond_device(bda);
-#endif
-    } else {
-#ifdef CONFIG_BT_CLASSIC_ENABLED
-      esp_bt_gap_remove_bond_device(bda);
-#endif
-    }
-  } else {
-    ESP_LOGW(TAG, "Bluetooth is not running, the bond of %s stays", mac);
-  }
-#endif
+  delete_bond(record.address, static_cast<Transport>(record.transport));
   this->dirty_ = true;
-  this->next_attempt_ms_ = 0;
+  this->next_attempt_ms_ = millis();
   this->enable_loop();
+}
+
+void BTPairing::delete_bond(const uint8_t *address, Transport transport) {
+#ifdef CONFIG_BT_BLUEDROID_ENABLED
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(address, mac);
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    ESP_LOGW(TAG, "Bluetooth is not running, the bond of %s stays", mac);
+    return;
+  }
+  uint8_t bda[6];
+  memcpy(bda, address, sizeof(bda));
+  esp_err_t err = ESP_ERR_NOT_SUPPORTED;
+  if (transport == Transport::LE) {
+#ifdef CONFIG_BT_BLE_ENABLED
+    err = esp_ble_remove_bond_device(bda);
+#endif
+  } else {
+#ifdef CONFIG_BT_CLASSIC_ENABLED
+    err = esp_bt_gap_remove_bond_device(bda);
+#endif
+  }
+  ESP_LOGD(TAG, "Bond of %s deleted: %s", mac, esp_err_to_name(err));
+#endif
 }
 
 void BTPairing::forget_slot(uint32_t slot) {
@@ -232,7 +243,7 @@ void BTPairing::log_records() const {
 }
 
 std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {
-  const size_t count = fixed_size ? this->max_devices_ : this->records_.size();
+  const size_t count = fixed_size ? PREFERENCE_RECORDS : this->records_.size();
   std::vector<uint8_t> out(sizeof(Header) + count * sizeof(PairingRecord), 0);
   const size_t used = this->records_.size() * sizeof(PairingRecord);
   if (used != 0)
@@ -298,7 +309,7 @@ BTPairing::LoadResult BTPairing::load_() {
     return LoadResult::OK;
   }
 #endif
-  std::vector<uint8_t> data(sizeof(Header) + this->max_devices_ * sizeof(PairingRecord));
+  std::vector<uint8_t> data(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord));
   if (!this->pref_.load(data.data(), data.size()) || !this->decode_(data.data(), data.size()))
     return LoadResult::EMPTY;
   return LoadResult::OK;
