@@ -737,6 +737,10 @@ void SimpleVideoPlayer::playback_loop_() {
     const int payload = slot->size;
     if (payload == 0) {  // EOF sentinel
       xQueueSend(this->empty_queue_, &slot, 0);
+#ifdef SVP_STREAM
+      if (this->net_session_)
+        this->stream_played_to_end_.store(true, std::memory_order_release);
+#endif
       ESP_LOGI(TAG, "Playback finished");
       this->on_finished_callbacks_.call();
       break;

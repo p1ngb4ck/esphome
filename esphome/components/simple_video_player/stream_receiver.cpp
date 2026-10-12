@@ -245,6 +245,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
           if (sink != nullptr) {
             sink_seen = true;
           } else if (sink_seen || (st != PlayerState::PLAYING && st != PlayerState::PAUSED)) {
+            // 'E': how the AVI's playback ended -- 1 played to its end, 0 stopped on the panel.
+            const uint8_t message[2] = {'E',
+                                        static_cast<uint8_t>(this->stream_played_to_end_.load(std::memory_order_acquire))};
+            ::send(client, message, sizeof(message), MSG_DONTWAIT);
             break;
           }
           if (sender_done) {
@@ -290,6 +294,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
             if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
               break;
             this->net_session_ = true;
+            this->stream_played_to_end_.store(false, std::memory_order_release);
             this->start_playback_("network stream");
             this->stream_avi_.store(true, std::memory_order_release);
             this->stream_connected_.store(false, std::memory_order_release);

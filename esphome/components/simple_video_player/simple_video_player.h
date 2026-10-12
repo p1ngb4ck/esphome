@@ -592,6 +592,7 @@ class SimpleVideoPlayer : public Component
   // playback path, fed from the network task through stream_sink_.
   bool net_session_{false};                                // set before start_playback_()
   std::atomic<bool> stream_avi_{false};                    // an AVI connection is up
+  std::atomic<bool> stream_played_to_end_{false};          // the network AVI's playback reached its end
   std::atomic<BufferedFileReader *> stream_sink_{nullptr};  // open network source, or none
 #ifndef SVP_DSI_OUTPUT
   // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.
