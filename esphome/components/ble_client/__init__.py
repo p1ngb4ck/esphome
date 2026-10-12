@@ -109,7 +109,9 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(BLEClient),
-            cv.Required(CONF_MAC_ADDRESS): cv.mac_address,
+            # Optional for a client whose node sets the address at runtime
+            # (ble_client_hid paired slots); without one it never connects on its own.
+            cv.Optional(CONF_MAC_ADDRESS): cv.mac_address,
             cv.Optional(CONF_NAME): cv.string,
             cv.Optional(CONF_AUTO_CONNECT, default=True): cv.boolean,
             cv.Optional(CONF_ON_CONNECT): automation.validate_automation(
@@ -338,7 +340,8 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await esp32_ble_tracker.register_client(var, config)
-    cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
+    if CONF_MAC_ADDRESS in config:
+        cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

@@ -33,6 +33,10 @@
 #ifdef USE_API_HOMEASSISTANT_SERVICES
 #include "esphome/components/api/custom_api_device.h"
 #endif
+#ifdef USE_BT_PAIRING
+#include "esphome/components/bt_pairing/bt_pairing.h"
+#endif
+#include "esphome/core/automation.h"
 
 #include "ordered_event_buffer.h"
 #include "subscription_state.h"
@@ -156,6 +160,7 @@ struct SubscriptionInfo {
 
 class BLEClientHID : public Component,
                      public ble_client::BLEClientNode,
+                     public espbt::ESPBTDeviceListener,
 #ifdef USE_API_HOMEASSISTANT_SERVICES
                      public api::CustomAPIDevice,
 #endif
@@ -166,6 +171,23 @@ class BLEClientHID : public Component,
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }
+  void setup() override;
+#ifdef USE_ESP32_BLE_DEVICE
+  bool parse_device(const ble_device_base::ESPBTDevice &device) override;
+#endif
+
+  // A slot: the ble_client has no mac_address, pair() finds the device and bt_pairing keeps it.
+  void set_slot(uint32_t slot) { this->slot_ = slot; }
+  void set_dynamic(bool dynamic) { this->dynamic_ = dynamic; }
+#ifdef USE_BT_PAIRING
+  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+#endif
+  /// A slot: look for an advertising HID device for duration_ms, pair the first new one and
+  /// keep it. With a configured address: connect, which pairs it if it is not paired yet.
+  void pair(uint32_t duration_ms);
+  /// Delete the pairing (and forget the device of a slot).
+  void unpair();
+  bool is_pairing() const { return this->pairing_active_; }
 
 #ifdef USE_TEXT_SENSOR
   void register_last_event_usage_text_sensor(text_sensor::TextSensor *sensor) {
@@ -245,6 +267,8 @@ class BLEClientHID : public Component,
   void emit_hid_event_(HIDEvent event);
 
   void request_rediscovery_();
+  void restore_paired_();
+  void end_pairing_(bool success, const char *reason);
 
   const GattCharacteristicInfo *find_characteristic_(uint16_t handle) const;
   const GattDescriptorInfo *find_descriptor_(const GattCharacteristicInfo &characteristic, uint16_t uuid) const;
@@ -304,6 +328,18 @@ class BLEClientHID : public Component,
   SubscriptionAttemptState subscription_state_;
   std::string gatt_profile_hash_;
 
+#ifdef USE_BT_PAIRING
+  bt_pairing::BTPairing *pairing_{nullptr};
+#endif
+  std::string candidate_name_;
+  uint32_t slot_{0};
+  uint32_t pairing_until_{0};
+  uint16_t candidate_appearance_{0};
+  bool dynamic_{false};
+  bool restored_{false};
+  bool pairing_active_{false};
+  bool address_clear_pending_{false};
+
   bool publish_to_ha_{true};
   uint32_t keepalive_interval_ms_{0};
   uint32_t last_activity_ms_{0};
@@ -336,6 +372,17 @@ class BLEClientHID : public Component,
   static constexpr uint32_t OVERFLOW_WARNING_INTERVAL_MS = 5000;
   // The peer applies or rejects a parameter update within a few connection events.
   static constexpr uint32_t CONN_PARAMS_SETTLE_MS = 2000;
+};
+
+template<typename... Ts> class PairAction : public Action<Ts...>, public Parented<BLEClientHID> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, duration)
+  void play(const Ts &...x) override { this->parent_->pair(this->duration_.value(x...)); }
+};
+
+template<typename... Ts> class UnpairAction : public Action<Ts...>, public Parented<BLEClientHID> {
+ public:
+  void play(const Ts &...x) override { this->parent_->unpair(); }
 };
 
 }  // namespace esphome::ble_client_hid
