@@ -8,6 +8,10 @@
 #include "esp_bluedroid_hci.h"
 #include "esp_bt_main.h"
 #endif
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+#include "hci_split.h"
+#include "esphome/components/esp32_ble/ble.h"
+#endif
 
 #include <algorithm>
 #include <cinttypes>
@@ -170,6 +174,10 @@ void USBBluetooth::on_disconnected() {
   this->cancel_timeout("hci");
   this->pending_opcode_ = 0;
   this->pending_ = nullptr;
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  // BR/EDR commands are answered "unknown" from here on rather than left waiting.
+  hci_split::set_br(nullptr);
+#endif
   if (this->intf_ != 0xFF) {
     this->release_interface(this->intf_);
     this->intf_ = 0xFF;
@@ -198,9 +206,14 @@ bool USBBluetooth::send_command(const uint8_t *packet, size_t len) {
 // USB task.
 void USBBluetooth::send_done_() {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
-  if (this->send_blocked_.exchange(false, std::memory_order_acq_rel) && g_host_cb != nullptr &&
-      g_host_cb->notify_host_send_available != nullptr)
-    g_host_cb->notify_host_send_available();
+  if (this->send_blocked_.exchange(false, std::memory_order_acq_rel)) {
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+    hci_split::br_send_available();
+#else
+    if (g_host_cb != nullptr && g_host_cb->notify_host_send_available != nullptr)
+      g_host_cb->notify_host_send_available();
+#endif
+  }
 #endif
 }
 
@@ -266,6 +279,31 @@ bool USBBluetooth::send_acl_(const uint8_t *data, size_t len) {
   return true;
 }
 
+// USB task.
+void USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  hci_split::br_recv(h4, len);
+#else
+  if (g_host_cb != nullptr && g_host_cb->notify_host_recv != nullptr)
+    g_host_cb->notify_host_recv(h4, static_cast<uint16_t>(len));
+#endif
+}
+
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+// Bluedroid comes up with esp32_ble, on both controllers, once the dongle is ready.
+void USBBluetooth::start_split_() {
+  hci_split::set_br(this);
+  this->stack_attached_.store(true, std::memory_order_release);
+  if (g_stack_started) {
+    ESP_LOGW(TAG, "Bluedroid was started with the previous dongle; restart to use this one for BR/EDR");
+    return;
+  }
+  g_stack_started = true;
+  if (esp32_ble::global_ble != nullptr)
+    esp32_ble::global_ble->enable();
+}
+#endif
+
 void USBBluetooth::start_bluedroid_() {
   if (g_stack_started) {
     // Bluedroid is attached once, before it starts, and keeps the state of the controller it
@@ -308,8 +346,7 @@ void USBBluetooth::read_event_(uint32_t generation) {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
           if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->event_[0] = H4_EVENT;
-            if (g_host_cb != nullptr && g_host_cb->notify_host_recv != nullptr)
-              g_host_cb->notify_host_recv(this->event_, static_cast<uint16_t>(len + 1));
+            this->to_stack_(this->event_, len + 1);
             this->read_event_(generation);
             return;
           }
@@ -344,10 +381,9 @@ void USBBluetooth::read_acl_(uint32_t generation) {
         // ACL: handle and flags, little-endian data length, data. Only Bluedroid takes it.
         if (this->acl_len_ >= 4 && this->acl_len_ >= 4u + (acl[2] | (acl[3] << 8))) {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
-          if (this->stack_attached_.load(std::memory_order_acquire) && g_host_cb != nullptr &&
-              g_host_cb->notify_host_recv != nullptr) {
+          if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->acl_[0] = H4_ACL;
-            g_host_cb->notify_host_recv(this->acl_, static_cast<uint16_t>(this->acl_len_ + 1));
+            this->to_stack_(this->acl_, this->acl_len_ + 1);
           }
 #endif
           this->acl_len_ = 0;
@@ -505,7 +541,10 @@ void USBBluetooth::probe_done_(bool ok) {
   this->pending_opcode_ = 0;
   this->pending_ = nullptr;
   this->report_connected_();
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  if (ok)
+    this->start_split_();
+#elif defined(USE_USB_BLUETOOTH_BLUEDROID)
   if (ok)
     this->start_bluedroid_();
 #endif

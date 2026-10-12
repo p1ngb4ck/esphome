@@ -16,8 +16,8 @@ from esphome.components.usb_host import (
     require_control_transfers,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
-from esphome.core import ID
+from esphome.const import CONF_ENABLE_ON_BOOT, CONF_ID
+from esphome.core import CORE, ID
 import esphome.final_validate as fv
 
 from . import realtek
@@ -88,12 +88,25 @@ def _final_validate(config):
     instances = fv.full_config.get().get("usb_bluetooth") or []
     if config[CONF_BLUEDROID] and sum(1 for c in instances if c[CONF_BLUEDROID]) > 1:
         raise cv.Invalid(f"{CONF_BLUEDROID}: only one usb_bluetooth can run Bluedroid")
-    # esp32_ble would bring up another stack around a different controller.
-    if config[CONF_BLUEDROID] and "esp32_ble" in fv.full_config.get():
-        raise cv.Invalid(
-            f"{CONF_BLUEDROID}: Bluedroid takes the USB dongle as its controller; "
-            "esp32_ble cannot be used beside it"
-        )
+    if config[CONF_BLUEDROID] and _splits_with_esp32_ble(fv.full_config.get()):
+        full = fv.full_config.get()
+        if "esp32_hosted" not in full:
+            raise cv.Invalid(
+                f"{CONF_BLUEDROID} beside esp32_ble shares Bluedroid with the co-processor's "
+                "controller (esp32_hosted), which this configuration does not have"
+            )
+        # Bluedroid reads the controller's features once, when esp32_ble brings it up: the
+        # dongle has to be there by then, so usb_bluetooth enables esp32_ble itself.
+        if full["esp32_ble"].get(CONF_ENABLE_ON_BOOT, True):
+            raise cv.Invalid(
+                f"{CONF_BLUEDROID} beside esp32_ble: set esp32_ble {CONF_ENABLE_ON_BOOT}: "
+                "false; usb_bluetooth enables it once the dongle is ready"
+            )
+
+
+def _splits_with_esp32_ble(full_config) -> bool:
+    """Bluedroid on both controllers: LE on the co-processor, BR/EDR on the dongle."""
+    return "esp32_ble" in full_config
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -128,10 +141,15 @@ async def to_code(config):
     if config[CONF_BLUEDROID]:
         request_bluetooth()
         add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", True)
-        # Host only: the controller is the dongle.
+        # Host only: the controllers are the dongle (and the co-processor).
         add_idf_sdkconfig_option("CONFIG_BT_CONTROLLER_DISABLED", True)
+        # After esp32_ble's final validation, which turns it off for esp_hosted.
         add_idf_sdkconfig_option("CONFIG_BT_CLASSIC_ENABLED", True)
-        # Espressif's vendor commands for coexistence, on by default with the controller
-        # disabled; a USB dongle does not know them.
-        add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ESP_COEX_VSC", False)
         cg.add_define("USE_USB_BLUETOOTH_BLUEDROID")
+        if _splits_with_esp32_ble(CORE.config):
+            cg.add_define("USE_USB_BLUETOOTH_HCI_SPLIT")
+            cg.add_build_flag("-Wl,--wrap=esp_bluedroid_attach_hci_driver")
+        else:
+            # Espressif's vendor commands for coexistence, on by default with the controller
+            # disabled; a USB dongle does not know them.
+            add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ESP_COEX_VSC", False)

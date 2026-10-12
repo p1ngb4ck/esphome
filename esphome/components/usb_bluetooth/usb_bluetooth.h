@@ -74,6 +74,11 @@ class USBBluetooth : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
   void start_bluedroid_();
   bool send_acl_(const uint8_t *data, size_t len);
+  // USB task: an H4 packet from the dongle to the host stack.
+  void to_stack_(uint8_t *h4, size_t len);
+#endif
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  void start_split_();
 #endif
 
   uint8_t intf_{0xFF};
