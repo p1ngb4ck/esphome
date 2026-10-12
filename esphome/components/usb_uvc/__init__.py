@@ -30,7 +30,7 @@ UVCClient = usb_uvc_ns.class_(
     cg.Component,
 )
 
-UvcFormat = usb_uvc_ns.enum("UvcFormat")
+UvcFormat = usb_uvc_ns.enum("UvcFormat", is_class=True)
 
 UVC_FORMATS = {
     "MJPEG": UvcFormat.MJPEG,
