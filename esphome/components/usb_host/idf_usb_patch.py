@@ -465,6 +465,64 @@ _LS_RETRY_REPLACEMENT = """        // Get and store the pipe error event
         }
         pipe->last_event = pipe_decode_error_event(chan_error);"""
 
+# The high-speed controller as a full/low-speed host: HCFG.FSLSSupp set before every port
+# reset, so the controller does not answer a device's high-speed chirp. Backported from
+# espressif/usb 1.6.0 (usb_host_config_t.fsls_only), which needs it from an ESP-IDF HAL that
+# neither 5.5 nor 6.1 has; the LL setter it ends in is in both, so it is called directly.
+_FSLS_PUBLIC_ANCHOR = (
+    """    unsigned peripheral_map;      /**< Selects the USB peripheral(s) to use."""
+)
+
+_FSLS_PUBLIC_REPLACEMENT = """    bool fsls_only;               /**< If set, High-Speed capable USB-OTG peripherals operate as Full/Low-Speed only
+                                       hosts. The host will not respond to a connected device's High-Speed chirp.
+                                       Has no effect on Full-Speed only peripherals. */
+    unsigned peripheral_map;      /**< Selects the USB peripheral(s) to use."""
+
+_FSLS_HCD_HEADER_ANCHOR = """    hcd_fifo_bias_t fifo_bias;              /**< Bias used when fifo_config is NULL. HCD_FIFO_BIAS_DEFAULT follows Kconfig. */"""
+
+_FSLS_HCD_HEADER_REPLACEMENT = """    hcd_fifo_bias_t fifo_bias;              /**< Bias used when fifo_config is NULL. HCD_FIFO_BIAS_DEFAULT follows Kconfig. */
+    bool fsls_only;                         /**< Operate a High-Speed capable port as Full/Low-Speed only. */"""
+
+_FSLS_HUB_HEADER_ANCHOR = """    hcd_fifo_bias_t fifo_bias[HCD_NUM_PORTS];       /**< Per-port bias used where fifo_config is NULL. */"""
+
+_FSLS_HUB_HEADER_REPLACEMENT = """    hcd_fifo_bias_t fifo_bias[HCD_NUM_PORTS];       /**< Per-port bias used where fifo_config is NULL. */
+    bool fsls_only;                                 /**< Operate High-Speed root ports as Full/Low-Speed only. */"""
+
+_FSLS_HUB_PORT_ANCHOR = """                .fifo_bias = hub_config->fifo_bias[i],"""
+
+_FSLS_HUB_PORT_REPLACEMENT = """                .fifo_bias = hub_config->fifo_bias[i],
+                .fsls_only = hub_config->fsls_only,"""
+
+_FSLS_HOST_ANCHOR = """        .intr_flags = config->intr_flags,
+        .fifo_config = NULL,
+    };"""
+
+_FSLS_HOST_REPLACEMENT = """        .intr_flags = config->intr_flags,
+        .fifo_config = NULL,
+        .fsls_only = config->fsls_only,
+    };"""
+
+_FSLS_PORT_FIELD_ANCHOR = """    int periph_idx;                                 // Peripheral index of this port. Used for initialization check"""
+
+_FSLS_PORT_FIELD_REPLACEMENT = """    int periph_idx;                                 // Peripheral index of this port. Used for initialization check
+    bool fsls_only;                                 // High-Speed capable port held to Full/Low-Speed"""
+
+_FSLS_PORT_INIT_ANCHOR = """    usb_dwc_hal_init(port_obj->hal, port_number);"""
+
+_FSLS_PORT_INIT_REPLACEMENT = """    usb_dwc_hal_init(port_obj->hal, port_number);
+    port_obj->fsls_only = port_config->fsls_only && port_obj->hal->constant_config.hsphy_type != 0;"""
+
+_FSLS_RESET_ANCHOR = """    // Place the bus into the reset state. If the port was previously enabled, a disabled event will occur after this
+    usb_dwc_hal_port_toggle_reset(port->hal, true);"""
+
+_FSLS_RESET_REPLACEMENT = """    // Place the bus into the reset state. If the port was previously enabled, a disabled event will occur after this
+#if CONFIG_IDF_TARGET_ESP32P4
+    if (port->fsls_only) {
+        usb_dwc_ll_hcfg_set_fsls_supp_only(port->hal->dev);
+    }
+#endif
+    usb_dwc_hal_port_toggle_reset(port->hal, true);"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -486,6 +544,14 @@ PATCHES = (
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
     ("src/hub.c", _HUB_RESET_ERR_ANCHOR, _HUB_RESET_ERR_REPLACEMENT),
     ("src/usb_host.c", _HOST_WARN_ANCHOR, _HOST_WARN_REPLACEMENT),
+    ("include/usb/usb_host.h", _FSLS_PUBLIC_ANCHOR, _FSLS_PUBLIC_REPLACEMENT),
+    ("private_include/hcd.h", _FSLS_HCD_HEADER_ANCHOR, _FSLS_HCD_HEADER_REPLACEMENT),
+    ("private_include/hub.h", _FSLS_HUB_HEADER_ANCHOR, _FSLS_HUB_HEADER_REPLACEMENT),
+    ("src/hub.c", _FSLS_HUB_PORT_ANCHOR, _FSLS_HUB_PORT_REPLACEMENT),
+    ("src/usb_host.c", _FSLS_HOST_ANCHOR, _FSLS_HOST_REPLACEMENT),
+    ("src/hcd_dwc.c", _FSLS_PORT_FIELD_ANCHOR, _FSLS_PORT_FIELD_REPLACEMENT),
+    ("src/hcd_dwc.c", _FSLS_PORT_INIT_ANCHOR, _FSLS_PORT_INIT_REPLACEMENT),
+    ("src/hcd_dwc.c", _FSLS_RESET_ANCHOR, _FSLS_RESET_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy

@@ -537,6 +537,8 @@ class USBHost final : public Component {
     if (peripheral_index < SOC_USB_OTG_PERIPH_NUM)
       this->port_fifo_bias_[peripheral_index] = bias;
   }
+  // The high-speed controller as a full/low-speed host (full_speed_only option).
+  void set_full_speed_only(bool full_speed_only) { this->full_speed_only_ = full_speed_only; }
 #endif
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
@@ -619,6 +621,7 @@ class USBHost final : public Component {
   uint8_t fs_phy_index_{1};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
+  bool full_speed_only_{false};
 #endif
 };
 

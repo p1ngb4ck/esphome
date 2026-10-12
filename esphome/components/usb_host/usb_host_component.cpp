@@ -66,6 +66,9 @@ void USBHost::setup() {
       ESP_LOGI(TAG, "USB controller %u FIFO bias %u", i, this->port_fifo_bias_[i]);
     }
   }
+  config.fsls_only = this->full_speed_only_;
+  if (this->full_speed_only_)
+    ESP_LOGI(TAG, "High-speed controller limited to full/low speed");
 #endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));

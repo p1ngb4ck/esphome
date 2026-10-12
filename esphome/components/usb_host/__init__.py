@@ -50,6 +50,7 @@ _PERIPHERAL_MAPS = {
     CONTROLLERS_BOTH: 0b11,
 }
 CONF_FS_PINS = "fs_pins"
+CONF_FULL_SPEED_ONLY = "full_speed_only"
 CONF_MODE_SWITCH = "mode_switch"
 CONF_HID2HCI = "hid2hci"
 CONF_BULK_MESSAGES = "bulk_messages"
@@ -225,6 +226,22 @@ def _resolve_controllers(config: dict) -> dict:
     if controllers != CONTROLLERS_HIGH_SPEED and not per_port_fifo_bias_available():
         raise cv.Invalid(f"{CONF_CONTROLLERS}: {controllers} requires IDF >= 5.4.0")
     config[CONF_CONTROLLERS] = controllers
+    return config
+
+
+def _validate_full_speed_only(config: dict) -> dict:
+    """full_speed_only: the high-speed controller as a full/low-speed host."""
+    if not config.get(CONF_FULL_SPEED_ONLY):
+        return config
+    if get_esp32_variant() != VARIANT_ESP32P4:
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} is only supported on ESP32-P4")
+    if not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_FULL_SPEED_ONLY} requires IDF >= 5.4.0")
+    if config.get(CONF_CONTROLLERS) == CONTROLLERS_FULL_SPEED:
+        raise cv.Invalid(
+            f"{CONF_FULL_SPEED_ONLY} applies to the high-speed controller, which "
+            f"{CONF_CONTROLLERS}: {CONTROLLERS_FULL_SPEED} does not run"
+        )
     return config
 
 
@@ -411,6 +428,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DUAL_HOST, default=False): cv.boolean,
             cv.Optional(CONF_CONTROLLERS): cv.one_of(*_PERIPHERAL_MAPS, lower=True),
             cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
+            # The high-speed controller as a full/low-speed host: it ignores the
+            # high-speed chirp, so every device and hub on it runs at full or low speed.
+            cv.Optional(CONF_FULL_SPEED_ONLY): cv.boolean,
             # Devices that enumerate in the wrong mode, switched before they are routed.
             cv.Optional(CONF_MODE_SWITCH): cv.ensure_list(MODE_SWITCH_SCHEMA),
         }
@@ -425,6 +445,7 @@ CONFIG_SCHEMA = cv.All(
         ]
     ),
     _resolve_controllers,
+    _validate_full_speed_only,
     _store_host_options,
 )
 
@@ -543,6 +564,8 @@ async def to_code(config: ConfigType) -> None:
     ):
         cg.add(var.set_peripheral_map(_PERIPHERAL_MAPS[controllers]))
     cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
+    if config.get(CONF_FULL_SPEED_ONLY):
+        cg.add(var.set_full_speed_only(True))
 
     for entry in config.get(CONF_MODE_SWITCH) or ():
         vid, pid = entry[CONF_VID], entry[CONF_PID]
