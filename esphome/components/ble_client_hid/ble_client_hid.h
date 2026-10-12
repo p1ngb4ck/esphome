@@ -45,6 +45,16 @@ namespace esphome::ble_client_hid {
 
 namespace espbt = esphome::esp32_ble_tracker;
 
+class BLEHIDDeviceSelect;
+
+/// An advertising HID device the pairing window found, offered by the select.
+struct FoundBLEDevice {
+  uint64_t address;
+  esp_ble_addr_type_t address_type;
+  uint16_t appearance;
+  std::string name;
+};
+
 using hid::HIDBootReportDecoder;
 using hid::HIDCollectionSchema;
 using hid::HIDDecodeStatus;
@@ -194,6 +204,12 @@ class BLEClientHID : public Component,
   void unpair();
   /// Close a running pairing window; the device paired before stays.
   void cancel_pairing();
+  /// With a select, the pairing window only lists the HID devices it sees; the one picked is paired.
+  void set_device_select(BLEHIDDeviceSelect *select) { this->device_select_ = select; }
+  const std::vector<FoundBLEDevice> &found_devices() const { return this->found_; }
+  static constexpr size_t MAX_FOUND = 12;
+  /// Pair with a device the window listed; opens the window again when it has closed.
+  void pair_with(size_t index);
   bool is_pairing() const { return this->pairing_active_; }
 
 #ifdef USE_TEXT_SENSOR
@@ -276,6 +292,8 @@ class BLEClientHID : public Component,
   void request_rediscovery_();
   void restore_paired_();
   void end_pairing_(bool success, const char *reason);
+  void open_window_(uint32_t duration_ms);
+  void publish_found_();
   void schedule_address_(uint64_t address, esp_ble_addr_type_t type, bool auto_connect);
   bool stored_address_(uint8_t *bda, esp_ble_addr_type_t *type) const;
 
@@ -341,6 +359,8 @@ class BLEClientHID : public Component,
   bt_pairing::BTPairing *pairing_{nullptr};
 #endif
   std::string candidate_name_;
+  std::vector<FoundBLEDevice> found_;
+  BLEHIDDeviceSelect *device_select_{nullptr};
   std::string (*address_get_)(){nullptr};
   void (*address_set_)(const std::string &){nullptr};
   uint32_t slot_{0};

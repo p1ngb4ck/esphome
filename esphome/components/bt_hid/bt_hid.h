@@ -22,6 +22,15 @@
 
 namespace esphome::bt_hid {
 
+class BTHIDDeviceSelect;
+
+/// A device the pairing scan found, offered by the select.
+struct FoundDevice {
+  uint8_t address[6];
+  uint32_t device_class;
+  std::string name;
+};
+
 // One Bluetooth Classic HID device (keyboard, mouse, game controller, remote), through
 // Bluedroid's HID host. Its reports feed hid::HIDInput like usb_hid and ble_client_hid. The
 // HID host, pairing and connections are shared by all of them; see bt_hid.cpp.
@@ -33,6 +42,15 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }
 
   void set_address(uint64_t address);
+  /// With a select, the pairing scan only lists the devices it finds; the one picked is paired.
+  void set_device_select(BTHIDDeviceSelect *select) { this->device_select_ = select; }
+  bool has_device_select() const { return this->device_select_ != nullptr; }
+  const std::vector<FoundDevice> &found_devices() const { return this->found_; }
+  static constexpr size_t MAX_FOUND = 12;
+  /// Pair with a device the pairing scan listed; opens the window again when it has closed.
+  void pair_with(size_t index);
+  /// Main loop: a device the pairing scan found, or one that connected on its own.
+  void on_found(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void set_slot(uint32_t slot) { this->slot_ = slot; }
   /// A std::string global holding the slot's device address ("" when none).
   void set_address_global(std::string (*get)(), void (*set)(const std::string &)) {
@@ -90,6 +108,8 @@ class BTHIDDevice : public Component, public hid::HIDInput {
 
  protected:
   void write_leds_(uint8_t leds) override;
+  void open_window_(uint32_t until);
+  void publish_found_();
   void set_bda_(const uint8_t *bda);
   bool stored_address_(uint8_t *bda) const;
 
@@ -100,6 +120,8 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   bt_pairing::BTPairing *pairing_{nullptr};
 #endif
   std::string candidate_name_;
+  std::vector<FoundDevice> found_;
+  BTHIDDeviceSelect *device_select_{nullptr};
   std::string (*address_get_)(){nullptr};
   void (*address_set_)(const std::string &){nullptr};
   CallbackManager<void(uint32_t)> passkey_cb_;

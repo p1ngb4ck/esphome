@@ -5,6 +5,8 @@
 #include "../a2dp_source.h"
 #include "esphome/core/log.h"
 
+#include <cstdio>
+
 namespace esphome {
 namespace a2dp_source {
 
@@ -32,7 +34,10 @@ void A2DPDeviceSelect::set_devices(const std::vector<DiscoveredDevice> &devices)
       if (this->option_storage_.size() >= this->option_storage_.capacity()) {
         break;
       }
-      this->option_storage_.push_back(device.name);
+      char mac[18];
+      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", device.address[0], device.address[1],
+               device.address[2], device.address[3], device.address[4], device.address[5]);
+      this->option_storage_.push_back(device.name.empty() ? std::string(mac) : device.name + " (" + mac + ")");
     }
   }
 
@@ -49,8 +54,13 @@ void A2DPDeviceSelect::control(const std::string &value) {
   if (this->parent_ == nullptr || value == NO_DEVICES) {
     return;
   }
-  this->publish_state(value);
-  this->parent_->pair_with_name(value);
+  for (size_t i = 0; i < this->option_storage_.size(); i++) {
+    if (this->option_storage_[i] != value)
+      continue;
+    this->publish_state(value);
+    this->parent_->pair_with_index(i);
+    return;
+  }
 }
 
 void A2DPDeviceSelect::dump_config() { LOG_SELECT("", "A2DP device", this); }

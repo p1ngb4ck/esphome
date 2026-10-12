@@ -72,6 +72,8 @@ class A2DPSource : public Component {
   /// which is the only moment the library will write it to NVS.
   /// @return false when no device of that name was seen.
   bool pair_with_name(const std::string &name);
+  /// @brief Pairs with the device at this place in discovered_devices() (the select).
+  bool pair_with_index(size_t index);
   /// @brief Devices seen since the pairing window opened.
   const std::vector<DiscoveredDevice> &discovered_devices() const { return this->devices_; }
   /// @brief Upper bound on that list, so the select can size its storage once.

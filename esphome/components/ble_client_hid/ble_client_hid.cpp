@@ -1,4 +1,7 @@
 #include "ble_client_hid.h"
+#ifdef USE_BLE_CLIENT_HID_SELECT
+#include "select/ble_hid_device_select.h"
+#endif
 
 #ifdef USE_ESP32
 
@@ -293,7 +296,18 @@ void BLEClientHID::pair(uint32_t duration_ms) {
     return;
   }
 #endif
-  // The device paired so far stays stored until another one has paired.
+  this->found_.clear();
+  this->publish_found_();
+  this->open_window_(duration_ms);
+  if (this->device_select_ != nullptr) {
+    ESP_LOGI(TAG, "Pairing: listing the HID devices in pairing mode, pick one");
+  } else {
+    ESP_LOGI(TAG, "Pairing: looking for a HID device in pairing mode");
+  }
+}
+
+// The device paired so far stays stored until another one has paired.
+void BLEClientHID::open_window_(uint32_t duration_ms) {
   if (this->parent()->get_address() != 0 || this->pending_address_valid_)
     this->schedule_address_(0, BLE_ADDR_TYPE_PUBLIC, false);
   this->restored_ = true;
@@ -302,7 +316,33 @@ void BLEClientHID::pair(uint32_t duration_ms) {
   this->candidate_selected_ = false;
   this->pairing_active_ = true;
   this->pairing_until_ = millis() + duration_ms + PAIRING_CONNECT_GRACE_MS;
-  ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
+}
+
+void BLEClientHID::publish_found_() {
+#ifdef USE_BLE_CLIENT_HID_SELECT
+  if (this->device_select_ != nullptr)
+    this->device_select_->set_devices(this->found_);
+#endif
+}
+
+void BLEClientHID::pair_with(size_t index) {
+  if (index >= this->found_.size() || !this->dynamic_)
+    return;
+  const FoundBLEDevice found = this->found_[index];
+  // The window closed since, or another device was picked in it: start over with this one.
+  if (!this->pairing_active_ || this->candidate_selected_)
+    this->open_window_(0);
+  this->candidate_name_ = found.name;
+  this->candidate_appearance_ = found.appearance;
+  this->candidate_address_ = found.address;
+  this->candidate_selected_ = true;
+  this->schedule_address_(found.address, found.address_type, true);
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  uint8_t bda[6];
+  for (int i = 0; i < 6; i++)
+    bda[i] = static_cast<uint8_t>(found.address >> (40 - 8 * i));
+  format_mac_addr_upper(bda, mac);
+  ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, found.name.c_str());
 }
 
 #ifdef USE_ESP32_BLE_DEVICE
@@ -332,6 +372,25 @@ bool BLEClientHID::parse_device(const ble_device_base::ESPBTDevice &device) {
   }
 #endif
   const StringRef name = device.get_name();
+  if (this->device_select_ != nullptr) {
+    // Listed only; the one picked in the select is paired.
+    const std::string listed_name = name.empty() ? std::string() : std::string(name.c_str(), name.size());
+    for (auto &found : this->found_) {
+      if (found.address != address)
+        continue;
+      if (found.name.empty() && !listed_name.empty()) {
+        found.name = listed_name;
+        this->publish_found_();
+      }
+      return false;
+    }
+    if (this->found_.size() < MAX_FOUND) {
+      this->found_.push_back(
+          {address, device.get_address_type(), appearance.has_value() ? *appearance : uint16_t(0), listed_name});
+      this->publish_found_();
+    }
+    return false;
+  }
   this->candidate_name_ = name.empty() ? std::string() : std::string(name.c_str(), name.size());
   this->candidate_appearance_ = appearance.has_value() ? *appearance : 0;
   this->candidate_address_ = address;

@@ -196,6 +196,19 @@ void A2DPSource::start_pairing() {
   }
 }
 
+bool A2DPSource::pair_with_index(size_t index) {
+  if (index >= this->devices_.size())
+    return false;
+  const DiscoveredDevice &device = this->devices_[index];
+  memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
+  this->chosen_valid_ = true;
+  this->pairing_mode_.store(true);
+  if (this->started_.load())
+    this->source_.resume_discovery();
+  ESP_LOGI(TAG, "Pairing with %s on its next sighting", device.name.c_str());
+  return true;
+}
+
 bool A2DPSource::pair_with_name(const std::string &name) {
   for (const auto &device : this->devices_) {
     if (device.name != name) {

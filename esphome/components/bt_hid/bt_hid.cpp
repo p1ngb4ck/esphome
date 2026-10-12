@@ -3,6 +3,9 @@
 #ifdef USE_ESP32
 
 #include "esphome/components/bt_classic/bt_classic.h"
+#ifdef USE_BT_HID_SELECT
+#include "select/bt_hid_device_select.h"
+#endif
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
@@ -29,7 +32,7 @@ namespace {
 
 // Bluedroid calls back on its BTC task; everything is handed to the main loop as one of these.
 struct HostEvent {
-  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, ADOPTED, AUTH, FOUND, SCAN_STATE };
+  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, ADOPTED, LISTED, AUTH, FOUND, SCAN_STATE };
   Type type{INIT};
   uint8_t handle{0xFF};
   esp_bd_addr_t bda{};
@@ -82,7 +85,8 @@ BTHIDDevice *find_or_adopt(const uint8_t *bda) {
   {
     LockGuard guard(host().lock);
     slot = host().pairing;
-    if (slot == nullptr || slot->has_fixed_address() || slot->has_address())
+    // With a select the device is only listed, see note_connected().
+    if (slot == nullptr || slot->has_fixed_address() || slot->has_address() || slot->has_device_select())
       return nullptr;
     slot->adopt_address(bda);
   }
@@ -91,6 +95,26 @@ BTHIDDevice *find_or_adopt(const uint8_t *bda) {
   memcpy(e.bda, bda, ESP_BD_ADDR_LEN);
   push(std::move(e));
   return slot;
+}
+
+// A device connected on its own: an open slot takes it, or with a select lists it.
+void note_connected(const uint8_t *bda) {
+  if (find_by_address(bda) != nullptr)
+    return;
+  bool listed = false;
+  {
+    LockGuard guard(host().lock);
+    BTHIDDevice *slot = host().pairing;
+    listed = slot != nullptr && slot->has_device_select() && !slot->has_address();
+  }
+  if (!listed) {
+    find_or_adopt(bda);
+    return;
+  }
+  HostEvent e;
+  e.type = HostEvent::LISTED;
+  memcpy(e.bda, bda, ESP_BD_ADDR_LEN);
+  push(std::move(e));
 }
 
 // Bluedroid's bond store.
@@ -215,7 +239,7 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       // starts (btm_sec_pin_code_request: the host originates keyboard bonding). An open slot
       // takes it and connects to it itself.
       if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS)
-        find_or_adopt(param->acl_conn_cmpl_stat.bda);
+        note_connected(param->acl_conn_cmpl_stat.bda);
       break;
     case ESP_BT_GAP_AUTH_CMPL_EVT: {
       HostEvent e;
@@ -360,6 +384,10 @@ void handle_event(HostEvent &e) {
       if (h.pairing != nullptr)
         h.pairing->on_adopted();
       break;
+    case HostEvent::LISTED:
+      if (h.pairing != nullptr && h.pairing->has_device_select() && find_by_address(e.bda) == nullptr)
+        h.pairing->on_found(e.bda, 0, "");
+      break;
     case HostEvent::FOUND: {
       if (esp_bt_gap_get_cod_major_dev(e.value) != ESP_BT_COD_MAJOR_DEV_PERIPHERAL)
         break;
@@ -370,8 +398,13 @@ void handle_event(HostEvent &e) {
       } else {
         ESP_LOGI(TAG, "Found %s %s '%s'", peripheral_kind(e.value), mac, name.c_str());
       }
-      if (h.pairing != nullptr && find_by_address(e.bda) == nullptr)
-        h.pairing->on_pairing_candidate(e.bda, e.value, name);
+      if (h.pairing != nullptr && find_by_address(e.bda) == nullptr) {
+        if (h.pairing->has_device_select()) {
+          h.pairing->on_found(e.bda, e.value, name);
+        } else {
+          h.pairing->on_pairing_candidate(e.bda, e.value, name);
+        }
+      }
       break;
     }
     case HostEvent::SCAN_STATE:
@@ -628,7 +661,19 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
     ESP_LOGW(TAG, "Pairing scan failed to start: %s", esp_err_to_name(err));
     return;
   }
-  // The device paired so far stays stored until another one has paired.
+  this->found_.clear();
+  this->publish_found_();
+  this->open_window_(millis() + units * 1280 + CONNECT_TIMEOUT_MS);
+  if (this->device_select_ != nullptr) {
+    ESP_LOGI(TAG, "Pairing: listing the devices in pairing mode, pick one");
+  } else {
+    ESP_LOGI(TAG, "Pairing: looking for a device in pairing mode");
+  }
+}
+
+// The device paired so far stays stored until another one has paired.
+void BTHIDDevice::open_window_(uint32_t until) {
+  Host &h = host();
   if (this->connected_)
     esp_bt_hid_host_disconnect(this->bda_);
   this->set_bda_(nullptr);
@@ -640,8 +685,54 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
     LockGuard guard(h.lock);
     h.pairing = this;
   }
-  h.pairing_until = millis() + units * 1280 + CONNECT_TIMEOUT_MS;
-  ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
+  h.pairing_until = until;
+}
+
+void BTHIDDevice::publish_found_() {
+#ifdef USE_BT_HID_SELECT
+  if (this->device_select_ != nullptr)
+    this->device_select_->set_devices(this->found_);
+#endif
+}
+
+void BTHIDDevice::on_found(const uint8_t *bda, uint32_t device_class, const std::string &name) {
+  for (auto &found : this->found_) {
+    if (memcmp(found.address, bda, ESP_BD_ADDR_LEN) != 0)
+      continue;
+    if (found.name.empty() && !name.empty()) {
+      found.name = name;
+      found.device_class = device_class;
+      this->publish_found_();
+    }
+    return;
+  }
+  if (this->found_.size() >= MAX_FOUND)
+    return;
+  FoundDevice found;
+  memcpy(found.address, bda, ESP_BD_ADDR_LEN);
+  found.device_class = device_class;
+  found.name = name;
+  this->found_.push_back(std::move(found));
+  this->publish_found_();
+}
+
+void BTHIDDevice::pair_with(size_t index) {
+  if (index >= this->found_.size())
+    return;
+  Host &h = host();
+  if (!h.ready) {
+    ESP_LOGW(TAG, "Bluetooth Classic is not running, cannot pair");
+    return;
+  }
+  if (h.pairing != nullptr && h.pairing != this) {
+    ESP_LOGW(TAG, "Another pairing is running");
+    return;
+  }
+  const FoundDevice found = this->found_[index];
+  // The window closed since the scan, or another device was picked in it: start over with this one.
+  if (h.pairing == nullptr || this->has_address())
+    this->open_window_(millis() + 2 * CONNECT_TIMEOUT_MS);
+  this->on_pairing_candidate(found.address, found.device_class, found.name);
 }
 
 void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name) {
