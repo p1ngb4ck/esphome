@@ -8,6 +8,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_NAME, CONF_TRIGGER_ID, CONF_VOLUME
 from esphome.core import CORE
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
@@ -160,6 +161,7 @@ async def to_code(config):
     await cg.register_component(var, config)
     if CONF_BT_PAIRING_ID in config:
         cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_PAIRING_ID])))
+        cg.add(var.set_slot(fnv1_hash(f"a2dp_source:{config[CONF_ID]}")))
 
     # passive=False: this component is the reason the microphone runs, so it
     # starts and stops it rather than listening in on someone else's stream.

@@ -105,6 +105,8 @@ CONF_ON_NUMERIC_COMPARISON_REQUEST = "on_numeric_comparison_request"
 CONF_AUTO_CONNECT = "auto_connect"
 
 MULTI_CONF = True
+# Auto-loaded by bt_pairing, which creates its own instances.
+MULTI_CONF_NO_DEFAULT = True
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(

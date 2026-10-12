@@ -62,6 +62,10 @@ class BTHIDDevice : public Component,
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override { return !this->fixed_address_ && !this->has_address() && !this->is_pairing(); }
   bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  bool is_device_connected() const override { return this->connected_; }
+  void connect_device() override { this->connect(); }
+  void disconnect_device() override { this->disconnect(); }
+  void cancel_device_pairing() override { this->cancel_pairing(); }
 #endif
   /// Main loop: a device the pairing scan found, or one that connected on its own.
   void on_found(const uint8_t *bda, uint32_t device_class, const std::string &name);

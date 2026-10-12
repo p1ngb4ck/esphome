@@ -1,14 +1,16 @@
-"""Paired Bluetooth Classic and LE devices of bt_hid and ble_client_hid slots.
+"""Bluetooth devices: one scan for every kind, and the devices paired from it.
 
-Kept across reboots in preferences, or in a file on a storage (file: a VFS path). The bond
-keys themselves stay in Bluedroid's NVS store; forgetting a device also deletes its bond.
+max_hid_devices / max_broadcast_devices create the bt_hid, ble_client_hid and ble_broadcast
+slots internally; a2dp_source joins on its own. Paired devices are kept across reboots in
+preferences, or in a file on a storage (file: a VFS path); the bond keys stay in Bluedroid's
+NVS store, and forgetting a device also deletes its bond.
 """
 
 import logging
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import esp32_ble_tracker
+from esphome.components import esp32_ble, esp32_ble_tracker, hid
 from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
 from esphome.const import (
@@ -16,10 +18,13 @@ from esphome.const import (
     CONF_DURATION,
     CONF_FILE,
     CONF_ID,
+    CONF_KEY,
+    CONF_MAX_CONNECTIONS,
     CONF_RESTORE_VALUE,
     CONF_TRIGGER_ID,
     CONF_TYPE,
 )
+from esphome.core import CORE
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
 
@@ -33,9 +38,15 @@ CONF_ADDRESS_GLOBAL = "address_global"
 CONF_MAX_RESTORE_DATA_LENGTH = "max_restore_data_length"
 CONF_MAX_DEVICES = "max_devices"
 CONF_ON_STATUS = "on_status"
+CONF_ON_CONNECTED = "on_connected"
+CONF_ON_DISCONNECTED = "on_disconnected"
+CONF_MAX_HID_DEVICES = "max_hid_devices"
+CONF_MAX_BROADCAST_DEVICES = "max_broadcast_devices"
+CONF_SLOTS = "slots"
 
 bt_pairing_ns = cg.esphome_ns.namespace("bt_pairing")
-BTPairing = bt_pairing_ns.class_("BTPairing", cg.Component)
+# A HIDInput too (with max_hid_devices): hid_id for LVGL and the hid platforms.
+BTPairing = bt_pairing_ns.class_("BTPairing", cg.Component, hid.HIDInput)
 ForgetAllAction = bt_pairing_ns.class_(
     "ForgetAllAction", automation.Action, cg.Parented.template(BTPairing)
 )
@@ -54,6 +65,53 @@ CancelScanAction = bt_pairing_ns.class_(
 StatusTrigger = bt_pairing_ns.class_(
     "StatusTrigger", automation.Trigger.template(cg.std_string)
 )
+ConnectionTrigger = bt_pairing_ns.class_(
+    "ConnectionTrigger", automation.Trigger.template(cg.std_string)
+)
+DeviceKeyTrigger = bt_pairing_ns.class_(
+    "DeviceKeyTrigger",
+    automation.Trigger.template(cg.std_string, cg.std_string, cg.bool_),
+)
+DeviceTextTrigger = bt_pairing_ns.class_(
+    "DeviceTextTrigger", automation.Trigger.template(cg.std_string, cg.std_string)
+)
+DevicePointerTrigger = bt_pairing_ns.class_(
+    "DevicePointerTrigger",
+    automation.Trigger.template(
+        cg.std_string, cg.int_, cg.int_, cg.int_, cg.int_, cg.int_
+    ),
+)
+DeviceControlTrigger = bt_pairing_ns.class_(
+    "DeviceControlTrigger",
+    automation.Trigger.template(cg.std_string, cg.std_string, cg.int_),
+)
+PairAction = bt_pairing_ns.class_(
+    "PairAction", automation.Action, cg.Parented.template(BTPairing)
+)
+ConnectAction = bt_pairing_ns.class_(
+    "ConnectAction", automation.Action, cg.Parented.template(BTPairing)
+)
+DisconnectAction = bt_pairing_ns.class_(
+    "DisconnectAction", automation.Action, cg.Parented.template(BTPairing)
+)
+UnpairAction = bt_pairing_ns.class_(
+    "UnpairAction", automation.Action, cg.Parented.template(BTPairing)
+)
+
+
+def AUTO_LOAD(config=None) -> list[str]:
+    """The components behind the internal slots."""
+    slots = (config or {}).get(CONF_SLOTS) or {}
+    loads = []
+    if (config or {}).get(CONF_MAX_HID_DEVICES):
+        loads.append("hid")
+    if slots.get("bt_hid"):
+        loads += ["bt_hid", "bt_classic"]
+    if slots.get("ble_client"):
+        loads += ["ble_client", "esp32_ble_client", "ble_client_hid", "sha256"]
+    if slots.get("ble_broadcast"):
+        loads.append("ble_broadcast")
+    return loads
 
 
 def _validate_file(value):
@@ -65,10 +123,86 @@ def _validate_file(value):
     return value
 
 
-CONFIG_SCHEMA = cv.Schema(
+def _automation(trigger):
+    return automation.validate_automation(
+        {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(trigger)}
+    )
+
+
+def _ble_connection_budget() -> int:
+    raw = (CORE.raw_config or {}).get("esp32_ble") or {}
+    try:
+        return int(raw.get(CONF_MAX_CONNECTIONS, esp32_ble.DEFAULT_MAX_CONNECTIONS))
+    except (AttributeError, TypeError, ValueError):
+        return esp32_ble.DEFAULT_MAX_CONNECTIONS
+
+
+def _generate_slots(config):
+    """The slots, as the configs of their own components, so IDs and BLE connection slots are
+    accounted for like any other. Classic HID needs usb_bluetooth; BLE needs
+    esp32_ble_tracker, and gets at most esp32_ble max_connections HID slots."""
+    from esphome.components import ble_broadcast, ble_client, ble_client_hid, bt_hid
+
+    hid_count = config[CONF_MAX_HID_DEVICES]
+    slots = {}
+    if hid_count and "usb_bluetooth" in CORE.loaded_integrations:
+        slots["bt_hid"] = [
+            bt_hid.CONFIG_SCHEMA({CONF_ID: f"bt_pairing_bt_hid_{i}"})
+            for i in range(1, hid_count + 1)
+        ]
+    if "esp32_ble_tracker" in CORE.loaded_integrations:
+        clients, nodes = [], []
+        for i in range(1, min(hid_count, _ble_connection_budget()) + 1):
+            client_id = f"bt_pairing_ble_client_{i}"
+            clients.append(ble_client.CONFIG_SCHEMA({CONF_ID: client_id}))
+            nodes.append(
+                ble_client_hid.CONFIG_SCHEMA(
+                    {
+                        CONF_ID: f"bt_pairing_ble_hid_{i}",
+                        ble_client.CONF_BLE_CLIENT_ID: client_id,
+                    }
+                )
+            )
+        if clients:
+            slots["ble_client"] = clients
+            slots["ble_client_hid"] = nodes
+        if config[CONF_MAX_BROADCAST_DEVICES]:
+            slots["ble_broadcast"] = [
+                ble_broadcast.CONFIG_SCHEMA({CONF_ID: f"bt_pairing_ble_broadcast_{i}"})
+                for i in range(1, config[CONF_MAX_BROADCAST_DEVICES] + 1)
+            ]
+    config[CONF_SLOTS] = slots
+    return config
+
+
+_BASE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(BTPairing),
         cv.Optional(CONF_MAX_DEVICES, default=8): cv.int_range(min=1, max=32),
+        # HID devices (keyboards, mice, remotes, game controllers) paired at most, Bluetooth
+        # Classic and LE together. 0: no internal HID slots.
+        cv.Optional(CONF_MAX_HID_DEVICES, default=0): cv.int_range(min=0, max=8),
+        # BLE devices that only advertise (buttons), heard without a connection.
+        cv.Optional(CONF_MAX_BROADCAST_DEVICES, default=0): cv.int_range(min=0, max=8),
+        # Typed text of every HID device.
+        cv.Optional(hid.CONF_LAYOUT, default="us"): hid.LAYOUT_SCHEMA,
+        cv.Optional(hid.CONF_NUM_LOCK, default=True): cv.boolean,
+        # device, key, pressed
+        cv.Optional(hid.CONF_ON_KEY): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(DeviceKeyTrigger),
+                cv.Optional(CONF_KEY): hid.validate_key,
+            }
+        ),
+        # device, text
+        cv.Optional(hid.CONF_ON_TEXT): _automation(DeviceTextTrigger),
+        # device, dx, dy, wheel, pan, buttons
+        cv.Optional(hid.CONF_ON_POINTER): _automation(DevicePointerTrigger),
+        # device, control, value
+        cv.Optional(hid.CONF_ON_CONTROL): _automation(DeviceControlTrigger),
+        # device
+        cv.Optional(CONF_ON_CONNECTED): _automation(ConnectionTrigger),
+        cv.Optional(CONF_ON_DISCONNECTED): _automation(ConnectionTrigger),
         # A file under a storage's mount_path; without it the database is kept in
         # preferences. Read once the storage is mounted, rewritten on every change.
         cv.Optional(CONF_FILE): _validate_file,
@@ -82,6 +216,27 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
+
+CONFIG_SCHEMA = cv.All(_BASE_SCHEMA, _generate_slots)
+
+
+async def _slots_to_code(var, slots) -> None:
+    from esphome.components import ble_broadcast, ble_client, ble_client_hid, bt_hid
+
+    for conf in slots.get("bt_hid", []):
+        await bt_hid.to_code(conf)
+        slot = await cg.get_variable(conf[CONF_ID])
+        cg.add(slot.set_log_name(""))
+        cg.add(var.add_hid_slot(slot, slot))
+    for conf in slots.get("ble_client", []):
+        await ble_client.to_code(conf)
+    for conf in slots.get("ble_client_hid", []):
+        await ble_client_hid.slot_to_code(conf)
+        slot = await cg.get_variable(conf[CONF_ID])
+        cg.add(slot.set_log_name(""))
+        cg.add(var.add_hid_slot(slot, slot))
+    for conf in slots.get("ble_broadcast", []):
+        await ble_broadcast.to_code(conf)
 
 
 async def to_code(config):
@@ -99,12 +254,56 @@ async def to_code(config):
     for conf in config.get(CONF_ON_STATUS, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [(cg.std_string, "message")], conf)
+    for key, connected in ((CONF_ON_CONNECTED, True), (CONF_ON_DISCONNECTED, False)):
+        for conf in config.get(key, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var, connected)
+            await automation.build_automation(
+                trigger, [(cg.std_string, "device")], conf
+            )
+    if config[CONF_MAX_HID_DEVICES]:
+        cg.add_define("USE_BT_PAIRING_HID")
+        cg.add(var.set_max_hid_devices(config[CONF_MAX_HID_DEVICES]))
+        hid.setup_hid_layout(var, config[hid.CONF_LAYOUT], config[hid.CONF_NUM_LOCK])
+        device = (cg.std_string, "device")
+        for conf in config.get(hid.CONF_ON_KEY, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+            if (key := conf.get(CONF_KEY)) is not None:
+                cg.add(trigger.set_key(*key))
+            await automation.build_automation(
+                trigger, [device, (cg.std_string, "key"), (cg.bool_, "pressed")], conf
+            )
+        for conf in config.get(hid.CONF_ON_TEXT, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+            await automation.build_automation(
+                trigger, [device, (cg.std_string, "text")], conf
+            )
+        for conf in config.get(hid.CONF_ON_POINTER, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+            await automation.build_automation(
+                trigger,
+                [device]
+                + [(cg.int_, n) for n in ("dx", "dy", "wheel", "pan", "buttons")],
+                conf,
+            )
+        for conf in config.get(hid.CONF_ON_CONTROL, []):
+            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+            await automation.build_automation(
+                trigger, [device, (cg.std_string, "control"), (cg.int_, "value")], conf
+            )
+    await _slots_to_code(var, config[CONF_SLOTS])
 
 
 def _final_validate(config):
-    if CONF_FILE in config and "storage" not in fv.full_config.get():
+    full = fv.full_config.get()
+    if CONF_FILE in config and "storage" not in full:
         raise cv.Invalid(
             f"{CONF_FILE} needs a storage (sd_storage, usb_storage, ...) mounted there"
+        )
+    if config[CONF_SLOTS].get("bt_hid") and not any(
+        c.get("bluedroid") for c in full.get("usb_bluetooth") or []
+    ):
+        raise cv.Invalid(
+            "Bluetooth Classic HID needs a usb_bluetooth dongle with bluedroid: true"
         )
 
 
@@ -167,6 +366,35 @@ def _validate_address(value):
     if isinstance(value, cv.Lambda):
         return value
     return str(cv.mac_address(value))
+
+
+ADDRESS_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(BTPairing),
+        cv.Required(CONF_ADDRESS): cv.templatable(_validate_address),
+    }
+)
+
+
+@automation.register_action(
+    "bt_pairing.pair", PairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+)
+@automation.register_action(
+    "bt_pairing.connect", ConnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+)
+@automation.register_action(
+    "bt_pairing.disconnect", DisconnectAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+)
+@automation.register_action(
+    "bt_pairing.unpair", UnpairAction, ADDRESS_ACTION_SCHEMA, synchronous=True
+)
+async def address_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(
+        var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.std_string))
+    )
+    return var
 
 
 @automation.register_action(

@@ -140,8 +140,16 @@ void A2DPSource::setup() {
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
   bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ != nullptr)
+  if (this->pairing_ != nullptr) {
     this->pairing_->add_target(this);
+    this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
+      if (record.slot != this->slot_)
+        return;
+      if (this->connected_.load())
+        this->source_.disconnect();
+      this->forget_device();
+    });
+  }
 #endif
 
   bool stored = this->has_stored_device();
@@ -227,6 +235,8 @@ bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
   }
   memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
   this->chosen_valid_ = true;
+  this->picked_ = device;
+  this->picked_valid_ = true;
   this->pairing_mode_.store(true);
   this->source_.resume_discovery();
   ESP_LOGI(TAG, "Pairing with %s on its next sighting", device.name.c_str());
@@ -458,12 +468,32 @@ void A2DPSource::loop() {
     for (auto *trigger : this->connected_triggers_) {
       trigger->trigger();
     }
+#ifdef USE_BT_PAIRING
+    if (this->pairing_ != nullptr) {
+      // The device picked in the pairing scan is kept once it has connected.
+      if (this->picked_valid_) {
+        this->picked_valid_ = false;
+        bt_pairing::PairingRecord record{};
+        memcpy(record.address, this->picked_.address, sizeof(record.address));
+        record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+        record.slot = this->slot_;
+        record.device_class = this->picked_.device_class;
+        strncpy(record.name, this->picked_.name.c_str(), sizeof(record.name) - 1);
+        this->pairing_->store(record);
+      }
+      this->pairing_->on_connection(this, true);
+    }
+#endif
   }
   if (this->disconnect_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Disconnected");
     for (auto *trigger : this->disconnected_triggers_) {
       trigger->trigger();
     }
+#ifdef USE_BT_PAIRING
+    if (this->pairing_ != nullptr)
+      this->pairing_->on_connection(this, false);
+#endif
   }
   if (this->streaming_start_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Streaming");

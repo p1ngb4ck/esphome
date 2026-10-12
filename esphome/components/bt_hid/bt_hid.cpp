@@ -873,6 +873,10 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
   this->retry_ms_ = 0;
   ESP_LOGI(TAG, "[%s] Connected", mac);
   this->connect_cb_.call();
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr)
+    this->pairing_->on_connection(this, true);
+#endif
 }
 
 void BTHIDDevice::on_close() {
@@ -886,8 +890,13 @@ void BTHIDDevice::on_close() {
   this->handle_ = 0xFF;
   this->map_.reset();
   this->release_all_hid();
-  if (was_connected)
+  if (was_connected) {
     this->disconnect_cb_.call();
+#ifdef USE_BT_PAIRING
+    if (this->pairing_ != nullptr)
+      this->pairing_->on_connection(this, false);
+#endif
+  }
 }
 
 void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor) {
@@ -920,6 +929,10 @@ void BTHIDDevice::on_pin_request() {
   format_mac_addr_upper(this->bda_, mac);
   ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, this->pin_.c_str());
   this->pin_cb_.call(this->pin_);
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr)
+    this->pairing_->on_pin_request(this, this->pin_);
+#endif
 }
 
 void BTHIDDevice::on_passkey(uint32_t passkey) {
@@ -927,6 +940,10 @@ void BTHIDDevice::on_passkey(uint32_t passkey) {
   format_mac_addr_upper(this->bda_, mac);
   ESP_LOGI(TAG, "[%s] Passkey: type %06" PRIu32 " and Enter on the device", mac, passkey);
   this->passkey_cb_.call(passkey);
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr)
+    this->pairing_->on_passkey(this, passkey);
+#endif
 }
 
 // Output reports go on the interrupt channel, report ID first where the device uses them.

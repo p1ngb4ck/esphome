@@ -247,15 +247,27 @@ void BTPairing::forget_all() {
 }
 
 void BTPairing::log_records() const {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   if (this->records_.empty()) {
     ESP_LOGI(TAG, "No paired devices");
-    return;
+  } else {
+    ESP_LOGI(TAG, "Paired devices:");
   }
   for (const auto &record : this->records_) {
-    char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(record.address, mac);
-    ESP_LOGI(TAG, "  %s %s '%s', class 0x%06" PRIX32 ", slot 0x%08" PRIX32, transport_str(record.transport), mac,
-             record.name, record.device_class, record.slot);
+    const PairingTarget *target = this->target_of_(record.address);
+    ESP_LOGI(TAG, "  %s %s '%s', class 0x%06" PRIX32 ", %s", transport_str(record.transport), mac, record.name,
+             record.device_class,
+             target == nullptr               ? "no slot"
+             : target->is_device_connected() ? "connected"
+                                             : "disconnected");
+  }
+  if (this->scanned_.empty())
+    return;
+  ESP_LOGI(TAG, "Found by the last scan:");
+  for (const auto &device : this->scanned_) {
+    format_mac_addr_upper(device.address, mac);
+    ESP_LOGI(TAG, "  %s %s '%s'", kind_str(device), mac, device.name.c_str());
   }
 }
 
@@ -446,6 +458,8 @@ void BTPairing::scan(uint32_t duration_ms) {
 void BTPairing::cancel_scan() {
   const bool active = this->scanning_.exchange(false) || this->pending_target_ != nullptr;
   this->pending_target_ = nullptr;
+  for (auto *target : this->targets_)
+    target->cancel_device_pairing();
 #ifdef USE_BT_CLASSIC
   if (this->classic_discovering_.load())
     esp_bt_gap_cancel_discovery();
@@ -511,18 +525,39 @@ bool BTPairing::slot_in_use(uint32_t slot) const {
   return false;
 }
 
-// The slot already holding the device, else a free one.
-PairingTarget *BTPairing::target_for_(const ScannedDevice &device) const {
-  const PairingRecord *record = this->find_address(device.address);
+PairingTarget *BTPairing::target_of_(const uint8_t *address) const {
+  const PairingRecord *record = this->find_address(address);
+  if (record == nullptr || record->slot == 0)
+    return nullptr;
   for (auto *target : this->targets_) {
-    if (target->pairs(device.transport, device.kind) && record != nullptr && target->pairing_slot() != 0 &&
-        record->slot == target->pairing_slot())
+    if (target->pairing_slot() == record->slot)
       return target;
+  }
+  return nullptr;
+}
+
+// The slot already holding the device, else a free one within the HID budget.
+PairingTarget *BTPairing::target_for_(const ScannedDevice &device, const char **reason) const {
+  if (PairingTarget *target = this->target_of_(device.address);
+      target != nullptr && target->pairs(device.transport, device.kind))
+    return target;
+  if (device.kind == DeviceKind::HID && this->max_hid_devices_ != 0) {
+    size_t used = 0;
+    for (auto *target : this->targets_) {
+      if ((target->pairs(Transport::CLASSIC, DeviceKind::HID) || target->pairs(Transport::LE, DeviceKind::HID)) &&
+          !target->is_free())
+        used++;
+    }
+    if (used >= this->max_hid_devices_) {
+      *reason = "all HID devices in use";
+      return nullptr;
+    }
   }
   for (auto *target : this->targets_) {
     if (target->pairs(device.transport, device.kind) && target->is_free())
       return target;
   }
+  *reason = "no free slot";
   return nullptr;
 }
 
@@ -533,9 +568,10 @@ void BTPairing::pair_with(size_t index) {
   char text[128];
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(device.address, mac);
-  PairingTarget *target = this->target_for_(device);
+  const char *reason = "";
+  PairingTarget *target = this->target_for_(device, &reason);
   if (target == nullptr) {
-    snprintf(text, sizeof(text), "No free %s slot for %s: unpair a device first", kind_str(device), mac);
+    snprintf(text, sizeof(text), "Cannot pair %s %s: %s, unpair one first", kind_str(device), mac, reason);
     this->status_(text);
     return;
   }
@@ -558,12 +594,116 @@ void BTPairing::dispatch_(const ScannedDevice &device, PairingTarget *target) {
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(device.address, mac);
   const char *label = device.name.empty() ? mac : device.name.c_str();
+  this->dispatched_ = device;
+  this->dispatched_target_ = target;
   if (target->pair_device(device)) {
     snprintf(text, sizeof(text), "Pairing with %s '%s'", kind_str(device), label);
   } else {
     snprintf(text, sizeof(text), "%s '%s' cannot be paired now", kind_str(device), label);
   }
   this->status_(text);
+}
+
+std::string BTPairing::device_label(const PairingTarget *target) const {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  if (target == this->dispatched_target_ && !target->is_free()) {
+    if (!this->dispatched_.name.empty())
+      return this->dispatched_.name;
+    format_mac_addr_upper(this->dispatched_.address, mac);
+    return mac;
+  }
+  const PairingRecord *record = target->pairing_slot() != 0 ? this->find_slot(target->pairing_slot()) : nullptr;
+  if (record == nullptr)
+    return "";
+  if (record->name[0] != '\0')
+    return record->name;
+  format_mac_addr_upper(record->address, mac);
+  return mac;
+}
+
+void BTPairing::on_pin_request(const PairingTarget *target, const std::string &pin) {
+  this->status_("Type " + pin + " + Enter on " + this->device_label(target));
+}
+
+void BTPairing::on_passkey(const PairingTarget *target, uint32_t passkey) {
+  char text[96];
+  snprintf(text, sizeof(text), "Type %06" PRIu32 " + Enter on %s", passkey, this->device_label(target).c_str());
+  this->status_(text);
+}
+
+void BTPairing::on_connection(const PairingTarget *target, bool connected) {
+  const std::string label = this->device_label(target);
+  this->status_(label + (connected ? " connected" : " disconnected"));
+  this->connection_callbacks_.call(label, connected);
+}
+
+#ifdef USE_BT_PAIRING_HID
+void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
+  input->add_on_key_event_callback([this, target](uint16_t page, uint16_t usage, bool pressed) {
+    this->event_device_ = this->device_label(target);
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+    ESP_LOGD(TAG, "[%s] %s %s", this->event_device_.c_str(), hid::key_name(page, usage).c_str(),
+             pressed ? "pressed" : "released");
+#endif
+    this->key_(page, usage, pressed);
+  });
+  input->add_on_pointer_callback([this, target](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
+    this->event_device_ = this->device_label(target);
+    this->buttons_ = buttons;
+    this->pointer_cb_.call(dx, dy, wheel, pan, buttons);
+  });
+  input->add_on_control_callback([this, target](uint16_t page, uint16_t usage, int32_t value) {
+    this->event_device_ = this->device_label(target);
+    this->control_cb_.call(page, usage, value);
+  });
+}
+#endif
+
+bool BTPairing::pair_address(const std::string &address) {
+  uint8_t bda[6];
+  if (!parse_address(address, bda))
+    return false;
+  for (size_t i = 0; i < this->scanned_.size(); i++) {
+    if (memcmp(this->scanned_[i].address, bda, sizeof(bda)) == 0) {
+      this->pair_with(i);
+      return true;
+    }
+  }
+  this->status_(address + " was not found by the last scan");
+  return false;
+}
+
+bool BTPairing::connect(const std::string &address) {
+  uint8_t bda[6];
+  PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
+  if (target == nullptr) {
+    this->status_(address + " is not paired");
+    return false;
+  }
+  target->connect_device();
+  return true;
+}
+
+bool BTPairing::disconnect(const std::string &address) {
+  uint8_t bda[6];
+  PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
+  if (target == nullptr) {
+    this->status_(address + " is not paired");
+    return false;
+  }
+  target->disconnect_device();
+  return true;
+}
+
+bool BTPairing::unpair(const std::string &address) {
+  uint8_t bda[6];
+  return parse_address(address, bda) && this->forget_address(bda);
+}
+
+bool BTPairing::is_connected(const std::string &address) const {
+  uint8_t bda[6];
+  const PairingTarget *target = parse_address(address, bda) ? this->target_of_(bda) : nullptr;
+  return target != nullptr && target->is_device_connected();
 }
 
 std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {

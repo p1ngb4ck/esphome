@@ -28,6 +28,8 @@ CODEOWNERS = ["@fsievers22", "@p1ngb4ck"]
 DEPENDENCIES = ["ble_client"]
 AUTO_LOAD = ["hid", "sha256", "bt_pairing"]
 MULTI_CONF = True
+# Auto-loaded by bt_pairing, which creates its own instances.
+MULTI_CONF_NO_DEFAULT = True
 
 CONF_EVENT_SAMPLING_INTERVAL = "event_sampling_interval"
 CONF_DISCOVERY_MODE = "discovery_mode"
@@ -157,11 +159,16 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
+    await slot_to_code(config, _is_slot(CORE.config, config))
+
+
+async def slot_to_code(config, slot: bool = True):
+    """Also bt_pairing's internal slots, whose ble_client is not in the config."""
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await ble_client.register_ble_node(var, config)
     cg.add(var.set_slot(fnv1_hash(f"ble_client_hid:{config[CONF_ID]}")))
-    if _is_slot(CORE.config, config):
+    if slot:
         cg.add(var.set_dynamic(True))
         # Pairing looks for advertising HID devices.
         await esp32_ble_tracker.register_ble_device(var, config)

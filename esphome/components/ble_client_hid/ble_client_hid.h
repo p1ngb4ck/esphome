@@ -221,6 +221,10 @@ class BLEClientHID : public Component,
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override;
   bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  bool is_device_connected() const override { return this->hid_connected_; }
+  void connect_device() override;
+  void disconnect_device() override;
+  void cancel_device_pairing() override { this->cancel_pairing(); }
 #endif
   bool is_pairing() const { return this->pairing_active_; }
 
@@ -406,6 +410,7 @@ class BLEClientHID : public Component,
   bool has_conn_latency_{false};
   bool encryption_{true};
   uint64_t plain_address_{0};
+  bool hid_connected_{false};
   bool io_cap_lowered_{false};
 
   OrderedEventBuffer sampled_events_{16};

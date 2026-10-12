@@ -22,6 +22,8 @@ from esphome.helpers import fnv1_hash
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32", "bt_pairing", "esp32_ble_tracker"]
 MULTI_CONF = True
+# Auto-loaded by bt_pairing, which creates its own instances.
+MULTI_CONF_NO_DEFAULT = True
 
 CONF_ON_MANUFACTURER_DATA = "on_manufacturer_data"
 CONF_ON_SERVICE_DATA = "on_service_data"

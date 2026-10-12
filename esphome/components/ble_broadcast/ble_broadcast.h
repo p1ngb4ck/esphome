@@ -40,6 +40,10 @@ class BLEBroadcast : public Component, public esp32_ble_tracker::ESPBTDeviceList
   uint32_t pairing_slot() const override { return this->slot_; }
   bool is_free() const override { return this->address_ == 0; }
   bool pair_device(const bt_pairing::ScannedDevice &device) override;
+  /// Listening counts as connected; there is no link to make or drop.
+  bool is_device_connected() const override { return this->address_ != 0; }
+  void connect_device() override {}
+  void disconnect_device() override {}
   void unpair();
   /// The device listened to, 0 when none.
   uint64_t get_address() const { return this->address_; }

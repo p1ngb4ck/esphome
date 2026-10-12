@@ -345,6 +345,17 @@ bool BLEClientHID::pair_device(const bt_pairing::ScannedDevice &device) {
   return this->pair_found_({address_to_uint64(device.address), static_cast<esp_ble_addr_type_t>(device.address_type),
                             static_cast<uint16_t>(device.device_class), device.name});
 }
+
+void BLEClientHID::connect_device() {
+  if (this->parent()->get_address() != 0)
+    this->parent()->set_auto_connect(true);
+}
+
+void BLEClientHID::disconnect_device() {
+  this->parent()->set_auto_connect(false);
+  if (this->parent()->state() != espbt::ClientState::IDLE)
+    this->parent()->disconnect();
+}
 #endif
 
 bool BLEClientHID::pair_found_(const FoundBLEDevice &picked) {
@@ -1494,6 +1505,13 @@ void BLEClientHID::handle_cccd_result_(uint16_t handle, esp_gatt_status_t status
 
 void BLEClientHID::finalize_setup_() {
   this->profile_ready_ = true;
+  if (!this->hid_connected_) {
+    this->hid_connected_ = true;
+#ifdef USE_BT_PAIRING
+    if (this->pairing_ != nullptr)
+      this->pairing_->on_connection(this, true);
+#endif
+  }
   this->update_conn_params_();
   if (this->degraded_) {
     this->transition_(SetupPhase::DEGRADED);
@@ -1708,6 +1726,21 @@ void BLEClientHID::write_leds_(uint8_t leds) {
 // -- GAP events --------------------------------------------------------------------------
 
 void BLEClientHID::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if ((event == ESP_GAP_BLE_PASSKEY_NOTIF_EVT || event == ESP_GAP_BLE_NC_REQ_EVT) &&
+      memcmp(param->ble_security.key_notif.bd_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) == 0) {
+    if (event == ESP_GAP_BLE_NC_REQ_EVT) {
+      // Numeric comparison: the device shows the number and confirms it; nothing to compare here.
+      esp_ble_confirm_reply(param->ble_security.key_notif.bd_addr, true);
+      return;
+    }
+    ESP_LOGI(TAG, "[%s] Passkey: type %06" PRIu32 " and Enter on the device", this->parent()->address_str(),
+             param->ble_security.key_notif.passkey);
+#ifdef USE_BT_PAIRING
+    if (this->pairing_ != nullptr)
+      this->pairing_->on_passkey(this, param->ble_security.key_notif.passkey);
+#endif
+    return;
+  }
   if (event != ESP_GAP_BLE_AUTH_CMPL_EVT ||
       memcmp(param->ble_security.auth_cmpl.bd_addr, this->parent()->get_remote_bda(), sizeof(esp_bd_addr_t)) != 0)
     return;
@@ -1789,6 +1822,13 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
       this->release_all_hid();
       this->reset_connection_state_();
       this->transition_(SetupPhase::DISCONNECTED);
+      if (this->hid_connected_) {
+        this->hid_connected_ = false;
+#ifdef USE_BT_PAIRING
+        if (this->pairing_ != nullptr)
+          this->pairing_->on_connection(this, false);
+#endif
+      }
       break;
     }
     case ESP_GATTC_SEARCH_CMPL_EVT:

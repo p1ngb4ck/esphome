@@ -210,12 +210,17 @@ def _emit_layout(config) -> str:
     return name
 
 
+def setup_hid_layout(var, layout_config, num_lock: bool) -> None:
+    """Layout and Num Lock of a HIDInput."""
+    _emit_key_names()
+    layout = _emit_layout(layout_config)
+    cg.add(var.set_layout(cg.RawExpression(f"&esphome::hid::{layout}")))
+    cg.add(var.set_num_lock(num_lock))
+
+
 async def setup_hid_input(var, config) -> None:
     """Layout, Num Lock and automations of a transport configured with HID_INPUT_SCHEMA."""
-    _emit_key_names()
-    layout = _emit_layout(config[CONF_LAYOUT])
-    cg.add(var.set_layout(cg.RawExpression(f"&esphome::hid::{layout}")))
-    cg.add(var.set_num_lock(config[CONF_NUM_LOCK]))
+    setup_hid_layout(var, config[CONF_LAYOUT], config[CONF_NUM_LOCK])
     cg.add(var.set_log_name(str(config[CONF_ID])))
     for conf in config.get(CONF_ON_KEY, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

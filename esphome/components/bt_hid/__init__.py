@@ -33,6 +33,8 @@ CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["hid", "bt_pairing", "bt_classic"]
 MULTI_CONF = True
+# Auto-loaded by bt_pairing, which creates its own instances.
+MULTI_CONF_NO_DEFAULT = True
 
 CONF_ON_PASSKEY = "on_passkey"
 CONF_ON_PIN_REQUEST = "on_pin_request"
