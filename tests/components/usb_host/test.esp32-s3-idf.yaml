@@ -1,2 +1,17 @@
 usb_host:
   max_transfer_requests: 32  # Test uint32_t bitmask path (17-32 requests)
+  mode_switch:
+    - vid: 0x0A5C
+      pid: 0x4503
+      hid2hci: dell
+    - vid: 0x1234
+      pid: 0x5678
+      bulk_messages:
+        - "5553424312345678000000000000061b000000020000000000000000000000"
+      need_response: true
+    - vid: 0x1111
+      pid: 0x2222
+      control:
+        request_type: 0x40
+        request: 0x01
+        data: [0x01, 0x02]

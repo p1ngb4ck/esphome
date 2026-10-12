@@ -52,6 +52,17 @@ from esphome.types import ConfigType
             {"id": "b", "vid": 0x303A, "pid": 0x4002},
             id="wildcard_vid_different_pid",
         ),
+        # No vid/pid at all: routed by device class, which this check cannot see.
+        pytest.param(
+            {"id": "a", "vid": 0, "pid": 0},
+            {"id": "b", "vid": 0x303A, "pid": 0x4001, "product": "ZBT-2"},
+            id="class_routed_entry_is_not_compared",
+        ),
+        pytest.param(
+            {"id": "a"},
+            {"id": "b", "vid": 0x303A, "pid": 0x4001},
+            id="entry_without_ids_is_not_compared",
+        ),
     ],
 )
 def test_disjoint_clients_are_accepted(first: ConfigType, second: ConfigType) -> None:
@@ -76,11 +87,6 @@ def test_disjoint_clients_are_accepted(first: ConfigType, second: ConfigType) ->
             {"id": "a", "vid": 0x303A, "pid": 0x4001, "product": "ZBT-2"},
             {"id": "b", "vid": 0x303A, "pid": 0x4001, "product": "ZBT-2"},
             id="identical_filters",
-        ),
-        pytest.param(
-            {"id": "a", "vid": 0, "pid": 0},
-            {"id": "b", "vid": 0x303A, "pid": 0x4001, "product": "ZBT-2"},
-            id="zero_ids_match_every_device",
         ),
         pytest.param(
             {"id": "a", "vid": 0x303A, "pid": 0},

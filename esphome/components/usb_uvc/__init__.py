@@ -12,6 +12,7 @@ from esphome.const import CONF_ID
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["usb_host"]
+MULTI_CONF = True
 
 CONF_FORMAT = "format"
 CONF_WIDTH = "width"

@@ -543,6 +543,21 @@ void USBStorageClient::on_disconnected() {
 
 void USBStorageClient::on_removed(usb_device_handle_t handle) { USBClient::on_removed(handle); }
 
+// A mount naming the stick makes it this instance's; a mount without vid/pid takes any stick.
+usb_host::MatchTier USBStorageClient::refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const {
+  if (this->devices_.empty())
+    return tier;
+  bool any = false;
+  for (const auto *device : this->devices_) {
+    if (device->vid_ == 0 && device->pid_ == 0) {
+      any = true;
+    } else if (device->vid_ == dev.desc->idVendor && device->pid_ == dev.desc->idProduct) {
+      return usb_host::MatchTier::NAMED;
+    }
+  }
+  return any ? tier : usb_host::MatchTier::NONE;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // USBStorageDevice -- lifecycle
 // ─────────────────────────────────────────────────────────────────────────────

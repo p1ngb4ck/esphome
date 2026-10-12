@@ -25,6 +25,7 @@ from . import realtek
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["usb_host"]
+MULTI_CONF = True
 
 CONF_BLUEDROID = "bluedroid"
 CONF_FIRMWARE = "firmware"
@@ -83,7 +84,11 @@ def _final_validate(config):
             f"usb_bluetooth sends HCI commands of up to 258 bytes in one control transfer: set "
             f"usb_host max_packet_size to {MIN_TRANSFER_BUFFER} or more"
         )
-    # Bluedroid takes one controller; esp32_ble would bring up another stack around a different one.
+    # Bluedroid is one stack with one controller.
+    instances = fv.full_config.get().get("usb_bluetooth") or []
+    if config[CONF_BLUEDROID] and sum(1 for c in instances if c[CONF_BLUEDROID]) > 1:
+        raise cv.Invalid(f"{CONF_BLUEDROID}: only one usb_bluetooth can run Bluedroid")
+    # esp32_ble would bring up another stack around a different controller.
     if config[CONF_BLUEDROID] and "esp32_ble" in fv.full_config.get():
         raise cv.Invalid(
             f"{CONF_BLUEDROID}: Bluedroid takes the USB dongle as its controller; "

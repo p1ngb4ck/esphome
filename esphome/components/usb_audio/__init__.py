@@ -26,7 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["audio", "usb_host"]
-MULTI_CONF = False
+MULTI_CONF = True
+DOMAIN = "usb_audio"
+KEY_FIFO_BIAS_APPLIED = "fifo_bias_applied"
 
 usb_audio_ns = cg.esphome_ns.namespace("usb_audio")
 
@@ -178,14 +180,18 @@ def _endpoint_mps(stream) -> int:
     return per_interval + frame
 
 
-def _usb_audio_streams(full_config):
-    """The configured playback and capture stream, either of which may be absent."""
-    streams = {}
+def _usb_audio_mps(full_config) -> tuple[int, int]:
+    """Widest playback and capture packet over every usb_audio stream, 0 where there is none.
+
+    Several usb_audio instances can share one controller, and its FIFO division has to carry
+    the widest stream in each direction.
+    """
+    widest = {}
     for domain in (CONF_SPEAKER, CONF_MICROPHONE):
         for entry in full_config.get(domain) or []:
             if entry.get(CONF_PLATFORM) == "usb_audio":
-                streams[domain] = entry
-    return streams.get(CONF_SPEAKER), streams.get(CONF_MICROPHONE)
+                widest[domain] = max(widest.get(domain, 0), _endpoint_mps(entry))
+    return widest.get(CONF_SPEAKER, 0), widest.get(CONF_MICROPHONE, 0)
 
 
 def _select_fifo_bias(out_mps: int, in_mps: int):
@@ -214,9 +220,7 @@ def _final_validate(config):
     if not _needs_fifo_bias():
         return config
 
-    speaker, microphone = _usb_audio_streams(fv.full_config.get())
-    out_mps = _endpoint_mps(speaker) if speaker else 0
-    in_mps = _endpoint_mps(microphone) if microphone else 0
+    out_mps, in_mps = _usb_audio_mps(fv.full_config.get())
     if _select_fifo_bias(out_mps, in_mps) is not None:
         return config
 
@@ -258,9 +262,11 @@ def _apply_fifo_bias() -> None:
     if index is None:
         return
 
-    speaker, microphone = _usb_audio_streams(CORE.config)
-    out_mps = _endpoint_mps(speaker) if speaker else 0
-    in_mps = _endpoint_mps(microphone) if microphone else 0
+    # Once for all instances: they share the controller and its division.
+    if CORE.data.setdefault(DOMAIN, {}).get(KEY_FIFO_BIAS_APPLIED):
+        return
+    CORE.data[DOMAIN][KEY_FIFO_BIAS_APPLIED] = True
+    out_mps, in_mps = _usb_audio_mps(CORE.config)
     bias = _select_fifo_bias(out_mps, in_mps)
     if bias is None:
         # Rejected during validation; nothing sensible to set.

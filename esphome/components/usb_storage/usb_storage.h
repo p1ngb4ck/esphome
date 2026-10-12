@@ -72,6 +72,7 @@ class USBStorageClient : public usb_host::USBClient {
   void on_connected() override;
   void on_disconnected() override;
   void on_removed(usb_device_handle_t handle) override;
+  usb_host::MatchTier refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const override;
 
   bool parse_msc_endpoints_();
   // Bulk IN transfers must ask for a whole number of max-size packets. The BOT/SCSI

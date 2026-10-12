@@ -32,6 +32,7 @@ from esphome.const import CONF_DEVICES, CONF_ID, CONF_TRIGGER_ID
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["storage", "usb_host"]
+MULTI_CONF = True
 
 CONF_VID = "vid"
 CONF_PID = "pid"

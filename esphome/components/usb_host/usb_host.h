@@ -150,6 +150,25 @@ enum class MatchTier : uint8_t {
   NAMED,   // its configured filters name the device
 };
 
+// A message that takes a device out of the mode it enumerates in (a Bluetooth dongle in HID
+// proxy mode, a camera or modem posing as mass storage), from the usb_host mode_switch option.
+// Either a control request, or bulk messages to the first bulk OUT endpoint as usb_modeswitch
+// sends its MessageContent.
+struct ModeSwitch {
+  uint16_t vid;
+  uint16_t pid;
+  uint8_t request_type;
+  uint8_t request;
+  uint16_t value;
+  uint16_t index;
+  std::vector<uint8_t> data;
+  std::vector<std::vector<uint8_t>> messages;
+  bool need_response;
+  // When it was last sent; a device that comes back with the same ids soon after is routed
+  // as it is instead of being switched again.
+  uint32_t sent_ms;
+};
+
 // A device USBHost has open, from enumeration until it is gone.
 struct RoutedDevice {
   uint8_t addr{0};
@@ -163,6 +182,16 @@ struct RoutedDevice {
   // Drivers that let the device go again; not offered it until it is plugged in anew.
   std::vector<USBClient *> declined{};
   bool reported_unrouted{false};
+  // Mode switch in progress: not routed until it is done and the device had time to leave.
+  const ModeSwitch *mode_switch{nullptr};
+  uint8_t switch_step{0};
+  usb_transfer_t *switch_xfer{nullptr};
+  uint8_t switch_intf{0xFF};
+  uint8_t switch_ep_out{0};
+  uint8_t switch_ep_in{0};
+  uint16_t switch_mps_in{0};
+  uint32_t switched_ms{0};
+  bool gone{false};
 };
 
 // USB string descriptors hold at most 126 characters; one more for the terminator
@@ -415,6 +444,9 @@ class USBClient : public Component {
   bool is_free_() const { return this->state_ == USB_CLIENT_INIT; }
   // How this driver matches the device, and which of its interfaces it would serve.
   MatchTier match_(const RoutedDevice &dev, uint32_t &interfaces) const;
+  /// A driver's own say on a class or vendor match: NONE to pass the device by, NAMED when
+  /// its configuration names it after all (a usb_storage mount with the stick's vid/pid).
+  virtual MatchTier refine_match_(const RoutedDevice &dev, MatchTier tier) const { return tier; }
   void bind_(uint8_t addr, uint32_t interfaces);
   /// Whether routing handed this interface of the current device to this driver.
   bool interface_routed_(uint8_t interface_num) const {
@@ -556,13 +588,30 @@ class USBHost final : public Component {
   // A driver let its device go: declined it, lost it, or failed to open it.
   void client_released(USBClient *client, int addr);
 
+  // -- Mode switching (mode_switch option) ---------------------------------------
+  void add_mode_switch_control(uint16_t vid, uint16_t pid, uint8_t request_type, uint8_t request, uint16_t value,
+                               uint16_t index, std::vector<uint8_t> data) {
+    this->mode_switches_.push_back({vid, pid, request_type, request, value, index, std::move(data), {}, false, 0});
+  }
+  void add_mode_switch_bulk(uint16_t vid, uint16_t pid, std::vector<std::vector<uint8_t>> messages,
+                            bool need_response) {
+    this->mode_switches_.push_back({vid, pid, 0, 0, 0, 0, {}, std::move(messages), need_response, 0});
+  }
+
  protected:
   static void host_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
   void device_new_(uint8_t addr);
   void device_gone_(usb_device_handle_t handle);
   void route_(RoutedDevice &dev);
+  RoutedDevice *find_device_(usb_device_handle_t handle);
+  bool start_mode_switch_(RoutedDevice &dev);
+  bool submit_switch_step_(RoutedDevice &dev);
+  static void switch_cb(usb_transfer_t *xfer);
+  void finish_mode_switch_(usb_device_handle_t handle);
+  void forget_device_(usb_device_handle_t handle);
 
   std::vector<USBClient *> clients_{};
+  std::vector<ModeSwitch> mode_switches_{};
   usb_host_client_handle_t client_handle_{nullptr};
   std::vector<RoutedDevice> devices_{};
   bool reroute_{false};

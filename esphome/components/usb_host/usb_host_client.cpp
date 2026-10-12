@@ -513,15 +513,20 @@ MatchTier USBClient::match_(const RoutedDevice &dev, uint32_t &interfaces) const
     interfaces = (by_class | by_vendor) != 0 ? (by_class | by_vendor) : all;
     return MatchTier::NAMED;
   }
+  MatchTier tier = MatchTier::NONE;
   if (by_vendor != 0) {
     interfaces = by_vendor;
-    return MatchTier::VENDOR;
-  }
-  if (by_class != 0) {
+    tier = MatchTier::VENDOR;
+  } else if (by_class != 0) {
     interfaces = by_class;
-    return MatchTier::CLASS;
+    tier = MatchTier::CLASS;
+  } else {
+    return MatchTier::NONE;
   }
-  return MatchTier::NONE;
+  tier = this->refine_match_(dev, tier);
+  if (tier == MatchTier::NONE)
+    interfaces = 0;
+  return tier;
 }
 
 void USBClient::bind_(uint8_t addr, uint32_t interfaces) {
