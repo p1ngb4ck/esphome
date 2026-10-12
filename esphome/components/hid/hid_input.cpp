@@ -33,6 +33,37 @@ std::string key_name(uint16_t page, uint16_t usage) {
   return buf;
 }
 
+bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id, std::vector<uint8_t> &payload) {
+  for (const auto &report : map.reports()) {
+    if (report.kind != HIDReportKind::OUTPUT)
+      continue;
+    payload.assign(report.byte_size(), 0);
+    bool has_led = false;
+    for (const uint16_t id : report.field_ids) {
+      const HIDFieldSchema *field = map.find_field(id);
+      if (field == nullptr || field->is_constant() || !field->is_variable() || field->report_size != 1)
+        continue;
+      for (uint32_t i = 0; i < field->report_count; i++) {
+        const HIDUsage usage = field->usage_at(i, true);
+        if (usage.page != PAGE_LED || usage.usage < 1 || usage.usage > 3)
+          continue;
+        has_led = true;
+        if ((leds & (1u << (usage.usage - 1))) == 0)
+          continue;
+        const uint32_t bit = field->bit_offset + i;
+        if (bit / 8 < payload.size())
+          payload[bit / 8] |= 1u << (bit % 8);
+      }
+    }
+    if (has_led) {
+      report_id = report.report_id;
+      return true;
+    }
+  }
+  payload.clear();
+  return false;
+}
+
 void append_utf8(std::string &out, char32_t c) {
   if (c < 0x80) {
     out += static_cast<char>(c);

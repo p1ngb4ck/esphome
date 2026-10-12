@@ -1,0 +1,47 @@
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: 01:02:03:04:05:06
+    id: test_remote_client
+  - mac_address: 01:02:03:04:05:07
+    id: test_keyboard_client
+
+ble_client_hid:
+  - id: test_remote
+    ble_client_id: test_remote_client
+    keepalive_interval: 4min
+    conn_latency: 30
+    event_sampling_interval: 50ms
+    on_key:
+      - key: MENU_UP
+        then:
+          - logger.log: up
+  - id: test_keyboard
+    ble_client_id: test_keyboard_client
+    publish_to_ha: false
+    layout: de
+    protocol_mode: report
+    on_text:
+      - logger.log:
+          format: "%s"
+          args: [text.c_str()]
+
+sensor:
+  - platform: ble_client_hid
+    type: battery
+    name: Remote battery
+    ble_client_hid_id: test_remote
+  - platform: ble_client_hid
+    type: last_event_value
+    name: Remote last value
+    ble_client_hid_id: test_remote
+
+text_sensor:
+  - platform: ble_client_hid
+    type: last_event_usage
+    name: Remote last usage
+    ble_client_hid_id: test_remote
+  - platform: ble_client_hid
+    type: last_event_code
+    name: Remote last code
+    ble_client_hid_id: test_remote

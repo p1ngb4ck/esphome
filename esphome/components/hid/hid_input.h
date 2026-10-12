@@ -67,6 +67,10 @@ extern const uint16_t KEY_NAMES_COUNT;
 std::string key_name(uint16_t page, uint16_t usage);
 void append_utf8(std::string &out, char32_t c);
 
+/// The output report of a report descriptor that carries the Num, Caps and Scroll Lock LEDs,
+/// with the bits of `leds` set, without its report ID byte. False if the device has none.
+bool build_led_report(const HIDReportMap &map, uint8_t leds, uint8_t &report_id, std::vector<uint8_t> &payload);
+
 // What any HID transport (USB, BLE, Bluetooth Classic) feeds its decoded reports into: keys,
 // typed text, pointer motion and every other control, for automations, sensors, LVGL and
 // key_provider (key_collector) alike. Typed characters go to key_provider as well when they

@@ -365,37 +365,16 @@ void USBHIDClient::write_leds_(uint8_t leds) {
   for (auto &intf : this->interfaces_) {
     if (intf.map == nullptr)
       continue;
-    for (const auto &report : intf.map->reports()) {
-      if (report.kind != hid::HIDReportKind::OUTPUT)
-        continue;
-      std::vector<uint8_t> payload(report.byte_size(), 0);
-      bool has_led = false;
-      for (const uint16_t id : report.field_ids) {
-        const hid::HIDFieldSchema *field = intf.map->find_field(id);
-        if (field == nullptr || field->is_constant() || !field->is_variable() || field->report_size != 1)
-          continue;
-        for (uint32_t i = 0; i < field->report_count; i++) {
-          const hid::HIDUsage usage = field->usage_at(i, true);
-          if (usage.page != hid::PAGE_LED || usage.usage < 1 || usage.usage > 3)
-            continue;
-          has_led = true;
-          if ((leds & (1u << (usage.usage - 1))) == 0)
-            continue;
-          const uint32_t bit = field->bit_offset + i;
-          if (bit / 8 < payload.size())
-            payload[bit / 8] |= 1u << (bit % 8);
-        }
-      }
-      if (!has_led)
-        continue;
-      if (intf.map->uses_report_ids())
-        payload.insert(payload.begin(), report.report_id);
-      this->control_transfer(
-          HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT,
-          static_cast<uint16_t>(HID_REPORT_TYPE_OUTPUT << 8 | report.report_id), intf.number,
-          [](const usb_host::TransferStatus &) {}, payload);
-      return;
-    }
+    uint8_t report_id = 0;
+    std::vector<uint8_t> payload;
+    if (!hid::build_led_report(*intf.map, leds, report_id, payload))
+      continue;
+    if (intf.map->uses_report_ids())
+      payload.insert(payload.begin(), report_id);
+    this->control_transfer(
+        HID_REQ_TYPE_HOST_TO_DEV, HID_REQ_SET_REPORT, static_cast<uint16_t>(HID_REPORT_TYPE_OUTPUT << 8 | report_id),
+        intf.number, [](const usb_host::TransferStatus &) {}, payload);
+    return;
   }
 }
 
