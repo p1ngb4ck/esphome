@@ -1,7 +1,13 @@
 import esphome.codegen as cg
 from esphome.components import audio, speaker
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_MICROPHONE
+from esphome.const import (
+    CONF_BITS_PER_SAMPLE,
+    CONF_ID,
+    CONF_MICROPHONE,
+    CONF_NUM_CHANNELS,
+    CONF_SAMPLE_RATE,
+)
 import esphome.final_validate as fv
 
 from .. import CONF_A2DP_SOURCE_ID, A2DPSource, a2dp_source_ns
@@ -15,8 +21,15 @@ A2DPSpeaker = a2dp_source_ns.class_(
 )
 
 
+_FORMAT = {CONF_BITS_PER_SAMPLE: 16, CONF_NUM_CHANNELS: 2, CONF_SAMPLE_RATE: 44100}
+
+
 def _set_stream_limits(config):
-    # What A2DP's SBC encoder takes here; players resample to it.
+    # What A2DP's SBC encoder takes here; players resample to it. Declared like a fixed
+    # hardware format, for components that read a speaker's format off its config.
+    for key, value in _FORMAT.items():
+        if config.setdefault(key, value) != value:
+            raise cv.Invalid(f"{key} is {value} for an a2dp_source speaker")
     audio.set_stream_limits(
         min_bits_per_sample=16,
         max_bits_per_sample=16,
