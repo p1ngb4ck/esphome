@@ -210,6 +210,13 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       push(std::move(e));
       break;
     }
+    case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+      // A keyboard in pairing mode connects on its own, but Bluedroid refuses the pairing it
+      // starts (btm_sec_pin_code_request: the host originates keyboard bonding). An open slot
+      // takes it and connects to it itself.
+      if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS)
+        find_or_adopt(param->acl_conn_cmpl_stat.bda);
+      break;
     case ESP_BT_GAP_AUTH_CMPL_EVT: {
       HostEvent e;
       e.type = HostEvent::AUTH;
@@ -673,6 +680,7 @@ void BTHIDDevice::on_adopted() {
   this->candidate_class_ = 0;
   this->candidate_name_.clear();
   this->retry_ms_ = 0;
+  this->next_connect_ms_ = millis();
   host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
   if (host().discovering)
     esp_bt_gap_cancel_discovery();

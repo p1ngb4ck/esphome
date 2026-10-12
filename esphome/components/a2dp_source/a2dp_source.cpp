@@ -34,7 +34,7 @@ bool A2DPSource::device_filter_(const char *name, esp_bd_addr_t address, int rss
 
 int32_t A2DPSource::audio_callback_(Frame *frames, int32_t frame_count) {
   if (global_a2dp_source == nullptr) {
-    memset(frames, 0, (size_t) frame_count * BYTES_PER_FRAME);
+    memset(static_cast<void *>(frames), 0, (size_t) frame_count * BYTES_PER_FRAME);
     return frame_count;
   }
   return global_a2dp_source->fill_frames_(frames, frame_count);

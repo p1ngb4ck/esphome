@@ -44,6 +44,7 @@
 using namespace esp_i2s;
 #endif
 
+#include <inttypes.h>  // ESPHome: PRI format macros
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>

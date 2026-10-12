@@ -325,11 +325,11 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
     switch (p->type) {
       case ESP_BT_GAP_DEV_PROP_COD:
         cod = *(uint32_t *)(p->val);
-        ESP_LOGI(BT_AV_TAG, "--Class of Device: 0x%x", cod);
+        ESP_LOGI(BT_AV_TAG, "--Class of Device: 0x%" PRIx32, cod);  // ESPHome: format
         break;
       case ESP_BT_GAP_DEV_PROP_RSSI:
         rssi = *(int8_t *)(p->val);
-        ESP_LOGI(BT_AV_TAG, "--RSSI: %d", rssi);
+        ESP_LOGI(BT_AV_TAG, "--RSSI: %" PRId32, rssi);  // ESPHome: format
         break;
       case ESP_BT_GAP_DEV_PROP_EIR:
         eir = (uint8_t *)(p->val);
@@ -523,7 +523,7 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
     /* when Security Simple Pairing passkey notified, this event comes */
     case ESP_BT_GAP_KEY_NOTIF_EVT:
       if (!ssp_enabled) break;
-      ESP_LOGI(BT_AV_TAG, "ESP_BT_GAP_KEY_NOTIF_EVT passkey:%d",
+      ESP_LOGI(BT_AV_TAG, "ESP_BT_GAP_KEY_NOTIF_EVT passkey:%" PRIu32,  // ESPHome: format
                param->key_notif.passkey);
       break;
     /* when Security Simple Pairing passkey requested, this event comes */
@@ -1244,7 +1244,7 @@ void BluetoothA2DPSource::av_hdl_avrc_tg_evt(uint16_t event, void *p_param) {
                                              &psth_set) != ESP_OK) {
           ESP_LOGE(BT_AV_TAG, "esp_avrc_tg_set_psth_cmd_filter");
         }
-        ESP_LOGI(BT_AV_TAG, "Set passthru capabilities: 0x%0x", psth_set);
+        ESP_LOGI(BT_AV_TAG, "Set passthru capabilities: 0x%04x", psth_set.bits[0]);  // ESPHome: the mask, not the struct
       }
       break;
     }
@@ -1264,7 +1264,7 @@ void BluetoothA2DPSource::av_hdl_avrc_tg_evt(uint16_t event, void *p_param) {
     }
 
     case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT: {
-      ESP_LOGI(BT_AV_TAG, "AVRC register event notification: %d, param: 0x%x",
+      ESP_LOGI(BT_AV_TAG, "AVRC register event notification: %d, param: 0x%" PRIx32,  // ESPHome: format
                rc->reg_ntf.event_id, rc->reg_ntf.event_parameter);
       if (rc->reg_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
         ESP_LOGW(BT_AV_TAG, "ESP_AVRC_RN_VOLUME_CHANGE");
@@ -1282,7 +1282,7 @@ void BluetoothA2DPSource::av_hdl_avrc_tg_evt(uint16_t event, void *p_param) {
     }
 
     case ESP_AVRC_TG_REMOTE_FEATURES_EVT: {
-      ESP_LOGI(BT_AV_TAG, "AVRC remote features %x, CT features %x",
+      ESP_LOGI(BT_AV_TAG, "AVRC remote features %" PRIx32 ", CT features %x",  // ESPHome: format
                rc->rmt_feats.feat_mask, rc->rmt_feats.ct_feat_flag);
       break;
     }

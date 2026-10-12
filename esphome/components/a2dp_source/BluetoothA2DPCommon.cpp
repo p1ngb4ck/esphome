@@ -382,7 +382,7 @@ void BluetoothA2DPCommon::debounce(void (*cb)(void), int ms) {
 
 /// Logs the free heap
 void BluetoothA2DPCommon::log_free_heap() {
-  ESP_LOGI(BT_AV_TAG, "Available Heap: %zu", esp_get_free_heap_size());
+  ESP_LOGI(BT_AV_TAG, "Available Heap: %" PRIu32, esp_get_free_heap_size());  // ESPHome: format
 }
 
 /// converts esp_a2d_connection_state_t to a string
