@@ -56,6 +56,7 @@ struct Host {
   bool ready{false};
   bool connecting{false};
   bool discovering{false};
+  bool scan_requested{false};  // bt_hid.scan: its finds are logged
   uint32_t connecting_since{0};
 };
 
@@ -393,10 +394,12 @@ void handle_event(HostEvent &e) {
         break;
       format_mac_addr_upper(e.bda, mac);
       const std::string name(e.data.begin(), e.data.end());
-      if (e.has_rssi) {
-        ESP_LOGI(TAG, "Found %s %s '%s', RSSI %d", peripheral_kind(e.value), mac, name.c_str(), e.rssi);
+      // Other inquiries (bt_pairing, a2dp_source) report their own finds.
+      if (h.pairing != nullptr || h.scan_requested) {
+        ESP_LOGI(TAG, "Found %s %s '%s', RSSI %d", peripheral_kind(e.value), mac, name.c_str(),
+                 e.has_rssi ? e.rssi : 0);
       } else {
-        ESP_LOGI(TAG, "Found %s %s '%s'", peripheral_kind(e.value), mac, name.c_str());
+        ESP_LOGV(TAG, "Found %s %s '%s'", peripheral_kind(e.value), mac, name.c_str());
       }
       if (h.pairing != nullptr && find_by_address(e.bda) == nullptr) {
         if (h.pairing->has_device_select()) {
@@ -409,7 +412,13 @@ void handle_event(HostEvent &e) {
     }
     case HostEvent::SCAN_STATE:
       h.discovering = e.value != 0;
-      ESP_LOGI(TAG, "Scan %s", h.discovering ? "started" : "finished");
+      if (h.pairing != nullptr || h.scan_requested) {
+        ESP_LOGI(TAG, "Scan %s", h.discovering ? "started" : "finished");
+      } else {
+        ESP_LOGV(TAG, "Scan %s", h.discovering ? "started" : "finished");
+      }
+      if (!h.discovering)
+        h.scan_requested = false;
       // Without a device found the window stays open until it times out: a device in pairing
       // mode may still connect on its own.
       if (!h.discovering && h.pairing != nullptr && !h.pairing->has_address())
@@ -852,8 +861,11 @@ void BTHIDDevice::scan(uint32_t duration_ms) {
   // Inquiry length is in units of 1.28 s.
   const uint32_t units =
       std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
-  if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK)
+  if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
     ESP_LOGW(TAG, "Scan failed to start: %s", esp_err_to_name(err));
+    return;
+  }
+  host().scan_requested = true;
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {

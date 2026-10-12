@@ -287,7 +287,7 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     return false;
   }
 
-  ESP_LOGD(TAG, "Found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
+  ESP_LOGV(TAG, "Found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
            address[3], address[4], address[5], rssi);
 
   bool known = false;
