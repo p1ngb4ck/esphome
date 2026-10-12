@@ -465,115 +465,6 @@ _LS_RETRY_REPLACEMENT = """        // Get and store the pipe error event
         }
         pipe->last_event = pipe_decode_error_event(chan_error);"""
 
-# A low-speed device behind a full-speed hub, part two: the controller cannot issue two
-# PRE-qualified transactions in one frame (IDF-12986), and the data stage of a control
-# transfer is one descriptor covering every packet of it, so anything longer than one packet
-# (an 18 byte device descriptor on an 8 byte EP0) failed from its second packet on. For such
-# pipes the data stage now runs one packet per descriptor, a frame apart, continued with the
-# next DATA toggle until a short packet or the end; the transfer reports the bytes moved.
-_LS_FLAGS_ANCHOR = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
-            uint32_t reserved28: 28;"""
-
-_LS_FLAGS_REPLACEMENT = """            uint32_t cur_stg: 2;            // Index of the current stage (e.g., 0 is setup stage, 2 is status stage)
-            uint32_t ls_split: 1;           // Data stage runs one packet at a time (LS via FS hub)
-            uint32_t ls_data_done: 16;      // Data stage bytes moved so far when ls_split
-            uint32_t reserved11: 11;"""
-
-_LS_PACKET_HELPERS_ANCHOR = """#define LS_CTRL_RETRY_MAX 3
-"""
-
-_LS_PACKET_HELPERS_REPLACEMENT = """#define LS_CTRL_RETRY_MAX 3
-
-static inline int _ls_ctrl_data_pid(const dma_buffer_block_t *buffer, int mps)
-{
-    // DATA1 first, then alternating
-    return ((buffer->flags.ctrl.ls_data_done / mps) & 1) ? 0 : 1;
-}
-
-static inline int _ls_ctrl_packet_len(const dma_buffer_block_t *buffer, const usb_transfer_t *transfer, int mps)
-{
-    const int remaining = transfer->num_bytes - (int)sizeof(usb_setup_packet_t) - (int)buffer->flags.ctrl.ls_data_done;
-    return remaining < mps ? remaining : mps;
-}
-
-static inline void _ls_ctrl_fill_data_packet(dma_buffer_block_t *buffer, usb_transfer_t *transfer, int mps)
-{
-    usb_dwc_hal_xfer_desc_fill(buffer->xfer_desc_list, 1,
-                               transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_data_done,
-                               _ls_ctrl_packet_len(buffer, transfer, mps),
-                               (buffer->flags.ctrl.data_stg_in ? USB_DWC_HAL_XFER_DESC_FLAG_IN : 0) | USB_DWC_HAL_XFER_DESC_FLAG_HOC);
-}
-"""
-
-_LS_RETRY_PACKET_ANCHOR = """    } else if (stage == 1) {
-        is_in = buffer->flags.ctrl.data_stg_in;
-        pid = 1;
-        data = transfer->data_buffer + sizeof(usb_setup_packet_t);
-        len = transfer->num_bytes - sizeof(usb_setup_packet_t);
-    } else {"""
-
-_LS_RETRY_PACKET_REPLACEMENT = """    } else if (stage == 1) {
-        is_in = buffer->flags.ctrl.data_stg_in;
-        if (buffer->flags.ctrl.ls_split) {
-            pid = _ls_ctrl_data_pid(buffer, pipe->ep_char.mps);
-            data = transfer->data_buffer + sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_data_done;
-            len = _ls_ctrl_packet_len(buffer, transfer, pipe->ep_char.mps);
-        } else {
-            pid = 1;
-            data = transfer->data_buffer + sizeof(usb_setup_packet_t);
-            len = transfer->num_bytes - sizeof(usb_setup_packet_t);
-        }
-    } else {"""
-
-_LS_FILL_ANCHOR = """        _buffer_fill_ctrl(buffer_to_fill, transfer);
-        break;"""
-
-_LS_FILL_REPLACEMENT = """        _buffer_fill_ctrl(buffer_to_fill, transfer);
-        buffer_to_fill->flags.ctrl.ls_split = 0;
-        if (pipe->ep_char.ls_via_fs_hub && !buffer_to_fill->flags.ctrl.data_stg_skip) {
-            buffer_to_fill->flags.ctrl.ls_split = 1;
-            buffer_to_fill->flags.ctrl.ls_data_done = 0;
-            _ls_ctrl_fill_data_packet(buffer_to_fill, transfer, mps);
-        }
-        break;"""
-
-_LS_CONT_ANCHOR = """    if (buffer_inflight->flags.ctrl.cur_stg == 0) { // Just finished control stage"""
-
-_LS_CONT_REPLACEMENT = """    if (buffer_inflight->flags.ctrl.cur_stg == 1 && buffer_inflight->flags.ctrl.ls_split) {
-        usb_transfer_t *transfer = &buffer_inflight->urb->transfer;
-        const int mps = pipe->ep_char.mps;
-        const int programmed = _ls_ctrl_packet_len(buffer_inflight, transfer, mps);
-        int rem_len;
-        int desc_status;
-        CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer_inflight);
-        usb_dwc_hal_xfer_desc_parse(buffer_inflight->xfer_desc_list, 1, &rem_len, &desc_status);
-        const int moved = programmed - rem_len;
-        buffer_inflight->flags.ctrl.ls_data_done += moved;
-        if (moved == programmed && _ls_ctrl_packet_len(buffer_inflight, transfer, mps) > 0) {
-            // Next packet of the data stage; _buffer_check_done() already waited for a new frame
-            pipe->ls_ctrl_retry_count = 0;
-            _ls_ctrl_fill_data_packet(buffer_inflight, transfer, mps);
-            CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer_inflight);
-            usb_dwc_hal_chan_set_dir(pipe->chan_obj, buffer_inflight->flags.ctrl.data_stg_in);
-            usb_dwc_hal_chan_set_pid(pipe->chan_obj, _ls_ctrl_data_pid(buffer_inflight, mps));
-            usb_dwc_hal_chan_activate(pipe->chan_obj, buffer_inflight->xfer_desc_list, XFER_LIST_LEN_CTRL, 1);
-            return;
-        }
-    }
-    if (buffer_inflight->flags.ctrl.cur_stg == 0) { // Just finished control stage"""
-
-_LS_PARSE_ANCHOR = """    if (buffer->flags.ctrl.data_stg_skip)     {
-        // There was no data stage. Just set the actual length to the size of the setup packet
-        transfer->actual_num_bytes = sizeof(usb_setup_packet_t);
-    } else {"""
-
-_LS_PARSE_REPLACEMENT = """    if (buffer->flags.ctrl.data_stg_skip)     {
-        // There was no data stage. Just set the actual length to the size of the setup packet
-        transfer->actual_num_bytes = sizeof(usb_setup_packet_t);
-    } else if (buffer->flags.ctrl.ls_split) {
-        transfer->actual_num_bytes = sizeof(usb_setup_packet_t) + buffer->flags.ctrl.ls_data_done;
-    } else {"""
-
 # The high-speed controller as a full/low-speed host: HCFG.FSLSSupp set before every port
 # reset, so the controller does not answer a device's high-speed chirp. Backported from
 # espressif/usb 1.6.0 (usb_host_config_t.fsls_only), which needs it from an ESP-IDF HAL that
@@ -649,12 +540,6 @@ PATCHES = (
     ("src/hcd_dwc.c", _LS_EXEC_CONT_ANCHOR, _LS_EXEC_CONT_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_RETRY_HELPER_ANCHOR, _LS_RETRY_HELPER_REPLACEMENT),
     ("src/hcd_dwc.c", _LS_RETRY_ANCHOR, _LS_RETRY_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_FLAGS_ANCHOR, _LS_FLAGS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PACKET_HELPERS_ANCHOR, _LS_PACKET_HELPERS_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_RETRY_PACKET_ANCHOR, _LS_RETRY_PACKET_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_FILL_ANCHOR, _LS_FILL_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_CONT_ANCHOR, _LS_CONT_REPLACEMENT),
-    ("src/hcd_dwc.c", _LS_PARSE_ANCHOR, _LS_PARSE_REPLACEMENT),
     ("src/hcd_dwc.c", _RESET_BAILOUT_ANCHOR, _RESET_BAILOUT_REPLACEMENT),
     ("src/hub.c", _HUB_PORT_ANCHOR, _HUB_PORT_REPLACEMENT),
     ("src/hub.c", _HUB_RESET_ERR_ANCHOR, _HUB_RESET_ERR_REPLACEMENT),
