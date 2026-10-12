@@ -27,12 +27,14 @@ namespace {
 
 // Bluedroid calls back on its BTC task; everything is handed to the main loop as one of these.
 struct HostEvent {
-  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, AUTH };
+  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, AUTH, FOUND, SCAN_STATE };
   Type type{INIT};
   uint8_t handle{0xFF};
   esp_bd_addr_t bda{};
   int status{0};
   uint32_t value{0};
+  int8_t rssi{0};
+  bool has_rssi{false};
   std::vector<uint8_t> data;
 };
 
@@ -122,6 +124,40 @@ void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
       // Nothing here to type a passkey on.
       esp_bt_gap_ssp_passkey_reply(param->key_req.bda, false, 0);
       break;
+    case ESP_BT_GAP_DISC_RES_EVT: {
+      HostEvent e;
+      e.type = HostEvent::FOUND;
+      memcpy(e.bda, param->disc_res.bda, ESP_BD_ADDR_LEN);
+      for (int i = 0; i < param->disc_res.num_prop; i++) {
+        const esp_bt_gap_dev_prop_t &prop = param->disc_res.prop[i];
+        if (prop.type == ESP_BT_GAP_DEV_PROP_COD && prop.len >= (int) sizeof(uint32_t)) {
+          e.value = *static_cast<const uint32_t *>(prop.val);
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_RSSI && prop.len >= 1) {
+          e.rssi = *static_cast<const int8_t *>(prop.val);
+          e.has_rssi = true;
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_BDNAME && e.data.empty() && prop.len > 0) {
+          const auto *name = static_cast<const uint8_t *>(prop.val);
+          e.data.assign(name, name + strnlen(reinterpret_cast<const char *>(name), prop.len));
+        } else if (prop.type == ESP_BT_GAP_DEV_PROP_EIR && e.data.empty()) {
+          uint8_t len = 0;
+          auto *eir = static_cast<uint8_t *>(prop.val);
+          uint8_t *name = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &len);
+          if (name == nullptr)
+            name = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &len);
+          if (name != nullptr)
+            e.data.assign(name, name + len);
+        }
+      }
+      push(std::move(e));
+      break;
+    }
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
+      HostEvent e;
+      e.type = HostEvent::SCAN_STATE;
+      e.value = param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED;
+      push(std::move(e));
+      break;
+    }
     case ESP_BT_GAP_AUTH_CMPL_EVT: {
       HostEvent e;
       e.type = HostEvent::AUTH;
@@ -179,6 +215,31 @@ void hh_cb(esp_hidh_cb_event_t event, esp_hidh_cb_param_t *param) {
   push(std::move(e));
 }
 
+// Class of Device, peripheral major class: bits 7..6 keyboard/pointing, bits 5..2 the device type.
+const char *peripheral_kind(uint32_t cod) {
+  const uint32_t minor = esp_bt_gap_get_cod_minor_dev(cod);
+  switch (minor & 0x0F) {
+    case 1:
+      return "joystick";
+    case 2:
+      return "gamepad";
+    case 3:
+      return "remote";
+    default:
+      break;
+  }
+  switch ((minor >> 4) & 0x03) {
+    case 1:
+      return "keyboard";
+    case 2:
+      return "mouse";
+    case 3:
+      return "keyboard/mouse";
+    default:
+      return "peripheral";
+  }
+}
+
 void handle_event(HostEvent &e) {
   Host &h = host();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -196,7 +257,11 @@ void handle_event(HostEvent &e) {
     case HostEvent::OPEN: {
       h.connecting = false;
       BTHIDDevice *dev = find_by_address(e.bda);
-      if (dev != nullptr) {
+      if (dev != nullptr && e.status == ESP_HIDH_OK && !dev->get_auto_connect()) {
+        format_mac_addr_upper(e.bda, mac);
+        ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
+        esp_bt_hid_host_disconnect(e.bda);
+      } else if (dev != nullptr) {
         dev->on_open(e.handle, e.status == ESP_HIDH_OK, e.status);
       } else if (e.status == ESP_HIDH_OK) {
         format_mac_addr_upper(e.bda, mac);
@@ -231,6 +296,21 @@ void handle_event(HostEvent &e) {
     case HostEvent::PASSKEY:
       if (BTHIDDevice *dev = find_by_address(e.bda))
         dev->on_passkey(e.value);
+      break;
+    case HostEvent::FOUND:
+      if (esp_bt_gap_get_cod_major_dev(e.value) != ESP_BT_COD_MAJOR_DEV_PERIPHERAL)
+        break;
+      format_mac_addr_upper(e.bda, mac);
+      e.data.push_back('\0');
+      if (e.has_rssi) {
+        ESP_LOGI(TAG, "Found %s %s '%s', RSSI %d", peripheral_kind(e.value), mac,
+                 reinterpret_cast<const char *>(e.data.data()), e.rssi);
+      } else {
+        ESP_LOGI(TAG, "Found %s %s '%s'", peripheral_kind(e.value), mac, reinterpret_cast<const char *>(e.data.data()));
+      }
+      break;
+    case HostEvent::SCAN_STATE:
+      ESP_LOGI(TAG, "Scan %s", e.value != 0 ? "started" : "finished");
       break;
     case HostEvent::AUTH:
       format_mac_addr_upper(e.bda, mac);
@@ -286,7 +366,7 @@ void host_loop() {
   if (!h.ready || h.connecting)
     return;
   for (auto *dev : h.devices) {
-    if (dev->is_connected() || static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
+    if (dev->is_connected() || !dev->get_auto_connect() || static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
       continue;
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
       h.connecting = true;
@@ -317,8 +397,51 @@ void BTHIDDevice::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Bluetooth Classic HID device:\n"
                 "  Address: %s\n"
-                "  Legacy PIN: %s",
-                mac, this->pin_.c_str());
+                "  Legacy PIN: %s\n"
+                "  Auto connect: %s",
+                mac, this->pin_.c_str(), YESNO(this->auto_connect_));
+}
+
+void BTHIDDevice::connect() {
+  this->auto_connect_ = true;
+  this->retry_ms_ = 0;
+  this->next_connect_ms_ = millis();
+}
+
+void BTHIDDevice::disconnect() {
+  this->auto_connect_ = false;
+  if (this->connected_)
+    esp_bt_hid_host_disconnect(this->bda_);
+}
+
+// Connected: a virtual cable unplug, which also deletes the bond (or a close that does, for a
+// device without virtual cable support). Otherwise the bond is deleted directly.
+void BTHIDDevice::unpair() {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(this->bda_, mac);
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    ESP_LOGW(TAG, "[%s] Bluetooth is not running, cannot unpair", mac);
+    return;
+  }
+  esp_err_t err =
+      this->connected_ ? esp_bt_hid_host_virtual_cable_unplug(this->bda_) : esp_bt_gap_remove_bond_device(this->bda_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "[%s] Unpair failed: %s", mac, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "[%s] Unpaired", mac);
+  }
+}
+
+void BTHIDDevice::scan(uint32_t duration_ms) {
+  if (!host().ready) {
+    ESP_LOGW(TAG, "Bluetooth Classic is not running, cannot scan");
+    return;
+  }
+  // Inquiry length is in units of 1.28 s.
+  const uint32_t units =
+      std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
+  if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK)
+    ESP_LOGW(TAG, "Scan failed to start: %s", esp_err_to_name(err));
 }
 
 void BTHIDDevice::connect_attempted(uint32_t now) {
@@ -337,10 +460,12 @@ void BTHIDDevice::on_open(uint8_t handle, bool success, int status) {
   this->connected_ = true;
   this->retry_ms_ = 0;
   ESP_LOGI(TAG, "[%s] Connected", mac);
+  this->connect_cb_.call();
 }
 
 void BTHIDDevice::on_close() {
-  if (this->connected_) {
+  const bool was_connected = this->connected_;
+  if (was_connected) {
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(this->bda_, mac);
     ESP_LOGI(TAG, "[%s] Disconnected", mac);
@@ -349,6 +474,8 @@ void BTHIDDevice::on_close() {
   this->handle_ = 0xFF;
   this->map_.reset();
   this->release_all_hid();
+  if (was_connected)
+    this->disconnect_cb_.call();
 }
 
 void BTHIDDevice::on_descriptor(const std::vector<uint8_t> &descriptor) {

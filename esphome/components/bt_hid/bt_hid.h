@@ -30,7 +30,20 @@ class BTHIDDevice : public Component, public hid::HIDInput {
 
   void set_address(uint64_t address);
   void set_pin(const std::string &pin) { this->pin_ = pin; }
+  void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
   template<typename F> void add_on_passkey_callback(F &&cb) { this->passkey_cb_.add(std::forward<F>(cb)); }
+  template<typename F> void add_on_connect_callback(F &&cb) { this->connect_cb_.add(std::forward<F>(cb)); }
+  template<typename F> void add_on_disconnect_callback(F &&cb) { this->disconnect_cb_.add(std::forward<F>(cb)); }
+
+  /// Connect, and keep reconnecting; also lets the device connect on its own again.
+  void connect();
+  /// Disconnect, and stay disconnected (the device connecting on its own is refused) until connect().
+  void disconnect();
+  /// Delete the pairing, telling the device first if it is connected.
+  void unpair();
+  /// Look for discoverable Bluetooth Classic HID devices and log them; shared by all devices.
+  static void scan(uint32_t duration_ms);
+  bool get_auto_connect() const { return this->auto_connect_; }
 
   bool is_connected() const { return this->connected_; }
   const uint8_t *address() const { return this->bda_; }
@@ -53,10 +66,13 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   std::string pin_;
   std::unique_ptr<hid::HIDReportMap> map_;
   CallbackManager<void(uint32_t)> passkey_cb_;
+  CallbackManager<void()> connect_cb_;
+  CallbackManager<void()> disconnect_cb_;
   uint32_t next_connect_ms_{0};
   uint32_t retry_ms_{0};
   uint8_t handle_{0xFF};
   bool connected_{false};
+  bool auto_connect_{true};
 };
 
 class PasskeyTrigger : public Trigger<uint32_t> {
@@ -64,6 +80,53 @@ class PasskeyTrigger : public Trigger<uint32_t> {
   explicit PasskeyTrigger(BTHIDDevice *parent) {
     parent->add_on_passkey_callback([this](uint32_t passkey) { this->trigger(passkey); });
   }
+};
+
+class ConnectTrigger : public Trigger<> {
+ public:
+  explicit ConnectTrigger(BTHIDDevice *parent) {
+    parent->add_on_connect_callback([this]() { this->trigger(); });
+  }
+};
+
+class DisconnectTrigger : public Trigger<> {
+ public:
+  explicit DisconnectTrigger(BTHIDDevice *parent) {
+    parent->add_on_disconnect_callback([this]() { this->trigger(); });
+  }
+};
+
+template<typename... Ts> class ConnectAction : public Action<Ts...> {
+ public:
+  explicit ConnectAction(BTHIDDevice *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->connect(); }
+
+ protected:
+  BTHIDDevice *parent_;
+};
+
+template<typename... Ts> class DisconnectAction : public Action<Ts...> {
+ public:
+  explicit DisconnectAction(BTHIDDevice *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->disconnect(); }
+
+ protected:
+  BTHIDDevice *parent_;
+};
+
+template<typename... Ts> class UnpairAction : public Action<Ts...> {
+ public:
+  explicit UnpairAction(BTHIDDevice *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->unpair(); }
+
+ protected:
+  BTHIDDevice *parent_;
+};
+
+template<typename... Ts> class ScanAction : public Action<Ts...> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, duration)
+  void play(const Ts &...x) override { BTHIDDevice::scan(this->duration_.value(x...)); }
 };
 
 }  // namespace esphome::bt_hid
