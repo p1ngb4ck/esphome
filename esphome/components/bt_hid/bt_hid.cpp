@@ -2,6 +2,7 @@
 
 #ifdef USE_ESP32
 
+#include "esphome/components/bt_classic/bt_classic.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
@@ -105,28 +106,29 @@ void push(HostEvent &&event) {
   App.wake_loop_threadsafe();
 }
 
-// BTC task.
-void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+// BTC task, through bt_classic. Pairing requests are answered only for this component's devices.
+bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*arg*/) {
   switch (event) {
     case ESP_BT_GAP_PIN_REQ_EVT: {
-      // Legacy pairing: the PIN is sent here and typed on the keyboard. Only configured devices.
+      // Legacy pairing: the PIN is sent here and typed on the keyboard.
       BTHIDDevice *dev = find_by_address(param->pin_req.bda);
+      if (dev == nullptr)
+        return false;
       esp_bt_pin_code_t code{};
-      uint8_t len = 0;
-      if (dev != nullptr) {
-        len = std::min<size_t>(dev->pin().size(), ESP_BT_PIN_CODE_LEN);
-        memcpy(code, dev->pin().data(), len);
-      }
-      esp_bt_gap_pin_reply(param->pin_req.bda, dev != nullptr, len, code);
+      const uint8_t len = std::min<size_t>(dev->pin().size(), ESP_BT_PIN_CODE_LEN);
+      memcpy(code, dev->pin().data(), len);
+      esp_bt_gap_pin_reply(param->pin_req.bda, true, len, code);
       HostEvent e;
       e.type = HostEvent::PIN;
       memcpy(e.bda, param->pin_req.bda, ESP_BD_ADDR_LEN);
       push(std::move(e));
-      break;
+      return true;
     }
     case ESP_BT_GAP_CFM_REQ_EVT:
-      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, find_by_address(param->cfm_req.bda) != nullptr);
-      break;
+      if (find_by_address(param->cfm_req.bda) == nullptr)
+        return false;
+      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+      return true;
     case ESP_BT_GAP_KEY_NOTIF_EVT: {
       HostEvent e;
       e.type = HostEvent::PASSKEY;
@@ -135,10 +137,6 @@ void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
       push(std::move(e));
       break;
     }
-    case ESP_BT_GAP_KEY_REQ_EVT:
-      // Nothing here to type a passkey on.
-      esp_bt_gap_ssp_passkey_reply(param->key_req.bda, false, 0);
-      break;
     case ESP_BT_GAP_DISC_RES_EVT: {
       HostEvent e;
       e.type = HostEvent::FOUND;
@@ -184,6 +182,7 @@ void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
     default:
       break;
   }
+  return false;
 }
 
 // BTC task. Descriptor and report buffers are freed once this returns, so they are copied.
@@ -304,11 +303,8 @@ void handle_event(HostEvent &e) {
       break;
     case HostEvent::PIN:
       format_mac_addr_upper(e.bda, mac);
-      if (BTHIDDevice *dev = find_by_address(e.bda)) {
+      if (BTHIDDevice *dev = find_by_address(e.bda))
         ESP_LOGI(TAG, "[%s] PIN requested: type %s and Enter on the device", mac, dev->pin().c_str());
-      } else {
-        ESP_LOGW(TAG, "[%s] Not configured, pairing refused", mac);
-      }
       break;
     case HostEvent::PASSKEY:
       if (BTHIDDevice *dev = find_by_address(e.bda))
@@ -350,7 +346,7 @@ void handle_event(HostEvent &e) {
 
 void host_loop() {
   Host &h = host();
-  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+  if (!bt_classic::ensure_gap_callback()) {
     if (h.started) {
       h.started = false;
       h.ready = false;
@@ -364,7 +360,6 @@ void host_loop() {
   }
   if (!h.started) {
     h.started = true;
-    esp_bt_gap_register_callback(gap_cb);
     // DisplayOnly: a keyboard gets a passkey to type, everything else pairs with Just Works.
     esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_OUT;
     esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(iocap));
@@ -436,6 +431,8 @@ bool BTHIDDevice::has_address() const {
 bool BTHIDDevice::is_pairing() const { return host().pairing == this; }
 
 void BTHIDDevice::setup() {
+  if (host().devices.empty())
+    bt_classic::add_gap_handler(gap_cb, nullptr);
   host().devices.push_back(this);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
