@@ -19,7 +19,7 @@ from esphome.components.bt_pairing import (
 )
 from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
 import esphome.config_validation as cv
-from esphome.const import CONF_DURATION, CONF_ID, CONF_MAC_ADDRESS
+from esphome.const import CONF_DURATION, CONF_ENCRYPTION, CONF_ID, CONF_MAC_ADDRESS
 from esphome.core import CORE
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
@@ -113,6 +113,8 @@ CONFIG_SCHEMA = (
             # Connection events the peripheral may skip while it has nothing to send. Saves
             # its battery without delaying key presses. Unset: what the device asks for.
             cv.Optional(CONF_CONN_LATENCY): cv.int_range(min=0, max=499),
+            # false: no encryption is requested; a device that asks for it still gets it.
+            cv.Optional(CONF_ENCRYPTION, default=True): cv.boolean,
         }
     )
 )
@@ -179,6 +181,8 @@ async def to_code(config):
     cg.add(var.set_keepalive_interval(config[CONF_KEEPALIVE_INTERVAL]))
     if (latency := config.get(CONF_CONN_LATENCY)) is not None:
         cg.add(var.set_conn_latency(latency))
+    if not config[CONF_ENCRYPTION]:
+        cg.add(var.set_encryption(False))
 
 
 async def register_last_event_usage_text_sensor(var, config):

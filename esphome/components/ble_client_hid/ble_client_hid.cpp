@@ -961,9 +961,9 @@ void BLEClientHID::start_next_read_() {
   const esp_err_t status =
       this->active_read_->descriptor
           ? esp_ble_gattc_read_char_descr(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                          this->active_read_->handle, ESP_GATT_AUTH_REQ_NO_MITM)
+                                          this->active_read_->handle, this->read_auth_())
           : esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                    this->active_read_->handle, ESP_GATT_AUTH_REQ_NO_MITM);
+                                    this->active_read_->handle, this->read_auth_());
   if (status != ESP_OK) {
     const bool required = this->active_read_->required;
     ESP_LOGW(TAG, "GATT_READ handle=%u status=schedule_failed code=%d", this->active_read_->handle, status);
@@ -1625,7 +1625,7 @@ void BLEClientHID::maybe_send_keepalive_() {
   operation->characteristic_handle = this->keepalive_handle_;
   operation->purpose = ReadPurpose::KEEPALIVE;
   const esp_err_t status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                                   this->keepalive_handle_, ESP_GATT_AUTH_REQ_NO_MITM);
+                                                   this->keepalive_handle_, this->read_auth_());
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "HID_KEEPALIVE status=read_failed code=%d", status);
     return;
@@ -1694,7 +1694,7 @@ void BLEClientHID::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
         break;
       this->reset_connection_state_();
       this->transition_(SetupPhase::WAITING_FOR_DISCOVERY);
-      if (esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
+      if (this->encryption_ && esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT) != ESP_OK)
         ESP_LOGW(TAG, "HID_CONNECTION security=request_failed");
       break;
     case ESP_GATTC_DISCONNECT_EVT: {

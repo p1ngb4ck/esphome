@@ -241,9 +241,14 @@ class BLEClientHID : public Component,
     this->conn_latency_ = latency;
     this->has_conn_latency_ = true;
   }
+  /// false: the link is not encrypted unless the device asks for it.
+  void set_encryption(bool encryption) { this->encryption_ = encryption; }
 
  protected:
   void write_leds_(uint8_t leds) override;
+  esp_gatt_auth_req_t read_auth_() const {
+    return this->encryption_ ? ESP_GATT_AUTH_REQ_NO_MITM : ESP_GATT_AUTH_REQ_NONE;
+  }
 
   void reset_connection_state_();
   void transition_(SetupPhase phase);
@@ -382,6 +387,7 @@ class BLEClientHID : public Component,
   bool keepalive_enabled_{true};
   uint16_t conn_latency_{0};
   bool has_conn_latency_{false};
+  bool encryption_{true};
 
   OrderedEventBuffer sampled_events_{16};
   uint32_t sampling_window_started_us_{0};
