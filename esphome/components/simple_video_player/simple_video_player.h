@@ -30,6 +30,11 @@
 #ifdef USE_AUDIO
 #include "esphome/components/audio/audio_decoder.h"
 #endif
+
+#ifdef SVP_MEDIA_PLAYER
+#include "esphome/components/api/custom_api_device.h"
+#include "esphome/components/media_player/media_player.h"
+#endif
 // ring_buffer::RingBuffer is used for the audio input/decoded rings (see USE_AUDIO members).
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "buffered_file_reader.h"
@@ -124,7 +129,11 @@ class StreamTouchListener : public touchscreen::TouchListener {
 #endif
 
 /// Main video player component
-class SimpleVideoPlayer : public Component {
+class SimpleVideoPlayer : public Component
+#ifdef SVP_MEDIA_PLAYER
+    , public api::CustomAPIDevice
+#endif
+{
  public:
   ~SimpleVideoPlayer();
 
@@ -154,14 +163,25 @@ class SimpleVideoPlayer : public Component {
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
-  // Volume of the sound this player plays (files, streams): the speaker's own volume, 0..1.
-  void set_volume(float volume) {
-    if (this->speaker_ != nullptr)
-      this->speaker_->set_volume(volume);
-  }
-  float get_volume() { return this->speaker_ != nullptr ? this->speaker_->get_volume() : 0.0f; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
+  // The device's one volume, 0..1: this player's speaker and, with media_player_id, the media player's.
+  void set_volume(float volume);
+  float get_volume();
+
+#ifdef SVP_MEDIA_PLAYER
+  // The panel's audio player (YAML media_player_id, internal): svp_relay plays sound through the
+  // actions registered in setup() and shows it in Home Assistant as part of the panel's one player.
+  void set_media_player(media_player::MediaPlayer *player) { this->media_player_ = player; }
+  void on_svp_play_audio(std::string url, bool announce);
+  void on_svp_audio_command(std::string command);
+  void on_svp_set_volume(float volume);
+#endif
+
+  // What svp_relay reads from the status text sensor: a short JSON (Home Assistant states are at most
+  // 255 characters). Status callbacks run whenever it may have changed.
+  std::string status_json();
+  void add_on_status_callback(std::function<void()> &&callback) { this->status_callbacks_.add(std::move(callback)); }
 
 #ifdef SVP_DSI_OUTPUT
   // Direct output onto a display with draw_pixels_at() while LVGL is paused. Wired by the FINAL
@@ -688,6 +708,11 @@ class SimpleVideoPlayer : public Component {
   CallbackManager<void()> on_finished_callbacks_;
   CallbackManager<void()> on_paused_callbacks_;
   CallbackManager<void(uint8_t)> on_error_callbacks_;
+  CallbackManager<void()> status_callbacks_;
+#ifdef SVP_MEDIA_PLAYER
+  media_player::MediaPlayer *media_player_{nullptr};
+  void setup_media_player_();
+#endif
 };
 
 //========================================================================
@@ -778,7 +803,6 @@ template<typename... Ts> class StreamWakeAction : public Action<Ts...> {
 };
 #endif
 
-#ifdef USE_SPEAKER
 template<typename... Ts> class SetVolumeAction : public Action<Ts...> {
  public:
   explicit SetVolumeAction(SimpleVideoPlayer *player) : player_(player) {}
@@ -788,7 +812,6 @@ template<typename... Ts> class SetVolumeAction : public Action<Ts...> {
  protected:
   SimpleVideoPlayer *player_;
 };
-#endif
 
 template<typename... Ts> class StopAction : public Action<Ts...> {
  public:

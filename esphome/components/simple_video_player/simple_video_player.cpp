@@ -40,6 +40,9 @@ SimpleVideoPlayer::~SimpleVideoPlayer() {
 
 void SimpleVideoPlayer::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Simple Video Player...");
+#ifdef SVP_MEDIA_PLAYER
+  this->setup_media_player_();
+#endif
 
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {

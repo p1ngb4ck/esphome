@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import display, speaker, touchscreen
+from esphome.components import display, media_player, speaker, touchscreen
 from esphome.components.audio import CONF_CODECS, CONF_FLAC, CONF_MP3
 from esphome.components.esp32 import only_on_variant, request_http_client
 from esphome.components.esp32.const import VARIANT_ESP32P4
@@ -87,6 +87,7 @@ SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Ac
 CONF_CANVAS_ID = "canvas_id"
 CONF_DISPLAY_ID = "display_id"
 CONF_SPEAKER_ID = "speaker_id"
+CONF_MEDIA_PLAYER_ID = "media_player_id"
 CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
 CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
 CONF_PREFETCH_DURATION = "prefetch_duration"
@@ -248,6 +249,11 @@ CONFIG_SCHEMA = cv.All(
                 else {}
             ),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
+            # The panel's audio player (mark it `internal: true`): svp_relay plays sound through it with
+            # the svp_* actions and shows panel and sound as one media player in Home Assistant.
+            cv.Optional(CONF_MEDIA_PLAYER_ID): cv.All(
+                cv.requires_component("api"), cv.use_id(media_player.MediaPlayer)
+            ),
             cv.Optional(
                 CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
             ): cv.All(
@@ -432,6 +438,16 @@ def _final_validate(config):
     if CONF_CANVAS_ID in config:
         _resolve_canvas_size(config, fconf)
 
+    # The svp_* actions are registered at runtime (CustomAPIDevice::register_service), which the API
+    # only builds in with custom_services.
+    if CONF_MEDIA_PLAYER_ID in config:
+        api_conf = fconf.get("api") or {}
+        if not api_conf.get("custom_services", False):
+            raise cv.Invalid(
+                f"{CONF_MEDIA_PLAYER_ID}: the panel offers its audio actions to Home Assistant at "
+                "runtime. Add `custom_services: true` to the api: block."
+            )
+
     if CONF_SPEAKER_ID not in config:
         return config
 
@@ -555,6 +571,10 @@ async def to_code(config):
         # lock: source channel count equals the speaker's, no runtime conversion.
         channel_mode = config[CONF_RESOLVED_SPEAKER_CHANNEL]
         cg.add(var.set_speaker_channel_mode(SPEAKER_CHANNEL_MODES[channel_mode]))
+
+    if CONF_MEDIA_PLAYER_ID in config:
+        cg.add(var.set_media_player(await cg.get_variable(config[CONF_MEDIA_PLAYER_ID])))
+        cg.add_define("SVP_MEDIA_PLAYER")
 
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))

@@ -4,15 +4,18 @@
 #include "esphome/core/component.h"
 #include "../simple_video_player.h"
 
-#ifdef USE_SPEAKER
+#include <cmath>
 
 namespace esphome::simple_video_player {
 
-// The volume of what the player plays (files and streams): the speaker's own, in percent.
+// The device's volume (SimpleVideoPlayer::set_volume), in percent; follows changes made elsewhere.
 class VolumeNumber : public number::Number, public Component {
  public:
   void set_parent(SimpleVideoPlayer *parent) { this->parent_ = parent; }
-  void setup() override { this->publish_state(this->parent_->get_volume() * 100.0f); }
+  void setup() override {
+    this->parent_->add_on_status_callback([this]() { this->follow_(); });
+    this->publish_state(this->parent_->get_volume() * 100.0f);
+  }
   void dump_config() override;
 
  protected:
@@ -21,9 +24,13 @@ class VolumeNumber : public number::Number, public Component {
     this->publish_state(value);
   }
 
+  void follow_() {
+    float value = roundf(this->parent_->get_volume() * 100.0f);
+    if (!this->has_state() || value != this->state)
+      this->publish_state(value);
+  }
+
   SimpleVideoPlayer *parent_{nullptr};
 };
 
 }  // namespace esphome::simple_video_player
-
-#endif  // USE_SPEAKER
