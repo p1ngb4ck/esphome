@@ -122,6 +122,15 @@ CONFIG_SCHEMA = cv.All(
     speaker.SPEAKER_SCHEMA.extend(
         {
             cv.GenerateID(): cv.declare_id(AudioRouter),
+            # The format a speaker in front of the router (a mixer, a resampler) takes from
+            # here when it leaves its own unset. The router itself takes any format.
+            cv.Optional(CONF_SAMPLE_RATE, default=48000): cv.int_range(
+                min=8000, max=192000
+            ),
+            cv.Optional(CONF_BITS_PER_SAMPLE, default=16): cv.one_of(
+                16, 24, 32, int=True
+            ),
+            cv.Optional(CONF_NUM_CHANNELS, default=2): cv.int_range(min=1, max=8),
             cv.Required(CONF_OUTPUTS): cv.All(
                 cv.ensure_list(OUTPUT_SCHEMA), cv.Length(min=1), _unique_names
             ),
