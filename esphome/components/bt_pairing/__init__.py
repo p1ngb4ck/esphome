@@ -53,6 +53,7 @@ CONFIG_SCHEMA = cv.Schema(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    cg.add_define("USE_BT_PAIRING")
     cg.add(var.set_max_devices(config[CONF_MAX_DEVICES]))
     cg.add(var.set_preference_key(fnv1_hash(f"bt_pairing:{config[CONF_ID]}")))
     if CONF_FILE in config:

@@ -10,6 +10,10 @@
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 
+#ifdef USE_BT_PAIRING
+#include "esphome/components/bt_pairing/bt_pairing.h"
+#endif
+
 #include <esp_bt_defs.h>
 
 #include <memory>
@@ -29,6 +33,10 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }
 
   void set_address(uint64_t address);
+  void set_slot(uint32_t slot) { this->slot_ = slot; }
+#ifdef USE_BT_PAIRING
+  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+#endif
   void set_pin(const std::string &pin) { this->pin_ = pin; }
   void set_auto_connect(bool auto_connect) { this->auto_connect_ = auto_connect; }
   template<typename F> void add_on_passkey_callback(F &&cb) { this->passkey_cb_.add(std::forward<F>(cb)); }
@@ -41,11 +49,16 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   void disconnect();
   /// Delete the pairing, telling the device first if it is connected.
   void unpair();
+  /// Without a configured address: look for a device in pairing mode, pair the first new one
+  /// and keep it. With one: connect, which pairs a device that is not paired yet.
+  void pair(uint32_t duration_ms);
   /// Look for discoverable Bluetooth Classic HID devices and log them; shared by all devices.
   static void scan(uint32_t duration_ms);
   bool get_auto_connect() const { return this->auto_connect_; }
 
   bool is_connected() const { return this->connected_; }
+  bool is_pairing() const;
+  bool has_address() const;
   const uint8_t *address() const { return this->bda_; }
   const std::string &pin() const { return this->pin_; }
 
@@ -58,21 +71,33 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   uint8_t handle() const { return this->handle_; }
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }
   void connect_attempted(uint32_t now);
+  void on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
+  void end_pairing(bool success, const char *reason);
+  void restore_paired();
 
  protected:
   void write_leds_(uint8_t leds) override;
+  void set_bda_(const uint8_t *bda);
 
   esp_bd_addr_t bda_{};
   std::string pin_;
   std::unique_ptr<hid::HIDReportMap> map_;
+#ifdef USE_BT_PAIRING
+  bt_pairing::BTPairing *pairing_{nullptr};
+#endif
+  std::string candidate_name_;
   CallbackManager<void(uint32_t)> passkey_cb_;
   CallbackManager<void()> connect_cb_;
   CallbackManager<void()> disconnect_cb_;
   uint32_t next_connect_ms_{0};
   uint32_t retry_ms_{0};
+  uint32_t slot_{0};
+  uint32_t candidate_class_{0};
   uint8_t handle_{0xFF};
   bool connected_{false};
   bool auto_connect_{true};
+  bool fixed_address_{false};
+  bool restored_{false};
 };
 
 class PasskeyTrigger : public Trigger<uint32_t> {
@@ -118,6 +143,16 @@ template<typename... Ts> class UnpairAction : public Action<Ts...> {
  public:
   explicit UnpairAction(BTHIDDevice *parent) : parent_(parent) {}
   void play(const Ts &...x) override { this->parent_->unpair(); }
+
+ protected:
+  BTHIDDevice *parent_;
+};
+
+template<typename... Ts> class PairAction : public Action<Ts...> {
+ public:
+  explicit PairAction(BTHIDDevice *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(uint32_t, duration)
+  void play(const Ts &...x) override { this->parent_->pair(this->duration_.value(x...)); }
 
  protected:
   BTHIDDevice *parent_;

@@ -6,6 +6,7 @@ Bluedroid's HID host on the BR/EDR controller, which is the USB dongle of usb_bl
 
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
 from esphome.components.esp32 import add_idf_sdkconfig_option
 from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
 import esphome.config_validation as cv
@@ -19,6 +20,7 @@ from esphome.const import (
     CONF_TRIGGER_ID,
 )
 import esphome.final_validate as fv
+from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
@@ -39,6 +41,7 @@ ConnectAction = bt_hid_ns.class_("ConnectAction", automation.Action)
 DisconnectAction = bt_hid_ns.class_("DisconnectAction", automation.Action)
 UnpairAction = bt_hid_ns.class_("UnpairAction", automation.Action)
 ScanAction = bt_hid_ns.class_("ScanAction", automation.Action)
+PairAction = bt_hid_ns.class_("PairAction", automation.Action)
 
 
 def _validate_pin(value):
@@ -53,7 +56,10 @@ def _validate_pin(value):
 CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(HID_INPUT_SCHEMA).extend(
     {
         cv.GenerateID(): cv.declare_id(BTHIDDevice),
-        cv.Required(CONF_MAC_ADDRESS): cv.mac_address,
+        # Without it the entry is a slot: bt_hid.pair finds a device in pairing mode and
+        # bt_pairing keeps it across reboots.
+        cv.Optional(CONF_MAC_ADDRESS): cv.mac_address,
+        cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
         # Legacy pairing (older keyboards): this PIN is typed on the keyboard, then Enter.
         cv.Optional(CONF_PIN, default="0000"): _validate_pin,
         # Off: connected only by bt_hid.connect; the device connecting on its own is refused.
@@ -83,9 +89,18 @@ def _final_validate(config):
         raise cv.Invalid(
             "bt_hid and a2dp_source both register Bluedroid's Classic GAP callback"
         )
-    macs = [str(c[CONF_MAC_ADDRESS]) for c in full.get("bt_hid") or []]
+    macs = [
+        str(c[CONF_MAC_ADDRESS])
+        for c in full.get("bt_hid") or []
+        if CONF_MAC_ADDRESS in c
+    ]
     if len(macs) != len(set(macs)):
         raise cv.Invalid("two bt_hid entries have the same mac_address")
+    if CONF_MAC_ADDRESS not in config and CONF_BT_PAIRING_ID not in config:
+        raise cv.Invalid(
+            "a bt_hid entry without mac_address is paired at runtime and needs bt_pairing "
+            "to keep the device"
+        )
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -95,7 +110,12 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await setup_hid_input(var, config)
-    cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
+    if CONF_MAC_ADDRESS in config:
+        cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
+    cg.add(var.set_slot(fnv1_hash(f"bt_hid:{config[CONF_ID]}")))
+    if CONF_BT_PAIRING_ID in config:
+        pairing = await cg.get_variable(config[CONF_BT_PAIRING_ID])
+        cg.add(var.set_pairing(pairing))
     cg.add(var.set_pin(config[CONF_PIN]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
     for conf in config.get(CONF_ON_PASSKEY, []):
@@ -133,6 +153,31 @@ def _validate_scan_duration(value):
     if not 1280 <= value.total_milliseconds <= 61440:
         raise cv.Invalid("a scan lasts 1.28 s to 61.44 s")
     return value
+
+
+# A slot (no mac_address): finds a device in pairing mode, pairs the first new one and keeps
+# it, replacing the one paired before. With a mac_address: connects, which pairs it.
+@automation.register_action(
+    "bt_hid.pair",
+    PairAction,
+    automation.maybe_simple_id(
+        {
+            cv.Required(CONF_ID): cv.use_id(BTHIDDevice),
+            cv.Optional(CONF_DURATION, default="30s"): cv.templatable(
+                _validate_scan_duration
+            ),
+        }
+    ),
+    synchronous=True,
+)
+async def pair_action_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    duration = config[CONF_DURATION]
+    if not cg.is_template(duration):
+        duration = duration.total_milliseconds
+    cg.add(var.set_duration(await cg.templatable(duration, args, cg.uint32)))
+    return var
 
 
 # Looks for discoverable Bluetooth Classic HID devices and logs their addresses, for every
