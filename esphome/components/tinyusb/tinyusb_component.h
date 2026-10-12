@@ -49,6 +49,10 @@ class TinyUSB final : public Component {
   void set_usb_desc_serial(const char *usb_desc_serial) { this->string_descriptor_[SERIAL_NUMBER] = usb_desc_serial; }
   /// Self-powered device: watch VBUS on this GPIO so a cable pull becomes a detach.
   void set_vbus_monitor_pin(int pin) { this->vbus_monitor_pin_ = static_cast<int8_t>(pin); }
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  /// ESP32-P4: be the device on the high-speed controller instead of the full-speed one.
+  void set_high_speed_port() { this->port_ = TINYUSB_PORT_HIGH_SPEED_0; }
+#endif
 
  protected:
   char usb_desc_lang_id_[2] = {0x09, 0x04};  // defaults to english
@@ -66,6 +70,7 @@ class TinyUSB final : public Component {
   // Edge-detection baseline for loop(); is_mounted() reads the live state instead.
   bool last_reported_mounted_{false};
   int8_t vbus_monitor_pin_{-1};
+  tinyusb_port_t port_{TINYUSB_PORT_FULL_SPEED_0};
 
   tinyusb_config_t tusb_cfg_{};
   tusb_desc_device_t usb_descriptor_{

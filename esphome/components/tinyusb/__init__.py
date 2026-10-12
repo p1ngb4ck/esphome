@@ -16,7 +16,6 @@ from esphome.const import CONF_HARDWARE_UART, CONF_ID
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@kbx81"]
-CONFLICTS_WITH = ["usb_host"]
 
 CONF_ON_MOUNT = "on_mount"
 CONF_ON_UNMOUNT = "on_unmount"
@@ -27,6 +26,9 @@ CONF_USB_PRODUCT_STR = "usb_product_str"
 CONF_USB_SERIAL_STR = "usb_serial_str"
 CONF_USB_VENDOR_ID = "usb_vendor_id"
 CONF_VBUS_MONITOR_PIN = "vbus_monitor_pin"
+CONF_PORT = "port"
+PORT_HIGH_SPEED = "high_speed"
+PORT_FULL_SPEED = "full_speed"
 
 # Components that provide a USB device class (CDC, HID, MSC, ...) on top of
 # tinyusb. Configuring `tinyusb:` without any of these triggers a 5s hang in
@@ -51,6 +53,17 @@ _CALLBACK_AUTOMATIONS = (
     ),
 )
 
+
+def _validate_vbus_on_port(config: ConfigType) -> ConfigType:
+    # On the P4's high-speed port esp_tinyusb watches VBUS through a GPIO interrupt, as on the
+    # S31 (see vbus_monitor_pin).
+    if config.get(CONF_PORT) == PORT_HIGH_SPEED and CONF_VBUS_MONITOR_PIN in config:
+        raise cv.Invalid(
+            f"{CONF_VBUS_MONITOR_PIN} is not supported with {CONF_PORT}: {PORT_HIGH_SPEED}"
+        )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -71,10 +84,19 @@ CONFIG_SCHEMA = cv.All(
                     unsupported=[VARIANT_ESP32S31], msg_prefix=CONF_VBUS_MONITOR_PIN
                 ),
             ),
+            # ESP32-P4 only: which of its two controllers is the device. usb_host may run on
+            # the other one.
+            cv.Optional(CONF_PORT): cv.All(
+                cv.one_of(PORT_HIGH_SPEED, PORT_FULL_SPEED, lower=True),
+                esp32.only_on_variant(
+                    supported=[VARIANT_ESP32P4], msg_prefix=CONF_PORT
+                ),
+            ),
             cv.Optional(CONF_ON_MOUNT): automation.validate_automation({}),
             cv.Optional(CONF_ON_UNMOUNT): automation.validate_automation({}),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_vbus_on_port,
     esp32.only_on_variant(
         supported=[
             VARIANT_ESP32H4,
@@ -93,6 +115,15 @@ def _final_validate(config: ConfigType) -> None:
         raise cv.Invalid(
             "The 'tinyusb' component requires at least one USB class component"
         )
+    # One controller cannot be host and device at once. Only the ESP32-P4 has two.
+    if (usb_host_config := full_config.get("usb_host")) is not None:
+        host_controllers = usb_host_config.get("controllers") or PORT_HIGH_SPEED
+        port = config.get(CONF_PORT, PORT_FULL_SPEED)
+        if get_esp32_variant() != VARIANT_ESP32P4 or host_controllers in (port, "both"):
+            raise cv.Invalid(
+                "'tinyusb' and 'usb_host' would use the same USB controller. On ESP32-P4 "
+                "put them on different ones with 'tinyusb: port:' and 'usb_host: controllers:'"
+            )
     # tinyusb owns the USB OTG peripheral. The logger's USB_CDC backend routes
     # the ROM console through that same peripheral, so the two cannot coexist.
     # (USB_SERIAL_JTAG is a separate peripheral and is fine alongside tinyusb.)
@@ -133,11 +164,13 @@ async def to_code(config: ConfigType) -> None:
     add_idf_sdkconfig_option("CONFIG_TINYUSB_DESC_USE_DEFAULT_PID", False)
     add_idf_sdkconfig_option("CONFIG_TINYUSB_DESC_BCD_DEVICE", 0x0100)
 
-    # ESP32-P4 has two USB controllers: OTG2.0 (High Speed) and OTG1.1 (Full Speed).
-    # Explicitly select the High Speed port and ensure TinyUSB stack init happens on the
-    # same core as the TinyUSB task (required for correct interrupt routing on multicore P4).
+    # ESP32-P4 has two USB controllers: OTG2.0 (High Speed) and OTG1.1 (Full Speed); the
+    # device runs on the one `port` names (full-speed by default). TinyUSB stack init happens
+    # on the same core as the TinyUSB task (required for correct interrupt routing on P4).
     if get_esp32_variant() == VARIANT_ESP32P4:
-        add_idf_sdkconfig_option("CONFIG_TINYUSB_RHPORT_HS", True)
+        if config.get(CONF_PORT) == PORT_HIGH_SPEED:
+            add_idf_sdkconfig_option("CONFIG_TINYUSB_RHPORT_HS", True)
+            cg.add(var.set_high_speed_port())
         add_idf_sdkconfig_option("CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK", True)
 
 

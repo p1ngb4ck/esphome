@@ -27,7 +27,7 @@ void TinyUSB::setup() {
 
   // Start from esp_tinyusb defaults to keep required task settings valid across esp_tinyusb updates.
   this->tusb_cfg_ = TINYUSB_DEFAULT_CONFIG();
-  this->tusb_cfg_.port = TINYUSB_PORT_FULL_SPEED_0;
+  this->tusb_cfg_.port = this->port_;
   this->tusb_cfg_.phy.skip_setup = false;
   // Without VBUS monitoring the OTG core only sees a cable pull as the bus going idle
   // (a suspend), so TinyUSB never reports a detach and stays "mounted".
@@ -85,9 +85,11 @@ void TinyUSB::dump_config() {
                 "  Vendor ID: 0x%04X\n"
                 "  Manufacturer: '%s'\n"
                 "  Product: '%s'\n"
-                "  Serial: '%s'",
+                "  Serial: '%s'\n"
+                "  Port: %s",
                 this->usb_descriptor_.idProduct, this->usb_descriptor_.idVendor, this->string_descriptor_[MANUFACTURER],
-                this->string_descriptor_[PRODUCT], this->string_descriptor_[SERIAL_NUMBER]);
+                this->string_descriptor_[PRODUCT], this->string_descriptor_[SERIAL_NUMBER],
+                this->port_ == TINYUSB_PORT_FULL_SPEED_0 ? "full-speed" : "high-speed");
   if (this->vbus_monitor_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  VBUS Monitor Pin: GPIO%d", this->vbus_monitor_pin_);
   }
