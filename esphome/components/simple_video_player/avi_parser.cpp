@@ -438,6 +438,12 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
     bool is_video = (chunk_id == FOURCC_00dc || chunk_id == FOURCC_00db);
     bool is_audio = (chunk_id == FOURCC_01wb);
 
+    // An empty audio chunk carries nothing: ffmpeg writes one for every gap in a VBR track's
+    // timestamps (write_skip_frames, libavformat/avienc.c -- FLAC and MP3, not PCM). It is not the
+    // end of the stream.
+    if (is_audio && chunk_size == 0)
+      continue;
+
     if (is_video || is_audio) {
       // Found a frame. Only stream_type (read every frame) and size (read by seek_to_frame) are
       // set -- offset/keyframe/timestamp_ms were write-only.
