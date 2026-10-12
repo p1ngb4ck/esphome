@@ -9,6 +9,7 @@
 
 #include <nvs.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace esphome {
@@ -87,13 +88,16 @@ void A2DPSource::setup() {
   this->devices_.reserve(MAX_DISCOVERED);
 
   size_t ring_bytes = (size_t) SAMPLE_RATE * BYTES_PER_FRAME * this->buffer_duration_ms_ / 1000;
+  ring_bytes -= ring_bytes % BYTES_PER_FRAME;
   this->ring_ = xRingbufferCreate(ring_bytes, RINGBUF_TYPE_BYTEBUF);
   if (this->ring_ == nullptr) {
     ESP_LOGE(TAG, "Could not allocate the %u byte buffer", (unsigned) ring_bytes);
     this->mark_failed();
     return;
   }
+  this->ring_bytes_ = ring_bytes;
 
+#ifdef USE_MICROPHONE
   if (this->mic_source_ != nullptr) {
     this->mic_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
       if (data.empty()) {
@@ -110,6 +114,7 @@ void A2DPSource::setup() {
     });
     this->mic_source_->start();
   }
+#endif
 
   this->source_.set_local_name(this->local_name_.c_str());
   this->source_.set_task_core(CONFIG_BT_BLUEDROID_PINNED_TO_CORE);
@@ -305,11 +310,49 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     filled += got;
   }
 
+  bool producer = this->speaker_active_.load();
+#ifdef USE_MICROPHONE
+  producer = producer || this->mic_source_ != nullptr;
+#endif
+  if (this->speaker_active_.load())
+    this->played_frames_.fetch_add((uint32_t) (filled / BYTES_PER_FRAME));
   if (filled < wanted) {
     memset(out + filled, 0, wanted - filled);
-    this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
+    if (producer)
+      this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
   }
   return frame_count;
+}
+
+size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
+  if (this->ring_ == nullptr)
+    return 0;
+  if (!this->streaming_.load())
+    return length;
+  size_t chunk = std::min(length, this->ring_bytes_ / 4);
+  const size_t free = xRingbufferGetCurFreeSize(this->ring_);
+  if (free >= BYTES_PER_FRAME)
+    chunk = std::min(chunk, free);
+  chunk -= chunk % BYTES_PER_FRAME;
+  if (chunk == 0)
+    return 0;
+  return xRingbufferSend(this->ring_, data, chunk, ticks_to_wait) == pdTRUE ? chunk : 0;
+}
+
+void A2DPSource::clear_audio() {
+  if (this->ring_ == nullptr)
+    return;
+  size_t got = 0;
+  while (void *item = xRingbufferReceiveUpTo(this->ring_, &got, 0, this->ring_bytes_))
+    vRingbufferReturnItem(this->ring_, item);
+}
+
+bool A2DPSource::has_audio() const {
+  if (this->ring_ == nullptr)
+    return false;
+  UBaseType_t waiting = 0;
+  vRingbufferGetInfo(this->ring_, nullptr, nullptr, nullptr, nullptr, &waiting);
+  return waiting != 0;
 }
 
 void A2DPSource::loop() {

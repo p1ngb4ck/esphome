@@ -9,7 +9,7 @@ from esphome.core import CORE
 import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
-DEPENDENCIES = ["esp32", "microphone"]
+DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["bt_classic"]
 
 CONF_A2DP_SOURCE_ID = "a2dp_source_id"
@@ -49,8 +49,9 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(A2DPSource),
             # Stereo, because A2DP is. The library's frame is two int16 samples
-            # and nothing in the path resamples or upmixes.
-            cv.Required(
+            # and nothing in the path resamples or upmixes. Without it, audio comes
+            # from the a2dp_source speaker platform.
+            cv.Optional(
                 microphone.CONF_MICROPHONE
             ): microphone.microphone_source_schema(min_channels=2, max_channels=2),
             cv.Optional(CONF_LOCAL_NAME, default="ESPHome Audio"): cv.string,
@@ -109,7 +110,7 @@ def _external_host(full_config) -> bool:
 # so it has to be addressed at the key it belongs to.
 _MICROPHONE_FINAL_VALIDATE = cv.Schema(
     {
-        cv.Required(microphone.CONF_MICROPHONE): (
+        cv.Optional(microphone.CONF_MICROPHONE): (
             microphone.final_validate_microphone_source_schema(
                 "a2dp_source", sample_rate=44100
             )
@@ -140,10 +141,11 @@ async def to_code(config):
 
     # passive=False: this component is the reason the microphone runs, so it
     # starts and stops it rather than listening in on someone else's stream.
-    mic_source = await microphone.microphone_source_to_code(
-        config[microphone.CONF_MICROPHONE], passive=False
-    )
-    cg.add(var.set_microphone_source(mic_source))
+    if microphone.CONF_MICROPHONE in config:
+        mic_source = await microphone.microphone_source_to_code(
+            config[microphone.CONF_MICROPHONE], passive=False
+        )
+        cg.add(var.set_microphone_source(mic_source))
 
     cg.add(var.set_local_name(config[CONF_LOCAL_NAME]))
     cg.add(var.set_target_name(config[CONF_TARGET_NAME]))

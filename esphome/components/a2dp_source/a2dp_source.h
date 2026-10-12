@@ -4,7 +4,9 @@
 
 #if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
+#ifdef USE_MICROPHONE
 #include "esphome/components/microphone/microphone_source.h"
+#endif
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
@@ -37,7 +39,9 @@ class A2DPSource : public Component {
   void loop() override;
   void dump_config() override;
 
+#ifdef USE_MICROPHONE
   void set_microphone_source(microphone::MicrophoneSource *mic_source) { this->mic_source_ = mic_source; }
+#endif
   void set_local_name(const std::string &name) { this->local_name_ = name; }
   /// @brief Only accept a device whose name starts with this. Empty means the
   ///        strongest signal wins instead.
@@ -77,6 +81,17 @@ class A2DPSource : public Component {
   /// @brief Whether a device address is stored, which is what survives a reboot.
   bool has_stored_device() const;
 
+  /// @brief Speaker platform: 16 bit stereo 44.1 kHz into the stream. Returns the bytes taken; while
+  ///        the sink takes no audio everything is taken and dropped.
+  size_t write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait);
+  void clear_audio();
+  bool has_audio() const;
+  void set_speaker_active(bool active) { this->speaker_active_.store(active); }
+  /// @brief 0..127; sent to the sink as absolute volume when connected.
+  void set_output_volume(uint8_t volume) { this->source_.set_volume(volume); }
+  /// @brief Speaker frames handed to Bluetooth since the last call.
+  uint32_t take_played_frames() { return this->played_frames_.exchange(0); }
+
   static const size_t MAX_DISCOVERED = 12;
 
  protected:
@@ -91,8 +106,13 @@ class A2DPSource : public Component {
   bool accept_device_(const char *name, esp_bd_addr_t address, int rssi);
 
   BluetoothA2DPSource source_;
+#ifdef USE_MICROPHONE
   microphone::MicrophoneSource *mic_source_{nullptr};
+#endif
   RingbufHandle_t ring_{nullptr};
+  size_t ring_bytes_{0};
+  std::atomic<bool> speaker_active_{false};
+  std::atomic<uint32_t> played_frames_{0};
 
   std::string local_name_{"ESPHome Audio"};
   std::string target_name_;
