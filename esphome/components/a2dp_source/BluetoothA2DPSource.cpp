@@ -1,10 +1,11 @@
 // ESPHome: compiled through the tree's recursive source glob, so this file is
 // seen by every ESP32 variant build. Classic Bluetooth exists only on the
 // original ESP32, and the library header raises an #error everywhere else, so
-// the guard has to come before it rather than inside it. Nothing else in this
-// file is changed from upstream.
+// the guard has to come before it rather than inside it. A2DP_EXTERNAL_HOST:
+// the Bluedroid host runs on an external controller (usb_bluetooth) that
+// another component brings up; the changes for it are marked "ESPHome".
 #include "sdkconfig.h"
-#ifdef CONFIG_IDF_TARGET_ESP32
+#if defined(CONFIG_IDF_TARGET_ESP32) || defined(A2DP_EXTERNAL_HOST)
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +23,7 @@
 // Copyright 2015-2016 Espressif Systems (Shanghai) PTE LTD
 
 #include "BluetoothA2DPSource.h"
+#include "esphome/components/bt_classic/bt_classic.h"
 
 #if IS_VALID_PLATFORM
 
@@ -131,9 +133,11 @@ void BluetoothA2DPSource::start(std::vector<const char *> names) {
     }
   }
 
+#ifndef A2DP_EXTERNAL_HOST
   if (reset_ble) {
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
   }
+#endif
 
   if (!bt_start()) {
     ESP_LOGE(BT_AV_TAG, "Failed to initialize controller");
@@ -388,6 +392,45 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
   }
 }
 
+// ESPHome: one GAP callback serves every Classic component. Pairing requests and
+// link events are taken only for this source's peer; the rest belong to others.
+bool BluetoothA2DPSource::handle_gap_event(esp_bt_gap_cb_event_t event,
+                                           esp_bt_gap_cb_param_t *param) {
+  const uint8_t *bda = nullptr;
+  bool answers = false;
+  switch (event) {
+    case ESP_BT_GAP_PIN_REQ_EVT:
+      bda = param->pin_req.bda;
+      answers = true;
+      break;
+    case ESP_BT_GAP_CFM_REQ_EVT:
+      bda = param->cfm_req.bda;
+      answers = true;
+      break;
+    case ESP_BT_GAP_KEY_REQ_EVT:
+      bda = param->key_req.bda;
+      break;
+    case ESP_BT_GAP_KEY_NOTIF_EVT:
+      bda = param->key_notif.bda;
+      break;
+    case ESP_BT_GAP_AUTH_CMPL_EVT:
+      bda = param->auth_cmpl.bda;
+      break;
+#if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 4, 4)
+    case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+      bda = param->acl_disconn_cmpl_stat.bda;
+      break;
+#endif
+    default:
+      break;
+  }
+  if (bda != nullptr && memcmp(bda, peer_bd_addr, ESP_BD_ADDR_LEN) != 0 &&
+      memcmp(bda, last_connection, ESP_BD_ADDR_LEN) != 0)
+    return false;
+  app_gap_callback(event, param);
+  return answers;
+}
+
 void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
                                               esp_bt_gap_cb_param_t *param) {
   ESP_LOGD(BT_AV_TAG, "%s evt %d", __func__, event);
@@ -536,8 +579,9 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       // set up device name
       esp_bt_gap_set_device_name(dev_name);
 
-      // register GAP callback function
-      esp_bt_gap_register_callback(ccall_app_gap_callback);
+      // ESPHome: the GAP callback is bt_classic's, shared with other components;
+      // handle_gap_event() is registered with it.
+      esphome::bt_classic::ensure_gap_callback();
 
       // initialize AVRCP controller
       esp_avrc_ct_init();
@@ -570,7 +614,9 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       // esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
       // ESP_BT_NON_DISCOVERABLE);
       delay_ms(10000);
+#ifndef A2DP_EXTERNAL_HOST  // ESPHome: other devices (HID) still connect on their own
       set_scan_mode_connectable(false);
+#endif
 
       if (reconnect_status == AutoReconnect && has_last_connection()) {
         ESP_LOGW(BT_AV_TAG, "Reconnecting to %s", to_str(last_connection));

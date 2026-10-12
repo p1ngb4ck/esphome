@@ -1,6 +1,6 @@
 #include "a2dp_device_select.h"
 
-#ifdef USE_ESP32_VARIANT_ESP32
+#if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
 #include "../a2dp_source.h"
 #include "esphome/core/log.h"
@@ -58,4 +58,4 @@ void A2DPDeviceSelect::dump_config() { LOG_SELECT("", "A2DP device", this); }
 }  // namespace a2dp_source
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32
+#endif  // USE_ESP32_VARIANT_ESP32 || USE_A2DP_SOURCE_EXTERNAL_HOST

@@ -93,10 +93,6 @@ def _final_validate(config):
             "bt_hid needs a Bluetooth Classic controller: a usb_bluetooth dongle with "
             "bluedroid: true"
         )
-    if "a2dp_source" in full:
-        raise cv.Invalid(
-            "bt_hid and a2dp_source both register Bluedroid's Classic GAP callback"
-        )
     macs = [
         str(c[CONF_MAC_ADDRESS])
         for c in full.get("bt_hid") or []

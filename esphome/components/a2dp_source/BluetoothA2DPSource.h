@@ -106,6 +106,10 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   /// Constructor
   BluetoothA2DPSource();
 
+  /// ESPHome: one event of the shared Classic GAP callback (bt_classic). True when it
+  /// answered a pairing request for this source's peer.
+  bool handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+
   /// Destructor
   ~BluetoothA2DPSource();
 

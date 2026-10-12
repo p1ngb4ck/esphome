@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_ESP32_VARIANT_ESP32
+#if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
 #include "esphome/components/select/select.h"
 #include "esphome/core/component.h"
@@ -46,4 +46,4 @@ class A2DPDeviceSelect : public select::Select, public Component {
 }  // namespace a2dp_source
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32
+#endif  // USE_ESP32_VARIANT_ESP32 || USE_A2DP_SOURCE_EXTERNAL_HOST

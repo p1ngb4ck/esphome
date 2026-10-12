@@ -1,10 +1,11 @@
 // ESPHome: compiled through the tree's recursive source glob, so this file is
 // seen by every ESP32 variant build. Classic Bluetooth exists only on the
 // original ESP32, and the library header raises an #error everywhere else, so
-// the guard has to come before it rather than inside it. Nothing else in this
-// file is changed from upstream.
+// the guard has to come before it rather than inside it. A2DP_EXTERNAL_HOST:
+// the Bluedroid host runs on an external controller (usb_bluetooth) that
+// another component brings up; the changes for it are marked "ESPHome".
 #include "sdkconfig.h"
-#ifdef CONFIG_IDF_TARGET_ESP32
+#if defined(CONFIG_IDF_TARGET_ESP32) || defined(A2DP_EXTERNAL_HOST)
 
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -188,6 +189,7 @@ void BluetoothA2DPCommon::end(bool release_memory) {
   delay_ms(wait_ms);
   log_free_heap();
 
+#ifndef A2DP_EXTERNAL_HOST  // ESPHome: Bluedroid is shared, never released here
   if (release_memory) {
     ESP_LOGI(BT_AV_TAG, "disable bluetooth");
     if (esp_bluedroid_disable() != ESP_OK) {
@@ -237,6 +239,7 @@ void BluetoothA2DPCommon::end(bool release_memory) {
     log_free_heap();
     is_start_disabled = true;
   }
+#endif
 
   delay_ms(wait_ms);
 
@@ -412,7 +415,10 @@ const char* BluetoothA2DPCommon::to_str(esp_bt_gap_discovery_state_t state) {
  * @return false
  */
 bool BluetoothA2DPCommon::bt_start() {
-#ifdef ARDUINO
+#ifdef A2DP_EXTERNAL_HOST
+  // ESPHome: no controller here; the component that owns Bluedroid has enabled it.
+  return esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
+#elif defined(ARDUINO)
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
   auto mde = BT_MODE_CLASSIC_BT;
   switch (bt_mode) {

@@ -25,7 +25,7 @@
 
 // Compile only for ESP32
 #include "sdkconfig.h"
-#if defined(CONFIG_IDF_TARGET_ESP32) 
+#if defined(CONFIG_IDF_TARGET_ESP32) || defined(A2DP_EXTERNAL_HOST)
 #  define IS_VALID_PLATFORM true
 #elif defined(CONFIG_IDF_TARGET_ESP32S31)
 #  define IS_VALID_PLATFORM true
@@ -63,7 +63,9 @@ using namespace esp_i2s;
 #include "A2DPVolumeControl.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
+#ifndef A2DP_EXTERNAL_HOST  // ESPHome: no controller API without a controller
 #include "esp_bt.h"
+#endif
 #include "esp_bt_device.h"
 #include "esp_bt_main.h"
 #include "esp_gap_bt_api.h"
@@ -341,7 +343,9 @@ class BluetoothA2DPCommon {
 
   /// Defines the default bt mode. The default is ESP_BT_MODE_CLASSIC_BT: use
   /// this e.g. to set to ESP_BT_MODE_BTDM
+#ifndef A2DP_EXTERNAL_HOST
   virtual void set_default_bt_mode(esp_bt_mode_t mode) { bt_mode = mode; }
+#endif
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 1)
   /// Defines the esp_bluedroid_config_t: Available from IDF 5.2.1
@@ -415,7 +419,9 @@ class BluetoothA2DPCommon {
 
   int event_queue_size = 20;
   int event_stack_size = 3072;
+#ifndef A2DP_EXTERNAL_HOST
   esp_bt_mode_t bt_mode = ESP_BT_MODE_CLASSIC_BT;
+#endif
   std::vector<esp_avrc_rn_event_ids_t> avrc_rn_events = {
       ESP_AVRC_RN_VOLUME_CHANGE};
 

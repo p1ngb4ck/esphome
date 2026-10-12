@@ -1,13 +1,16 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, microphone
-from esphome.components.esp32 import add_idf_sdkconfig_option, only_on_variant
+from esphome.components.esp32 import add_idf_sdkconfig_option, get_esp32_variant
 from esphome.components.esp32.const import VARIANT_ESP32
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_NAME, CONF_TRIGGER_ID, CONF_VOLUME
+from esphome.core import CORE
+import esphome.final_validate as fv
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32", "microphone"]
+AUTO_LOAD = ["bt_classic"]
 
 CONF_A2DP_SOURCE_ID = "a2dp_source_id"
 CONF_BUFFER_DURATION = "buffer_duration"
@@ -93,13 +96,18 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    only_on_variant(supported=[VARIANT_ESP32], msg_prefix="a2dp_source"),
     cv.require_framework_version(esp_idf=cv.Version(5, 0, 0)),
 )
 
+
+def _external_host(full_config) -> bool:
+    """A usb_bluetooth dongle runs Bluedroid: A2DP goes over it, on any variant."""
+    return any(c.get("bluedroid") for c in full_config.get("usb_bluetooth") or [])
+
+
 # The helper validates a microphone source block, not a whole component config,
 # so it has to be addressed at the key it belongs to.
-FINAL_VALIDATE_SCHEMA = cv.Schema(
+_MICROPHONE_FINAL_VALIDATE = cv.Schema(
     {
         cv.Required(microphone.CONF_MICROPHONE): (
             microphone.final_validate_microphone_source_schema(
@@ -109,6 +117,21 @@ FINAL_VALIDATE_SCHEMA = cv.Schema(
     },
     extra=cv.ALLOW_EXTRA,
 )
+
+
+def _final_validate(config):
+    if (
+        not _external_host(fv.full_config.get())
+        and get_esp32_variant() != VARIANT_ESP32
+    ):
+        raise cv.Invalid(
+            "a2dp_source needs the original ESP32's Classic radio, or a usb_bluetooth "
+            "dongle with bluedroid: true"
+        )
+    return _MICROPHONE_FINAL_VALIDATE(config)
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config):
@@ -151,6 +174,16 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_stop_trigger(trigger))
 
+    if _external_host(CORE.config):
+        # Bluedroid and the controller are usb_bluetooth's (BLE may be the
+        # co-processor's): only the profile is added here.
+        cg.add_define("USE_A2DP_SOURCE_EXTERNAL_HOST")
+        cg.add_build_flag("-DA2DP_EXTERNAL_HOST=1")
+        add_idf_sdkconfig_option("CONFIG_BT_CLASSIC_ENABLED", True)
+        add_idf_sdkconfig_option("CONFIG_BT_A2DP_ENABLE", True)
+        add_library_flags()
+        return
+
     # A2DP is Classic Bluetooth: Bluedroid host, controller in BR/EDR only mode.
     # BLE is switched off because the profile does not use it and dual mode costs
     # both RAM and radio time.
@@ -169,7 +202,10 @@ async def to_code(config):
     # pulls it back while also telling the network reconciler that the radio is
     # in use.
     esp32.request_bluetooth()
+    add_library_flags()
 
+
+def add_library_flags():
     # The A2DP library is vendored beside this file rather than pulled in as a
     # managed component. Its own CMakeLists compiles every source under src/ and
     # REQUIRES arduino-audio-tools, which the sink's I2S output stage needs and

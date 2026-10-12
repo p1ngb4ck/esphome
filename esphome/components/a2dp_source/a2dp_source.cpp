@@ -2,8 +2,9 @@
 
 #include "select/a2dp_device_select.h"
 
-#ifdef USE_ESP32_VARIANT_ESP32
+#if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
+#include "esphome/components/bt_classic/bt_classic.h"
 #include "esphome/core/log.h"
 
 #include <nvs.h>
@@ -68,6 +69,10 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
   }
 }
 
+bool A2DPSource::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
+  return static_cast<A2DPSource *>(arg)->source_.handle_gap_event(event, param);
+}
+
 void A2DPSource::authentication_complete_(esp_bt_status_t status) {
   if (global_a2dp_source == nullptr) {
     return;
@@ -117,6 +122,7 @@ void A2DPSource::setup() {
       A2DPSource::authentication_complete_);
   
   this->source_.set_auto_reconnect(true);
+  bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
 
   bool stored = this->has_stored_device();
   if (!stored && this->pair_on_boot_if_empty_) {
@@ -128,8 +134,12 @@ void A2DPSource::setup() {
     ESP_LOGI(TAG, "No device stored, call a2dp_source.start_pairing to add one");
   }
 
+#ifdef USE_A2DP_SOURCE_EXTERNAL_HOST
+  // Bluedroid is brought up by usb_bluetooth once its dongle is ready; loop() starts then.
+#else
   this->source_.start();
   this->started_.store(true);
+#endif
 }
 
 bool A2DPSource::has_stored_device() const {
@@ -303,6 +313,16 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 }
 
 void A2DPSource::loop() {
+  bt_classic::ensure_gap_callback();
+#ifdef USE_A2DP_SOURCE_EXTERNAL_HOST
+  if (!this->started_.load()) {
+    if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED)
+      return;
+    ESP_LOGI(TAG, "Bluetooth is up, starting");
+    this->source_.start();
+    this->started_.store(true);
+  }
+#endif
   uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
   if (conn_state != 0xFF) {
     ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
@@ -386,4 +406,4 @@ void A2DPSource::dump_config() {
 }  // namespace a2dp_source
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32
+#endif  // USE_ESP32_VARIANT_ESP32 || USE_A2DP_SOURCE_EXTERNAL_HOST

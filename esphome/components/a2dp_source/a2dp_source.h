@@ -2,7 +2,7 @@
 
 #include "esphome/core/defines.h"
 
-#ifdef USE_ESP32_VARIANT_ESP32
+#if defined(USE_ESP32_VARIANT_ESP32) || defined(USE_A2DP_SOURCE_EXTERNAL_HOST)
 
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/core/automation.h"
@@ -85,6 +85,7 @@ class A2DPSource : public Component {
   static void connection_state_(esp_a2d_connection_state_t state, void *self);
   static void audio_state_(esp_a2d_audio_state_t state, void *self);
   static void authentication_complete_(esp_bt_status_t status);
+  static bool gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg);
 
   int32_t fill_frames_(Frame *frames, int32_t frame_count);
   bool accept_device_(const char *name, esp_bd_addr_t address, int rssi);
@@ -173,4 +174,4 @@ template<typename... Ts> class IsPairedCondition : public Condition<Ts...>, publ
 }  // namespace a2dp_source
 }  // namespace esphome
 
-#endif  // USE_ESP32_VARIANT_ESP32
+#endif  // USE_ESP32_VARIANT_ESP32 || USE_A2DP_SOURCE_EXTERNAL_HOST
