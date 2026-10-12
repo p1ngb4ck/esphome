@@ -27,7 +27,10 @@ static constexpr uint16_t OP_RESET = 0x0C03;
 static constexpr uint16_t OP_READ_LOCAL_NAME = 0x0C14;
 static constexpr uint16_t OP_READ_LOCAL_VERSION = 0x1001;
 static constexpr uint16_t OP_READ_BD_ADDR = 0x1009;
-static constexpr uint16_t PROBE[] = {OP_RESET, OP_READ_LOCAL_VERSION, OP_READ_BD_ADDR, OP_READ_LOCAL_NAME};
+// Realtek vendor commands (btrtl.c).
+static constexpr uint16_t OP_RTL_DOWNLOAD = 0xFC20;
+static constexpr uint16_t OP_RTL_READ_ROM_VERSION = 0xFC6D;
+static constexpr size_t RTL_FRAGMENT = 252;
 
 static constexpr uint16_t MANUFACTURER_REALTEK = 93;
 
@@ -157,8 +160,7 @@ void USBBluetooth::on_connected() {
   this->link_up_.store(true, std::memory_order_release);
   this->read_event_(generation);
   this->read_acl_(generation);
-  this->probe_step_ = 0;
-  this->probe_next_();
+  this->probe_start_();
 }
 
 void USBBluetooth::on_disconnected() {
@@ -166,6 +168,8 @@ void USBBluetooth::on_disconnected() {
   this->link_up_.store(false, std::memory_order_release);
   this->stack_attached_.store(false, std::memory_order_release);
   this->cancel_timeout("hci");
+  this->pending_opcode_ = 0;
+  this->pending_ = nullptr;
   if (this->intf_ != 0xFF) {
     this->release_interface(this->intf_);
     this->intf_ = 0xFF;
@@ -357,34 +361,25 @@ void USBBluetooth::read_acl_(uint32_t generation) {
 
 // -- Probe (main loop) -------------------------------------------------------------------
 
-void USBBluetooth::probe_next_() {
-  if (this->probe_step_ >= sizeof(PROBE) / sizeof(PROBE[0])) {
-    this->probe_done_(true);
-    return;
-  }
-  this->probe_opcode_ = PROBE[this->probe_step_];
-  const uint8_t command[3] = {static_cast<uint8_t>(this->probe_opcode_ & 0xFF),
-                              static_cast<uint8_t>(this->probe_opcode_ >> 8), 0};
-  if (!this->send_command(command, sizeof(command))) {
-    ESP_LOGE(TAG, "HCI command 0x%04X not submitted", this->probe_opcode_);
+void USBBluetooth::ask_(uint16_t opcode, std::vector<uint8_t> params,
+                        std::function<void(const uint8_t *ret, size_t n)> &&then) {
+  std::vector<uint8_t> command(3 + params.size());
+  command[0] = static_cast<uint8_t>(opcode & 0xFF);
+  command[1] = static_cast<uint8_t>(opcode >> 8);
+  command[2] = static_cast<uint8_t>(params.size());
+  if (!params.empty())
+    memcpy(command.data() + 3, params.data(), params.size());
+  this->pending_opcode_ = opcode;
+  this->pending_ = std::move(then);
+  if (!this->send_command(command.data(), command.size())) {
+    ESP_LOGE(TAG, "HCI command 0x%04X not submitted", opcode);
     this->probe_done_(false);
     return;
   }
   this->set_timeout("hci", COMMAND_TIMEOUT_MS, [this]() {
-    ESP_LOGE(TAG, "No answer to HCI command 0x%04X", this->probe_opcode_);
+    ESP_LOGE(TAG, "No answer to HCI command 0x%04X", this->pending_opcode_);
     this->probe_done_(false);
   });
-}
-
-void USBBluetooth::probe_done_(bool ok) {
-  this->probe_opcode_ = 0;
-  if (ok && this->manufacturer_ == MANUFACTURER_REALTEK)
-    ESP_LOGW(TAG, "Realtek controller: it runs its ROM until a firmware is loaded, which this does not do yet");
-  this->report_connected_();
-#ifdef USE_USB_BLUETOOTH_BLUEDROID
-  if (ok)
-    this->start_bluedroid_();
-#endif
 }
 
 void USBBluetooth::handle_event_(const std::vector<uint8_t> &event) {
@@ -394,43 +389,126 @@ void USBBluetooth::handle_event_(const std::vector<uint8_t> &event) {
     return;
   }
   const uint16_t opcode = static_cast<uint16_t>(event[3] | (event[4] << 8));
-  if (opcode != this->probe_opcode_ || opcode == 0)
+  if (opcode == 0 || opcode != this->pending_opcode_)
     return;
   this->cancel_timeout("hci");
-  const uint8_t status = event[5];
-  if (status != 0) {
-    ESP_LOGE(TAG, "HCI command 0x%04X failed, status 0x%02X", opcode, status);
+  this->pending_opcode_ = 0;
+  if (event[5] != 0) {
+    ESP_LOGE(TAG, "HCI command 0x%04X failed, status 0x%02X", opcode, event[5]);
     this->probe_done_(false);
     return;
   }
-  const uint8_t *p = event.data() + 6;
-  const size_t n = event.size() - 6;
-  switch (opcode) {
-    case OP_RESET:
-      ESP_LOGD(TAG, "Controller reset");
-      break;
-    case OP_READ_LOCAL_VERSION:
-      if (n >= 8) {
-        this->manufacturer_ = static_cast<uint16_t>(p[4] | (p[5] << 8));
-        ESP_LOGI(TAG, "HCI %u (Bluetooth %s), revision %u, LMP subversion 0x%04X, manufacturer %u", p[0],
-                 core_version(p[0]), static_cast<unsigned>(p[1] | (p[2] << 8)),
-                 static_cast<unsigned>(p[6] | (p[7] << 8)), this->manufacturer_);
+  auto then = std::move(this->pending_);
+  this->pending_ = nullptr;
+  if (then)
+    then(event.data() + 6, event.size() - 6);
+}
+
+void USBBluetooth::probe_start_() {
+  this->ask_(OP_RESET, {}, [this](const uint8_t *, size_t) {
+    this->ask_(OP_READ_LOCAL_VERSION, {}, [this](const uint8_t *p, size_t n) {
+      if (n < 8) {
+        this->probe_done_(false);
+        return;
       }
-      break;
-    case OP_READ_BD_ADDR:
-      if (n >= 6)
-        ESP_LOGI(TAG, "Address %02X:%02X:%02X:%02X:%02X:%02X", p[5], p[4], p[3], p[2], p[1], p[0]);
-      break;
-    case OP_READ_LOCAL_NAME: {
-      const size_t len = strnlen(reinterpret_cast<const char *>(p), n);
-      ESP_LOGI(TAG, "Name '%.*s'", static_cast<int>(len), reinterpret_cast<const char *>(p));
-      break;
-    }
-    default:
-      break;
+      const uint16_t hci_rev = static_cast<uint16_t>(p[1] | (p[2] << 8));
+      this->manufacturer_ = static_cast<uint16_t>(p[4] | (p[5] << 8));
+      this->lmp_subver_ = static_cast<uint16_t>(p[6] | (p[7] << 8));
+      ESP_LOGI(TAG, "HCI %u (Bluetooth %s), revision 0x%04X, LMP subversion 0x%04X, manufacturer %u", p[0],
+               core_version(p[0]), hci_rev, this->lmp_subver_, this->manufacturer_);
+      if (this->manufacturer_ == MANUFACTURER_REALTEK) {
+        this->realtek_();
+      } else {
+        this->probe_identity_();
+      }
+    });
+  });
+}
+
+void USBBluetooth::probe_identity_() {
+  this->ask_(OP_READ_BD_ADDR, {}, [this](const uint8_t *p, size_t n) {
+    if (n >= 6)
+      ESP_LOGI(TAG, "Address %02X:%02X:%02X:%02X:%02X:%02X", p[5], p[4], p[3], p[2], p[1], p[0]);
+    this->ask_(OP_READ_LOCAL_NAME, {}, [this](const uint8_t *name, size_t size) {
+      const size_t len = strnlen(reinterpret_cast<const char *>(name), size);
+      ESP_LOGI(TAG, "Name '%.*s'", static_cast<int>(len), reinterpret_cast<const char *>(name));
+      this->probe_done_(true);
+    });
+  });
+}
+
+// A Realtek controller still on its ROM reports the lmp_subver of its chip; a patched one
+// reports its firmware's. Only the former gets a firmware (btrtl.c does the same by its table).
+void USBBluetooth::realtek_() {
+  const RealtekImage *for_chip = nullptr;
+  for (const auto &image : this->realtek_images_) {
+    if (image.lmp_subver == this->lmp_subver_)
+      for_chip = &image;
   }
-  this->probe_step_++;
-  this->probe_next_();
+  if (for_chip == nullptr) {
+    if (this->realtek_images_.empty())
+      ESP_LOGW(TAG, "Realtek controller without a firmware configured: if it is on its ROM it will not "
+                    "reach anything on the air");
+    this->probe_identity_();
+    return;
+  }
+  this->ask_(OP_RTL_READ_ROM_VERSION, {}, [this](const uint8_t *p, size_t n) {
+    if (n < 1) {
+      this->probe_done_(false);
+      return;
+    }
+    const uint8_t rom = p[0];
+    this->download_ = nullptr;
+    for (const auto &image : this->realtek_images_) {
+      if (image.lmp_subver == this->lmp_subver_ && image.rom_version == rom)
+        this->download_ = &image;
+    }
+    if (this->download_ == nullptr) {
+      ESP_LOGE(TAG, "The firmware has no patch for ROM version %u", rom);
+      this->probe_identity_();
+      return;
+    }
+    ESP_LOGI(TAG, "Realtek ROM version %u: downloading %u bytes", rom, static_cast<unsigned>(this->download_->length));
+    this->download_fragment_(0);
+  });
+}
+
+// Fragments of RTL_FRAGMENT bytes, the last one flagged 0x80 and carrying the remainder;
+// indexes run 0..0x7F, then wrap to 1 (rtl_download_firmware() in btrtl.c).
+void USBBluetooth::download_fragment_(uint32_t i) {
+  const uint32_t count = this->download_->length / RTL_FRAGMENT + 1;
+  uint8_t index = i <= 0x7F ? static_cast<uint8_t>(i) : static_cast<uint8_t>((i - 0x80) % 0x7F + 1);
+  size_t take = RTL_FRAGMENT;
+  if (i + 1 == count) {
+    index |= 0x80;
+    take = this->download_->length % RTL_FRAGMENT;
+  }
+  std::vector<uint8_t> params(1 + take);
+  params[0] = index;
+  if (take != 0)
+    memcpy(params.data() + 1, this->download_->data + i * RTL_FRAGMENT, take);
+  this->ask_(OP_RTL_DOWNLOAD, std::move(params), [this, i, count](const uint8_t *, size_t) {
+    if (i + 1 < count) {
+      this->download_fragment_(i + 1);
+      return;
+    }
+    this->ask_(OP_READ_LOCAL_VERSION, {}, [this](const uint8_t *p, size_t n) {
+      if (n >= 8)
+        ESP_LOGI(TAG, "Firmware loaded: revision 0x%04X, LMP subversion 0x%04X",
+                 static_cast<unsigned>(p[1] | (p[2] << 8)), static_cast<unsigned>(p[6] | (p[7] << 8)));
+      this->probe_identity_();
+    });
+  });
+}
+
+void USBBluetooth::probe_done_(bool ok) {
+  this->pending_opcode_ = 0;
+  this->pending_ = nullptr;
+  this->report_connected_();
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+  if (ok)
+    this->start_bluedroid_();
+#endif
 }
 
 }  // namespace esphome::usb_bluetooth

@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace esphome::usb_bluetooth {
@@ -33,6 +34,11 @@ class USBBluetooth : public usb_host::USBClient {
   /// An HCI command: opcode (little endian), parameter length, parameters.
   bool send_command(const uint8_t *packet, size_t len);
 
+  /// A Realtek patch for one ROM version of the chip with this lmp_subver (prepared by realtek.py).
+  void add_realtek_firmware(uint16_t lmp_subver, uint8_t rom_version, const uint8_t *data, size_t length) {
+    this->realtek_images_.push_back({lmp_subver, rom_version, data, length});
+  }
+
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
   // Bluedroid's transport operations; its HCI task calls these.
   void hci_send(uint8_t *data, uint16_t len);
@@ -53,7 +59,12 @@ class USBBluetooth : public usb_host::USBClient {
   void read_acl_(uint32_t generation);
   // Main loop.
   void handle_event_(const std::vector<uint8_t> &event);
-  void probe_next_();
+  // One command; then runs with its return parameters once it completed with status 0.
+  void ask_(uint16_t opcode, std::vector<uint8_t> params, std::function<void(const uint8_t *ret, size_t n)> &&then);
+  void probe_start_();
+  void probe_identity_();
+  void realtek_();
+  void download_fragment_(uint32_t i);
   void probe_done_(bool ok);
   // USB task: a command or ACL transfer finished.
   void send_done_();
@@ -87,10 +98,20 @@ class USBBluetooth : public usb_host::USBClient {
   // Bluedroid refused a send for want of transfer slots; tell it once one frees up.
   std::atomic<bool> send_blocked_{false};
 
+  struct RealtekImage {
+    uint16_t lmp_subver;
+    uint8_t rom_version;
+    const uint8_t *data;
+    size_t length;
+  };
+  std::vector<RealtekImage> realtek_images_{};
+
   // Probe, main loop.
-  uint8_t probe_step_{0};
-  uint16_t probe_opcode_{0};
+  uint16_t pending_opcode_{0};
+  std::function<void(const uint8_t *, size_t)> pending_{};
   uint16_t manufacturer_{0};
+  uint16_t lmp_subver_{0};
+  const RealtekImage *download_{nullptr};
 };
 
 }  // namespace esphome::usb_bluetooth
