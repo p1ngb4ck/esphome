@@ -75,7 +75,7 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   void fetch_descriptor_(size_t index);
   void descriptor_done_(size_t index, const uint8_t *data, size_t length);
   void start_reading_();
-  void read_(size_t index, uint32_t generation);
+  void read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation);
   void report_(Interface &intf, const uint8_t *data, size_t length);
   void xbox360_(Interface &intf, const uint8_t *data, size_t length);
 

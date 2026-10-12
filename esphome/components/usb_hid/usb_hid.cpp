@@ -64,9 +64,14 @@ void USBHIDClient::on_connected() {
 
 void USBHIDClient::on_disconnected() {
   this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  // A read is always in flight on each IN endpoint, and the interface cannot be released
+  // (nor the device closed, nor the transfer buffers freed) while it is.
   for (auto &intf : this->interfaces_) {
-    if (intf.in_ep != 0)
-      this->release_interface(intf.number);
+    if (intf.in_ep == 0)
+      continue;
+    usb_host_endpoint_halt(this->device_handle_, intf.in_ep);
+    usb_host_endpoint_flush(this->device_handle_, intf.in_ep);
+    this->release_interface(intf.number);
   }
   this->interfaces_.clear();
   this->release_all_hid();
@@ -225,8 +230,9 @@ void USBHIDClient::descriptor_done_(size_t index, const uint8_t *data, size_t le
 void USBHIDClient::start_reading_() {
   const uint32_t generation = this->generation_.load(std::memory_order_acquire);
   for (size_t i = 0; i < this->interfaces_.size(); i++) {
-    if (this->interfaces_[i].in_ep != 0)
-      this->read_(i, generation);
+    const Interface &intf = this->interfaces_[i];
+    if (intf.in_ep != 0)
+      this->read_(static_cast<uint8_t>(i), intf.number, intf.in_ep, intf.in_mps, generation);
   }
   ESP_LOGI(TAG, "HID device ready (%u interfaces)", static_cast<unsigned>(this->interfaces_.size()));
   this->write_leds_(this->leds_);
@@ -242,33 +248,33 @@ void USBHIDClient::start_reading_() {
   this->report_connected_();
 }
 
-// USB task (and the main loop for the first read).
-void USBHIDClient::read_(size_t index, uint32_t generation) {
-  const Interface &intf = this->interfaces_[index];
+// USB task (and the main loop for the first read). Takes copies rather than reading
+// interfaces_, which the main loop clears on disconnect.
+void USBHIDClient::read_(uint8_t index, uint8_t number, uint8_t ep, uint16_t mps, uint32_t generation) {
   const bool submitted = this->transfer_in(
-      intf.in_ep,
-      [this, index, generation](const usb_host::TransferStatus &status) {
+      ep,
+      [this, index, number, ep, mps, generation](const usb_host::TransferStatus &status) {
         if (generation != this->generation_.load(std::memory_order_acquire))
           return;
         if (!status.success) {
-          ESP_LOGW(TAG, "Interface %u stopped (status %u)", this->interfaces_[index].number, status.error_code);
+          ESP_LOGW(TAG, "Interface %u stopped (status %u)", number, status.error_code);
           return;
         }
         if (status.data_len > 0) {
           Report *report = this->report_pool_.allocate();
           if (report != nullptr) {
-            report->interface = static_cast<uint8_t>(index);
+            report->interface = index;
             report->length = static_cast<uint8_t>(std::min(status.data_len, REPORT_MAX));
             memcpy(report->data, status.data, report->length);
             this->reports_.push(report);
             this->enable_loop_soon_any_context();
           }
         }
-        this->read_(index, generation);
+        this->read_(index, number, ep, mps, generation);
       },
-      intf.in_mps);
+      mps);
   if (!submitted)
-    ESP_LOGE(TAG, "Read on interface %u not submitted", intf.number);
+    ESP_LOGE(TAG, "Read on interface %u not submitted", number);
 }
 
 // -- Reports (main loop) -------------------------------------------------------------------
