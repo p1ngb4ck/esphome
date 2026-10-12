@@ -21,6 +21,9 @@ static constexpr uint8_t UVC_SC_VIDEOSTREAMING = 0x02;
 static constexpr uint8_t UVC_CS_INTERFACE = 0x24;
 static constexpr uint8_t UVC_CS_ENDPOINT  = 0x25;
 
+// ── VideoControl interface descriptor subtypes (bDescriptorSubType) ──────────
+static constexpr uint8_t UVC_VC_HEADER = 0x01;
+
 // ── VideoStreaming interface descriptor subtypes (bDescriptorSubType) ─────────
 static constexpr uint8_t UVC_VS_INPUT_HEADER        = 0x01;
 static constexpr uint8_t UVC_VS_FORMAT_UNCOMPRESSED = 0x04;

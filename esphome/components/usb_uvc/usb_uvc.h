@@ -10,97 +10,91 @@
 #include <atomic>
 #include <functional>
 #include <vector>
-#include <string>
 
-namespace esphome {
-namespace usb_uvc {
+namespace esphome::usb_uvc {
 
-// Callback fired in the main loop when a complete frame arrives.
-// data/len: frame buffer (valid only for the duration of the callback).
-// format: encoding of this frame.
+// A complete frame, on the main loop. data is valid only during the call.
 using frame_cb_t = std::function<void(const uint8_t *data, size_t len, UvcFormat format)>;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UVCClient
+// UVC (USB Video Class) camera as a usb_host client: it shares the host with every other client.
 //
-// Native UVC (USB Video Class) host driver built on USBClient.
-// No uvc_host library involved — implements the class protocol
-// directly using USBClient's control_transfer() and stream_open_() / stream_close_().
-//
-// Lifecycle (all called from main-loop context):
-//   on_connected()    — parse descriptors → probe/commit → stream_open_()
-//   on_disconnected() — stream_close_() → notify callbacks
-//   on_isoc_packet()  — frame assembly (USB-task context, fast path)
-//
-// Frame delivery:
-//   Complete frames are assembled in on_isoc_packet() into frame_buf_.
-//   When end-of-frame is detected the assembled frame is queued via a
-//   flag so loop() can fire the user callback from the main-loop context.
-// ─────────────────────────────────────────────────────────────────────────────
+// Setup runs on the main loop as a chain of control transfers, each continued from its
+// completion (no waiting): PROBE SET_CUR -> PROBE GET_CUR -> COMMIT SET_CUR -> isochronous
+// stream on the smallest alt-setting that carries the negotiated payload size.
+// Frames are assembled on the USB task into one of two PSRAM buffers; a finished frame is
+// handed to the main loop, while the other buffer takes the next one.
 class UVCClient : public usb_host::USBClient {
  public:
-  UVCClient() : usb_host::USBClient(0, 0) {}
+  UVCClient() : usb_host::USBClient(0, 0) { this->set_required_interface_class(USB_CLASS_VIDEO); }
 
-  void setup() override;
   void loop() override;
-  float get_setup_priority() const override { return setup_priority::IO; }
-  uint8_t get_interface_class() const override { return USB_CLASS_VIDEO; }
 
-  // ── Configuration setters (called from to_code()) ─────────────────────────
   void set_vid(uint16_t vid) { this->vid_ = vid; }
   void set_pid(uint16_t pid) { this->pid_ = pid; }
-  // Requested format and resolution — negotiated with device during connect.
   void set_format(UvcFormat fmt) { this->req_format_ = fmt; }
-  void set_width(uint16_t w)    { this->req_width_  = w; }
-  void set_height(uint16_t h)   { this->req_height_ = h; }
-  void set_fps(uint8_t fps)     { this->req_fps_    = fps; }
-  // Number of isochronous URBs in flight (triple-buffering = 3 recommended).
-  void set_num_urbs(uint8_t n)  { this->num_urbs_   = n; }
+  void set_width(uint16_t w) { this->req_width_ = w; }
+  void set_height(uint16_t h) { this->req_height_ = h; }
+  void set_fps(uint8_t fps) { this->req_fps_ = fps; }
+  void set_num_urbs(uint8_t n) { this->num_urbs_ = n; }
 
   void add_frame_callback(frame_cb_t cb) { this->frame_callbacks_.push_back(std::move(cb)); }
 
  protected:
+  struct AltSetting {
+    uint8_t alt;
+    uint8_t ep;
+    uint16_t mps;
+  };
+
+  bool reports_connection_itself() const override { return true; }
   void on_connected() override;
   void on_disconnected() override;
-
-  // USB-task context — must be fast and non-blocking.
+  void on_stream_open(usb_host::IsocStream &stream, bool ok) override;
+  // USB task.
   void on_isoc_packet(uint8_t ep_addr, const uint8_t *data, size_t len, bool error) override;
 
-  // ── Descriptor parsing ────────────────────────────────────────────────────
-  // Scan config descriptor for VideoStreaming interface with a matching format.
-  // Fills vs_intf_, vs_alt_, vs_ep_, vs_mps_, selected_frame_.
-  bool find_streaming_interface_();
+  bool parse_descriptors_();
+  // A probe/commit request; next runs on the main loop with the outcome, unless the device
+  // went away meanwhile.
+  void probe_request_(uint8_t request, uint8_t selector, std::function<void(bool)> &&next);
+  void commit_();
+  void start_stream_();
+  bool ensure_buffers_(size_t size);
+  void finish_setup_(bool ok);
 
-  // ── Probe / Commit ────────────────────────────────────────────────────────
-  bool probe_commit_();
-
-  // ── Frame assembly state ──────────────────────────────────────────────────
-  std::vector<uint8_t> frame_buf_;          // accumulates current frame (USB-task writes)
-  std::atomic<bool> frame_ready_{false};    // USB task sets, main loop clears
-  uint8_t current_frame_id_{2};             // 0/1 toggle; 2 = "not started" (USB-task only)
-  bool skip_frame_{false};                  // USB-task only
-
-  // ── Stream parameters (filled by find_streaming_interface_()) ─────────────
-  uint8_t  vs_intf_{0};              // VideoStreaming interface number
-  uint8_t  vs_alt_{0};              // alternate setting with bandwidth
-  uint8_t  vs_ep_{0};              // isochronous IN endpoint address
-  uint16_t vs_mps_{0};             // max packet size × mult
+  // Device, from the descriptors.
+  uint16_t probe_len_{26};  // probe/commit structure size of the device's UVC version
+  uint8_t vs_intf_{0};
+  std::vector<AltSetting> alts_{};
   UvcFrameDesc selected_frame_{};
+  bool high_speed_{false};
 
-  // ── User configuration ────────────────────────────────────────────────────
-  UvcFormat req_format_{UvcFormat::MJPEG};
-  uint16_t  req_width_{0};          // 0 = any
-  uint16_t  req_height_{0};
-  uint8_t   req_fps_{0};            // 0 = device default
-  uint8_t   num_urbs_{3};
+  UvcVsCtrl probe_{};
+  // Bumped on every connect and disconnect: a completion from an earlier device is dropped.
+  std::atomic<uint32_t> generation_{0};
 
-  // ── IsocStream member (passed to USBStreamClient) ─────────────────────────
   usb_host::IsocStream stream_{};
+
+  // Two frame buffers in PSRAM: the USB task fills one while the main loop reads the other.
+  uint8_t *buffers_[2]{nullptr, nullptr};
+  size_t buffer_size_{0};
+  uint8_t fill_{0};         // USB task
+  size_t fill_len_{0};      // USB task
+  uint8_t frame_id_{2};     // USB task; 2: no frame started
+  bool skip_frame_{false};  // USB task
+  uint8_t ready_index_{0};
+  size_t ready_len_{0};
+  std::atomic<bool> ready_{false};  // set by the USB task, cleared by the main loop
+
+  UvcFormat req_format_{UvcFormat::MJPEG};
+  uint16_t req_width_{0};  // 0: any
+  uint16_t req_height_{0};
+  uint8_t req_fps_{0};  // 0: the frame's default interval
+  uint8_t num_urbs_{3};
 
   std::vector<frame_cb_t> frame_callbacks_{};
 };
 
-}  // namespace usb_uvc
-}  // namespace esphome
+}  // namespace esphome::usb_uvc
 
 #endif  // USE_ESP32_VARIANT_ESP32P4 || USE_ESP32_VARIANT_ESP32S2 || USE_ESP32_VARIANT_ESP32S3

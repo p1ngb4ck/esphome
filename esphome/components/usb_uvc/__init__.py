@@ -1,10 +1,15 @@
 import esphome.codegen as cg
-from esphome.components.esp32 import only_on_variant, VARIANT_ESP32P4, VARIANT_ESP32S2, VARIANT_ESP32S3
+from esphome.components.esp32 import (
+    VARIANT_ESP32P4,
+    VARIANT_ESP32S2,
+    VARIANT_ESP32S3,
+    only_on_variant,
+)
 from esphome.components.usb_host import usb_host_ns
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
-CODEOWNERS = ["p1ngb4ck"]
+CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["usb_host", "esp32"]
 
 CONF_FORMAT = "format"
@@ -51,9 +56,9 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    if (vid := config.get(CONF_VID)):
+    if vid := config.get(CONF_VID):
         cg.add(var.set_vid(vid))
-    if (pid := config.get(CONF_PID)):
+    if pid := config.get(CONF_PID):
         cg.add(var.set_pid(pid))
 
     cg.add(var.set_format(config[CONF_FORMAT]))
