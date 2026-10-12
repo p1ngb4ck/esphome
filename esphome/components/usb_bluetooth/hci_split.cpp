@@ -26,7 +26,10 @@ static constexpr uint8_t H4_EVENT = 0x04;
 static constexpr uint8_t SIDE_BR = 0x01;
 static constexpr uint8_t SIDE_LE = 0x02;
 
+static constexpr uint8_t EVT_CONNECTION_COMPLETE = 0x03;
 static constexpr uint8_t EVT_DISCONNECTION_COMPLETE = 0x05;
+static constexpr uint8_t EVT_SYNC_CONNECTION_COMPLETE = 0x2C;
+static constexpr uint8_t REASON_CONNECTION_TIMEOUT = 0x08;
 static constexpr uint8_t EVT_ENCRYPTION_CHANGE = 0x08;
 static constexpr uint8_t EVT_READ_REMOTE_VERSION_COMPLETE = 0x0C;
 static constexpr uint8_t EVT_COMMAND_COMPLETE = 0x0E;
@@ -51,6 +54,10 @@ static constexpr uint16_t OP_READ_LOCAL_VERSION = 0x1001;
 static constexpr uint16_t OP_READ_LOCAL_COMMANDS = 0x1002;
 static constexpr uint16_t OP_READ_LOCAL_FEATURES = 0x1003;
 static constexpr uint16_t OP_READ_LOCAL_EXT_FEATURES = 0x1004;
+static constexpr uint16_t OP_READ_BD_ADDR = 0x1009;
+// Broadcom's Write BD_ADDR (btbcm_set_bdaddr() in Linux btbcm.c).
+static constexpr uint16_t OP_BCM_WRITE_BD_ADDR = 0xFC01;
+static constexpr uint16_t MANUFACTURER_BROADCOM = 15;
 static constexpr uint8_t OGF_LE = 0x08;
 static constexpr uint8_t OGF_VENDOR = 0x3F;
 
@@ -73,14 +80,21 @@ static constexpr uint16_t NO_HANDLE = 0xFFFF;
 
 enum class Route : uint8_t { BR, LE, BOTH, LOCAL };
 
+// One address for both radios: Bluedroid has one, and pairing on either radio uses it. The
+// co-processor's is read and, where the dongle can take another (Broadcom), written to it.
+enum class AddrStage : uint8_t { NONE, READ_LE, WRITE_BR, READ_BR };
+
 struct Pending {
   uint16_t opcode;
   uint8_t waiting;  // sides still to answer
   bool both;
   bool translate;  // the LE answer carries the connection handle after its status
   uint16_t host_handle;
+  AddrStage addr_stage;
   uint8_t answer[2][EVENT_BUF];
   size_t answer_len[2];
+  uint8_t addr_answer[EVENT_BUF];
+  size_t addr_answer_len;
 };
 
 static SemaphoreHandle_t s_lock = nullptr;
@@ -89,10 +103,15 @@ static esp_bluedroid_hci_driver_operations_t s_le_ops{};
 static esp_bluedroid_hci_driver_callbacks_t s_host{};
 static Pending s_pending{};
 static uint16_t s_le_ctrl[MAX_LE_LINKS];  // controller handle per host slot, NO_HANDLE when free
+// The dongle's open connections, so Bluedroid can be told they are gone with it.
+static constexpr size_t MAX_BR_LINKS = 16;
+static uint16_t s_br_links[MAX_BR_LINKS];
 static uint8_t s_br_max_page = 0;
 static uint8_t s_le_host_bits = 0;
 // Only Bluedroid's HCI task sends; only the esp_hosted RX path receives on the LE side.
 static uint8_t s_tx[ACL_BUF];
+// The splitter's own commands, sent from whichever side's task answered the one before.
+static uint8_t s_own[1 + 3 + 6];
 static uint8_t s_le_rx[ACL_BUF];
 
 class Lock {
@@ -108,7 +127,31 @@ static void ensure_lock() {
 
 // -- LE handles (under the lock) -----------------------------------------------------------
 
-static void clear_links() { std::fill(std::begin(s_le_ctrl), std::end(s_le_ctrl), NO_HANDLE); }
+static void clear_links() {
+  std::fill(std::begin(s_le_ctrl), std::end(s_le_ctrl), NO_HANDLE);
+  std::fill(std::begin(s_br_links), std::end(s_br_links), NO_HANDLE);
+}
+
+// Under the lock: follow the dongle's connections opening and closing.
+static void track_br_event(const uint8_t *ev, size_t len) {
+  const uint8_t *p = ev + 3;
+  if ((ev[1] == EVT_CONNECTION_COMPLETE || ev[1] == EVT_SYNC_CONNECTION_COMPLETE) && len >= 6 &&
+      p[0] == STATUS_SUCCESS) {
+    const uint16_t handle = (p[1] | (p[2] << 8)) & 0x0FFF;
+    for (auto &slot : s_br_links) {
+      if (slot == NO_HANDLE) {
+        slot = handle;
+        break;
+      }
+    }
+  } else if (ev[1] == EVT_DISCONNECTION_COMPLETE && len >= 6 && p[0] == STATUS_SUCCESS) {
+    const uint16_t handle = (p[1] | (p[2] << 8)) & 0x0FFF;
+    for (auto &slot : s_br_links) {
+      if (slot == handle)
+        slot = NO_HANDLE;
+    }
+  }
+}
 
 static uint16_t host_of(uint16_t ctrl) {
   for (size_t i = 0; i < MAX_LE_LINKS; i++) {
@@ -340,6 +383,12 @@ static void send_command(uint8_t *data, size_t len) {
       route = Route::LOCAL;
     if (opcode == OP_RESET)
       clear_links();
+    s_pending.addr_stage = AddrStage::NONE;
+    USBBluetooth *br = s_br;
+    if (opcode == OP_READ_BD_ADDR && br != nullptr && br->manufacturer() == MANUFACTURER_BROADCOM) {
+      route = Route::LE;
+      s_pending.addr_stage = AddrStage::READ_LE;
+    }
     s_pending.opcode = opcode;
     s_pending.both = route == Route::BOTH;
     s_pending.translate = translate;
@@ -434,6 +483,60 @@ static size_t merge_answers(uint8_t *out) {
   return len;
 }
 
+static size_t own_command(uint16_t opcode, const uint8_t *params, uint8_t plen) {
+  s_own[0] = H4_COMMAND;
+  s_own[1] = static_cast<uint8_t>(opcode & 0xFF);
+  s_own[2] = static_cast<uint8_t>(opcode >> 8);
+  s_own[3] = plen;
+  if (plen != 0)
+    memcpy(s_own + 4, params, plen);
+  return 4 + plen;
+}
+
+// Under the lock: the next step of the address handover, or false when the answer is not
+// part of it. own_len is set when a command of the splitter's has to go to the dongle.
+static bool address_step(uint16_t opcode, const uint8_t *ev, size_t len, uint8_t *out, size_t &out_len,
+                         size_t &own_len) {
+  own_len = 0;
+  const bool ok = len >= 7 && ev[1] == EVT_COMMAND_COMPLETE && ev[6] == STATUS_SUCCESS;
+  if (s_pending.addr_stage == AddrStage::READ_LE && opcode == OP_READ_BD_ADDR) {
+    if (ok && len >= 13) {
+      memcpy(s_pending.addr_answer, ev, len);
+      s_pending.addr_answer_len = len;
+      s_pending.addr_stage = AddrStage::WRITE_BR;
+      s_pending.opcode = OP_BCM_WRITE_BD_ADDR;
+      own_len = own_command(OP_BCM_WRITE_BD_ADDR, ev + 7, 6);
+    } else {
+      s_pending.addr_stage = AddrStage::READ_BR;
+      own_len = own_command(OP_READ_BD_ADDR, nullptr, 0);
+    }
+    s_pending.waiting = SIDE_BR;
+    out_len = 0;
+    return true;
+  }
+  if (s_pending.addr_stage == AddrStage::WRITE_BR && opcode == OP_BCM_WRITE_BD_ADDR) {
+    if (ok) {
+      const uint8_t *a = s_pending.addr_answer + 7;
+      ESP_LOGI(TAG, "Both radios on %02X:%02X:%02X:%02X:%02X:%02X", a[5], a[4], a[3], a[2], a[1], a[0]);
+      out_len = s_pending.addr_answer_len;
+      memcpy(out, s_pending.addr_answer, out_len);
+      out[3] = 1;
+      s_pending.addr_stage = AddrStage::NONE;
+      s_pending.waiting = 0;
+      s_pending.opcode = 0;
+      return true;
+    }
+    ESP_LOGW(TAG, "The dongle keeps its own address: LE pairing with the public address will fail");
+    s_pending.addr_stage = AddrStage::READ_BR;
+    s_pending.opcode = OP_READ_BD_ADDR;
+    s_pending.waiting = SIDE_BR;
+    own_len = own_command(OP_READ_BD_ADDR, nullptr, 0);
+    out_len = 0;
+    return true;
+  }
+  return false;
+}
+
 static void on_command_answer(uint8_t side, const uint8_t *ev, size_t len) {
   const bool complete = ev[1] == EVT_COMMAND_COMPLETE;
   if (len < (complete ? 6u : 7u))
@@ -445,9 +548,13 @@ static void on_command_answer(uint8_t side, const uint8_t *ev, size_t len) {
     return;
   uint8_t out[EVENT_BUF];
   size_t out_len = std::min(len, sizeof(out));
+  size_t own_len = 0;
   {
     Lock lock;
-    if (s_pending.opcode != opcode || (s_pending.waiting & side) == 0) {
+    if (s_pending.opcode == opcode && (s_pending.waiting & side) != 0 &&
+        address_step(opcode, ev, std::min(len, sizeof(out)), out, out_len, own_len)) {
+      // Handled: either the answer below, or the next command of the handover.
+    } else if (s_pending.opcode != opcode || (s_pending.waiting & side) == 0) {
       memcpy(out, ev, out_len);
       out[credits_at] = s_pending.waiting != 0 ? 0 : 1;
     } else if (s_pending.both) {
@@ -471,9 +578,16 @@ static void on_command_answer(uint8_t side, const uint8_t *ev, size_t len) {
         patch_features(opcode, out, out_len);
       s_pending.waiting = 0;
       s_pending.opcode = 0;
+      s_pending.addr_stage = AddrStage::NONE;
     }
   }
-  deliver(out, out_len);
+  if (own_len != 0) {
+    if (!send_side(SIDE_BR, s_own, own_len))
+      answer_missing(SIDE_BR);
+    return;
+  }
+  if (out_len != 0)
+    deliver(out, out_len);
 }
 
 // A side that is not there: its answer is "unknown command".
@@ -592,7 +706,16 @@ static void on_event(uint8_t side, uint8_t *ev, size_t len) {
     on_command_answer(side, ev, len);
     return;
   }
-  if (side == SIDE_BR || !le_event_names_connection(ev, len)) {
+  if (side == SIDE_BR) {
+    if (ev[1] == EVT_CONNECTION_COMPLETE || ev[1] == EVT_SYNC_CONNECTION_COMPLETE ||
+        ev[1] == EVT_DISCONNECTION_COMPLETE) {
+      Lock lock;
+      track_br_event(ev, len);
+    }
+    deliver(ev, len);
+    return;
+  }
+  if (!le_event_names_connection(ev, len)) {
     deliver(ev, len);
     return;
   }
@@ -682,6 +805,30 @@ static const esp_bluedroid_hci_driver_operations_t SPLIT_OPS = {
 void set_br(USBBluetooth *br) {
   ensure_lock();
   s_br = br;
+  if (br != nullptr)
+    return;
+  // The dongle is gone, and its connections with it: say so, rather than leave Bluedroid
+  // waiting on links nothing answers for.
+  uint16_t gone[MAX_BR_LINKS];
+  size_t count = 0;
+  {
+    Lock lock;
+    for (auto &slot : s_br_links) {
+      if (slot != NO_HANDLE)
+        gone[count++] = slot;
+      slot = NO_HANDLE;
+    }
+  }
+  for (size_t i = 0; i < count; i++) {
+    uint8_t ev[7] = {H4_EVENT,
+                     EVT_DISCONNECTION_COMPLETE,
+                     4,
+                     STATUS_SUCCESS,
+                     static_cast<uint8_t>(gone[i] & 0xFF),
+                     static_cast<uint8_t>(gone[i] >> 8),
+                     REASON_CONNECTION_TIMEOUT};
+    deliver(ev, sizeof(ev));
+  }
 }
 
 void br_recv(uint8_t *h4, size_t len) {

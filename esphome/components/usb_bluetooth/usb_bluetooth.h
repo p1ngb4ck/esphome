@@ -37,6 +37,9 @@ class USBBluetooth : public usb_host::USBClient {
   /// An HCI command: opcode (little endian), parameter length, parameters.
   bool send_command(const uint8_t *packet, size_t len);
 
+  /// The controller's manufacturer (Bluetooth SIG company identifier), once it is probed.
+  uint16_t manufacturer() const { return this->manufacturer_; }
+
   /// A Realtek patch for one ROM version of the chip with this lmp_subver (prepared by realtek.py).
   void add_realtek_firmware(uint16_t lmp_subver, uint8_t rom_version, const uint8_t *data, size_t length) {
     this->realtek_images_.push_back({lmp_subver, rom_version, data, length});

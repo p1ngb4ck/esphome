@@ -18,7 +18,8 @@ class USBBluetooth;
 //   Reset, the event masks and the flow control set-up go to both and are answered once.
 // - Features come from the dongle with LE marked supported; supported commands are merged.
 // - LE connection handles are renumbered (0x0E00 up) so they cannot meet the dongle's.
-// - Bluedroid's own address is the dongle's; LE uses a random address on the other radio.
+// - One address for both radios: the co-processor's, written to a Broadcom dongle; any other
+//   dongle keeps its own, which then is Bluedroid's.
 //
 // esp32_ble's esp_bluedroid_attach_hci_driver() is intercepted (linker --wrap): its esp_hosted
 // operations become the LE side and Bluedroid is attached to the splitter instead.
