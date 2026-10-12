@@ -31,7 +31,7 @@ from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["hid"]
+AUTO_LOAD = ["hid", "bt_pairing"]
 MULTI_CONF = True
 
 CONF_ON_PASSKEY = "on_passkey"

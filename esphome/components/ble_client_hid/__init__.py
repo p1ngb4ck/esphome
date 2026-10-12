@@ -26,7 +26,7 @@ from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@fsievers22", "@p1ngb4ck"]
 DEPENDENCIES = ["ble_client"]
-AUTO_LOAD = ["hid", "sha256"]
+AUTO_LOAD = ["hid", "sha256", "bt_pairing"]
 MULTI_CONF = True
 
 CONF_EVENT_SAMPLING_INTERVAL = "event_sampling_interval"
