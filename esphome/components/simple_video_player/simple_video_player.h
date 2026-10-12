@@ -712,6 +712,7 @@ class SimpleVideoPlayer : public Component
 #ifdef SVP_MEDIA_PLAYER
   media_player::MediaPlayer *media_player_{nullptr};
   void setup_media_player_();
+  std::string media_traits_json_;  // "pause":..,"formats":[..] of the status
 #endif
 };
 

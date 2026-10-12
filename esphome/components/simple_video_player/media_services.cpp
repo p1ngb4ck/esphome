@@ -1,6 +1,8 @@
 #include "simple_video_player.h"
 
+#include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <strings.h>
 
 #include "esphome/core/log.h"
@@ -52,15 +54,15 @@ std::string SimpleVideoPlayer::status_json() {
 #ifdef SVP_STREAM
   port = this->stream_port_;
 #endif
-  char json[128];
-  snprintf(json, sizeof(json), "{\"svp\":1,\"port\":%u,\"audio\":%s,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s}",
-           port,
+  const char *traits = "\"pause\":false,\"formats\":[]";
 #ifdef SVP_MEDIA_PLAYER
-           this->media_player_ != nullptr ? "true" : "false",
-#else
-           "false",
+  if (this->media_player_ != nullptr)
+    traits = this->media_traits_json_.c_str();
 #endif
-           state, this->get_volume(), muted ? "true" : "false");
+  char json[256];
+  snprintf(json, sizeof(json),
+           "{\"svp\":1,\"port\":%u,\"state\":\"%s\",\"volume\":%.2f,\"muted\":%s,%s}", port, state,
+           this->get_volume(), muted ? "true" : "false", traits);
   return json;
 }
 
@@ -72,8 +74,25 @@ void SimpleVideoPlayer::setup_media_player_() {
   this->register_service(&SimpleVideoPlayer::on_svp_play_audio, "svp_play_audio", {"url", "announce"});
   this->register_service(&SimpleVideoPlayer::on_svp_audio_command, "svp_audio_command", {"command"});
   this->register_service(&SimpleVideoPlayer::on_svp_set_volume, "svp_set_volume", {"volume"});
+  // Pause, and the formats the media player decodes, [format, rate, channels, sample bytes, purpose]: svp_relay
+  // converts what it plays to one of them (Home Assistant's ESPHome ffmpeg proxy), as Home Assistant
+  // does for an ESPHome media player it sees.
+  auto traits = this->media_player_->get_traits();
+  std::string formats = traits.get_supports_pause() ? "\"pause\":true,\"formats\":[" : "\"pause\":false,\"formats\":[";
+  const size_t start = formats.size();
+  for (const auto &format : traits.get_supported_formats()) {
+    char entry[64];
+    snprintf(entry, sizeof(entry), "%s[\"%s\",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%u]", formats.size() > start ? "," : "",
+             format.format.c_str(), format.sample_rate, format.num_channels, format.sample_bytes,
+             static_cast<unsigned>(format.purpose));
+    if (formats.size() + strlen(entry) > 140)
+      break;  // the status must stay within Home Assistant's 255 characters
+    formats += entry;
+  }
+  this->media_traits_json_ = formats + "]";
   this->media_player_->add_on_state_callback(
       [this](media_player::MediaPlayerState) { this->status_callbacks_.call(); });
+  this->status_callbacks_.call();  // whatever published the status before this setup
 }
 
 void SimpleVideoPlayer::on_svp_play_audio(std::string url, bool announce) {
