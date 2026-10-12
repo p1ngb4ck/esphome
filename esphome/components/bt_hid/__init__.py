@@ -6,7 +6,14 @@ Bluedroid's HID host on the BR/EDR controller, which is the USB dongle of usb_bl
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
+from esphome.components.bt_pairing import (
+    ADDRESS_GLOBAL_SCHEMA,
+    CONF_ADDRESS_GLOBAL,
+    CONF_BT_PAIRING_ID,
+    BTPairing,
+    setup_address_global,
+    validate_address_global,
+)
 from esphome.components.esp32 import add_idf_sdkconfig_option
 from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
 import esphome.config_validation as cv
@@ -60,6 +67,7 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(HID_INPUT_SCHEMA).extend(
         # bt_pairing keeps it across reboots.
         cv.Optional(CONF_MAC_ADDRESS): cv.mac_address,
         cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
+        **ADDRESS_GLOBAL_SCHEMA,
         # Legacy pairing (older keyboards): this PIN is typed on the keyboard, then Enter.
         cv.Optional(CONF_PIN, default="0000"): _validate_pin,
         # Off: connected only by bt_hid.connect; the device connecting on its own is refused.
@@ -96,11 +104,18 @@ def _final_validate(config):
     ]
     if len(macs) != len(set(macs)):
         raise cv.Invalid("two bt_hid entries have the same mac_address")
-    if CONF_MAC_ADDRESS not in config and CONF_BT_PAIRING_ID not in config:
+    if CONF_MAC_ADDRESS in config and CONF_ADDRESS_GLOBAL in config:
+        raise cv.Invalid(f"{CONF_ADDRESS_GLOBAL} is for entries without mac_address")
+    if (
+        CONF_MAC_ADDRESS not in config
+        and CONF_BT_PAIRING_ID not in config
+        and CONF_ADDRESS_GLOBAL not in config
+    ):
         raise cv.Invalid(
             "a bt_hid entry without mac_address is paired at runtime and needs bt_pairing "
-            "to keep the device"
+            "or an address_global to keep the device"
         )
+    validate_address_global(config)
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -116,6 +131,7 @@ async def to_code(config):
     if CONF_BT_PAIRING_ID in config:
         pairing = await cg.get_variable(config[CONF_BT_PAIRING_ID])
         cg.add(var.set_pairing(pairing))
+    await setup_address_global(var, config)
     cg.add(var.set_pin(config[CONF_PIN]))
     cg.add(var.set_auto_connect(config[CONF_AUTO_CONNECT]))
     for conf in config.get(CONF_ON_PASSKEY, []):

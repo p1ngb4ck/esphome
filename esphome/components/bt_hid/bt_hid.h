@@ -34,6 +34,11 @@ class BTHIDDevice : public Component, public hid::HIDInput {
 
   void set_address(uint64_t address);
   void set_slot(uint32_t slot) { this->slot_ = slot; }
+  /// A std::string global holding the slot's device address ("" when none).
+  void set_address_global(std::string (*get)(), void (*set)(const std::string &)) {
+    this->address_get_ = get;
+    this->address_set_ = set;
+  }
 #ifdef USE_BT_PAIRING
   void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
 #endif
@@ -78,6 +83,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
  protected:
   void write_leds_(uint8_t leds) override;
   void set_bda_(const uint8_t *bda);
+  bool stored_address_(uint8_t *bda) const;
 
   esp_bd_addr_t bda_{};
   std::string pin_;
@@ -86,6 +92,8 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   bt_pairing::BTPairing *pairing_{nullptr};
 #endif
   std::string candidate_name_;
+  std::string (*address_get_)(){nullptr};
+  void (*address_set_)(const std::string &){nullptr};
   CallbackManager<void(uint32_t)> passkey_cb_;
   CallbackManager<void()> connect_cb_;
   CallbackManager<void()> disconnect_cb_;

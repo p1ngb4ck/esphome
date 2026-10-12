@@ -4,17 +4,30 @@ Kept across reboots in preferences, or in a file on a storage (file: a VFS path)
 keys themselves stay in Bluedroid's NVS store; forgetting a device also deletes its bond.
 """
 
+import logging
+
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
-from esphome.const import CONF_ADDRESS, CONF_FILE, CONF_ID
+from esphome.const import (
+    CONF_ADDRESS,
+    CONF_FILE,
+    CONF_ID,
+    CONF_RESTORE_VALUE,
+    CONF_TYPE,
+)
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["esp32"]
 
+_LOGGER = logging.getLogger(__name__)
+
 CONF_BT_PAIRING_ID = "bt_pairing_id"
+CONF_ADDRESS_GLOBAL = "address_global"
+CONF_MAX_RESTORE_DATA_LENGTH = "max_restore_data_length"
 CONF_MAX_DEVICES = "max_devices"
 
 bt_pairing_ns = cg.esphome_ns.namespace("bt_pairing")
@@ -115,3 +128,46 @@ async def forget_action_to_code(config, action_id, template_arg, args):
         var.set_address(await cg.templatable(config[CONF_ADDRESS], args, cg.std_string))
     )
     return var
+
+
+# For bt_hid / ble_client_hid slots: a std::string global (restore_value: true) holding the
+# paired device's address, "AA:BB:CC:DD:EE:FF" or "" -- upstream's globals and preferences,
+# readable and settable from lambdas. Works alongside bt_pairing or without it.
+ADDRESS_GLOBAL_SCHEMA = {
+    cv.Optional(CONF_ADDRESS_GLOBAL): cv.use_id(GlobalsComponent),
+}
+
+
+def validate_address_global(config) -> None:
+    """FINAL_VALIDATE part: the global is a std::string long enough for an address."""
+    if CONF_ADDRESS_GLOBAL not in config:
+        return
+    gid = str(config[CONF_ADDRESS_GLOBAL])
+    for glob in fv.full_config.get().get("globals") or []:
+        if str(glob[CONF_ID]) != gid:
+            continue
+        if glob.get(CONF_TYPE) != "std::string":
+            raise cv.Invalid(f"{CONF_ADDRESS_GLOBAL} '{gid}' must be type std::string")
+        if not glob.get(CONF_RESTORE_VALUE):
+            _LOGGER.warning(
+                "%s '%s' has no restore_value: the paired device is lost on reboot",
+                CONF_ADDRESS_GLOBAL,
+                gid,
+            )
+        elif glob.get(CONF_MAX_RESTORE_DATA_LENGTH, 63) < 17:
+            raise cv.Invalid(
+                f"{CONF_ADDRESS_GLOBAL} '{gid}' needs max_restore_data_length >= 17"
+            )
+        return
+
+
+async def setup_address_global(var, config) -> None:
+    if CONF_ADDRESS_GLOBAL not in config:
+        return
+    glob = await cg.get_variable(config[CONF_ADDRESS_GLOBAL])
+    cg.add(
+        var.set_address_global(
+            cg.RawExpression(f"[]() -> std::string {{ return {glob}->value(); }}"),
+            cg.RawExpression(f"[](const std::string &v) {{ {glob}->value() = v; }}"),
+        )
+    )

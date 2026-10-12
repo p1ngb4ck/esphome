@@ -9,7 +9,14 @@ shared hid input (keys, text, pointer, controls, layouts), as usb_hid does.
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import ble_client, esp32_ble_tracker
-from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
+from esphome.components.bt_pairing import (
+    ADDRESS_GLOBAL_SCHEMA,
+    CONF_ADDRESS_GLOBAL,
+    CONF_BT_PAIRING_ID,
+    BTPairing,
+    setup_address_global,
+    validate_address_global,
+)
 from esphome.components.hid import HID_INPUT_SCHEMA, HIDInput, setup_hid_input
 import esphome.config_validation as cv
 from esphome.const import CONF_DURATION, CONF_ID, CONF_MAC_ADDRESS
@@ -77,6 +84,7 @@ CONFIG_SCHEMA = (
             # With a ble_client without mac_address this is a slot: ble_client_hid.pair
             # finds an advertising HID device and bt_pairing keeps it across reboots.
             cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
+            **ADDRESS_GLOBAL_SCHEMA,
             # Coalesces relative motion (pointer, dials) in the Home Assistant events and
             # last-event sensors; keys, text and on_pointer always see every report.
             cv.Optional(
@@ -126,11 +134,18 @@ def _is_slot(full_config, config) -> bool:
 
 
 def _final_validate(config):
-    if _is_slot(fv.full_config.get(), config) and CONF_BT_PAIRING_ID not in config:
+    slot = _is_slot(fv.full_config.get(), config)
+    if not slot and CONF_ADDRESS_GLOBAL in config:
+        raise cv.Invalid(
+            f"{CONF_ADDRESS_GLOBAL} is for a ble_client_hid whose ble_client has no "
+            "mac_address"
+        )
+    if slot and CONF_BT_PAIRING_ID not in config and CONF_ADDRESS_GLOBAL not in config:
         raise cv.Invalid(
             "a ble_client_hid whose ble_client has no mac_address is paired at runtime and "
-            "needs bt_pairing to keep the device"
+            "needs bt_pairing or an address_global to keep the device"
         )
+    validate_address_global(config)
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
@@ -148,6 +163,7 @@ async def to_code(config):
     if CONF_BT_PAIRING_ID in config:
         pairing = await cg.get_variable(config[CONF_BT_PAIRING_ID])
         cg.add(var.set_pairing(pairing))
+    await setup_address_global(var, config)
     await setup_hid_input(var, config)
     cg.add(var.set_event_sampling_interval_us(config[CONF_EVENT_SAMPLING_INTERVAL]))
     cg.add(var.set_discovery_mode(config[CONF_DISCOVERY_MODE]))

@@ -179,6 +179,11 @@ class BLEClientHID : public Component,
   // A slot: the ble_client has no mac_address, pair() finds the device and bt_pairing keeps it.
   void set_slot(uint32_t slot) { this->slot_ = slot; }
   void set_dynamic(bool dynamic) { this->dynamic_ = dynamic; }
+  /// A std::string global holding the slot's device address ("" when none).
+  void set_address_global(std::string (*get)(), void (*set)(const std::string &)) {
+    this->address_get_ = get;
+    this->address_set_ = set;
+  }
 #ifdef USE_BT_PAIRING
   void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
 #endif
@@ -270,6 +275,7 @@ class BLEClientHID : public Component,
   void restore_paired_();
   void end_pairing_(bool success, const char *reason);
   void schedule_address_(uint64_t address, esp_ble_addr_type_t type, bool auto_connect);
+  bool stored_address_(uint8_t *bda, esp_ble_addr_type_t *type) const;
 
   const GattCharacteristicInfo *find_characteristic_(uint16_t handle) const;
   const GattDescriptorInfo *find_descriptor_(const GattCharacteristicInfo &characteristic, uint16_t uuid) const;
@@ -333,6 +339,8 @@ class BLEClientHID : public Component,
   bt_pairing::BTPairing *pairing_{nullptr};
 #endif
   std::string candidate_name_;
+  std::string (*address_get_)(){nullptr};
+  void (*address_set_)(const std::string &){nullptr};
   uint32_t slot_{0};
   uint32_t pairing_until_{0};
   uint16_t candidate_appearance_{0};

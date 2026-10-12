@@ -69,6 +69,16 @@ BTHIDDevice *find_by_address(const uint8_t *bda) {
   return nullptr;
 }
 
+bool parse_mac(const std::string &text, uint8_t *bda) {
+  if (text.size() != 17)
+    return false;
+  for (size_t i = 0; i < ESP_BD_ADDR_LEN; i++) {
+    if ((i > 0 && text[i * 3 - 1] != ':') || parse_hex(text.c_str() + i * 3, 2, bda + i, 1) != 2)
+      return false;
+  }
+  return true;
+}
+
 BTHIDDevice *find_by_handle(uint8_t handle) {
   if (handle == 0xFF)
     return nullptr;
@@ -436,29 +446,46 @@ void BTHIDDevice::setup() {
         esp_bt_hid_host_virtual_cable_unplug(this->bda_);
       if (!this->fixed_address_)
         this->set_bda_(nullptr);
+      if (this->address_set_ != nullptr)
+        this->address_set_("");
     });
   }
 #endif
 }
 
-// A slot without a configured address takes the device it was paired with, once the
-// pairing database is loaded.
-void BTHIDDevice::restore_paired() {
-  if (this->restored_ || this->fixed_address_)
-    return;
+// The slot's device: the address global when it holds one, else the pairing database.
+bool BTHIDDevice::stored_address_(uint8_t *bda) const {
+  if (this->address_get_ != nullptr && parse_mac(this->address_get_(), bda))
+    return true;
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    if (!this->pairing_->is_loaded())
-      return;
-    if (const auto *record = this->pairing_->find_slot(this->slot_); record != nullptr && !this->has_address()) {
-      this->set_bda_(record->address);
-      char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
-      format_mac_addr_upper(record->address, mac);
-      ESP_LOGI(TAG, "[%s] Paired device '%s'", mac, record->name);
+    if (const auto *record = this->pairing_->find_slot(this->slot_); record != nullptr) {
+      memcpy(bda, record->address, ESP_BD_ADDR_LEN);
+      return true;
     }
   }
 #endif
+  return false;
+}
+
+// A slot without a configured address takes the device it was paired with: from the
+// address global, or once the pairing database is loaded, from there.
+void BTHIDDevice::restore_paired() {
+  if (this->restored_ || this->fixed_address_)
+    return;
+  uint8_t bda[ESP_BD_ADDR_LEN];
+  const bool from_global = this->address_get_ != nullptr && parse_mac(this->address_get_(), bda);
+#ifdef USE_BT_PAIRING
+  if (!from_global && this->pairing_ != nullptr && !this->pairing_->is_loaded())
+    return;
+#endif
   this->restored_ = true;
+  if ((from_global || this->stored_address_(bda)) && !this->has_address()) {
+    this->set_bda_(bda);
+    char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+    format_mac_addr_upper(bda, mac);
+    ESP_LOGI(TAG, "[%s] Paired device", mac);
+  }
 }
 
 void BTHIDDevice::loop() {
@@ -519,6 +546,11 @@ void BTHIDDevice::unpair() {
     ESP_LOGW(TAG, "[%s] Unpair failed: %s", mac, esp_err_to_name(err));
   } else {
     ESP_LOGI(TAG, "[%s] Unpaired", mac);
+  }
+  if (!this->fixed_address_) {
+    this->set_bda_(nullptr);
+    if (this->address_set_ != nullptr)
+      this->address_set_("");
   }
 }
 
@@ -597,30 +629,27 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
     esp_bt_gap_cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
-#ifdef USE_BT_PAIRING
-  const bt_pairing::PairingRecord *previous =
-      this->pairing_ != nullptr ? this->pairing_->find_slot(this->slot_) : nullptr;
-#endif
+  uint8_t previous[ESP_BD_ADDR_LEN];
+  const bool has_previous = this->stored_address_(previous);
+  const bool same_device = has_previous && memcmp(previous, this->bda_, ESP_BD_ADDR_LEN) == 0;
   if (!success) {
     ESP_LOGW(TAG, "Pairing failed: %s", reason);
     if (this->connected_)
       esp_bt_hid_host_disconnect(this->bda_);
-#ifdef USE_BT_PAIRING
     // A bond the failed attempt may have left goes; the device paired before comes back.
-    if (this->has_address() && (previous == nullptr || memcmp(previous->address, this->bda_, ESP_BD_ADDR_LEN) != 0))
-      bt_pairing::BTPairing::delete_bond(this->bda_, bt_pairing::Transport::CLASSIC);
-    this->set_bda_(previous != nullptr ? previous->address : nullptr);
-#else
-    this->set_bda_(nullptr);
-#endif
+    if (this->has_address() && !same_device)
+      esp_bt_gap_remove_bond_device(this->bda_);
+    this->set_bda_(has_previous ? previous : nullptr);
     return;
   }
   ESP_LOGI(TAG, "[%s] Paired with '%s'", mac, this->candidate_name_.c_str());
+  // The device it replaces loses its bond.
+  if (has_previous && !same_device)
+    esp_bt_gap_remove_bond_device(previous);
+  if (this->address_set_ != nullptr)
+    this->address_set_(mac);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    // The device it replaces loses its bond.
-    if (previous != nullptr && memcmp(previous->address, this->bda_, ESP_BD_ADDR_LEN) != 0)
-      bt_pairing::BTPairing::delete_bond(previous->address, bt_pairing::Transport::CLASSIC);
     bt_pairing::PairingRecord record{};
     memcpy(record.address, this->bda_, sizeof(record.address));
     record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);

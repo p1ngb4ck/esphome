@@ -190,14 +190,22 @@ std::vector<BLEClientHID *> &instances() {
   return list;
 }
 
-#ifdef USE_BT_PAIRING
 uint64_t address_to_uint64(const uint8_t *bda) {
   uint64_t address = 0;
   for (int i = 0; i < 6; i++)
     address |= static_cast<uint64_t>(bda[i]) << ((5 - i) * 8);
   return address;
 }
-#endif
+
+bool parse_mac(const std::string &text, uint8_t *bda) {
+  if (text.size() != 17)
+    return false;
+  for (size_t i = 0; i < 6; i++) {
+    if ((i > 0 && text[i * 3 - 1] != ':') || parse_hex(text.c_str() + i * 3, 2, bda + i, 1) != 2)
+      return false;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -208,6 +216,8 @@ void BLEClientHID::setup() {
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
       if (record.slot != this->slot_)
         return;
+      if (this->address_set_ != nullptr)
+        this->address_set_("");
       if (this->dynamic_) {
         this->schedule_address_(0, BLE_ADDR_TYPE_PUBLIC, false);
       } else if (this->parent()->state() != espbt::ClientState::IDLE) {
@@ -231,22 +241,40 @@ void BLEClientHID::schedule_address_(uint64_t address, esp_ble_addr_type_t type,
     this->parent()->disconnect();
 }
 
+// The slot's device: the address global when it holds one, else the pairing database.
+bool BLEClientHID::stored_address_(uint8_t *bda, esp_ble_addr_type_t *type) const {
+  *type = BLE_ADDR_TYPE_PUBLIC;
+  if (this->address_get_ != nullptr && parse_mac(this->address_get_(), bda))
+    return true;
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr) {
+    if (const auto *record = this->pairing_->find_slot(this->slot_); record != nullptr) {
+      memcpy(bda, record->address, 6);
+      *type = static_cast<esp_ble_addr_type_t>(record->address_type);
+      return true;
+    }
+  }
+#endif
+  return false;
+}
+
 void BLEClientHID::restore_paired_() {
   if (!this->dynamic_ || this->restored_)
     return;
+  uint8_t bda[6];
+  esp_ble_addr_type_t type = BLE_ADDR_TYPE_PUBLIC;
+  const bool from_global = this->address_get_ != nullptr && parse_mac(this->address_get_(), bda);
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ == nullptr || !this->pairing_->is_loaded())
+  if (!from_global && this->pairing_ != nullptr && !this->pairing_->is_loaded())
     return;
-  this->restored_ = true;
-  const auto *record = this->pairing_->find_slot(this->slot_);
-  if (record == nullptr || this->parent()->get_address() != 0)
-    return;
-  this->parent()->set_address(address_to_uint64(record->address));
-  this->parent()->set_remote_addr_type(static_cast<esp_ble_addr_type_t>(record->address_type));
-  ESP_LOGI(TAG, "[%s] Paired device '%s'", this->parent()->address_str(), record->name);
-#else
-  this->restored_ = true;
 #endif
+  this->restored_ = true;
+  if (!this->stored_address_(bda, &type) || this->parent()->get_address() != 0)
+    return;
+  // The advertisement the client connects on brings the current address type.
+  this->parent()->set_address(address_to_uint64(bda));
+  this->parent()->set_remote_addr_type(type);
+  ESP_LOGI(TAG, "[%s] Paired device", this->parent()->address_str());
 }
 
 void BLEClientHID::pair(uint32_t duration_ms) {
@@ -260,7 +288,7 @@ void BLEClientHID::pair(uint32_t duration_ms) {
     return;
   }
 #ifdef USE_BT_PAIRING
-  if (this->pairing_ == nullptr || !this->pairing_->is_loaded()) {
+  if (this->pairing_ != nullptr && !this->pairing_->is_loaded()) {
     ESP_LOGW(TAG, "Pairing database not loaded yet");
     return;
   }
@@ -324,32 +352,30 @@ void BLEClientHID::end_pairing_(bool success, const char *reason) {
                   this->parent()->get_address() != this->candidate_address_))
     return;
   this->pairing_active_ = false;
-#ifdef USE_BT_PAIRING
-  const bt_pairing::PairingRecord *previous =
-      this->pairing_ != nullptr ? this->pairing_->find_slot(this->slot_) : nullptr;
-#endif
+  uint8_t previous[6];
+  esp_ble_addr_type_t previous_type = BLE_ADDR_TYPE_PUBLIC;
+  const bool has_previous = this->stored_address_(previous, &previous_type);
+  const bool same_device = has_previous && address_to_uint64(previous) == this->candidate_address_;
   if (!success) {
     ESP_LOGW(TAG, "Pairing failed: %s", reason);
-#ifdef USE_BT_PAIRING
     // A bond the failed attempt may have left goes; the device paired before comes back.
-    if (this->candidate_selected_ &&
-        (previous == nullptr || address_to_uint64(previous->address) != this->candidate_address_))
-      bt_pairing::BTPairing::delete_bond(this->parent()->get_remote_bda(), bt_pairing::Transport::LE);
-    if (previous != nullptr) {
-      this->schedule_address_(address_to_uint64(previous->address),
-                              static_cast<esp_ble_addr_type_t>(previous->address_type), true);
-      return;
+    if (this->candidate_selected_ && !same_device)
+      esp_ble_remove_bond_device(this->parent()->get_remote_bda());
+    if (has_previous) {
+      this->schedule_address_(address_to_uint64(previous), previous_type, true);
+    } else {
+      this->schedule_address_(0, BLE_ADDR_TYPE_PUBLIC, false);
     }
-#endif
-    this->schedule_address_(0, BLE_ADDR_TYPE_PUBLIC, false);
     return;
   }
   ESP_LOGI(TAG, "[%s] Paired with '%s'", this->parent()->address_str(), this->candidate_name_.c_str());
+  // The device it replaces loses its bond.
+  if (has_previous && !same_device)
+    esp_ble_remove_bond_device(previous);
+  if (this->address_set_ != nullptr)
+    this->address_set_(this->parent()->address_str());
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    // The device it replaces loses its bond.
-    if (previous != nullptr && address_to_uint64(previous->address) != this->candidate_address_)
-      bt_pairing::BTPairing::delete_bond(previous->address, bt_pairing::Transport::LE);
     bt_pairing::PairingRecord record{};
     memcpy(record.address, this->parent()->get_remote_bda(), sizeof(record.address));
     record.transport = static_cast<uint8_t>(bt_pairing::Transport::LE);
@@ -375,9 +401,14 @@ void BLEClientHID::unpair() {
   }
   if (esp_err_t err = esp_ble_remove_bond_device(this->parent()->get_remote_bda()); err != ESP_OK) {
     ESP_LOGW(TAG, "[%s] Unpair failed: %s", this->parent()->address_str(), esp_err_to_name(err));
-    return;
+  } else {
+    ESP_LOGI(TAG, "[%s] Unpaired", this->parent()->address_str());
   }
-  ESP_LOGI(TAG, "[%s] Unpaired", this->parent()->address_str());
+  if (this->dynamic_) {
+    if (this->address_set_ != nullptr)
+      this->address_set_("");
+    this->schedule_address_(0, BLE_ADDR_TYPE_PUBLIC, false);
+  }
 }
 
 void BLEClientHID::loop() {
