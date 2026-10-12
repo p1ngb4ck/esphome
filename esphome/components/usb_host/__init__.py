@@ -51,6 +51,7 @@ _PERIPHERAL_MAPS = {
 }
 CONF_FS_PINS = "fs_pins"
 CONF_FULL_SPEED_ONLY = "full_speed_only"
+CONF_LOG_LOW_SPEED_HUB_ERRORS = "log_low_speed_hub_errors"
 CONF_MODE_SWITCH = "mode_switch"
 CONF_HID2HCI = "hid2hci"
 CONF_BULK_MESSAGES = "bulk_messages"
@@ -245,6 +246,12 @@ def _validate_full_speed_only(config: dict) -> dict:
     return config
 
 
+def _validate_log_low_speed_hub_errors(config: dict) -> dict:
+    if config.get(CONF_LOG_LOW_SPEED_HUB_ERRORS) and not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_LOG_LOW_SPEED_HUB_ERRORS} requires IDF >= 5.4.0")
+    return config
+
+
 def _require_transfers(*kinds: str) -> None:
     """Record transfer classes a consumer needs.
 
@@ -431,6 +438,9 @@ CONFIG_SCHEMA = cv.All(
             # The high-speed controller as a full/low-speed host: it ignores the
             # high-speed chirp, so every device and hub on it runs at full or low speed.
             cv.Optional(CONF_FULL_SPEED_ONLY): cv.boolean,
+            # Diagnostic: logs every transaction error of a low-speed device behind a
+            # full-speed hub, from the host controller's interrupt.
+            cv.Optional(CONF_LOG_LOW_SPEED_HUB_ERRORS): cv.boolean,
             # Devices that enumerate in the wrong mode, switched before they are routed.
             cv.Optional(CONF_MODE_SWITCH): cv.ensure_list(MODE_SWITCH_SCHEMA),
         }
@@ -446,6 +456,7 @@ CONFIG_SCHEMA = cv.All(
     ),
     _resolve_controllers,
     _validate_full_speed_only,
+    _validate_log_low_speed_hub_errors,
     _store_host_options,
 )
 
@@ -566,6 +577,8 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
     if config.get(CONF_FULL_SPEED_ONLY):
         cg.add(var.set_full_speed_only(True))
+    if config.get(CONF_LOG_LOW_SPEED_HUB_ERRORS):
+        cg.add(var.set_log_low_speed_hub_errors(True))
 
     for entry in config.get(CONF_MODE_SWITCH) or ():
         vid, pid = entry[CONF_VID], entry[CONF_PID]

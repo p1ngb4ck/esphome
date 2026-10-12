@@ -69,6 +69,9 @@ void USBHost::setup() {
   config.fsls_only = this->full_speed_only_;
   if (this->full_speed_only_)
     ESP_LOGI(TAG, "High-speed controller limited to full/low speed");
+  usb_host_ls_hub_debug = this->log_low_speed_hub_errors_;
+  if (this->log_low_speed_hub_errors_)
+    ESP_LOGI(TAG, "Logging low-speed hub transaction errors");
 #endif
   if (usb_host_install(&config) != ESP_OK) {
     this->status_set_error(LOG_STR("usb_host_install failed"));

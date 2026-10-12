@@ -539,6 +539,7 @@ class USBHost final : public Component {
   }
   // The high-speed controller as a full/low-speed host (full_speed_only option).
   void set_full_speed_only(bool full_speed_only) { this->full_speed_only_ = full_speed_only; }
+  void set_log_low_speed_hub_errors(bool log) { this->log_low_speed_hub_errors_ = log; }
 #endif
 
   // -- Submission engine (called by USBClient thin forwarders) ----------------
@@ -622,6 +623,7 @@ class USBHost final : public Component {
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
   bool full_speed_only_{false};
+  bool log_low_speed_hub_errors_{false};
 #endif
 };
 

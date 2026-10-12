@@ -523,6 +523,58 @@ _FSLS_RESET_REPLACEMENT = """    // Place the bus into the reset state. If the p
 #endif
     usb_dwc_hal_port_toggle_reset(port->hal, true);"""
 
+# Diagnostic, from NonaSuomy's USB_DWC_TT_DEBUG error detail: one line per channel error on
+# a pipe to a low-speed device behind a full-speed hub, retried or not. HCINT is read before
+# the HAL decodes (and clears) it; the stage's QTD word is read without the clearing parse.
+_LS_DEBUG_PUBLIC_ANCHOR = (
+    """esp_err_t usb_host_install(const usb_host_config_t *config);"""
+)
+
+_LS_DEBUG_PUBLIC_REPLACEMENT = """esp_err_t usb_host_install(const usb_host_config_t *config);
+
+/**
+ * @brief Log every channel error of a low-speed device behind a full-speed hub (diagnostic)
+ */
+extern bool usb_host_ls_hub_debug;"""
+
+_LS_DEBUG_CHAN_ANCHOR = """static hcd_pipe_event_t _intr_hdlr_chan(pipe_t *pipe, usb_dwc_hal_chan_t *chan_obj, bool *yield)
+{
+    usb_dwc_hal_chan_event_t chan_event = usb_dwc_hal_chan_decode_intr(chan_obj);"""
+
+_LS_DEBUG_CHAN_REPLACEMENT = """bool usb_host_ls_hub_debug = false;
+
+static void _ls_hub_debug_log(pipe_t *pipe, usb_dwc_hal_chan_t *chan_obj, usb_dwc_hal_chan_error_t chan_error, uint32_t raw_chan_intrs)
+{
+    int stage = -1;
+    uint32_t qtd = 0;
+    if (pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL) {
+        dma_buffer_block_t *buffer = pipe->buffers[pipe->multi_buffer_control.rd_idx];
+        stage = buffer->flags.ctrl.cur_stg;
+        CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer);
+        qtd = ((usb_dwc_ll_dma_qtd_t *)buffer->xfer_desc_list)[stage].buffer_status_val;
+    }
+    ESP_EARLY_LOGE(HCD_DWC_TAG, "LS hub error: addr=%u ep=0x%02x type=%u stage=%d err=%d retry=%u frame=%u "
+                   "HCINT=0x%08x HCCHAR=0x%08x HCTSIZ=0x%08x QTD=0x%08x",
+                   (unsigned)pipe->ep_char.dev_addr, (unsigned)pipe->ep_char.bEndpointAddress, (unsigned)pipe->ep_char.type,
+                   stage, (int)chan_error, (unsigned)pipe->ls_ctrl_retry_count,
+                   (unsigned)usb_dwc_hal_port_get_cur_frame_num(pipe->port->hal), (unsigned)raw_chan_intrs,
+                   (unsigned)chan_obj->regs->hcchar_reg.val, (unsigned)chan_obj->regs->hctsiz_reg.val, (unsigned)qtd);
+}
+
+static hcd_pipe_event_t _intr_hdlr_chan(pipe_t *pipe, usb_dwc_hal_chan_t *chan_obj, bool *yield)
+{
+    const uint32_t raw_chan_intrs = (usb_host_ls_hub_debug && pipe->ep_char.ls_via_fs_hub) ? chan_obj->regs->hcint_reg.val : 0;
+    usb_dwc_hal_chan_event_t chan_event = usb_dwc_hal_chan_decode_intr(chan_obj);"""
+
+_LS_DEBUG_ERROR_ANCHOR = """        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
+        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&"""
+
+_LS_DEBUG_ERROR_REPLACEMENT = """        usb_dwc_hal_chan_error_t chan_error = usb_dwc_hal_chan_get_error(chan_obj);
+        if (usb_host_ls_hub_debug && pipe->ep_char.ls_via_fs_hub) {
+            _ls_hub_debug_log(pipe, chan_obj, chan_error, raw_chan_intrs);
+        }
+        if (pipe->ep_char.ls_via_fs_hub && pipe->ep_char.type == USB_DWC_XFER_TYPE_CTRL &&"""
+
 # (relative path, anchor, replacement) applied in order, each exactly once.
 PATCHES = (
     ("include/usb/usb_host.h", _PUBLIC_INCLUDE_ANCHOR, _PUBLIC_INCLUDE_ADDITION),
@@ -552,6 +604,9 @@ PATCHES = (
     ("src/hcd_dwc.c", _FSLS_PORT_FIELD_ANCHOR, _FSLS_PORT_FIELD_REPLACEMENT),
     ("src/hcd_dwc.c", _FSLS_PORT_INIT_ANCHOR, _FSLS_PORT_INIT_REPLACEMENT),
     ("src/hcd_dwc.c", _FSLS_RESET_ANCHOR, _FSLS_RESET_REPLACEMENT),
+    ("include/usb/usb_host.h", _LS_DEBUG_PUBLIC_ANCHOR, _LS_DEBUG_PUBLIC_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_DEBUG_CHAN_ANCHOR, _LS_DEBUG_CHAN_REPLACEMENT),
+    ("src/hcd_dwc.c", _LS_DEBUG_ERROR_ANCHOR, _LS_DEBUG_ERROR_REPLACEMENT),
 )
 
 # Identifies an existing patched copy. It has to change whenever anything about that copy
