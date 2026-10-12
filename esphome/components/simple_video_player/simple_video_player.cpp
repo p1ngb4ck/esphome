@@ -1678,8 +1678,11 @@ void SimpleVideoPlayer::process_audio_frame_(const AVIFrame &frame, const uint8_
   // signal. In a multi-codec build audio_decoder_ exists even for a PCM file, so the pointer can't
   // signal the mode anymore.
   if (this->audio_use_decoder_.load(std::memory_order_acquire)) {
-    // Compressed audio (MP3/FLAC): feed the decoder's input ring buffer.
-    this->audio_input_ring_buffer_->write(data, size);
+    // Compressed audio (MP3/FLAC): feed the decoder's input ring buffer. Whole chunks only and
+    // never over older data: write() overwrites the oldest bytes when full (ring_buffer.h), which
+    // before playback starts (nothing drains yet) is the FLAC stream header, and mid-stream cuts a
+    // compressed frame in two. A chunk that does not fit is dropped whole.
+    this->audio_input_ring_buffer_->write_without_replacement(data, size, 0, false);
     return;
   }
 
