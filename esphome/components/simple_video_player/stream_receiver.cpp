@@ -234,6 +234,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
       bool wifi_held = false;
       bool kind_known = false;
       bool sink_seen = false;
+      bool sender_done = false;  // the sender's AVI is complete: the connection stays until it has played
       while (true) {
         BufferedFileReader *sink = nullptr;
         if (this->stream_avi_.load(std::memory_order_relaxed)) {
@@ -245,6 +246,10 @@ void SimpleVideoPlayer::stream_net_loop_() {
             sink_seen = true;
           } else if (sink_seen || (st != PlayerState::PLAYING && st != PlayerState::PAUSED)) {
             break;
+          }
+          if (sender_done) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
           }
           if (sink == nullptr || sink->stream_room() < STREAM_RECV_BYTES) {
             this->stream_send_pending_(client);
@@ -292,6 +297,14 @@ void SimpleVideoPlayer::stream_net_loop_() {
           }
         }
         const int received = ::recv(client, buffer, STREAM_RECV_BYTES, 0);
+        if (received == 0 && sink != nullptr) {
+          // The sender has sent all of its AVI (svp_relay half-closes): the rest of the ring plays, and
+          // closing the connection once it has played tells the sender the end was reached.
+          sink->end_stream();
+          sender_done = true;
+          hold_wifi_for_stream(wifi_held, false);
+          continue;
+        }
         if (received <= 0) {
           if (sink == nullptr)
             ESP_LOGI(TAG, "Sender disconnected");
