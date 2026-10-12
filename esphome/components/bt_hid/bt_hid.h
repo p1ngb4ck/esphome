@@ -34,7 +34,13 @@ struct FoundDevice {
 // One Bluetooth Classic HID device (keyboard, mouse, game controller, remote), through
 // Bluedroid's HID host. Its reports feed hid::HIDInput like usb_hid and ble_client_hid. The
 // HID host, pairing and connections are shared by all of them; see bt_hid.cpp.
-class BTHIDDevice : public Component, public hid::HIDInput {
+class BTHIDDevice : public Component,
+                    public hid::HIDInput
+#ifdef USE_BT_PAIRING
+    ,
+                    public bt_pairing::PairingTarget
+#endif
+{
  public:
   void setup() override;
   void loop() override;
@@ -49,6 +55,14 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   static constexpr size_t MAX_FOUND = 12;
   /// Pair with a device the pairing scan listed; opens the window again when it has closed.
   void pair_with(size_t index);
+#ifdef USE_BT_PAIRING
+  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
+    return transport == bt_pairing::Transport::CLASSIC && kind == bt_pairing::DeviceKind::HID;
+  }
+  uint32_t pairing_slot() const override { return this->slot_; }
+  bool is_free() const override { return !this->fixed_address_ && !this->has_address() && !this->is_pairing(); }
+  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+#endif
   /// Main loop: a device the pairing scan found, or one that connected on its own.
   void on_found(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void set_slot(uint32_t slot) { this->slot_ = slot; }
@@ -109,6 +123,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
  protected:
   void write_leds_(uint8_t leds) override;
   void open_window_(uint32_t until);
+  bool pair_found_(const FoundDevice &found);
   void publish_found_();
   void set_bda_(const uint8_t *bda);
   bool stored_address_(uint8_t *bda) const;

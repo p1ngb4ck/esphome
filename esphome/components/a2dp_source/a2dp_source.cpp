@@ -137,6 +137,10 @@ void A2DPSource::setup() {
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
   bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr)
+    this->pairing_->add_target(this);
+#endif
 
   bool stored = this->has_stored_device();
   if (!stored && this->pair_on_boot_if_empty_) {
@@ -208,6 +212,25 @@ bool A2DPSource::pair_with_index(size_t index) {
   ESP_LOGI(TAG, "Pairing with %s on its next sighting", device.name.c_str());
   return true;
 }
+
+#ifdef USE_BT_PAIRING
+bool A2DPSource::pair_device(const bt_pairing::ScannedDevice &device) {
+  if (!this->started_.load()) {
+    ESP_LOGW(TAG, "Bluetooth is not running, cannot pair");
+    return false;
+  }
+  if (this->connected_.load()) {
+    ESP_LOGW(TAG, "Connected to another device; forget it and switch it off first");
+    return false;
+  }
+  memcpy(this->chosen_addr_, device.address, ESP_BD_ADDR_LEN);
+  this->chosen_valid_ = true;
+  this->pairing_mode_.store(true);
+  this->source_.resume_discovery();
+  ESP_LOGI(TAG, "Pairing with %s on its next sighting", device.name.c_str());
+  return true;
+}
+#endif
 
 bool A2DPSource::pair_with_name(const std::string &name) {
   for (const auto &device : this->devices_) {

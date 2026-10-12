@@ -1,6 +1,7 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, microphone
+from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
 from esphome.components.esp32 import add_idf_sdkconfig_option, get_esp32_variant
 from esphome.components.esp32.const import VARIANT_ESP32
 import esphome.config_validation as cv
@@ -49,6 +50,8 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(A2DPSource),
+            # bt_pairing.scan lists audio devices too; the one picked connects here.
+            cv.OnlyWith(CONF_BT_PAIRING_ID, "bt_pairing"): cv.use_id(BTPairing),
             # Stereo, because A2DP is. The library's frame is two int16 samples
             # and nothing in the path resamples or upmixes. Without it, audio comes
             # from the a2dp_source speaker platform.
@@ -155,6 +158,8 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    if CONF_BT_PAIRING_ID in config:
+        cg.add(var.set_pairing(await cg.get_variable(config[CONF_BT_PAIRING_ID])))
 
     # passive=False: this component is the reason the microphone runs, so it
     # starts and stops it rather than listening in on someone else's stream.

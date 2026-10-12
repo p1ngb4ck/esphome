@@ -515,6 +515,7 @@ void BTHIDDevice::setup() {
   host().devices.push_back(this);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
+    this->pairing_->add_target(this);
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
       if (record.slot != this->slot_ && memcmp(record.address, this->bda_, ESP_BD_ADDR_LEN) != 0)
         return;
@@ -717,22 +718,36 @@ void BTHIDDevice::on_found(const uint8_t *bda, uint32_t device_class, const std:
 }
 
 void BTHIDDevice::pair_with(size_t index) {
-  if (index >= this->found_.size())
-    return;
+  if (index < this->found_.size())
+    this->pair_found_(this->found_[index]);
+}
+
+#ifdef USE_BT_PAIRING
+bool BTHIDDevice::pair_device(const bt_pairing::ScannedDevice &device) {
+  FoundDevice found;
+  memcpy(found.address, device.address, ESP_BD_ADDR_LEN);
+  found.device_class = device.device_class;
+  found.name = device.name;
+  return this->pair_found_(found);
+}
+#endif
+
+bool BTHIDDevice::pair_found_(const FoundDevice &picked) {
   Host &h = host();
   if (!h.ready) {
     ESP_LOGW(TAG, "Bluetooth Classic is not running, cannot pair");
-    return;
+    return false;
   }
   if (h.pairing != nullptr && h.pairing != this) {
     ESP_LOGW(TAG, "Another pairing is running");
-    return;
+    return false;
   }
-  const FoundDevice found = this->found_[index];
+  const FoundDevice found = picked;
   // The window closed since the scan, or another device was picked in it: start over with this one.
   if (h.pairing == nullptr || this->has_address())
     this->open_window_(millis() + 2 * CONNECT_TIMEOUT_MS);
   this->on_pairing_candidate(found.address, found.device_class, found.name);
+  return true;
 }
 
 void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name) {

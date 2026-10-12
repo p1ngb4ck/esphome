@@ -10,6 +10,9 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#ifdef USE_BT_PAIRING
+#include "esphome/components/bt_pairing/bt_pairing.h"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
@@ -31,7 +34,12 @@ struct DiscoveredDevice {
   int rssi;
 };
 
-class A2DPSource : public Component {
+class A2DPSource : public Component
+#ifdef USE_BT_PAIRING
+    ,
+                   public bt_pairing::PairingTarget
+#endif
+{
  public:
   float get_setup_priority() const override { return esphome::setup_priority::AFTER_CONNECTION; }
 
@@ -74,6 +82,16 @@ class A2DPSource : public Component {
   bool pair_with_name(const std::string &name);
   /// @brief Pairs with the device at this place in discovered_devices() (the select).
   bool pair_with_index(size_t index);
+#ifdef USE_BT_PAIRING
+  void set_pairing(bt_pairing::BTPairing *pairing) { this->pairing_ = pairing; }
+  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
+    return transport == bt_pairing::Transport::CLASSIC && kind == bt_pairing::DeviceKind::AUDIO;
+  }
+  uint32_t pairing_slot() const override { return 0; }
+  /// The device picked replaces the stored one.
+  bool is_free() const override { return true; }
+  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+#endif
   /// @brief Devices seen since the pairing window opened.
   const std::vector<DiscoveredDevice> &discovered_devices() const { return this->devices_; }
   /// @brief Upper bound on that list, so the select can size its storage once.
@@ -114,6 +132,9 @@ class A2DPSource : public Component {
   BluetoothA2DPSource source_;
 #ifdef USE_MICROPHONE
   microphone::MicrophoneSource *mic_source_{nullptr};
+#endif
+#ifdef USE_BT_PAIRING
+  bt_pairing::BTPairing *pairing_{nullptr};
 #endif
   RingbufHandle_t ring_{nullptr};
   size_t ring_bytes_{0};

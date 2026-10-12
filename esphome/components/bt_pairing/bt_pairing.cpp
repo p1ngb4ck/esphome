@@ -2,6 +2,10 @@
 
 #ifdef USE_ESP32
 
+#ifdef USE_BT_PAIRING_SELECT
+#include "select/bt_pairing_select.h"
+#endif
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include <sdkconfig.h>
@@ -15,6 +19,7 @@
 #endif
 #endif
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstring>
 
@@ -53,12 +58,22 @@ static const char *transport_str(uint8_t transport) {
   return transport == static_cast<uint8_t>(Transport::LE) ? "LE" : "Classic";
 }
 
+static const char *kind_str(const ScannedDevice &device) {
+  if (device.transport == Transport::LE)
+    return "BLE HID";
+  return device.kind == DeviceKind::AUDIO ? "BT audio" : "BT HID";
+}
+
 void BTPairing::setup() {
   this->pref_ = global_preferences->make_preference(sizeof(Header) + PREFERENCE_RECORDS * sizeof(PairingRecord),
                                                     this->preference_key_);
+#ifdef USE_BT_CLASSIC
+  bt_classic::add_gap_handler(BTPairing::gap_handler_, this);
+#endif
 }
 
 void BTPairing::loop() {
+  this->scan_loop_();
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - this->next_attempt_ms_) < 0)
     return;
@@ -82,7 +97,8 @@ void BTPairing::loop() {
     this->next_attempt_ms_ = now + RETRY_MS;
     return;
   }
-  this->disable_loop();
+  if (!this->scanning_.load() && this->pending_target_ == nullptr)
+    this->disable_loop();
 }
 
 void BTPairing::dump_config() {
@@ -240,6 +256,262 @@ void BTPairing::log_records() const {
     ESP_LOGI(TAG, "  %s %s '%s', class 0x%06" PRIX32 ", slot 0x%08" PRIX32, transport_str(record.transport), mac,
              record.name, record.device_class, record.slot);
   }
+}
+
+// -- Pairing scan -------------------------------------------------------------------------
+
+void BTPairing::status_(const std::string &message) {
+  ESP_LOGI(TAG, "%s", message.c_str());
+  this->status_callbacks_.call(message);
+}
+
+#ifdef USE_BT_CLASSIC
+// BTC task.
+bool BTPairing::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
+  auto *self = static_cast<BTPairing *>(arg);
+  if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
+    self->classic_discovering_.store(param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED);
+    self->enable_loop_soon_any_context();
+    return false;
+  }
+  if (event != ESP_BT_GAP_DISC_RES_EVT || !self->scanning_.load())
+    return false;
+  uint32_t cod = 0;
+  std::string name;
+  for (int i = 0; i < param->disc_res.num_prop; i++) {
+    const esp_bt_gap_dev_prop_t &prop = param->disc_res.prop[i];
+    if (prop.type == ESP_BT_GAP_DEV_PROP_COD && prop.len >= (int) sizeof(uint32_t)) {
+      cod = *static_cast<const uint32_t *>(prop.val);
+    } else if (prop.type == ESP_BT_GAP_DEV_PROP_BDNAME && name.empty() && prop.len > 0) {
+      const auto *text = static_cast<const char *>(prop.val);
+      name.assign(text, strnlen(text, prop.len));
+    } else if (prop.type == ESP_BT_GAP_DEV_PROP_EIR && name.empty()) {
+      uint8_t len = 0;
+      auto *eir = static_cast<uint8_t *>(prop.val);
+      uint8_t *text = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &len);
+      if (text == nullptr)
+        text = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &len);
+      if (text != nullptr)
+        name.assign(reinterpret_cast<const char *>(text), len);
+    }
+  }
+  if (!esp_bt_gap_is_valid_cod(cod))
+    return false;
+  ScannedDevice device{};
+  const uint32_t major = esp_bt_gap_get_cod_major_dev(cod);
+  if (major == ESP_BT_COD_MAJOR_DEV_PERIPHERAL) {
+    device.kind = DeviceKind::HID;
+  } else if (major == ESP_BT_COD_MAJOR_DEV_AV &&
+             (esp_bt_gap_get_cod_srvc(cod) & (ESP_BT_COD_SRVC_RENDERING | ESP_BT_COD_SRVC_AUDIO)) != 0) {
+    // What a2dp_source connects to.
+    device.kind = DeviceKind::AUDIO;
+  } else {
+    return false;
+  }
+  memcpy(device.address, param->disc_res.bda, sizeof(device.address));
+  device.transport = Transport::CLASSIC;
+  device.device_class = cod;
+  device.name = std::move(name);
+  {
+    LockGuard guard(self->found_lock_);
+    if (self->found_.size() < MAX_SCANNED)
+      self->found_.push_back(std::move(device));
+  }
+  self->enable_loop_soon_any_context();
+  return false;
+}
+#endif
+
+#ifdef USE_BT_PAIRING_LE
+// GAP appearance category 0x00F: HID (keyboard, mouse, joystick, gamepad, ...).
+static constexpr uint16_t APPEARANCE_HID_FIRST = 0x03C0;
+static constexpr uint16_t APPEARANCE_HID_LAST = 0x03FF;
+static constexpr uint16_t UUID_HID_SERVICE = 0x1812;
+
+bool BTPairing::parse_device(const ble_device_base::ESPBTDevice &device) {
+  if (!this->scanning_.load())
+    return false;
+  const auto hid_uuid = ble_device_base::ESPBTUUID::from_uint16(UUID_HID_SERVICE);
+  bool hid = false;
+  for (const auto &uuid : device.get_service_uuids())
+    hid = hid || uuid == hid_uuid;
+  const auto &appearance = device.get_appearance();
+  if (appearance.has_value() && *appearance >= APPEARANCE_HID_FIRST && *appearance <= APPEARANCE_HID_LAST)
+    hid = true;
+  if (!hid)
+    return false;
+  ScannedDevice found{};
+  memcpy(found.address, device.address(), sizeof(found.address));
+  found.transport = Transport::LE;
+  found.kind = DeviceKind::HID;
+  found.address_type = static_cast<uint8_t>(device.get_address_type());
+  found.device_class = appearance.has_value() ? *appearance : 0;
+  const StringRef name = device.get_name();
+  if (!name.empty())
+    found.name.assign(name.c_str(), name.size());
+  this->add_scanned_(found);
+  return false;
+}
+#endif
+
+void BTPairing::scan(uint32_t duration_ms) {
+  if (this->scanning_.load()) {
+    this->status_("A scan is already running");
+    return;
+  }
+  this->pending_target_ = nullptr;
+  this->scanned_.clear();
+  {
+    LockGuard guard(this->found_lock_);
+    this->found_.clear();
+  }
+  bool started = false;
+  this->scanning_.store(true);
+#ifdef USE_BT_CLASSIC
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED && bt_classic::ensure_gap_callback()) {
+    // Inquiry length is in units of 1.28 s.
+    const uint32_t units =
+        std::clamp<uint32_t>((duration_ms + 1279) / 1280, ESP_BT_GAP_MIN_INQ_LEN, ESP_BT_GAP_MAX_INQ_LEN);
+    if (esp_err_t err = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, units, 0); err != ESP_OK) {
+      ESP_LOGW(TAG, "Bluetooth Classic scan failed to start: %s", esp_err_to_name(err));
+    } else {
+      started = true;
+    }
+  } else {
+    ESP_LOGW(TAG, "Bluetooth Classic is not running");
+  }
+#endif
+#ifdef USE_BT_PAIRING_LE
+  if (this->parent_ != nullptr) {
+    this->parent_->start_scan_if_idle();
+    started = true;
+  }
+#endif
+  if (!started) {
+    this->scanning_.store(false);
+    this->publish_scanned_();
+    this->status_("Bluetooth is not running, cannot scan");
+    return;
+  }
+  this->scan_until_ = millis() + duration_ms;
+  this->publish_scanned_();
+  this->enable_loop();
+  this->status_("Scanning for Bluetooth devices in pairing mode");
+}
+
+void BTPairing::cancel_scan() {
+  const bool active = this->scanning_.exchange(false) || this->pending_target_ != nullptr;
+  this->pending_target_ = nullptr;
+#ifdef USE_BT_CLASSIC
+  if (this->classic_discovering_.load())
+    esp_bt_gap_cancel_discovery();
+#endif
+  if (active)
+    this->status_("Scan cancelled");
+}
+
+void BTPairing::add_scanned_(const ScannedDevice &device) {
+  for (auto &known : this->scanned_) {
+    if (memcmp(known.address, device.address, sizeof(device.address)) != 0)
+      continue;
+    if (known.name.empty() && !device.name.empty()) {
+      known.name = device.name;
+      this->publish_scanned_();
+    }
+    return;
+  }
+  if (this->scanned_.size() >= MAX_SCANNED)
+    return;
+  this->scanned_.push_back(device);
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(device.address, mac);
+  ESP_LOGI(TAG, "Found %s %s '%s'", kind_str(device), mac, device.name.c_str());
+  this->publish_scanned_();
+}
+
+void BTPairing::publish_scanned_() {
+#ifdef USE_BT_PAIRING_SELECT
+  if (this->device_select_ != nullptr)
+    this->device_select_->set_devices(this->scanned_);
+#endif
+}
+
+void BTPairing::scan_loop_() {
+  std::deque<ScannedDevice> found;
+  {
+    LockGuard guard(this->found_lock_);
+    found.swap(this->found_);
+  }
+  for (const auto &device : found)
+    this->add_scanned_(device);
+  if (this->scanning_.load() && static_cast<int32_t>(millis() - this->scan_until_) >= 0) {
+    this->scanning_.store(false);
+    char text[96];
+    snprintf(text, sizeof(text), "Scan finished: %u device(s), pick one in the device select",
+             static_cast<unsigned>(this->scanned_.size()));
+    this->status_(text);
+  }
+  // A Classic device is paged once the inquiry has stopped.
+  if (this->pending_target_ != nullptr && !this->classic_discovering_.load()) {
+    PairingTarget *target = this->pending_target_;
+    this->pending_target_ = nullptr;
+    this->dispatch_(this->pending_, target);
+  }
+}
+
+// The slot already holding the device, else a free one.
+PairingTarget *BTPairing::target_for_(const ScannedDevice &device) const {
+  const PairingRecord *record = this->find_address(device.address);
+  for (auto *target : this->targets_) {
+    if (target->pairs(device.transport, device.kind) && record != nullptr && target->pairing_slot() != 0 &&
+        record->slot == target->pairing_slot())
+      return target;
+  }
+  for (auto *target : this->targets_) {
+    if (target->pairs(device.transport, device.kind) && target->is_free())
+      return target;
+  }
+  return nullptr;
+}
+
+void BTPairing::pair_with(size_t index) {
+  if (index >= this->scanned_.size())
+    return;
+  const ScannedDevice device = this->scanned_[index];
+  char text[128];
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(device.address, mac);
+  PairingTarget *target = this->target_for_(device);
+  if (target == nullptr) {
+    snprintf(text, sizeof(text), "No free %s slot for %s: unpair a device first", kind_str(device), mac);
+    this->status_(text);
+    return;
+  }
+  this->scanning_.store(false);
+#ifdef USE_BT_CLASSIC
+  if (device.transport == Transport::CLASSIC && this->classic_discovering_.load()) {
+    // Paging during an inquiry fails.
+    esp_bt_gap_cancel_discovery();
+    this->pending_ = device;
+    this->pending_target_ = target;
+    this->enable_loop();
+    return;
+  }
+#endif
+  this->dispatch_(device, target);
+}
+
+void BTPairing::dispatch_(const ScannedDevice &device, PairingTarget *target) {
+  char text[128];
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(device.address, mac);
+  const char *label = device.name.empty() ? mac : device.name.c_str();
+  if (target->pair_device(device)) {
+    snprintf(text, sizeof(text), "Pairing with %s '%s'", kind_str(device), label);
+  } else {
+    snprintf(text, sizeof(text), "%s '%s' cannot be paired now", kind_str(device), label);
+  }
+  this->status_(text);
 }
 
 std::vector<uint8_t> BTPairing::encode_(bool fixed_size) const {

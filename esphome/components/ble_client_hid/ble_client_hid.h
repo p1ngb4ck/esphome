@@ -174,6 +174,9 @@ class BLEClientHID : public Component,
 #ifdef USE_API_HOMEASSISTANT_SERVICES
                      public api::CustomAPIDevice,
 #endif
+#ifdef USE_BT_PAIRING
+                     public bt_pairing::PairingTarget,
+#endif
                      public hid::HIDInput {
  public:
   void loop() override;
@@ -210,6 +213,14 @@ class BLEClientHID : public Component,
   static constexpr size_t MAX_FOUND = 12;
   /// Pair with a device the window listed; opens the window again when it has closed.
   void pair_with(size_t index);
+#ifdef USE_BT_PAIRING
+  bool pairs(bt_pairing::Transport transport, bt_pairing::DeviceKind kind) const override {
+    return transport == bt_pairing::Transport::LE && kind == bt_pairing::DeviceKind::HID;
+  }
+  uint32_t pairing_slot() const override { return this->slot_; }
+  bool is_free() const override;
+  bool pair_device(const bt_pairing::ScannedDevice &device) override;
+#endif
   bool is_pairing() const { return this->pairing_active_; }
 
 #ifdef USE_TEXT_SENSOR
@@ -298,6 +309,7 @@ class BLEClientHID : public Component,
   void restore_paired_();
   void end_pairing_(bool success, const char *reason);
   void open_window_(uint32_t duration_ms);
+  bool pair_found_(const FoundBLEDevice &found);
   void publish_found_();
   void schedule_address_(uint64_t address, esp_ble_addr_type_t type, bool auto_connect);
   bool stored_address_(uint8_t *bda, esp_ble_addr_type_t *type) const;

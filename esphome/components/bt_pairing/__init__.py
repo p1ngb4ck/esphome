@@ -8,13 +8,16 @@ import logging
 
 from esphome import automation
 import esphome.codegen as cg
+from esphome.components import esp32_ble_tracker
 from esphome.components.globals import GlobalsComponent
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ADDRESS,
+    CONF_DURATION,
     CONF_FILE,
     CONF_ID,
     CONF_RESTORE_VALUE,
+    CONF_TRIGGER_ID,
     CONF_TYPE,
 )
 import esphome.final_validate as fv
@@ -29,6 +32,7 @@ CONF_BT_PAIRING_ID = "bt_pairing_id"
 CONF_ADDRESS_GLOBAL = "address_global"
 CONF_MAX_RESTORE_DATA_LENGTH = "max_restore_data_length"
 CONF_MAX_DEVICES = "max_devices"
+CONF_ON_STATUS = "on_status"
 
 bt_pairing_ns = cg.esphome_ns.namespace("bt_pairing")
 BTPairing = bt_pairing_ns.class_("BTPairing", cg.Component)
@@ -40,6 +44,15 @@ ForgetAction = bt_pairing_ns.class_(
 )
 LogAction = bt_pairing_ns.class_(
     "LogAction", automation.Action, cg.Parented.template(BTPairing)
+)
+ScanAction = bt_pairing_ns.class_(
+    "ScanAction", automation.Action, cg.Parented.template(BTPairing)
+)
+CancelScanAction = bt_pairing_ns.class_(
+    "CancelScanAction", automation.Action, cg.Parented.template(BTPairing)
+)
+StatusTrigger = bt_pairing_ns.class_(
+    "StatusTrigger", automation.Trigger.template(cg.std_string)
 )
 
 
@@ -59,6 +72,14 @@ CONFIG_SCHEMA = cv.Schema(
         # A file under a storage's mount_path; without it the database is kept in
         # preferences. Read once the storage is mounted, rewritten on every change.
         cv.Optional(CONF_FILE): _validate_file,
+        # The pairing scan also lists advertising BLE HID devices.
+        cv.OnlyWith(
+            esp32_ble_tracker.CONF_ESP32_BLE_ID, "esp32_ble_tracker"
+        ): cv.use_id(esp32_ble_tracker.ESP32BLETracker),
+        # What the pairing scan and a pick do: message
+        cv.Optional(CONF_ON_STATUS): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(StatusTrigger)}
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -72,6 +93,12 @@ async def to_code(config):
     if CONF_FILE in config:
         cg.add_define("USE_BT_PAIRING_STORAGE")
         cg.add(var.set_file(config[CONF_FILE]))
+    if esp32_ble_tracker.CONF_ESP32_BLE_ID in config:
+        cg.add_define("USE_BT_PAIRING_LE")
+        await esp32_ble_tracker.register_ble_device(var, config)
+    for conf in config.get(CONF_ON_STATUS, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [(cg.std_string, "message")], conf)
 
 
 def _final_validate(config):
@@ -101,6 +128,38 @@ PAIRING_ACTION_SCHEMA = automation.maybe_simple_id(
 async def pairing_simple_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+@automation.register_action(
+    "bt_pairing.cancel_scan", CancelScanAction, PAIRING_ACTION_SCHEMA, synchronous=True
+)
+async def cancel_scan_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
+
+
+@automation.register_action(
+    "bt_pairing.scan",
+    ScanAction,
+    automation.maybe_simple_id(
+        {
+            cv.GenerateID(): cv.use_id(BTPairing),
+            cv.Optional(CONF_DURATION, default="20s"): cv.templatable(
+                cv.positive_time_period_milliseconds
+            ),
+        }
+    ),
+    synchronous=True,
+)
+async def scan_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    duration = config[CONF_DURATION]
+    if not cg.is_template(duration):
+        duration = duration.total_milliseconds
+    cg.add(var.set_duration(await cg.templatable(duration, args, cg.uint32)))
     return var
 
 

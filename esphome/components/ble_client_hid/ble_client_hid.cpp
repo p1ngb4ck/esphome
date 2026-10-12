@@ -215,6 +215,8 @@ bool parse_mac(const std::string &text, uint8_t *bda) {
 void BLEClientHID::setup() {
   instances().push_back(this);
 #ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr && this->dynamic_)
+    this->pairing_->add_target(this);
   if (this->pairing_ != nullptr) {
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
       if (record.slot != this->slot_)
@@ -326,9 +328,27 @@ void BLEClientHID::publish_found_() {
 }
 
 void BLEClientHID::pair_with(size_t index) {
-  if (index >= this->found_.size() || !this->dynamic_)
-    return;
-  const FoundBLEDevice found = this->found_[index];
+  if (index < this->found_.size())
+    this->pair_found_(this->found_[index]);
+}
+
+#ifdef USE_BT_PAIRING
+bool BLEClientHID::is_free() const {
+  if (!this->dynamic_ || this->pairing_active_)
+    return false;
+  return this->pending_address_valid_ ? this->pending_address_ == 0 : this->parent_->get_address() == 0;
+}
+
+bool BLEClientHID::pair_device(const bt_pairing::ScannedDevice &device) {
+  return this->pair_found_({address_to_uint64(device.address), static_cast<esp_ble_addr_type_t>(device.address_type),
+                            static_cast<uint16_t>(device.device_class), device.name});
+}
+#endif
+
+bool BLEClientHID::pair_found_(const FoundBLEDevice &picked) {
+  if (!this->dynamic_)
+    return false;
+  const FoundBLEDevice found = picked;
   // The window closed since, or another device was picked in it: start over with this one.
   if (!this->pairing_active_ || this->candidate_selected_)
     this->open_window_(0);
@@ -343,6 +363,7 @@ void BLEClientHID::pair_with(size_t index) {
     bda[i] = static_cast<uint8_t>(found.address >> (40 - 8 * i));
   format_mac_addr_upper(bda, mac);
   ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, found.name.c_str());
+  return true;
 }
 
 #ifdef USE_ESP32_BLE_DEVICE
