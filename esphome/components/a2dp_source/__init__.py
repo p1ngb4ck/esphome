@@ -29,6 +29,7 @@ a2dp_source_ns = cg.esphome_ns.namespace("a2dp_source")
 A2DPSource = a2dp_source_ns.class_("A2DPSource", cg.Component)
 StartPairingAction = a2dp_source_ns.class_("StartPairingAction", automation.Action)
 ForgetDeviceAction = a2dp_source_ns.class_("ForgetDeviceAction", automation.Action)
+StopPairingAction = a2dp_source_ns.class_("StopPairingAction", automation.Action)
 PairWithNameAction = a2dp_source_ns.class_("PairWithNameAction", automation.Action)
 IsConnectedCondition = a2dp_source_ns.class_(
     "IsConnectedCondition", automation.Condition
@@ -244,6 +245,12 @@ A2DP_ACTION_SCHEMA = automation.maybe_simple_id(
 @automation.register_action(
     "a2dp_source.start_pairing",
     StartPairingAction,
+    A2DP_ACTION_SCHEMA,
+    synchronous=True,
+)
+@automation.register_action(
+    "a2dp_source.stop_pairing",
+    StopPairingAction,
     A2DP_ACTION_SCHEMA,
     synchronous=True,
 )

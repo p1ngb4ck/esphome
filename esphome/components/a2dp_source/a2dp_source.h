@@ -64,6 +64,8 @@ class A2DPSource : public Component {
   void start_pairing();
   /// @brief Drops the stored device. The next pairing window picks a new one.
   void forget_device();
+  /// @brief Closes a running pairing window; the stored device stays.
+  void stop_pairing();
   /// @brief Pairs with one of the devices found in this window, by name.
   ///
   /// The address is remembered and taken the next time the inquiry reports it,
@@ -165,6 +167,11 @@ class A2DPSource : public Component {
 template<typename... Ts> class StartPairingAction : public Action<Ts...>, public Parented<A2DPSource> {
  public:
   void play(Ts... x) override { this->parent_->start_pairing(); }
+};
+
+template<typename... Ts> class StopPairingAction : public Action<Ts...>, public Parented<A2DPSource> {
+ public:
+  void play(Ts... x) override { this->parent_->stop_pairing(); }
 };
 
 template<typename... Ts> class ForgetDeviceAction : public Action<Ts...>, public Parented<A2DPSource> {

@@ -51,6 +51,7 @@ DisconnectTrigger = bt_hid_ns.class_("DisconnectTrigger", automation.Trigger.tem
 ConnectAction = bt_hid_ns.class_("ConnectAction", automation.Action)
 DisconnectAction = bt_hid_ns.class_("DisconnectAction", automation.Action)
 UnpairAction = bt_hid_ns.class_("UnpairAction", automation.Action)
+CancelPairingAction = bt_hid_ns.class_("CancelPairingAction", automation.Action)
 ScanAction = bt_hid_ns.class_("ScanAction", automation.Action)
 PairAction = bt_hid_ns.class_("PairAction", automation.Action)
 
@@ -168,6 +169,10 @@ automation.register_simple_action(
 # Delete the pairing; the device has to be put in pairing mode to connect again.
 automation.register_simple_action(
     "bt_hid.unpair", UnpairAction, DEVICE_ACTION_SCHEMA, synchronous=True
+)
+# Close a running pairing window; the device paired before stays.
+automation.register_simple_action(
+    "bt_hid.cancel_pairing", CancelPairingAction, DEVICE_ACTION_SCHEMA, synchronous=True
 )
 
 

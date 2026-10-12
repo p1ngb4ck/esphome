@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <deque>
+#include <memory>
 
 namespace esphome::bt_hid {
 
@@ -28,7 +29,7 @@ namespace {
 
 // Bluedroid calls back on its BTC task; everything is handed to the main loop as one of these.
 struct HostEvent {
-  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, AUTH, FOUND, SCAN_STATE };
+  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, ADOPTED, AUTH, FOUND, SCAN_STATE };
   Type type{INIT};
   uint8_t handle{0xFF};
   esp_bd_addr_t bda{};
@@ -68,6 +69,43 @@ BTHIDDevice *find_by_address(const uint8_t *bda) {
       return dev;
   }
   return nullptr;
+}
+
+void push(HostEvent &&event);
+
+// A device not configured here that pairs or connects on its own while a slot's pairing window
+// is open (it was in pairing mode already, or found us first): the slot takes it.
+BTHIDDevice *find_or_adopt(const uint8_t *bda) {
+  if (BTHIDDevice *dev = find_by_address(bda))
+    return dev;
+  BTHIDDevice *slot = nullptr;
+  {
+    LockGuard guard(host().lock);
+    slot = host().pairing;
+    if (slot == nullptr || slot->has_fixed_address() || slot->has_address())
+      return nullptr;
+    slot->adopt_address(bda);
+  }
+  HostEvent e;
+  e.type = HostEvent::ADOPTED;
+  memcpy(e.bda, bda, ESP_BD_ADDR_LEN);
+  push(std::move(e));
+  return slot;
+}
+
+// Bluedroid's bond store.
+bool is_bonded(const uint8_t *bda) {
+  int num = esp_bt_gap_get_bond_device_num();
+  if (num <= 0)
+    return false;
+  std::unique_ptr<esp_bd_addr_t[]> list(new esp_bd_addr_t[num]);
+  if (esp_bt_gap_get_bond_device_list(&num, list.get()) != ESP_OK)
+    return false;
+  for (int i = 0; i < num; i++) {
+    if (memcmp(list[i], bda, ESP_BD_ADDR_LEN) == 0)
+      return true;
+  }
+  return false;
 }
 
 bool parse_mac(const std::string &text, uint8_t *bda) {
@@ -111,7 +149,7 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
   switch (event) {
     case ESP_BT_GAP_PIN_REQ_EVT: {
       // Legacy pairing: the PIN is sent here and typed on the keyboard.
-      BTHIDDevice *dev = find_by_address(param->pin_req.bda);
+      BTHIDDevice *dev = find_or_adopt(param->pin_req.bda);
       if (dev == nullptr)
         return false;
       esp_bt_pin_code_t code{};
@@ -125,11 +163,12 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       return true;
     }
     case ESP_BT_GAP_CFM_REQ_EVT:
-      if (find_by_address(param->cfm_req.bda) == nullptr)
+      if (find_or_adopt(param->cfm_req.bda) == nullptr)
         return false;
       esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
       return true;
     case ESP_BT_GAP_KEY_NOTIF_EVT: {
+      find_or_adopt(param->key_notif.bda);
       HostEvent e;
       e.type = HostEvent::PASSKEY;
       memcpy(e.bda, param->key_notif.bda, ESP_BD_ADDR_LEN);
@@ -270,15 +309,16 @@ void handle_event(HostEvent &e) {
       break;
     case HostEvent::OPEN: {
       h.connecting = false;
-      BTHIDDevice *dev = find_by_address(e.bda);
+      BTHIDDevice *dev = e.status == ESP_HIDH_OK ? find_or_adopt(e.bda) : find_by_address(e.bda);
       if (dev != nullptr && e.status == ESP_HIDH_OK && !dev->get_auto_connect()) {
         format_mac_addr_upper(e.bda, mac);
         ESP_LOGI(TAG, "[%s] Disconnected by request, refusing", mac);
         esp_bt_hid_host_disconnect(e.bda);
       } else if (dev != nullptr) {
         dev->on_open(e.handle, e.status == ESP_HIDH_OK, e.status);
-        if (dev == h.pairing)
-          dev->end_pairing(e.status == ESP_HIDH_OK, "connection failed");
+        // A failed attempt is retried until the window closes: the PIN may still be typed.
+        if (dev == h.pairing && e.status == ESP_HIDH_OK)
+          dev->end_pairing(true, nullptr);
       } else if (e.status == ESP_HIDH_OK) {
         format_mac_addr_upper(e.bda, mac);
         ESP_LOGW(TAG, "[%s] Not configured, disconnecting", mac);
@@ -309,6 +349,10 @@ void handle_event(HostEvent &e) {
       if (BTHIDDevice *dev = find_by_address(e.bda))
         dev->on_passkey(e.value);
       break;
+    case HostEvent::ADOPTED:
+      if (h.pairing != nullptr)
+        h.pairing->on_adopted();
+      break;
     case HostEvent::FOUND: {
       if (esp_bt_gap_get_cod_major_dev(e.value) != ESP_BT_COD_MAJOR_DEV_PERIPHERAL)
         break;
@@ -326,18 +370,19 @@ void handle_event(HostEvent &e) {
     case HostEvent::SCAN_STATE:
       h.discovering = e.value != 0;
       ESP_LOGI(TAG, "Scan %s", h.discovering ? "started" : "finished");
+      // Without a device found the window stays open until it times out: a device in pairing
+      // mode may still connect on its own.
       if (!h.discovering && h.pairing != nullptr && !h.pairing->has_address())
-        h.pairing->end_pairing(false, "no device in pairing mode found");
+        ESP_LOGI(TAG, "No device in pairing mode found; waiting for one to connect");
       break;
     case HostEvent::AUTH:
       format_mac_addr_upper(e.bda, mac);
       if (e.status == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "[%s] Paired", mac);
       } else {
-        ESP_LOGW(TAG, "[%s] Pairing failed: %d", mac, e.status);
-        BTHIDDevice *dev = find_by_address(e.bda);
-        if (dev != nullptr && dev == h.pairing)
-          dev->end_pairing(false, "authentication failed");
+        // The pairing window stays open: a key kept from before fails first, then the device
+        // pairs anew; a wrong PIN can be typed again.
+        ESP_LOGW(TAG, "[%s] Authentication failed: %d", mac, e.status);
       }
       break;
   }
@@ -378,10 +423,11 @@ void host_loop() {
   for (auto *dev : h.devices)
     dev->restore_paired();
 
-  // One outgoing connection at a time.
+  // One outgoing connection at a time, and none while a scan runs: paging during an inquiry
+  // fails, so a device found by a pairing scan is connected once the scan has stopped.
   if (h.connecting && now - h.connecting_since > CONNECT_TIMEOUT_MS)
     h.connecting = false;
-  if (!h.ready || h.connecting)
+  if (!h.ready || h.connecting || h.discovering)
     return;
   for (auto *dev : h.devices) {
     if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
@@ -583,7 +629,10 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
   this->auto_connect_ = true;
   this->candidate_name_.clear();
   this->candidate_class_ = 0;
-  h.pairing = this;
+  {
+    LockGuard guard(h.lock);
+    h.pairing = this;
+  }
   h.pairing_until = millis() + units * 1280 + CONNECT_TIMEOUT_MS;
   ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
 }
@@ -602,19 +651,46 @@ void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(bda, mac);
   ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
+  // A device in pairing mode has dropped any key kept here from before; pair it anew.
+  if (is_bonded(bda))
+    esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
   this->set_bda_(bda);
   this->candidate_class_ = device_class;
   this->candidate_name_ = name;
   this->retry_ms_ = 0;
   this->next_connect_ms_ = millis();
+  // Time to connect and type the PIN, whatever was left of the scan.
+  host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
   esp_bt_gap_cancel_discovery();
+}
+
+void BTHIDDevice::adopt_address(const uint8_t *bda) { memcpy(this->bda_, bda, sizeof(this->bda_)); }
+
+void BTHIDDevice::on_adopted() {
+  char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
+  format_mac_addr_upper(this->bda_, mac);
+  ESP_LOGI(TAG, "[%s] Pairing with the device that connected", mac);
+  this->candidate_class_ = 0;
+  this->candidate_name_.clear();
+  this->retry_ms_ = 0;
+  host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
+  if (host().discovering)
+    esp_bt_gap_cancel_discovery();
+}
+
+void BTHIDDevice::cancel_pairing() {
+  if (host().pairing == this)
+    this->end_pairing(false, "cancelled");
 }
 
 void BTHIDDevice::end_pairing(bool success, const char *reason) {
   Host &h = host();
   if (h.pairing != this)
     return;
-  h.pairing = nullptr;
+  {
+    LockGuard guard(h.lock);
+    h.pairing = nullptr;
+  }
   if (h.discovering)
     esp_bt_gap_cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];

@@ -344,6 +344,11 @@ bool BLEClientHID::parse_device(const ble_device_base::ESPBTDevice &device) {
 }
 #endif
 
+void BLEClientHID::cancel_pairing() {
+  if (this->pairing_active_)
+    this->end_pairing_(false, "cancelled");
+}
+
 void BLEClientHID::end_pairing_(bool success, const char *reason) {
   if (!this->pairing_active_)
     return;

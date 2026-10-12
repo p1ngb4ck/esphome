@@ -48,6 +48,9 @@ BLEClientHID = ble_client_hid_ns.class_(
 PairAction = ble_client_hid_ns.class_(
     "PairAction", automation.Action, cg.Parented.template(BLEClientHID)
 )
+CancelPairingAction = ble_client_hid_ns.class_(
+    "CancelPairingAction", automation.Action, cg.Parented.template(BLEClientHID)
+)
 UnpairAction = ble_client_hid_ns.class_(
     "UnpairAction", automation.Action, cg.Parented.template(BLEClientHID)
 )
@@ -230,6 +233,13 @@ async def pair_action_to_code(config, action_id, template_arg, args):
     return var
 
 
+# Closes a running pairing window; the device paired before stays.
+@automation.register_action(
+    "ble_client_hid.cancel_pairing",
+    CancelPairingAction,
+    automation.maybe_simple_id({cv.Required(CONF_ID): cv.use_id(BLEClientHID)}),
+    synchronous=True,
+)
 # Deletes the bond; a paired slot also forgets its device.
 @automation.register_action(
     "ble_client_hid.unpair",

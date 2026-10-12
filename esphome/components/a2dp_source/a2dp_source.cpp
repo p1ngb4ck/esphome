@@ -70,9 +70,7 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
   }
 }
 
-bool A2DPSource::discovery_gate_() {
-  return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load();
-}
+bool A2DPSource::discovery_gate_() { return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load(); }
 
 bool A2DPSource::gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
   return static_cast<A2DPSource *>(arg)->source_.handle_unclaimed_pairing(event, param);
@@ -133,9 +131,8 @@ void A2DPSource::setup() {
   this->source_.set_ssid_callback(A2DPSource::device_filter_);
   this->source_.set_on_connection_state_changed(A2DPSource::connection_state_, this);
   this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
-  this->source_.set_on_authentication_complete(
-      A2DPSource::authentication_complete_);
-  
+  this->source_.set_on_authentication_complete(A2DPSource::authentication_complete_);
+
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
@@ -221,6 +218,15 @@ void A2DPSource::publish_device_list_() {
     return;
   }
   this->device_select_->set_devices(this->devices_);
+}
+
+void A2DPSource::stop_pairing() {
+  if (!this->pairing_mode_.load())
+    return;
+  this->pairing_mode_.store(false);
+  this->chosen_valid_ = false;
+  this->best_valid_ = false;
+  ESP_LOGI(TAG, "Pairing window closed");
 }
 
 void A2DPSource::forget_device() {

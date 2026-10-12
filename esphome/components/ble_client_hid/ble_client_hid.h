@@ -192,6 +192,8 @@ class BLEClientHID : public Component,
   void pair(uint32_t duration_ms);
   /// Delete the pairing (and forget the device of a slot).
   void unpair();
+  /// Close a running pairing window; the device paired before stays.
+  void cancel_pairing();
   bool is_pairing() const { return this->pairing_active_; }
 
 #ifdef USE_TEXT_SENSOR
@@ -397,6 +399,11 @@ template<typename... Ts> class PairAction : public Action<Ts...>, public Parente
 template<typename... Ts> class UnpairAction : public Action<Ts...>, public Parented<BLEClientHID> {
  public:
   void play(const Ts &...x) override { this->parent_->unpair(); }
+};
+
+template<typename... Ts> class CancelPairingAction : public Action<Ts...>, public Parented<BLEClientHID> {
+ public:
+  void play(const Ts &...x) override { this->parent_->cancel_pairing(); }
 };
 
 }  // namespace esphome::ble_client_hid

@@ -65,6 +65,7 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   bool is_connected() const { return this->connected_; }
   bool is_pairing() const;
   bool has_address() const;
+  bool has_fixed_address() const { return this->fixed_address_; }
   const uint8_t *address() const { return this->bda_; }
   const std::string &pin() const { return this->pin_; }
 
@@ -80,6 +81,11 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   void connect_attempted(uint32_t now);
   void on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void end_pairing(bool success, const char *reason);
+  /// Close a running pairing window; the device paired before stays.
+  void cancel_pairing();
+  /// BTC task, with the host lock held: the device that paired on its own takes the open slot.
+  void adopt_address(const uint8_t *bda);
+  void on_adopted();
   void restore_paired();
 
  protected:
@@ -116,6 +122,15 @@ class PasskeyTrigger : public Trigger<uint32_t> {
   explicit PasskeyTrigger(BTHIDDevice *parent) {
     parent->add_on_passkey_callback([this](uint32_t passkey) { this->trigger(passkey); });
   }
+};
+
+template<typename... Ts> class CancelPairingAction : public Action<Ts...> {
+ public:
+  explicit CancelPairingAction(BTHIDDevice *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->cancel_pairing(); }
+
+ protected:
+  BTHIDDevice *parent_;
 };
 
 class PinRequestTrigger : public Trigger<std::string> {
