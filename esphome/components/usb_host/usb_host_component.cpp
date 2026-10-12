@@ -37,12 +37,12 @@ void USBHost::setup() {
 #endif
   usb_host_config_t config{};
 #if defined(USE_ESP32_VARIANT_ESP32P4) && defined(USE_USB_HOST_PER_PORT_FIFO_BIAS)
-  if (this->dual_host_) {
-    // Peripheral index 0 is the high-speed controller, 1 is the full-speed one, per
-    // USB_DWC_LL_GET_HW() in the P4's hal. Setting both bits brings up both root ports.
-    // Needs espressif/usb >= 1.3.0, which is where dual host landed.
-    config.peripheral_map = BIT(0) | BIT(1);
-    ESP_LOGI(TAG, "USB dual-host enabled (HS + FS)");
+  if (this->peripheral_map_ != 0) {
+    // Bit 0 is the high-speed controller, bit 1 the full-speed one.
+    config.peripheral_map = this->peripheral_map_;
+    ESP_LOGI(TAG, "USB host on %s", this->peripheral_map_ == 0b11  ? "both controllers"
+                                    : this->peripheral_map_ == 0b10 ? "the full-speed controller"
+                                                                     : "the high-speed controller");
   }
 #endif
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS

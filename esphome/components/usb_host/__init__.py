@@ -39,6 +39,17 @@ CONF_ENABLE_HUBS = "enable_hubs"
 CONF_MAX_TRANSFER_REQUESTS = "max_transfer_requests"
 CONF_MAX_PACKET_SIZE = "max_packet_size"
 CONF_DUAL_HOST = "dual_host"
+CONF_CONTROLLERS = "controllers"
+CONTROLLERS_HIGH_SPEED = "high_speed"
+CONTROLLERS_FULL_SPEED = "full_speed"
+CONTROLLERS_BOTH = "both"
+# usb_host_config_t.peripheral_map on the ESP32-P4: bit 0 is the high-speed controller (UTMI
+# PHY), bit 1 the full-speed one (soc/esp32p4/usb_dwc_periph.c).
+_PERIPHERAL_MAPS = {
+    CONTROLLERS_HIGH_SPEED: 0b01,
+    CONTROLLERS_FULL_SPEED: 0b10,
+    CONTROLLERS_BOTH: 0b11,
+}
 CONF_FS_PINS = "fs_pins"
 
 # GPIO pair the ESP32-P4 full-speed OTG controller is wired to on the board. The chip has
@@ -139,7 +150,28 @@ def _store_host_options(config: dict) -> dict:
     domain_data = CORE.data.setdefault(DOMAIN, {})
     domain_data[CONF_MAX_PACKET_SIZE] = config[CONF_MAX_PACKET_SIZE]
     domain_data[CONF_MAX_TRANSFER_REQUESTS] = config[CONF_MAX_TRANSFER_REQUESTS]
-    domain_data[CONF_DUAL_HOST] = config[CONF_DUAL_HOST]
+    domain_data[CONF_CONTROLLERS] = config.get(CONF_CONTROLLERS)
+    return config
+
+
+def _resolve_controllers(config: dict) -> dict:
+    """controllers: which ESP32-P4 controllers run as host; dual_host: true means both."""
+    controllers = config.get(CONF_CONTROLLERS)
+    if config[CONF_DUAL_HOST]:
+        if controllers not in (None, CONTROLLERS_BOTH):
+            raise cv.Invalid(
+                f"dual_host runs both controllers; it contradicts {CONF_CONTROLLERS}: {controllers}"
+            )
+        controllers = CONTROLLERS_BOTH
+    if controllers is None:
+        return config
+    if get_esp32_variant() != VARIANT_ESP32P4:
+        raise cv.Invalid(
+            f"{CONF_CONTROLLERS} and {CONF_DUAL_HOST} are only supported on ESP32-P4"
+        )
+    if controllers != CONTROLLERS_HIGH_SPEED and not per_port_fifo_bias_available():
+        raise cv.Invalid(f"{CONF_CONTROLLERS}: {controllers} requires IDF >= 5.4.0")
+    config[CONF_CONTROLLERS] = controllers
     return config
 
 
@@ -246,7 +278,8 @@ def fs_peripheral_index() -> int | None:
     """
     variant = get_esp32_variant()
     if variant == VARIANT_ESP32P4:
-        return 1 if dual_host_enabled() else None
+        controllers = CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS)
+        return 1 if controllers in (CONTROLLERS_FULL_SPEED, CONTROLLERS_BOTH) else None
     if variant in (VARIANT_ESP32S2, VARIANT_ESP32S3):
         return 0
     return None
@@ -297,7 +330,7 @@ def dual_host_enabled() -> bool:
     device can land on the full-speed one, whose FIFO and packet limits are those of a
     full-speed controller no matter how capable the variant is overall.
     """
-    return bool(CORE.data.get(DOMAIN, {}).get(CONF_DUAL_HOST, False))
+    return CORE.data.get(DOMAIN, {}).get(CONF_CONTROLLERS) == CONTROLLERS_BOTH
 
 
 def _default_max_packet_size() -> int:
@@ -311,17 +344,6 @@ def _default_max_packet_size() -> int:
     return 512 if get_esp32_variant() == VARIANT_ESP32P4 else 64
 
 
-def _dual_host_validator(value):
-    """dual_host requires ESP32-P4 and the patched espressif/usb component (IDF >= 5.4)."""
-    value = cv.boolean(value)
-    if value:
-        if get_esp32_variant() != VARIANT_ESP32P4:
-            raise cv.Invalid("dual_host is only supported on ESP32-P4")
-        if not per_port_fifo_bias_available():
-            raise cv.Invalid("dual_host requires IDF >= 5.4.0")
-    return value
-
-
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
@@ -333,7 +355,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_MAX_PACKET_SIZE, default=_default_max_packet_size
             ): cv.one_of(64, 128, 256, 512, 1024, int=True),
-            cv.Optional(CONF_DUAL_HOST, default=False): _dual_host_validator,
+            cv.Optional(CONF_DUAL_HOST, default=False): cv.boolean,
+            cv.Optional(CONF_CONTROLLERS): cv.one_of(*_PERIPHERAL_MAPS, lower=True),
             cv.Optional(CONF_FS_PINS, default="26_27"): cv.enum(FS_PIN_CHOICES),
             cv.Optional(CONF_DEVICES): cv.ensure_list(usb_device_schema()),
         }
@@ -347,6 +370,7 @@ CONFIG_SCHEMA = cv.All(
             VARIANT_ESP32S31,
         ]
     ),
+    _resolve_controllers,
     _store_host_options,
 )
 
@@ -457,8 +481,11 @@ async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    if config.get(CONF_DUAL_HOST):
-        cg.add(var.set_dual_host(True))
+    if (controllers := config.get(CONF_CONTROLLERS)) not in (
+        None,
+        CONTROLLERS_HIGH_SPEED,
+    ):
+        cg.add(var.set_peripheral_map(_PERIPHERAL_MAPS[controllers]))
     cg.add(var.set_fs_phy_index(config[CONF_FS_PINS]))
 
     devices = config.get(CONF_DEVICES)

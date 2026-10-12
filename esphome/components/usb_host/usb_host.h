@@ -433,12 +433,11 @@ class USBHost final : public Component {
   void loop() override;
   void setup() override;
 
-  // Run the ESP32-P4's high-speed and full-speed host controllers at the same time, so one
-  // board can serve devices of both speeds. Selected through usb_host_config_t's
-  // peripheral_map: BIT0 | BIT1 enables both controllers, the default BIT0 is HS only. Only
-  // the patched espressif/usb component sets up a PHY per controller (IDF's 5.x built-in sets
-  // up one), hence the guards at the use site and in codegen.
-  void set_dual_host(bool enable) { this->dual_host_ = enable; }
+  // Which ESP32-P4 controllers run as host (controllers option): usb_host_config_t's
+  // peripheral_map, BIT0 high-speed, BIT1 full-speed. Only the patched espressif/usb component
+  // sets up a PHY per controller (IDF's 5.x built-in sets up one), hence the guards at the use
+  // site and in codegen.
+  void set_peripheral_map(uint8_t map) { this->peripheral_map_ = map; }
   // Which of the ESP32-P4's two internal FSLS PHYs the full-speed OTG controller uses:
   // 0 is GPIO24/25, 1 is GPIO26/27 (the reset default). Set from the fs_pins option.
   void set_fs_phy_index(uint8_t index) { this->fs_phy_index_ = index; }
@@ -499,7 +498,7 @@ class USBHost final : public Component {
 
  protected:
   std::vector<USBClient *> clients_{};
-  bool dual_host_{false};
+  uint8_t peripheral_map_{0};  // 0: ESP-IDF's default, the high-speed controller
   uint8_t fs_phy_index_{1};
 #ifdef USE_USB_HOST_PER_PORT_FIFO_BIAS
   uint8_t port_fifo_bias_[SOC_USB_OTG_PERIPH_NUM]{};
