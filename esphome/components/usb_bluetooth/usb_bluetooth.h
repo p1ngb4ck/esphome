@@ -20,6 +20,9 @@ namespace esphome::usb_bluetooth {
 // packet, so a larger read would wait for data that is not coming.
 //
 // On connect the controller is reset and asked for its version, address and name (logged).
+// With bluedroid: true it then becomes ESP-IDF Bluedroid's controller (esp_bluedroid_hci.h, the
+// host-only transport): H4 packets from Bluedroid are split onto endpoint 0 (commands) and the
+// bulk OUT endpoint (ACL); events and ACL data go back up with their H4 type byte.
 class USBBluetooth : public usb_host::USBClient {
  public:
   USBBluetooth(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, pid) {
@@ -29,6 +32,12 @@ class USBBluetooth : public usb_host::USBClient {
 
   /// An HCI command: opcode (little endian), parameter length, parameters.
   bool send_command(const uint8_t *packet, size_t len);
+
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+  // Bluedroid's transport operations; its HCI task calls these.
+  void hci_send(uint8_t *data, uint16_t len);
+  bool hci_send_available();
+#endif
 
  protected:
   static constexpr uint8_t HCI_CLASS = 0xE0;
@@ -46,6 +55,12 @@ class USBBluetooth : public usb_host::USBClient {
   void handle_event_(const std::vector<uint8_t> &event);
   void probe_next_();
   void probe_done_(bool ok);
+  // USB task: a command or ACL transfer finished.
+  void send_done_();
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+  void start_bluedroid_();
+  bool send_acl_(const uint8_t *data, size_t len);
+#endif
 
   uint8_t intf_{0xFF};
   uint8_t evt_ep_{0};
@@ -53,16 +68,24 @@ class USBBluetooth : public usb_host::USBClient {
   uint8_t acl_in_ep_{0};
   uint16_t acl_in_mps_{0};
   uint8_t acl_out_ep_{0};
+  uint16_t acl_out_mps_{0};
   bool vendor_class_{false};
 
   // Bumped on connect and disconnect: completions of an earlier device are dropped.
   std::atomic<uint32_t> generation_{0};
 
-  // Reassembly, USB task.
-  uint8_t event_[EVENT_MAX]{};
+  // Reassembly, USB task. Byte 0 is kept free for the H4 packet type.
+  uint8_t event_[1 + EVENT_MAX]{};
   size_t event_len_{0};
-  uint8_t acl_[ACL_MAX]{};
+  uint8_t acl_[1 + ACL_MAX]{};
   size_t acl_len_{0};
+
+  // The controller interface is claimed and the readers run.
+  std::atomic<bool> link_up_{false};
+  // Events and ACL data go to Bluedroid rather than to the probe.
+  std::atomic<bool> stack_attached_{false};
+  // Bluedroid refused a send for want of transfer slots; tell it once one frees up.
+  std::atomic<bool> send_blocked_{false};
 
   // Probe, main loop.
   uint8_t probe_step_{0};

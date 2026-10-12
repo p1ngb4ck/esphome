@@ -4,6 +4,11 @@
 #include "esphome/core/log.h"
 #include "usb/usb_helpers.h"
 
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+#include "esp_bluedroid_hci.h"
+#include "esp_bt_main.h"
+#endif
+
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
@@ -25,6 +30,50 @@ static constexpr uint16_t OP_READ_BD_ADDR = 0x1009;
 static constexpr uint16_t PROBE[] = {OP_RESET, OP_READ_LOCAL_VERSION, OP_READ_BD_ADDR, OP_READ_LOCAL_NAME};
 
 static constexpr uint16_t MANUFACTURER_REALTEK = 93;
+
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+// H4 packet types, the byte Bluedroid's transport puts in front of every packet.
+static constexpr uint8_t H4_COMMAND = 0x01;
+static constexpr uint8_t H4_ACL = 0x02;
+static constexpr uint8_t H4_SCO = 0x03;
+static constexpr uint8_t H4_EVENT = 0x04;
+// Transfer slots a send leaves free (the two readers hold theirs all the time).
+static constexpr size_t SPARE_SLOTS = 1;
+
+// The transport operations are plain C function pointers without a user argument.
+static USBBluetooth *g_instance = nullptr;
+static const esp_bluedroid_hci_driver_callbacks_t *g_host_cb = nullptr;
+static bool g_stack_started = false;
+
+static void hci_drv_send(uint8_t *data, uint16_t len) {
+  if (g_instance != nullptr)
+    g_instance->hci_send(data, len);
+}
+static bool hci_drv_check_send_available() { return g_instance != nullptr && g_instance->hci_send_available(); }
+static esp_err_t hci_drv_register_host_callback(const esp_bluedroid_hci_driver_callbacks_t *callback) {
+  g_host_cb = callback;
+  return ESP_OK;
+}
+static const esp_bluedroid_hci_driver_operations_t HCI_OPS = {
+    .send = hci_drv_send,
+    .check_send_available = hci_drv_check_send_available,
+    .register_host_callback = hci_drv_register_host_callback,
+};
+
+// esp_bluedroid_enable() waits for the controller to answer Bluedroid's start-up commands,
+// which need the main loop running: it gets a task of its own.
+static void bluedroid_start_task(void * /*arg*/) {
+  esp_err_t err = esp_bluedroid_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(err));
+  } else if ((err = esp_bluedroid_enable()) != ESP_OK) {
+    ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "Bluedroid running on the USB dongle");
+  }
+  vTaskDelete(nullptr);
+}
+#endif
 
 // Bluetooth SIG assigned numbers: HCI/LMP version.
 static const char *core_version(uint8_t version) {
@@ -75,12 +124,13 @@ bool USBBluetooth::find_interface_() {
       this->acl_in_mps_ = USB_EP_DESC_GET_MPS(ep);
     } else if (type == USB_BM_ATTRIBUTES_XFER_BULK) {
       this->acl_out_ep_ = ep->bEndpointAddress;
+      this->acl_out_mps_ = USB_EP_DESC_GET_MPS(ep);
     }
   }
   if (this->intf_ == 0xFF)
     return false;
   if (this->evt_ep_ == 0 || this->acl_in_ep_ == 0 || this->acl_out_ep_ == 0 || this->evt_mps_ == 0 ||
-      this->acl_in_mps_ == 0) {
+      this->acl_in_mps_ == 0 || this->acl_out_mps_ == 0) {
     ESP_LOGE(TAG, "Interface %u lacks the event or ACL endpoints", this->intf_);
     return false;
   }
@@ -104,6 +154,7 @@ void USBBluetooth::on_connected() {
            this->vendor_class_ ? " (vendor class)" : "", this->evt_ep_, this->acl_in_ep_, this->acl_out_ep_);
   this->event_len_ = 0;
   this->acl_len_ = 0;
+  this->link_up_.store(true, std::memory_order_release);
   this->read_event_(generation);
   this->read_acl_(generation);
   this->probe_step_ = 0;
@@ -112,6 +163,8 @@ void USBBluetooth::on_connected() {
 
 void USBBluetooth::on_disconnected() {
   this->generation_.fetch_add(1, std::memory_order_acq_rel);
+  this->link_up_.store(false, std::memory_order_release);
+  this->stack_attached_.store(false, std::memory_order_release);
   this->cancel_timeout("hci");
   if (this->intf_ != 0xFF) {
     this->release_interface(this->intf_);
@@ -130,12 +183,104 @@ bool USBBluetooth::send_command(const uint8_t *packet, size_t len) {
   const uint16_t opcode = static_cast<uint16_t>(packet[0] | (packet[1] << 8));
   return this->control_transfer(
       HCI_COMMAND_REQUEST_TYPE, 0, 0, this->intf_,
-      [opcode](const usb_host::TransferStatus &status) {
+      [this, opcode](const usb_host::TransferStatus &status) {
         if (!status.success)
           ESP_LOGW(TAG, "HCI command 0x%04X not taken (status %u)", opcode, status.error_code);
+        this->send_done_();
       },
       data);
 }
+
+// USB task.
+void USBBluetooth::send_done_() {
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+  if (this->send_blocked_.exchange(false, std::memory_order_acq_rel) && g_host_cb != nullptr &&
+      g_host_cb->notify_host_send_available != nullptr)
+    g_host_cb->notify_host_send_available();
+#endif
+}
+
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+bool USBBluetooth::hci_send_available() {
+  const size_t used = __builtin_popcount(this->get_trq_in_use());
+  const bool available =
+      this->link_up_.load(std::memory_order_acquire) && used + 1 + SPARE_SLOTS <= usb_host::MAX_REQUESTS;
+  if (!available)
+    this->send_blocked_.store(true, std::memory_order_release);
+  return available;
+}
+
+// Bluedroid's HCI task.
+void USBBluetooth::hci_send(uint8_t *data, uint16_t len) {
+  if (!this->link_up_.load(std::memory_order_acquire) || data == nullptr || len < 2)
+    return;
+  switch (data[0]) {
+    case H4_COMMAND:
+      if (!this->send_command(data + 1, len - 1))
+        ESP_LOGW(TAG, "HCI command 0x%02X%02X dropped", data[2], data[1]);
+      break;
+    case H4_ACL:
+      if (!this->send_acl_(data + 1, len - 1))
+        ESP_LOGW(TAG, "ACL packet of %u bytes dropped", len - 1);
+      break;
+    case H4_SCO: {
+      static bool said = false;
+      if (!said) {
+        said = true;
+        ESP_LOGW(TAG, "SCO (voice) is not carried over this transport");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// One ACL packet as consecutive bulk OUT transfers: each but the last a whole number of
+// packets, so the device sees one unbroken transfer.
+bool USBBluetooth::send_acl_(const uint8_t *data, size_t len) {
+  const size_t capacity = this->transfer_capacity();
+  const size_t chunk = (capacity / this->acl_out_mps_) * this->acl_out_mps_;
+  if (chunk == 0)
+    return false;
+  const size_t needed = (len + chunk - 1) / chunk;
+  const size_t used = __builtin_popcount(this->get_trq_in_use());
+  if (used + needed + SPARE_SLOTS > usb_host::MAX_REQUESTS)
+    return false;
+  for (size_t offset = 0; offset < len; offset += chunk) {
+    const size_t n = std::min(chunk, len - offset);
+    if (!this->transfer_out(
+            this->acl_out_ep_,
+            [this](const usb_host::TransferStatus &status) {
+              if (!status.success)
+                ESP_LOGW(TAG, "ACL data not taken (status %u)", status.error_code);
+              this->send_done_();
+            },
+            data + offset, static_cast<uint16_t>(n)))
+      return false;
+  }
+  return true;
+}
+
+void USBBluetooth::start_bluedroid_() {
+  if (g_stack_started) {
+    // Bluedroid is attached once, before it starts, and keeps the state of the controller it
+    // started with.
+    ESP_LOGW(TAG, "Bluedroid was started with the previous dongle; restart to use this one");
+    return;
+  }
+  g_instance = this;
+  esp_err_t err = esp_bluedroid_attach_hci_driver(&HCI_OPS);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Bluedroid did not take the transport: %s", esp_err_to_name(err));
+    return;
+  }
+  this->stack_attached_.store(true, std::memory_order_release);
+  g_stack_started = true;
+  if (xTaskCreate(bluedroid_start_task, "usb_bt_start", 4096, nullptr, 5, nullptr) != pdPASS)
+    ESP_LOGE(TAG, "Starting Bluedroid failed: no task");
+}
+#endif
 
 // USB task.
 void USBBluetooth::read_event_(uint32_t generation) {
@@ -148,16 +293,26 @@ void USBBluetooth::read_event_(uint32_t generation) {
           ESP_LOGW(TAG, "Event endpoint stopped (status %u)", status.error_code);
           return;
         }
-        const size_t take = std::min(status.data_len, sizeof(this->event_) - this->event_len_);
-        memcpy(this->event_ + this->event_len_, status.data, take);
+        uint8_t *event = this->event_ + 1;
+        const size_t take = std::min(status.data_len, EVENT_MAX - this->event_len_);
+        memcpy(event + this->event_len_, status.data, take);
         this->event_len_ += take;
         // An event: code, parameter length, parameters.
-        if (this->event_len_ >= 2 && this->event_len_ >= 2u + this->event_[1]) {
-          std::vector<uint8_t> event(this->event_, this->event_ + 2 + this->event_[1]);
+        if (this->event_len_ >= 2 && this->event_len_ >= 2u + event[1]) {
+          const size_t len = 2u + event[1];
           this->event_len_ = 0;
-          this->defer([this, generation, event = std::move(event)]() {
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+          if (this->stack_attached_.load(std::memory_order_acquire)) {
+            this->event_[0] = H4_EVENT;
+            if (g_host_cb != nullptr && g_host_cb->notify_host_recv != nullptr)
+              g_host_cb->notify_host_recv(this->event_, static_cast<uint16_t>(len + 1));
+            this->read_event_(generation);
+            return;
+          }
+#endif
+          this->defer([this, generation, copy = std::vector<uint8_t>(event, event + len)]() {
             if (generation == this->generation_.load(std::memory_order_acquire))
-              this->handle_event_(event);
+              this->handle_event_(copy);
           });
         }
         this->read_event_(generation);
@@ -178,12 +333,21 @@ void USBBluetooth::read_acl_(uint32_t generation) {
           ESP_LOGW(TAG, "ACL endpoint stopped (status %u)", status.error_code);
           return;
         }
-        const size_t take = std::min(status.data_len, sizeof(this->acl_) - this->acl_len_);
-        memcpy(this->acl_ + this->acl_len_, status.data, take);
+        uint8_t *acl = this->acl_ + 1;
+        const size_t take = std::min(status.data_len, ACL_MAX - this->acl_len_);
+        memcpy(acl + this->acl_len_, status.data, take);
         this->acl_len_ += take;
-        // ACL: handle and flags, little-endian data length, data. Not used yet: dropped.
-        if (this->acl_len_ >= 4 && this->acl_len_ >= 4u + (this->acl_[2] | (this->acl_[3] << 8)))
+        // ACL: handle and flags, little-endian data length, data. Only Bluedroid takes it.
+        if (this->acl_len_ >= 4 && this->acl_len_ >= 4u + (acl[2] | (acl[3] << 8))) {
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+          if (this->stack_attached_.load(std::memory_order_acquire) && g_host_cb != nullptr &&
+              g_host_cb->notify_host_recv != nullptr) {
+            this->acl_[0] = H4_ACL;
+            g_host_cb->notify_host_recv(this->acl_, static_cast<uint16_t>(this->acl_len_ + 1));
+          }
+#endif
           this->acl_len_ = 0;
+        }
         this->read_acl_(generation);
       },
       this->acl_in_mps_);
@@ -217,6 +381,10 @@ void USBBluetooth::probe_done_(bool ok) {
   if (ok && this->manufacturer_ == MANUFACTURER_REALTEK)
     ESP_LOGW(TAG, "Realtek controller: it runs its ROM until a firmware is loaded, which this does not do yet");
   this->report_connected_();
+#ifdef USE_USB_BLUETOOTH_BLUEDROID
+  if (ok)
+    this->start_bluedroid_();
+#endif
 }
 
 void USBBluetooth::handle_event_(const std::vector<uint8_t> &event) {
