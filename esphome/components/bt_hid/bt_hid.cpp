@@ -746,19 +746,21 @@ bool BTHIDDevice::pair_found_(const FoundDevice &picked) {
   // The window closed since the scan, or another device was picked in it: start over with this one.
   if (h.pairing == nullptr || this->has_address())
     this->open_window_(millis() + 2 * CONNECT_TIMEOUT_MS);
-  this->on_pairing_candidate(found.address, found.device_class, found.name);
-  return true;
+  if (this->on_pairing_candidate(found.address, found.device_class, found.name))
+    return true;
+  this->end_pairing(false, "the device belongs to another slot");
+  return false;
 }
 
-void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name) {
+bool BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name) {
   if (this->has_address())
-    return;
+    return false;
 #ifdef USE_BT_PAIRING
-  // Another slot's device; this slot's own may pair again.
+  // Another slot's device; this slot's own may pair again, and so may one left from an old config.
   if (this->pairing_ != nullptr) {
     const auto *record = this->pairing_->find_address(bda);
-    if (record != nullptr && record->slot != this->slot_)
-      return;
+    if (record != nullptr && record->slot != this->slot_ && this->pairing_->slot_in_use(record->slot))
+      return false;
   }
 #endif
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
@@ -775,6 +777,7 @@ void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   // Time to connect and type the PIN, whatever was left of the scan.
   host().pairing_until = millis() + 2 * CONNECT_TIMEOUT_MS;
   esp_bt_gap_cancel_discovery();
+  return true;
 }
 
 void BTHIDDevice::adopt_address(const uint8_t *bda) { memcpy(this->bda_, bda, sizeof(this->bda_)); }

@@ -503,6 +503,14 @@ void BTPairing::scan_loop_() {
   }
 }
 
+bool BTPairing::slot_in_use(uint32_t slot) const {
+  for (auto *target : this->targets_) {
+    if (target->pairing_slot() == slot)
+      return true;
+  }
+  return false;
+}
+
 // The slot already holding the device, else a free one.
 PairingTarget *BTPairing::target_for_(const ScannedDevice &device) const {
   const PairingRecord *record = this->find_address(device.address);

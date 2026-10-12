@@ -111,7 +111,7 @@ class BTHIDDevice : public Component,
   uint8_t handle() const { return this->handle_; }
   uint32_t next_connect_ms() const { return this->next_connect_ms_; }
   void connect_attempted(uint32_t now);
-  void on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
+  bool on_pairing_candidate(const uint8_t *bda, uint32_t device_class, const std::string &name);
   void end_pairing(bool success, const char *reason);
   /// Close a running pairing window; the device paired before stays.
   void cancel_pairing();

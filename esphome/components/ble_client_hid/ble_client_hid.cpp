@@ -390,7 +390,7 @@ bool BLEClientHID::parse_device(const ble_device_base::ESPBTDevice &device) {
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
     const auto *record = this->pairing_->find_address(device.address());
-    if (record != nullptr && record->slot != this->slot_)
+    if (record != nullptr && record->slot != this->slot_ && this->pairing_->slot_in_use(record->slot))
       return false;
   }
 #endif

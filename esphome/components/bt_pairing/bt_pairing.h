@@ -115,6 +115,8 @@ class BTPairing : public Component
   }
 
   void add_target(PairingTarget *target) { this->targets_.push_back(target); }
+  /// A configured slot owns this slot id; a record of any other id is left from an old config.
+  bool slot_in_use(uint32_t slot) const;
   void set_device_select(BTPairingSelect *select) { this->device_select_ = select; }
   static constexpr size_t MAX_SCANNED = 16;
   /// Lists the Bluetooth Classic and LE devices that can be paired, for duration_ms.
