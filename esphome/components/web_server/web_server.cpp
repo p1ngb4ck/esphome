@@ -1557,11 +1557,11 @@ void WebServer::select_json_(select::Select *obj, StringRef value, JsonDetail st
 
   const JsonString state = linked(value);
   set_json_icon_state_value(root, obj, "select", state, state, start_config);
+  JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
+  for (auto &option : obj->traits.get_options()) {
+    opt.add(linked(option));
+  }
   if (start_config == DETAIL_ALL) {
-    JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
-    for (auto &option : obj->traits.get_options()) {
-      opt.add(linked(option));
-    }
     this->add_sorting_info_(root, obj);
   }
 }
