@@ -178,10 +178,8 @@ def _validate_scan_duration(value):
     return value
 
 
-# The only way a device gets paired: a pairing window. A slot (no mac_address) finds a device in
-# pairing mode, pairs the first new one and keeps it, replacing the one paired before. With a
-# mac_address it connects to that device until it pairs. Outside the window pairing requests are
-# refused, and only bonded devices are connected.
+# A slot (no mac_address): finds a device in pairing mode, pairs the first new one and keeps
+# it, replacing the one paired before. With a mac_address: connects, which pairs it.
 @automation.register_action(
     "bt_hid.pair",
     PairAction,

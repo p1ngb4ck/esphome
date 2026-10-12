@@ -55,9 +55,8 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   void disconnect();
   /// Delete the pairing, telling the device first if it is connected.
   void unpair();
-  /// Open a pairing window, the only time a device is paired. Without a configured address:
-  /// look for a device in pairing mode, pair the first new one and keep it. With one: connect
-  /// to it until it pairs or the window closes.
+  /// Without a configured address: look for a device in pairing mode, pair the first new one
+  /// and keep it. With one: connect, which pairs a device that is not paired yet.
   void pair(uint32_t duration_ms);
   /// Look for discoverable Bluetooth Classic HID devices and log them; shared by all devices.
   static void scan(uint32_t duration_ms);
@@ -66,7 +65,6 @@ class BTHIDDevice : public Component, public hid::HIDInput {
   bool is_connected() const { return this->connected_; }
   bool is_pairing() const;
   bool has_address() const;
-  bool has_fixed_address() const { return this->fixed_address_; }
   const uint8_t *address() const { return this->bda_; }
   const std::string &pin() const { return this->pin_; }
 

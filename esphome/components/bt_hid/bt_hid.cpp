@@ -14,7 +14,6 @@
 #include <cinttypes>
 #include <cstring>
 #include <deque>
-#include <memory>
 
 namespace esphome::bt_hid {
 
@@ -29,7 +28,7 @@ namespace {
 
 // Bluedroid calls back on its BTC task; everything is handed to the main loop as one of these.
 struct HostEvent {
-  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, REFUSED, AUTH, FOUND, SCAN_STATE };
+  enum Type : uint8_t { INIT, OPEN, CLOSE, DESCRIPTOR, DATA, PIN, PASSKEY, AUTH, FOUND, SCAN_STATE };
   Type type{INIT};
   uint8_t handle{0xFF};
   esp_bd_addr_t bda{};
@@ -71,42 +70,6 @@ BTHIDDevice *find_by_address(const uint8_t *bda) {
   return nullptr;
 }
 
-// The pairing window is opened and closed on the main loop and read on the BTC task.
-void set_pairing_window(BTHIDDevice *dev) {
-  LockGuard guard(host().lock);
-  host().pairing = dev;
-}
-
-bool pairing_open(const BTHIDDevice *dev) {
-  LockGuard guard(host().lock);
-  return host().pairing == dev;
-}
-
-// Bluedroid's bond store. Only bonded devices are connected outside a pairing window, so a
-// connection never starts a pairing nobody asked for.
-bool is_bonded(const uint8_t *bda) {
-  int num = esp_bt_gap_get_bond_device_num();
-  if (num <= 0)
-    return false;
-  std::unique_ptr<esp_bd_addr_t[]> list(new esp_bd_addr_t[num]);
-  if (esp_bt_gap_get_bond_device_list(&num, list.get()) != ESP_OK)
-    return false;
-  for (int i = 0; i < num; i++) {
-    if (memcmp(list[i], bda, ESP_BD_ADDR_LEN) == 0)
-      return true;
-  }
-  return false;
-}
-
-void push(HostEvent &&event);
-
-void push_refused(const uint8_t *bda) {
-  HostEvent e;
-  e.type = HostEvent::REFUSED;
-  memcpy(e.bda, bda, ESP_BD_ADDR_LEN);
-  push(std::move(e));
-}
-
 bool parse_mac(const std::string &text, uint8_t *bda) {
   if (text.size() != 17)
     return false;
@@ -143,8 +106,7 @@ void push(HostEvent &&event) {
   App.wake_loop_threadsafe();
 }
 
-// BTC task, through bt_classic. Pairing requests are answered only for this component's devices,
-// and accepted only while their pairing window is open; outside it they are refused.
+// BTC task, through bt_classic. Pairing requests are answered only for this component's devices.
 bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*arg*/) {
   switch (event) {
     case ESP_BT_GAP_PIN_REQ_EVT: {
@@ -152,12 +114,6 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       BTHIDDevice *dev = find_by_address(param->pin_req.bda);
       if (dev == nullptr)
         return false;
-      if (!pairing_open(dev)) {
-        esp_bt_pin_code_t none{};
-        esp_bt_gap_pin_reply(param->pin_req.bda, false, 0, none);
-        push_refused(param->pin_req.bda);
-        return true;
-      }
       esp_bt_pin_code_t code{};
       const uint8_t len = std::min<size_t>(dev->pin().size(), ESP_BT_PIN_CODE_LEN);
       memcpy(code, dev->pin().data(), len);
@@ -168,23 +124,12 @@ bool gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void * /*
       push(std::move(e));
       return true;
     }
-    case ESP_BT_GAP_CFM_REQ_EVT: {
-      BTHIDDevice *dev = find_by_address(param->cfm_req.bda);
-      if (dev == nullptr)
+    case ESP_BT_GAP_CFM_REQ_EVT:
+      if (find_by_address(param->cfm_req.bda) == nullptr)
         return false;
-      const bool open = pairing_open(dev);
-      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, open);
-      if (!open)
-        push_refused(param->cfm_req.bda);
+      esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
       return true;
-    }
     case ESP_BT_GAP_KEY_NOTIF_EVT: {
-      // Nothing to refuse: without the passkey shown, the device cannot complete the pairing.
-      BTHIDDevice *dev = find_by_address(param->key_notif.bda);
-      if (dev != nullptr && !pairing_open(dev)) {
-        push_refused(param->key_notif.bda);
-        break;
-      }
       HostEvent e;
       e.type = HostEvent::PASSKEY;
       memcpy(e.bda, param->key_notif.bda, ESP_BD_ADDR_LEN);
@@ -332,8 +277,7 @@ void handle_event(HostEvent &e) {
         esp_bt_hid_host_disconnect(e.bda);
       } else if (dev != nullptr) {
         dev->on_open(e.handle, e.status == ESP_HIDH_OK, e.status);
-        // A configured device is tried again until it pairs or the window closes.
-        if (dev == h.pairing && (e.status == ESP_HIDH_OK || !dev->has_fixed_address()))
+        if (dev == h.pairing)
           dev->end_pairing(e.status == ESP_HIDH_OK, "connection failed");
       } else if (e.status == ESP_HIDH_OK) {
         format_mac_addr_upper(e.bda, mac);
@@ -365,10 +309,6 @@ void handle_event(HostEvent &e) {
       if (BTHIDDevice *dev = find_by_address(e.bda))
         dev->on_passkey(e.value);
       break;
-    case HostEvent::REFUSED:
-      format_mac_addr_upper(e.bda, mac);
-      ESP_LOGW(TAG, "[%s] Pairing request outside a pairing window, refused (pair with bt_hid.pair)", mac);
-      break;
     case HostEvent::FOUND: {
       if (esp_bt_gap_get_cod_major_dev(e.value) != ESP_BT_COD_MAJOR_DEV_PERIPHERAL)
         break;
@@ -394,8 +334,10 @@ void handle_event(HostEvent &e) {
       if (e.status == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "[%s] Paired", mac);
       } else {
-        // The pairing window stays open: the device may still pair (a stale key fails first).
-        ESP_LOGW(TAG, "[%s] Authentication failed: %d", mac, e.status);
+        ESP_LOGW(TAG, "[%s] Pairing failed: %d", mac, e.status);
+        BTHIDDevice *dev = find_by_address(e.bda);
+        if (dev != nullptr && dev == h.pairing)
+          dev->end_pairing(false, "authentication failed");
       }
       break;
   }
@@ -445,10 +387,6 @@ void host_loop() {
     if (dev->is_connected() || !dev->has_address() || !dev->get_auto_connect() ||
         static_cast<int32_t>(now - dev->next_connect_ms()) < 0)
       continue;
-    if (dev != h.pairing && !is_bonded(dev->address())) {
-      dev->connect_attempted(now);
-      continue;
-    }
     if (esp_bt_hid_host_connect(const_cast<uint8_t *>(dev->address())) == ESP_OK) {
       h.connecting = true;
       h.connecting_since = now;
@@ -608,27 +546,17 @@ void BTHIDDevice::unpair() {
 
 void BTHIDDevice::pair(uint32_t duration_ms) {
   Host &h = host();
+  if (this->fixed_address_) {
+    ESP_LOGI(TAG, "Configured address: connecting, which pairs it if it is not paired yet");
+    this->connect();
+    return;
+  }
   if (!h.ready) {
     ESP_LOGW(TAG, "Bluetooth Classic is not running, cannot pair");
     return;
   }
   if (h.pairing != nullptr) {
     ESP_LOGW(TAG, "A pairing is already running");
-    return;
-  }
-  if (this->fixed_address_) {
-    if (this->connected_) {
-      ESP_LOGI(TAG, "Already connected");
-      return;
-    }
-    this->candidate_name_.clear();
-    // A device in pairing mode has dropped the old key: a bond kept here would only fail.
-    if (is_bonded(this->bda_))
-      esp_bt_gap_remove_bond_device(this->bda_);
-    set_pairing_window(this);
-    h.pairing_until = millis() + duration_ms;
-    ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
-    this->connect();
     return;
   }
   if (h.discovering) {
@@ -655,7 +583,7 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
   this->auto_connect_ = true;
   this->candidate_name_.clear();
   this->candidate_class_ = 0;
-  set_pairing_window(this);
+  h.pairing = this;
   h.pairing_until = millis() + units * 1280 + CONNECT_TIMEOUT_MS;
   ESP_LOGI(TAG, "Pairing: put the device in pairing mode");
 }
@@ -674,8 +602,6 @@ void BTHIDDevice::on_pairing_candidate(const uint8_t *bda, uint32_t device_class
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(bda, mac);
   ESP_LOGI(TAG, "[%s] Pairing with '%s'", mac, name.c_str());
-  if (is_bonded(bda))
-    esp_bt_gap_remove_bond_device(const_cast<uint8_t *>(bda));
   this->set_bda_(bda);
   this->candidate_class_ = device_class;
   this->candidate_name_ = name;
@@ -688,21 +614,11 @@ void BTHIDDevice::end_pairing(bool success, const char *reason) {
   Host &h = host();
   if (h.pairing != this)
     return;
-  set_pairing_window(nullptr);
+  h.pairing = nullptr;
   if (h.discovering)
     esp_bt_gap_cancel_discovery();
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
   format_mac_addr_upper(this->bda_, mac);
-  if (this->fixed_address_) {
-    if (success) {
-      ESP_LOGI(TAG, "[%s] Paired", mac);
-    } else {
-      ESP_LOGW(TAG, "[%s] Pairing failed: %s", mac, reason);
-      if (this->connected_)
-        esp_bt_hid_host_disconnect(this->bda_);
-    }
-    return;
-  }
   uint8_t previous[ESP_BD_ADDR_LEN];
   const bool has_previous = this->stored_address_(previous);
   const bool same_device = has_previous && memcmp(previous, this->bda_, ESP_BD_ADDR_LEN) == 0;
