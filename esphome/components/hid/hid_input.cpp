@@ -1,9 +1,13 @@
 #include "hid_input.h"
 
+#include "esphome/core/log.h"
+
 #include <algorithm>
 #include <cstdio>
 
 namespace esphome::hid {
+
+static const char *const TAG = "hid";
 
 static constexpr uint16_t USAGE_POINTER = 0x01;
 static constexpr uint16_t USAGE_MOUSE = 0x02;
@@ -159,6 +163,9 @@ void HIDInput::key_(uint16_t page, uint16_t usage, bool pressed) {
   } else {
     this->down_.erase(it);
   }
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+  ESP_LOGD(TAG, "[%s] %s %s", this->log_name_, key_name(page, usage).c_str(), pressed ? "pressed" : "released");
+#endif
   if (page == PAGE_KEYBOARD && usage >= KEY_LEFT_CTRL && usage <= KEY_RIGHT_GUI) {
     const uint8_t bit = 1u << (usage - KEY_LEFT_CTRL);
     this->modifiers_ = pressed ? (this->modifiers_ | bit) : (this->modifiers_ & ~bit);

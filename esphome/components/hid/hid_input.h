@@ -79,6 +79,8 @@ class HIDInput : public key_provider::KeyProvider {
  public:
   void set_layout(const KeyboardLayout *layout) { this->layout_ = layout; }
   void set_num_lock(bool on) { this->leds_ = on ? (this->leds_ | LED_NUM_LOCK) : (this->leds_ & ~LED_NUM_LOCK); }
+  /// The device's id, for the key log.
+  void set_log_name(const char *name) { this->log_name_ = name; }
 
   /// The values the report parser decoded from one report.
   void process_hid_values(const std::vector<HIDReportItemValue> &values);
@@ -113,6 +115,7 @@ class HIDInput : public key_provider::KeyProvider {
   CallbackManager<void(int16_t, int16_t, int16_t, int16_t, uint8_t)> pointer_cb_;
   CallbackManager<void(uint16_t, uint16_t, int32_t)> control_cb_;
   const KeyboardLayout *layout_{nullptr};
+  const char *log_name_{""};
   std::vector<uint32_t> down_;  // page << 16 | usage of every key held
   char32_t dead_{0};
   uint8_t modifiers_{0};

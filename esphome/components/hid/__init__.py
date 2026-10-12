@@ -14,7 +14,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import key_provider
 import esphome.config_validation as cv
-from esphome.const import CONF_KEY, CONF_TRIGGER_ID
+from esphome.const import CONF_ID, CONF_KEY, CONF_TRIGGER_ID
 from esphome.core import CORE
 
 from . import layouts
@@ -216,6 +216,7 @@ async def setup_hid_input(var, config) -> None:
     layout = _emit_layout(config[CONF_LAYOUT])
     cg.add(var.set_layout(cg.RawExpression(f"&esphome::hid::{layout}")))
     cg.add(var.set_num_lock(config[CONF_NUM_LOCK]))
+    cg.add(var.set_log_name(str(config[CONF_ID])))
     for conf in config.get(CONF_ON_KEY, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         if (key := conf.get(CONF_KEY)) is not None:
