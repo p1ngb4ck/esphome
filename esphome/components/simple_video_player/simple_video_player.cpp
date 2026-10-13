@@ -2080,6 +2080,10 @@ uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, uint8_t other) {
   xSemaphoreGive(this->media_lock_);
   if (piece != nullptr)
     return piece;
+#ifdef SVP_STREAM
+  this->output_release_stream_.store(xTaskGetCurrentTaskHandle() == this->stream_draw_task_,
+                                     std::memory_order_relaxed);
+#endif
   this->output_release_req_.store(other, std::memory_order_release);
   for (uint32_t waited = 0; this->output_release_req_.load(std::memory_order_acquire) != 0 && waited < 2000;
        waited += 5)
@@ -2099,15 +2103,20 @@ bool SimpleVideoPlayer::ensure_direct_target_() {
   uint8_t *target = this->output_alloc_(size, RELEASE_CANVAS);
   if (target == nullptr)
     return false;
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  // The stream's draw task and a starting file may both get here: one target only.
+  if (this->decode_target_ != nullptr) {
+    this->pool_.free(target);
+  } else {
+    this->decode_target_len_ = size;
+    this->decode_target_ = target;
+  }
 #ifdef SVP_CONTROLS
   // The controls drawn over the direct output, with the display's decode buffer.
-  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
   if (this->ctl_mem_ == nullptr && this->controls_reserve_ != 0)
     this->ctl_mem_ = this->pool_.alloc(this->controls_reserve_);
-  xSemaphoreGive(this->media_lock_);
 #endif
-  this->decode_target_len_ = size;
-  this->decode_target_ = target;
+  xSemaphoreGive(this->media_lock_);
   return true;
 }
 #endif
@@ -2134,9 +2143,19 @@ bool SimpleVideoPlayer::ensure_canvas_outputs_() {
   }
   for (auto *buf : buffers)
     std::memset(buf, 0, size);
-  this->output_buffer_size_ = size;
-  this->output_buffers_[0] = buffers[0];
-  this->output_buffers_[1] = buffers[1];
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  // The stream's draw task and a starting file may both get here: one pair only.
+  if (this->output_buffers_[1] != nullptr) {
+    for (auto *buf : buffers) {
+      if (buf != this->output_buffers_[0] && buf != this->output_buffers_[1])
+        this->pool_.free(buf);
+    }
+  } else {
+    this->output_buffer_size_ = size;
+    this->output_buffers_[0] = buffers[0];
+    this->output_buffers_[1] = buffers[1];
+  }
+  xSemaphoreGive(this->media_lock_);
   return true;
 }
 #endif
@@ -2147,6 +2166,13 @@ void SimpleVideoPlayer::handle_output_release_() {
   if (which == 0)
     return;
 #ifdef SVP_STREAM
+  // The stream never takes a file's output, also not while its session starts or ends: it goes
+  // without (its alloc fails, the frame is dropped).
+  if (this->output_release_stream_.load(std::memory_order_relaxed) &&
+      (this->session_busy_() || this->start_pending_.load(std::memory_order_acquire))) {
+    this->output_release_req_.store(0, std::memory_order_release);
+    return;
+  }
   if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
     return;  // next loop
 #endif

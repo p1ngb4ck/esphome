@@ -762,6 +762,9 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
   enum : uint8_t { RELEASE_CANVAS = 1, RELEASE_DIRECT = 2 };
   std::atomic<uint8_t> output_release_req_{0};  // an output waits for the other one's memory
+#ifdef SVP_STREAM
+  std::atomic<bool> output_release_stream_{false};  // the stream's draw task asked for it
+#endif
   // The shares of the pool (plan_pool_()).
   size_t ring_size_{0};         // read-ahead ring: what is left
   size_t frame_bytes_{0};       // compressed-frame slot: the largest frame that plays

@@ -613,8 +613,8 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     uint8_t *target = nullptr;
     size_t target_len = 0;
     bool output_ok = false;
-    // While a file plays its picture wins: nothing is drawn, nor its outputs taken.
-    const bool file_playing = this->task_handle_ != nullptr;
+    // While a file plays, starts or ends its picture wins: nothing is drawn, nor its outputs taken.
+    const bool file_playing = this->session_busy_() || this->start_pending_.load(std::memory_order_acquire);
 #ifdef SVP_DSI_OUTPUT
     const display::ColorBitness bitness =
         this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
@@ -722,9 +722,11 @@ void SimpleVideoPlayer::stream_copy_to_canvas_(const uint16_t x, const uint16_t 
 
 #ifdef USE_AUDIO
 void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
-  // A playing file owns the speaker.
-  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
+  // A playing file owns the speaker. Sound not played drops a split frame too.
+  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED) {
+    this->stream_audio_carry_len_ = 0;
     return;
+  }
   const uint32_t rate = this->wanted_audio_rate_.load(std::memory_order_acquire);
   if (AUDIO_BITS_PER_SAMPLE != 16 || this->stream_audio_rate_ != rate || this->stream_audio_src_ch_ > 2) {
     if (!this->stream_logged_audio_format_) {
@@ -733,6 +735,7 @@ void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
                static_cast<unsigned>(this->stream_audio_rate_), this->stream_audio_src_ch_,
                static_cast<unsigned>(rate), static_cast<unsigned>(AUDIO_BITS_PER_SAMPLE));
     }
+    this->stream_audio_carry_len_ = 0;
     return;
   }
   this->stream_logged_audio_format_ = false;
@@ -748,6 +751,8 @@ void SimpleVideoPlayer::stream_on_audio_(const uint8_t *data, size_t len) {
   this->stream_audio_on_.store(true, std::memory_order_release);
 
   const size_t in_frame = static_cast<size_t>(this->stream_audio_src_ch_) * sizeof(int16_t);
+  if (this->stream_audio_carry_len_ >= in_frame)
+    this->stream_audio_carry_len_ = 0;  // the channel count changed with a split frame pending
   while (len > 0) {
     if (this->stream_audio_carry_len_ > 0 || len < in_frame) {
       const size_t take = std::min(in_frame - this->stream_audio_carry_len_, len);
