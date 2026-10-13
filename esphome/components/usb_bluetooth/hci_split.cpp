@@ -206,6 +206,8 @@ static void to_host(uint8_t *p) {
 
 // Per side, the L2CAP frames still waiting for continuations. Each table is touched only by the
 // task its side receives on (USB task, esp_hosted RX task); the counts are read by the main loop.
+// A continuation for no frame is dropped here, counted, and reported every 10s, instead of
+// reaching Bluedroid, which drops it as well but logs every one.
 struct OpenFrame {
   uint16_t handle{NO_HANDLE};
   uint16_t remaining{0};
@@ -215,13 +217,16 @@ struct AclCheck {
   std::atomic<uint32_t> orphans{0};  // continuation with no frame open on its handle
   std::atomic<uint32_t> cut{0};      // a new frame started before the open one was complete
   std::atomic<uint16_t> handle{0};   // the last handle either happened on
+  uint8_t untracked{0};              // more frames open than the table holds
 };
 static AclCheck s_check_br;
 static AclCheck s_check_le;
 
-static void check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
+// Follows the frames as Bluedroid's packet_fragmenter.c does: only boundary 10 starts one.
+// Returns false for a continuation Bluedroid would drop (and log) as belonging to no frame.
+static bool check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
   if (len < 5)
-    return;
+    return true;
   const uint16_t handle = (h4[1] | (h4[2] << 8)) & 0x0FFF;
   const uint8_t boundary = (h4[2] >> 4) & 0x03;
   const uint16_t acl_len = h4[3] | (h4[4] << 8);
@@ -233,16 +238,18 @@ static void check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
     else if (entry.handle == NO_HANDLE && spare == nullptr)
       spare = &entry;
   }
-  if (boundary == 0x01) {
+  if (boundary != 0x02) {
     if (frame == nullptr) {
       check.orphans.fetch_add(1, std::memory_order_relaxed);
       check.handle.store(handle, std::memory_order_relaxed);
-    } else if (acl_len >= frame->remaining) {
+      return check.untracked == 0;
+    }
+    if (acl_len >= frame->remaining) {
       frame->handle = NO_HANDLE;
     } else {
       frame->remaining -= acl_len;
     }
-    return;
+    return true;
   }
   if (frame != nullptr) {
     check.cut.fetch_add(1, std::memory_order_relaxed);
@@ -251,12 +258,18 @@ static void check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
     spare = frame;
   }
   if (acl_len < 4 || len < 9)
-    return;
+    return true;
   const uint32_t total = 4u + (h4[5] | (h4[6] << 8));
-  if (total <= acl_len || spare == nullptr)
-    return;
+  if (total <= acl_len)
+    return true;
+  if (spare == nullptr) {
+    // A frame this table cannot follow: stop judging continuations rather than drop its own.
+    check.untracked = 1;
+    return true;
+  }
   spare->handle = handle;
   spare->remaining = static_cast<uint16_t>(total - acl_len);
+  return true;
 }
 
 static void report_side(AclCheck &check, const char *side) {
@@ -864,8 +877,8 @@ static int le_recv(uint8_t *data, uint16_t len) {
       Lock lock;
       to_host(s_le_rx + 1);
     }
-    check_acl(s_check_le, s_le_rx, len);
-    deliver(s_le_rx, len);
+    if (check_acl(s_check_le, s_le_rx, len))
+      deliver(s_le_rx, len);
     return 0;
   }
   deliver(data, len);
@@ -928,8 +941,8 @@ void br_recv(uint8_t *h4, size_t len) {
     on_event(SIDE_BR, h4, len);
     return;
   }
-  if (h4[0] == H4_ACL)
-    check_acl(s_check_br, h4, len);
+  if (h4[0] == H4_ACL && !check_acl(s_check_br, h4, len))
+    return;
   deliver(h4, len);
 }
 
