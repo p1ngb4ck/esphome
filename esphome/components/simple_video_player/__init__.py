@@ -101,7 +101,27 @@ CONF_TOKEN = "token"
 CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
-MAX_AUDIO_LATENCY_MS = 400  # what the decoded-audio ring (500 ms) holds ahead with room to spare
+CONF_MAX_AUDIO_LATENCY = "max_audio_latency"
+CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
+DEFAULT_MAX_AUDIO_LATENCY_MS = 400
+MAX_AUDIO_LATENCY_MS = 3000
+DEFAULT_READ_AHEAD_BUFFER_SIZE = 4 * 1024 * 1024
+MIN_READ_AHEAD_BUFFER_SIZE = 1000000  # 1MB
+MAX_READ_AHEAD_BUFFER_SIZE = 16 * 1024 * 1024
+
+
+def _next_power_of_two(value):
+    # The ring indexes with a mask: "4MB" (4000000) becomes 4 MiB.
+    return 1 << (value - 1).bit_length()
+
+
+def _latency_within_max(config):
+    latency = config.get(CONF_AUDIO_LATENCY)
+    if isinstance(latency, cv.TimePeriod) and latency > config[CONF_MAX_AUDIO_LATENCY]:
+        raise cv.Invalid(
+            f"{CONF_AUDIO_LATENCY} is above {CONF_MAX_AUDIO_LATENCY}", [CONF_AUDIO_LATENCY]
+        )
+    return config
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
 # referenced speaker's own config and stashes them here for to_code() to read back.
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
@@ -295,10 +315,26 @@ CONFIG_SCHEMA = cv.All(
             # How long the audio output takes to be heard (a Bluetooth sink's buffer, say): the
             # sound starts this much before the picture. A lambda is read at every start.
             cv.Optional(CONF_AUDIO_LATENCY): cv.templatable(
-                cv.All(
-                    cv.positive_time_period_milliseconds,
-                    cv.Range(max=cv.TimePeriod(milliseconds=MAX_AUDIO_LATENCY_MS)),
-                )
+                cv.positive_time_period_milliseconds
+            ),
+            # The largest latency audio_latency may ask for; the audio buffers hold that much ahead.
+            cv.Optional(
+                CONF_MAX_AUDIO_LATENCY,
+                default=f"{DEFAULT_MAX_AUDIO_LATENCY_MS}ms",
+            ): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(max=cv.TimePeriod(milliseconds=MAX_AUDIO_LATENCY_MS)),
+            ),
+            # PSRAM ring the file or stream is read ahead into; it also holds the picture the sound
+            # runs ahead of.
+            cv.Optional(
+                CONF_READ_AHEAD_BUFFER_SIZE, default=DEFAULT_READ_AHEAD_BUFFER_SIZE
+            ): cv.All(
+                cv.validate_bytes,
+                cv.Range(
+                    min=MIN_READ_AHEAD_BUFFER_SIZE, max=MAX_READ_AHEAD_BUFFER_SIZE
+                ),
+                _next_power_of_two,
             ),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
@@ -330,6 +366,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
+    _latency_within_max,
     _validate_output_target,
     _validate_stream,
     _request_fast_network,
@@ -621,6 +658,10 @@ async def to_code(config):
     # Set buffer sizes
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
+    cg.add(var.set_read_ahead_buffer_size(config[CONF_READ_AHEAD_BUFFER_SIZE]))
+    cg.add_define(
+        "SVP_MAX_AUDIO_LATENCY_MS", config[CONF_MAX_AUDIO_LATENCY].total_milliseconds
+    )
     cg.add(
         var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds)
     )

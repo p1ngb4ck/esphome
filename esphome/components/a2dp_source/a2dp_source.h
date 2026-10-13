@@ -77,7 +77,7 @@ class A2DPSource : public Component
   }
   /// @brief Sets and keeps the delay of the connected device.
   void set_output_delay_ms(uint32_t ms);
-  static constexpr uint32_t MAX_OUTPUT_DELAY_MS = 400;
+  static constexpr uint32_t MAX_OUTPUT_DELAY_MS = 3000;
 
   void add_on_paired_trigger(Trigger<std::string> *trigger) { this->paired_triggers_.push_back(trigger); }
   void add_on_streaming_start_trigger(Trigger<> *trigger) { this->streaming_start_triggers_.push_back(trigger); }

@@ -17,9 +17,13 @@ namespace simple_video_player {
 
 static const char *const TAG = "buffered_file_reader";
 
-bool BufferedFileReader::LookaheadRing::allocate() {
-  if (this->data == nullptr)
-    this->data = static_cast<uint8_t *>(heap_caps_malloc(RING_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+bool BufferedFileReader::LookaheadRing::allocate(size_t bytes) {
+  if (this->data != nullptr && this->size != bytes)
+    this->release();
+  if (this->data == nullptr) {
+    this->data = static_cast<uint8_t *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    this->size = this->data != nullptr ? bytes : 0;
+  }
   this->reset();
   return this->data != nullptr;
 }
@@ -27,12 +31,13 @@ bool BufferedFileReader::LookaheadRing::allocate() {
 void BufferedFileReader::LookaheadRing::release() {
   heap_caps_free(this->data);
   this->data = nullptr;
+  this->size = 0;
   this->reset();
 }
 
 void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, size_t len) const {
-  const size_t at = pos & (RING_BYTES - 1);
-  const size_t first = std::min(len, RING_BYTES - at);
+  const size_t at = pos & (this->size - 1);
+  const size_t first = std::min(len, this->size - at);
   memcpy(dst, this->data + at, first);
   if (first < len)
     memcpy(dst + first, this->data, len - first);
@@ -40,8 +45,8 @@ void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, si
 
 void BufferedFileReader::LookaheadRing::write(const uint8_t *src, size_t len) {
   const uint32_t pos = this->head.load(std::memory_order_relaxed);
-  const size_t at = pos & (RING_BYTES - 1);
-  const size_t first = std::min(len, RING_BYTES - at);
+  const size_t at = pos & (this->size - 1);
+  const size_t first = std::min(len, this->size - at);
   memcpy(this->data + at, src, first);
   if (first < len)
     memcpy(this->data, src + first, len - first);
@@ -156,8 +161,8 @@ bool BufferedFileReader::open(const char *path) {
     this->wait_sync_();
     return false;
   }
-  if (!this->ring_.allocate()) {
-    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", RING_BYTES);
+  if (!this->ring_.allocate(this->ring_bytes_)) {
+    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", this->ring_bytes_);
     storage::global_transfer_buffer->release();
     this->arena_ = nullptr;
     this->arm_wait_();
@@ -216,9 +221,9 @@ bool BufferedFileReader::open_stream() {
     return false;
   }
   xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
-  if (!this->ring_.allocate()) {
+  if (!this->ring_.allocate(this->ring_bytes_)) {
     xSemaphoreGive(this->stream_lock_);
-    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", RING_BYTES);
+    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", this->ring_bytes_);
     return false;
   }
   this->network_ = true;

@@ -161,6 +161,7 @@ class SimpleVideoPlayer : public Component
 #endif
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
+  void set_read_ahead_buffer_size(uint32_t size) { this->read_ahead_buffer_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
   void set_prefetch_duration_ms(uint32_t ms) { this->prefetch_duration_ms_ = ms; }
 
@@ -429,6 +430,7 @@ class SimpleVideoPlayer : public Component
   uint16_t canvas_size_w_{0}, canvas_size_h_{0};
   lv_draw_buf_t *canvas_shown_{nullptr};  // the canvas's draw buffer as lv_canvas_set_buffer() left it
 #endif
+  uint32_t read_ahead_buffer_size_{4 * 1024 * 1024};  // PSRAM read-ahead ring, a power of two
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
@@ -472,6 +474,11 @@ class SimpleVideoPlayer : public Component
   // allocation after setup()). Per-file auto-detected format info is still read at open time
   // (init_audio_decoder_()), but only to VALIDATE it matches this fixed format -- a mismatch is
   // a hard error (no audio for that file), never a reason to resize anything.
+#ifdef SVP_MAX_AUDIO_LATENCY_MS
+  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = SVP_MAX_AUDIO_LATENCY_MS;
+#else
+  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = 400;
+#endif
 #if defined(SVP_AUDIO_SAMPLE_RATE)
   static constexpr uint32_t AUDIO_SAMPLE_RATE = SVP_AUDIO_SAMPLE_RATE;
   static constexpr uint8_t AUDIO_SOURCE_CHANNELS = SVP_AUDIO_SOURCE_CHANNELS;
@@ -481,11 +488,14 @@ class SimpleVideoPlayer : public Component
   static constexpr size_t AUDIO_BYTES_PER_SEC = static_cast<size_t>(AUDIO_SAMPLE_RATE) * AUDIO_BYTES_PER_FRAME;
   // Same target durations / minimums init_audio_decoder_() always used -- just resolved at
   // compile time now instead of recomputed from a parsed file header every play().
-  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 250 / 1000) > (32 * 1024)
-                                                        ? (AUDIO_BYTES_PER_SEC * 250 / 1000)
+  // Both hold at least MAX_AUDIO_LATENCY_MS ahead plus room, as the audio runs ahead of the picture.
+  static constexpr uint32_t AUDIO_INPUT_MS = MAX_AUDIO_LATENCY_MS + 250 > 250 ? MAX_AUDIO_LATENCY_MS + 250 : 250;
+  static constexpr uint32_t AUDIO_DECODED_MS = MAX_AUDIO_LATENCY_MS + 250 > 500 ? MAX_AUDIO_LATENCY_MS + 250 : 500;
+  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * AUDIO_INPUT_MS / 1000) > (32 * 1024)
+                                                        ? (AUDIO_BYTES_PER_SEC * AUDIO_INPUT_MS / 1000)
                                                         : (32 * 1024);
-  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 500 / 1000) > (16 * 1024)
-                                                          ? (AUDIO_BYTES_PER_SEC * 500 / 1000)
+  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * AUDIO_DECODED_MS / 1000) > (16 * 1024)
+                                                          ? (AUDIO_BYTES_PER_SEC * AUDIO_DECODED_MS / 1000)
                                                           : (16 * 1024);
   static constexpr size_t AUDIO_TEMP_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024)
                                                        ? (AUDIO_BYTES_PER_SEC * 100 / 1000)
@@ -569,7 +579,6 @@ class SimpleVideoPlayer : public Component
   // of the picture: an audio cursor walks the read-ahead ring with peek() and feeds the audio chunks,
   // the frame read skips the ones it fed. At the start the sound is released audio_lead_us_ before
   // the first frame is shown.
-  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = 400;  // the decoded-audio ring holds 500 ms
   TemplatableFn<uint32_t> audio_latency_{};
   uint32_t audio_lead_us_{0};      // this session's latency, read when playback starts
   uint32_t audio_lead_frames_{0};  // the same in video frames

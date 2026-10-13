@@ -34,6 +34,8 @@ class BufferedFileReader {
   /// While *flag is true, a pending wait returns immediately instead of waiting out a storage
   /// completion -- so playback can be stopped promptly.
   void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
+  /// Size of the PSRAM read-ahead ring, a power of two; takes effect at the next open.
+  void set_ring_bytes(size_t bytes) { this->ring_bytes_ = bytes; }
 
   bool open(const char *path);
   void close();
@@ -115,7 +117,6 @@ class BufferedFileReader {
 
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
-  static constexpr size_t RING_BYTES = 4 * 1024 * 1024;  // PSRAM read-ahead ring (~4 MB)
   static constexpr size_t FILL_CHUNK = 256 * 1024;   // per read_chunk into the arena
 
   storage::StreamHandle handle_{};
@@ -132,12 +133,13 @@ class BufferedFileReader {
 
   uint8_t *arena_{nullptr};  // borrowed storage::TransferBuffer -- read_chunk destination
   // Byte ring with look-ahead: one writer (fill chain or push()), one reader task that read()s and
-  // peek()s. Positions count bytes and wrap at 2^32; RING_BYTES is a power of two, so they index it.
+  // peek()s. Positions count bytes and wrap at 2^32; the size is a power of two, so they index it.
   struct LookaheadRing {
     uint8_t *data{nullptr};
+    size_t size{0};
     std::atomic<uint32_t> head{0};  // bytes written
     std::atomic<uint32_t> tail{0};  // bytes read
-    bool allocate();
+    bool allocate(size_t bytes);
     void release();
     void reset() {
       this->head.store(0, std::memory_order_relaxed);
@@ -147,15 +149,15 @@ class BufferedFileReader {
       return this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_relaxed);
     }
     size_t free() const {
-      return RING_BYTES - (this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_acquire));
+      return this->size - (this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_acquire));
     }
     void write(const uint8_t *src, size_t len);  // len <= free()
     size_t read(uint8_t *dst, size_t len);
     bool peek(size_t offset, uint8_t *dst, size_t len) const;
     void copy_out_(uint32_t pos, uint8_t *dst, size_t len) const;
   };
-  static_assert((RING_BYTES & (RING_BYTES - 1)) == 0, "RING_BYTES must be a power of two");
   LookaheadRing ring_;
+  size_t ring_bytes_{4 * 1024 * 1024};
   std::atomic<bool> fill_in_flight_{false};
   std::atomic<bool> draining_{false};   // set during close()/seek(): no new fill may start
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports

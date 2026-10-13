@@ -351,6 +351,7 @@ void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
   ESP_LOGCONFIG(TAG, "  Cache buffer size: %" PRIu32 " bytes", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes", this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Read-ahead buffer: %" PRIu32 " bytes (PSRAM)", this->read_ahead_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
   if (this->state_ != PlayerState::STOPPED) {
@@ -391,7 +392,9 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
   this->av_started_.store(false, std::memory_order_release);
+#ifdef USE_AUDIO
   this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), MAX_AUDIO_LATENCY_MS) * 1000;
+#endif
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
 
   // Create the decode/playback task on Core 1, alongside ESPHome's main loop task (which drives
@@ -1341,6 +1344,7 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   // any previous stream first.
   if (!this->file_reader_) {
     this->file_reader_ = std::make_unique<BufferedFileReader>();
+    this->file_reader_->set_ring_bytes(this->read_ahead_buffer_size_);
   }
   // A wait inside the reader returns early once playback_task_stop_ goes true, so an outstanding
   // storage completion cannot block the end of playback.
@@ -1429,6 +1433,7 @@ bool SimpleVideoPlayer::open_stream_source_() {
   // file, which the network task fills instead of the storage worker.
   if (!this->file_reader_) {
     this->file_reader_ = std::make_unique<BufferedFileReader>();
+    this->file_reader_->set_ring_bytes(this->read_ahead_buffer_size_);
   }
   this->file_reader_->set_abort_flag(&this->playback_task_stop_);
   if (!this->file_reader_->open_stream()) {
