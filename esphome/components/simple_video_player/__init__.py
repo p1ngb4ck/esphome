@@ -546,7 +546,7 @@ CONFIG_SCHEMA = cv.All(
                         {
                             cv.Required(CONF_URL): cv.url,
                             cv.Optional(CONF_TOKEN): cv.string,
-                            cv.Required(CONF_WIDGET_ID): cv.use_id(lv_dropdown_t),
+                            cv.Optional(CONF_WIDGET_ID): cv.use_id(lv_dropdown_t),
                         }
                     )
                 }
@@ -862,8 +862,9 @@ async def to_code(config):
             cg.add(var.set_channel_url(channels[CONF_URL].rstrip("/")))
             if CONF_TOKEN in channels:
                 cg.add(var.set_channel_token(channels[CONF_TOKEN]))
-            widget = await cg.get_variable(channels[CONF_WIDGET_ID])
-            cg.add(var.set_channel_widget(widget))
+            if CONF_WIDGET_ID in channels:
+                widget = await cg.get_variable(channels[CONF_WIDGET_ID])
+                cg.add(var.set_channel_widget(widget))
             cg.add_define("SVP_CHANNEL_LIST")
 
     if controls := config.get(CONF_CONTROLS):
@@ -1167,15 +1168,22 @@ async def simple_video_player_channels_refresh_to_code(config, action_id, templa
     return cg.new_Pvariable(action_id, template_arg, paren)
 
 
+# index: a channel of the list; without, the dropdown's selection or the channel played last.
 @automation.register_action(
     "simple_video_player.channels.play",
     ChannelPlayAction,
-    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA.extend(
+        {cv.Optional(CONF_INDEX): cv.templatable(cv.int_range(min=0))}
+    ),
     synchronous=True,  # queues the request for the channel task
 )
 async def simple_video_player_channels_play_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
-    return cg.new_Pvariable(action_id, template_arg, paren)
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    if CONF_INDEX in config:
+        template_ = await cg.templatable(config[CONF_INDEX], args, cg.int_)
+        cg.add(var.set_index(template_))
+    return var
 
 
 @automation.register_action(

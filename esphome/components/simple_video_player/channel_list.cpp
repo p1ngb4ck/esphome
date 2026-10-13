@@ -1,5 +1,5 @@
-// Channel list for the network stream: fetched from the svp_relay Home Assistant integration into an
-// LVGL dropdown; channels.play asks the relay to stream the selected one to this panel's stream_port.
+// Channel list for the network stream: fetched from the svp_relay Home Assistant integration, optionally
+// into an LVGL dropdown; channels.play asks the relay to stream one to this panel's stream_port.
 
 #include "simple_video_player.h"
 
@@ -40,7 +40,15 @@ void SimpleVideoPlayer::channel_request_(uint8_t cmd, uint16_t index) {
 }
 
 void SimpleVideoPlayer::channel_play() {
-  this->channel_request_(CHANNEL_CMD_PLAY, static_cast<uint16_t>(this->channel_widget_->get_selected_index()));
+  this->channel_play(this->channel_widget_ != nullptr ? static_cast<int>(this->channel_widget_->get_selected_index())
+                                                      : this->channel_index_);
+}
+
+void SimpleVideoPlayer::channel_play(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= this->channel_names_.size())
+    return;
+  this->channel_index_ = index;
+  this->channel_request_(CHANNEL_CMD_PLAY, static_cast<uint16_t>(index));
 }
 
 void SimpleVideoPlayer::channel_loop_() {
@@ -55,14 +63,19 @@ void SimpleVideoPlayer::channel_loop_() {
   xSemaphoreTake(this->channel_lock_, portMAX_DELAY);
   this->channel_names_.swap(this->channel_new_names_);
   this->channel_refs_.swap(this->channel_new_refs_);
-  FixedVector<const char *> options;
-  options.init(this->channel_names_.empty() ? 1 : this->channel_names_.size());
-  if (this->channel_names_.empty())
-    options.push_back("(no channels)");
-  for (const auto &name : this->channel_names_)
-    options.push_back(name.c_str());
-  this->channel_widget_->set_options(std::move(options));
+  if (this->channel_widget_ != nullptr) {
+    FixedVector<const char *> options;
+    options.init(this->channel_names_.empty() ? 1 : this->channel_names_.size());
+    if (this->channel_names_.empty())
+      options.push_back("(no channels)");
+    for (const auto &name : this->channel_names_)
+      options.push_back(name.c_str());
+    this->channel_widget_->set_options(std::move(options));
+  }
   xSemaphoreGive(this->channel_lock_);
+  if (static_cast<size_t>(this->channel_index_ + 1) > this->channel_names_.size())
+    this->channel_index_ = -1;
+  this->channel_version_++;
 }
 
 void SimpleVideoPlayer::channel_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->channel_task_loop_(); }

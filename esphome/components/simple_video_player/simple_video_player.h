@@ -290,14 +290,21 @@ class SimpleVideoPlayer : public Component
 #endif
 
 #ifdef SVP_CHANNEL_LIST
-  // Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
-  // channel_play() asks the relay to stream the selected channel to stream_port.
+  // Channel list from the svp_relay Home Assistant integration, optionally shown in an LVGL dropdown;
+  // channel_play() asks the relay to stream a channel to stream_port.
   void set_channel_url(const std::string &url) { this->channel_url_ = url; }
   void set_channel_token(const std::string &token) { this->channel_token_ = token; }
   void set_channel_widget(lvgl::LvDropdownType *widget) { this->channel_widget_ = widget; }
   void channel_list_refresh() { this->channel_request_(CHANNEL_CMD_REFRESH, 0); }
+  // The dropdown's selection, without one the channel played last.
   void channel_play();
+  void channel_play(int index);
   void channel_stop() { this->channel_request_(CHANNEL_CMD_STOP, 0); }
+  // Main loop: the names of the channels; the version changes with every new list.
+  const std::vector<std::string> &get_channel_names() const { return this->channel_names_; }
+  uint32_t get_channel_list_version() const { return this->channel_version_; }
+  // The channel played last, -1 for none.
+  int get_channel_index() const { return this->channel_index_; }
 #endif
 
   //========================================================================
@@ -1328,6 +1335,8 @@ class SimpleVideoPlayer : public Component
   std::vector<std::string> channel_new_names_, channel_new_refs_;
   std::atomic<bool> channel_new_{false};
   bool channel_requested_once_{false};
+  uint32_t channel_version_{0};
+  int channel_index_{-1};
 #endif
 
   jpeg_decoder_handle_t hw_jpeg_decoder_{nullptr};
@@ -1563,7 +1572,14 @@ template<typename... Ts> class ChannelRefreshAction : public Action<Ts...> {
 template<typename... Ts> class ChannelPlayAction : public Action<Ts...> {
  public:
   explicit ChannelPlayAction(SimpleVideoPlayer *player) : player_(player) {}
-  void play(const Ts &...x) override { this->player_->channel_play(); }
+  TEMPLATABLE_VALUE(int, index)
+  void play(const Ts &...x) override {
+    if (this->index_.has_value()) {
+      this->player_->channel_play(this->index_.value(x...));
+    } else {
+      this->player_->channel_play();
+    }
+  }
 
  protected:
   SimpleVideoPlayer *player_;

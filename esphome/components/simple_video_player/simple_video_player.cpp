@@ -173,7 +173,7 @@ void SimpleVideoPlayer::setup() {
     ESP_LOGE(TAG, "Network stream receiver disabled");
 #endif
 #ifdef SVP_CHANNEL_LIST
-  if (this->channel_widget_ != nullptr && !this->setup_channel_list_())
+  if (!this->channel_url_.empty() && !this->setup_channel_list_())
     ESP_LOGE(TAG, "Channel list disabled");
 #endif
 #ifdef SVP_PICTURES
