@@ -11,11 +11,13 @@ from esphome.components.esp32 import (
     add_idf_sdkconfig_option,
     get_esp32_variant,
 )
+from esphome.components.logger import DOMAIN as LOGGER_DOMAIN
 import esphome.config_validation as cv
 from esphome.const import CONF_HARDWARE_UART, CONF_ID
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@kbx81"]
+DOMAIN = "tinyusb"
 
 CONF_ON_MOUNT = "on_mount"
 CONF_ON_UNMOUNT = "on_unmount"
@@ -35,7 +37,7 @@ PORT_FULL_SPEED = "full_speed"
 # esp_tinyusb's driver install (descriptors_set fails with no class and no
 # user-provided full_speed_config), which trips the task watchdog before
 # loop() ever runs.
-_USB_CLASS_COMPONENTS = ("usb_cdc_acm",)
+_USB_CLASS_COMPONENTS = ("usb_cdc_acm", "tinyusb_keyboard")
 
 tinyusb_ns = cg.esphome_ns.namespace("tinyusb")
 TinyUSB = tinyusb_ns.class_("TinyUSB", cg.Component)
@@ -127,7 +129,7 @@ def _final_validate(config: ConfigType) -> None:
     # tinyusb owns the USB OTG peripheral. The logger's USB_CDC backend routes
     # the ROM console through that same peripheral, so the two cannot coexist.
     # (USB_SERIAL_JTAG is a separate peripheral and is fine alongside tinyusb.)
-    logger_config = full_config.get("logger")
+    logger_config = full_config.get(LOGGER_DOMAIN)
     if logger_config and logger_config.get(CONF_HARDWARE_UART) == "USB_CDC":
         raise cv.Invalid(
             "'tinyusb' cannot be used with 'logger.hardware_uart: USB_CDC' "

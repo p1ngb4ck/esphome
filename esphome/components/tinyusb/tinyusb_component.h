@@ -53,6 +53,8 @@ class TinyUSB final : public Component {
   /// ESP32-P4: be the device on the high-speed controller instead of the full-speed one.
   void set_high_speed_port() { this->port_ = TINYUSB_PORT_HIGH_SPEED_0; }
 #endif
+  /// Configuration descriptor from a class component that esp_tinyusb has no built-in default for (HID).
+  void set_full_speed_config(const uint8_t *descriptor) { this->tusb_cfg_.descriptor.full_speed_config = descriptor; }
 
  protected:
   char usb_desc_lang_id_[2] = {0x09, 0x04};  // defaults to english

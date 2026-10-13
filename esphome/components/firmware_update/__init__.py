@@ -67,7 +67,7 @@ async def to_code(config):
         cg.add_define("USE_OTA_PARTITIONS")
 
 
-FIRMWARE_UPDATE_FLASH_ACTION_SCHEMA = cv.maybe_simple_id(
+FIRMWARE_UPDATE_FLASH_ACTION_SCHEMA = automation.maybe_simple_id(
     {
         cv.GenerateID(): cv.use_id(FirmwareUpdateComponent),
         cv.Optional(CONF_PATH): cv.templatable(_validate_local_path),

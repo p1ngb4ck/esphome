@@ -1,0 +1,135 @@
+substitutions:
+  disp_width: "1024"
+  disp_height: "600"
+
+globals:
+  - id: storage_devices
+    type: std::vector<std::string>
+    restore_value: false
+  - id: video_files
+    type: std::vector<std::string>
+    restore_value: false
+  - id: video_scan
+    type: std::vector<std::string>
+    restore_value: false
+
+esphome:
+  on_boot:
+    - priority: -100
+      then:
+        - lambda: |-
+            id(storage_devices).clear();
+            auto *reg = esphome::storage::global_storage_registry;
+            if (reg != nullptr) {
+              for (size_t i = 0; i < reg->size(); i++) {
+                auto *s = reg->get(i);
+                if (s == nullptr) continue;
+                auto t = s->get_storage_type();
+                if (t == esphome::storage::StorageType::STORAGE_TYPE_FILESYSTEM ||
+                    t == esphome::storage::StorageType::STORAGE_TYPE_NETWORK) {
+                  id(storage_devices).push_back(static_cast<esphome::storage::PathStorage *>(s)->get_mount_path());
+                }
+              }
+            }
+            if (id(storage_devices).empty()) id(storage_devices).push_back("(no storage)");
+            FixedVector<const char *> opts;
+            opts.init(id(storage_devices).size());
+            for (auto &d : id(storage_devices)) opts.push_back(d.c_str());
+            id(storage_device_select).traits.set_options(opts);
+
+lvgl:
+  pages:
+    - id: video_page
+      skip: true
+      widgets:
+        - canvas:
+            id: video_canvas
+            width: ${disp_width}
+            height: ${disp_height}
+            dma_buffer: true
+
+simple_video_player:
+  id: video
+  canvas_id: video_canvas
+  speaker_id: usb_spk
+  target_fps: 25
+  audio_codec:
+    - pcm
+    - mp3
+    - flac
+  on_playback_started:
+    - micro_wake_word.stop:
+    - lvgl.page.show: video_page
+  on_playback_finished:
+    - lvgl.page.show: home_page
+    - micro_wake_word.start:
+  on_playback_error:
+    - lvgl.page.show: home_page
+    - micro_wake_word.start:
+
+select:
+  - platform: template
+    id: storage_device_select
+    name: "Storage device"
+    optimistic: true
+    options:
+      - "(scanning...)"
+    on_value:
+      - script.execute: scan_videos
+
+  - platform: template
+    id: video_file_select
+    name: "Video file"
+    optimistic: true
+    options:
+      - "(select storage)"
+
+button:
+  - platform: template
+    name: "Play video"
+    on_press:
+      - simple_video_player.play:
+          id: video
+          path: !lambda |-
+            return std::string(id(storage_device_select).current_option().c_str()) + "/" +
+                   std::string(id(video_file_select).current_option().c_str());
+
+  - platform: template
+    name: "Stop video"
+    on_press:
+      - simple_video_player.stop:
+          id: video
+
+  - platform: template
+    name: "Rescan videos"
+    on_press:
+      - script.execute: scan_videos
+
+script:
+  - id: scan_videos
+    then:
+      - lambda: 'id(video_scan).clear();'
+      - storage.list_dir:
+          path: !lambda 'return std::string(id(storage_device_select).current_option().c_str());'
+          max_entries: 64
+          on_entry:
+            - lambda: |-
+                if (!is_dir) {
+                  std::string n = name;
+                  if (n.size() > 4 &&
+                      (n.rfind(".avi") == n.size() - 4 || n.rfind(".mjpeg") == n.size() - 6)) {
+                    id(video_scan).push_back(n);
+                  }
+                }
+          on_complete:
+            - lambda: |-
+                if (id(video_scan).empty()) id(video_scan).push_back("(no videos)");
+                id(video_files) = id(video_scan);
+                FixedVector<const char *> opts;
+                opts.init(id(video_files).size());
+                for (auto &n : id(video_files)) opts.push_back(n.c_str());
+                id(video_file_select).traits.set_options(opts);
+          on_error:
+            - logger.log:
+                format: "list_dir failed: %s"
+                args: [x.c_str()]

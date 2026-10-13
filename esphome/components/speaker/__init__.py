@@ -8,6 +8,7 @@ from esphome.coroutine import CoroPriority, coroutine_with_priority
 
 AUTO_LOAD = ["audio", "speaker_media_player_base"]
 CODEOWNERS = ["@jesserockz", "@kahrendt"]
+DOMAIN = "speaker"
 
 IS_PLATFORM_COMPONENT = True
 

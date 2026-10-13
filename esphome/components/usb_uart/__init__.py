@@ -1,7 +1,13 @@
 import esphome.codegen as cg
 from esphome.components.const import CONF_DATA_BITS, CONF_PARITY, CONF_STOP_BITS
 from esphome.components.esp32 import VARIANT_ESP32P4, get_esp32_variant
-from esphome.components.uart import CONF_DEBUG_PREFIX, CONF_FLUSH_TIMEOUT, UARTComponent
+from esphome.components.uart import (
+    CONF_DEBUG_PREFIX,
+    CONF_FLUSH_TIMEOUT,
+    UARTComponent,
+    UARTParityOptions,
+    mark_unclocked,
+)
 from esphome.components.usb_host import (
     get_max_packet_size,
     get_max_transfer_requests,
@@ -26,6 +32,7 @@ from esphome.types import ConfigType
 
 AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
+DOMAIN = "usb_uart"
 
 usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 USBUartComponent = usb_uart_ns.class_("USBUartComponent", Component)
@@ -36,12 +43,11 @@ CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
     return any(
         channel[CONF_ID] == uart_id
-        for device in full_config.get("usb_uart") or []
+        for device in full_config.get(DOMAIN) or []
         for channel in device[CONF_CHANNELS]
     )
 
 
-UARTParityOptions = usb_uart_ns.enum("UARTParityOptions")
 UART_PARITY_OPTIONS = {
     "NONE": UARTParityOptions.UART_CONFIG_PARITY_NONE,
     "EVEN": UARTParityOptions.UART_CONFIG_PARITY_EVEN,
@@ -180,7 +186,7 @@ def _validate_debug_add_uart_settings(config):
     return config
 
 
-def channel_schema(type_: "Type", baud_rate_required) -> cv.Schema:
+def channel_schema(type_: "Type") -> cv.Schema:
     max_channels = type_.max_channels
     schema = cv.Schema(
         {
@@ -189,13 +195,15 @@ def channel_schema(type_: "Type", baud_rate_required) -> cv.Schema:
                     cv.All(
                         cv.Schema(
                             {
-                                cv.GenerateID(): cv.declare_id(type_.channel_cls),
-                                cv.Optional(CONF_BUFFER_SIZE, default=256): cv.int_range(
-                                    min=64, max=8192
+                                cv.GenerateID(): cv.All(
+                                    cv.declare_id(type_.channel_cls), mark_unclocked
                                 ),
+                                cv.Optional(
+                                    CONF_BUFFER_SIZE, default=256
+                                ): cv.int_range(min=64, max=8192),
                                 (
                                     cv.Required(CONF_BAUD_RATE)
-                                    if baud_rate_required
+                                    if type_.baud_rate_required
                                     else cv.Optional(
                                         CONF_BAUD_RATE, default=DEFAULT_BAUD_RATE
                                     )
@@ -209,8 +217,12 @@ def channel_schema(type_: "Type", baud_rate_required) -> cv.Schema:
                                 cv.Optional(CONF_DATA_BITS, default=8): cv.int_range(
                                     min=5, max=8
                                 ),
-                                cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
-                                cv.Optional(CONF_CLAIM_NOTIFICATION_EP, default=False): cv.boolean,
+                                cv.Optional(
+                                    CONF_DUMMY_RECEIVER, default=False
+                                ): cv.boolean,
+                                cv.Optional(
+                                    CONF_CLAIM_NOTIFICATION_EP, default=False
+                                ): cv.boolean,
                                 cv.Optional(CONF_DEBUG, default=False): cv.boolean,
                                 cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
                                 cv.Optional(
@@ -255,7 +267,7 @@ CONFIG_SCHEMA = cv.All(
         cv.typed_schema(
             {
                 it.name: usb_device_schema(it.cls, it.vid, it.pid).extend(
-                    channel_schema(it, it.baud_rate_required)
+                    channel_schema(it)
                 )
                 for it in uart_types
             },
