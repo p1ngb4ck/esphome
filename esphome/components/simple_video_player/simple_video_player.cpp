@@ -256,10 +256,30 @@ void SimpleVideoPlayer::loop() {
       this->lvgl_component_->set_paused(true, false);
       this->dsi_lvgl_paused_ = true;
     }
-    if (this->dsi_lvgl_paused_ && !streaming &&
-        this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
+    const PlayerState state = this->state_.load(std::memory_order_acquire);
+    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::STOPPED) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
+    }
+    // A paused file: LVGL gets the panel once the playback task is parked (on-device controls),
+    // and gives it back here, before the task is let go again, when resume() asks for it.
+    if (this->paused_ui_ && state != PlayerState::PAUSED) {
+      this->paused_ui_ = false;  // stopped or replaced meanwhile
+      this->resume_req_.store(false, std::memory_order_relaxed);
+    }
+    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED &&
+        !this->is_network_session() && this->playback_parked_.load(std::memory_order_acquire)) {
+      this->lvgl_component_->set_paused(false, false);
+      this->dsi_lvgl_paused_ = false;
+      this->paused_ui_ = true;
+    }
+    if (this->paused_ui_ && this->resume_req_.exchange(false, std::memory_order_acq_rel)) {
+      this->lvgl_component_->set_paused(true, false);
+      this->dsi_lvgl_paused_ = true;
+      this->paused_ui_ = false;
+      PlayerState expected = PlayerState::PAUSED;
+      if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel))
+        ESP_LOGI(TAG, "Resuming playback");
     }
     const bool lvgl_off = this->lvgl_component_ == nullptr || this->dsi_lvgl_paused_;
 #else
@@ -442,6 +462,16 @@ void SimpleVideoPlayer::pause() {
 }
 
 void SimpleVideoPlayer::resume() {
+#if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
+  if (this->paused_ui_) {
+    // LVGL draws the paused UI onto the panel. resume() may be running inside an LVGL event (a
+    // button), so LVGL is paused from loop(), outside lv_timer_handler(), and only then does the
+    // playback task get to draw again.
+    if (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED)
+      this->resume_req_.store(true, std::memory_order_release);
+    return;
+  }
+#endif
   PlayerState expected = PlayerState::PAUSED;
   if (this->state_.compare_exchange_strong(expected, PlayerState::PLAYING, std::memory_order_acq_rel)) {
     ESP_LOGI(TAG, "Resuming playback");
@@ -762,11 +792,15 @@ void SimpleVideoPlayer::playback_loop_() {
     // behind (which would trigger a re-sync on resume).
     if (st == PlayerState::PAUSED) {
       const int64_t pause_started_us = esp_timer_get_time();
+      // Parked: nothing of this task touches the panel until the state changes, so loop() may
+      // hand it to LVGL meanwhile.
+      this->playback_parked_.store(true, std::memory_order_release);
       // Paused is not playback -- a coarse sleep here is fine (and correct: it lets the rest of
       // the system run at full speed). The zero-wait rule is about the active decode/pace path.
       while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
         vTaskDelay(pdMS_TO_TICKS(50));
       }
+      this->playback_parked_.store(false, std::memory_order_release);
       this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
       continue;
     }
@@ -1869,7 +1903,7 @@ void SimpleVideoPlayer::audio_task_entry_(void *param) {
 void SimpleVideoPlayer::audio_processing_loop_() {
   ESP_LOGI(TAG, "Audio processing task started on core %d", xPortGetCoreID());
 
-  // Core 0, prio 1. Never sleeps: no vTaskDelay anywhere in this loop. When there is nothing to
+  // Core 0, prio 1. Never sleeps while playing (only while paused). When there is nothing to
   // push (ring empty, or speaker DMA full) it simply re-checks. The FreeRTOS tick still lets the
   // storage worker and system tasks preempt it; the speaker's own I2S task drains its DMA in
   // parallel. This decouples audio entirely from the Core 1 video decode/pace task -- a multi-ms
@@ -1890,6 +1924,14 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 
     if (!this->audio_enabled_)
       break;
+
+    // Paused: the sound holds where the picture stopped (the reader feeds at most one frame
+    // further meanwhile, well within the rings' 250 ms margin), so both go on together on resume.
+    // Paused is not playback, so this wait is not the hot path.
+    if (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
 
     // Run audio decoder only when THIS file is compressed (MP3/FLAC). In a multi-codec build
     // audio_decoder_ exists even for a PCM file, so gate on the per-file mode, not the pointer --

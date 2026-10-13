@@ -254,6 +254,15 @@ class SimpleVideoPlayer : public Component
   bool is_stopped() const { return this->state_ == PlayerState::STOPPED; }
   PlaybackError get_last_error() const { return this->last_error_; }
   const std::string &get_current_file() const { return this->video_path_; }
+  /// Whether what shows came over the network (an svp_relay AVI or udisp rectangles) rather than
+  /// from a file: the sender controls it, and touches go to the sender.
+  bool is_network_session() const {
+#ifdef SVP_STREAM
+    return this->stream_avi_.load(std::memory_order_acquire) || this->stream_connected_.load(std::memory_order_acquire);
+#else
+    return false;
+#endif
+  }
 
   //========================================================================
   // Automation Callbacks
@@ -594,9 +603,14 @@ class SimpleVideoPlayer : public Component
   uint32_t avi_fps_num_{0};
   uint32_t avi_fps_den_{0};
 
+  std::atomic<bool> playback_parked_{false};  // the playback task sits in its pause wait
 #ifdef SVP_DSI_OUTPUT
   display::Display *dsi_{nullptr};  // non-null -> direct display output instead of the LVGL canvas
   bool dsi_lvgl_paused_{false};     // LVGL was paused for the duration of direct playback
+  // Paused file playback: once the playback task is parked, LVGL gets the panel (on-device
+  // controls). resume() then hands it back from loop(), before the task draws again.
+  std::atomic<bool> resume_req_{false};  // resume() asked while LVGL shows the paused UI
+  bool paused_ui_{false};                // LVGL was handed the panel for the pause (loop() only)
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};  // panel native resolution; the video must match it
   uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
   uint8_t *decode_target_{nullptr};       // own decode buffer (jpeg_alloc_decoder_mem, PSRAM)
