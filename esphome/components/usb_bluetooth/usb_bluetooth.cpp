@@ -381,16 +381,32 @@ void USBBluetooth::read_acl_(uint32_t generation) {
           ESP_LOGW(TAG, "ACL endpoint stopped (status %u)", status.error_code);
           return;
         }
+        // A byte stream, as btusb_recv_bulk() takes it: one USB packet may end an ACL packet and
+        // begin the next.
         uint8_t *acl = this->acl_ + 1;
-        const size_t take = std::min(status.data_len, ACL_MAX - this->acl_len_);
-        memcpy(acl + this->acl_len_, status.data, take);
-        this->acl_len_ += take;
-        // ACL: handle and flags, little-endian data length, data. Only Bluedroid takes it.
-        if (this->acl_len_ >= 4 && this->acl_len_ >= 4u + (acl[2] | (acl[3] << 8))) {
+        const uint8_t *in = status.data;
+        size_t count = status.data_len;
+        while (count > 0) {
+          const size_t want = this->acl_len_ < 4 ? 4 - this->acl_len_ : 4u + (acl[2] | (acl[3] << 8)) - this->acl_len_;
+          const size_t take = std::min(want, count);
+          memcpy(acl + this->acl_len_, in, take);
+          this->acl_len_ += take;
+          in += take;
+          count -= take;
+          if (this->acl_len_ < 4)
+            continue;
+          const size_t total = 4u + (acl[2] | (acl[3] << 8));
+          if (total > ACL_MAX) {
+            // Larger than any controller sends: the stream is lost until the next USB packet.
+            this->acl_len_ = 0;
+            break;
+          }
+          if (this->acl_len_ < total)
+            continue;
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
           if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->acl_[0] = H4_ACL;
-            this->to_stack_(this->acl_, this->acl_len_ + 1);
+            this->to_stack_(this->acl_, total + 1);
           }
 #endif
           this->acl_len_ = 0;
