@@ -136,6 +136,13 @@ void A2DPSource::setup() {
   this->source_.set_on_audio_state_changed(A2DPSource::audio_state_, this);
   this->source_.set_on_authentication_complete(A2DPSource::authentication_complete_);
 
+  this->media_wanted_ = this->idle_timeout_ms_ == 0;
+#ifdef USE_MICROPHONE
+  if (this->mic_source_ != nullptr)
+    this->media_wanted_ = true;
+#endif
+  this->idle_since_ms_ = millis() - this->idle_timeout_ms_;
+  this->source_.set_media_active(this->media_wanted_);
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
@@ -411,7 +418,8 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
 size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
   if (this->ring_ == nullptr)
     return 0;
-  if (!this->streaming_.load())
+  // While the stream starts (or resumes after idling) the audio waits in the buffer
+  if (!this->connected_.load())
     return length;
   size_t chunk = std::min(length, this->ring_bytes_ / 4);
   const size_t free = xRingbufferGetCurFreeSize(this->ring_);
@@ -437,6 +445,23 @@ bool A2DPSource::has_audio() const {
   UBaseType_t waiting = 0;
   vRingbufferGetInfo(this->ring_, nullptr, nullptr, nullptr, nullptr, &waiting);
   return waiting != 0;
+}
+
+void A2DPSource::update_media_() {
+  if (this->idle_timeout_ms_ == 0)
+    return;
+  bool producer = this->speaker_active_.load();
+#ifdef USE_MICROPHONE
+  producer = producer || this->mic_source_ != nullptr;
+#endif
+  const uint32_t now = millis();
+  if (producer || this->has_audio())
+    this->idle_since_ms_ = now;
+  const bool wanted = now - this->idle_since_ms_ < this->idle_timeout_ms_;
+  if (wanted == this->media_wanted_)
+    return;
+  this->media_wanted_ = wanted;
+  this->source_.set_media_active(wanted);
 }
 
 void A2DPSource::loop() {
@@ -522,6 +547,8 @@ void A2DPSource::loop() {
     }
   }
 
+  this->update_media_();
+
   uint32_t now = millis();
   if (now - this->last_report_ms_ >= 10000) {
     this->last_report_ms_ = now;
@@ -547,6 +574,7 @@ void A2DPSource::dump_config() {
     ESP_LOGCONFIG(TAG, "  Target: chosen from the select");
   }
   ESP_LOGCONFIG(TAG, "  Buffer: %" PRIu32 " ms", this->buffer_duration_ms_);
+  ESP_LOGCONFIG(TAG, "  Idle timeout: %" PRIu32 " ms", this->idle_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Device stored: %s", YESNO(this->has_stored_device()));
 }
 

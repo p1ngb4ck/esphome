@@ -29,6 +29,8 @@
 
 #define APP_RC_CT_TL_RN_VOLUME_CHANGE (1)
 #define BT_APP_HEART_BEAT_EVT (0xff00)
+// ESPHome: set_media_active() changed what the stream should do
+#define BT_APP_MEDIA_WANT_EVT (0xff01)
 
 /* event for handler "bt_av_hdl_stack_up */
 enum {
@@ -41,6 +43,7 @@ enum {
   APP_AV_MEDIA_STATE_STARTING,
   APP_AV_MEDIA_STATE_STARTED,
   APP_AV_MEDIA_STATE_STOPPING,
+  APP_AV_MEDIA_STATE_SUSPENDING,  // ESPHome: suspend without disconnecting
 };
 
 BluetoothA2DPSource *actual_bluetooth_a2dp_source;
@@ -679,6 +682,12 @@ void BluetoothA2DPSource::app_a2d_callback(esp_a2d_cb_event_t event,
                        sizeof(esp_a2d_cb_param_t), nullptr);
 }
 
+void BluetoothA2DPSource::set_media_active(bool active) {
+  if (media_wanted.exchange(active) == active || s_a2d_state != APP_AV_STATE_CONNECTED)
+    return;
+  bt_app_work_dispatch(ccall_bt_app_av_sm_hdlr, BT_APP_MEDIA_WANT_EVT, nullptr, 0, nullptr);
+}
+
 void BluetoothA2DPSource::a2d_app_heart_beat(void *arg) {
   bt_app_work_dispatch(ccall_bt_app_av_sm_hdlr, BT_APP_HEART_BEAT_EVT, nullptr, 0,
                        nullptr);
@@ -726,6 +735,8 @@ void BluetoothA2DPSource::process_user_state_callbacks(uint16_t event,
 void BluetoothA2DPSource::bt_app_av_sm_hdlr(uint16_t event, void *param) {
   ESP_LOGVV(BT_AV_TAG, "%s state %s, evt 0x%x", __func__,
            to_state_str(s_a2d_state), event);
+  if (event == BT_APP_MEDIA_WANT_EVT && s_a2d_state != APP_AV_STATE_CONNECTED)
+    return;
   process_user_state_callbacks(event, param);
 
   /* select handler according to different states */
@@ -929,9 +940,19 @@ void BluetoothA2DPSource::bt_app_av_state_connected_hdlr(uint16_t event,
       break;
     }
     case BT_APP_HEART_BEAT_EVT: {
-      if (s_media_state == APP_AV_MEDIA_STATE_IDLE) {
+      if (s_media_state == APP_AV_MEDIA_STATE_IDLE && media_wanted.load()) {
         ESP_LOGVV(BT_AV_TAG, "a2dp media ready checking ...");
         esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      }
+      break;
+    }
+    case BT_APP_MEDIA_WANT_EVT: {
+      if (media_wanted.load()) {
+        if (s_media_state == APP_AV_MEDIA_STATE_IDLE)
+          esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      } else if (s_media_state == APP_AV_MEDIA_STATE_STARTED) {
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+        s_media_state = APP_AV_MEDIA_STATE_SUSPENDING;
       }
       break;
     }
@@ -996,7 +1017,7 @@ void BluetoothA2DPSource::bt_app_av_media_proc(uint16_t event, void *param) {
       if (event == ESP_A2D_MEDIA_CTRL_ACK_EVT) {
         a2d = (esp_a2d_cb_param_t *)(param);
         if (a2d->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY &&
-            a2d->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
+            a2d->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS && media_wanted.load()) {
           ESP_LOGVV(BT_AV_TAG, "a2dp media ready, starting ...");
           esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
           s_media_state = APP_AV_MEDIA_STATE_STARTING;
@@ -1013,6 +1034,10 @@ void BluetoothA2DPSource::bt_app_av_media_proc(uint16_t event, void *param) {
           ESP_LOGI(BT_AV_TAG, "a2dp media start successfully.");
           s_intv_cnt = 0;
           s_media_state = APP_AV_MEDIA_STATE_STARTED;
+          if (!media_wanted.load()) {
+            esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+            s_media_state = APP_AV_MEDIA_STATE_SUSPENDING;
+          }
         } else {
           // not started succesfully, transfer to idle state
           ESP_LOGI(BT_AV_TAG, "a2dp media start failed.");
@@ -1024,6 +1049,23 @@ void BluetoothA2DPSource::bt_app_av_media_proc(uint16_t event, void *param) {
 
     case APP_AV_MEDIA_STATE_STARTED: {
       ESP_LOGVV(BT_AV_TAG, "a2dp media started");
+      break;
+    }
+
+    case APP_AV_MEDIA_STATE_SUSPENDING: {
+      if (event == ESP_A2D_MEDIA_CTRL_ACK_EVT) {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        if (a2d->media_ctrl_stat.cmd != ESP_A2D_MEDIA_CTRL_SUSPEND)
+          break;
+        if (a2d->media_ctrl_stat.status != ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
+          s_media_state = APP_AV_MEDIA_STATE_STARTED;
+          break;
+        }
+        ESP_LOGI(BT_AV_TAG, "a2dp media suspended");
+        s_media_state = APP_AV_MEDIA_STATE_IDLE;
+        if (media_wanted.load())
+          esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+      }
       break;
     }
 

@@ -18,6 +18,7 @@ AUTO_LOAD = ["bt_classic"]
 CONF_A2DP_SOURCE_ID = "a2dp_source_id"
 CONF_BUFFER_DURATION = "buffer_duration"
 CONF_FALLBACK_TIME = "fallback_time"
+CONF_IDLE_TIMEOUT = "idle_timeout"
 CONF_LOCAL_NAME = "local_name"
 CONF_ON_CONNECTED = "on_connected"
 CONF_ON_DISCONNECTED = "on_disconnected"
@@ -78,6 +79,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_FALLBACK_TIME, default="20s"
             ): cv.positive_time_period_seconds,
+            # Suspend the stream (no packets, link kept) once nothing has played
+            # this long; 0s keeps it running. A microphone source never idles.
+            cv.Optional(
+                CONF_IDLE_TIMEOUT, default="30s"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_VOLUME, default=60): cv.int_range(0, 127),
             # Slack between the microphone and the Bluetooth stack. The two run
             # on independent clocks, so one always drifts against the other.
@@ -184,6 +190,7 @@ async def to_code(config):
     cg.add(var.set_fallback_time(config[CONF_FALLBACK_TIME].total_seconds))
     cg.add(var.set_volume(config[CONF_VOLUME]))
     cg.add(var.set_buffer_duration_ms(config[CONF_BUFFER_DURATION].total_milliseconds))
+    cg.add(var.set_idle_timeout_ms(config[CONF_IDLE_TIMEOUT].total_milliseconds))
     cg.add(var.set_pair_on_boot_if_empty(config[CONF_PAIR_ON_BOOT_IF_EMPTY]))
 
     for conf in config.get(CONF_ON_PAIRED, []):

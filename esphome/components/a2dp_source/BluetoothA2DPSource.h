@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <vector>
 
 #include "BluetoothA2DPCommon.h"
@@ -121,6 +122,9 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
 
   /// activate Secure Simple Pairing
   virtual void set_ssp_enabled(bool active) { this->ssp_enabled = active; }
+  /// ESPHome: false suspends the media stream while staying connected (no packets are sent),
+  /// true starts it again. Callable from any task.
+  void set_media_active(bool active);
 
   /// activate / deactivate the automatic reconnection to the last address (per
   /// default this is on) If active is true, will retry up to max_retries times
@@ -283,6 +287,7 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
 #endif
   const char* dev_name = "ESP32_A2DP_SRC";
   bool ssp_enabled = false;
+  std::atomic<bool> media_wanted{true};  // ESPHome
   std::vector<const char*> bt_names;
   esp_bt_pin_type_t pin_type;
   esp_bt_pin_code_t pin_code;

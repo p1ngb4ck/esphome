@@ -59,6 +59,7 @@ class A2DPSource : public Component
   void set_fallback_time(uint32_t seconds) { this->fallback_seconds_ = seconds; }
   void set_volume(uint8_t volume) { this->volume_ = volume; }
   void set_buffer_duration_ms(uint32_t ms) { this->buffer_duration_ms_ = ms; }
+  void set_idle_timeout_ms(uint32_t ms) { this->idle_timeout_ms_ = ms; }
   void set_pair_on_boot_if_empty(bool enable) { this->pair_on_boot_if_empty_ = enable; }
   void set_device_select(A2DPDeviceSelect *select) { this->device_select_ = select; }
 
@@ -113,7 +114,7 @@ class A2DPSource : public Component
   bool has_stored_device() const;
 
   /// @brief Speaker platform: 16 bit stereo 44.1 kHz into the stream. Returns the bytes taken; while
-  ///        the sink takes no audio everything is taken and dropped.
+  ///        no sink is connected everything is taken and dropped.
   size_t write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait);
   void clear_audio();
   bool has_audio() const;
@@ -175,6 +176,7 @@ class A2DPSource : public Component
   std::atomic<uint8_t> pending_connection_state_{0xFF};
 
   void publish_device_list_();
+  void update_media_();
 
   A2DPDeviceSelect *device_select_{nullptr};
   std::vector<DiscoveredDevice> devices_;
@@ -192,6 +194,9 @@ class A2DPSource : public Component
 
   std::atomic<uint32_t> underrun_frames_{0};
   uint32_t last_report_ms_{0};
+  uint32_t idle_timeout_ms_{0};
+  uint32_t idle_since_ms_{0};
+  bool media_wanted_{true};
 
   std::vector<Trigger<std::string> *> paired_triggers_;
   std::vector<Trigger<> *> connected_triggers_;
