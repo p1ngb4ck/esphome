@@ -210,7 +210,6 @@ void SimpleVideoPlayer::render_controls_() {
   }
   lv_area_t area;
   lv_obj_get_coords(this->ctl_widget_, &area);
-  const int32_t ext = lv_obj_get_ext_draw_size(this->ctl_widget_);
   lv_obj_get_coords(this->ctl_widget_, &this->ctl_area_);
   if (this->ctl_seek_ != nullptr)
     lv_obj_get_coords(this->ctl_seek_, &this->ctl_seek_area_);
@@ -221,6 +220,8 @@ void SimpleVideoPlayer::render_controls_() {
     this->hide_controls();
     return;
   }
+  // The snapshot is the widget plus its extra draw size on every side (lv_snapshot_reshape_draw_buf).
+  const int32_t ext = (static_cast<int32_t>(this->ctl_snapshot_->header.w) - lv_obj_get_width(this->ctl_widget_)) / 2;
   lv_area_increase(&area, ext, ext);
 
   // The part on the screen, in LVGL coordinates, then where it lies on the panel. Same mapping as
