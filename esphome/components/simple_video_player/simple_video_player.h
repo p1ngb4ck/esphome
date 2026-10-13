@@ -543,8 +543,17 @@ class SimpleVideoPlayer : public Component
   /// FreeRTOS task entry point (decode/playback task, pinned to Core 1)
   static void playback_task_entry_(void *param);
 
-  /// play() for a file, and for the network stream (net_session_ set first).
+  /// Starts the session's playback task. Only while no session runs (session_busy_()), under
+  /// session_lock_: from run_pending_start_() and, for the network stream, the network task.
   void start_playback_(const std::string &video_path);
+  /// A task of the last session still runs (playback, reader, audio): nothing new starts before.
+  bool session_busy_() const;
+  /// Main loop: what play()/next()/... asked for, once the session before has fully ended. The
+  /// main loop never waits for that: the ending session's file closes through the storage worker,
+  /// whose completions only the main loop delivers.
+  void run_pending_start_();
+  /// The current session is told to end (play(), next() and the like start another after it).
+  void end_session_();
 
   /// Main playback loop (runs in task)
   void playback_loop_();
@@ -554,7 +563,7 @@ class SimpleVideoPlayer : public Component
   static void reader_task_entry_(void *param);
   void reader_loop_();
 
-  /// Wait for a task to stop
+  /// Playback task: waits (bounded) for one of its helper tasks to have exited.
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
 
   /// Playback task: carries out a seek() -- holds the sound, has the reader jump, restarts the sound.
@@ -564,10 +573,9 @@ class SimpleVideoPlayer : public Component
   /// Reader task: back to the first frame (loop).
   bool reader_rewind_();
 
-  /// Main loop: the playlist becomes the videos of path's folder (stops what plays: the listing
-  /// must not run beside the reader).
+  /// Main loop, no session running: the playlist becomes the videos of path's folder.
   void load_folder_playlist_(const std::string &path);
-  /// Main loop: plays playlist item `index`.
+  /// Main loop: playlist item `index` is to play (run_pending_start_()).
   void play_index_(size_t index);
 
   //========================================================================
@@ -856,6 +864,8 @@ class SimpleVideoPlayer : public Component
   // longer signal the per-file mode -- this flag does. Set in init_audio_decoder_() per play().
   std::atomic<bool> audio_use_decoder_{false};
   TaskHandle_t audio_task_handle_{nullptr};       // Audio processing task (runs on Core 0)
+  void end_session_audio_();
+  bool session_audio_{false};  // this session started the audio task and the speaker
   volatile bool audio_task_stop_{false};          // Signal to stop audio task
 #endif
 
@@ -1377,6 +1387,15 @@ class SimpleVideoPlayer : public Component
   RepeatMode repeat_{RepeatMode::OFF};
   std::atomic<bool> advance_req_{false};
   static constexpr size_t MAX_PLAYLIST = 500;
+  // What is to play next (main loop): a file (start_path_, its folder as the playlist with
+  // start_folder_) or, start_path_ empty, playlist item start_index_. Started by
+  // run_pending_start_() once the session before has ended.
+  std::atomic<bool> start_pending_{false};
+  bool start_folder_{false};
+  std::string start_path_;
+  size_t start_index_{0};
+  // Held from "no session runs" to the new playback task: the main loop and the network task.
+  SemaphoreHandle_t session_lock_{nullptr};
 
   // Seeking: seek() (main loop) -> playback task (handle_seek_) -> reader task (reader_seek_).
   std::atomic<bool> seek_pending_{false};

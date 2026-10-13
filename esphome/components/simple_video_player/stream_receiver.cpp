@@ -51,6 +51,8 @@ static constexpr size_t STREAM_RECV_BYTES = 32768;
 static constexpr uint32_t ROAM_QUIET_MS = 15000;
 static constexpr int HEARTBEAT_BYTES = 16;
 static constexpr uint32_t STREAM_RECV_TIMEOUT_MS = 30000;
+// How long a starting stream waits for the session before it to end.
+static constexpr uint32_t SESSION_END_WAIT_MS = 10000;
 static constexpr uint32_t STREAM_FRAME_WAIT_MS = 250;
 
 static inline uint16_t rd16(const uint8_t *p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
@@ -298,12 +300,26 @@ void SimpleVideoPlayer::stream_net_loop_() {
           }
           kind_known = true;
           if (std::memcmp(magic, "RIFF", sizeof(magic)) == 0) {
-            // An AVI (svp_relay): played like a file from SD. Not while something else plays.
-            if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED)
+            // An AVI (svp_relay): played like a file from SD. Not while something else plays or is
+            // about to; a session that still ends is waited for here (this task may wait, the main
+            // loop may not).
+            if (this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
+                this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED)
               break;
+            for (uint32_t waited = 0; this->session_busy_() && waited < SESSION_END_WAIT_MS; waited += 10)
+              vTaskDelay(pdMS_TO_TICKS(10));
+            if (xSemaphoreTake(this->session_lock_, pdMS_TO_TICKS(SESSION_END_WAIT_MS)) != pdTRUE)
+              break;
+            const PlayerState st = this->state_.load(std::memory_order_acquire);
+            if (this->session_busy_() || this->start_pending_.load(std::memory_order_acquire) ||
+                st == PlayerState::PLAYING || st == PlayerState::PAUSED) {
+              xSemaphoreGive(this->session_lock_);
+              break;
+            }
             this->net_session_ = true;
             this->stream_played_to_end_.store(false, std::memory_order_release);
             this->start_playback_("network stream");
+            xSemaphoreGive(this->session_lock_);
             this->stream_avi_.store(true, std::memory_order_release);
             this->stream_connected_.store(false, std::memory_order_release);
             continue;

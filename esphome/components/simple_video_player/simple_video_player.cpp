@@ -57,7 +57,8 @@ void SimpleVideoPlayer::setup() {
 
   // Every PSRAM buffer of the player comes from here (psram_pool_size); plan_pool_() shares it out.
   this->media_lock_ = xSemaphoreCreateMutex();
-  if (this->media_lock_ == nullptr || !this->pool_.init(this->psram_pool_size_)) {
+  this->session_lock_ = xSemaphoreCreateMutex();
+  if (this->media_lock_ == nullptr || this->session_lock_ == nullptr || !this->pool_.init(this->psram_pool_size_)) {
     ESP_LOGE(TAG, "Could not take the %" PRIu32 "-byte PSRAM pool", this->psram_pool_size_);
     this->mark_failed();
     return;
@@ -198,6 +199,7 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {
   this->handle_output_release_();
+  this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
 #endif
@@ -248,8 +250,11 @@ void SimpleVideoPlayer::loop() {
       this->dsi_lvgl_paused_ = true;
     }
     const PlayerState state = this->state_.load(std::memory_order_acquire);
-    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::STOPPED &&
-        !this->advance_req_.load(std::memory_order_acquire)) {
+    // Back to LVGL once the playback task is gone (stopped, ended or failed), not between two
+    // videos of a playlist.
+    const bool ended = (state == PlayerState::STOPPED || state == PlayerState::ERROR) && this->task_handle_ == nullptr;
+    if (this->dsi_lvgl_paused_ && !streaming && ended && !this->advance_req_.load(std::memory_order_acquire) &&
+        !this->start_pending_.load(std::memory_order_acquire)) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
     }
@@ -383,13 +388,11 @@ void SimpleVideoPlayer::dump_config() {
 //========================================================================
 
 void SimpleVideoPlayer::play(const std::string &video_path, bool folder_playlist) {
-  this->playlist_.clear();
-  this->playlist_index_ = 0;
-  if (folder_playlist)
-    this->load_folder_playlist_(video_path);
-  if (this->playlist_.empty())
-    this->playlist_.push_back(video_path);
-  this->play_index_(this->playlist_index_);
+  this->start_path_ = video_path;
+  this->start_folder_ = folder_playlist;
+  this->start_pending_.store(true, std::memory_order_release);
+  this->end_session_();
+  this->run_pending_start_();
 }
 
 void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) {
@@ -402,12 +405,58 @@ void SimpleVideoPlayer::play_list(std::vector<std::string> paths, size_t start) 
 }
 
 void SimpleVideoPlayer::play_index_(size_t index) {
-  this->playlist_index_ = index;
-  this->advance_req_.store(false, std::memory_order_relaxed);
-#ifdef SVP_STREAM
-  this->net_session_ = false;
+  this->start_path_.clear();
+  this->start_index_ = index;
+  this->start_pending_.store(true, std::memory_order_release);
+  this->end_session_();
+  this->run_pending_start_();
+}
+
+bool SimpleVideoPlayer::session_busy_() const {
+#ifdef USE_AUDIO
+  if (this->audio_task_handle_ != nullptr)
+    return true;
 #endif
-  this->start_playback_(this->playlist_[index]);
+  return this->task_handle_ != nullptr || this->reader_task_handle_ != nullptr;
+}
+
+void SimpleVideoPlayer::run_pending_start_() {
+  if (!this->start_pending_.load(std::memory_order_acquire))
+    return;
+  // What started meanwhile (the network stream) ends too: what was asked for last plays.
+  const PlayerState now = this->state_.load(std::memory_order_acquire);
+  if (now == PlayerState::PLAYING || now == PlayerState::PAUSED)
+    this->end_session_();
+  if (this->session_busy_())
+    return;
+  if (xSemaphoreTake(this->session_lock_, 0) != pdTRUE)
+    return;  // the network task is starting a stream: next loop
+  if (this->session_busy_() || this->state_.load(std::memory_order_acquire) == PlayerState::PLAYING ||
+      this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
+    xSemaphoreGive(this->session_lock_);
+    return;
+  }
+  this->start_pending_.store(false, std::memory_order_release);
+  size_t index = this->start_index_;
+  if (!this->start_path_.empty()) {
+    this->playlist_.clear();
+    this->playlist_index_ = 0;
+    if (this->start_folder_)
+      this->load_folder_playlist_(this->start_path_);
+    if (this->playlist_.empty())
+      this->playlist_.push_back(this->start_path_);
+    index = this->playlist_index_;
+    this->start_path_.clear();
+  }
+  if (index < this->playlist_.size()) {
+    this->playlist_index_ = index;
+    this->advance_req_.store(false, std::memory_order_relaxed);
+#ifdef SVP_STREAM
+    this->net_session_ = false;
+#endif
+    this->start_playback_(this->playlist_[index]);
+  }
+  xSemaphoreGive(this->session_lock_);
 }
 
 void SimpleVideoPlayer::next() {
@@ -446,10 +495,6 @@ void SimpleVideoPlayer::load_folder_playlist_(const std::string &path) {
   const size_t slash = path.rfind('/');
   if (slash == std::string::npos || slash == 0 || storage::global_storage_registry == nullptr)
     return;
-  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED) {
-    this->stop();
-    this->wait_for_task_stop_(this->task_handle_, 5000);
-  }
   const std::string dir = path.substr(0, slash);
   const char *rel = nullptr;
   storage::PathStorage *storage = storage::global_storage_registry->resolve_path(dir.c_str(), &rel);
@@ -506,13 +551,11 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
     ESP_LOGE(TAG, "Cannot play: component failed to initialize (see setup logs)");
     return;
   }
-  ESP_LOGI(TAG, "Playing video: %s", video_path.c_str());
-
-  // Stop any existing playback
-  if (this->state_ != PlayerState::STOPPED) {
-    this->stop();
-    this->wait_for_task_stop_(this->task_handle_, 5000);
+  if (this->session_busy_()) {
+    ESP_LOGE(TAG, "Not starting %s: the last session still ends", video_path.c_str());
+    return;
   }
+  ESP_LOGI(TAG, "Playing video: %s", video_path.c_str());
 
   // Update state. video_path_ is written here, before the playback task is created below (the
   // task creation is a full memory barrier), and only read by that task -- no lock needed.
@@ -594,9 +637,14 @@ void SimpleVideoPlayer::resume() {
 }
 
 void SimpleVideoPlayer::stop() {
+  this->start_pending_.store(false, std::memory_order_release);
+  this->end_session_();
+}
+
+void SimpleVideoPlayer::end_session_() {
   this->advance_req_.store(false, std::memory_order_relaxed);
   PlayerState prev = this->state_.exchange(PlayerState::STOPPED, std::memory_order_acq_rel);
-  if (prev != PlayerState::STOPPED) {
+  if (prev == PlayerState::PLAYING || prev == PlayerState::PAUSED) {
     ESP_LOGI(TAG, "Stopping playback");
   }
 }
@@ -822,6 +870,9 @@ void SimpleVideoPlayer::playback_loop_() {
     ESP_LOGE(TAG, "Failed to allocate buffers");
     this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
     this->close_file_();
+#ifdef USE_AUDIO
+    this->end_session_audio_();  // its task waits for a first frame that never comes
+#endif
     return;
   }
 
@@ -1266,27 +1317,7 @@ void SimpleVideoPlayer::playback_loop_() {
   // Buffers are only freed in destructor when component is destroyed
 
 #ifdef USE_AUDIO
-  // Stop and cleanup audio processing
-  if (this->audio_enabled_) {
-    // Stop audio processing task first
-    this->stop_audio_task_();
-
-    // Stop speaker
-    if (this->speaker_) {
-      this->speaker_->stop();
-    }
-
-    // audio_decoder_ is permanent now too (allocated once in setup(), see there) -- deliberately
-    // NOT reset()'d here, same reasoning as the ring buffers below: init_audio_decoder_() calls
-    // add_source()/add_sink()/start() on it again right before the next session starts, which is
-    // enough to reinitialize it for a new file (verified against the real audio component
-    // source). audio_input_ring_buffer_/audio_decoded_ring_buffer_/audio_temp_buffer_ are the
-    // same story -- init_audio_decoder_() clears the ring buffers itself, and the temp buffer
-    // needs no clearing (fully overwritten before every read).
-    this->audio_enabled_ = false;
-
-    ESP_LOGI(TAG, "Audio processing stopped");
-  }
+  this->end_session_audio_();
 #endif
 
   // Blank the canvas on stop -- cosmetic best-effort (it otherwise keeps showing the last frame).
@@ -2414,6 +2445,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
   // (wait_speaker_running_() + av_started_).
   this->speaker_->start();
   this->audio_enabled_ = true;
+  this->session_audio_ = true;
   ESP_LOGI(TAG, "Audio processing initialized successfully (%s mode)", use_decoder ? "decoder" : "direct PCM");
   return true;
 }
@@ -2656,6 +2688,20 @@ void SimpleVideoPlayer::wait_speaker_running_() {
   }
 }
 
+// Playback task, end of a session: the audio task (also one that turned audio off itself, or that
+// still waits for the first frame) and the speaker.
+void SimpleVideoPlayer::end_session_audio_() {
+  // audio_decoder_ and the rings are permanent (setup()): init_audio_decoder_() starts them anew.
+  const bool had_audio = this->session_audio_ || this->audio_task_handle_ != nullptr;
+  this->stop_audio_task_();
+  if (had_audio && this->speaker_ != nullptr)
+    this->speaker_->stop();
+  this->audio_enabled_ = false;
+  this->session_audio_ = false;
+  if (had_audio)
+    ESP_LOGI(TAG, "Audio processing stopped");
+}
+
 void SimpleVideoPlayer::stop_audio_task_() {
   if (this->audio_task_handle_ != nullptr) {
     ESP_LOGI(TAG, "Stopping audio processing task...");
@@ -2671,6 +2717,8 @@ void SimpleVideoPlayer::stop_audio_task_() {
 
     if (this->audio_task_handle_ != nullptr) {
       ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
+      // Off the task watchdog first: a deleted task left subscribed trips it.
+      esp_task_wdt_delete(this->audio_task_handle_);
       vTaskDelete(this->audio_task_handle_);
       this->audio_task_handle_ = nullptr;
     }
