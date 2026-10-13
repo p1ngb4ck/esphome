@@ -214,6 +214,11 @@ async def to_code(config):
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_stop_trigger(trigger))
 
+    # Bluedroid traces "l2cab is_cong_cback_context" as an error each time a congested L2CAP
+    # channel frees up and the stream sends from the callback, which streaming does many times a
+    # second; compiled out, the formatting and logging cost goes with it.
+    add_idf_sdkconfig_option("CONFIG_BT_LOG_L2CAP_TRACE_LEVEL_NONE", True)
+
     if PSRAM_DOMAIN in CORE.config:
         # Bluedroid takes every queued SBC packet (4 kB) from malloc, which with PSRAM
         # in caps-only mode is internal RAM: a slow sink then starves the device.
