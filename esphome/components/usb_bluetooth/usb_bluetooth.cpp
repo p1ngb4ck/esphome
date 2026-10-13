@@ -294,6 +294,7 @@ void USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
 void USBBluetooth::start_split_() {
   hci_split::set_br(this);
   this->stack_attached_.store(true, std::memory_order_release);
+  this->set_interval("acl_check", 10000, []() { hci_split::report_acl(); });
   if (g_stack_started) {
     ESP_LOGW(TAG, "Bluedroid was started with the previous dongle; restart to use this one for BR/EDR");
     return;

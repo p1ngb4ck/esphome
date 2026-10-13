@@ -9,6 +9,8 @@
 #include <freertos/semphr.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cinttypes>
 #include <cstring>
 
 // Linker --wrap: every caller of esp_bluedroid_attach_hci_driver() lands here.
@@ -196,6 +198,79 @@ static void to_host(uint8_t *p) {
     return;
   p[0] = static_cast<uint8_t>(host & 0xFF);
   p[1] = static_cast<uint8_t>((p[1] & 0xF0) | (host >> 8));
+}
+
+// -- ACL reassembly check -----------------------------------------------------------------
+
+// Per side, the L2CAP frames still waiting for continuations. Each table is touched only by the
+// task its side receives on (USB task, esp_hosted RX task); the counts are read by the main loop.
+struct OpenFrame {
+  uint16_t handle{NO_HANDLE};
+  uint16_t remaining{0};
+};
+struct AclCheck {
+  OpenFrame open[MAX_LE_LINKS];
+  std::atomic<uint32_t> orphans{0};  // continuation with no frame open on its handle
+  std::atomic<uint32_t> cut{0};      // a new frame started before the open one was complete
+  std::atomic<uint16_t> handle{0};   // the last handle either happened on
+};
+static AclCheck s_check_br;
+static AclCheck s_check_le;
+
+static void check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
+  if (len < 5)
+    return;
+  const uint16_t handle = (h4[1] | (h4[2] << 8)) & 0x0FFF;
+  const uint8_t boundary = (h4[2] >> 4) & 0x03;
+  const uint16_t acl_len = h4[3] | (h4[4] << 8);
+  OpenFrame *frame = nullptr;
+  OpenFrame *spare = nullptr;
+  for (auto &entry : check.open) {
+    if (entry.handle == handle)
+      frame = &entry;
+    else if (entry.handle == NO_HANDLE && spare == nullptr)
+      spare = &entry;
+  }
+  if (boundary == 0x01) {
+    if (frame == nullptr) {
+      check.orphans.fetch_add(1, std::memory_order_relaxed);
+      check.handle.store(handle, std::memory_order_relaxed);
+    } else if (acl_len >= frame->remaining) {
+      frame->handle = NO_HANDLE;
+    } else {
+      frame->remaining -= acl_len;
+    }
+    return;
+  }
+  if (frame != nullptr) {
+    check.cut.fetch_add(1, std::memory_order_relaxed);
+    check.handle.store(handle, std::memory_order_relaxed);
+    frame->handle = NO_HANDLE;
+    spare = frame;
+  }
+  if (acl_len < 4 || len < 9)
+    return;
+  const uint32_t total = 4u + (h4[5] | (h4[6] << 8));
+  if (total <= acl_len || spare == nullptr)
+    return;
+  spare->handle = handle;
+  spare->remaining = static_cast<uint16_t>(total - acl_len);
+}
+
+static void report_side(AclCheck &check, const char *side) {
+  const uint32_t orphans = check.orphans.exchange(0, std::memory_order_relaxed);
+  const uint32_t cut = check.cut.exchange(0, std::memory_order_relaxed);
+  if (orphans == 0 && cut == 0)
+    return;
+  ESP_LOGW(TAG,
+           "ACL from the %s: %" PRIu32 " continuation(s) without a start, %" PRIu32
+           " frame(s) cut short, last on handle 0x%03X",
+           side, orphans, cut, check.handle.load(std::memory_order_relaxed));
+}
+
+void report_acl() {
+  report_side(s_check_br, "dongle");
+  report_side(s_check_le, "co-processor");
 }
 
 // -- To Bluedroid --------------------------------------------------------------------------
@@ -773,6 +848,7 @@ static int le_recv(uint8_t *data, uint16_t len) {
       Lock lock;
       to_host(s_le_rx + 1);
     }
+    check_acl(s_check_le, s_le_rx, len);
     deliver(s_le_rx, len);
     return 0;
   }
@@ -836,6 +912,8 @@ void br_recv(uint8_t *h4, size_t len) {
     on_event(SIDE_BR, h4, len);
     return;
   }
+  if (h4[0] == H4_ACL)
+    check_acl(s_check_br, h4, len);
   deliver(h4, len);
 }
 

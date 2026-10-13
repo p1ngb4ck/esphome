@@ -31,6 +31,8 @@ void set_br(USBBluetooth *br);
 void br_recv(uint8_t *h4, size_t len);
 /// USB task: the dongle can take another packet.
 void br_send_available();
+/// Main loop: log ACL continuations that arrived without their start, per side, since the last call.
+void report_acl();
 
 }  // namespace hci_split
 }  // namespace esphome::usb_bluetooth
