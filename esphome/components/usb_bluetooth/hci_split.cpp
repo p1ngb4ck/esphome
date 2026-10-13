@@ -206,7 +206,7 @@ static void to_host(uint8_t *p) {
 
 // Per side, the L2CAP frames still waiting for continuations. Each table is touched only by the
 // task its side receives on (USB task, esp_hosted RX task); the counts are read by the main loop.
-// A continuation for no frame is dropped here, counted, and reported every 10s, instead of
+// A continuation for no frame is dropped here and counted (verbose log every 10s), instead of
 // reaching Bluedroid, which drops it as well but logs every one.
 struct OpenFrame {
   uint16_t handle{NO_HANDLE};
@@ -277,7 +277,7 @@ static void report_side(AclCheck &check, const char *side) {
   const uint32_t cut = check.cut.exchange(0, std::memory_order_relaxed);
   if (orphans == 0 && cut == 0)
     return;
-  ESP_LOGW(TAG,
+  ESP_LOGV(TAG,
            "ACL from the %s: %" PRIu32 " continuation(s) without a start, %" PRIu32
            " frame(s) cut short, last on handle 0x%03X",
            side, orphans, cut, check.handle.load(std::memory_order_relaxed));
