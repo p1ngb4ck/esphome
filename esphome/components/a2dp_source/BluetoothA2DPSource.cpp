@@ -481,7 +481,8 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
           s_a2d_state = APP_AV_STATE_CONNECTING;
           ESP_LOGVV(BT_AV_TAG, "Device discovery stopped.");
           ESP_LOGI(BT_AV_TAG, "a2dp connecting to peer: %s", s_peer_bdname);
-          esp_bt_gap_get_remote_services(peer_bd_addr);
+          // ESPHome: no separate service search; it pages the device alongside the A2DP connect
+          // and a controller refuses the second page (HCI 0x0B, connection exists).
           esp_a2d_connect(peer_bd_addr);
         } else {
           // not discovered, continue to discover
