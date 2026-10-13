@@ -43,8 +43,10 @@ void AudioRouter::setup() {
 }
 
 void AudioRouter::loop() {
-  if (this->switching_.load() && this->in_play_.load() == 0)
+  if (this->switching_.load() && this->in_play_.load() == 0 && this->lock_.try_lock()) {
     this->switch_now_();
+    this->lock_.unlock();
+  }
   if (this->state_ == speaker::STATE_STOPPING && this->current_()->is_stopped())
     this->state_ = speaker::STATE_STOPPED;
 }
@@ -62,11 +64,16 @@ void AudioRouter::dump_config() {
 size_t AudioRouter::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
   if (this->is_failed())
     return length;
+  // Players write from their own tasks, two at once when one starts while the other still ends:
+  // one after the other, as the conversion keeps state between calls.
+  LockGuard guard(this->lock_);
   this->in_play_.fetch_add(1);
   size_t written = 0;
   if (!this->switching_.load()) {
-    if (this->state_ != speaker::STATE_RUNNING)
-      this->start();
+    if (this->state_ != speaker::STATE_RUNNING) {
+      this->start_output_();
+      this->state_ = speaker::STATE_RUNNING;
+    }
     written = this->convert_ ? this->play_converted_(data, length, ticks_to_wait)
                              : this->current_()->play(data, length, ticks_to_wait);
   }
@@ -77,6 +84,7 @@ size_t AudioRouter::play(const uint8_t *data, size_t length, TickType_t ticks_to
 void AudioRouter::start() {
   if (this->is_failed())
     return;
+  LockGuard guard(this->lock_);
   this->start_output_();
   this->state_ = speaker::STATE_RUNNING;
 }
@@ -214,8 +222,10 @@ void AudioRouter::select_output(size_t index) {
   if (index == this->active_.load() && !this->switching_.load())
     return;
   this->switching_.store(true);
-  if (this->in_play_.load() == 0)
+  if (this->in_play_.load() == 0 && this->lock_.try_lock()) {
     this->switch_now_();
+    this->lock_.unlock();
+  }
 }
 
 void AudioRouter::switch_now_() {
