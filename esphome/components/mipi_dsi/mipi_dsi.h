@@ -16,8 +16,6 @@
 
 #include "esp_lcd_mipi_dsi.h"
 
-#include <atomic>
-
 namespace esphome::mipi_dsi {
 
 constexpr static const char *const TAG = "display.mipi_dsi";
@@ -82,10 +80,6 @@ class MipiDsi final : public display::Display {
   }
   void present_dsi_frame_buffer(void *fb);
 
-  uint8_t get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) override;
-  void present_scanout_buffer(void *buffer) override;
-  bool scanout_flipped() override;
-
   void smark_failed(const LogString *message, esp_err_t err);
 
   void update() override;
@@ -106,10 +100,6 @@ class MipiDsi final : public display::Display {
   void write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
                          int x_pad);
   bool check_buffer_();
-  static bool notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
-                                    void *user_ctx);
-  static bool notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
-                                    void *user_ctx);
   GPIOPin *reset_pin_{nullptr};
   std::vector<GPIOPin *> enable_pins_{};
   size_t width_{};
@@ -139,8 +129,6 @@ class MipiDsi final : public display::Display {
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   esp_lcd_panel_io_handle_t io_handle_{};
   SemaphoreHandle_t io_lock_{};
-  std::atomic<uint32_t> scan_frames_{0};
-  uint32_t flip_frame_{0};
   uint8_t *buffer_{nullptr};
   uint16_t x_low_{1};
   uint16_t y_low_{1};
