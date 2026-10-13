@@ -21,7 +21,6 @@
 #include <string>
 #include <vector>
 #include "buffered_file_reader.h"
-#include "psram_pool.h"
 
 namespace esphome {
 namespace simple_video_player {
@@ -142,19 +141,21 @@ class AVIParser {
    */
   int read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size);
 
-  /// The pool the index comes from, and how much of it the index may take.
-  void set_pool(PsramPool *pool, size_t max_bytes) {
-    this->pool_ = pool;
-    this->index_max_bytes_ = max_bytes;
+  /// The player's memory for the index of every file (kept by the player, never freed here).
+  void set_index_memory(uint32_t *memory, size_t bytes) {
+    if (memory != this->index_memory_)
+      this->release_index_();
+    this->index_memory_ = memory;
+    this->index_max_bytes_ = memory != nullptr ? bytes : 0;
   }
 
-  /// Reads the idx1 index (offsets of the video frames) into the pool. Reads from the end of the
+  /// Reads the idx1 index (offsets of the video frames) into the index memory. Reads from the end of the
   /// file and needs a blocking reader; the read position is restored. Tried once per file.
   bool load_index(uint8_t *scratch, size_t scratch_size);
   bool has_index() const { return this->index_ != nullptr; }
 
   /// Positions the reader at a video frame (0-based) through the index; clamped to the last frame.
-  /// An index too large for the pool keeps every n-th frame: then the frame at or before it.
+  /// An index too large for its memory keeps every n-th frame: then the frame at or before it.
   bool seek_to_frame(uint32_t frame_number);
 
   /// Video frames read so far: the next frame read has this number.
@@ -225,9 +226,9 @@ class AVIParser {
   /// After damage: the reader at the next intact video frame (index), else the next plausible
   /// chunk header read into hdr. False when there is none.
   bool resync_(uint8_t *hdr, size_t max_frame, bool &have_header);
-  PsramPool *pool_{nullptr};
+  uint32_t *index_memory_{nullptr};
   size_t index_max_bytes_{0};
-  uint32_t *index_{nullptr};  // chunk offset of every index_stride_-th video frame (pool)
+  uint32_t *index_{nullptr};  // chunk offset of every index_stride_-th video frame (index_memory_)
   uint32_t index_count_{0};
   uint32_t index_stride_{1};
   uint32_t recoveries_{0};  // in a row, without an intact frame between

@@ -612,8 +612,6 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
 }
 
 void AVIParser::release_index_() {
-  if (this->pool_ != nullptr)
-    this->pool_->free(reinterpret_cast<uint8_t *>(this->index_));
   this->index_ = nullptr;
   this->index_count_ = 0;
   this->index_stride_ = 1;
@@ -657,18 +655,13 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
     }
   }
   const uint32_t entries = idx_size / 16;
-  if (entries == 0 || this->pool_ == nullptr)
+  if (entries == 0 || this->index_memory_ == nullptr)
     return false;
-  // From the pool; when it has not the room for every frame, every second (fourth, ...) is kept.
-  const auto capacity = static_cast<uint32_t>(
-      std::min<size_t>(entries, std::min(this->index_max_bytes_, this->pool_->largest_free()) / sizeof(uint32_t)));
-  if (capacity < 2) {
-    ESP_LOGE(TAG, "No room in the PSRAM pool for the index");
+  // When the memory has not the room for every frame, every second (fourth, ...) is kept.
+  const auto capacity = static_cast<uint32_t>(std::min<size_t>(entries, this->index_max_bytes_ / sizeof(uint32_t)));
+  if (capacity < 2)
     return false;
-  }
-  this->index_ = reinterpret_cast<uint32_t *>(this->pool_->alloc(capacity * sizeof(uint32_t)));
-  if (this->index_ == nullptr)
-    return false;
+  this->index_ = this->index_memory_;
   this->index_stride_ = 1;
   const size_t per_read = scratch_size / 16;
   uint32_t left = entries;

@@ -1658,8 +1658,8 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     if (!this->avi_parser_) {
       this->avi_parser_ = std::make_unique<AVIParser>();
-      this->avi_parser_->set_pool(&this->pool_, this->index_reserve_);
     }
+    this->avi_parser_->set_index_memory(this->index_buf_, this->index_reserve_);
 
     // Seek back to start for parser
     if (!this->seek_to_(0)) {
@@ -1725,8 +1725,8 @@ bool SimpleVideoPlayer::open_stream_source_() {
   this->video_format_ = VideoFormat::AVI_MJPEG;
   if (!this->avi_parser_) {
     this->avi_parser_ = std::make_unique<AVIParser>();
-    this->avi_parser_->set_pool(&this->pool_, this->index_reserve_);
   }
+  this->avi_parser_->set_index_memory(this->index_buf_, this->index_reserve_);
   if (!this->avi_parser_->open(this->file_reader_.get())) {
     ESP_LOGE(TAG, "Network stream is not an AVI this player reads");
     this->close_file_();
@@ -2021,9 +2021,11 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
       slot.capacity = slot.data != nullptr ? this->frame_bytes_ : 0;
     }
   }
+  if (this->index_buf_ == nullptr)
+    this->index_buf_ = reinterpret_cast<uint32_t *>(this->media_alloc_(this->index_reserve_));
   if (this->ring_buf_ == nullptr)
     this->ring_buf_ = this->media_alloc_(this->ring_size_);
-  bool ok = this->ring_buf_ != nullptr;
+  bool ok = this->ring_buf_ != nullptr && this->index_buf_ != nullptr;
   for (auto &slot : this->frame_slots_)
     ok = ok && slot.data != nullptr;
   xSemaphoreGive(this->media_lock_);
@@ -2216,6 +2218,13 @@ bool SimpleVideoPlayer::release_media_() {
         slot.capacity = 0;
         released = true;
       }
+    }
+    if (this->index_buf_ != nullptr) {
+      if (this->avi_parser_)
+        this->avi_parser_->set_index_memory(nullptr, 0);
+      this->pool_.free(reinterpret_cast<uint8_t *>(this->index_buf_));
+      this->index_buf_ = nullptr;
+      released = true;
     }
     xSemaphoreGive(this->media_lock_);
   }

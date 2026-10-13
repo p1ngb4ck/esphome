@@ -647,7 +647,7 @@ class SimpleVideoPlayer : public Component
   /// From any task but the main loop: a piece for the media side; asks the main loop for the
   /// pictures' if needed.
   uint8_t *media_alloc_(size_t size);
-  /// Playback task: the read-ahead ring and the compressed-frame slot of a session.
+  /// Playback task: the read-ahead ring, the compressed-frame slot and the index of a session.
   bool acquire_session_buffers_();
   /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
   /// when it does not fit beside the other output, the main loop gives that back first.
@@ -681,6 +681,7 @@ class SimpleVideoPlayer : public Component
   PsramPool pool_;
   SemaphoreHandle_t media_lock_{nullptr};      // taking or giving back media buffers
   uint8_t *ring_buf_{nullptr};                 // the read-ahead ring (pool)
+  uint32_t *index_buf_{nullptr};               // a file's index (pool), kept with the ring
   std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
   enum : uint8_t { RELEASE_CANVAS = 1, RELEASE_DIRECT = 2 };
   std::atomic<uint8_t> output_release_req_{0};  // an output waits for the other one's memory
@@ -911,6 +912,18 @@ class SimpleVideoPlayer : public Component
     uint32_t used_ms{0};
   };
   static constexpr size_t PIC_FILE_COUNT = 3;
+  // A picture decoded at the canvas' size, in the pool: the shown one and its neighbours, so a step
+  // only switches what the canvas shows; the next one is decoded into one not shown.
+  struct PicPage {
+    int index{-1};  // image, -1 for none (or being decoded, or drawn over)
+    uint32_t generation{0};
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    int32_t w{0}, h{0};  // the canvas size it was decoded for
+    uint32_t stride{0};
+    lv_draw_buf_t buf{};  // what the canvas shows of it
+  };
+  static constexpr size_t PIC_PAGE_COUNT = 3;
   // The file being read through the storage worker (whole, in one request), then decoded on the
   // picture task.
   struct PictureRead {
@@ -941,6 +954,7 @@ class SimpleVideoPlayer : public Component
     int32_t target_w{0}, target_h{0};
     uint32_t target_stride{0};
     ImageFitMode fit{ImageFitMode::SCALE_TO_FIT};
+    PicPage *page{nullptr};  // a picture's
     uint8_t *scratch{nullptr};  // the whole decoded JPEG when it does not go straight in (pool)
     size_t scratch_capacity{0};
     // Result: straight into the target at the picture's own size (stride: the decoder's rows), or
@@ -977,13 +991,14 @@ class SimpleVideoPlayer : public Component
   size_t pic_decode_cap_{0};
   std::atomic<bool> pic_decoded_{false};
   int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none
-  lv_draw_buf_t *pic_full_buf_{nullptr};  // the canvas's own buffer (DMA-capable), all of it
-  lv_draw_buf_t pic_fit_buf_{};           // the same memory at the shown picture's own size
-  lv_draw_buf_t *pic_draw_buf_{nullptr};  // what the canvas shows: one of the two
-  uint8_t *pic_own_buf_{nullptr};         // set_fullscreen()'s, from the pool
-  lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer (YAML)
-  bool pic_fullscreen_lost_{false};       // its full-screen buffer went to a video meanwhile
-  int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while the task writes the canvas
+  PicPage pic_pages_[PIC_PAGE_COUNT];
+  PicPage *pic_shown_{nullptr};
+  int32_t pic_w_{0}, pic_h_{0};           // the canvas size pictures are decoded for
+  uint32_t pic_stride_{0};
+  size_t pic_page_bytes_{0};              // a page: the display's whole size, any canvas size fits
+  lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer (YAML), shown while no page is
+  bool pic_restore_{false};               // the pages went to a video: the picture decoded again after it
+  int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while a picture is decoded
 
   uint32_t slideshow_interval_ms_{5000};
   SlideshowMode slideshow_mode_{SlideshowMode::STOPPED};
@@ -1055,8 +1070,12 @@ class SimpleVideoPlayer : public Component
   void finish_read_();
   void picture_read_done_();
   void preload_neighbours_();
-  bool start_decode_(bool thumbnail, size_t index, size_t slot, PicFile *file);
+  bool start_decode_(bool thumbnail, size_t index, size_t slot, PicFile *file, bool preload = false);
   void picture_decoded_();
+  PicPage *page_of_(int index);
+  PicPage *free_page_();
+  void show_page_(PicPage *page);
+  void update_picture_size_();
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
   bool adopt_canvas_buffer_();
