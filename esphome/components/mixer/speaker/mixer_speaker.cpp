@@ -217,7 +217,11 @@ size_t SourceSpeaker::play(const uint8_t *data, size_t length, TickType_t ticks_
     this->start();
   }
   size_t bytes_written = 0;
-  std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+  std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer;
+  {
+    LockGuard guard(this->ring_buffer_lock_);
+    temp_ring_buffer = this->ring_buffer_.lock();
+  }
   if (temp_ring_buffer != nullptr) {
     // Only write to the ring buffer if the reference is valid
     bytes_written = temp_ring_buffer->write_without_replacement(data, length, ticks_to_wait);
@@ -251,9 +255,14 @@ esp_err_t SourceSpeaker::start_() {
   const size_t ring_buffer_size =
       (this->audio_stream_info_.ms_to_bytes(this->buffer_duration_ms_) / bytes_per_frame) * bytes_per_frame;
   if (this->audio_source_ == nullptr) {
-    std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer = this->ring_buffer_.lock();
+    std::shared_ptr<ring_buffer::RingBuffer> temp_ring_buffer;
+    {
+      LockGuard guard(this->ring_buffer_lock_);
+      temp_ring_buffer = this->ring_buffer_.lock();
+    }
     if (temp_ring_buffer == nullptr) {
       temp_ring_buffer = ring_buffer::RingBuffer::create(ring_buffer_size);
+      LockGuard guard(this->ring_buffer_lock_);
       this->ring_buffer_ = temp_ring_buffer;
     }
 

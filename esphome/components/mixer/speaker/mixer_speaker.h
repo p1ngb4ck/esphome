@@ -100,6 +100,8 @@ class SourceSpeaker final : public speaker::Speaker, public Component {
 
   std::shared_ptr<audio::RingBufferAudioSource> audio_source_;
   std::weak_ptr<ring_buffer::RingBuffer> ring_buffer_;
+  // play() reads ring_buffer_ on the writer's task while start_() replaces it on the main loop.
+  Mutex ring_buffer_lock_;
 
   uint32_t buffer_duration_ms_;
   uint32_t last_seen_data_ms_{0};
