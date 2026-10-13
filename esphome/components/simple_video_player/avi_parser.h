@@ -146,6 +146,11 @@ class AVIParser {
    */
   bool rewind();
 
+  /// Reader position where the frame data ends (UINT64_MAX while unknown: a live stream).
+  uint64_t data_end() const {
+    return this->movi_size_ == UINT64_MAX ? UINT64_MAX : this->movi_offset_ + this->movi_size_;
+  }
+
  protected:
   /**
    * @brief Parse AVI file headers

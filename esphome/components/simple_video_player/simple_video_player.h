@@ -166,6 +166,8 @@ class SimpleVideoPlayer : public Component
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+  /// How long the audio output takes to be heard (ms): the sound starts this much before the picture.
+  template<typename V> void set_audio_latency(V latency) { this->audio_latency_ = latency; }
   void set_speaker_channel_mode(SpeakerChannelMode mode) { this->speaker_channel_mode_ = mode; }
 #endif
 #ifdef SVP_AUDIO_ROUTER
@@ -562,6 +564,24 @@ class SimpleVideoPlayer : public Component
   // for DSI output, fires on_playback_started and sets 2. Nothing is presented or played before that.
   std::atomic<uint8_t> start_req_{0};
   std::atomic<bool> av_started_{false};
+
+  // Audio latency compensation. The reader hands the audio on audio_lead_frames_ video frames ahead
+  // of the picture: an audio cursor walks the read-ahead ring with peek() and feeds the audio chunks,
+  // the frame read skips the ones it fed. At the start the sound is released audio_lead_us_ before
+  // the first frame is shown.
+  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = 400;  // the decoded-audio ring holds 500 ms
+  TemplatableFn<uint32_t> audio_latency_{};
+  uint32_t audio_lead_us_{0};      // this session's latency, read when playback starts
+  uint32_t audio_lead_frames_{0};  // the same in video frames
+  uint64_t audio_cursor_pos_{0};   // reader position of the next chunk the cursor reads (reader task)
+  std::atomic<uint32_t> audio_cursor_frames_{0};  // video chunks the cursor has passed
+  std::atomic<uint32_t> reader_frames_{0};        // video frames the reader has handed on
+#ifdef USE_AUDIO
+  void advance_audio_cursor_();
+  void reader_audio_chunk_(const AVIFrame &frame, const uint8_t *data, size_t size);
+  void reader_passed_video_();
+  void reset_audio_cursor_();
+#endif
   uint32_t avi_fps_num_{0};
   uint32_t avi_fps_den_{0};
 

@@ -1,11 +1,13 @@
 /**
  * @file buffered_file_reader.cpp
- * @brief Async storage-worker read -> transfer arena -> ring_buffer::RingBuffer -> read().
+ * @brief Async storage-worker read -> transfer arena -> PSRAM read-ahead ring -> read() / peek().
  */
 
 #include "buffered_file_reader.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <cstring>
@@ -14,6 +16,52 @@ namespace esphome {
 namespace simple_video_player {
 
 static const char *const TAG = "buffered_file_reader";
+
+bool BufferedFileReader::LookaheadRing::allocate() {
+  if (this->data == nullptr)
+    this->data = static_cast<uint8_t *>(heap_caps_malloc(RING_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  this->reset();
+  return this->data != nullptr;
+}
+
+void BufferedFileReader::LookaheadRing::release() {
+  heap_caps_free(this->data);
+  this->data = nullptr;
+  this->reset();
+}
+
+void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, size_t len) const {
+  const size_t at = pos & (RING_BYTES - 1);
+  const size_t first = std::min(len, RING_BYTES - at);
+  memcpy(dst, this->data + at, first);
+  if (first < len)
+    memcpy(dst + first, this->data, len - first);
+}
+
+void BufferedFileReader::LookaheadRing::write(const uint8_t *src, size_t len) {
+  const uint32_t pos = this->head.load(std::memory_order_relaxed);
+  const size_t at = pos & (RING_BYTES - 1);
+  const size_t first = std::min(len, RING_BYTES - at);
+  memcpy(this->data + at, src, first);
+  if (first < len)
+    memcpy(this->data, src + first, len - first);
+  this->head.store(pos + static_cast<uint32_t>(len), std::memory_order_release);
+}
+
+size_t BufferedFileReader::LookaheadRing::read(uint8_t *dst, size_t len) {
+  const uint32_t pos = this->tail.load(std::memory_order_relaxed);
+  len = std::min(len, static_cast<size_t>(this->head.load(std::memory_order_acquire) - pos));
+  this->copy_out_(pos, dst, len);
+  this->tail.store(pos + static_cast<uint32_t>(len), std::memory_order_release);
+  return len;
+}
+
+bool BufferedFileReader::LookaheadRing::peek(size_t offset, uint8_t *dst, size_t len) const {
+  if (offset + len > this->available())
+    return false;
+  this->copy_out_(this->tail.load(std::memory_order_relaxed) + static_cast<uint32_t>(offset), dst, len);
+  return true;
+}
 
 void BufferedFileReader::kick_fill_() {
   if (this->network_)
@@ -26,7 +74,7 @@ void BufferedFileReader::kick_fill_() {
 
   // Only whole chunks: a request occupies the single in-flight slot for a full worker round trip,
   // so topping up a few bytes after every small read() halved the fill rate.
-  size_t room = this->ring_->free();
+  size_t room = this->ring_.free();
   if (room < FILL_CHUNK) {
     this->fill_in_flight_.store(false, std::memory_order_release);  // read() re-kicks after draining
     return;
@@ -50,12 +98,8 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   } else if (this->fill_got_ == 0) {
     this->eof_.store(true, std::memory_order_release);
   } else {
-    // want was <= ring free space and read() only frees more, so this always fits whole. Written in
-    // slices: xRingbufferSend copies with interrupts masked on this core.
-    for (size_t off = 0; off < this->fill_got_; off += RING_WRITE_SLICE) {
-      const size_t n = std::min(RING_WRITE_SLICE, this->fill_got_ - off);
-      this->ring_->write_without_replacement(this->arena_ + off, n, 0, true);
-    }
+    // want was <= ring free space and read() only frees more, so this always fits whole.
+    this->ring_.write(this->arena_, this->fill_got_);
     const uint32_t dt = micros() - this->fill_submit_us_;
     this->stats_.chunks++;
     this->stats_.chunk_us += dt;
@@ -112,9 +156,8 @@ bool BufferedFileReader::open(const char *path) {
     this->wait_sync_();
     return false;
   }
-  this->ring_ = ring_buffer::RingBuffer::create(RING_BYTES);
-  if (this->ring_ == nullptr) {
-    ESP_LOGE(TAG, "could not create %zu-byte ring buffer", RING_BYTES);
+  if (!this->ring_.allocate()) {
+    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", RING_BYTES);
     storage::global_transfer_buffer->release();
     this->arena_ = nullptr;
     this->arm_wait_();
@@ -141,7 +184,7 @@ void BufferedFileReader::close() {
     xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
     this->open_ = false;
     this->network_ = false;
-    this->ring_.reset();
+    this->ring_.release();
     xSemaphoreGive(this->stream_lock_);
     this->streaming_ = false;
     this->current_position_ = 0;
@@ -159,7 +202,7 @@ void BufferedFileReader::close() {
   if (storage::global_transfer_buffer != nullptr)
     storage::global_transfer_buffer->release();
   this->arena_ = nullptr;
-  this->ring_.reset();
+  this->ring_.release();
   this->open_ = false;
   this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
   this->current_position_ = 0;
@@ -172,13 +215,12 @@ bool BufferedFileReader::open_stream() {
     ESP_LOGE(TAG, "could not create the stream lock");
     return false;
   }
-  auto ring = ring_buffer::RingBuffer::create(RING_BYTES);
-  if (ring == nullptr) {
-    ESP_LOGE(TAG, "could not create %zu-byte ring buffer", RING_BYTES);
+  xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
+  if (!this->ring_.allocate()) {
+    xSemaphoreGive(this->stream_lock_);
+    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", RING_BYTES);
     return false;
   }
-  xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
-  this->ring_ = std::move(ring);
   this->network_ = true;
   this->current_position_ = 0;
   this->eof_.store(false);
@@ -195,7 +237,7 @@ size_t BufferedFileReader::stream_room() {
   if (this->stream_lock_ == nullptr)
     return 0;
   xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
-  const size_t room = this->open_ && this->network_ ? this->ring_->free() : 0;
+  const size_t room = this->open_ && this->network_ ? this->ring_.free() : 0;
   xSemaphoreGive(this->stream_lock_);
   return room;
 }
@@ -205,11 +247,7 @@ void BufferedFileReader::push(const uint8_t *data, size_t len) {
     return;
   xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
   if (this->open_ && this->network_) {
-    // In slices, as on_fill_done_ writes: xRingbufferSend copies with interrupts masked.
-    for (size_t off = 0; off < len; off += RING_WRITE_SLICE) {
-      const size_t n = std::min(RING_WRITE_SLICE, len - off);
-      this->ring_->write_without_replacement(data + off, n, 0, true);
-    }
+    this->ring_.write(data, std::min(len, this->ring_.free()));
     this->stats_.chunks++;
     this->stats_.bytes_filled += len;
   }
@@ -229,7 +267,7 @@ bool BufferedFileReader::prefill_cache() {
   this->waiting_task_ = xTaskGetCurrentTaskHandle();
   this->kick_fill_();
   uint32_t waited = 0;
-  while (this->ring_->free() > FILL_CHUNK) {
+  while (this->ring_.free() > FILL_CHUNK) {
     if (this->fill_err_.load(std::memory_order_acquire))
       return false;
     if (this->eof_.load(std::memory_order_acquire))
@@ -252,12 +290,12 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
     // PLAY path: single non-blocking drain. The storage worker streams chunks in ahead via the
     // async read_chunk() completion chain (on_fill_done_ -> kick_fill_), so in normal playback the
     // ring is already primed and this returns the full `size`. Never parks, never spins.
-    const size_t avail = this->ring_->available();
+    const size_t avail = this->ring_.available();
     if (!this->stats_.min_set || avail < this->stats_.min_avail) {
       this->stats_.min_avail = avail;
       this->stats_.min_set = true;
     }
-    size_t n = this->ring_->read(buffer, size, 0);
+    size_t n = this->ring_.read(buffer, size);
     if (n < size && !this->eof_.load(std::memory_order_acquire))
       this->stats_.underruns++;
     this->current_position_ += n;
@@ -276,7 +314,7 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   size_t copied = 0;
   uint32_t waited = 0;
   while (copied < size) {
-    size_t n = this->ring_->read(buffer + copied, size - copied, pdMS_TO_TICKS(WAIT_SLICE_MS));
+    size_t n = this->ring_.read(buffer + copied, size - copied);
     if (n > 0) {
       copied += n;
       this->current_position_ += n;
@@ -286,15 +324,20 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
     }
     if (this->fill_err_.load(std::memory_order_acquire))
       return copied > 0 ? static_cast<int>(copied) : -1;
-    if (this->eof_.load(std::memory_order_acquire) && this->ring_->available() == 0)
+    if (this->eof_.load(std::memory_order_acquire) && this->ring_.available() == 0)
       break;  // stream ended and ring drained
     if (this->abort_flag_ != nullptr && *this->abort_flag_)
       return copied > 0 ? static_cast<int>(copied) : -1;
     this->kick_fill_();
+    vTaskDelay(pdMS_TO_TICKS(WAIT_SLICE_MS));
     if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       return copied > 0 ? static_cast<int>(copied) : -1;
   }
   return static_cast<int>(copied);
+}
+
+bool BufferedFileReader::peek(size_t offset, uint8_t *buffer, size_t size) const {
+  return this->open_ && this->ring_.peek(offset, buffer, size);
 }
 
 bool BufferedFileReader::seek(uint64_t position) {
@@ -313,7 +356,7 @@ bool BufferedFileReader::seek(uint64_t position) {
     return true;
   }
   this->quiesce_fill_();
-  this->ring_->reset();
+  this->ring_.reset();
   this->eof_.store(false);
   this->fill_err_.store(false);
 

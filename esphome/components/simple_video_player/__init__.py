@@ -100,6 +100,8 @@ CONF_CHANNEL_LIST = "channel_list"
 CONF_TOKEN = "token"
 CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
+CONF_AUDIO_LATENCY = "audio_latency"
+MAX_AUDIO_LATENCY_MS = 400  # what the decoded-audio ring (500 ms) holds ahead with room to spare
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
 # referenced speaker's own config and stashes them here for to_code() to read back.
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
@@ -290,6 +292,14 @@ CONFIG_SCHEMA = cv.All(
             # listed here plays video-only. sample_rate/channels/bits_per_sample are still the
             # speaker's fixed format (resolved below), not per-codec.
             cv.Optional(CONF_AUDIO_CODEC): cv.ensure_list(cv.one_of(*AUDIO_CODECS, lower=True)),
+            # How long the audio output takes to be heard (a Bluetooth sink's buffer, say): the
+            # sound starts this much before the picture. A lambda is read at every start.
+            cv.Optional(CONF_AUDIO_LATENCY): cv.templatable(
+                cv.All(
+                    cv.positive_time_period_milliseconds,
+                    cv.Range(max=cv.TimePeriod(milliseconds=MAX_AUDIO_LATENCY_MS)),
+                )
+            ),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
                 {
@@ -571,6 +581,14 @@ async def to_code(config):
         cg.add(var.set_speaker(spkr))
         cg.add_define("USE_SPEAKER")
         cg.add_define("USE_AUDIO")
+        if CONF_AUDIO_LATENCY in config:
+            latency = await cg.templatable(
+                config[CONF_AUDIO_LATENCY],
+                [],
+                cg.uint32,
+                to_exp=lambda period: period.total_milliseconds,
+            )
+            cg.add(var.set_audio_latency(latency))
         if config.get(CONF_AUDIO_ROUTER):
             cg.add_define("SVP_AUDIO_ROUTER")
             cg.add(var.set_audio_router(spkr))
