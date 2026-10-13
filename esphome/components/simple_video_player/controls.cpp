@@ -17,8 +17,10 @@ static const char *const TAG = "simple_video_player.controls";
 static constexpr float SEEK_STEP_S = 10.0f;
 static constexpr float VOLUME_STEP = 0.05f;
 static constexpr int32_t SEEK_RANGE = 1000;
-static const char *const GLYPHS = "0123456789:";
 static const char *const REPEAT_TEXT[3] = {LV_SYMBOL_LOOP " off", LV_SYMBOL_LOOP " 1", LV_SYMBOL_LOOP " all"};
+
+#ifdef SVP_DSI_OUTPUT
+static const char *const GLYPHS = "0123456789:";
 
 static bool inside(const lv_area_t &area, int32_t x, int32_t y) {
   return x >= area.x1 && x <= area.x2 && y >= area.y1 && y <= area.y2;
@@ -34,6 +36,15 @@ static bool clip(lv_area_t &area, const lv_area_t &to) {
   return area.x1 <= area.x2 && area.y1 <= area.y2;
 }
 static int32_t area_h(const lv_area_t &area) { return area.y2 - area.y1 + 1; }
+
+// "m:ss", or "h:mm:ss" when the file runs an hour or more.
+static size_t format_time(char *out, size_t size, uint32_t seconds, bool hours) {
+  const int n = hours ? snprintf(out, size, "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, seconds / 3600,
+                                 seconds / 60 % 60, seconds % 60)
+                      : snprintf(out, size, "%" PRIu32 ":%02" PRIu32, seconds / 60, seconds % 60);
+  return n > 0 ? std::min<size_t>(static_cast<size_t>(n), size - 1) : 0;
+}
+#endif
 
 static const char *button_text(uint8_t button) {
   switch (button) {
@@ -53,17 +64,11 @@ static const char *button_text(uint8_t button) {
       return LV_SYMBOL_MINUS;
     case SimpleVideoPlayer::CTL_VOLUME_UP:
       return LV_SYMBOL_PLUS;
+    case SimpleVideoPlayer::CTL_EXIT:
+      return LV_SYMBOL_CLOSE;
     default:
       return REPEAT_TEXT[0];
   }
-}
-
-// "m:ss", or "h:mm:ss" when the file runs an hour or more.
-static size_t format_time(char *out, size_t size, uint32_t seconds, bool hours) {
-  const int n = hours ? snprintf(out, size, "%" PRIu32 ":%02" PRIu32 ":%02" PRIu32, seconds / 3600,
-                                 seconds / 60 % 60, seconds % 60)
-                      : snprintf(out, size, "%" PRIu32 ":%02" PRIu32, seconds / 60, seconds % 60);
-  return n > 0 ? std::min<size_t>(static_cast<size_t>(n), size - 1) : 0;
 }
 
 void ControlsTouchListener::update(const touchscreen::TouchPoints_t &points) {
@@ -120,9 +125,15 @@ void SimpleVideoPlayer::controls_setup_() {
   lv_style_set_bg_color(&this->ctl_indicator_style_, lv_color_hex(0x2F81F7));
   lv_style_set_bg_opa(&this->ctl_indicator_style_, LV_OPA_COVER);
 
+#ifdef SVP_DSI_OUTPUT
   if (this->ctl_video_.enabled && this->dsi_ != nullptr && this->build_controls_bar_(this->ctl_video_) &&
       this->ctl_touchscreen_ != nullptr)
     this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
+#endif
+#ifdef SVP_PICTURES
+  if (this->ctl_picture_.enabled && this->pic_canvas_ != nullptr)
+    this->build_controls_bar_(this->ctl_picture_);
+#endif
 }
 
 static lv_obj_t *plain_row(lv_obj_t *parent, lv_style_t *style) {
@@ -158,9 +169,11 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
     if (bar.time) {
       bar.position_label = lv_label_create(row);
       lv_obj_set_style_text_align(bar.position_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-      lv_label_set_text(bar.position_label, "0:00");
-      bar.duration_label = lv_label_create(row);
-      lv_label_set_text(bar.duration_label, "/ 0:00");
+      lv_label_set_text(bar.position_label, bar.picture ? "" : "0:00");
+      if (!bar.picture) {
+        bar.duration_label = lv_label_create(row);
+        lv_label_set_text(bar.duration_label, "/ 0:00");
+      }
     }
   }
   if (bar.seek_bar) {
@@ -197,11 +210,63 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
       lv_obj_center(label);
       bar.button[id] = button;
       bar.button_label[id] = label;
+      // Over a picture LVGL runs: the buttons act through their events.
+      bar.target[id] = ControlsTarget{this, &bar, id};
+      if (bar.picture)
+        lv_obj_add_event_cb(button, &SimpleVideoPlayer::controls_button_event_, LV_EVENT_CLICKED, &bar.target[id]);
     }
   }
+#ifdef SVP_PICTURES
+  if (bar.picture) {
+    lv_obj_add_event_cb(
+        root,
+        [](lv_event_t *event) {
+          static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event))->picture_controls_touched_();
+        },
+        LV_EVENT_PRESSED, this);
+  }
+#endif
   return true;
 }
 
+void SimpleVideoPlayer::controls_button_event_(lv_event_t *event) {
+  const auto *target = static_cast<ControlsTarget *>(lv_event_get_user_data(event));
+#ifdef SVP_PICTURES
+  if (target->bar->picture) {
+    SimpleVideoPlayer *self = target->player;
+    self->picture_controls_touched_();
+    switch (target->button) {
+      case CTL_PREVIOUS:
+        self->previous_image();
+        break;
+      case CTL_NEXT:
+        self->next_image();
+        break;
+      case CTL_PLAY_PAUSE:
+        self->toggle_slideshow();
+        break;
+      case CTL_STOP:
+        self->stop_slideshow();
+        break;
+      case CTL_EXIT:
+        self->hide_picture_controls_();
+        target->bar->exit_trigger.trigger();
+        return;
+      case CTL_VOLUME_DOWN:
+      case CTL_VOLUME_UP:
+        self->controls_press_(target->button);
+        break;
+      default:
+        break;
+    }
+    self->update_picture_controls_(false);
+    return;
+  }
+#endif
+  target->player->controls_press_(target->button);
+}
+
+#ifdef SVP_DSI_OUTPUT
 size_t SimpleVideoPlayer::controls_bytes_() {
   if (this->ctl_video_.bar == nullptr)
     return 0;
@@ -500,10 +565,16 @@ void SimpleVideoPlayer::prerender_controls_() {
   this->ctl_ready_.store(true, std::memory_order_release);
 }
 
+#else
+size_t SimpleVideoPlayer::controls_bytes_() { return 0; }
+void SimpleVideoPlayer::prerender_controls_() {}
+#endif
+
 //========================================================================
 // Showing, touches (main loop)
 //========================================================================
 
+#ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::controls_active_() const {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
   return this->ctl_ready_.load(std::memory_order_acquire) && !this->ctl_failed_ && this->dsi_lvgl_paused_ &&
@@ -587,6 +658,13 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
   this->ctl_repaint_.store(true, std::memory_order_release);
 }
 
+#else
+bool SimpleVideoPlayer::controls_active_() const { return false; }
+void SimpleVideoPlayer::show_controls() {}
+void SimpleVideoPlayer::hide_controls() {}
+void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {}
+#endif
+
 void SimpleVideoPlayer::controls_press_(uint8_t button) {
   switch (button) {
     case CTL_PREVIOUS:
@@ -607,6 +685,7 @@ void SimpleVideoPlayer::controls_press_(uint8_t button) {
       this->next();
       break;
     case CTL_STOP:
+    case CTL_EXIT:
       this->stop();
       break;
     case CTL_REPEAT:
@@ -626,6 +705,9 @@ void SimpleVideoPlayer::controls_press_(uint8_t button) {
 }
 
 void SimpleVideoPlayer::controls_loop_() {
+#ifdef SVP_PICTURES
+  this->picture_controls_loop_();
+#endif
   if (this->ctl_video_.bar == nullptr)
     return;
   if (!this->controls_active_()) {
@@ -640,10 +722,80 @@ void SimpleVideoPlayer::controls_loop_() {
     this->hide_controls();
 }
 
+#ifdef SVP_PICTURES
+//========================================================================
+// Over a picture in full screen (main loop, LVGL shows them)
+//========================================================================
+
+void SimpleVideoPlayer::show_picture_controls_() {
+  ControlsBar &bar = this->ctl_picture_;
+  if (bar.bar == nullptr || !this->fullscreen_ || this->pictures_held_())
+    return;
+  this->update_picture_controls_(true);
+  lv_obj_move_to_index(bar.bar, -1);
+  lv_obj_set_hidden(bar.bar, false);
+  bar.shown_ms = millis();
+}
+
+void SimpleVideoPlayer::hide_picture_controls_() {
+  if (this->ctl_picture_.bar != nullptr)
+    lv_obj_set_hidden(this->ctl_picture_.bar, true);
+}
+
+void SimpleVideoPlayer::picture_controls_tap_() {
+  if (this->ctl_picture_.bar == nullptr)
+    return;
+  if (lv_obj_is_hidden(this->ctl_picture_.bar)) {
+    this->show_picture_controls_();
+  } else {
+    this->hide_picture_controls_();
+  }
+}
+
+void SimpleVideoPlayer::picture_controls_touched_() { this->ctl_picture_.shown_ms = millis(); }
+
+// The texts only when they changed: what LVGL redraws.
+void SimpleVideoPlayer::update_picture_controls_(bool force) {
+  ControlsBar &bar = this->ctl_picture_;
+  const int image = this->current_image_;
+  const int count = static_cast<int>(this->images_.size());
+  const int playing = this->slideshow_mode_ == SlideshowMode::PLAYING ? 1 : 0;
+  if (force || image != bar.shown_image || count != bar.shown_count) {
+    if (bar.title_label != nullptr)
+      lv_label_set_text(bar.title_label,
+                        image >= 0 && image < count ? this->images_[image].filename.c_str() : "");
+    if (bar.position_label != nullptr) {
+      char text[24] = "";
+      if (image >= 0 && image < count)
+        snprintf(text, sizeof(text), "%d / %d", image + 1, count);
+      lv_label_set_text(bar.position_label, text);
+    }
+    bar.shown_image = image;
+    bar.shown_count = count;
+  }
+  if ((force || playing != bar.shown_playing) && bar.button_label[CTL_PLAY_PAUSE] != nullptr) {
+    lv_label_set_text(bar.button_label[CTL_PLAY_PAUSE], playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    bar.shown_playing = playing;
+  }
+}
+
+void SimpleVideoPlayer::picture_controls_loop_() {
+  ControlsBar &bar = this->ctl_picture_;
+  if (bar.bar == nullptr || lv_obj_is_hidden(bar.bar))
+    return;
+  if (!this->fullscreen_ || this->pictures_held_() || millis() - bar.shown_ms > this->ctl_hide_after_ms_) {
+    this->hide_picture_controls_();
+    return;
+  }
+  this->update_picture_controls_(false);
+}
+#endif
+
 //========================================================================
 // Into the frame (playback task): copies only, no LVGL
 //========================================================================
 
+#ifdef SVP_DSI_OUTPUT
 // The sprite with its top left at LVGL's (x, y); only its first `width` columns when given.
 void SimpleVideoPlayer::ctl_blit_(const ControlsSprite &sprite, int32_t x, int32_t y, int32_t width) {
   if (sprite.data == nullptr)
@@ -715,6 +867,11 @@ void SimpleVideoPlayer::repaint_paused_() {
   this->dsi_->draw_pixels_at(0, 0, this->dsi_out_w_, this->dsi_out_h_, this->decode_target_, display::COLOR_ORDER_RGB,
                              bitness, false, 0, 0, 0);
 }
+
+#else
+void SimpleVideoPlayer::composite_controls_() {}
+void SimpleVideoPlayer::repaint_paused_() {}
+#endif
 
 }  // namespace simple_video_player
 }  // namespace esphome

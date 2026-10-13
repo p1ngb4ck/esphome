@@ -1156,8 +1156,18 @@ void SimpleVideoPlayer::canvas_event_(lv_event_t *event) {
       self->press_ms_ = millis();
       self->press_handled_ = false;
       self->gesture_seen_ = false;
+#ifdef SVP_CONTROLS
+      self->picture_controls_touched_();
+#endif
       break;
     }
+#ifdef SVP_CONTROLS
+    case LV_EVENT_SHORT_CLICKED:
+      // In full screen a tap shows the controls (or hides them again).
+      if (self->fullscreen_ && !self->press_handled_)
+        self->picture_controls_tap_();
+      break;
+#endif
     case LV_EVENT_PRESSING: {
       // Held still for long_press_time: the slideshow starts or stops.
       if (self->press_handled_ || self->gesture_seen_ || millis() - self->press_ms_ < self->long_press_time_ms_)

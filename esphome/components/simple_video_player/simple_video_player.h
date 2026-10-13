@@ -363,6 +363,7 @@ class SimpleVideoPlayer : public Component
     CTL_REPEAT,
     CTL_VOLUME_DOWN,
     CTL_VOLUME_UP,
+    CTL_EXIT,
     CTL_BUTTON_COUNT,
   };
   void set_controls_touchscreen(touchscreen::Touchscreen *touchscreen) { this->ctl_touchscreen_ = touchscreen; }
@@ -383,6 +384,19 @@ class SimpleVideoPlayer : public Component
     this->ctl_video_.seek_bar = seek_bar;
     this->ctl_video_.enabled = true;
   }
+#ifdef SVP_PICTURES
+  /// Over a picture in full screen (LVGL shows them): time is the picture's number in the folder.
+  void set_picture_controls(std::vector<uint8_t> buttons, bool title, bool counter) {
+    this->ctl_picture_.buttons = std::move(buttons);
+    this->ctl_picture_.title = title;
+    this->ctl_picture_.time = counter;
+    this->ctl_picture_.seek_bar = false;
+    this->ctl_picture_.picture = true;
+    this->ctl_picture_.enabled = true;
+  }
+  /// The exit button over a picture: leaving full screen is the configuration's (its layout).
+  Trigger<> *get_picture_exit_trigger() { return &this->ctl_picture_.exit_trigger; }
+#endif
   void show_controls();
   void hide_controls();
   /// Listener: a touch (pressed, display coordinates) or its release.
@@ -902,10 +916,23 @@ class SimpleVideoPlayer : public Component
     int32_t pw{0}, ph{0};
     uint8_t *data{nullptr};
   };
+  struct ControlsBar;
+  struct ControlsTarget {  // what a button's LVGL event acts on
+    SimpleVideoPlayer *player;
+    ControlsBar *bar;
+    uint8_t button;
+  };
   struct ControlsBar {
     bool enabled{false};
+    bool picture{false};
     std::vector<uint8_t> buttons;
     bool title{true}, time{true}, seek_bar{true};
+    Trigger<> exit_trigger;
+    ControlsTarget target[CTL_BUTTON_COUNT]{};
+    uint32_t shown_ms{0};
+    int shown_image{-2};
+    int shown_count{-1};
+    int shown_playing{-1};
     lv_obj_t *bar{nullptr};
     lv_obj_t *title_label{nullptr};
     lv_obj_t *position_label{nullptr};
@@ -916,6 +943,17 @@ class SimpleVideoPlayer : public Component
   };
   static constexpr size_t CTL_GLYPHS = 11;  // 0-9 and ':'
   ControlsBar ctl_video_;
+#ifdef SVP_PICTURES
+  ControlsBar ctl_picture_;
+  void picture_controls_loop_();
+  void show_picture_controls_();
+  void hide_picture_controls_();
+  void update_picture_controls_(bool force);
+  /// A tap on the picture in full screen: the controls shown, or hidden again.
+  void picture_controls_tap_();
+  void picture_controls_touched_();
+#endif
+  static void controls_button_event_(lv_event_t *event);
   lv_style_t *ctl_user_bar_style_{nullptr};
   lv_style_t *ctl_user_button_style_{nullptr};
   lv_style_t *ctl_user_accent_style_{nullptr};

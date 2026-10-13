@@ -186,7 +186,14 @@ CONTROL_BUTTONS = {
     "repeat": 6,
     "volume_down": 7,
     "volume_up": 8,
+    "exit": 9,
 }
+CONF_PICTURE = "picture"
+CONF_COUNTER = "counter"
+CONF_ON_EXIT = "on_exit"
+PICTURE_CONTROL_BUTTONS = ["previous", "play_pause", "next", "exit"]
+# Over a picture: previous/next picture, play_pause and stop the slideshow, exit (on_exit).
+PICTURE_BUTTON_CHOICES = ["previous", "play_pause", "next", "stop", "exit", "volume_down", "volume_up"]
 VIDEO_CONTROL_BUTTONS = [
     "previous",
     "rewind",
@@ -331,10 +338,9 @@ def _validate_stream(config):
 def _validate_controls(config):
     if CONF_CONTROLS not in config:
         return config
-    if CONF_DISPLAY_ID not in config or CONF_TOUCHSCREEN_ID not in config:
+    if CONF_DISPLAY_ID in config and CONF_TOUCHSCREEN_ID not in config:
         raise cv.Invalid(
-            f"'{CONF_CONTROLS}' are drawn over direct display output: they need '{CONF_DISPLAY_ID}' "
-            f"and '{CONF_TOUCHSCREEN_ID}'."
+            f"'{CONF_CONTROLS}' over a full-screen video take its touches directly: they need '{CONF_TOUCHSCREEN_ID}'."
         )
     # The player builds the controls from these widgets and renders them with lv_snapshot.
     lvgl_defines.add_define("LV_USE_SNAPSHOT", "1")
@@ -514,6 +520,17 @@ CONFIG_SCHEMA = cv.All(
                                         cv.Optional(CONF_TITLE, default=True): cv.boolean,
                                         cv.Optional(CONF_TIME, default=True): cv.boolean,
                                         cv.Optional(CONF_SEEK_BAR, default=True): cv.boolean,
+                                    }
+                                ),
+                                cv.Optional(CONF_PICTURE, default={}): cv.Schema(
+                                    {
+                                        cv.Optional(
+                                            CONF_BUTTONS, default=PICTURE_CONTROL_BUTTONS
+                                        ): cv.ensure_list(cv.one_of(*PICTURE_BUTTON_CHOICES, lower=True)),
+                                        cv.Optional(CONF_TITLE, default=True): cv.boolean,
+                                        cv.Optional(CONF_COUNTER, default=True): cv.boolean,
+                                        # The exit button: leave full screen (the page's layout is yours).
+                                        cv.Optional(CONF_ON_EXIT): automation.validate_automation(single=True),
                                     }
                                 ),
                             }
@@ -851,7 +868,8 @@ async def to_code(config):
 
     if controls := config.get(CONF_CONTROLS):
         cg.add_define("SVP_CONTROLS")
-        cg.add(var.set_controls_touchscreen(await cg.get_variable(config[CONF_TOUCHSCREEN_ID])))
+        if CONF_TOUCHSCREEN_ID in config:
+            cg.add(var.set_controls_touchscreen(await cg.get_variable(config[CONF_TOUCHSCREEN_ID])))
         cg.add(var.set_controls_hide_after(controls[CONF_HIDE_AFTER]))
         styles = [
             await cg.get_variable(controls[key]) if key in controls else cg.RawExpression("nullptr")
@@ -864,15 +882,27 @@ async def to_code(config):
             )
         ]
         cg.add(var.set_controls_styles(*styles))
-        video = controls[CONF_VIDEO]
-        cg.add(
-            var.set_video_controls(
-                [CONTROL_BUTTONS[b] for b in video[CONF_BUTTONS]],
-                video[CONF_TITLE],
-                video[CONF_TIME],
-                video[CONF_SEEK_BAR],
+        if CONF_DISPLAY_ID in config:
+            video = controls[CONF_VIDEO]
+            cg.add(
+                var.set_video_controls(
+                    [CONTROL_BUTTONS[b] for b in video[CONF_BUTTONS]],
+                    video[CONF_TITLE],
+                    video[CONF_TIME],
+                    video[CONF_SEEK_BAR],
+                )
             )
-        )
+        if CONF_PICTURE_CANVAS_ID in config:
+            picture = controls[CONF_PICTURE]
+            cg.add(
+                var.set_picture_controls(
+                    [CONTROL_BUTTONS[b] for b in picture[CONF_BUTTONS]],
+                    picture[CONF_TITLE],
+                    picture[CONF_COUNTER],
+                )
+            )
+            if on_exit := picture.get(CONF_ON_EXIT):
+                await automation.build_automation(var.get_picture_exit_trigger(), [], on_exit)
 
     if CONF_PICTURE_CANVAS_ID in config:
         await _pictures_to_code(var, config)
