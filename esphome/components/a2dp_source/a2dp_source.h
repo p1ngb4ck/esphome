@@ -179,6 +179,7 @@ class A2DPSource : public Component
   std::atomic<uint8_t> pending_connection_state_{0xFF};
 
   void publish_device_list_();
+  void drop_device_(bool delete_bond);
   void update_media_();
 
   A2DPDeviceSelect *device_select_{nullptr};

@@ -155,11 +155,8 @@ void A2DPSource::setup() {
     this->device_kept_.store(false);
     this->pairing_->add_target(this);
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
-      if (record.slot != this->slot_)
-        return;
-      if (this->connected_.load())
-        this->source_.disconnect();
-      this->forget_device();
+      if (record.slot == this->slot_)
+        this->drop_device_(false);
     });
   }
 #endif
@@ -290,7 +287,25 @@ void A2DPSource::stop_pairing() {
 }
 
 void A2DPSource::forget_device() {
+#ifdef USE_BT_PAIRING
+  // bt_pairing drops the record and the bond; its forget callback lets go of the device here.
+  if (this->pairing_ != nullptr && this->pairing_->find_slot(this->slot_) != nullptr) {
+    this->pairing_->forget_slot(this->slot_);
+    return;
+  }
+#endif
   ESP_LOGI(TAG, "Forgetting the stored device");
+  this->drop_device_(true);
+}
+
+void A2DPSource::drop_device_(bool delete_bond) {
+  if (this->connected_.load())
+    this->source_.disconnect();
+  esp_bd_addr_t *address = this->source_.get_last_peer_address();
+  static const esp_bd_addr_t NO_ADDRESS = {};
+  if (delete_bond && memcmp(*address, NO_ADDRESS, ESP_BD_ADDR_LEN) != 0 &&
+      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED)
+    esp_bt_gap_remove_bond_device(*address);
   this->source_.clean_last_connection();
 }
 
