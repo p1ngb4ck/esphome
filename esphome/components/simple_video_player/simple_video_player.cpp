@@ -221,6 +221,9 @@ void SimpleVideoPlayer::setup() {
   if (this->ctl_widget_ != nullptr && this->ctl_touchscreen_ != nullptr)
     this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
 #endif
+#ifdef SVP_PICTURES
+  this->pictures_setup_();
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -236,6 +239,9 @@ void SimpleVideoPlayer::setup() {
 void SimpleVideoPlayer::loop() {
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
+#endif
+#ifdef SVP_PICTURES
+  this->pictures_loop_();
 #endif
   // A file played to its end: the next of the playlist, before LVGL would get the screen back.
   if (this->advance_req_.load(std::memory_order_acquire) &&

@@ -42,14 +42,25 @@ except ImportError:
 
 try:
     from esphome.components.lvgl import defines as lvgl_defines
-    from esphome.components.lvgl.types import lv_obj_base_t
+    from esphome.components.lvgl.types import lv_obj_base_t, lv_style_t
 except ImportError:
     lvgl_defines = None
     lv_obj_base_t = None
+    lv_style_t = None
 
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
-AUTO_LOAD = ["image", "audio", "json"]
+
+CONF_PICTURE_CANVAS_ID = "picture_canvas_id"
+
+
+def AUTO_LOAD(config):
+    load = ["image", "audio", "json"]
+    # Pictures are decoded by runtime_image (its formats enabled in to_code).
+    if config and CONF_PICTURE_CANVAS_ID in config:
+        load.append("runtime_image")
+    return load
+
 
 # Namespaces
 simple_video_player_ns = cg.esphome_ns.namespace("simple_video_player")
@@ -98,6 +109,34 @@ TogglePauseAction = simple_video_player_ns.class_("TogglePauseAction", automatio
 PreviousAction = simple_video_player_ns.class_("PreviousAction", automation.Action)
 RepeatAction = simple_video_player_ns.class_("RepeatAction", automation.Action)
 VolumeStepAction = simple_video_player_ns.class_("VolumeStepAction", automation.Action)
+ShowImageAction = simple_video_player_ns.class_("ShowImageAction", automation.Action)
+PictureDirectoryAction = simple_video_player_ns.class_("PictureDirectoryAction", automation.Action)
+PictureCommandAction = simple_video_player_ns.class_("PictureCommandAction", automation.Action)
+FullscreenAction = simple_video_player_ns.class_("FullscreenAction", automation.Action)
+PictureCommand = simple_video_player_ns.enum("PictureCommand", is_class=True)
+ThumbnailClickTrigger = simple_video_player_ns.class_(
+    "ThumbnailClickTrigger", automation.Trigger.template(cg.size_t)
+)
+ImageFitMode = simple_video_player_ns.enum("ImageFitMode", is_class=True)
+IMAGE_FIT_MODES = {
+    "SCALE_TO_FIT": ImageFitMode.SCALE_TO_FIT,
+    "SCALE_TO_FILL": ImageFitMode.SCALE_TO_FILL,
+    "STRETCH": ImageFitMode.STRETCH,
+    "CENTER": ImageFitMode.CENTER,
+}
+ThumbnailLayout = simple_video_player_ns.enum("ThumbnailLayout", is_class=True)
+THUMBNAIL_LAYOUTS = {
+    "HORIZONTAL": ThumbnailLayout.HORIZONTAL,
+    "VERTICAL": ThumbnailLayout.VERTICAL,
+    "GRID": ThumbnailLayout.GRID,
+}
+ThumbnailSlideEdge = simple_video_player_ns.enum("ThumbnailSlideEdge", is_class=True)
+THUMBNAIL_SLIDE_EDGES = {
+    "LEFT": ThumbnailSlideEdge.LEFT,
+    "RIGHT": ThumbnailSlideEdge.RIGHT,
+    "TOP": ThumbnailSlideEdge.TOP,
+    "BOTTOM": ThumbnailSlideEdge.BOTTOM,
+}
 RepeatMode = simple_video_player_ns.enum("RepeatMode", is_class=True)
 REPEAT_MODES = {
     "off": RepeatMode.OFF,
@@ -134,6 +173,49 @@ CONF_REPEAT_ID = "repeat_id"
 CONF_STEP = "step"
 CONF_HIDE_AFTER = "hide_after"
 CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
+CONF_PICTURE_DIRECTORIES = "picture_directories"
+CONF_SLIDESHOW_INTERVAL = "slideshow_interval"
+CONF_FIT_MODE = "fit_mode"
+CONF_OVERLAY_ICON_SIZE = "overlay_icon_size"
+CONF_OVERLAY_ICON_COLOR = "overlay_icon_color"
+CONF_OVERLAY_DURATION = "overlay_duration"
+CONF_DEFAULT_IMAGE_INDEX = "default_image_index"
+CONF_LONG_PRESS_TIME = "long_press_time"
+CONF_ENABLE_THUMBNAILS = "enable_thumbnails"
+CONF_THUMBNAIL_WIDTH = "thumbnail_width"
+CONF_THUMBNAIL_HEIGHT = "thumbnail_height"
+CONF_THUMBNAIL_MAX_COUNT = "thumbnail_max_count"
+CONF_THUMBNAIL_LAZY_LOAD = "thumbnail_lazy_load"
+CONF_THUMBNAIL_PRELOAD_COUNT = "thumbnail_preload_count"
+CONF_THUMBNAIL_LAYOUT = "thumbnail_layout"
+CONF_THUMBNAIL_SPACING = "thumbnail_spacing"
+CONF_THUMBNAIL_GRID_COLUMNS = "thumbnail_grid_columns"
+CONF_THUMBNAIL_CONTAINER_ID = "thumbnail_container_id"
+CONF_THUMBNAIL_STYLE_ID = "thumbnail_style_id"
+CONF_THUMBNAIL_ACTIVE_STYLE_ID = "thumbnail_active_style_id"
+CONF_THUMBNAIL_CONTAINER_STYLE_ID = "thumbnail_container_style_id"
+CONF_THUMBNAIL_LABEL_PATTERN = "thumbnail_label_pattern"
+CONF_THUMBNAIL_LABEL_STYLE_ID = "thumbnail_label_style_id"
+CONF_THUMBNAIL_SLIDE_EDGE = "thumbnail_slide_edge"
+CONF_THUMBNAIL_SLIDE_ENABLED = "thumbnail_slide_enabled"
+CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT = "thumbnail_auto_hide_timeout"
+CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
+CONF_INDEX = "index"
+CONF_PATH = "path"
+CONF_FULLSCREEN = "fullscreen"
+PICTURE_FORMATS = ("JPEG", "PNG", "BMP")
+# Picture keys with no default: setting one without picture_canvas_id is an error.
+PICTURE_ONLY_KEYS = (
+    CONF_PICTURE_DIRECTORIES,
+    CONF_DEFAULT_IMAGE_INDEX,
+    CONF_THUMBNAIL_CONTAINER_ID,
+    CONF_THUMBNAIL_STYLE_ID,
+    CONF_THUMBNAIL_ACTIVE_STYLE_ID,
+    CONF_THUMBNAIL_CONTAINER_STYLE_ID,
+    CONF_THUMBNAIL_LABEL_PATTERN,
+    CONF_THUMBNAIL_LABEL_STYLE_ID,
+    CONF_ON_THUMBNAIL_CLICK,
+)
 # The read-ahead ring holds the picture the sound runs ahead of: 100 ms per MiB (4MB -> 400 ms).
 AUDIO_LATENCY_MS_PER_MIB = 100
 DEFAULT_READ_AHEAD_BUFFER_SIZE = 4 * 1024 * 1024
@@ -268,6 +350,107 @@ def _validate_controls(config):
     return config
 
 
+def _validate_pictures(config):
+    if CONF_PICTURE_CANVAS_ID in config:
+        return config
+    for key in PICTURE_ONLY_KEYS:
+        if key in config:
+            raise cv.Invalid(f"'{key}' is for pictures: it needs '{CONF_PICTURE_CANVAS_ID}'.", [key])
+    return config
+
+
+def _picture_schema():
+    if lv_canvas_t is None or lv_obj_base_t is None or lv_style_t is None:
+        return {}
+    return {
+        # Pictures (JPEG/PNG/BMP) of a folder in an LVGL canvas (opaque, RGB565): slideshow,
+        # play/pause overlay, swipes (left/right: picture, up/down: folder, long press: slideshow)
+        # and an optional thumbnail strip in thumbnail_container_id.
+        cv.Optional(CONF_PICTURE_CANVAS_ID): cv.use_id(lv_canvas_t),
+        cv.Optional(CONF_PICTURE_DIRECTORIES): cv.ensure_list(cv.string),
+        cv.Optional(CONF_SLIDESHOW_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_FIT_MODE, default="SCALE_TO_FIT"): cv.enum(IMAGE_FIT_MODES, upper=True),
+        cv.Optional(CONF_OVERLAY_ICON_SIZE, default=128): cv.int_range(min=32, max=256),
+        cv.Optional(CONF_OVERLAY_ICON_COLOR, default=0xFFFFFF): cv.hex_uint32_t,
+        cv.Optional(CONF_OVERLAY_DURATION, default="1500ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=500), max=cv.TimePeriod(milliseconds=5000)),
+        ),
+        # Shown once the folder is listed; off: nothing until asked for.
+        cv.Optional(CONF_DEFAULT_IMAGE_INDEX): cv.Any(cv.int_range(min=0), cv.one_of("off", lower=True)),
+        cv.Optional(CONF_LONG_PRESS_TIME, default="1000ms"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_ENABLE_THUMBNAILS, default=True): cv.boolean,
+        cv.Optional(CONF_THUMBNAIL_WIDTH, default=120): cv.int_range(min=32, max=320),
+        cv.Optional(CONF_THUMBNAIL_HEIGHT, default=90): cv.int_range(min=32, max=240),
+        # Slots of the strip (PSRAM, width x height x 2 bytes each); it scrolls through the folder.
+        cv.Optional(CONF_THUMBNAIL_MAX_COUNT, default=10): cv.int_range(min=1, max=50),
+        cv.Optional(CONF_THUMBNAIL_LAZY_LOAD, default=True): cv.boolean,
+        cv.Optional(CONF_THUMBNAIL_PRELOAD_COUNT, default=5): cv.int_range(min=0, max=50),
+        cv.Optional(CONF_THUMBNAIL_LAYOUT, default="HORIZONTAL"): cv.enum(THUMBNAIL_LAYOUTS, upper=True),
+        cv.Optional(CONF_THUMBNAIL_SPACING, default=5): cv.int_range(min=0, max=50),
+        cv.Optional(CONF_THUMBNAIL_GRID_COLUMNS, default=3): cv.int_range(min=1, max=10),
+        cv.Optional(CONF_THUMBNAIL_CONTAINER_ID): cv.use_id(lv_obj_base_t),
+        cv.Optional(CONF_THUMBNAIL_STYLE_ID): cv.use_id(lv_style_t),
+        cv.Optional(CONF_THUMBNAIL_ACTIVE_STYLE_ID): cv.use_id(lv_style_t),
+        cv.Optional(CONF_THUMBNAIL_CONTAINER_STYLE_ID): cv.use_id(lv_style_t),
+        # {index} (1-based), {filename}, {name} (without extension)
+        cv.Optional(CONF_THUMBNAIL_LABEL_PATTERN): cv.string,
+        cv.Optional(CONF_THUMBNAIL_LABEL_STYLE_ID): cv.use_id(lv_style_t),
+        cv.Optional(CONF_THUMBNAIL_SLIDE_EDGE, default="RIGHT"): cv.enum(THUMBNAIL_SLIDE_EDGES, upper=True),
+        cv.Optional(CONF_THUMBNAIL_SLIDE_ENABLED, default=False): cv.boolean,
+        cv.Optional(CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT, default="10s"): cv.positive_time_period_milliseconds,
+        # Replaces showing the tapped picture; x is its index.
+        cv.Optional(CONF_ON_THUMBNAIL_CLICK): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(ThumbnailClickTrigger)}
+        ),
+    }
+
+
+async def _pictures_to_code(var, config):
+    from esphome.components.runtime_image import enable_format
+
+    # JPEG goes through esp32.require_hw_jpeg() (the P4's JPEG unit).
+    for name in PICTURE_FORMATS:
+        enable_format(name)
+    cg.add_define("SVP_PICTURES")
+    cg.add(var.set_picture_canvas(await cg.get_variable(config[CONF_PICTURE_CANVAS_ID])))
+    for path in config.get(CONF_PICTURE_DIRECTORIES, []):
+        cg.add(var.add_picture_directory(path))
+    cg.add(var.set_slideshow_interval(config[CONF_SLIDESHOW_INTERVAL]))
+    cg.add(var.set_fit_mode(config[CONF_FIT_MODE]))
+    cg.add(var.set_overlay_icon_size(config[CONF_OVERLAY_ICON_SIZE]))
+    cg.add(var.set_overlay_icon_color(config[CONF_OVERLAY_ICON_COLOR]))
+    cg.add(var.set_overlay_duration(config[CONF_OVERLAY_DURATION]))
+    if (index := config.get(CONF_DEFAULT_IMAGE_INDEX)) is not None:
+        cg.add(var.set_default_image_index(-1 if index == "off" else index))
+    cg.add(var.set_long_press_time(config[CONF_LONG_PRESS_TIME]))
+    cg.add(var.set_enable_thumbnails(config[CONF_ENABLE_THUMBNAILS]))
+    cg.add(var.set_thumbnail_size(config[CONF_THUMBNAIL_WIDTH], config[CONF_THUMBNAIL_HEIGHT]))
+    cg.add(var.set_thumbnail_max_count(config[CONF_THUMBNAIL_MAX_COUNT]))
+    cg.add(var.set_thumbnail_lazy_load(config[CONF_THUMBNAIL_LAZY_LOAD]))
+    cg.add(var.set_thumbnail_preload_count(config[CONF_THUMBNAIL_PRELOAD_COUNT]))
+    cg.add(var.set_thumbnail_layout(config[CONF_THUMBNAIL_LAYOUT]))
+    cg.add(var.set_thumbnail_spacing(config[CONF_THUMBNAIL_SPACING]))
+    cg.add(var.set_thumbnail_grid_columns(config[CONF_THUMBNAIL_GRID_COLUMNS]))
+    for key, setter in (
+        (CONF_THUMBNAIL_CONTAINER_ID, "set_thumbnail_container"),
+        (CONF_THUMBNAIL_STYLE_ID, "set_thumbnail_style"),
+        (CONF_THUMBNAIL_ACTIVE_STYLE_ID, "set_thumbnail_active_style"),
+        (CONF_THUMBNAIL_CONTAINER_STYLE_ID, "set_thumbnail_container_style"),
+        (CONF_THUMBNAIL_LABEL_STYLE_ID, "set_thumbnail_label_style"),
+    ):
+        if key in config:
+            cg.add(getattr(var, setter)(await cg.get_variable(config[key])))
+    if CONF_THUMBNAIL_LABEL_PATTERN in config:
+        cg.add(var.set_thumbnail_label_pattern(config[CONF_THUMBNAIL_LABEL_PATTERN]))
+    cg.add(var.set_thumbnail_slide_edge(config[CONF_THUMBNAIL_SLIDE_EDGE]))
+    cg.add(var.set_thumbnail_slide_enabled(config[CONF_THUMBNAIL_SLIDE_ENABLED]))
+    cg.add(var.set_thumbnail_auto_hide_timeout(config[CONF_THUMBNAIL_AUTO_HIDE_TIMEOUT]))
+    for conf in config.get(CONF_ON_THUMBNAIL_CLICK, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [(cg.size_t, "x")], conf)
+
+
 def _request_fast_network(config):
     # As Portall does whenever it receives over the network: ESPHome's high-performance networking
     # (TCP window, Wi-Fi buffers), and the runtime controls stream_receiver.cpp uses to hold off
@@ -350,6 +533,7 @@ CONFIG_SCHEMA = cv.All(
                 if lv_dropdown_t is not None
                 else {}
             ),
+            **_picture_schema(),
             cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
             # The panel's audio player (mark it `internal: true`): svp_relay plays sound through it with
             # the svp_* actions and shows panel and sound as one media player in Home Assistant.
@@ -440,6 +624,7 @@ CONFIG_SCHEMA = cv.All(
     _validate_output_target,
     _validate_stream,
     _validate_controls,
+    _validate_pictures,
     _request_fast_network,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
@@ -698,6 +883,9 @@ async def to_code(config):
             if key in controls:
                 cg.add(getattr(var, setter)(await cg.get_variable(controls[key])))
         cg.add(var.set_controls_hide_after(controls[CONF_HIDE_AFTER]))
+
+    if CONF_PICTURE_CANVAS_ID in config:
+        await _pictures_to_code(var, config)
 
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:
@@ -1029,4 +1217,86 @@ async def simple_video_player_set_volume_to_code(config, action_id, template_arg
     var = cg.new_Pvariable(action_id, template_arg, paren)
     volume = await cg.templatable(config[CONF_VOLUME], args, float)
     cg.add(var.set_volume(volume))
+    return var
+
+
+# Pictures (picture_canvas_id). show_image: index or path (a path outside the folder opens its folder).
+_PICTURE_TARGET_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Optional(CONF_INDEX): cv.templatable(cv.int_),
+            cv.Optional(CONF_PATH): cv.templatable(cv.string),
+        }
+    ),
+    cv.has_exactly_one_key(CONF_INDEX, CONF_PATH),
+)
+
+
+async def _picture_target_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    if CONF_PATH in config:
+        cg.add(var.set_path(await cg.templatable(config[CONF_PATH], args, cg.std_string)))
+    else:
+        cg.add(var.set_index(await cg.templatable(config[CONF_INDEX], args, cg.int_)))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.show_image", ShowImageAction, _PICTURE_TARGET_SCHEMA, synchronous=True
+)
+async def simple_video_player_show_image_to_code(config, action_id, template_arg, args):
+    return await _picture_target_to_code(config, action_id, template_arg, args)
+
+
+# index: one of picture_directories; path: any folder.
+@automation.register_action(
+    "simple_video_player.picture_directory", PictureDirectoryAction, _PICTURE_TARGET_SCHEMA, synchronous=True
+)
+async def simple_video_player_picture_directory_to_code(config, action_id, template_arg, args):
+    return await _picture_target_to_code(config, action_id, template_arg, args)
+
+
+def _register_picture_command(name, command):
+    async def _to_code(config, action_id, template_arg, args):
+        paren = await cg.get_variable(config[CONF_ID])
+        return cg.new_Pvariable(action_id, template_arg, paren, command)
+
+    automation.register_action(
+        f"simple_video_player.{name}",
+        PictureCommandAction,
+        SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+        synchronous=True,
+    )(_to_code)
+
+
+for _name, _command in (
+    ("next_image", PictureCommand.NEXT),
+    ("previous_image", PictureCommand.PREVIOUS),
+    ("start_slideshow", PictureCommand.START),
+    ("stop_slideshow", PictureCommand.STOP),
+    ("pause_slideshow", PictureCommand.PAUSE),
+    ("toggle_slideshow", PictureCommand.TOGGLE),
+    ("refresh_images", PictureCommand.REFRESH),
+):
+    _register_picture_command(_name, _command)
+
+
+# After the canvas widget was resized: a buffer of its size, the picture fitted again.
+@automation.register_action(
+    "simple_video_player.fullscreen",
+    FullscreenAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_FULLSCREEN): cv.templatable(cv.boolean),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_fullscreen_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_fullscreen(await cg.templatable(config[CONF_FULLSCREEN], args, bool)))
     return var

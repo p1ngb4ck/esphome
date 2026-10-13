@@ -1,0 +1,1180 @@
+#include "simple_video_player.h"
+
+#ifdef SVP_PICTURES
+
+#include "esphome/core/hal.h"
+#include "esphome/core/log.h"
+
+#include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+
+namespace esphome::simple_video_player {
+
+static const char *const TAG = "simple_video_player.pictures";
+
+static constexpr size_t READ_CHUNK = 32 * 1024;
+static constexpr size_t PSRAM_MARGIN = 64 * 1024;
+static constexpr uint32_t LIST_RETRY_MS = 1000;
+static constexpr size_t MAX_IMAGES = 1000;
+static constexpr int32_t LONG_PRESS_SLOP = 20;  // px the finger may move and still long-press
+
+static std::string lower(std::string text) {
+  for (char &c : text)
+    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+  return text;
+}
+
+static bool picture_format(const std::string &name, runtime_image::ImageFormat *format) {
+  const size_t dot = name.rfind('.');
+  if (dot == std::string::npos)
+    return false;
+  const std::string extension = lower(name.substr(dot));
+#ifdef USE_RUNTIME_IMAGE_JPEG
+  if (extension == ".jpg" || extension == ".jpeg") {
+    *format = runtime_image::JPEG;
+    return true;
+  }
+#endif
+#ifdef USE_RUNTIME_IMAGE_PNG
+  if (extension == ".png") {
+    *format = runtime_image::PNG;
+    return true;
+  }
+#endif
+#ifdef USE_RUNTIME_IMAGE_BMP
+  if (extension == ".bmp") {
+    *format = runtime_image::BMP;
+    return true;
+  }
+#endif
+  return false;
+}
+
+static size_t psram_largest() { return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
+
+static uint16_t to_rgb565(uint32_t color) {
+  return ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
+}
+
+//========================================================================
+// Setup, loop
+//========================================================================
+
+void SimpleVideoPlayer::pictures_setup_() {
+  if (this->pic_canvas_ == nullptr)
+    return;
+  this->pic_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
+                                                                   image::TRANSPARENCY_OPAQUE);
+  if (this->thumbs_enabled_ && this->thumb_container_ != nullptr && this->thumb_count_ > 0) {
+    if (this->setup_thumbnails_()) {
+      this->thumb_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
+                                                                         image::TRANSPARENCY_OPAQUE, nullptr, false,
+                                                                         this->thumb_w_, this->thumb_h_);
+    }
+  }
+
+  lv_obj_t *canvas = this->pic_canvas_;
+  lv_obj_set_clickable(canvas, true);
+  lv_obj_set_scrollable(canvas, false);
+  lv_obj_set_gesture_bubble(canvas, false);  // swipes are ours, not the page's
+  lv_obj_add_event_cb(canvas, &SimpleVideoPlayer::canvas_event_, LV_EVENT_ALL, this);
+  // Leaving the page ends the slideshow.
+  lv_obj_t *screen = lv_obj_get_screen(canvas);
+  if (screen != nullptr) {
+    lv_obj_add_event_cb(
+        screen,
+        [](lv_event_t *event) {
+          auto *self = static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event));
+          if (self->slideshow_mode_ == SlideshowMode::PLAYING)
+            self->stop_slideshow();
+        },
+        LV_EVENT_SCREEN_UNLOAD_START, this);
+  }
+
+  if (!this->pic_dirs_.empty()) {
+    this->pic_dir_index_ = 0;
+    this->pic_dir_ = this->pic_dirs_[0];
+    this->pic_list_pending_ = true;
+  }
+  this->pic_ready_ = true;
+}
+
+bool SimpleVideoPlayer::pictures_held_() const {
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+  return state == PlayerState::PLAYING || state == PlayerState::PAUSED;
+}
+
+void SimpleVideoPlayer::pictures_loop_() {
+  if (!this->pic_ready_)
+    return;
+  const uint32_t now = millis();
+  if (this->overlay_visible_ && now - this->overlay_shown_ms_ >= this->overlay_duration_ms_)
+    this->hide_overlay_icon_();
+  if (this->thumb_auto_hide_ms_ > 0 && this->thumbs_visible_ && this->thumb_slide_enabled_ &&
+      now - this->thumb_touched_ms_ >= this->thumb_auto_hide_ms_)
+    this->slide_thumbnails_(false);
+
+  // While a video plays nothing is read or decoded: the JPEG unit and the storage are its.
+  if (this->pictures_held_())
+    return;
+
+  if (this->pic_read_.active) {
+    if (this->pic_read_.done)
+      this->picture_read_done_();
+    return;
+  }
+  if (this->pic_list_pending_) {
+    if (now - this->pic_list_retry_ms_ >= LIST_RETRY_MS)
+      this->list_directory_();
+    return;
+  }
+  if (this->slideshow_mode_ == SlideshowMode::PLAYING && this->pic_wanted_ < 0 &&
+      now - this->last_slide_ms_ >= this->slideshow_interval_ms_) {
+    this->last_slide_ms_ = now;
+    this->next_image();
+  }
+  if (this->pic_wanted_ >= 0) {
+    this->start_read_(false, static_cast<size_t>(this->pic_wanted_), 0);
+    return;
+  }
+  while (!this->thumb_queue_.empty()) {
+    const size_t slot = this->thumb_queue_.front();
+    this->thumb_queue_.erase(this->thumb_queue_.begin());
+    if (slot < this->thumb_slots_.size() && !this->thumb_slots_[slot].loaded && this->thumb_slots_[slot].image >= 0) {
+      this->start_read_(true, static_cast<size_t>(this->thumb_slots_[slot].image), slot);
+      return;
+    }
+  }
+}
+
+//========================================================================
+// Folders
+//========================================================================
+
+bool SimpleVideoPlayer::open_directory(const std::string &path) {
+  std::string dir = path;
+  while (dir.size() > 1 && dir.back() == '/')
+    dir.pop_back();
+  if (dir.empty() || dir == "/") {
+    ESP_LOGW(TAG, "Not a picture folder: '%s'", path.c_str());
+    return false;
+  }
+  this->pic_dir_ = dir;
+  this->pic_dir_index_ = SIZE_MAX;
+  for (size_t i = 0; i < this->pic_dirs_.size(); i++) {
+    std::string configured = this->pic_dirs_[i];
+    while (configured.size() > 1 && configured.back() == '/')
+      configured.pop_back();
+    if (configured == dir)
+      this->pic_dir_index_ = i;
+  }
+  this->pic_list_pending_ = true;
+  this->pic_list_retry_ms_ = millis() - LIST_RETRY_MS;
+  return true;
+}
+
+bool SimpleVideoPlayer::set_current_directory(size_t index) {
+  if (index >= this->pic_dirs_.size()) {
+    ESP_LOGW(TAG, "No picture directory %u", static_cast<unsigned>(index));
+    return false;
+  }
+  return this->open_directory(this->pic_dirs_[index]);
+}
+
+void SimpleVideoPlayer::refresh_images() {
+  if (this->pic_dir_.empty())
+    return;
+  if (this->pic_select_.empty()) {
+    if (const ImageEntry *entry = this->get_current_image())
+      this->pic_select_ = entry->path;
+  }
+  this->pic_list_pending_ = true;
+  this->pic_list_retry_ms_ = millis() - LIST_RETRY_MS;
+}
+
+void SimpleVideoPlayer::list_directory_() {
+  this->pic_list_retry_ms_ = millis();
+  if (storage::global_storage_registry == nullptr)
+    return;
+  const char *rel = nullptr;
+  storage::PathStorage *storage = storage::global_storage_registry->resolve_path(this->pic_dir_.c_str(), &rel);
+  // Not mounted yet, or the worker reads from it on its task: tried again.
+  if (storage == nullptr ||
+      (storage::global_storage_worker != nullptr && storage::global_storage_worker->has_active_task_io(storage)))
+    return;
+
+  struct Context {
+    std::vector<ImageEntry> found;
+    const std::string *dir;
+  } context{{}, &this->pic_dir_};
+  const storage::StorageError err =
+      storage->list_dir((rel == nullptr || rel[0] == '\0') ? "/" : rel,
+                        [](const storage::FileStat *entry, void *ctx) -> bool {
+                          auto *context = static_cast<Context *>(ctx);
+                          runtime_image::ImageFormat format;
+                          if (entry->is_dir || entry->name[0] == '.' || !picture_format(entry->name, &format))
+                            return true;
+                          context->found.push_back({*context->dir + "/" + entry->name, entry->name, entry->size});
+                          return context->found.size() < MAX_IMAGES;
+                        },
+                        &context);
+  this->pic_list_pending_ = false;
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGW(TAG, "Cannot list %s: %s", this->pic_dir_.c_str(), storage::error_to_string(err));
+    return;
+  }
+  std::sort(context.found.begin(), context.found.end(),
+            [](const ImageEntry &a, const ImageEntry &b) { return lower(a.filename) < lower(b.filename); });
+
+  this->pic_generation_++;  // a read in flight belongs to the old list
+  this->images_ = std::move(context.found);
+  for (ThumbSlot &slot : this->thumb_slots_) {
+    slot.image = -1;  // nothing carries over into the new list
+    slot.loaded = false;
+  }
+  this->current_image_ = -1;
+  this->pic_wanted_ = -1;
+  ESP_LOGI(TAG, "%u pictures in %s", static_cast<unsigned>(this->images_.size()), this->pic_dir_.c_str());
+
+  int show = -1;
+  if (!this->pic_select_.empty()) {
+    for (size_t i = 0; i < this->images_.size(); i++) {
+      if (this->images_[i].path == this->pic_select_)
+        show = static_cast<int>(i);
+    }
+    this->pic_select_.clear();
+  } else if (this->default_image_index_ >= 0 &&
+             static_cast<size_t>(this->default_image_index_) < this->images_.size()) {
+    show = this->default_image_index_;
+  }
+  this->place_thumbnail_window_(show >= 0 ? static_cast<size_t>(show) : 0);
+  if (show >= 0)
+    this->show_image(static_cast<size_t>(show));
+}
+
+//========================================================================
+// Navigation, slideshow
+//========================================================================
+
+bool SimpleVideoPlayer::show_image(size_t index) {
+  if (index >= this->images_.size()) {
+    ESP_LOGW(TAG, "No picture %u (of %u)", static_cast<unsigned>(index), static_cast<unsigned>(this->images_.size()));
+    return false;
+  }
+  this->pic_wanted_ = static_cast<int>(index);
+  return true;
+}
+
+bool SimpleVideoPlayer::show_image(const std::string &path) {
+  for (size_t i = 0; i < this->images_.size(); i++) {
+    if (this->images_[i].path == path || this->images_[i].filename == path)
+      return this->show_image(i);
+  }
+  const size_t slash = path.rfind('/');
+  if (slash == std::string::npos || slash == 0) {
+    ESP_LOGW(TAG, "Picture not found: %s", path.c_str());
+    return false;
+  }
+  this->pic_select_ = path;
+  return this->open_directory(path.substr(0, slash));
+}
+
+bool SimpleVideoPlayer::next_image() {
+  if (this->images_.empty())
+    return false;
+  const int base = this->pic_wanted_ >= 0 ? this->pic_wanted_ : this->current_image_;
+  return this->show_image(static_cast<size_t>((base + 1) % static_cast<int>(this->images_.size())));
+}
+
+bool SimpleVideoPlayer::previous_image() {
+  if (this->images_.empty())
+    return false;
+  const int base = this->pic_wanted_ >= 0 ? this->pic_wanted_ : this->current_image_;
+  const int count = static_cast<int>(this->images_.size());
+  return this->show_image(static_cast<size_t>(base <= 0 ? count - 1 : base - 1));
+}
+
+void SimpleVideoPlayer::start_slideshow() {
+  if (this->images_.empty()) {
+    ESP_LOGW(TAG, "No pictures for a slideshow");
+    return;
+  }
+  this->slideshow_mode_ = SlideshowMode::PLAYING;
+  this->last_slide_ms_ = millis();
+  if (this->current_image_ < 0 && this->pic_wanted_ < 0)
+    this->show_image(static_cast<size_t>(0));
+  this->show_overlay_icon_(true);
+}
+
+void SimpleVideoPlayer::stop_slideshow() {
+  const bool was_playing = this->slideshow_mode_ == SlideshowMode::PLAYING;
+  this->slideshow_mode_ = SlideshowMode::STOPPED;
+  if (was_playing)
+    this->show_overlay_icon_(false);
+}
+
+void SimpleVideoPlayer::pause_slideshow() { this->slideshow_mode_ = SlideshowMode::PAUSED; }
+
+void SimpleVideoPlayer::toggle_slideshow() {
+  if (this->slideshow_mode_ == SlideshowMode::PLAYING) {
+    this->pause_slideshow();
+    this->show_overlay_icon_(false);
+  } else {
+    this->start_slideshow();
+  }
+}
+
+//========================================================================
+// Reading through the storage worker
+//========================================================================
+
+bool SimpleVideoPlayer::reserve_file_buffer_(size_t size) {
+  if (this->pic_file_cap_ >= size)
+    return true;
+  if (this->pic_file_ != nullptr) {
+    heap_caps_free(this->pic_file_);
+    this->pic_file_ = nullptr;
+    this->pic_file_cap_ = 0;
+  }
+  if (psram_largest() < size + PSRAM_MARGIN)
+    return false;
+  // Cache-line aligned: the JPEG unit reads it by DMA.
+  this->pic_file_ = static_cast<uint8_t *>(heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->pic_file_ == nullptr)
+    return false;
+  this->pic_file_cap_ = size;
+  return true;
+}
+
+void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot) {
+  if (index >= this->images_.size()) {
+    if (!thumbnail)
+      this->pic_wanted_ = -1;
+    return;
+  }
+  const ImageEntry &entry = this->images_[index];
+  const char *why = nullptr;
+  const char *rel = nullptr;
+  storage::PathStorage *storage = nullptr;
+  if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr) {
+    why = "no storage";
+  } else if ((storage = storage::global_storage_registry->resolve_path(entry.path.c_str(), &rel)) == nullptr ||
+             rel == nullptr || rel[0] == '\0') {
+    why = "storage not mounted";
+  } else if (!this->reserve_file_buffer_(static_cast<size_t>(entry.size) + 1)) {
+    why = "not enough PSRAM for the file";
+  }
+  if (why != nullptr) {
+    ESP_LOGW(TAG, "%s: %s", entry.path.c_str(), why);
+    if (!thumbnail)
+      this->pic_wanted_ = -1;
+    return;
+  }
+
+  PictureRead &read = this->pic_read_;
+  read = PictureRead{};
+  read.active = true;
+  read.thumbnail = thumbnail;
+  read.index = index;
+  read.slot = slot;
+  read.generation = this->pic_generation_;
+  read.limit = static_cast<size_t>(entry.size) + 1;
+  const storage::StorageError err =
+      storage::global_storage_worker->begin_read(storage, rel, &read.handle, [this](storage::StorageError result) {
+        if (result != storage::StorageError::STORAGE_ERROR_OK) {
+          this->pic_read_.failed = true;
+          this->finish_read_();
+          return;
+        }
+        this->read_next_chunk_();
+      });
+  if (err == storage::StorageError::STORAGE_ERROR_OK)
+    return;
+  read.active = false;
+  if (err == storage::StorageError::STORAGE_ERROR_NOT_READY) {
+    // All streams busy: the same file next loop.
+    if (thumbnail)
+      this->thumb_queue_.insert(this->thumb_queue_.begin(), slot);
+    return;
+  }
+  ESP_LOGW(TAG, "%s: %s", entry.path.c_str(), storage::error_to_string(err));
+  if (!thumbnail)
+    this->pic_wanted_ = -1;
+}
+
+void SimpleVideoPlayer::read_next_chunk_() {
+  PictureRead &read = this->pic_read_;
+  const size_t room = read.limit - read.length;
+  if (room == 0) {
+    read.failed = true;  // larger than when it was listed
+    this->finish_read_();
+    return;
+  }
+  const storage::StorageError err =
+      storage::global_storage_worker->read_chunk(read.handle, this->pic_file_ + read.length, std::min(room, READ_CHUNK),
+                                                 &read.chunk, [this](storage::StorageError result) {
+                                                   PictureRead &read = this->pic_read_;
+                                                   if (result != storage::StorageError::STORAGE_ERROR_OK) {
+                                                     read.failed = true;
+                                                     this->finish_read_();
+                                                   } else if (read.chunk == 0) {
+                                                     this->finish_read_();  // end of file
+                                                   } else {
+                                                     read.length += read.chunk;
+                                                     this->read_next_chunk_();
+                                                   }
+                                                 });
+  if (err != storage::StorageError::STORAGE_ERROR_OK) {
+    read.failed = true;
+    this->finish_read_();
+  }
+}
+
+void SimpleVideoPlayer::finish_read_() {
+  const storage::StorageError err = storage::global_storage_worker->end_read(
+      this->pic_read_.handle, [this](storage::StorageError) { this->pic_read_.done = true; });
+  if (err != storage::StorageError::STORAGE_ERROR_OK)
+    this->pic_read_.done = true;
+}
+
+void SimpleVideoPlayer::picture_read_done_() {
+  const PictureRead read = this->pic_read_;
+  this->pic_read_ = PictureRead{};
+  if (!read.thumbnail && this->pic_wanted_ == static_cast<int>(read.index))
+    this->pic_wanted_ = -1;
+  if (read.generation != this->pic_generation_ || read.index >= this->images_.size())
+    return;
+  const ImageEntry &entry = this->images_[read.index];
+  if (read.failed || read.length == 0) {
+    ESP_LOGW(TAG, "Cannot read %s", entry.path.c_str());
+    return;
+  }
+
+  if (read.thumbnail) {
+    if (this->thumb_image_ == nullptr || read.slot >= this->thumb_slots_.size() ||
+        this->thumb_slots_[read.slot].image != static_cast<int>(read.index))
+      return;
+    const size_t need = static_cast<size_t>(this->thumb_w_) * this->thumb_h_ * 2;
+    if (psram_largest() < need + PSRAM_MARGIN) {
+      ESP_LOGW(TAG, "Not enough PSRAM for a thumbnail");
+      return;
+    }
+    if (this->decode_file_(this->thumb_image_.get(), entry.path, read.length))
+      this->store_thumbnail_(read.slot);
+    return;
+  }
+
+  if (this->pic_wanted_ >= 0)
+    return;  // another picture was asked for meanwhile
+  size_t need = 1024 * 1024;
+  if (this->adopt_canvas_buffer_())
+    need = static_cast<size_t>(this->pic_draw_buf_->header.w) * this->pic_draw_buf_->header.h * 2;
+  if (psram_largest() < need + PSRAM_MARGIN) {
+    ESP_LOGW(TAG, "%s: not enough PSRAM to decode", entry.path.c_str());
+    return;
+  }
+  if (!this->decode_file_(this->pic_image_.get(), entry.path, read.length))
+    return;
+  this->current_image_ = static_cast<int>(read.index);
+  this->compose_picture_();
+  const size_t slots = this->thumb_slots_.size();
+  if (slots != 0 && (read.index < this->thumb_window_ || read.index >= this->thumb_window_ + slots))
+    this->place_thumbnail_window_(read.index > slots / 2 ? read.index - slots / 2 : 0);
+  this->highlight_thumbnail_(true);
+  ESP_LOGD(TAG, "Showing %s (%dx%d)", entry.filename.c_str(), this->pic_image_->get_width(),
+           this->pic_image_->get_height());
+}
+
+bool SimpleVideoPlayer::decode_file_(runtime_image::RuntimeImage *image, const std::string &path, size_t length) {
+  runtime_image::ImageFormat format;
+  if (!picture_format(path, &format) || !image->begin_decode(length, format))
+    return false;
+  size_t offset = 0;
+  while (offset < length) {
+    const int used = image->feed_data(this->pic_file_ + offset, length - offset);
+    if (used < 0) {
+      ESP_LOGW(TAG, "%s: %s", path.c_str(), runtime_image::decode_error_to_string(used));
+      image->release();
+      return false;
+    }
+    if (used == 0)
+      break;
+    offset += static_cast<size_t>(used);
+  }
+  image->end_decode();
+  const uint8_t *pixels = image->get_data_start();
+  if (pixels == nullptr || image->get_width() <= 0 || image->get_height() <= 0) {
+    ESP_LOGW(TAG, "%s: incomplete picture", path.c_str());
+    image->release();
+    return false;
+  }
+  // runtime_image allocates with an internal-RAM fallback: a picture never stays there.
+  if (!esp_ptr_external_ram(pixels)) {
+    ESP_LOGE(TAG, "%s: decoded outside PSRAM -- dropped", path.c_str());
+    image->release();
+    return false;
+  }
+  return true;
+}
+
+//========================================================================
+// Canvas
+//========================================================================
+
+bool SimpleVideoPlayer::adopt_canvas_buffer_() {
+  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
+  if (buf == nullptr || buf->data == nullptr || buf->header.w == 0 || buf->header.h == 0 ||
+      buf->header.cf != LV_COLOR_FORMAT_RGB565) {
+    if (!this->pic_buf_error_logged_) {
+      ESP_LOGE(TAG, "The picture canvas needs an RGB565 buffer (a canvas without transparency)");
+      this->pic_buf_error_logged_ = true;
+    }
+    this->pic_draw_buf_ = nullptr;
+    return false;
+  }
+  this->pic_draw_buf_ = buf;
+  return true;
+}
+
+void SimpleVideoPlayer::compose_picture_() {
+  if (this->pic_image_ == nullptr || this->pic_image_->get_data_start() == nullptr || !this->adopt_canvas_buffer_())
+    return;
+  lv_draw_buf_t *buf = this->pic_draw_buf_;
+  const int32_t cw = buf->header.w;
+  const int32_t ch = buf->header.h;
+  const uint32_t stride = buf->header.stride;
+  const int32_t iw = this->pic_image_->get_width();
+  const int32_t ih = this->pic_image_->get_height();
+  const auto *src = reinterpret_cast<const uint16_t *>(this->pic_image_->get_data_start());
+
+  int32_t dw = iw;
+  int32_t dh = ih;
+  switch (this->fit_mode_) {
+    case ImageFitMode::SCALE_TO_FIT:
+    case ImageFitMode::SCALE_TO_FILL: {
+      const float sx = static_cast<float>(cw) / static_cast<float>(iw);
+      const float sy = static_cast<float>(ch) / static_cast<float>(ih);
+      const float scale = this->fit_mode_ == ImageFitMode::SCALE_TO_FIT ? std::min(sx, sy) : std::max(sx, sy);
+      dw = std::max<int32_t>(1, static_cast<int32_t>(static_cast<float>(iw) * scale));
+      dh = std::max<int32_t>(1, static_cast<int32_t>(static_cast<float>(ih) * scale));
+      break;
+    }
+    case ImageFitMode::STRETCH:
+      dw = cw;
+      dh = ch;
+      break;
+    case ImageFitMode::CENTER:
+      break;
+  }
+  const int32_t dx = (cw - dw) / 2;
+  const int32_t dy = (ch - dh) / 2;
+
+  if (this->fit_mode_ != ImageFitMode::STRETCH) {
+    for (int32_t y = 0; y < ch; y++)
+      memset(buf->data + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(cw) * 2);
+  }
+  const int32_t x0 = std::max<int32_t>(dx, 0);
+  const int32_t x1 = std::min<int32_t>(dx + dw, cw);
+  const int32_t y0 = std::max<int32_t>(dy, 0);
+  const int32_t y1 = std::min<int32_t>(dy + dh, ch);
+  // Nearest neighbour, 16.16 fixed point.
+  const uint64_t step_x = (static_cast<uint64_t>(iw) << 16) / static_cast<uint64_t>(dw);
+  const uint64_t step_y = (static_cast<uint64_t>(ih) << 16) / static_cast<uint64_t>(dh);
+  for (int32_t y = y0; y < y1; y++) {
+    const int32_t sy = std::min<int32_t>(static_cast<int32_t>((static_cast<uint64_t>(y - dy) * step_y) >> 16), ih - 1);
+    const uint16_t *src_row = src + static_cast<size_t>(sy) * iw;
+    auto *dst_row = reinterpret_cast<uint16_t *>(buf->data + static_cast<size_t>(y) * stride);
+    if (dw == iw) {
+      memcpy(dst_row + x0, src_row + (x0 - dx), static_cast<size_t>(x1 - x0) * 2);
+      continue;
+    }
+    uint64_t acc = static_cast<uint64_t>(x0 - dx) * step_x;
+    for (int32_t x = x0; x < x1; x++, acc += step_x)
+      dst_row[x] = src_row[std::min<int32_t>(static_cast<int32_t>(acc >> 16), iw - 1)];
+  }
+
+  if (this->overlay_visible_) {
+    const int cx = cw / 2;
+    const int cy = ch / 2;
+    const uint16_t color = to_rgb565(this->overlay_icon_color_);
+    if (this->overlay_playing_) {
+      this->draw_play_icon_(cx, cy, this->overlay_icon_size_, color);
+    } else {
+      this->draw_pause_icon_(cx, cy, this->overlay_icon_size_, color);
+    }
+  }
+  lv_obj_invalidate(this->pic_canvas_);
+}
+
+void SimpleVideoPlayer::set_fullscreen(bool fullscreen) {
+  if (this->fullscreen_ == fullscreen || this->pic_canvas_ == nullptr)
+    return;
+  this->fullscreen_ = fullscreen;
+  lv_obj_update_layout(this->pic_canvas_);
+  const int32_t w = lv_obj_get_width(this->pic_canvas_);
+  const int32_t h = lv_obj_get_height(this->pic_canvas_);
+  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
+  if (w <= 0 || h <= 0 ||
+      (buf != nullptr && buf->header.w == static_cast<uint32_t>(w) && buf->header.h == static_cast<uint32_t>(h))) {
+    this->compose_picture_();
+    return;
+  }
+  const size_t size = static_cast<size_t>(lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565)) * h;
+  uint8_t *memory = nullptr;
+  if (psram_largest() >= size + PSRAM_MARGIN)
+    memory = static_cast<uint8_t *>(heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (memory == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for a %dx%d canvas buffer", static_cast<int>(w), static_cast<int>(h));
+    return;
+  }
+  memset(memory, 0, size);
+  lv_canvas_set_buffer(this->pic_canvas_, memory, w, h, LV_COLOR_FORMAT_RGB565);
+  if (this->pic_own_buf_ != nullptr)
+    heap_caps_free(this->pic_own_buf_);  // the canvas has let go of it
+  this->pic_own_buf_ = memory;
+  this->compose_picture_();
+}
+
+//========================================================================
+// Play/pause overlay
+//========================================================================
+
+void SimpleVideoPlayer::show_overlay_icon_(bool playing) {
+  this->overlay_visible_ = true;
+  this->overlay_playing_ = playing;
+  this->overlay_shown_ms_ = millis();
+  this->compose_picture_();
+}
+
+void SimpleVideoPlayer::hide_overlay_icon_() {
+  if (!this->overlay_visible_)
+    return;
+  this->overlay_visible_ = false;
+  this->compose_picture_();
+}
+
+void SimpleVideoPlayer::fill_rect_(int x0, int y0, int x1, int y1, uint16_t color) {
+  lv_draw_buf_t *buf = this->pic_draw_buf_;
+  x0 = std::max(x0, 0);
+  y0 = std::max(y0, 0);
+  x1 = std::min(x1, static_cast<int>(buf->header.w) - 1);
+  y1 = std::min(y1, static_cast<int>(buf->header.h) - 1);
+  for (int y = y0; y <= y1; y++) {
+    auto *row = reinterpret_cast<uint16_t *>(buf->data + static_cast<size_t>(y) * buf->header.stride);
+    for (int x = x0; x <= x1; x++)
+      row[x] = color;
+  }
+}
+
+void SimpleVideoPlayer::draw_play_icon_(int cx, int cy, int size, uint16_t color) {
+  // A triangle pointing right, 3:4 wide.
+  const int height = size;
+  const int width = size * 3 / 4;
+  const int left = cx - width / 2;
+  const int top = cy - height / 2;
+  for (int y = 0; y <= height; y++) {
+    const int distance = y <= height / 2 ? y : height - y;
+    this->fill_rect_(left, top + y, left + distance * width * 2 / height, top + y, color);
+  }
+}
+
+void SimpleVideoPlayer::draw_pause_icon_(int cx, int cy, int size, uint16_t color) {
+  const int bar = size / 5;
+  const int gap = size / 6;
+  const int top = cy - size / 2;
+  const int bottom = cy + size / 2;
+  this->fill_rect_(cx - gap / 2 - bar, top, cx - gap / 2, bottom, color);
+  this->fill_rect_(cx + gap / 2, top, cx + gap / 2 + bar, bottom, color);
+}
+
+//========================================================================
+// Touch on the picture
+//========================================================================
+
+void SimpleVideoPlayer::canvas_event_(lv_event_t *event) {
+  auto *self = static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event));
+  lv_indev_t *indev = lv_indev_active();
+  switch (lv_event_get_code(event)) {
+    case LV_EVENT_PRESSED: {
+      lv_point_t point{};
+      if (indev != nullptr)
+        lv_indev_get_point(indev, &point);
+      self->press_x_ = point.x;
+      self->press_y_ = point.y;
+      self->press_ms_ = millis();
+      self->press_handled_ = false;
+      self->gesture_seen_ = false;
+      break;
+    }
+    case LV_EVENT_PRESSING: {
+      // Held still for long_press_time: the slideshow starts or stops.
+      if (self->press_handled_ || self->gesture_seen_ || millis() - self->press_ms_ < self->long_press_time_ms_)
+        break;
+      lv_point_t point{};
+      if (indev != nullptr)
+        lv_indev_get_point(indev, &point);
+      if (std::abs(point.x - self->press_x_) > LONG_PRESS_SLOP || std::abs(point.y - self->press_y_) > LONG_PRESS_SLOP)
+        break;
+      self->press_handled_ = true;
+      if (self->slideshow_mode_ == SlideshowMode::PLAYING) {
+        self->stop_slideshow();
+      } else {
+        self->start_slideshow();
+      }
+      break;
+    }
+    case LV_EVENT_GESTURE:
+      self->gesture_seen_ = true;
+      if (!self->press_handled_ && indev != nullptr) {
+        self->press_handled_ = true;
+        self->canvas_gesture_(lv_indev_get_gesture_dir(indev));
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void SimpleVideoPlayer::canvas_gesture_(lv_dir_t dir) {
+  if (dir == LV_DIR_NONE)
+    return;
+  // A swipe from the strip's edge slides the thumbnails in; one towards it slides them out.
+  if (this->thumb_slide_enabled_ && !this->thumb_slots_.empty()) {
+    lv_obj_t *screen = lv_screen_active();
+    const int32_t sw = lv_obj_get_width(screen);
+    const int32_t sh = lv_obj_get_height(screen);
+    const int32_t edge_h = this->thumb_layout_ == ThumbnailLayout::VERTICAL ? this->thumb_w_ : sw / 10;
+    const int32_t edge_v = this->thumb_layout_ == ThumbnailLayout::HORIZONTAL ? this->thumb_h_ : sh / 10;
+    bool in_from_edge = false;
+    lv_dir_t inward = LV_DIR_NONE;
+    lv_dir_t outward = LV_DIR_NONE;
+    switch (this->thumb_slide_edge_) {
+      case ThumbnailSlideEdge::RIGHT:
+        in_from_edge = this->press_x_ > sw - edge_h;
+        inward = LV_DIR_LEFT;
+        outward = LV_DIR_RIGHT;
+        break;
+      case ThumbnailSlideEdge::LEFT:
+        in_from_edge = this->press_x_ < edge_h;
+        inward = LV_DIR_RIGHT;
+        outward = LV_DIR_LEFT;
+        break;
+      case ThumbnailSlideEdge::TOP:
+        in_from_edge = this->press_y_ < edge_v;
+        inward = LV_DIR_BOTTOM;
+        outward = LV_DIR_TOP;
+        break;
+      case ThumbnailSlideEdge::BOTTOM:
+        in_from_edge = this->press_y_ > sh - edge_v;
+        inward = LV_DIR_TOP;
+        outward = LV_DIR_BOTTOM;
+        break;
+    }
+    if (!this->thumbs_visible_ && in_from_edge && dir == inward) {
+      this->slide_thumbnails_(true);
+      return;
+    }
+    if (this->thumbs_visible_ && dir == outward) {
+      this->slide_thumbnails_(false);
+      return;
+    }
+  }
+  // Up and down change the folder (with more than one configured).
+  if (this->pic_dirs_.size() > 1 && (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM)) {
+    const size_t count = this->pic_dirs_.size();
+    const size_t current = this->pic_dir_index_ < count ? this->pic_dir_index_ : 0;
+    this->set_current_directory(dir == LV_DIR_TOP ? (current + 1) % count : (current + count - 1) % count);
+    return;
+  }
+  // Left and right: next and previous picture; a running slideshow stops.
+  if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+    this->stop_slideshow();
+    if (dir == LV_DIR_LEFT) {
+      this->next_image();
+    } else {
+      this->previous_image();
+    }
+  }
+}
+
+//========================================================================
+// Thumbnails
+//========================================================================
+
+bool SimpleVideoPlayer::setup_thumbnails_() {
+  this->thumb_stride_ = lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565);
+  const size_t slot_bytes = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
+  const size_t total = slot_bytes * this->thumb_count_;
+  if (psram_largest() >= total + PSRAM_MARGIN)
+    this->thumb_buffer_ = static_cast<uint8_t *>(heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->thumb_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Thumbnails need %u bytes of PSRAM -- disabled", static_cast<unsigned>(total));
+    return false;
+  }
+  memset(this->thumb_buffer_, 0, total);
+
+  lv_style_init(&this->thumb_default_style_);
+  lv_style_set_pad_all(&this->thumb_default_style_, 0);
+  lv_style_set_border_width(&this->thumb_default_style_, 0);
+  lv_style_set_radius(&this->thumb_default_style_, 0);
+  lv_style_init(&this->thumb_default_active_style_);
+  lv_style_set_border_width(&this->thumb_default_active_style_, 2);
+  lv_style_set_border_color(&this->thumb_default_active_style_, lv_color_hex(0x00FF00));
+
+  lv_obj_t *box = this->thumb_container_;
+  if (this->thumb_container_style_ != nullptr)
+    lv_obj_add_style(box, this->thumb_container_style_, LV_PART_MAIN);
+  lv_obj_set_flex_flow(box, this->thumb_layout_ == ThumbnailLayout::HORIZONTAL ? LV_FLEX_FLOW_ROW
+                            : this->thumb_layout_ == ThumbnailLayout::VERTICAL ? LV_FLEX_FLOW_COLUMN
+                                                                               : LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_column(box, this->thumb_spacing_, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(box, this->thumb_spacing_, LV_PART_MAIN);
+  if (this->thumb_layout_ == ThumbnailLayout::GRID) {
+    const int32_t columns = std::max(this->thumb_columns_, 1);
+    lv_obj_set_width(box, columns * this->thumb_w_ + (columns - 1) * this->thumb_spacing_ +
+                              lv_obj_get_style_pad_left(box, LV_PART_MAIN) +
+                              lv_obj_get_style_pad_right(box, LV_PART_MAIN) +
+                              2 * lv_obj_get_style_border_width(box, LV_PART_MAIN));
+  }
+  lv_obj_set_scrollable(box, true);
+  lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_scroll_dir(box, this->thumb_layout_ == ThumbnailLayout::HORIZONTAL ? LV_DIR_HOR : LV_DIR_VER);
+  lv_obj_add_event_cb(box, &SimpleVideoPlayer::thumbnail_event_, LV_EVENT_SCROLL, this);
+
+  this->thumb_slots_.resize(this->thumb_count_);
+  for (size_t i = 0; i < this->thumb_count_; i++) {
+    ThumbSlot &slot = this->thumb_slots_[i];
+    slot.data = this->thumb_buffer_ + i * slot_bytes;
+    lv_obj_t *button = lv_obj_create(box);
+    lv_obj_set_size(button, this->thumb_w_, this->thumb_h_);
+    lv_obj_set_scrollable(button, false);
+    lv_obj_set_clickable(button, true);
+    lv_obj_add_style(button, this->thumb_style_ != nullptr ? this->thumb_style_ : &this->thumb_default_style_,
+                     LV_PART_MAIN);
+    lv_obj_set_hidden(button, true);
+    lv_obj_set_user_data(button, reinterpret_cast<void *>(i));
+    lv_obj_add_event_cb(button, &SimpleVideoPlayer::thumbnail_event_, LV_EVENT_CLICKED, this);
+    lv_obj_t *canvas = lv_canvas_create(button);
+    lv_canvas_set_buffer(canvas, slot.data, this->thumb_w_, this->thumb_h_, LV_COLOR_FORMAT_RGB565);
+    lv_obj_center(canvas);
+    lv_obj_set_clickable(canvas, false);
+    if (!this->thumb_label_pattern_.empty()) {
+      slot.label = lv_label_create(button);
+      lv_obj_align(slot.label, LV_ALIGN_BOTTOM_MID, 0, 0);
+      lv_obj_set_clickable(slot.label, false);
+      if (this->thumb_label_style_ != nullptr)
+        lv_obj_add_style(slot.label, this->thumb_label_style_, LV_PART_MAIN);
+    }
+    slot.button = button;
+    slot.canvas = canvas;
+  }
+
+  lv_obj_t *strip = lv_obj_get_parent(box);
+  if (strip != nullptr && this->thumb_slide_enabled_) {
+    // A swipe on the strip (bubbled up from the thumbnails) slides it out.
+    lv_obj_set_clickable(strip, true);
+    lv_obj_add_event_cb(strip, &SimpleVideoPlayer::thumbnail_event_, LV_EVENT_GESTURE, this);
+  }
+  this->slide_thumbnails_(true);
+  return true;
+}
+
+void SimpleVideoPlayer::thumbnail_event_(lv_event_t *event) {
+  auto *self = static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event));
+  self->thumb_touched_ms_ = millis();
+  switch (lv_event_get_code(event)) {
+    case LV_EVENT_SCROLL:
+      self->thumbnails_scrolled_();
+      break;
+    case LV_EVENT_GESTURE: {
+      lv_indev_t *indev = lv_indev_active();
+      if (!self->thumbs_visible_ || indev == nullptr)
+        break;
+      const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+      const ThumbnailSlideEdge edge = self->thumb_slide_edge_;
+      if ((edge == ThumbnailSlideEdge::RIGHT && dir == LV_DIR_RIGHT) ||
+          (edge == ThumbnailSlideEdge::LEFT && dir == LV_DIR_LEFT) ||
+          (edge == ThumbnailSlideEdge::TOP && dir == LV_DIR_TOP) ||
+          (edge == ThumbnailSlideEdge::BOTTOM && dir == LV_DIR_BOTTOM))
+        self->slide_thumbnails_(false);
+      break;
+    }
+    case LV_EVENT_CLICKED: {
+      const auto slot = reinterpret_cast<size_t>(lv_obj_get_user_data(lv_event_get_current_target_obj(event)));
+      if (slot >= self->thumb_slots_.size() || self->thumb_slots_[slot].image < 0)
+        break;
+      const auto image = static_cast<size_t>(self->thumb_slots_[slot].image);
+      self->stop_slideshow();
+      if (self->thumb_click_handled_) {
+        self->thumb_click_callbacks_.call(image);
+      } else {
+        self->show_image(image);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+std::string SimpleVideoPlayer::thumbnail_label_(size_t image) const {
+  if (image >= this->images_.size())
+    return "";
+  const std::string &filename = this->images_[image].filename;
+  const size_t dot = filename.rfind('.');
+  const std::string name = dot == std::string::npos ? filename : filename.substr(0, dot);
+  const std::string number = std::to_string(image + 1);
+  std::string text = this->thumb_label_pattern_;
+  const std::pair<const char *, const std::string *> fields[] = {
+      {"{index}", &number}, {"{filename}", &filename}, {"{name}", &name}};
+  for (const auto &field : fields) {
+    const size_t key_length = strlen(field.first);
+    for (size_t pos = text.find(field.first); pos != std::string::npos;
+         pos = text.find(field.first, pos + field.second->size()))
+      text.replace(pos, key_length, *field.second);
+  }
+  return text;
+}
+
+/// The strip holds thumb_count_ slots: slot k shows image thumb_window_ + k.
+void SimpleVideoPlayer::place_thumbnail_window_(size_t start) {
+  if (this->thumb_slots_.empty())
+    return;
+  const size_t slots = this->thumb_slots_.size();
+  const size_t images = this->images_.size();
+  // Whole lines only, so a grid keeps its columns; the last line may have hidden slots.
+  const size_t per_line =
+      this->thumb_layout_ == ThumbnailLayout::GRID ? static_cast<size_t>(std::max(this->thumb_columns_, 1)) : 1;
+  const size_t last_start = images > slots ? (images - slots + per_line - 1) / per_line * per_line : 0;
+  start = std::min(start, last_start) / per_line * per_line;
+  const size_t slot_bytes = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
+
+  // Thumbnails still in the window keep their pixels: moved to their new slot.
+  const size_t old_start = this->thumb_window_;
+  std::vector<bool> carried(slots, false);
+  auto carry = [&](size_t k) {
+    const int image = static_cast<int>(start + k);
+    if (start + k >= old_start && start + k < old_start + slots) {
+      ThumbSlot &from = this->thumb_slots_[start + k - old_start];
+      if (from.loaded && from.image == image) {
+        if (&from != &this->thumb_slots_[k])
+          memcpy(this->thumb_slots_[k].data, from.data, slot_bytes);
+        carried[k] = true;
+      }
+    }
+  };
+  if (start >= old_start) {
+    for (size_t k = 0; k < slots; k++)
+      carry(k);
+  } else {
+    for (size_t k = slots; k-- > 0;)
+      carry(k);
+  }
+
+  this->thumb_window_ = start;
+  this->thumb_queue_.clear();
+  for (size_t k = 0; k < slots; k++) {
+    ThumbSlot &slot = this->thumb_slots_[k];
+    slot.image = start + k < images ? static_cast<int>(start + k) : -1;
+    slot.loaded = carried[k];
+    if (!slot.loaded)
+      memset(slot.data, 0, slot_bytes);
+    lv_obj_set_hidden(slot.button, slot.image < 0);
+    if (slot.label != nullptr)
+      lv_label_set_text(slot.label, slot.image >= 0 ? this->thumbnail_label_(slot.image).c_str() : "");
+    lv_obj_invalidate(slot.canvas);
+  }
+  this->queue_thumbnails_(!this->thumb_lazy_);
+  this->highlight_thumbnail_(false);
+}
+
+bool SimpleVideoPlayer::visible_slots_(size_t *first, size_t *last) const {
+  if (this->thumb_slots_.empty())
+    return false;
+  const bool horizontal = this->thumb_layout_ == ThumbnailLayout::HORIZONTAL;
+  const int32_t per_line = this->thumb_layout_ == ThumbnailLayout::GRID ? std::max(this->thumb_columns_, 1) : 1;
+  const int32_t cell = (horizontal ? this->thumb_w_ : this->thumb_h_) + this->thumb_spacing_;
+  const int32_t view =
+      horizontal ? lv_obj_get_width(this->thumb_container_) : lv_obj_get_height(this->thumb_container_);
+  const int32_t pos = std::max<int32_t>(
+      0, horizontal ? lv_obj_get_scroll_x(this->thumb_container_) : lv_obj_get_scroll_y(this->thumb_container_));
+  const size_t count = this->thumb_slots_.size();
+  *first = std::min(count - 1, static_cast<size_t>(pos / cell * per_line));
+  *last = std::min(count - 1, static_cast<size_t>(((pos + view) / cell + 1) * per_line - 1));
+  return true;
+}
+
+void SimpleVideoPlayer::queue_slot_(size_t slot) {
+  if (slot >= this->thumb_slots_.size() || this->thumb_slots_[slot].loaded || this->thumb_slots_[slot].image < 0)
+    return;
+  if (std::find(this->thumb_queue_.begin(), this->thumb_queue_.end(), slot) == this->thumb_queue_.end())
+    this->thumb_queue_.push_back(slot);
+}
+
+void SimpleVideoPlayer::queue_thumbnails_(bool all) {
+  size_t first;
+  size_t last;
+  if (!this->visible_slots_(&first, &last))
+    return;
+  for (size_t k = first; k <= last; k++)
+    this->queue_slot_(k);
+  const size_t count = this->thumb_slots_.size();
+  const size_t ahead = all ? count : this->thumb_preload_;
+  for (size_t k = last + 1; k < count && k <= last + ahead; k++)
+    this->queue_slot_(k);
+  for (size_t k = first; k-- > 0 && first - k <= ahead;)
+    this->queue_slot_(k);
+}
+
+void SimpleVideoPlayer::thumbnails_scrolled_() {
+  const bool horizontal = this->thumb_layout_ == ThumbnailLayout::HORIZONTAL;
+  const int32_t pos =
+      horizontal ? lv_obj_get_scroll_x(this->thumb_container_) : lv_obj_get_scroll_y(this->thumb_container_);
+  const uint32_t now = millis();
+  if (this->thumb_scroll_ms_ != 0 && now != this->thumb_scroll_ms_)
+    this->thumb_scroll_velocity_ =
+        static_cast<float>(pos - this->thumb_scroll_pos_) / static_cast<float>(now - this->thumb_scroll_ms_);
+  this->thumb_scroll_pos_ = pos;
+  this->thumb_scroll_ms_ = now;
+
+  size_t first;
+  size_t last;
+  if (!this->visible_slots_(&first, &last))
+    return;
+  // At an end of the window with more pictures beyond it: the window moves half a strip on, the
+  // scroll position back by as much, so the same thumbnails stay where they are.
+  const size_t slots = this->thumb_slots_.size();
+  const size_t images = this->images_.size();
+  const size_t per_line =
+      this->thumb_layout_ == ThumbnailLayout::GRID ? static_cast<size_t>(std::max(this->thumb_columns_, 1)) : 1;
+  const int32_t cell = (horizontal ? this->thumb_w_ : this->thumb_h_) + this->thumb_spacing_;
+  size_t start = this->thumb_window_;
+  if (this->thumb_shifting_)
+    return;  // the scroll set by the shift below
+  if (last + 1 >= slots && first > 0 && start + slots < images) {
+    start += std::max<size_t>(slots / 2 / per_line, 1) * per_line;
+  } else if (first == 0 && last + 1 < slots && start > 0) {
+    start -= std::min(start, std::max<size_t>(slots / 2 / per_line, 1) * per_line);
+  }
+  if (start != this->thumb_window_) {
+    const size_t old_start = this->thumb_window_;
+    this->place_thumbnail_window_(start);
+    const int32_t shift = (static_cast<int32_t>(this->thumb_window_) - static_cast<int32_t>(old_start)) /
+                          static_cast<int32_t>(per_line) * cell;
+    this->thumb_shifting_ = true;
+    if (horizontal) {
+      lv_obj_scroll_to_x(this->thumb_container_, pos - shift, LV_ANIM_OFF);
+    } else {
+      lv_obj_scroll_to_y(this->thumb_container_, pos - shift, LV_ANIM_OFF);
+    }
+    this->thumb_shifting_ = false;
+    this->queue_thumbnails_(!this->thumb_lazy_);
+    return;
+  }
+
+  for (size_t k = first; k <= last; k++)
+    this->queue_slot_(k);
+  if (this->thumb_scroll_velocity_ > 0.1f) {
+    for (size_t k = last + 1; k < slots && k <= last + this->thumb_preload_; k++)
+      this->queue_slot_(k);
+  } else if (this->thumb_scroll_velocity_ < -0.1f) {
+    for (size_t k = first; k-- > 0 && first - k <= this->thumb_preload_;)
+      this->queue_slot_(k);
+  }
+}
+
+void SimpleVideoPlayer::store_thumbnail_(size_t slot_index) {
+  ThumbSlot &slot = this->thumb_slots_[slot_index];
+  runtime_image::RuntimeImage *thumb = this->thumb_image_.get();
+  // Fitted into the slot with its aspect kept: centred, black around it.
+  const int32_t tw = std::min<int32_t>(thumb->get_width(), this->thumb_w_);
+  const int32_t th = std::min<int32_t>(thumb->get_height(), this->thumb_h_);
+  const int32_t ox = (this->thumb_w_ - tw) / 2;
+  const int32_t oy = (this->thumb_h_ - th) / 2;
+  const uint8_t *src = thumb->get_data_start();
+  const size_t src_stride = thumb->get_width_stride();
+  memset(slot.data, 0, static_cast<size_t>(this->thumb_stride_) * this->thumb_h_);
+  for (int32_t y = 0; y < th; y++)
+    memcpy(slot.data + static_cast<size_t>(oy + y) * this->thumb_stride_ + static_cast<size_t>(ox) * 2,
+           src + static_cast<size_t>(y) * src_stride, static_cast<size_t>(tw) * 2);
+  thumb->release();
+  slot.loaded = true;
+  this->show_slot_(slot_index);
+  if (this->thumb_ready_callback_)
+    this->thumb_ready_callback_(static_cast<size_t>(slot.image));
+}
+
+void SimpleVideoPlayer::show_slot_(size_t slot_index) {
+  ThumbSlot &slot = this->thumb_slots_[slot_index];
+  lv_obj_set_hidden(slot.button, slot.image < 0);
+  lv_obj_invalidate(slot.canvas);
+}
+
+void SimpleVideoPlayer::highlight_thumbnail_(bool scroll) {
+  lv_style_t *active =
+      this->thumb_active_style_ != nullptr ? this->thumb_active_style_ : &this->thumb_default_active_style_;
+  for (ThumbSlot &slot : this->thumb_slots_) {
+    lv_obj_remove_style(slot.button, active, LV_PART_MAIN);
+    if (slot.image >= 0 && slot.image == this->current_image_) {
+      lv_obj_add_style(slot.button, active, LV_PART_MAIN);
+      if (scroll && this->thumbs_visible_)
+        lv_obj_scroll_to_view(slot.button, LV_ANIM_ON);
+    }
+  }
+}
+
+void SimpleVideoPlayer::slide_thumbnails_(bool show) {
+  if (this->thumb_container_ == nullptr)
+    return;
+  lv_obj_t *strip = lv_obj_get_parent(this->thumb_container_);
+  lv_obj_t *target = strip != nullptr ? strip : this->thumb_container_;
+  if (show) {
+    this->thumb_touched_ms_ = millis();
+    lv_obj_set_hidden(target, false);
+    lv_obj_move_foreground(target);
+  } else {
+    lv_obj_set_hidden(target, true);
+    lv_obj_move_background(target);
+  }
+  // Hidden, the strip must not take the canvas's touches.
+  if (strip != nullptr && this->thumb_slide_enabled_)
+    lv_obj_set_clickable(strip, show);
+  this->thumbs_visible_ = show;
+}
+
+const uint8_t *SimpleVideoPlayer::get_thumbnail_data(size_t index, int &width, int &height) {
+  if (index < this->thumb_window_ || index >= this->thumb_window_ + this->thumb_slots_.size())
+    return nullptr;
+  const ThumbSlot &slot = this->thumb_slots_[index - this->thumb_window_];
+  if (!slot.loaded)
+    return nullptr;
+  width = this->thumb_w_;
+  height = this->thumb_h_;
+  return slot.data;
+}
+
+lv_obj_t *SimpleVideoPlayer::get_thumbnail_button(size_t index) {
+  if (index < this->thumb_window_ || index >= this->thumb_window_ + this->thumb_slots_.size())
+    return nullptr;
+  return this->thumb_slots_[index - this->thumb_window_].button;
+}
+
+bool SimpleVideoPlayer::request_thumbnail(size_t index) {
+  if (index < this->thumb_window_ || index >= this->thumb_window_ + this->thumb_slots_.size())
+    return false;
+  const size_t slot = index - this->thumb_window_;
+  if (this->thumb_slots_[slot].loaded)
+    return true;
+  this->queue_slot_(slot);
+  return false;
+}
+
+}  // namespace esphome::simple_video_player
+
+#endif  // SVP_PICTURES

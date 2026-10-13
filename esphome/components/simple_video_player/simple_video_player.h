@@ -23,6 +23,11 @@
 #include "esphome/components/touchscreen/touchscreen.h"
 #endif
 
+#ifdef SVP_PICTURES
+#include "esphome/components/runtime_image/runtime_image.h"
+#include "esphome/components/storage/storage_worker.h"
+#endif
+
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
 #endif
@@ -148,6 +153,30 @@ class StreamTouchListener : public touchscreen::TouchListener {
 
  protected:
   SimpleVideoPlayer *parent_;
+};
+#endif
+
+#ifdef SVP_PICTURES
+enum class SlideshowMode : uint8_t { STOPPED, PLAYING, PAUSED };
+enum class ImageFitMode : uint8_t {
+  SCALE_TO_FIT,   // whole picture, aspect kept (bars)
+  SCALE_TO_FILL,  // fills the canvas, aspect kept (cropped)
+  STRETCH,        // fills the canvas, aspect ignored
+  CENTER,         // unscaled, centred
+};
+enum class ThumbnailLayout : uint8_t { HORIZONTAL, VERTICAL, GRID };
+enum class ThumbnailSlideEdge : uint8_t { LEFT, RIGHT, TOP, BOTTOM };
+
+struct ImageEntry {
+  std::string path;
+  std::string filename;
+  uint64_t size{0};
+};
+
+/// Fired with the image index when a thumbnail is tapped (replaces showing that image).
+class ThumbnailClickTrigger : public Trigger<size_t> {
+ public:
+  explicit ThumbnailClickTrigger(SimpleVideoPlayer *parent);
 };
 #endif
 
@@ -310,6 +339,86 @@ class SimpleVideoPlayer : public Component
   void hide_controls();
   /// Listener: a touch (pressed, display coordinates) or its release.
   void controls_touch(bool pressed, int32_t x, int32_t y);
+#endif
+#ifdef SVP_PICTURES
+  // Pictures: JPEG/PNG/BMP files of a folder shown in an LVGL canvas, with slideshow, play/pause
+  // overlay, swipe navigation and a thumbnail strip. Main loop only; files are read through the
+  // storage worker and decoded by runtime_image. Held while a video plays.
+  void set_picture_canvas(lv_obj_t *canvas) { this->pic_canvas_ = canvas; }
+  void add_picture_directory(const std::string &path) { this->pic_dirs_.push_back(path); }
+  void set_slideshow_interval(uint32_t ms) { this->slideshow_interval_ms_ = ms; }
+  void set_fit_mode(ImageFitMode mode) { this->fit_mode_ = mode; }
+  void set_overlay_icon_size(int size) { this->overlay_icon_size_ = size; }
+  void set_overlay_icon_color(uint32_t color) { this->overlay_icon_color_ = color; }
+  void set_overlay_duration(uint32_t ms) { this->overlay_duration_ms_ = ms; }
+  /// -1: nothing is shown until asked for.
+  void set_default_image_index(int index) { this->default_image_index_ = index; }
+  void set_long_press_time(uint32_t ms) { this->long_press_time_ms_ = ms; }
+  void set_enable_thumbnails(bool enable) { this->thumbs_enabled_ = enable; }
+  void set_thumbnail_size(int width, int height) {
+    this->thumb_w_ = width;
+    this->thumb_h_ = height;
+  }
+  void set_thumbnail_max_count(size_t count) { this->thumb_count_ = count; }
+  void set_thumbnail_lazy_load(bool lazy) { this->thumb_lazy_ = lazy; }
+  void set_thumbnail_preload_count(size_t count) { this->thumb_preload_ = count; }
+  void set_thumbnail_layout(ThumbnailLayout layout) { this->thumb_layout_ = layout; }
+  void set_thumbnail_spacing(int spacing) { this->thumb_spacing_ = spacing; }
+  void set_thumbnail_grid_columns(int columns) { this->thumb_columns_ = columns; }
+  void set_thumbnail_container(lv_obj_t *container) { this->thumb_container_ = container; }
+  void set_thumbnail_style(lv_style_t *style) { this->thumb_style_ = style; }
+  void set_thumbnail_active_style(lv_style_t *style) { this->thumb_active_style_ = style; }
+  void set_thumbnail_container_style(lv_style_t *style) { this->thumb_container_style_ = style; }
+  void set_thumbnail_label_style(lv_style_t *style) { this->thumb_label_style_ = style; }
+  /// {index} (1-based), {filename}, {name} (without extension).
+  void set_thumbnail_label_pattern(const std::string &pattern) { this->thumb_label_pattern_ = pattern; }
+  void set_thumbnail_slide_edge(ThumbnailSlideEdge edge) { this->thumb_slide_edge_ = edge; }
+  void set_thumbnail_slide_enabled(bool enabled) { this->thumb_slide_enabled_ = enabled; }
+  void set_thumbnail_auto_hide_timeout(uint32_t ms) { this->thumb_auto_hide_ms_ = ms; }
+  void add_on_thumbnail_click_callback(std::function<void(size_t)> &&callback) {
+    this->thumb_click_callbacks_.add(std::move(callback));
+    this->thumb_click_handled_ = true;
+  }
+  void set_thumbnail_ready_callback(std::function<void(size_t)> callback) {
+    this->thumb_ready_callback_ = std::move(callback);
+  }
+
+  /// Requests an image of the current folder; it shows once read and decoded. False when out of range.
+  bool show_image(size_t index);
+  /// An image by full path or file name; a path outside the current folder opens its folder.
+  bool show_image(const std::string &path);
+  bool next_image();
+  bool previous_image();
+  void start_slideshow();
+  void stop_slideshow();
+  void pause_slideshow();
+  void toggle_slideshow();
+  SlideshowMode get_slideshow_mode() const { return this->slideshow_mode_; }
+  size_t get_image_count() const { return this->images_.size(); }
+  int get_current_index() const { return this->current_image_; }
+  const ImageEntry *get_current_image() const {
+    return this->current_image_ >= 0 && static_cast<size_t>(this->current_image_) < this->images_.size()
+               ? &this->images_[this->current_image_]
+               : nullptr;
+  }
+  /// One of the configured picture directories.
+  bool set_current_directory(size_t index);
+  /// Any folder (full path, e.g. "/sd/photos").
+  bool open_directory(const std::string &path);
+  const std::string &get_current_directory() const { return this->pic_dir_; }
+  size_t get_directory_count() const { return this->pic_dirs_.size(); }
+  size_t get_current_directory_index() const { return this->pic_dir_index_; }
+  /// Lists the current folder again.
+  void refresh_images();
+  /// After the canvas widget was resized: a buffer of its new size, the picture fitted again.
+  void set_fullscreen(bool fullscreen);
+  bool is_fullscreen() const { return this->fullscreen_; }
+  size_t get_thumbnail_count() const { return this->images_.size(); }
+  /// RGB565 pixels of a loaded thumbnail (stride: width * 2 rounded as LVGL does), else nullptr.
+  const uint8_t *get_thumbnail_data(size_t index, int &width, int &height);
+  lv_obj_t *get_thumbnail_button(size_t index);
+  /// Queues a thumbnail of the strip; true when it is loaded already.
+  bool request_thumbnail(size_t index);
 #endif
   /// A local AVI file plays or is paused, so seek() can work.
   bool can_seek() const;
@@ -737,6 +846,139 @@ class SimpleVideoPlayer : public Component
   /// Playback task, paused: shows decode_target_ (with the controls) again.
   void repaint_paused_();
 #endif
+#ifdef SVP_PICTURES
+  struct ThumbSlot {
+    int image{-1};  // image index shown, -1 = none
+    bool loaded{false};
+    uint8_t *data{nullptr};  // RGB565, inside thumb_buffer_
+    lv_obj_t *button{nullptr};
+    lv_obj_t *canvas{nullptr};
+    lv_obj_t *label{nullptr};
+  };
+  // The file being read through the storage worker, then decoded on the main loop.
+  struct PictureRead {
+    bool active{false};
+    bool done{false};
+    bool failed{false};
+    bool thumbnail{false};
+    size_t index{0};  // image
+    size_t slot{0};   // thumbnail slot
+    uint32_t generation{0};
+    storage::StreamHandle handle{};
+    size_t limit{0};  // one byte more than the listed size: a file that grew is noticed
+    size_t length{0};
+    size_t chunk{0};
+  };
+
+  bool pic_ready_{false};
+  lv_obj_t *pic_canvas_{nullptr};
+  std::vector<std::string> pic_dirs_;
+  std::string pic_dir_;                  // folder whose images_ are listed
+  size_t pic_dir_index_{SIZE_MAX};       // in pic_dirs_, SIZE_MAX for another folder
+  std::string pic_select_;               // shown once the folder is listed
+  bool pic_list_pending_{false};
+  uint32_t pic_list_retry_ms_{0};
+  uint32_t pic_generation_{0};           // bumped with every listing; older reads are dropped
+  std::vector<ImageEntry> images_;
+  int current_image_{-1};
+  int pic_wanted_{-1};                   // requested, not read yet
+  PictureRead pic_read_;
+  uint8_t *pic_file_{nullptr};           // PSRAM, one whole file
+  size_t pic_file_cap_{0};
+  std::unique_ptr<runtime_image::RuntimeImage> pic_image_;    // the picture, unscaled
+  std::unique_ptr<runtime_image::RuntimeImage> thumb_image_;  // a thumbnail, fitted into its slot
+  lv_draw_buf_t *pic_draw_buf_{nullptr};  // the canvas's buffer, RGB565
+  uint8_t *pic_own_buf_{nullptr};         // allocated by set_fullscreen()
+  bool pic_buf_error_logged_{false};
+
+  uint32_t slideshow_interval_ms_{5000};
+  SlideshowMode slideshow_mode_{SlideshowMode::STOPPED};
+  uint32_t last_slide_ms_{0};
+  ImageFitMode fit_mode_{ImageFitMode::SCALE_TO_FIT};
+  bool fullscreen_{false};
+  int default_image_index_{0};
+
+  int overlay_icon_size_{128};
+  uint32_t overlay_icon_color_{0xFFFFFF};
+  uint32_t overlay_duration_ms_{1500};
+  bool overlay_visible_{false};
+  bool overlay_playing_{false};
+  uint32_t overlay_shown_ms_{0};
+
+  uint32_t long_press_time_ms_{1000};
+  uint32_t press_ms_{0};
+  bool press_handled_{false};
+  bool gesture_seen_{false};
+  int32_t press_x_{0}, press_y_{0};
+
+  bool thumbs_enabled_{true};
+  int thumb_w_{120};
+  int thumb_h_{90};
+  size_t thumb_count_{10};
+  bool thumb_lazy_{true};
+  size_t thumb_preload_{5};
+  ThumbnailLayout thumb_layout_{ThumbnailLayout::HORIZONTAL};
+  int thumb_spacing_{5};
+  int thumb_columns_{3};
+  lv_obj_t *thumb_container_{nullptr};
+  lv_style_t *thumb_style_{nullptr};
+  lv_style_t *thumb_active_style_{nullptr};
+  lv_style_t *thumb_container_style_{nullptr};
+  lv_style_t *thumb_label_style_{nullptr};
+  lv_style_t thumb_default_style_{};
+  lv_style_t thumb_default_active_style_{};
+  std::string thumb_label_pattern_;
+  ThumbnailSlideEdge thumb_slide_edge_{ThumbnailSlideEdge::RIGHT};
+  bool thumb_slide_enabled_{false};
+  uint32_t thumb_auto_hide_ms_{10000};
+  bool thumbs_visible_{false};
+  uint32_t thumb_touched_ms_{0};
+  std::vector<ThumbSlot> thumb_slots_;
+  uint8_t *thumb_buffer_{nullptr};  // PSRAM, all slots
+  uint32_t thumb_stride_{0};
+  size_t thumb_window_{0};               // image shown by slot 0
+  std::vector<size_t> thumb_queue_;      // slots to load, first first
+  int32_t thumb_scroll_pos_{0};
+  uint32_t thumb_scroll_ms_{0};
+  float thumb_scroll_velocity_{0.0f};
+  bool thumb_click_handled_{false};
+  bool thumb_shifting_{false};
+  CallbackManager<void(size_t)> thumb_click_callbacks_;
+  std::function<void(size_t)> thumb_ready_callback_;
+
+  void pictures_setup_();
+  void pictures_loop_();
+  bool pictures_held_() const;
+  void list_directory_();
+  void start_read_(bool thumbnail, size_t index, size_t slot);
+  void read_next_chunk_();
+  void finish_read_();
+  void picture_read_done_();
+  bool reserve_file_buffer_(size_t size);
+  bool decode_file_(runtime_image::RuntimeImage *image, const std::string &path, size_t length);
+  bool adopt_canvas_buffer_();
+  void compose_picture_();
+  void after_picture_change_(bool was_playing);
+  void show_overlay_icon_(bool playing);
+  void hide_overlay_icon_();
+  void draw_play_icon_(int cx, int cy, int size, uint16_t color);
+  void draw_pause_icon_(int cx, int cy, int size, uint16_t color);
+  void fill_rect_(int x0, int y0, int x1, int y1, uint16_t color);
+  bool setup_thumbnails_();
+  void place_thumbnail_window_(size_t start);
+  bool visible_slots_(size_t *first, size_t *last) const;
+  void queue_thumbnails_(bool all);
+  void queue_slot_(size_t slot);
+  void store_thumbnail_(size_t slot);
+  void show_slot_(size_t slot);
+  void highlight_thumbnail_(bool scroll);
+  void slide_thumbnails_(bool show);
+  void thumbnails_scrolled_();
+  std::string thumbnail_label_(size_t image) const;
+  void canvas_gesture_(lv_dir_t dir);
+  static void canvas_event_(lv_event_t *event);
+  static void thumbnail_event_(lv_event_t *event);
+#endif
 #ifdef SVP_DSI_OUTPUT
   display::Display *dsi_{nullptr};  // non-null -> direct display output instead of the LVGL canvas
   bool dsi_lvgl_paused_{false};     // LVGL was paused for the duration of direct playback
@@ -1153,5 +1395,96 @@ inline PlaybackPausedTrigger::PlaybackPausedTrigger(SimpleVideoPlayer *parent) {
 inline PlaybackErrorTrigger::PlaybackErrorTrigger(SimpleVideoPlayer *parent) {
   parent->add_on_error_callback([this](uint8_t error) { this->trigger(error); });
 }
+
+#ifdef SVP_PICTURES
+inline ThumbnailClickTrigger::ThumbnailClickTrigger(SimpleVideoPlayer *parent) {
+  parent->add_on_thumbnail_click_callback([this](size_t index) { this->trigger(index); });
+}
+
+template<typename... Ts> class ShowImageAction : public Action<Ts...> {
+ public:
+  explicit ShowImageAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(int, index)
+  TEMPLATABLE_VALUE(std::string, path)
+  void play(const Ts &...x) override {
+    if (this->path_.has_value()) {
+      this->player_->show_image(this->path_.value(x...));
+    } else {
+      const int index = this->index_.value(x...);
+      if (index >= 0)
+        this->player_->show_image(static_cast<size_t>(index));
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class PictureDirectoryAction : public Action<Ts...> {
+ public:
+  explicit PictureDirectoryAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(int, index)
+  TEMPLATABLE_VALUE(std::string, path)
+  void play(const Ts &...x) override {
+    if (this->path_.has_value()) {
+      this->player_->open_directory(this->path_.value(x...));
+    } else {
+      const int index = this->index_.value(x...);
+      if (index >= 0)
+        this->player_->set_current_directory(static_cast<size_t>(index));
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+enum class PictureCommand : uint8_t { NEXT, PREVIOUS, START, STOP, PAUSE, TOGGLE, REFRESH };
+
+/// next_image, previous_image, the slideshow, refresh_images.
+template<typename... Ts> class PictureCommandAction : public Action<Ts...> {
+ public:
+  PictureCommandAction(SimpleVideoPlayer *player, PictureCommand command) : player_(player), command_(command) {}
+  void play(const Ts &...x) override {
+    switch (this->command_) {
+      case PictureCommand::NEXT:
+        this->player_->next_image();
+        break;
+      case PictureCommand::PREVIOUS:
+        this->player_->previous_image();
+        break;
+      case PictureCommand::START:
+        this->player_->start_slideshow();
+        break;
+      case PictureCommand::STOP:
+        this->player_->stop_slideshow();
+        break;
+      case PictureCommand::PAUSE:
+        this->player_->pause_slideshow();
+        break;
+      case PictureCommand::TOGGLE:
+        this->player_->toggle_slideshow();
+        break;
+      case PictureCommand::REFRESH:
+        this->player_->refresh_images();
+        break;
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  PictureCommand command_;
+};
+
+template<typename... Ts> class FullscreenAction : public Action<Ts...> {
+ public:
+  explicit FullscreenAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(bool, fullscreen)
+  void play(const Ts &...x) override { this->player_->set_fullscreen(this->fullscreen_.value(x...)); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+#endif
 
 }  // namespace esphome::simple_video_player
