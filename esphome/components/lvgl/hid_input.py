@@ -50,7 +50,7 @@ BUILTIN_ACTIONS = {
     "next": ["TAB"],
     "prev": ["SHIFT+TAB"],
     "enter": ["ENTER", "KP_ENTER", "SELECT"],
-    "back": ["ESCAPE", "MENU_ESCAPE", "AC_BACK"],
+    "back": ["ESCAPE", "MENU_ESCAPE", "AC_BACK", "0x07:0xF1"],  # 0x07:0xF1: Fire TV remote
     "home": ["HOME", "AC_HOME"],
     "end": ["END"],
     "page_up": ["PAGE_UP"],
