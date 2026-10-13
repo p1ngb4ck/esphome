@@ -390,6 +390,24 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
   auto *out = reinterpret_cast<uint8_t *>(frames);
   size_t filled = 0;
 
+  // While the link lags, Bluedroid takes less than real time (a tick only fetches what its send
+  // queue has room for) and drops nothing; the audio piles up in front of it. Keep at most half
+  // the buffer beyond this request and drop the oldest, so the delay stays bounded.
+  UBaseType_t waiting = 0;
+  vRingbufferGetInfo(this->ring_, nullptr, nullptr, nullptr, nullptr, &waiting);
+  const size_t keep = wanted + this->ring_bytes_ / 2;
+  size_t excess = waiting > keep ? waiting - keep : 0;
+  excess -= excess % BYTES_PER_FRAME;
+  while (excess > 0) {
+    size_t got = 0;
+    void *item = xRingbufferReceiveUpTo(this->ring_, &got, 0, excess);
+    if (item == nullptr)
+      break;
+    vRingbufferReturnItem(this->ring_, item);
+    this->dropped_frames_.fetch_add((uint32_t) (got / BYTES_PER_FRAME));
+    excess -= std::min(excess, got);
+  }
+
   while (filled < wanted) {
     size_t got = 0;
     void *item = xRingbufferReceiveUpTo(this->ring_, &got, pdMS_TO_TICKS(2), wanted - filled);
@@ -555,6 +573,11 @@ void A2DPSource::loop() {
     uint32_t frames = this->underrun_frames_.exchange(0);
     if (frames > 0) {
       ESP_LOGW(TAG, "Inserted %" PRIu32 " frames of silence in the last 10 s (%" PRIu32 " ms)", frames,
+               frames * 1000 / SAMPLE_RATE);
+    }
+    frames = this->dropped_frames_.exchange(0);
+    if (frames > 0) {
+      ESP_LOGW(TAG, "Dropped %" PRIu32 " frames in the last 10 s (%" PRIu32 " ms): the link lags", frames,
                frames * 1000 / SAMPLE_RATE);
     }
   }
