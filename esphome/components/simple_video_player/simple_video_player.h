@@ -404,6 +404,7 @@ class SimpleVideoPlayer : public Component
   /// The exit button over a picture: leaving full screen is the configuration's (its layout).
   Trigger<> *get_picture_exit_trigger() { return &this->ctl_picture_.exit_trigger; }
 #endif
+  /// Over a full-screen video, or a picture in full screen.
   void show_controls();
   void hide_controls();
   /// Listener: a touch (pressed, display coordinates) or its release.

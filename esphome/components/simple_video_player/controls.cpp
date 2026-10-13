@@ -582,6 +582,12 @@ bool SimpleVideoPlayer::controls_active_() const {
 }
 
 void SimpleVideoPlayer::show_controls() {
+#ifdef SVP_PICTURES
+  if (this->fullscreen_) {
+    this->show_picture_controls_();
+    return;
+  }
+#endif
   if (!this->controls_active_())
     return;
   this->ctl_last_input_ms_ = millis();
@@ -660,7 +666,12 @@ void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {
 
 #else
 bool SimpleVideoPlayer::controls_active_() const { return false; }
-void SimpleVideoPlayer::show_controls() {}
+void SimpleVideoPlayer::show_controls() {
+#ifdef SVP_PICTURES
+  if (this->fullscreen_)
+    this->show_picture_controls_();
+#endif
+}
 void SimpleVideoPlayer::hide_controls() {}
 void SimpleVideoPlayer::controls_touch(bool pressed, int32_t x, int32_t y) {}
 #endif
