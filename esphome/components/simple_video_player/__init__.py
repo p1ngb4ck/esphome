@@ -102,6 +102,7 @@ ChannelPlayAction = simple_video_player_ns.class_("ChannelPlayAction", automatio
 ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automation.Action)
 StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automation.Action)
 StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
+StreamOutputAction = simple_video_player_ns.class_("StreamOutputAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
@@ -156,6 +157,9 @@ CONF_PREFETCH_DURATION = "prefetch_duration"
 CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
 CONF_STREAM_MAX_FRAME_BYTES = "stream_max_frame_bytes"
+CONF_STREAM_OUTPUT = "stream_output"
+STREAM_OUTPUT_FULLSCREEN = "fullscreen"
+STREAM_OUTPUT_CANVAS = "canvas"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_CHANNEL_LIST = "channel_list"
 CONF_TOKEN = "token"
@@ -310,20 +314,23 @@ def _validate_audio_codec_required(config):
 
 
 def _validate_output_target(config):
-    # Exactly one output: an LVGL canvas widget (canvas_id) OR a mipi_dsi panel we render straight
-    # into (display_id). They are mutually exclusive -- display_id bypasses LVGL for the video path.
+    # An LVGL canvas widget (canvas_id), a mipi_dsi panel drawn straight into (display_id), or both:
+    # each video plays on the one its size fits.
     has_canvas = CONF_CANVAS_ID in config
     has_display = CONF_DISPLAY_ID in config
-    if has_canvas and has_display:
-        raise cv.Invalid(
-            f"Use either '{CONF_CANVAS_ID}' (render into an LVGL canvas) or '{CONF_DISPLAY_ID}' "
-            "(render straight into a mipi_dsi panel), not both."
-        )
     if not has_canvas and not has_display:
         raise cv.Invalid(
-            f"An output is required: set '{CONF_CANVAS_ID}' to render into an LVGL canvas, or "
-            f"'{CONF_DISPLAY_ID}' to render straight into a mipi_dsi panel."
+            f"An output is required: set '{CONF_CANVAS_ID}' to render into an LVGL canvas, "
+            f"'{CONF_DISPLAY_ID}' to render straight into a mipi_dsi panel, or both."
         )
+    if CONF_STREAM_OUTPUT not in config:
+        if CONF_STREAM_PORT in config:
+            config[CONF_STREAM_OUTPUT] = STREAM_OUTPUT_FULLSCREEN if has_display else STREAM_OUTPUT_CANVAS
+    elif (config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_FULLSCREEN and not has_display) or (
+        config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_CANVAS and not has_canvas
+    ):
+        needed = CONF_DISPLAY_ID if config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_FULLSCREEN else CONF_CANVAS_ID
+        raise cv.Invalid(f"{CONF_STREAM_OUTPUT}: {config[CONF_STREAM_OUTPUT]} needs '{needed}'.")
     return config
 
 
@@ -479,8 +486,8 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(SimpleVideoPlayer),
-            # Output target -- exactly one of these (enforced by _validate_output_target):
-            #   canvas_id  : render into an LVGL canvas widget (the original path)
+            # Outputs -- one or both (_validate_output_target); a video plays on the one it fits:
+            #   canvas_id  : render into an LVGL canvas widget, centred when smaller
             #   display_id : draw each decoded frame onto this display with draw_pixels_at() while
             #                LVGL is paused (Portall's way); the video must match the panel exactly.
             cv.Optional(CONF_CANVAS_ID): cv.use_id(lv_canvas_t),
@@ -490,6 +497,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
             cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=131072): cv.int_range(
                 min=16384, max=1048576
+            ),
+            # The output a stream sender makes its picture for (stream.output changes it at runtime):
+            # fullscreen (display_id, the default with it) or canvas.
+            cv.Optional(CONF_STREAM_OUTPUT): cv.one_of(
+                STREAM_OUTPUT_FULLSCREEN, STREAM_OUTPUT_CANVAS, lower=True
             ),
             # Touches go back to the stream sender, which replays them into its page.
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
@@ -841,19 +853,21 @@ async def to_code(config):
         cg.add(var.set_lvgl(await cg.get_variable(lvgl_configs[0][CONF_ID])))
         cg.add_define("SVP_USE_LVGL")
 
-    # Output target: LVGL canvas OR direct mipi_dsi (mutually exclusive, see
-    # _validate_output_target). The mipi_dsi wiring is deferred to a FINAL codegen coroutine so the
-    # display variable is guaranteed to exist by then.
+    # Outputs: LVGL canvas and/or direct mipi_dsi (see _validate_output_target). The mipi_dsi
+    # wiring is deferred to a FINAL codegen coroutine so the display variable is guaranteed to exist
+    # by then.
     if CONF_CANVAS_ID in config:
         canvas = await cg.get_variable(config[CONF_CANVAS_ID])
         cg.add(var.set_canvas(canvas))
         cg.add(var.set_canvas_size(*config[CONF_RESOLVED_CANVAS_SIZE]))
+        cg.add_define("SVP_CANVAS_OUTPUT")
     if CONF_DISPLAY_ID in config:
         CORE.add_job(_resolve_display_output, var, config[CONF_DISPLAY_ID])
 
     if CONF_STREAM_PORT in config:
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
         cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
+        cg.add(var.init_stream_fullscreen(config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_FULLSCREEN))
         cg.add_define("SVP_STREAM")
         if CONF_TOUCHSCREEN_ID in config:
             ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
@@ -1198,6 +1212,25 @@ async def simple_video_player_stream_sleep_to_code(config, action_id, template_a
 async def simple_video_player_stream_wake_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# The output a stream is made for; a connected sender is told at once and restarts for it.
+@automation.register_action(
+    "simple_video_player.stream.output",
+    StreamOutputAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_FULLSCREEN): cv.templatable(cv.boolean),
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_stream_output_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_fullscreen(await cg.templatable(config[CONF_FULLSCREEN], args, bool)))
+    return var
 
 
 # The volume of what this player plays: the speaker's own set_volume() (a template number can drive it).

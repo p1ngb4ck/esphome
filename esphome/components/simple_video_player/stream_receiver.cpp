@@ -141,13 +141,8 @@ bool SimpleVideoPlayer::setup_stream_() {
     ESP_LOGE(TAG, "Failed to create the stream network task");
     return false;
   }
-#ifdef SVP_DSI_OUTPUT
-  ESP_LOGCONFIG(TAG, "Listening on port %u for AVI streams and udisp frames (%ux%u, %u-bit)", this->stream_port_,
-                this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_ * 8);
-#else
-  ESP_LOGCONFIG(TAG, "Listening on port %u for AVI streams and udisp frames (canvas %ux%u)", this->stream_port_, this->canvas_size_w_,
-                this->canvas_size_h_);
-#endif
+  ESP_LOGCONFIG(TAG, "Listening on port %u for AVI streams and udisp frames, made for the %s", this->stream_port_,
+                this->stream_direct_() ? "display" : "canvas");
   return true;
 }
 
@@ -161,6 +156,21 @@ void SimpleVideoPlayer::stream_set_awake_(bool awake) {
 void SimpleVideoPlayer::stream_sleep(bool asleep) {
   this->stream_asleep_.store(asleep, std::memory_order_release);
   this->stream_status_pending_.store(true, std::memory_order_release);
+}
+
+void SimpleVideoPlayer::set_stream_fullscreen(bool fullscreen) {
+#if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
+  if (this->stream_fullscreen_.exchange(fullscreen, std::memory_order_acq_rel) == fullscreen)
+    return;
+  ESP_LOGI(TAG, "Streams are made for the %s", fullscreen ? "display" : "canvas");
+  // A connected sender gets the new picture ('V') and restarts its stream for it.
+  this->stream_depth_pending_.store(true, std::memory_order_release);
+  if (this->stream_draw_task_ != nullptr)
+    xTaskNotifyGive(this->stream_draw_task_);
+#else
+  if (fullscreen != this->stream_direct_())
+    ESP_LOGW(TAG, "Streams can only be made for the %s here", this->stream_direct_() ? "display" : "canvas");
+#endif
 }
 
 void SimpleVideoPlayer::stream_net_task_entry_(void *param) { static_cast<SimpleVideoPlayer *>(param)->stream_net_loop_(); }
@@ -423,10 +433,20 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
       this->stream_skip_ = total;
       continue;
     }
+    // Each rectangle is for the output its stream is made for now: bounds and target go with it.
+    const bool direct = this->stream_direct_();
+    uint32_t out_w = 0, out_h = 0;
 #ifdef SVP_DSI_OUTPUT
-    const uint32_t out_w = this->dsi_out_w_, out_h = this->dsi_out_h_;
-#else
-    const uint32_t out_w = this->canvas_size_w_, out_h = this->canvas_size_h_;
+    if (direct) {
+      out_w = this->dsi_out_w_;
+      out_h = this->dsi_out_h_;
+    }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+    if (!direct) {
+      out_w = this->canvas_size_w_;
+      out_h = this->canvas_size_h_;
+    }
 #endif
     const bool usable = w > 0 && h > 0 && static_cast<uint32_t>(x) + w <= out_w &&
                         static_cast<uint32_t>(y) + h <= out_h && total > 0 &&
@@ -458,6 +478,7 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
     frame->h = h;
     frame->total = total;
     frame->received = 0;
+    frame->direct = direct;
     this->stream_current_ = frame;
   }
 }
@@ -469,25 +490,30 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
     // may send.
     uint8_t message[12];
     size_t at = 0;
+    uint16_t width = 0, height = 0;
+    uint8_t turns = 0;
+    const uint32_t still = static_cast<uint32_t>(this->stream_frames_[0].capacity);
 #ifdef SVP_DSI_OUTPUT
     message[at++] = 'C';
     message[at++] = static_cast<uint8_t>(this->dsi_fb_bpp_ * 8);
-    const uint16_t width = this->dsi_out_w_;
-    const uint16_t height = this->dsi_out_h_;
-    display::DisplayRotation rotation = this->dsi_->get_rotation();
+    if (this->stream_direct_()) {
+      width = this->dsi_out_w_;
+      height = this->dsi_out_h_;
+      display::DisplayRotation rotation = this->dsi_->get_rotation();
 #ifdef SVP_USE_LVGL
-    // With LVGL the rotation is LVGL's own (ESPHome rejects a display rotation under LVGL).
-    if (this->lvgl_component_ != nullptr)
-      rotation = this->lvgl_component_->get_rotation();
+      // With LVGL the rotation is LVGL's own (ESPHome rejects a display rotation under LVGL).
+      if (this->lvgl_component_ != nullptr)
+        rotation = this->lvgl_component_->get_rotation();
 #endif
-    const uint8_t turns = static_cast<uint8_t>(static_cast<int>(rotation) / 90);
-    const uint32_t still = static_cast<uint32_t>(this->stream_frames_[0].capacity);
-#else
-    // The canvas turns with LVGL's own rotation: the picture goes in upright.
-    const uint16_t width = this->canvas_size_w_;
-    const uint16_t height = this->canvas_size_h_;
-    const uint8_t turns = 0;
-    const uint32_t still = static_cast<uint32_t>(this->stream_frames_[0].capacity);
+      turns = static_cast<uint8_t>(static_cast<int>(rotation) / 90);
+    }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+    if (!this->stream_direct_()) {
+      // The canvas turns with LVGL's own rotation: the picture goes in upright.
+      width = this->canvas_size_w_;
+      height = this->canvas_size_h_;
+    }
 #endif
     message[at++] = 'V';
     message[at++] = static_cast<uint8_t>(width & 0xFF);
@@ -565,33 +591,39 @@ void SimpleVideoPlayer::stream_draw_task_entry_(void *param) {
 void SimpleVideoPlayer::stream_draw_loop_() {
   jpeg_decode_cfg_t decode_cfg = {};
   decode_cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;
-#ifdef SVP_DSI_OUTPUT
-  decode_cfg.output_format =
-      this->dsi_fb_bpp_ == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
-  const display::ColorBitness bitness =
-      this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-  uint8_t *const target = this->decode_target_;
-  const size_t target_len = this->decode_target_len_;
-#else
-  // Canvas output: RGB888 like the video. While no file plays (output_lock_), the second output
-  // buffer takes the decoded rectangle and the first is the page the canvas shows.
-  decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;
-  uint8_t *const target = this->output_buffers_[1];
-  const size_t target_len = this->output_buffer_size_;
-#endif
 
   while (true) {
     StreamFrame *frame = nullptr;
     if (xQueueReceive(this->stream_filled_q_, &frame, portMAX_DELAY) != pdTRUE)
       continue;
+    uint8_t *target = nullptr;
+    size_t target_len = 0;
+    bool output_ok = false;
 #ifdef SVP_DSI_OUTPUT
-    // Draw only once loop() has LVGL (if any) paused; released by loop() via notification.
-    while (this->stream_connected_.load(std::memory_order_acquire) &&
-           !this->stream_output_ok_.load(std::memory_order_acquire))
-      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    const bool output_ok = this->stream_output_ok_.load(std::memory_order_acquire);
-#else
-    const bool output_ok = this->stream_connected_.load(std::memory_order_acquire);
+    const display::ColorBitness bitness =
+        this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
+    if (frame->direct) {
+      decode_cfg.output_format =
+          this->dsi_fb_bpp_ == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
+      target = this->decode_target_;
+      target_len = this->decode_target_len_;
+      // Draw only once loop() has LVGL (if any) paused; released by loop() via notification, also
+      // when the stream is made for the canvas meanwhile.
+      while (this->stream_connected_.load(std::memory_order_acquire) && this->stream_direct_() &&
+             !this->stream_output_ok_.load(std::memory_order_acquire))
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      output_ok = this->stream_output_ok_.load(std::memory_order_acquire);
+    }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+    if (!frame->direct) {
+      // Canvas output: RGB888 like the video. While no file plays (output_lock_), the second output
+      // buffer takes the decoded rectangle and the first is the page the canvas shows.
+      decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;
+      target = this->output_buffers_[1];
+      target_len = this->output_buffer_size_;
+      output_ok = this->stream_connected_.load(std::memory_order_acquire);
+    }
 #endif
     // A playing file holds output_lock_ for its whole session: its picture wins.
     if (output_ok && xSemaphoreTake(this->output_lock_, 0) == pdTRUE) {
@@ -602,12 +634,16 @@ void SimpleVideoPlayer::stream_draw_loop_() {
           out_size > 0) {
         const uint32_t start = micros();
 #ifdef SVP_DSI_OUTPUT
-        // Decoded rows are padded to 16; x_pad skips the padding at the end of each row.
-        const uint16_t padded_w = (frame->w + 15) & ~15;
-        this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB, bitness,
-                                   false, 0, 0, padded_w - frame->w);
-#else
-        this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h);
+        if (frame->direct) {
+          // Decoded rows are padded to 16; x_pad skips the padding at the end of each row.
+          const uint16_t padded_w = (frame->w + 15) & ~15;
+          this->dsi_->draw_pixels_at(frame->x, frame->y, frame->w, frame->h, target, display::COLOR_ORDER_RGB,
+                                     bitness, false, 0, 0, padded_w - frame->w);
+        }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+        if (!frame->direct)
+          this->stream_copy_to_canvas_(frame->x, frame->y, frame->w, frame->h);
 #endif
         const uint32_t took = micros() - start;
         this->stream_draw_us_ += took;
@@ -623,7 +659,7 @@ void SimpleVideoPlayer::stream_draw_loop_() {
   }
 }
 
-#ifndef SVP_DSI_OUTPUT
+#ifdef SVP_CANVAS_OUTPUT
 void SimpleVideoPlayer::stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h) {
   // Rows of the decoded rectangle are padded to 16 pixels; the page's rows are the canvas buffer's
   // (ALIGN_UP(width,16), as loop() hands it to LVGL). Bounds were checked against the canvas size
@@ -764,25 +800,30 @@ void SimpleVideoPlayer::stream_on_touch(const touchscreen::TouchPoints_t &points
   if ((!udisp_shown && !this->stream_avi_.load(std::memory_order_acquire)) ||
       this->stream_asleep_.load(std::memory_order_acquire))
     return;
-#ifndef SVP_DSI_OUTPUT
+#ifdef SVP_CANVAS_OUTPUT
   // Canvas output: a contact in the canvas's own pixels, as LVGL sees the screen (its rotation,
   // lvgl_esphome.cpp's touch read callback); one outside the canvas is LVGL's alone. Runs on the
   // main loop (touchscreen.cpp defers send_touches_()), so asking LVGL is safe.
+  const bool on_canvas = this->stream_avi_.load(std::memory_order_acquire) ? !this->direct_session_()
+                                                                            : !this->stream_direct_();
   lv_area_t at{};
-  lv_obj_get_coords(this->canvas_, &at);
+  if (on_canvas)
+    lv_obj_get_coords(this->canvas_, &at);
 #endif
   StreamTouch event{};
   for (const auto &point : points) {
     if (event.count >= STREAM_TOUCH_MAX)
       break;
     int32_t x = point.x, y = point.y;
-#ifndef SVP_DSI_OUTPUT
-    if (this->lvgl_component_ != nullptr)
-      this->lvgl_component_->rotate_coordinates(x, y);
-    x -= at.x1;
-    y -= at.y1;
-    if (x < 0 || y < 0 || x >= this->canvas_size_w_ || y >= this->canvas_size_h_)
-      continue;
+#ifdef SVP_CANVAS_OUTPUT
+    if (on_canvas) {
+      if (this->lvgl_component_ != nullptr)
+        this->lvgl_component_->rotate_coordinates(x, y);
+      x -= at.x1;
+      y -= at.y1;
+      if (x < 0 || y < 0 || x >= this->canvas_size_w_ || y >= this->canvas_size_h_)
+        continue;
+    }
 #endif
     event.id[event.count] = point.id;
     event.x[event.count] = static_cast<uint16_t>(x);

@@ -56,18 +56,14 @@ void SimpleVideoPlayer::setup() {
 #endif
 
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ != nullptr) {
-    // Direct display output: no LVGL canvas, no canvas output buffers. `canvas_id` is not set in
-    // this mode (schema makes the two mutually exclusive).
-    if (!this->init_dsi_output_()) {
-      this->mark_failed();
-      return;
-    }
-  } else
+  // Direct display output: a decode buffer of the panel's size.
+  if (this->dsi_ != nullptr && !this->init_dsi_output_()) {
+    this->mark_failed();
+    return;
+  }
 #endif
+#ifdef SVP_CANVAS_OUTPUT
   {
-#ifdef SVP_USE_LVGL
-    // Verify canvas is set
     if (this->canvas_ == nullptr) {
       ESP_LOGE(TAG, "Canvas not set");
       this->mark_failed();
@@ -101,8 +97,8 @@ void SimpleVideoPlayer::setup() {
     }
     ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, %ux%u)", this->output_buffer_size_,
              static_cast<unsigned>(ALIGN_UP(fb_w, 16)), static_cast<unsigned>(ALIGN_UP(fb_h, 16)));
-#endif
   }
+#endif
 
   // Allocate cache buffer (internal RAM, aligned for DMA)
   // ESP32-P4 only
@@ -258,7 +254,7 @@ void SimpleVideoPlayer::loop() {
 #endif
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
-    if (this->dsi_ != nullptr && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
+    if (this->direct_session_() && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
       this->lvgl_component_->set_paused(true, false);
       this->dsi_lvgl_paused_ = true;
     }
@@ -270,8 +266,9 @@ void SimpleVideoPlayer::loop() {
   if (this->dsi_ != nullptr) {
     // Direct playback owns the panel; the video task draws each frame itself. Nothing to
     // invalidate on the LVGL thread. Hand the panel back to LVGL once playback has fully stopped.
+    // A udisp sender draws onto the panel only when its picture is made for it.
 #ifdef SVP_STREAM
-    const bool streaming = this->stream_connected_.load(std::memory_order_acquire);
+    const bool streaming = this->stream_connected_.load(std::memory_order_acquire) && this->stream_direct_();
 #else
     const bool streaming = false;
 #endif
@@ -334,17 +331,14 @@ void SimpleVideoPlayer::loop() {
     (void) streaming;
     (void) lvgl_off;
 #endif
-    return;
   }
 #endif
-#if defined(SVP_USE_LVGL) && LV_USE_CANVAS
+#ifdef SVP_CANVAS_OUTPUT
   // Runs on the LVGL thread. decode_frame_() (video task) finished a frame in the back buffer and
   // published it via display_buffer_ + frame_ready_. Point the canvas at that completed buffer and
   // invalidate -- all lv_canvas_* happens HERE, never on the video task. Cheap load first so the
-  // common no-frame path is a plain relaxed read, not an atomic RMW. Gated on LV_USE_CANVAS:
-  // ESPHome only enables it when a canvas widget is in the YAML, so a DSI-direct config (display_id,
-  // no canvas widget) compiles this out -- there the dsi_ early-return above handles loop() anyway.
-#if defined(SVP_STREAM) && !defined(SVP_DSI_OUTPUT)
+  // common no-frame path is a plain relaxed read, not an atomic RMW.
+#ifdef SVP_STREAM
   // udisp rectangles copied into the page (stream_copy_to_canvas_): show the page if a file showed
   // something else, and tell LVGL which part changed.
   {
@@ -756,24 +750,40 @@ void SimpleVideoPlayer::playback_loop_() {
   }
   ESP_LOGI(TAG, "Video dimensions: %" PRIu32 "x%" PRIu32, width, height);
 
+  // Nothing is scaled: the display takes a video of exactly its native picture (transposed at
+  // transcode to the panel's orientation), the canvas one of at most its size, centred. A stream
+  // was made for the output it asked for.
+  uint32_t panel_w = 0, panel_h = 0, canvas_w = 0, canvas_h = 0;
 #ifdef SVP_DSI_OUTPUT
   if (this->dsi_ != nullptr) {
-    // DSI direct output presents the decoded frame straight into the panel's native framebuffer --
-    // no scaling, no rotation. The transcoded video must therefore match the panel framebuffer
-    // exactly (the user transposes at transcode to the panel's native orientation). A mismatch would
-    // decode out of bounds, so abort cleanly instead of running into it.
-    if (width != this->dsi_out_w_ || height != this->dsi_out_h_) {
-      ESP_LOGE(TAG,
-               "Video %" PRIu32 "x%" PRIu32 " does not match panel framebuffer %ux%u -- transcode to the "
-               "panel's native resolution/orientation. Aborting playback.",
-               width, height, this->dsi_out_w_, this->dsi_out_h_);
-      this->set_error_(PlaybackError::INVALID_VIDEO_FORMAT);
-      this->close_file_();
-      return;
-    }
-  } else
+    panel_w = this->dsi_out_w_;
+    panel_h = this->dsi_out_h_;
+  }
 #endif
-  {
+#ifdef SVP_CANVAS_OUTPUT
+  canvas_w = this->canvas_size_w_;
+  canvas_h = this->canvas_size_h_;
+#endif
+  const bool fits_canvas = width <= canvas_w && height <= canvas_h;
+  bool direct = width == panel_w && height == panel_h;
+#ifdef SVP_STREAM
+  if (direct && fits_canvas && this->net_session_ && !this->stream_direct_())
+    direct = false;
+#endif
+  if (!direct && !fits_canvas) {
+    ESP_LOGE(TAG,
+             "Video %" PRIu32 "x%" PRIu32 " fits no output (display: exactly %" PRIu32 "x%" PRIu32
+             ", canvas: at most %" PRIu32 "x%" PRIu32 ") -- transcode it. Aborting playback.",
+             width, height, panel_w, panel_h, canvas_w, canvas_h);
+    this->set_error_(PlaybackError::INVALID_VIDEO_FORMAT);
+    this->close_file_();
+    return;
+  }
+#ifdef SVP_DSI_OUTPUT
+  this->direct_.store(direct, std::memory_order_release);
+#endif
+  ESP_LOGI(TAG, "Output: %s", direct ? "display" : "canvas");
+  if (!direct) {
     // Record the canvas dimensions for loop() to pass to lv_canvas_set_buffer. The canvas is pointed
     // at the freshly decoded buffer from loop() (the LVGL thread) -- NEVER from this video task, since
     // LVGL is not thread-safe and loopTask runs the render/rotate/flush pipeline on the same core.
@@ -823,10 +833,7 @@ void SimpleVideoPlayer::playback_loop_() {
     return;
   }
 
-#ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ == nullptr)
-#endif
-  {
+  if (!direct) {
     // Clear the region the decode won't cover (padding / rounding tail, or a previous larger video's
     // leftover pixels around a smaller new one) in BOTH buffers; the decode overwrites the
     // ALIGN_UP(w,16) x ALIGN_UP(h,16) x 3 region. For a max-resolution video this is a no-op.
@@ -1015,11 +1022,11 @@ void SimpleVideoPlayer::playback_loop_() {
         if (this->seek_pending_.load(std::memory_order_acquire)) {
           this->handle_seek_();
 #ifdef SVP_CONTROLS
-          this->ctl_step_.store(this->dsi_ != nullptr && this->ctl_widget_ != nullptr, std::memory_order_relaxed);
+          this->ctl_step_.store(direct && this->ctl_widget_ != nullptr, std::memory_order_relaxed);
 #endif
         }
 #ifdef SVP_CONTROLS
-        if (this->dsi_ != nullptr && this->ctl_widget_ != nullptr) {
+        if (direct && this->ctl_widget_ != nullptr) {
           // After a seek the new picture shows, with the controls over it.
           FrameSlot *slot = nullptr;
           if (this->ctl_step_.load(std::memory_order_relaxed) &&
@@ -1102,7 +1109,7 @@ void SimpleVideoPlayer::playback_loop_() {
     // Direct path: if more than one frame BEHIND the file clock, re-anchor the clock to now and
     // carry on at 1x -- this HW cannot sprint to catch up. Every frame still plays, just shifted
     // later; audio rides the same feed rate so it stays aligned. Not frame-dropping.
-    if (this->dsi_ != nullptr && (esp_timer_get_time() - target_present_time_us) > frame_dur) {
+    if (direct && (esp_timer_get_time() - target_present_time_us) > frame_dur) {
       this->playback_start_time_us_ =
           esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur) - this->paused_accum_us_;
       target_present_time_us =
@@ -1158,7 +1165,7 @@ void SimpleVideoPlayer::playback_loop_() {
     // decode_frame_() wrote the frame into the back buffer and published it; loop() points the canvas at it.
 
 #ifdef SVP_DSI_OUTPUT
-    if (decoded && this->dsi_ != nullptr) {
+    if (decoded && direct) {
       // Portall's plain mode: the frame was decoded into our own buffer in the display's depth; the
       // display copies it in. Panel dims are multiples of 16 (init_dsi_output_), so no x_pad.
       {
@@ -1231,7 +1238,7 @@ void SimpleVideoPlayer::playback_loop_() {
              static_cast<uint32_t>(this->present_us_sum_ / stat_frames), this->present_us_max_,
              this->decode_fail_count_, this->bad_payload_count_);
 #ifdef SVP_DSI_OUTPUT
-    if (this->dsi_ != nullptr) {
+    if (direct) {
       char idx[SOLID_FRAME_LOG_MAX * 11 + 1] = "";
       size_t pos = 0;
       const uint32_t shown = std::min<uint32_t>(this->solid_frame_count_, SOLID_FRAME_LOG_MAX);
@@ -1285,7 +1292,7 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Blank the canvas on stop -- cosmetic best-effort (it otherwise keeps showing the last frame).
   // memset here on the playback task, invalidate from loop() via frame_ready_.
-  if (this->output_buffers_[0] != nullptr) {
+  if (!direct && this->output_buffers_[0] != nullptr) {
     for (auto *buf : this->output_buffers_)
       std::memset(buf, 0, this->output_buffer_size_);
     this->display_buffer_.store(this->output_buffers_[0], std::memory_order_release);
@@ -1456,7 +1463,8 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   uint8_t *out_buf = this->output_buffers_[this->decode_buf_idx_];
   uint32_t out_cap = static_cast<uint32_t>(this->output_buffer_size_);
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ != nullptr) {
+  const bool direct = this->direct_session_();
+  if (direct) {
     // Direct mode: decode into our own buffer in the display's depth (color_depth from the YAML).
     // BGR element order for BOTH depths: it puts the lowest-addressed byte at blue, which is the
     // little-endian layout esp_lcd's RGB565 and RGB888 framebuffers both read.
@@ -1473,7 +1481,7 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   if (err != ESP_OK || out_size == 0)
     return false;
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ == nullptr)
+  if (!direct)
 #endif
   {
     // The decoder pads each row to its MCU width: 16 pixels for 4:2:2 and 4:2:0, 8 otherwise
@@ -1487,9 +1495,8 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
     // DSI direct path relies on).
     this->display_buffer_.store(out_buf, std::memory_order_release);
     this->decode_buf_idx_ ^= 1;
+    this->frame_ready_.store(true, std::memory_order_release);  // loop() points the canvas at it
   }
-  // Tell loop() a frame is ready (consumed only on the canvas path; harmless in DSI mode).
-  this->frame_ready_.store(true, std::memory_order_release);
   return true;
 }
 
@@ -1870,7 +1877,7 @@ bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
 
 bool SimpleVideoPlayer::allocate_buffers_(uint32_t video_width, uint32_t video_height) {
 #ifdef SVP_DSI_OUTPUT
-  if (this->dsi_ != nullptr) {
+  if (this->direct_session_()) {
     // DSI direct output: the video must be transcoded to exactly the resolution the panel needs
     // (native res with W/H swapped for a 90/270 rotation). No scaling -- the user matches it.
     if (video_width != this->dsi_out_w_ || video_height != this->dsi_out_h_) {

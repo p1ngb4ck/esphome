@@ -257,6 +257,11 @@ class SimpleVideoPlayer : public Component
   // Tell the sender the panel sleeps (it stops drawing) or is awake again (it redraws), as Portall's
   // portall.sleep / portall.wake.
   void stream_sleep(bool asleep);
+  // The output a stream's picture is made for: the display (fullscreen) or the canvas. A connected
+  // sender is told the new picture at once.
+  void set_stream_fullscreen(bool fullscreen);
+  void init_stream_fullscreen(bool fullscreen) { this->stream_fullscreen_.store(fullscreen); }
+  bool is_stream_fullscreen() const { return this->stream_direct_(); }
 #ifdef SVP_STREAM_TOUCH
   void set_stream_touchscreen(touchscreen::Touchscreen *ts) { this->stream_touchscreen_ = ts; }
   void stream_on_touch(const touchscreen::TouchPoints_t &points);
@@ -512,6 +517,14 @@ class SimpleVideoPlayer : public Component
 
   /// Decode JPEG frame (from the ring slot the decode task currently holds) and update canvas
   bool decode_frame_(const uint8_t *frame_data, size_t frame_size);
+  /// Whether the current session draws onto the display (else into the canvas).
+  bool direct_session_() const {
+#ifdef SVP_DSI_OUTPUT
+    return this->direct_.load(std::memory_order_relaxed);
+#else
+    return false;
+#endif
+  }
 
 #ifdef SVP_DSI_OUTPUT
   /// setup(): read the panel size and allocate the decode buffer. false -> mark_failed.
@@ -524,7 +537,17 @@ class SimpleVideoPlayer : public Component
   static void stream_draw_task_entry_(void *param);
   void stream_draw_loop_();
   void stream_feed_(const uint8_t *data, size_t len);
-#ifndef SVP_DSI_OUTPUT
+  /// Whether a sender's picture is made for the display (else the canvas).
+  bool stream_direct_() const {
+#if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
+    return this->stream_fullscreen_.load(std::memory_order_acquire);
+#elif defined(SVP_DSI_OUTPUT)
+    return true;
+#else
+    return false;
+#endif
+  }
+#ifdef SVP_CANVAS_OUTPUT
   /// Canvas output: copy one decoded udisp rectangle into the page buffer the canvas shows.
   void stream_copy_to_canvas_(const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h);
 #endif
@@ -998,6 +1021,7 @@ class SimpleVideoPlayer : public Component
   // controls). resume() then hands it back from loop(), before the task draws again.
   std::atomic<bool> resume_req_{false};  // resume() asked while LVGL shows the paused UI
   bool paused_ui_{false};                // LVGL was handed the panel for the pause (loop() only)
+  std::atomic<bool> direct_{false};       // the current session draws onto the display
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};  // panel native resolution; the video must match it
   uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
   uint8_t *decode_target_{nullptr};       // own decode buffer (jpeg_alloc_decoder_mem, PSRAM)
@@ -1011,6 +1035,7 @@ class SimpleVideoPlayer : public Component
     uint16_t x{0}, y{0}, w{0}, h{0};
     uint32_t total{0};
     uint32_t received{0};
+    bool direct{false};  // for the display, else the canvas page
   };
   static constexpr uint8_t STREAM_FRAME_COUNT = 4;
   uint16_t stream_port_{0};
@@ -1032,6 +1057,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_output_ok_{false};  // loop(): connected and LVGL (if any) paused
   std::atomic<bool> stream_awake_{true};   // false while a file plays
   std::atomic<bool> stream_asleep_{false};  // stream_sleep()
+  std::atomic<bool> stream_fullscreen_{true};  // set_stream_fullscreen()
   std::atomic<bool> stream_status_pending_{false};
   std::atomic<bool> stream_depth_pending_{false};
   // The sender streams an AVI (svp_relay) rather than udisp rectangles: it plays through the file
@@ -1040,7 +1066,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> stream_avi_{false};                    // an AVI connection is up
   std::atomic<bool> stream_played_to_end_{false};          // the network AVI's playback reached its end
   std::atomic<BufferedFileReader *> stream_sink_{nullptr};  // open network source, or none
-#ifndef SVP_DSI_OUTPUT
+#ifdef SVP_CANVAS_OUTPUT
   // Canvas output: the part of the page the udisp rectangles changed since loop() last told LVGL.
   portMUX_TYPE stream_dirty_lock_ = portMUX_INITIALIZER_UNLOCKED;
   bool stream_dirty_{false};
@@ -1362,6 +1388,16 @@ template<typename... Ts> class StreamWakeAction : public Action<Ts...> {
  public:
   explicit StreamWakeAction(SimpleVideoPlayer *player) : player_(player) {}
   void play(const Ts &...x) override { this->player_->stream_sleep(false); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class StreamOutputAction : public Action<Ts...> {
+ public:
+  explicit StreamOutputAction(SimpleVideoPlayer *player) : player_(player) {}
+  TEMPLATABLE_VALUE(bool, fullscreen)
+  void play(const Ts &...x) override { this->player_->set_stream_fullscreen(this->fullscreen_.value(x...)); }
 
  protected:
   SimpleVideoPlayer *player_;
