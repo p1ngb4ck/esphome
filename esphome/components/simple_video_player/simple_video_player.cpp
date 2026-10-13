@@ -1016,8 +1016,6 @@ void SimpleVideoPlayer::playback_loop_() {
     }
   }
 #ifdef USE_AUDIO
-  if (this->audio_enabled_)
-    this->wait_speaker_running_();
   // The audio cursor reads ahead while the reader waits for the slot; the sound is released once it
   // is audio_lead_frames_ ahead (bounded: a short file or a slow stream starts with what there is).
   {
@@ -1030,6 +1028,10 @@ void SimpleVideoPlayer::playback_loop_() {
       vTaskDelay(pdMS_TO_TICKS(1));
       waited_ms++;
     }
+  }
+  if (this->audio_enabled_) {
+    this->speaker_->start();
+    this->wait_speaker_running_();
   }
 #endif
   this->av_started_.store(true, std::memory_order_release);
@@ -1823,8 +1825,6 @@ void SimpleVideoPlayer::handle_seek_() {
       this->speaker_->stop();
       for (uint32_t waited = 0; !this->speaker_->is_stopped() && waited < 500; waited++)
         vTaskDelay(pdMS_TO_TICKS(1));
-      this->speaker_->start();
-      this->wait_speaker_running_();
       for (uint32_t waited = 0; this->audio_cursor_frames_.load(std::memory_order_acquire) <
                                     this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ &&
                                 waited < 1000;
@@ -1833,6 +1833,8 @@ void SimpleVideoPlayer::handle_seek_() {
           storage::global_storage_worker->update();
         vTaskDelay(pdMS_TO_TICKS(1));
       }
+      this->speaker_->start();
+      this->wait_speaker_running_();
     }
     this->audio_hold_.store(false, std::memory_order_release);
   }
@@ -2471,9 +2473,8 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
     return false;
   }
 
-  // Speaker starts up in parallel with the video buffering; feeding it begins at the first frame
-  // (wait_speaker_running_() + av_started_).
-  this->speaker_->start();
+  // The speaker starts right before the first frame: a mixer source started earlier stops again
+  // after its timeout without data.
   this->audio_enabled_ = true;
   this->session_audio_ = true;
   ESP_LOGI(TAG, "Audio processing initialized successfully (%s mode)", use_decoder ? "decoder" : "direct PCM");
@@ -2705,8 +2706,8 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 }
 
 void SimpleVideoPlayer::wait_speaker_running_() {
-  // Runs once on the playback task right before the first frame (not the per-frame path). The
-  // speaker was started at audio init, so after the buffering this normally returns at once.
+  // Playback task, right after speaker_->start() before the first frame or after a seek (not the
+  // per-frame path).
   static constexpr uint32_t SPEAKER_START_TIMEOUT_MS = 1000;
   const uint32_t wait_start = millis();
   while (!this->speaker_->is_running() && (millis() - wait_start) < SPEAKER_START_TIMEOUT_MS)
