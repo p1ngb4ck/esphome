@@ -199,6 +199,11 @@ void SimpleVideoPlayer::setup() {
 
 void SimpleVideoPlayer::loop() {
   this->handle_output_release_();
+  if (this->finished_pending_.exchange(false, std::memory_order_acq_rel))
+    this->on_finished_callbacks_.call();
+  const int16_t error = this->error_pending_.exchange(-1, std::memory_order_acq_rel);
+  if (error >= 0)
+    this->on_error_callbacks_.call(static_cast<uint8_t>(error));
   this->run_pending_start_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
@@ -685,7 +690,8 @@ void SimpleVideoPlayer::seek(float seconds) {
 void SimpleVideoPlayer::playback_task_entry_(void *param) {
   auto *player = static_cast<SimpleVideoPlayer *>(param);
   player->playback_loop_();
-  player->task_handle_ = nullptr;  // also after an early return
+  // Also after an early return. The last thing this task does: from here a new session may start.
+  player->task_handle_ = nullptr;
   vTaskDelete(nullptr);
 }
 
@@ -1124,7 +1130,7 @@ void SimpleVideoPlayer::playback_loop_() {
       if (!this->net_session_)
 #endif
         this->advance_req_.store(true, std::memory_order_release);
-      this->on_finished_callbacks_.call();
+      this->finished_pending_.store(true, std::memory_order_release);  // automations run from loop()
       break;
     }
     const bool repeat = payload == AVIParser::REPEAT_FRAME;  // the previous picture stays one more frame
@@ -1337,8 +1343,6 @@ void SimpleVideoPlayer::playback_loop_() {
   }
 
   esp_task_wdt_delete(nullptr);
-  this->task_handle_ = nullptr;
-
   ESP_LOGI(TAG, "Playback task finished");
 }
 
@@ -2709,19 +2713,15 @@ void SimpleVideoPlayer::stop_audio_task_() {
     xTaskNotifyGive(this->audio_task_handle_);
 
     // Teardown, not the zero-wait path -- a coarse sleep is fine while the audio task exits.
-    uint32_t timeout_ms = 1000;
+    uint32_t timeout_ms = 3000;
     uint32_t start = millis();
     while (this->audio_task_handle_ != nullptr && (millis() - start) < timeout_ms) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-    if (this->audio_task_handle_ != nullptr) {
-      ESP_LOGW(TAG, "Audio task didn't stop gracefully, deleting forcefully");
-      // Off the task watchdog first: a deleted task left subscribed trips it.
-      esp_task_wdt_delete(this->audio_task_handle_);
-      vTaskDelete(this->audio_task_handle_);
-      this->audio_task_handle_ = nullptr;
-    }
+    // Never deleted from here: it may hold the speaker's lock. The next session waits until it has
+    // gone (session_busy_()).
+    if (this->audio_task_handle_ != nullptr)
+      ESP_LOGE(TAG, "Audio task still running after %" PRIu32 " ms", timeout_ms);
   }
 }
 #endif
@@ -2734,8 +2734,8 @@ void SimpleVideoPlayer::set_error_(PlaybackError error) {
   // Publish last_error_ before state_ so any reader that sees ERROR also sees the reason.
   this->last_error_.store(error, std::memory_order_relaxed);
   this->state_.store(PlayerState::ERROR, std::memory_order_release);
-
-  this->on_error_callbacks_.call(static_cast<uint8_t>(error));
+  // Mostly the playback task: the automations run from loop(), on the main loop.
+  this->error_pending_.store(static_cast<int16_t>(error), std::memory_order_release);
 }
 
 }  // namespace esphome::simple_video_player

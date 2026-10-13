@@ -1439,6 +1439,9 @@ class SimpleVideoPlayer : public Component
   CallbackManager<void()> on_finished_callbacks_;
   CallbackManager<void()> on_paused_callbacks_;
   CallbackManager<void(uint8_t)> on_error_callbacks_;
+  // Set by the playback task, the automations then run from loop(): -1 none, else the PlaybackError.
+  std::atomic<bool> finished_pending_{false};
+  std::atomic<int16_t> error_pending_{-1};
   CallbackManager<void()> status_callbacks_;
 #ifdef SVP_MEDIA_PLAYER
   media_player::MediaPlayer *media_player_{nullptr};
