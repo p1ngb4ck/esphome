@@ -20,6 +20,7 @@
 #include "esphome/components/display/display_color_utils.h"
 #include "esphome/core/component.h"
 
+#include <atomic>
 #include <list>
 #include <lvgl.h>
 #include <map>
@@ -42,6 +43,7 @@
 #endif  // USE_LVGL_BUTTONMATRIX
 #ifdef USE_LVGL_HID
 #include "esphome/components/hid/hid_input.h"
+#include "key_bindings.h"
 #endif  // USE_LVGL_HID
 
 namespace esphome::lvgl {
@@ -523,26 +525,54 @@ class LVEncoderListener final : public Parented<LvglComponent> {
 #endif  //  USE_LVGL_KEY_LISTENER
 
 #ifdef USE_LVGL_HID
-// A HID keyboard or remote as an LVGL keypad: navigation keys as LV_KEY_*, typed text as
-// characters. Key changes are queued, so a press and release between two reads is not lost.
+// A HID keyboard or remote as an LVGL keypad. Its keys do what the key bindings say: the arrows
+// move the focus to the nearest widget that way (or work the focused widget that uses them), Enter
+// presses, Back is Escape, and an action of the configuration runs its automation. Typed text goes
+// to a focused text area. Key changes are queued, so a press and release between two reads are kept.
 class LVHIDKeypadListener final : public Parented<LvglComponent> {
  public:
-  LVHIDKeypadListener(hid::HIDInput *input, uint16_t long_press_time, uint16_t long_press_repeat_time);
+  LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
+                      uint16_t long_press_repeat_time);
   lv_indev_t *get_drv() { return this->drv_; }
 
  protected:
-  struct KeyEvent {
-    uint32_t key;
-    bool pressed;
+  enum EventKind : uint8_t { KEY_PRESS, KEY_RELEASE, TEXT };
+  struct Event {
+    uint32_t code;  // page << 16 | usage, or a character
+    uint8_t mods;
+    EventKind kind;
   };
-  static constexpr uint8_t QUEUE_SIZE = 16;
-  void push_(uint32_t key, bool pressed);
+  struct Held {
+    uint32_t code;
+    uint32_t lv_key;
+  };
+  static constexpr uint8_t QUEUE_SIZE = 32;
+  static constexpr uint8_t HELD_SIZE = 4;
 
-  KeyEvent queue_[QUEUE_SIZE]{};
-  uint8_t head_{0};
-  uint8_t count_{0};
+  void push_(uint32_t code, uint8_t mods, EventKind kind);
+  void read_(lv_indev_data_t *data);
+  /// The LVGL key a key press becomes, 0 when it is done here (or nothing).
+  uint32_t press_(uint16_t page, uint16_t usage, uint8_t mods);
+  uint32_t builtin_(int action, lv_obj_t *focused);
+  lv_obj_t *focused_() const;
+  /// A full-screen widget shown on the top layer (a popup's backdrop): only its widgets are reached.
+  lv_obj_t *modal_() const;
+  bool reachable_(lv_obj_t *obj, lv_obj_t *modal) const;
+  /// To the nearest reachable widget that way (LV_KEY_UP..LEFT), or the first one when from is null.
+  void move_focus_(uint32_t direction, lv_obj_t *from, lv_obj_t *modal);
+  /// To the next or previous reachable widget in the group's order.
+  void step_focus_(bool forward, lv_obj_t *from, lv_obj_t *modal);
+  /// Scrolls the list around the focused widget by a page and focuses what is then in its place.
+  void scroll_page_(bool down, lv_obj_t *from, lv_obj_t *modal);
+
+  KeyBindings *bindings_;
+  Event queue_[QUEUE_SIZE]{};
+  std::atomic<uint8_t> head_{0};  // read by read_()
+  std::atomic<uint8_t> tail_{0};  // written by push_()
+  Held held_[HELD_SIZE]{};
   uint32_t key_{0};
   bool pressed_{false};
+  bool release_next_{false};
   lv_indev_t *drv_{};
 };
 

@@ -34,6 +34,7 @@ from esphome.const import (
     CONF_BUFFER_SIZE,
     CONF_BUILD_FLAGS,
     CONF_ESPHOME,
+    CONF_FILE,
     CONF_GROUP,
     CONF_ID,
     CONF_LOG_LEVEL,
@@ -74,8 +75,10 @@ from .gradient import GRADIENT_SCHEMA, gradients_to_code
 from .hid_input import (
     CONF_HID_KEYBOARDS,
     CONF_HID_POINTERS,
+    CONF_KEY_BINDINGS,
     HID_KEYBOARDS_CONFIG,
     HID_POINTERS_CONFIG,
+    KEY_BINDINGS_SCHEMA,
     hid_inputs_to_code,
 )
 from .keypads import KEYPADS_CONFIG, keypads_to_code
@@ -259,6 +262,10 @@ def final_validation(config_list):
     global_config = full_config.get()
     # Resolve byte_order from display metadata before multi-config validation
     for config in config_list:
+        if CONF_FILE in config[CONF_KEY_BINDINGS] and "storage" not in global_config:
+            raise cv.Invalid(
+                "key_bindings file needs a storage (sd_storage, usb_storage, ...) mounted there"
+            )
         metas = [get_display_metadata(disp) for disp in config[df.CONF_DISPLAYS]]
         if any(m.has_writer for m in metas):
             raise cv.Invalid(
@@ -662,6 +669,7 @@ LVGL_TOP_LEVEL_SCHEMA = (
             cv.Optional(df.CONF_KEYPADS, default=None): KEYPADS_CONFIG,
             cv.Optional(CONF_HID_KEYBOARDS): HID_KEYBOARDS_CONFIG,
             cv.Optional(CONF_HID_POINTERS): HID_POINTERS_CONFIG,
+            cv.Optional(CONF_KEY_BINDINGS, default={}): KEY_BINDINGS_SCHEMA,
             cv.GenerateID(df.CONF_DEFAULT_GROUP): cv.declare_id(lv_group_t),
             cv.Optional(df.CONF_RESUME_ON_INPUT, default=True): cv.boolean,
             cv.Optional(df.CONF_PAUSED, default=False): cv.boolean,
