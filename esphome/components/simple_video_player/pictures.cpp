@@ -421,7 +421,8 @@ uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) {
 }
 
 // The pictures' buffers, all at once when pictures are first wanted (after boot or a video): the
-// pages, and the files at PICTURE_STEP. Only a larger file or picture takes more, when it comes.
+// pages, the decode buffer for a picture larger than the canvas (up to the display's pixels) and the
+// files (a quarter of that). Only a larger file or picture takes more, when it comes.
 bool SimpleVideoPlayer::acquire_picture_buffers_() {
   if (this->pic_pages_[0].data != nullptr)
     return true;
@@ -434,10 +435,16 @@ bool SimpleVideoPlayer::acquire_picture_buffers_() {
     page.capacity = page.data != nullptr ? this->pic_page_bytes_ : 0;
     ok = ok && page.data != nullptr;
   }
-  auto take = [this, &ok](PicFile &file) {
+  if (ok && this->pic_decode_buf_ == nullptr) {
+    this->pic_decode_buf_ = this->picture_alloc_(this->pic_page_bytes_);
+    this->pic_decode_cap_ = this->pic_decode_buf_ != nullptr ? this->pic_page_bytes_ : 0;
+  }
+  ok = ok && this->pic_decode_buf_ != nullptr;
+  const size_t file_bytes = align_up(this->pic_page_bytes_ / 4, PsramPool::ALIGN);
+  auto take = [this, &ok, file_bytes](PicFile &file) {
     if (ok && file.data == nullptr) {
-      file.data = this->picture_alloc_(PICTURE_STEP);
-      file.capacity = file.data != nullptr ? PICTURE_STEP : 0;
+      file.data = this->picture_alloc_(file_bytes);
+      file.capacity = file.data != nullptr ? file_bytes : 0;
     }
     ok = ok && file.data != nullptr;
   };
@@ -447,7 +454,7 @@ bool SimpleVideoPlayer::acquire_picture_buffers_() {
   if (ok)
     return true;
   ESP_LOGE(TAG, "No room in the PSRAM pool for the pictures (%u bytes)",
-           static_cast<unsigned>(PIC_PAGE_COUNT * this->pic_page_bytes_ + (PIC_FILE_COUNT + 1) * PICTURE_STEP));
+           static_cast<unsigned>((PIC_PAGE_COUNT + 1) * this->pic_page_bytes_ + (PIC_FILE_COUNT + 1) * file_bytes));
   this->release_picture_buffers_();
   this->pic_buffers_failed_ = true;
   return false;
@@ -473,6 +480,8 @@ bool SimpleVideoPlayer::reserve_file_(PicFile *file, size_t size) {
 }
 
 bool SimpleVideoPlayer::reserve_decode_(size_t size) {
+  if (!this->acquire_picture_buffers_())
+    return false;
   if (this->pic_decode_cap_ >= size)
     return true;
   this->pool_.free(this->pic_decode_buf_);
