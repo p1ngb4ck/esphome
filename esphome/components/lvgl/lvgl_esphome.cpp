@@ -524,9 +524,11 @@ bool LvglComponent::setup_scanout_() {
   this->scanout_[1] = static_cast<uint8_t *>(fbs[1]);
   this->scanout_stride_ = static_cast<size_t>(this->width_) * SCANOUT_BPP;
 #ifdef USE_ESP32_VARIANT_ESP32P4
+  // The PPA writes into PSRAM only in whole L2 cache lines.
+  static constexpr size_t LINE = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
   const size_t fb_size = this->scanout_stride_ * this->height_;
-  this->scanout_ppa_ = fb_size % 128 == 0 && reinterpret_cast<uintptr_t>(fbs[0]) % 128 == 0 &&
-                       reinterpret_cast<uintptr_t>(fbs[1]) % 128 == 0;
+  this->scanout_ppa_ = fb_size % LINE == 0 && reinterpret_cast<uintptr_t>(fbs[0]) % LINE == 0 &&
+                       reinterpret_cast<uintptr_t>(fbs[1]) % LINE == 0;
 #endif
   display->present_scanout_buffer(fbs[0]);
   this->scanout_back_ = 1;
