@@ -1557,12 +1557,21 @@ void WebServer::select_json_(select::Select *obj, StringRef value, JsonDetail st
 
   const JsonString state = linked(value);
   set_json_icon_state_value(root, obj, "select", state, state, start_config);
-  JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
-  for (auto &option : obj->traits.get_options()) {
-    opt.add(linked(option));
-  }
+  const auto &traits = obj->traits;
+  root[ESPHOME_F("orev")] = traits.get_options_revision();
   if (start_config == DETAIL_ALL) {
+    JsonArray opt = root[ESPHOME_F("option")].to<JsonArray>();
+    for (auto &option : traits.get_options()) {
+      opt.add(linked(option));
+    }
     this->add_sorting_info_(root, obj);
+  } else if (traits.get_last_change() != select::SelectOptionsChange::REPLACED) {
+    // The change that led to orev, for a client holding the revision before it; any other gap refetches the list
+    JsonObject op = root[ESPHOME_F("option_op")].to<JsonObject>();
+    const size_t index = traits.get_last_change_index();
+    op[ESPHOME_F("i")] = index;
+    if (traits.get_last_change() != select::SelectOptionsChange::REMOVED)
+      op[ESPHOME_F("v")] = linked(traits.get_options()[index]);
   }
 }
 #endif
