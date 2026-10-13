@@ -422,7 +422,7 @@ uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) {
 
 // The pictures' buffers, all at once when pictures are first wanted (after boot or a video): the
 // pages, the decode buffer for a picture larger than the canvas (up to the display's pixels) and the
-// files (a quarter of that). Only a larger file or picture takes more, when it comes.
+// files. Only a larger file or picture takes more, when it comes.
 bool SimpleVideoPlayer::acquire_picture_buffers_() {
   if (this->pic_pages_[0].data != nullptr)
     return true;
@@ -440,21 +440,17 @@ bool SimpleVideoPlayer::acquire_picture_buffers_() {
     this->pic_decode_cap_ = this->pic_decode_buf_ != nullptr ? this->pic_page_bytes_ : 0;
   }
   ok = ok && this->pic_decode_buf_ != nullptr;
-  const size_t file_bytes = align_up(this->pic_page_bytes_ / 4, PsramPool::ALIGN);
-  auto take = [this, &ok, file_bytes](PicFile &file) {
+  for (PicFile &file : this->pic_files_) {
     if (ok && file.data == nullptr) {
-      file.data = this->picture_alloc_(file_bytes);
-      file.capacity = file.data != nullptr ? file_bytes : 0;
+      file.data = this->picture_alloc_(PICTURE_STEP);
+      file.capacity = file.data != nullptr ? PICTURE_STEP : 0;
     }
     ok = ok && file.data != nullptr;
-  };
-  for (PicFile &file : this->pic_files_)
-    take(file);
-  take(this->thumb_file_);
+  }
   if (ok)
     return true;
   ESP_LOGE(TAG, "No room in the PSRAM pool for the pictures (%u bytes)",
-           static_cast<unsigned>((PIC_PAGE_COUNT + 1) * this->pic_page_bytes_ + (PIC_FILE_COUNT + 1) * file_bytes));
+           static_cast<unsigned>((PIC_PAGE_COUNT + 1) * this->pic_page_bytes_ + PIC_FILE_COUNT * PICTURE_STEP));
   this->release_picture_buffers_();
   this->pic_buffers_failed_ = true;
   return false;
@@ -513,8 +509,6 @@ void SimpleVideoPlayer::release_picture_buffers_() {
     this->pool_.free(file.data);
     file = PicFile{};
   }
-  this->pool_.free(this->thumb_file_.data);
-  this->thumb_file_ = PicFile{};
   this->pool_.free(this->pic_decode_buf_);
   this->pic_decode_buf_ = nullptr;
   this->pic_decode_cap_ = 0;
@@ -530,7 +524,7 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, b
   const char *why = nullptr;
   const char *rel = nullptr;
   storage::PathStorage *storage = nullptr;
-  PicFile *file = thumbnail ? &this->thumb_file_ : this->free_file_();
+  PicFile *file = this->free_file_();
   // Room up to a multiple of 16 past the file: the decoder is given that much (as the video's).
   const size_t size = static_cast<size_t>(entry.size) + 16;
   if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr) {

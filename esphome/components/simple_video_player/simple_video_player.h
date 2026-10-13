@@ -934,7 +934,7 @@ class SimpleVideoPlayer : public Component
     size_t length{0};
     uint32_t used_ms{0};
   };
-  static constexpr size_t PIC_FILE_COUNT = 3;
+  static constexpr size_t PIC_FILE_COUNT = 2;  // the shown picture's, and one to read the next into
   // A picture decoded at the canvas' size, in the pool: the shown one and its neighbours, so a step
   // only switches what the canvas shows; the next one is decoded into one not shown.
   struct PicPage {
@@ -1002,7 +1002,6 @@ class SimpleVideoPlayer : public Component
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
   PicFile pic_files_[PIC_FILE_COUNT];
-  PicFile thumb_file_;
   int pic_direction_{1};        // of the last step: the next picture read ahead
   uint8_t pic_preload_tries_{0};  // neighbours of the shown picture tried (each once)
   // PNG and BMP: no hardware for them; decoded by runtime_image, scaled, and let go.
