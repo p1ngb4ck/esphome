@@ -500,10 +500,17 @@ void A2DPSource::update_media_() {
 }
 
 void A2DPSource::loop() {
-  bt_classic::ensure_gap_callback();
+  const bool classic_up = bt_classic::ensure_gap_callback();
 #ifdef USE_A2DP_SOURCE_EXTERNAL_HOST
+  if (this->started_.load() && !classic_up) {
+    // The dongle went (or Bluedroid): the profiles go down while Bluedroid can still take it, and
+    // come back with start() once Classic is up again.
+    ESP_LOGI(TAG, "Bluetooth Classic is down, stopping");
+    this->source_.stack_down(esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED);
+    this->started_.store(false);
+  }
   if (!this->started_.load()) {
-    if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED)
+    if (!classic_up)
       return;
     ESP_LOGI(TAG, "Bluetooth is up, starting");
     this->source_.start();

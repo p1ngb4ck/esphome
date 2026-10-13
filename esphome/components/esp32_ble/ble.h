@@ -105,6 +105,13 @@ class ESP32BLE final : public Component {
 
   void enable() { this->request_state_(true); }
   void disable() { this->request_state_(false); }
+  /// Tears the stack down and brings it up again (e.g. for another controller); a no-op unless active.
+  void restart() {
+    if (this->state_ == BLE_COMPONENT_STATE_ACTIVE) {
+      this->restart_requested_ = true;
+      this->state_ = BLE_COMPONENT_STATE_DISABLE;
+    }
+  }
   ESPHOME_ALWAYS_INLINE bool is_active() { return this->state_ == BLE_COMPONENT_STATE_ACTIVE; }
   void setup() override;
   void loop() override;
@@ -245,6 +252,7 @@ class ESP32BLE final : public Component {
   // 1-byte aligned members (grouped together to minimize padding)
   esp_ble_io_cap_t io_cap_{ESP_IO_CAP_NONE};          // 1 byte (uint8_t typedef)
   BLEComponentState state_{BLE_COMPONENT_STATE_OFF};  // 1 byte (uint8_t enum)
+  bool restart_requested_{false};                     // restart(): brought up again once down
   bool enable_on_boot_{};                             // 1 byte
 #ifdef USE_ESP32_BLE_ADVERTISING
   uint8_t advertising_ref_count_{0};  // 1 byte, number of components requesting advertising

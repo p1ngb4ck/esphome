@@ -177,6 +177,25 @@ void BluetoothA2DPSource::start(std::vector<const char *> names) {
                        nullptr);
 }
 
+void BluetoothA2DPSource::stack_down(bool deinit) {
+  stack_generation.fetch_add(1);
+  if (s_tmr != nullptr) {
+    xTimerDelete(s_tmr, portMAX_DELAY);
+    s_tmr = nullptr;
+  }
+  if (deinit) {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0)
+    if (is_passthru_active)
+      esp_avrc_tg_deinit();
+#endif
+    esp_avrc_ct_deinit();
+    esp_a2d_source_deinit();
+  }
+  discovery_active = false;
+  s_a2d_state = APP_AV_STATE_IDLE;
+  connection_state = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
+}
+
 void BluetoothA2DPSource::end(bool release_memory) {
   is_end = true;
   while(discovery_active) {
@@ -609,12 +628,14 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
   switch (event) {
     /* when stack up worked, this event comes */
     case BT_APP_EVT_STACK_UP: {
+      const uint32_t generation = stack_generation.load();
       // set up device name
       esp_bt_gap_set_device_name(dev_name);
 
       // ESPHome: the GAP callback is bt_classic's, shared with other components;
-      // handle_gap_event() is registered with it.
-      esphome::bt_classic::ensure_gap_callback();
+      // handle_gap_event() is registered with it. Not up (any more): the next start() does it.
+      if (!esphome::bt_classic::ensure_gap_callback())
+        break;
 
       // initialize AVRCP controller
       esp_avrc_ct_init();
@@ -647,6 +668,8 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       // esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
       // ESP_BT_NON_DISCOVERABLE);
       delay_ms(10000);
+      if (generation != stack_generation.load())
+        break;  // ESPHome: Classic went away meanwhile
 #ifndef A2DP_EXTERNAL_HOST  // ESPHome: other devices (HID) still connect on their own
       set_scan_mode_connectable(false);
 #endif

@@ -33,6 +33,8 @@ void br_recv(uint8_t *h4, size_t len);
 void br_send_available();
 /// Main loop: log ACL continuations that arrived without their start, per side, since the last call.
 void report_acl();
+/// Bluedroid came up with the dongle there and it still is: BR/EDR (Classic) can be used.
+bool br_up();
 
 }  // namespace hci_split
 }  // namespace esphome::usb_bluetooth

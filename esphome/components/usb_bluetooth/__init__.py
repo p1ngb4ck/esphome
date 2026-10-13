@@ -17,7 +17,7 @@ from esphome.components.usb_host import (
     require_control_transfers,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_ENABLE_ON_BOOT, CONF_FRAMEWORK, CONF_ID, PLATFORM_ESP32
+from esphome.const import CONF_FRAMEWORK, CONF_ID, PLATFORM_ESP32
 from esphome.core import CORE, ID
 import esphome.final_validate as fv
 
@@ -96,13 +96,9 @@ def _final_validate(config):
                 f"{CONF_BLUEDROID} beside esp32_ble shares Bluedroid with the co-processor's "
                 "controller (esp32_hosted), which this configuration does not have"
             )
-        # Bluedroid reads the controller's features once, when esp32_ble brings it up: the
-        # dongle has to be there by then, so usb_bluetooth enables esp32_ble itself.
-        if full["esp32_ble"].get(CONF_ENABLE_ON_BOOT, True):
-            raise cv.Invalid(
-                f"{CONF_BLUEDROID} beside esp32_ble: set esp32_ble {CONF_ENABLE_ON_BOOT}: "
-                "false; usb_bluetooth enables it once the dongle is ready"
-            )
+        # Bluedroid reads the controllers once, when esp32_ble brings it up: it runs on the
+        # co-processor alone until the dongle is ready, then usb_bluetooth starts it again on both
+        # (with enable_on_boot: false, only then).
 
 
 def _splits_with_esp32_ble(full_config) -> bool:

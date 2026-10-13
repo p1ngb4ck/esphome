@@ -441,6 +441,10 @@ void host_loop() {
   Host &h = host();
   if (!bt_classic::ensure_gap_callback()) {
     if (h.started) {
+      // The dongle went: the host goes down while Bluedroid can still take it, so that it can be
+      // started again once Classic is back.
+      if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED)
+        esp_bt_hid_host_deinit();
       h.started = false;
       h.ready = false;
       h.connecting = false;

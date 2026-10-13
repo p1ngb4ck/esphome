@@ -57,7 +57,9 @@ static constexpr uint16_t OP_READ_LOCAL_VERSION = 0x1001;
 static constexpr uint16_t OP_READ_LOCAL_COMMANDS = 0x1002;
 static constexpr uint16_t OP_READ_LOCAL_FEATURES = 0x1003;
 static constexpr uint16_t OP_READ_LOCAL_EXT_FEATURES = 0x1004;
+static constexpr uint16_t OP_READ_BUFFER_SIZE = 0x1005;
 static constexpr uint16_t OP_READ_BD_ADDR = 0x1009;
+static constexpr uint16_t OP_LE_READ_BUFFER_SIZE = 0x2002;
 // Broadcom's Write BD_ADDR (btbcm_set_bdaddr() in Linux btbcm.c).
 static constexpr uint16_t OP_BCM_WRITE_BD_ADDR = 0xFC01;
 static constexpr uint16_t MANUFACTURER_BROADCOM = 15;
@@ -98,7 +100,8 @@ struct Pending {
   size_t answer_len[2];
   uint8_t addr_answer[EVENT_BUF];
   size_t addr_answer_len;
-  uint32_t since_ms;  // when the command went out
+  bool buffer_from_le;  // Read Buffer Size, answered from the LE controller's
+  uint32_t since_ms;    // when the command went out
 };
 
 static SemaphoreHandle_t s_lock = nullptr;
@@ -111,6 +114,8 @@ static uint16_t s_le_ctrl[MAX_LE_LINKS];  // controller handle per host slot, NO
 static constexpr size_t MAX_BR_LINKS = 16;
 static uint16_t s_br_links[MAX_BR_LINKS];
 static uint8_t s_br_max_page = 0;
+// Bluedroid was brought up with the dongle there: its BR/EDR side is usable.
+static std::atomic<bool> s_started_with_br{false};
 static uint8_t s_le_host_bits = 0;
 // Only Bluedroid's HCI task sends; only the esp_hosted RX path receives on the LE side.
 static uint8_t s_tx[ACL_BUF];
@@ -383,10 +388,14 @@ static void answer_locally(uint16_t opcode, const uint8_t *params, size_t plen) 
   uint8_t ret[1 + 2 + 8]{};
   size_t ret_len = 1;
   if (opcode == OP_READ_LOCAL_EXT_FEATURES && plen >= 1) {
-    // A page the dongle does not have: page 1 holds the host features Bluedroid set.
+    // A page the dongle does not have: page 1 holds the host features Bluedroid set. Without a
+    // dongle every page is answered here, page 0 with LE alone.
+    const bool no_br = s_br == nullptr;
     ret[1] = params[0];
-    ret[2] = std::max<uint8_t>(s_br_max_page, 1);
+    ret[2] = no_br ? 1 : std::max<uint8_t>(s_br_max_page, 1);
     ret[3] = params[0] == 1 ? s_le_host_bits : 0;
+    if (no_br && params[0] == 0)
+      ret[3 + FEATURE_LE_OFF] |= FEATURE_LE_MASK;
     ret_len = sizeof(ret);
   }
   uint8_t out[EVENT_BUF];
@@ -438,6 +447,7 @@ static void send_host_completed(const uint8_t *data, size_t len) {
 }
 
 static void answer_missing(uint8_t side);
+static size_t own_command(uint16_t opcode, const uint8_t *params, uint8_t plen);
 
 static void send_command(uint8_t *data, size_t len) {
   if (len < 4)
@@ -452,9 +462,23 @@ static void send_command(uint8_t *data, size_t len) {
   Route route = route_for(opcode);
   uint8_t *out = data;
   bool translate = false;
+  bool buffer_from_le = false;
   uint16_t host_handle = 0;
   {
     Lock lock;
+    USBBluetooth *br = s_br;
+    if (br == nullptr) {
+      // No dongle: Bluedroid has the LE controller alone. It takes its address, its buffers stand
+      // in for the BR/EDR ones Bluedroid starts with, and the feature pages say LE only.
+      if (opcode == OP_READ_BD_ADDR) {
+        route = Route::LE;
+      } else if (opcode == OP_READ_LOCAL_EXT_FEATURES) {
+        route = Route::LOCAL;
+      } else if (opcode == OP_READ_BUFFER_SIZE) {
+        route = Route::LE;
+        buffer_from_le = true;
+      }
+    }
     if (names_connection(opcode) && plen >= 2 && len <= sizeof(s_tx)) {
       host_handle = (params[0] | (params[1] << 8)) & 0x0FFF;
       const uint16_t ctrl = ctrl_of(host_handle);
@@ -474,12 +498,12 @@ static void send_command(uint8_t *data, size_t len) {
     if (opcode == OP_RESET)
       clear_links();
     s_pending.addr_stage = AddrStage::NONE;
-    USBBluetooth *br = s_br;
     if (opcode == OP_READ_BD_ADDR && br != nullptr && br->manufacturer() == MANUFACTURER_BROADCOM) {
       route = Route::LE;
       s_pending.addr_stage = AddrStage::READ_LE;
     }
-    s_pending.opcode = opcode;
+    s_pending.buffer_from_le = buffer_from_le;
+    s_pending.opcode = buffer_from_le ? OP_LE_READ_BUFFER_SIZE : opcode;
     s_pending.since_ms = millis();
     s_pending.both = route == Route::BOTH;
     s_pending.translate = translate;
@@ -493,6 +517,10 @@ static void send_command(uint8_t *data, size_t len) {
   if (route == Route::LOCAL) {
     answer_locally(opcode, params, plen);
     return;
+  }
+  if (buffer_from_le) {
+    len = own_command(OP_LE_READ_BUFFER_SIZE, nullptr, 0);
+    out = s_own;
   }
   for (uint8_t side : {SIDE_BR, SIDE_LE}) {
     if ((route == Route::BOTH || (side == SIDE_BR) == (route == Route::BR)) && !send_side(side, out, len))
@@ -642,7 +670,22 @@ static void on_command_answer(uint8_t side, const uint8_t *ev, size_t len) {
   size_t own_len = 0;
   {
     Lock lock;
-    if (s_pending.opcode == opcode && (s_pending.waiting & side) != 0 &&
+    if (s_pending.buffer_from_le && s_pending.opcode == opcode && side == SIDE_LE && complete) {
+      // LE Read Buffer Size as Read Buffer Size: the LE ACL packets, no SCO.
+      const bool ok = len >= 10 && ev[6] == STATUS_SUCCESS;
+      const uint8_t ret[8] = {ok ? STATUS_SUCCESS : (len >= 7 ? ev[6] : STATUS_UNKNOWN_COMMAND),
+                              ok ? ev[7] : static_cast<uint8_t>(0),
+                              ok ? ev[8] : static_cast<uint8_t>(0),
+                              0,
+                              ok ? ev[9] : static_cast<uint8_t>(0),
+                              0,
+                              0,
+                              0};
+      out_len = command_complete(out, OP_READ_BUFFER_SIZE, ret, sizeof(ret));
+      s_pending.buffer_from_le = false;
+      s_pending.waiting = 0;
+      s_pending.opcode = 0;
+    } else if (s_pending.opcode == opcode && (s_pending.waiting & side) != 0 &&
         address_step(opcode, ev, std::min(len, sizeof(out)), out, out_len, own_len)) {
       // Handled: either the answer below, or the next command of the handover.
     } else if (s_pending.opcode != opcode || (s_pending.waiting & side) == 0) {
@@ -899,6 +942,7 @@ void set_br(USBBluetooth *br) {
   s_br = br;
   if (br != nullptr)
     return;
+  s_started_with_br.store(false, std::memory_order_release);
   // The dongle is gone, and its connections with it: say so, rather than leave Bluedroid
   // waiting on links nothing answers for.
   uint16_t gone[MAX_BR_LINKS];
@@ -935,6 +979,8 @@ void br_recv(uint8_t *h4, size_t len) {
 
 void br_send_available() { notify_send_available(); }
 
+bool br_up() { return s_started_with_br.load(std::memory_order_acquire); }
+
 }  // namespace esphome::usb_bluetooth::hci_split
 
 extern "C" esp_err_t __wrap_esp_bluedroid_attach_hci_driver(const esp_bluedroid_hci_driver_operations_t *ops) {
@@ -945,7 +991,13 @@ extern "C" esp_err_t __wrap_esp_bluedroid_attach_hci_driver(const esp_bluedroid_
   ensure_lock();
   s_le_ops = *ops;
   clear_links();
-  ESP_LOGI(TAG, "Bluedroid on two controllers: LE on the co-processor, BR/EDR on the USB dongle");
+  const bool with_br = s_br != nullptr;
+  s_started_with_br.store(with_br, std::memory_order_release);
+  if (with_br) {
+    ESP_LOGI(TAG, "Bluedroid on two controllers: LE on the co-processor, BR/EDR on the USB dongle");
+  } else {
+    ESP_LOGI(TAG, "Bluedroid on the co-processor alone (LE); BR/EDR once the USB dongle is there");
+  }
   return __real_esp_bluedroid_attach_hci_driver(&SPLIT_OPS);
 }
 

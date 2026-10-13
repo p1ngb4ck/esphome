@@ -270,6 +270,9 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
 
   /// Ends the processing and releases the resources
   void end(bool releaseMemory = false) override;
+  /// ESPHome: Bluetooth Classic went away. The timer goes, and the profiles with deinit (only
+  /// while Bluedroid still runs); start() brings everything back.
+  void stack_down(bool deinit);
 
   /// Gets the time of the last heart beat
   unsigned long get_last_heart_beat() { return last_heart_beat; }
@@ -300,7 +303,8 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   int s_intv_cnt = 0;
   int s_connecting_heatbeat_count;
   uint32_t s_pkt_cnt;
-  TimerHandle_t s_tmr;
+  TimerHandle_t s_tmr = nullptr;
+  std::atomic<uint32_t> stack_generation{0};  // stack_down() count: a stale STACK_UP stops
 
   // initialization
   bool reset_ble = false;

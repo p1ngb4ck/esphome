@@ -5,6 +5,9 @@
 #include "esphome/core/log.h"
 
 #include <esp_bt_main.h>
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+#include "esphome/components/usb_bluetooth/hci_split.h"
+#endif
 
 #include <vector>
 
@@ -70,7 +73,12 @@ void add_gap_handler(GapHandler handler, void *arg) { handlers().push_back({hand
 void add_gap_fallback(GapHandler handler, void *arg) { fallbacks().push_back({handler, arg}); }
 
 bool ensure_gap_callback() {
-  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+  bool up = esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED;
+#ifdef USE_USB_BLUETOOTH_HCI_SPLIT
+  // Bluedroid also runs on the co-processor alone (LE), until the dongle is there.
+  up = up && usb_bluetooth::hci_split::br_up();
+#endif
+  if (!up) {
     registered = false;
     return false;
   }
