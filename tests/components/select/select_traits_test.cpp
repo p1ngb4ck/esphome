@@ -80,4 +80,41 @@ TEST(SelectTraits, CopyOfItsOwnOptionsStaysValid) {
   EXPECT_STREQ(traits.get_options()[1], "b");
 }
 
+TEST(SelectTraits, SlotChangesAreCountedWithTheirSlot) {
+  SelectTraits traits;
+  traits.set_options_static(OPTIONS, 3);
+  EXPECT_EQ(traits.get_options_revision(), 0U);
+
+  traits.set_option(1, "mid");
+  EXPECT_NE(traits.get_options().data(), OPTIONS);
+  EXPECT_STREQ(traits.get_options()[1], "mid");
+  EXPECT_STREQ(OPTIONS[1], "medium");
+  EXPECT_EQ(traits.get_options_revision(), 1U);
+  EXPECT_EQ(traits.get_last_change(), SelectOptionsChange::SET);
+  EXPECT_EQ(traits.get_last_change_index(), 1U);
+
+  traits.add_option("max");
+  ASSERT_EQ(traits.get_options().size(), 4U);
+  EXPECT_STREQ(traits.get_options()[3], "max");
+  EXPECT_EQ(traits.get_last_change(), SelectOptionsChange::ADDED);
+  EXPECT_EQ(traits.get_last_change_index(), 3U);
+
+  traits.remove_option(0);
+  ASSERT_EQ(traits.get_options().size(), 3U);
+  EXPECT_STREQ(traits.get_options()[0], "mid");
+  EXPECT_EQ(traits.get_last_change(), SelectOptionsChange::REMOVED);
+  EXPECT_EQ(traits.get_last_change_index(), 0U);
+  EXPECT_EQ(traits.get_options_revision(), 3U);
+
+  // Out of range slots change nothing
+  traits.set_option(3, "x");
+  traits.remove_option(3);
+  EXPECT_EQ(traits.get_options().size(), 3U);
+  EXPECT_EQ(traits.get_options_revision(), 3U);
+
+  traits.set_options({"a"});
+  EXPECT_EQ(traits.get_last_change(), SelectOptionsChange::REPLACED);
+  EXPECT_EQ(traits.get_options_revision(), 4U);
+}
+
 }  // namespace esphome::select::testing

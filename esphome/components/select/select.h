@@ -36,6 +36,8 @@ class Select : public EntityBase {
   void publish_state(const std::string &state) { this->publish_state(state.c_str()); }
   void publish_state(const char *state);
   void publish_state(size_t index);
+  /// Tell controllers the options changed while the state did not.
+  void publish_options();
 
   /// Return the currently selected option, or empty StringRef if no state.
   /// The returned StringRef points to string literals from codegen (static storage).
