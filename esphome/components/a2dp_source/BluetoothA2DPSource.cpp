@@ -481,8 +481,7 @@ void BluetoothA2DPSource::app_gap_callback(esp_bt_gap_cb_event_t event,
           s_a2d_state = APP_AV_STATE_CONNECTING;
           ESP_LOGVV(BT_AV_TAG, "Device discovery stopped.");
           ESP_LOGI(BT_AV_TAG, "a2dp connecting to peer: %s", s_peer_bdname);
-          // ESPHome: no separate service search; it pages the device alongside the A2DP connect
-          // and a controller refuses the second page (HCI 0x0B, connection exists).
+          esp_bt_gap_get_remote_services(peer_bd_addr);
           esp_a2d_connect(peer_bd_addr);
         } else {
           // not discovered, continue to discover
@@ -652,8 +651,7 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       set_scan_mode_connectable(false);
 #endif
 
-      if (reconnect_status == AutoReconnect && has_last_connection() &&
-          (reconnect_gate == nullptr || reconnect_gate())) {
+      if (reconnect_status == AutoReconnect && has_last_connection()) {
         ESP_LOGW(BT_AV_TAG, "Reconnecting to %s", to_str(last_connection));
         memcpy(peer_bd_addr, last_connection, ESP_BD_ADDR_LEN);
         connect_to(last_connection);
@@ -829,14 +827,6 @@ void BluetoothA2DPSource::resume_discovery() {
 }
 
 bool BluetoothA2DPSource::handle_reconnect_logic() {
-  // ESPHome: in the pairing window only the pairing connects; a second page of the same
-  // device fails both with "connection exists".
-  if (discovery_gate != nullptr && discovery_gate()) {
-    resume_discovery();
-    return true;
-  }
-  if (!has_last_connection() || (reconnect_gate != nullptr && !reconnect_gate()))
-    return true;
   if (!is_autoreconnect_allowed){
     ESP_LOGVV(BT_AV_TAG, "Auto-reconnect disabled, not attempting to reconnect");
     return false;

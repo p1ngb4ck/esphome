@@ -114,8 +114,6 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   bool handle_unclaimed_pairing(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
   /// ESPHome: discovery only while this returns true; nullptr allows it always.
   void set_discovery_gate(bool (*gate)()) { discovery_gate = gate; }
-  /// ESPHome: the stored device is paged on its own only while this returns true; nullptr allows it.
-  void set_reconnect_gate(bool (*gate)()) { reconnect_gate = gate; }
   /// ESPHome: start discovery now, unless connected or already discovering.
   void resume_discovery();
 
@@ -307,7 +305,6 @@ class BluetoothA2DPSource : public BluetoothA2DPCommon {
   // initialization
   bool reset_ble = false;
   bool (*discovery_gate)() = nullptr;
-  bool (*reconnect_gate)() = nullptr;
   bool incoming_pairing = false;
   void start_discovery();
   bool discovery_active = false;

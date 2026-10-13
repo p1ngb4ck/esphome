@@ -133,7 +133,6 @@ class A2DPSource : public Component
   static void audio_state_(esp_a2d_audio_state_t state, void *self);
   static void authentication_complete_(esp_bt_status_t status);
   static bool discovery_gate_();
-  static bool reconnect_gate_();
   static bool gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg);
   static bool gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg);
 
@@ -165,8 +164,6 @@ class A2DPSource : public Component
   bool pair_on_boot_if_empty_{true};
 
   std::atomic<bool> pairing_mode_{false};
-  // bt_pairing holds a device for this slot; only then is the stored device paged on its own.
-  std::atomic<bool> device_kept_{true};
   std::atomic<bool> connected_{false};
   std::atomic<bool> streaming_{false};
   std::atomic<bool> started_{false};
@@ -179,12 +176,7 @@ class A2DPSource : public Component
   std::atomic<uint8_t> pending_connection_state_{0xFF};
 
   void publish_device_list_();
-  void drop_device_(bool delete_bond);
-#ifdef USE_BT_PAIRING
-  void keep_picked_();
-#endif
   void update_media_();
-  void keep_pace_(int32_t frame_count);
 
   A2DPDeviceSelect *device_select_{nullptr};
   std::vector<DiscoveredDevice> devices_;
@@ -201,11 +193,6 @@ class A2DPSource : public Component
   std::string paired_name_;
 
   std::atomic<uint32_t> underrun_frames_{0};
-  std::atomic<uint32_t> dropped_frames_{0};
-  // Bluetooth media task only.
-  int64_t pace_start_us_{0};
-  int64_t pace_last_us_{0};
-  int64_t pace_frames_{0};
   uint32_t last_report_ms_{0};
   uint32_t idle_timeout_ms_{0};
   uint32_t idle_since_ms_{0};

@@ -9,8 +9,6 @@
 #include "esphome/components/bt_classic/bt_classic.h"
 #include "esphome/core/log.h"
 
-#include <esp_timer.h>
-
 #include <nvs.h>
 
 #include <algorithm>
@@ -75,8 +73,6 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
 }
 
 bool A2DPSource::discovery_gate_() { return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load(); }
-
-bool A2DPSource::reconnect_gate_() { return global_a2dp_source != nullptr && global_a2dp_source->device_kept_.load(); }
 
 bool A2DPSource::gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
   return static_cast<A2DPSource *>(arg)->source_.handle_unclaimed_pairing(event, param);
@@ -149,16 +145,17 @@ void A2DPSource::setup() {
   this->source_.set_media_active(this->media_wanted_);
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
-  this->source_.set_reconnect_gate(A2DPSource::reconnect_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
   bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
-    this->device_kept_.store(false);
     this->pairing_->add_target(this);
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
-      if (record.slot == this->slot_)
-        this->drop_device_(false);
+      if (record.slot != this->slot_)
+        return;
+      if (this->connected_.load())
+        this->source_.disconnect();
+      this->forget_device();
     });
   }
 #endif
@@ -289,42 +286,7 @@ void A2DPSource::stop_pairing() {
 }
 
 void A2DPSource::forget_device() {
-#ifdef USE_BT_PAIRING
-  // bt_pairing drops the record and the bond; its forget callback lets go of the device here.
-  if (this->pairing_ != nullptr && this->pairing_->find_slot(this->slot_) != nullptr) {
-    this->pairing_->forget_slot(this->slot_);
-    return;
-  }
-#endif
   ESP_LOGI(TAG, "Forgetting the stored device");
-  this->drop_device_(true);
-}
-
-#ifdef USE_BT_PAIRING
-// The device picked in the pairing scan is kept once it has paired or connected, whichever is first.
-void A2DPSource::keep_picked_() {
-  if (this->pairing_ == nullptr || !this->picked_valid_)
-    return;
-  this->picked_valid_ = false;
-  bt_pairing::PairingRecord record{};
-  memcpy(record.address, this->picked_.address, sizeof(record.address));
-  record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
-  record.slot = this->slot_;
-  record.device_class = this->picked_.device_class;
-  const std::string &name = this->picked_.name.empty() ? this->paired_name_ : this->picked_.name;
-  strncpy(record.name, name.c_str(), sizeof(record.name) - 1);
-  this->pairing_->store(record);
-}
-#endif
-
-void A2DPSource::drop_device_(bool delete_bond) {
-  if (this->connected_.load())
-    this->source_.disconnect();
-  esp_bd_addr_t *address = this->source_.get_last_peer_address();
-  static const esp_bd_addr_t NO_ADDRESS = {};
-  if (delete_bond && memcmp(*address, NO_ADDRESS, ESP_BD_ADDR_LEN) != 0 &&
-      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED)
-    esp_bt_gap_remove_bond_device(*address);
   this->source_.clean_last_connection();
 }
 
@@ -450,39 +412,7 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     if (producer)
       this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
   }
-  this->keep_pace_(frame_count);
   return frame_count;
-}
-
-// Bluedroid fetches what its send queue has room for; while the link lags that is less than real
-// time and it drops nothing, so audio piles up in front of it and the delay grows. Measured
-// against the clock, what it is behind is skipped at the front of the buffer.
-void A2DPSource::keep_pace_(int32_t frame_count) {
-  static constexpr int64_t RESTART_US = 500000;              // a gap this long: the stream restarted
-  static constexpr int64_t SLACK_FRAMES = SAMPLE_RATE / 16;  // about two of Bluedroid's 30 ms ticks
-  const int64_t now = esp_timer_get_time();
-  if (this->pace_start_us_ == 0 || now - this->pace_last_us_ > RESTART_US) {
-    this->pace_start_us_ = now;
-    this->pace_frames_ = 0;
-  }
-  this->pace_last_us_ = now;
-  this->pace_frames_ += frame_count;
-  const int64_t due = (now - this->pace_start_us_) * SAMPLE_RATE / 1000000;
-  int64_t behind = due - this->pace_frames_ - SLACK_FRAMES;
-  while (behind > 0) {
-    size_t got = 0;
-    void *item = xRingbufferReceiveUpTo(this->ring_, &got, 0, (size_t) behind * BYTES_PER_FRAME);
-    if (item == nullptr)
-      break;
-    vRingbufferReturnItem(this->ring_, item);
-    const int64_t frames = (int64_t) (got / BYTES_PER_FRAME);
-    this->dropped_frames_.fetch_add((uint32_t) frames);
-    this->pace_frames_ += frames;
-    behind -= frames;
-  }
-  // Nothing left to skip: the delay is not here, so the debt is not carried on.
-  if (behind > 0)
-    this->pace_frames_ += behind;
 }
 
 size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
@@ -545,10 +475,6 @@ void A2DPSource::loop() {
     this->started_.store(true);
   }
 #endif
-#ifdef USE_BT_PAIRING
-  if (this->pairing_ != nullptr)
-    this->device_kept_.store(this->pairing_->find_slot(this->slot_) != nullptr, std::memory_order_relaxed);
-#endif
   uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
   if (conn_state != 0xFF) {
     ESP_LOGD(TAG, "Connection state: %s", this->source_.to_str((esp_a2d_connection_state_t) conn_state));
@@ -572,9 +498,6 @@ void A2DPSource::loop() {
 
   if (this->paired_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Paired with %s", this->paired_name_.c_str());
-#ifdef USE_BT_PAIRING
-    this->keep_picked_();
-#endif
     for (auto *trigger : this->paired_triggers_) {
       trigger->trigger(this->paired_name_);
     }
@@ -586,7 +509,17 @@ void A2DPSource::loop() {
     }
 #ifdef USE_BT_PAIRING
     if (this->pairing_ != nullptr) {
-      this->keep_picked_();
+      // The device picked in the pairing scan is kept once it has connected.
+      if (this->picked_valid_) {
+        this->picked_valid_ = false;
+        bt_pairing::PairingRecord record{};
+        memcpy(record.address, this->picked_.address, sizeof(record.address));
+        record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+        record.slot = this->slot_;
+        record.device_class = this->picked_.device_class;
+        strncpy(record.name, this->picked_.name.c_str(), sizeof(record.name) - 1);
+        this->pairing_->store(record);
+      }
       this->pairing_->on_connection(this, true);
     }
 #endif
@@ -622,11 +555,6 @@ void A2DPSource::loop() {
     uint32_t frames = this->underrun_frames_.exchange(0);
     if (frames > 0) {
       ESP_LOGW(TAG, "Inserted %" PRIu32 " frames of silence in the last 10 s (%" PRIu32 " ms)", frames,
-               frames * 1000 / SAMPLE_RATE);
-    }
-    frames = this->dropped_frames_.exchange(0);
-    if (frames > 0) {
-      ESP_LOGW(TAG, "Skipped %" PRIu32 " frames in the last 10 s (%" PRIu32 " ms): Bluetooth fell behind", frames,
                frames * 1000 / SAMPLE_RATE);
     }
   }
