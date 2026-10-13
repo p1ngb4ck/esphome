@@ -632,7 +632,7 @@ class SimpleVideoPlayer : public Component
   lvgl::LvglComponent *lvgl_component_{nullptr};
   lv_obj_t *canvas_{nullptr};
   uint16_t canvas_size_w_{0}, canvas_size_h_{0};
-  lv_draw_buf_t *canvas_shown_{nullptr};  // the canvas's draw buffer as lv_canvas_set_buffer() left it
+  lv_draw_buf_t canvas_draw_buf_{};  // the shown output buffer: the video's own size, the decoder's rows
 #endif
   uint32_t read_ahead_buffer_size_{4 * 1024 * 1024};  // PSRAM read-ahead ring, a power of two
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
@@ -768,8 +768,9 @@ class SimpleVideoPlayer : public Component
   // (LVGL thread, Core 1) which points the canvas at it and invalidates. All lv_canvas_* calls
   // happen on the LVGL thread only -- never from the video task (LVGL is not thread-safe).
   std::atomic<uint8_t *> display_buffer_{nullptr};
-  uint32_t canvas_w_{0};  // ALIGN_UP(width,16) for lv_canvas_set_buffer, set once per session
-  uint32_t canvas_h_{0};  // ALIGN_UP(height,16)
+  uint32_t canvas_w_{0};  // the picture's own size, set once per session
+  uint32_t canvas_h_{0};
+  std::atomic<uint32_t> canvas_stride_{0};  // bytes per row of the published buffer
 
   // Set by decode_frame_() after a frame is decoded; consumed by loop() on the LVGL thread.
   std::atomic<bool> frame_ready_{false};

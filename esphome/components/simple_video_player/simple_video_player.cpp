@@ -357,8 +357,9 @@ void SimpleVideoPlayer::loop() {
     portEXIT_CRITICAL(&this->stream_dirty_lock_);
     if (dirty && this->canvas_ != nullptr && this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED) {
       if (this->display_buffer_.load(std::memory_order_acquire) != this->output_buffers_[0]) {
-        this->canvas_w_ = (this->canvas_size_w_ + 15) & ~15;
-        this->canvas_h_ = (this->canvas_size_h_ + 15) & ~15;
+        this->canvas_w_ = this->canvas_size_w_;
+        this->canvas_h_ = this->canvas_size_h_;
+        this->canvas_stride_.store(((this->canvas_size_w_ + 15) & ~15) * 3, std::memory_order_relaxed);
         this->display_buffer_.store(this->output_buffers_[0], std::memory_order_release);
         this->frame_ready_.store(true, std::memory_order_release);
       } else {
@@ -377,18 +378,21 @@ void SimpleVideoPlayer::loop() {
       this->frame_ready_.exchange(false, std::memory_order_acq_rel)) {
     uint8_t *buf = this->display_buffer_.load(std::memory_order_acquire);
     if (buf != nullptr && this->canvas_ != nullptr) {
+      // Only the picture's own pixels are shown: the rows keep the decoder's padding (stride), and
+      // the canvas widget keeps its YAML size, centring a smaller picture (lv_image's inner align).
+      const uint32_t stride = this->canvas_stride_.load(std::memory_order_relaxed);
       lv_draw_buf_t *shown = lv_canvas_get_draw_buf(this->canvas_);
-      if (shown != nullptr && shown == this->canvas_shown_ && shown->header.w == this->canvas_w_ &&
-          shown->header.h == this->canvas_h_) {
-        // Same buffer object, same size: only the pixels move. LVGL 9.5 reads an uncompressed
+      if (shown == &this->canvas_draw_buf_ && shown->header.w == this->canvas_w_ &&
+          shown->header.h == this->canvas_h_ && shown->header.stride == stride) {
+        // Same buffer object, same layout: only the pixels move. LVGL reads an uncompressed
         // variable image straight from draw_buf->data at every draw and never caches it
         // (lv_bin_decoder.c "Do not put image to cache if it can be used directly"), and
         // lv_draw_buf_init() sets data and unaligned_data alike (lv_draw_buf.c).
         shown->data = buf;
         shown->unaligned_data = buf;
-      } else {
-        lv_canvas_set_buffer(this->canvas_, buf, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888);
-        this->canvas_shown_ = lv_canvas_get_draw_buf(this->canvas_);
+      } else if (lv_draw_buf_init(&this->canvas_draw_buf_, this->canvas_w_, this->canvas_h_, LV_COLOR_FORMAT_RGB888,
+                                  stride, buf, static_cast<uint32_t>(this->output_buffer_size_)) == LV_RESULT_OK) {
+        lv_canvas_set_draw_buf(this->canvas_, &this->canvas_draw_buf_);
       }
       lv_obj_invalidate(this->canvas_);
     }
@@ -775,8 +779,9 @@ void SimpleVideoPlayer::playback_loop_() {
     // LVGL is not thread-safe and loopTask runs the render/rotate/flush pipeline on the same core.
     // RGB888: the decoder always outputs RGB888 (RGB565 is buggy on some P4 revs); LVGL converts
     // RGB888 -> the panel's format on blit (PPA/SW).
-    this->canvas_w_ = ALIGN_UP(width, 16);
-    this->canvas_h_ = ALIGN_UP(height, 16);
+    this->canvas_w_ = width;
+    this->canvas_h_ = height;
+    this->canvas_stride_.store(ALIGN_UP(width, 16) * 3, std::memory_order_relaxed);
   }
 
   // Fresh pacing state for this session.
@@ -1471,6 +1476,11 @@ bool SimpleVideoPlayer::decode_frame_(const uint8_t *frame_data, size_t frame_si
   if (this->dsi_ == nullptr)
 #endif
   {
+    // The decoder pads each row to its MCU width: 16 pixels for 4:2:2 and 4:2:0, 8 otherwise
+    // (esp_driver_jpeg jpeg_parse_marker.c, process_h/process_v). Only 8-pixel rows give w8 * h8.
+    const uint32_t w8 = ALIGN_UP(this->canvas_w_, 8);
+    const uint32_t row = out_size / 3 == w8 * ALIGN_UP(this->canvas_h_, 8) ? w8 : ALIGN_UP(this->canvas_w_, 16);
+    this->canvas_stride_.store(row * 3, std::memory_order_relaxed);
     // Publish the just-decoded buffer for loop() and flip the decode target to the other buffer, so
     // the next decode never writes the buffer LVGL is about to blit (the paced decode + frequent
     // loop() guarantee loop() repoints before the buffer is reused -- same 2-buffer invariant the
