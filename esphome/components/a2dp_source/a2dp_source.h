@@ -177,6 +177,7 @@ class A2DPSource : public Component
 
   void publish_device_list_();
   void update_media_();
+  void keep_pace_(int32_t frame_count);
 
   A2DPDeviceSelect *device_select_{nullptr};
   std::vector<DiscoveredDevice> devices_;
@@ -194,6 +195,10 @@ class A2DPSource : public Component
 
   std::atomic<uint32_t> underrun_frames_{0};
   std::atomic<uint32_t> dropped_frames_{0};
+  // Bluetooth media task only.
+  int64_t pace_start_us_{0};
+  int64_t pace_last_us_{0};
+  int64_t pace_frames_{0};
   uint32_t last_report_ms_{0};
   uint32_t idle_timeout_ms_{0};
   uint32_t idle_since_ms_{0};

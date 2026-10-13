@@ -9,6 +9,8 @@
 #include "esphome/components/bt_classic/bt_classic.h"
 #include "esphome/core/log.h"
 
+#include <esp_timer.h>
+
 #include <nvs.h>
 
 #include <algorithm>
@@ -390,24 +392,6 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
   auto *out = reinterpret_cast<uint8_t *>(frames);
   size_t filled = 0;
 
-  // While the link lags, Bluedroid takes less than real time (a tick only fetches what its send
-  // queue has room for) and drops nothing; the audio piles up in front of it. Keep at most half
-  // the buffer beyond this request and drop the oldest, so the delay stays bounded.
-  UBaseType_t waiting = 0;
-  vRingbufferGetInfo(this->ring_, nullptr, nullptr, nullptr, nullptr, &waiting);
-  const size_t keep = wanted + this->ring_bytes_ / 2;
-  size_t excess = waiting > keep ? waiting - keep : 0;
-  excess -= excess % BYTES_PER_FRAME;
-  while (excess > 0) {
-    size_t got = 0;
-    void *item = xRingbufferReceiveUpTo(this->ring_, &got, 0, excess);
-    if (item == nullptr)
-      break;
-    vRingbufferReturnItem(this->ring_, item);
-    this->dropped_frames_.fetch_add((uint32_t) (got / BYTES_PER_FRAME));
-    excess -= std::min(excess, got);
-  }
-
   while (filled < wanted) {
     size_t got = 0;
     void *item = xRingbufferReceiveUpTo(this->ring_, &got, pdMS_TO_TICKS(2), wanted - filled);
@@ -430,7 +414,39 @@ int32_t A2DPSource::fill_frames_(Frame *frames, int32_t frame_count) {
     if (producer)
       this->underrun_frames_.fetch_add((uint32_t) ((wanted - filled) / BYTES_PER_FRAME));
   }
+  this->keep_pace_(frame_count);
   return frame_count;
+}
+
+// Bluedroid fetches what its send queue has room for; while the link lags that is less than real
+// time and it drops nothing, so audio piles up in front of it and the delay grows. Measured
+// against the clock, what it is behind is skipped at the front of the buffer.
+void A2DPSource::keep_pace_(int32_t frame_count) {
+  static constexpr int64_t RESTART_US = 500000;              // a gap this long: the stream restarted
+  static constexpr int64_t SLACK_FRAMES = SAMPLE_RATE / 16;  // about two of Bluedroid's 30 ms ticks
+  const int64_t now = esp_timer_get_time();
+  if (this->pace_start_us_ == 0 || now - this->pace_last_us_ > RESTART_US) {
+    this->pace_start_us_ = now;
+    this->pace_frames_ = 0;
+  }
+  this->pace_last_us_ = now;
+  this->pace_frames_ += frame_count;
+  const int64_t due = (now - this->pace_start_us_) * SAMPLE_RATE / 1000000;
+  int64_t behind = due - this->pace_frames_ - SLACK_FRAMES;
+  while (behind > 0) {
+    size_t got = 0;
+    void *item = xRingbufferReceiveUpTo(this->ring_, &got, 0, (size_t) behind * BYTES_PER_FRAME);
+    if (item == nullptr)
+      break;
+    vRingbufferReturnItem(this->ring_, item);
+    const int64_t frames = (int64_t) (got / BYTES_PER_FRAME);
+    this->dropped_frames_.fetch_add((uint32_t) frames);
+    this->pace_frames_ += frames;
+    behind -= frames;
+  }
+  // Nothing left to skip: the delay is not here, so the debt is not carried on.
+  if (behind > 0)
+    this->pace_frames_ += behind;
 }
 
 size_t A2DPSource::write_audio(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
@@ -577,7 +593,7 @@ void A2DPSource::loop() {
     }
     frames = this->dropped_frames_.exchange(0);
     if (frames > 0) {
-      ESP_LOGW(TAG, "Dropped %" PRIu32 " frames in the last 10 s (%" PRIu32 " ms): the link lags", frames,
+      ESP_LOGW(TAG, "Skipped %" PRIu32 " frames in the last 10 s (%" PRIu32 " ms): Bluetooth fell behind", frames,
                frames * 1000 / SAMPLE_RATE);
     }
   }
