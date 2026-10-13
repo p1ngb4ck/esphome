@@ -1,6 +1,6 @@
+from dataclasses import dataclass, field
 import hashlib
 import re
-from dataclasses import dataclass, field
 
 from esphome import automation, preferences
 import esphome.codegen as cg
@@ -14,11 +14,12 @@ from esphome.const import (
     CONF_STORAGE,
 )
 from esphome.core import CORE, ID, coroutine_with_priority
-import esphome.final_validate as fv
 from esphome.coroutine import CoroPriority
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 CODEOWNERS = ["@esphome/core"]
+DOMAIN = "preferences"
 
 preferences_ns = cg.esphome_ns.namespace("preferences")
 storage_ns = cg.esphome_ns.namespace("storage")
@@ -33,9 +34,6 @@ CONF_STORAGE_BACKEND = "storage_backend"
 CONF_EXTERNAL_NVS = "external_nvs"
 CONF_KEEP_EARLY = "keep_early"
 CONF_USE_INTERNAL_NVS = "use_internal_nvs"
-
-
-DOMAIN = "preferences"
 
 
 @dataclass
@@ -107,9 +105,7 @@ CONFIG_SCHEMA = cv.Schema(
         # only with external_nvs and when every pre-storage reader uses RTC (keep_early) -- the
         # internal namespace is then not opened and preferences read before the external store is
         # bound return defaults. nvs_flash_init() still runs (IDF wifi/BT may need it).
-        cv.Optional(CONF_USE_INTERNAL_NVS, default=True): cv.All(
-            cv.boolean, cv.only_on_esp32
-        ),
+        cv.Optional(CONF_USE_INTERNAL_NVS): cv.All(cv.boolean, cv.only_on_esp32),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -298,8 +294,12 @@ def _pref_type_from_class(type_str: str) -> tuple[str, int] | None:
     return None
 
 
-ExportPreferencesAction = preferences_ns.class_("ExportPreferencesAction", automation.Action)
-ImportPreferencesAction = preferences_ns.class_("ImportPreferencesAction", automation.Action)
+ExportPreferencesAction = preferences_ns.class_(
+    "ExportPreferencesAction", automation.Action
+)
+ImportPreferencesAction = preferences_ns.class_(
+    "ImportPreferencesAction", automation.Action
+)
 
 
 def _global_nvs_key(global_id: str) -> int:

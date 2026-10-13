@@ -376,8 +376,8 @@ bool USBUartTypeCH934X::build_channel_write_(USBUartChannelBase *channel, uint8_
       case 4: {
         uint32_t baud_rate = channel->get_baud_rate();
         uint8_t data_bits = channel->get_data_bits();
-        uint8_t stop_bits = channel->get_stop_bits();
-        UARTParityOptions parity = channel->parity_;
+        const bool two_stop_bits = channel->line_stop_bits_() == LineStopBits::LINE_STOP_BITS_2;
+        const LineParity parity = channel->line_parity_();
         uint8_t pedt = (baud_rate > 115200) ? 0x01 : 0x00;
         uint32_t clrt = (baud_rate > 115200) ? 44236800 : 12000000;
         uint8_t bd1 = 0, bd2 = 0, bd3 = 0;
@@ -407,19 +407,19 @@ bool USBUartTypeCH934X::build_channel_write_(USBUartChannelBase *channel, uint8_
             break;
           }
         }
-        uint8_t sbit = (stop_bits == UART_CONFIG_STOP_BITS_2) ? 0x04 : 0x00;
+        uint8_t sbit = two_stop_bits ? 0x04 : 0x00;
         uint8_t pbit = 0;
         switch (parity) {
-          case UART_CONFIG_PARITY_ODD:
+          case LineParity::LINE_PARITY_ODD:
             pbit = 0x08;
             break;
-          case UART_CONFIG_PARITY_EVEN:
+          case LineParity::LINE_PARITY_EVEN:
             pbit = (0x01 << 4) | 0x08;
             break;
-          case UART_CONFIG_PARITY_MARK:
+          case LineParity::LINE_PARITY_MARK:
             pbit = (0x02 << 4) | 0x08;
             break;
-          case UART_CONFIG_PARITY_SPACE:
+          case LineParity::LINE_PARITY_SPACE:
             pbit = (0x03 << 4) | 0x08;
             break;
           default:
@@ -483,8 +483,8 @@ bool USBUartTypeCH934X::build_channel_write_(USBUartChannelBase *channel, uint8_
     case 1: {
       uint32_t baud_rate = channel->get_baud_rate();
       uint8_t data_bits = channel->get_data_bits();
-      uint8_t stop_bits = channel->get_stop_bits();
-      UARTParityOptions parity = channel->parity_;
+      const bool two_stop_bits = channel->line_stop_bits_() == LineStopBits::LINE_STOP_BITS_2;
+      const LineParity parity = channel->line_parity_();
       uint8_t rol = esp_random() & 0x0F;
       uint8_t xor_val = esp_random() & 0xFF;
       buffer[0] = 0x90 | (portnum & 0x0F);
@@ -494,8 +494,8 @@ bool USBUartTypeCH934X::build_channel_write_(USBUartChannelBase *channel, uint8_
       buffer[4] = (baud_rate >> 16) & 0xFF;
       buffer[5] = (baud_rate >> 8) & 0xFF;
       buffer[6] = baud_rate & 0xFF;
-      buffer[7] = (stop_bits == UART_CONFIG_STOP_BITS_2) ? 0x02 : 0x00;
-      buffer[8] = parity;
+      buffer[7] = two_stop_bits ? 0x02 : 0x00;
+      buffer[8] = static_cast<uint8_t>(parity);
       buffer[9] = data_bits;
       buffer[10] = (baud_rate < 9600) ? 0x1E : 0x0A;
       buffer[11] = xor_val;

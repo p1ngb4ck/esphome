@@ -1,4 +1,5 @@
-from itertools import combinations
+import itertools
+import logging
 
 import esphome.codegen as cg
 from esphome.components.const import CONF_MANUFACTURER
@@ -23,6 +24,8 @@ from esphome.cpp_types import Component
 import esphome.final_validate as fv
 from esphome.helpers import cpp_u16string_escape
 from esphome.types import ConfigType
+
+_LOGGER = logging.getLogger(__name__)
 
 AUTO_LOAD = ["bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
@@ -103,17 +106,21 @@ def _matches_by_class_only(config: ConfigType) -> bool:
     )
 
 
+def _clients_overlap(first: ConfigType, second: ConfigType) -> bool:
+    # Two entries overlap when no field they both constrain tells them apart
+    for key, wildcard in _FILTER_WILDCARDS.items():
+        a = first.get(key)
+        b = second.get(key)
+        if wildcard not in (a, b) and a != b:
+            return False
+    return True
+
+
 def validate_usb_clients(configs: list[ConfigType]) -> list[ConfigType]:
-    # Two entries overlap when no field they both constrain tells them apart. Fully
-    # wildcard entries are excluded: they match by device class, not by these fields.
+    # Fully wildcard entries are excluded: they match by device class, not by these fields.
     constrained = [c for c in configs if not _matches_by_class_only(c)]
-    for first, second in combinations(constrained, 2):
-        for key, wildcard in _FILTER_WILDCARDS.items():
-            a = first.get(key)
-            b = second.get(key)
-            if wildcard not in (a, b) and a != b:
-                break
-        else:
+    for first, second in itertools.combinations(constrained, 2):
+        if _clients_overlap(first, second):
             raise cv.Invalid(
                 f"USB configs overlap: {first[CONF_ID]}, {second[CONF_ID]}"
             )
@@ -121,11 +128,31 @@ def validate_usb_clients(configs: list[ConfigType]) -> list[ConfigType]:
 
 
 def _final_validate(config: ConfigType) -> ConfigType:
-    # Every USB client on the bus, whichever component configured it: any two could
-    # otherwise open the same device
-    clients = list(config.get(CONF_DEVICES) or ())
-    clients.extend(fv.full_config.get().get("usb_uart") or ())
-    validate_usb_clients(clients)
+    # Any two overlapping clients could otherwise open the same device
+    devices = config.get(CONF_DEVICES) or []
+    uarts = fv.full_config.get().get("usb_uart") or []
+    validate_usb_clients(devices)
+    validate_usb_clients(uarts)
+    # Remove before 2027.10.0, then pool devices and uarts in one validate_usb_clients call
+    for device, uart in itertools.product(devices, uarts):
+        if _matches_by_class_only(device) or _matches_by_class_only(uart):
+            continue
+        if not _clients_overlap(device, uart):
+            continue
+        # The device matches nothing the usb_uart entry does not already claim
+        redundant = all(
+            uart.get(key) in (wildcard, device.get(key))
+            for key, wildcard in _FILTER_WILDCARDS.items()
+        )
+        _LOGGER.warning(
+            "usb_host device '%s' matches the same USB device as usb_uart '%s'; %s. "
+            "This will be an error in 2027.10.0",
+            device[CONF_ID],
+            uart[CONF_ID],
+            "remove it from usb_host devices"
+            if redundant
+            else "narrow its filter so it no longer matches that device",
+        )
     return config
 
 
