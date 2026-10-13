@@ -10,6 +10,9 @@
 #include "esphome/core/log.h"
 
 #include <nvs.h>
+#ifdef USE_BT_PERSISTENCE
+#include "osi/esphome_nvs_redirect.h"
+#endif
 
 #include <algorithm>
 #include <cstring>

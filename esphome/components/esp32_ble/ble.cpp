@@ -30,6 +30,10 @@ extern "C" {
 #include <freertos/task.h>
 #include <nvs_flash.h>
 
+#ifdef USE_BT_PERSISTENCE
+#include "esphome/components/bt_persistence/bt_persistence.h"
+#endif
+
 #ifdef USE_ARDUINO
 // Prevent Arduino from releasing BT memory at startup (esp32-hal-misc.c).
 // Without this, esp_bt_controller_init() fails with ESP_ERR_INVALID_STATE.
@@ -605,6 +609,11 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
                                                                                           : BLE_COMPONENT_STATE_DISABLED;
     this->restart_requested_ = false;
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
+#ifdef USE_BT_PERSISTENCE
+    // Bluedroid reads its pairing data once, when it starts.
+    if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready())
+      return;
+#endif
     ESP_LOGD(TAG, "Enabling");
     this->state_ = BLE_COMPONENT_STATE_OFF;
 

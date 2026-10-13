@@ -7,6 +7,9 @@
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
 #include "esp_bluedroid_hci.h"
 #include "esp_bt_main.h"
+#ifdef USE_BT_PERSISTENCE
+#include "esphome/components/bt_persistence/bt_persistence.h"
+#endif
 #endif
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
 #include "hci_split.h"
@@ -314,6 +317,20 @@ void USBBluetooth::start_split_() {
 #endif
 
 void USBBluetooth::start_bluedroid_() {
+#ifdef USE_BT_PERSISTENCE
+  // Bluedroid reads its pairing data once, when it starts.
+  if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready()) {
+    if (!this->waiting_for_store_.exchange(true)) {
+      this->defer([this]() {
+        bt_persistence::global_bt_persistence->when_ready([this]() {
+          this->waiting_for_store_ = false;
+          this->start_bluedroid_();
+        });
+      });
+    }
+    return;
+  }
+#endif
   if (g_stack_started) {
     // Bluedroid is attached once, before it starts, and keeps the state of the controller it
     // started with.

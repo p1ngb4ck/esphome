@@ -23,6 +23,11 @@
 // Copyright 2020 Phil Schatzmann
 
 #include "BluetoothA2DPCommon.h"
+// ESPHome: the last device is kept with Bluedroid's pairing data.
+#include "esphome/core/defines.h"
+#ifdef USE_BT_PERSISTENCE
+#include "osi/esphome_nvs_redirect.h"
+#endif
 
 #if IS_VALID_PLATFORM
 

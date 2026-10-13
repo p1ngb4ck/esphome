@@ -108,6 +108,10 @@ class USBBluetooth : public usb_host::USBClient {
   std::atomic<bool> stack_attached_{false};
   // Bluedroid refused a send for want of transfer slots; tell it once one frees up.
   std::atomic<bool> send_blocked_{false};
+#ifdef USE_BT_PERSISTENCE
+  // Bluedroid's start waits for its pairing data.
+  std::atomic<bool> waiting_for_store_{false};
+#endif
 
   struct RealtekImage {
     uint16_t lmp_subver;
