@@ -10,6 +10,10 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
+#ifdef USE_A2DP_SOURCE_NUMBER
+#include "esphome/components/number/number.h"
+#endif
 #ifdef USE_BT_PAIRING
 #include "esphome/components/bt_pairing/bt_pairing.h"
 #endif
@@ -62,6 +66,18 @@ class A2DPSource : public Component
   void set_idle_timeout_ms(uint32_t ms) { this->idle_timeout_ms_ = ms; }
   void set_pair_on_boot_if_empty(bool enable) { this->pair_on_boot_if_empty_ = enable; }
   void set_device_select(A2DPDeviceSelect *select) { this->device_select_ = select; }
+#ifdef USE_A2DP_SOURCE_NUMBER
+  void set_delay_number(number::Number *number) { this->delay_number_ = number; }
+#endif
+
+  /// @brief How long the connected device takes to play what it receives (ms), as set for it; 0
+  ///        while none is connected. Kept per device.
+  uint32_t output_delay_ms() const {
+    return this->connected_.load() ? this->delay_ms_.load(std::memory_order_relaxed) : 0;
+  }
+  /// @brief Sets and keeps the delay of the connected device.
+  void set_output_delay_ms(uint32_t ms);
+  static constexpr uint32_t MAX_OUTPUT_DELAY_MS = 400;
 
   void add_on_paired_trigger(Trigger<std::string> *trigger) { this->paired_triggers_.push_back(trigger); }
   void add_on_streaming_start_trigger(Trigger<> *trigger) { this->streaming_start_triggers_.push_back(trigger); }
@@ -165,6 +181,14 @@ class A2DPSource : public Component
 
   std::atomic<bool> pairing_mode_{false};
   std::atomic<bool> connected_{false};
+  std::atomic<uint32_t> delay_ms_{0};
+  ESPPreferenceObject delay_pref_;
+  bool delay_pref_valid_{false};
+#ifdef USE_A2DP_SOURCE_NUMBER
+  number::Number *delay_number_{nullptr};
+#endif
+  void load_output_delay_();
+  void publish_output_delay_();
   std::atomic<bool> streaming_{false};
   std::atomic<bool> started_{false};
   std::atomic<bool> paired_pending_{false};

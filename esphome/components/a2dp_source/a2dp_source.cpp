@@ -285,6 +285,41 @@ void A2DPSource::stop_pairing() {
   ESP_LOGI(TAG, "Pairing window closed");
 }
 
+// The connected device's delay: a preference per device address.
+void A2DPSource::load_output_delay_() {
+  const uint8_t *address = *this->source_.get_last_peer_address();
+  uint32_t hash = fnv1_hash("a2dp_source_output_delay");
+  for (int i = 0; i < ESP_BD_ADDR_LEN; i++)
+    hash = fnv1_hash_extend(hash, address[i]);
+  this->delay_pref_ = global_preferences->make_preference<uint32_t>(hash, true);
+  this->delay_pref_valid_ = true;
+  uint32_t ms = 0;
+  if (!this->delay_pref_.load(&ms))
+    ms = 0;
+  this->delay_ms_.store(std::min(ms, MAX_OUTPUT_DELAY_MS), std::memory_order_relaxed);
+  ESP_LOGD(TAG, "Output delay of this device: %" PRIu32 " ms", this->delay_ms_.load(std::memory_order_relaxed));
+  this->publish_output_delay_();
+}
+
+void A2DPSource::set_output_delay_ms(uint32_t ms) {
+  if (!this->connected_.load() || !this->delay_pref_valid_) {
+    ESP_LOGW(TAG, "No device connected, the output delay is kept per device");
+    this->publish_output_delay_();
+    return;
+  }
+  ms = std::min(ms, MAX_OUTPUT_DELAY_MS);
+  this->delay_ms_.store(ms, std::memory_order_relaxed);
+  this->delay_pref_.save(&ms);
+  this->publish_output_delay_();
+}
+
+void A2DPSource::publish_output_delay_() {
+#ifdef USE_A2DP_SOURCE_NUMBER
+  if (this->delay_number_ != nullptr)
+    this->delay_number_->publish_state(static_cast<float>(this->delay_ms_.load(std::memory_order_relaxed)));
+#endif
+}
+
 void A2DPSource::forget_device() {
   ESP_LOGI(TAG, "Forgetting the stored device");
   this->source_.clean_last_connection();
@@ -504,6 +539,7 @@ void A2DPSource::loop() {
   }
   if (this->connect_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Connected");
+    this->load_output_delay_();
     for (auto *trigger : this->connected_triggers_) {
       trigger->trigger();
     }

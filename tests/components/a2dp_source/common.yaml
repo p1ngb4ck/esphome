@@ -37,6 +37,11 @@ select:
     a2dp_source_id: bt_out
     name: "Bluetooth device"
 
+number:
+  - platform: a2dp_source
+    a2dp_source_id: bt_out
+    name: "Bluetooth output delay"
+
 button:
   - platform: template
     name: "Pair Bluetooth"
