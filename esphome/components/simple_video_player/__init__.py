@@ -15,6 +15,7 @@ from esphome.const import (
     CONF_ID,
     CONF_NUM_CHANNELS,
     CONF_PLATFORM,
+    CONF_POSITION,
     CONF_SAMPLE_RATE,
     CONF_TRIGGER_ID,
     CONF_URL,
@@ -83,6 +84,7 @@ ChannelStopAction = simple_video_player_ns.class_("ChannelStopAction", automatio
 StreamSleepAction = simple_video_player_ns.class_("StreamSleepAction", automation.Action)
 StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.Action)
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
+SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
@@ -101,6 +103,7 @@ CONF_TOKEN = "token"
 CONF_WIDGET_ID = "widget_id"
 CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
+CONF_RELATIVE = "relative"
 CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
 # The read-ahead ring holds the picture the sound runs ahead of: 100 ms per MiB (4MB -> 400 ms).
 AUDIO_LATENCY_MS_PER_MIB = 100
@@ -732,6 +735,28 @@ async def simple_video_player_pause_to_code(config, action_id, template_arg, arg
 async def simple_video_player_resume_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+# Jumps in a local AVI file: position in seconds, from the start or (relative) from where it is.
+@automation.register_action(
+    "simple_video_player.seek",
+    SeekAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Required(CONF_POSITION): cv.templatable(cv.float_),
+            cv.Optional(CONF_RELATIVE, default=False): cv.boolean,
+        }
+    ),
+    synchronous=True,  # hands the target to the playback task and returns
+)
+async def simple_video_player_seek_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    position = await cg.templatable(config[CONF_POSITION], args, float)
+    cg.add(var.set_position(position))
+    cg.add(var.set_relative(config[CONF_RELATIVE]))
+    return var
 
 
 @automation.register_action(

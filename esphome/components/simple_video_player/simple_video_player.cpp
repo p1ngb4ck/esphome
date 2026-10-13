@@ -267,8 +267,8 @@ void SimpleVideoPlayer::loop() {
       this->paused_ui_ = false;  // stopped or replaced meanwhile
       this->resume_req_.store(false, std::memory_order_relaxed);
     }
-    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED &&
-        !this->is_network_session() && this->playback_parked_.load(std::memory_order_acquire)) {
+    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED && !this->is_network_session() &&
+        this->playback_parked_.load(std::memory_order_acquire)) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
       this->paused_ui_ = true;
@@ -412,6 +412,11 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->playback_task_stop_ = false;
   this->start_req_.store(0, std::memory_order_release);
   this->av_started_.store(false, std::memory_order_release);
+  this->seek_pending_.store(false, std::memory_order_relaxed);
+  this->reader_seek_req_.store(false, std::memory_order_relaxed);
+  this->audio_hold_.store(false, std::memory_order_relaxed);
+  this->duration_frames_.store(0, std::memory_order_relaxed);
+  this->position_frame_.store(0, std::memory_order_relaxed);
 #ifdef USE_AUDIO
   this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), MAX_AUDIO_LATENCY_MS) * 1000;
 #endif
@@ -485,6 +490,35 @@ void SimpleVideoPlayer::stop() {
   }
 }
 
+bool SimpleVideoPlayer::can_seek() const {
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+  return (state == PlayerState::PLAYING || state == PlayerState::PAUSED) &&
+         this->duration_frames_.load(std::memory_order_acquire) != 0 && this->frame_duration_us_ > 0;
+}
+
+float SimpleVideoPlayer::get_position() const {
+  if (this->state_.load(std::memory_order_acquire) == PlayerState::STOPPED)
+    return 0.0f;
+  return this->position_frame_.load(std::memory_order_relaxed) * this->frame_duration_us_ / 1e6f;
+}
+
+float SimpleVideoPlayer::get_duration() const {
+  return this->duration_frames_.load(std::memory_order_acquire) * this->frame_duration_us_ / 1e6f;
+}
+
+void SimpleVideoPlayer::seek(float seconds) {
+  if (!this->can_seek()) {
+    ESP_LOGW(TAG, "Seeking needs a local AVI file playing or paused");
+    return;
+  }
+  const uint32_t frames = this->duration_frames_.load(std::memory_order_acquire);
+  const float frame = std::max(seconds, 0.0f) * 1e6f / this->frame_duration_us_;
+  const uint32_t target = frame >= static_cast<float>(frames - 1) ? frames - 1 : static_cast<uint32_t>(frame);
+  ESP_LOGI(TAG, "Seeking to %.1f s", target * this->frame_duration_us_ / 1e6f);
+  this->seek_target_.store(target, std::memory_order_relaxed);
+  this->seek_pending_.store(true, std::memory_order_release);
+}
+
 //========================================================================
 // Playback Task
 //========================================================================
@@ -507,10 +541,27 @@ void SimpleVideoPlayer::reader_loop_() {
   // no JPEG decode, no PPA -- so it never drives DMA2D and cannot race the Core 1 decode/PPA
   // (esp-idf#18999). Backpressure is empty_queue_: it stalls here once FRAME_SLOT_COUNT frames are
   // read ahead and resumes as the decoder returns slots, so the storage ring is drained steadily.
+  bool at_end = false;
+  uint32_t raw_frame = 0;
   while (!this->reader_task_stop_) {
     const PlayerState st = this->state_.load(std::memory_order_acquire);
     if (st != PlayerState::PLAYING && st != PlayerState::PAUSED)
       break;
+
+    if (this->reader_seek_req_.load(std::memory_order_acquire)) {
+      const bool ok = this->reader_seek_(this->reader_seek_frame_.load(std::memory_order_relaxed));
+      if (ok) {
+        this->frame_gen_.fetch_add(1, std::memory_order_acq_rel);
+        at_end = false;
+      }
+      this->reader_seek_ok_.store(ok, std::memory_order_relaxed);
+      this->reader_seek_req_.store(false, std::memory_order_release);
+    }
+    if (at_end) {
+      // EOF/error sentinel delivered: nothing left to produce, unless a seek comes before the end.
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
 
 #ifdef USE_AUDIO
     this->advance_audio_cursor_();
@@ -527,9 +578,12 @@ void SimpleVideoPlayer::reader_loop_() {
       break;
     }
     slot->size = n;  // > 0 payload, 0 EOF sentinel, -1 read-error sentinel
+    slot->gen = this->frame_gen_.load(std::memory_order_relaxed);
+    slot->file_frame =
+        this->video_format_ == VideoFormat::AVI_MJPEG ? this->avi_parser_->current_frame() - 1 : raw_frame++;
     xQueueSend(this->filled_queue_, &slot, portMAX_DELAY);
     if (n <= 0)
-      break;  // EOF/error sentinel delivered -- nothing left to produce
+      at_end = true;
   }
 }
 
@@ -658,6 +712,14 @@ void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Frame interval: %.0f us (%.2f fps)", this->frame_duration_us_, 1000000.0f / this->frame_duration_us_);
   // Fixed for the whole session -- computed once here, not cast from the float every frame.
   const int64_t frame_dur = static_cast<int64_t>(this->frame_duration_us_);
+  {
+    bool seekable = this->video_format_ == VideoFormat::AVI_MJPEG;
+#ifdef SVP_STREAM
+    seekable = seekable && !this->net_session_;
+#endif
+    const AVIStreamInfo *video_info = seekable ? this->avi_parser_->get_video_info() : nullptr;
+    this->duration_frames_.store(video_info != nullptr ? video_info->total_frames : 0, std::memory_order_release);
+  }
 #ifdef USE_AUDIO
   this->audio_lead_frames_ =
       this->video_format_ == VideoFormat::AVI_MJPEG && this->audio_enabled_ && frame_dur > 0
@@ -708,6 +770,7 @@ void SimpleVideoPlayer::playback_loop_() {
 
   // Start the reader/producer on Core 0 (decode stays on Core 1, see play()'s esp-idf#18999 note).
   this->reader_task_stop_ = false;
+  this->expected_gen_ = this->frame_gen_.load(std::memory_order_acquire);
   xTaskCreatePinnedToCore(reader_task_entry_, "svp_reader", 4096, this, 2, &this->reader_task_handle_, 0);
 
   // Deep pre-buffer: wait (bounded) until the reader has filled the slot queue before presenting
@@ -788,6 +851,10 @@ void SimpleVideoPlayer::playback_loop_() {
     if (st != PlayerState::PLAYING && st != PlayerState::PAUSED) {
       break;
     }
+    if (this->seek_pending_.load(std::memory_order_acquire)) {
+      this->handle_seek_();
+      continue;
+    }
     // Charge parked wall time to paused_accum_us_ so a pause is not seen as the stream falling
     // behind (which would trigger a re-sync on resume).
     if (st == PlayerState::PAUSED) {
@@ -798,6 +865,9 @@ void SimpleVideoPlayer::playback_loop_() {
       // Paused is not playback -- a coarse sleep here is fine (and correct: it lets the rest of
       // the system run at full speed). The zero-wait rule is about the active decode/pace path.
       while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
+        if (this->seek_pending_.load(std::memory_order_acquire))
+          this->handle_seek_();
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(50));
       }
       this->playback_parked_.store(false, std::memory_order_release);
@@ -810,6 +880,10 @@ void SimpleVideoPlayer::playback_loop_() {
     // state this returns immediately.
     FrameSlot *slot = nullptr;
     if (xQueueReceive(this->filled_queue_, &slot, pdMS_TO_TICKS(20)) != pdTRUE) {
+      continue;
+    }
+    if (slot->gen != this->expected_gen_) {  // read before a seek
+      xQueueSend(this->empty_queue_, &slot, 0);
       continue;
     }
     const int payload = slot->size;
@@ -830,11 +904,13 @@ void SimpleVideoPlayer::playback_loop_() {
       break;
     }
     const uint32_t frame_index = this->video_frame_index_++;
+    this->position_frame_.store(slot->file_frame, std::memory_order_relaxed);
 
     // Anchor the wall clock on the first paced frame -- once its payload is in hand, so reader
     // cold-start latency isn't counted as the stream already running late.
     // The picture starts audio_lead_us_ after the sound, which was released at av_started_.
     if (this->playback_start_time_us_ == 0) {
+      this->paused_accum_us_ = 0;
       this->playback_start_time_us_ =
           esp_timer_get_time() - static_cast<int64_t>(frame_index * frame_dur) + this->audio_lead_us_;
     }
@@ -1081,7 +1157,8 @@ int SimpleVideoPlayer::read_frame_(uint8_t *dest, size_t cap) {
       if (s != PlayerState::PLAYING && s != PlayerState::PAUSED) {
         return -2;  // stopped / aborted
       }
-      this->seek_to_(0);
+      if (!this->reader_rewind_())
+        return -1;
       this->cache_buffer_valid_ = 0;
       this->cache_buffer_offset_ = 0;
 #ifdef USE_AUDIO
@@ -1503,6 +1580,95 @@ bool SimpleVideoPlayer::seek_to_(uint64_t position) {
   return this->file_reader_->seek(position);
 }
 
+void SimpleVideoPlayer::handle_seek_() {
+  this->seek_pending_.store(false, std::memory_order_release);
+  const uint32_t target = this->seek_target_.load(std::memory_order_relaxed);
+#ifdef USE_AUDIO
+  const bool audio = this->audio_enabled_ && this->audio_task_handle_ != nullptr;
+  if (audio) {
+    this->audio_held_.store(false, std::memory_order_release);
+    this->audio_hold_.store(true, std::memory_order_release);
+    for (uint32_t waited = 0; !this->audio_held_.load(std::memory_order_acquire) && waited < 500; waited++)
+      vTaskDelay(pdMS_TO_TICKS(1));
+  }
+#endif
+  this->reader_seek_frame_.store(target, std::memory_order_relaxed);
+  this->reader_seek_req_.store(true, std::memory_order_release);
+  while (this->reader_seek_req_.load(std::memory_order_acquire) && this->reader_task_handle_ != nullptr) {
+    const PlayerState st = this->state_.load(std::memory_order_acquire);
+    if (st != PlayerState::PLAYING && st != PlayerState::PAUSED)
+      break;
+    if (storage::global_storage_worker != nullptr)
+      storage::global_storage_worker->update();
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+  const bool ok = !this->reader_seek_req_.exchange(false, std::memory_order_acq_rel) &&
+                  this->reader_seek_ok_.load(std::memory_order_relaxed);
+  this->expected_gen_ = this->frame_gen_.load(std::memory_order_acquire);
+#ifdef USE_AUDIO
+  if (audio) {
+    if (ok) {
+      // The speaker drops what it still holds from before the jump, then starts again as at the
+      // start of playback, with the sound audio_lead_frames_ ahead of the picture.
+      this->speaker_->stop();
+      for (uint32_t waited = 0; !this->speaker_->is_stopped() && waited < 500; waited++)
+        vTaskDelay(pdMS_TO_TICKS(1));
+      this->speaker_->start();
+      this->wait_speaker_running_();
+      for (uint32_t waited = 0; this->audio_cursor_frames_.load(std::memory_order_acquire) <
+                                    this->reader_frames_.load(std::memory_order_acquire) + this->audio_lead_frames_ &&
+                                waited < 1000;
+           waited++) {
+        if (storage::global_storage_worker != nullptr)
+          storage::global_storage_worker->update();
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+    }
+    this->audio_hold_.store(false, std::memory_order_release);
+  }
+#endif
+  if (ok) {
+    this->playback_start_time_us_ = 0;  // anchored again on the next frame, like the first one
+    this->last_present_us_ = 0;
+    this->position_frame_.store(target, std::memory_order_relaxed);
+  } else {
+    ESP_LOGW(TAG, "Seek failed");
+  }
+}
+
+bool SimpleVideoPlayer::reader_seek_(uint32_t frame) {
+  if (this->video_format_ != VideoFormat::AVI_MJPEG || !this->avi_parser_ || !this->file_reader_)
+    return false;
+  BufferedFileReader *reader = this->file_reader_.get();
+  // Index and seek need blocking reads; the ring then restarts empty and is filled before frames
+  // are read again, as at the start of playback.
+  reader->set_streaming(false);
+  const bool ok = this->avi_parser_->load_index(this->cache_buffer_.get(), this->cache_buffer_size_) &&
+                  this->avi_parser_->seek_to_frame(frame);
+  reader->prefill_cache();
+  reader->set_streaming(true);
+  if (!ok)
+    return false;
+#ifdef USE_AUDIO
+  if (this->audio_enabled_)
+    this->restart_audio_feed_();
+  this->reset_audio_cursor_();
+#endif
+  return true;
+}
+
+bool SimpleVideoPlayer::reader_rewind_() {
+  if (!this->file_reader_ || !this->file_reader_->is_open())
+    return false;
+  BufferedFileReader *reader = this->file_reader_.get();
+  reader->set_streaming(false);
+  const bool ok = this->video_format_ == VideoFormat::AVI_MJPEG ? this->avi_parser_->rewind() : reader->seek(0);
+  reader->prefill_cache();
+  reader->set_streaming(true);
+  return ok;
+}
+
 bool SimpleVideoPlayer::get_file_size_(uint64_t &size) {
   if (!this->file_reader_ || !this->file_reader_->is_open()) {
     return false;
@@ -1733,6 +1899,7 @@ bool SimpleVideoPlayer::init_audio_decoder_() {
 
   // For PCM audio, we don't need a decoder - just handle raw samples directly
   bool use_decoder = (codec_type != audio::AudioFileType::NONE);
+  this->audio_file_type_ = codec_type;
   // Publish the per-file mode for the audio task / process_audio_frame_: in a multi-codec build
   // audio_decoder_ exists even for a PCM file, so the pointer can't signal the mode anymore.
   this->audio_use_decoder_.store(use_decoder, std::memory_order_release);
@@ -1831,6 +1998,34 @@ static constexpr uint32_t AVI_CHUNK_00DC = 0x63643030;  // '00dc'
 static constexpr uint32_t AVI_CHUNK_00DB = 0x62643030;  // '00db'
 static constexpr uint32_t AVI_CHUNK_01WB = 0x62773130;  // '01wb'
 
+// Reader task, with the audio task held: the rings and the decoder start over at the new position.
+void SimpleVideoPlayer::restart_audio_feed_() {
+  const bool use_decoder = this->audio_use_decoder_.load(std::memory_order_acquire);
+  bool ok = true;
+  if (use_decoder) {
+    // A new source first: the old one gives back what it holds of the ring, so the reset drops all.
+    this->audio_decoder_->discard_output();
+    std::weak_ptr<ring_buffer::RingBuffer> source = this->audio_input_ring_buffer_;
+    ok = this->audio_decoder_->add_source(source) == ESP_OK;
+  }
+  this->audio_input_ring_buffer_->reset();
+  if (this->audio_decoded_ring_buffer_)
+    this->audio_decoded_ring_buffer_->reset();
+  if (!use_decoder)
+    return;
+#ifdef SVP_AUDIO_SUPPORT_FLAC
+  if (this->audio_file_type_ == audio::AudioFileType::FLAC) {
+    const AVIStreamInfo *info = this->avi_parser_->get_audio_info();
+    if (info != nullptr && info->stream_header_len != 0)
+      this->audio_input_ring_buffer_->write(info->stream_header, info->stream_header_len);
+  }
+#endif
+  if (!ok || this->audio_decoder_->start(this->audio_file_type_) != ESP_OK) {
+    ESP_LOGE(TAG, "Audio decoder restart failed -- video only");
+    this->audio_enabled_ = false;
+  }
+}
+
 // Reader task. The cursor starts where the reader is.
 void SimpleVideoPlayer::reset_audio_cursor_() {
   this->audio_cursor_pos_ = this->file_reader_ ? this->file_reader_->tell() : 0;
@@ -1927,8 +2122,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
 
     // Paused: the sound holds where the picture stopped (the reader feeds at most one frame
     // further meanwhile, well within the rings' 250 ms margin), so both go on together on resume.
-    // Paused is not playback, so this wait is not the hot path.
-    if (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
+    // Held by a seek: the feed is restarted at the new position. Neither is the hot path.
+    if (this->audio_hold_.load(std::memory_order_acquire) ||
+        this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
+      this->audio_held_.store(true, std::memory_order_release);
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }

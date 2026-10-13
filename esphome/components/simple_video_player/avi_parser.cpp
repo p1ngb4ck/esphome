@@ -5,6 +5,8 @@
 
 #include "avi_parser.h"
 #include "esphome/core/log.h"
+#include <esp_heap_caps.h>
+#include <algorithm>
 #include <cinttypes>
 #include <cstring>
 
@@ -23,6 +25,7 @@ static constexpr uint32_t FOURCC_strl = 0x6C727473;  // 'strl'
 static constexpr uint32_t FOURCC_strh = 0x68727473;  // 'strh'
 static constexpr uint32_t FOURCC_strf = 0x66727473;  // 'strf'
 static constexpr uint32_t FOURCC_movi = 0x69766F6D;  // 'movi'
+static constexpr uint32_t FOURCC_idx1 = 0x31786469;  // 'idx1'
 static constexpr uint32_t FOURCC_vids = 0x73646976;  // 'vids'
 static constexpr uint32_t FOURCC_auds = 0x73647561;  // 'auds'
 
@@ -50,6 +53,8 @@ bool AVIParser::open(BufferedFileReader *reader) {
   this->movi_size_ = 0;
   this->current_offset_ = 0;
   this->current_frame_ = 0;
+  this->release_index_();
+  this->index_tried_ = false;
 
   // Parse AVI headers
   if (!this->parse_headers_()) {
@@ -83,6 +88,7 @@ bool AVIParser::open(BufferedFileReader *reader) {
 }
 
 void AVIParser::close() {
+  this->release_index_();
   this->reader_ = nullptr;
   this->has_video_ = false;
   this->has_audio_ = false;
@@ -498,27 +504,100 @@ int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_s
   return 0;
 }
 
-bool AVIParser::seek_to_frame(uint32_t frame_number) {
-  // TODO: Implement index-based seeking
-  // For now, just rewind and skip frames
-  if (!this->rewind()) {
+static inline uint32_t le32(const uint8_t *p) {
+  return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+void AVIParser::release_index_() {
+  heap_caps_free(this->index_);
+  this->index_ = nullptr;
+  this->index_count_ = 0;
+}
+
+bool AVIParser::load_index(uint8_t *scratch, size_t scratch_size) {
+  if (this->index_ != nullptr)
+    return true;
+  if (this->index_tried_ || !this->is_open() || this->movi_size_ == UINT64_MAX || scratch_size < 16)
+    return false;
+  this->index_tried_ = true;
+  const uint64_t resume = this->reader_->tell();
+  if (this->read_index_(scratch, scratch_size)) {
+    ESP_LOGI(TAG, "Index: %" PRIu32 " video frames", this->index_count_);
+    return true;
+  }
+  this->release_index_();
+  if (!this->reader_->seek(resume)) {
+    ESP_LOGE(TAG, "Could not return to the read position");
     return false;
   }
+  ESP_LOGW(TAG, "No usable index: seeking is not possible in this file");
+  return false;
+}
 
-  AVIFrame frame;
-  uint8_t dummy_buffer[16];  // Just for skipping
-
-  for (uint32_t i = 0; i < frame_number; i++) {
-    if (this->read_next_frame(frame, dummy_buffer, sizeof(dummy_buffer)) <= 0) {
+bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
+  // idx1 follows the movi list, possibly after other chunks (JUNK).
+  uint64_t pos = this->movi_offset_ + this->movi_size_;
+  pos += pos & 1;
+  uint32_t idx_size = 0;
+  for (int i = 0; i < 4 && idx_size == 0; i++) {
+    uint32_t id;
+    uint32_t size;
+    if (!this->reader_->seek(pos) || !this->read_fourcc_(id) || !this->read_uint32_(size))
       return false;
-    }
-
-    // Skip to next frame
-    if (frame.stream_type == AVIStreamType::VIDEO) {
-      this->skip_bytes_(frame.size);
+    if (id == FOURCC_idx1) {
+      idx_size = size;
+    } else {
+      pos += 8 + static_cast<uint64_t>(size) + (size & 1);
     }
   }
+  const uint32_t entries = idx_size / 16;
+  if (entries == 0)
+    return false;
+  this->index_ =
+      static_cast<uint32_t *>(heap_caps_malloc(entries * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->index_ == nullptr) {
+    ESP_LOGE(TAG, "No PSRAM for an index of %" PRIu32 " entries", entries);
+    return false;
+  }
+  const size_t per_read = scratch_size / 16;
+  uint32_t left = entries;
+  uint32_t count = 0;
+  while (left > 0) {
+    const size_t n = std::min<size_t>(left, per_read);
+    if (this->reader_->read(scratch, n * 16) != static_cast<int>(n * 16))
+      return false;
+    for (size_t i = 0; i < n; i++) {
+      const uint8_t *entry = scratch + i * 16;
+      const uint32_t id = le32(entry);
+      if (id == FOURCC_00dc || id == FOURCC_00db)
+        this->index_[count++] = le32(entry + 8);
+    }
+    left -= n;
+  }
+  if (count == 0)
+    return false;
+  this->index_count_ = count;
+  // Offsets count from the 'movi' fourcc (AVI spec, ffmpeg); some writers store file offsets.
+  for (const uint64_t base : {this->movi_offset_ - 4, static_cast<uint64_t>(0)}) {
+    uint32_t id;
+    if (base + this->index_[0] >= this->movi_offset_ && this->reader_->seek(base + this->index_[0]) &&
+        this->read_fourcc_(id) && (id == FOURCC_00dc || id == FOURCC_00db)) {
+      this->index_base_ = base;
+      return true;
+    }
+  }
+  return false;
+}
 
+bool AVIParser::seek_to_frame(uint32_t frame_number) {
+  if (this->index_ == nullptr || !this->is_open())
+    return false;
+  frame_number = std::min(frame_number, this->index_count_ - 1);
+  const uint64_t pos = this->index_base_ + this->index_[frame_number];
+  if (pos < this->movi_offset_ || !this->reader_->seek(pos))
+    return false;
+  this->current_offset_ = pos - this->movi_offset_;
+  this->current_frame_ = frame_number;
   return true;
 }
 

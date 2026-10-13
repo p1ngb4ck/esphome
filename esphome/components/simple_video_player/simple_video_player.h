@@ -244,6 +244,17 @@ class SimpleVideoPlayer : public Component
   /// Set loop mode (restart from beginning when finished)
   void set_loop(bool loop) { this->loop_ = loop; }
 
+  /// Jumps to `seconds` into a playing or paused local AVI file (clamped to the file); paused stays
+  /// paused. The first jump in a file reads its index.
+  void seek(float seconds);
+  /// seek() relative to the position shown.
+  void seek_relative(float seconds) { this->seek(this->get_position() + seconds); }
+  /// A local AVI file plays or is paused, so seek() can work.
+  bool can_seek() const;
+  /// Position of the frame shown and length of the file, in seconds; 0 when unknown.
+  float get_position() const;
+  float get_duration() const;
+
   //========================================================================
   // State Query
   //========================================================================
@@ -302,6 +313,13 @@ class SimpleVideoPlayer : public Component
 
   /// Wait for a task to stop
   bool wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeout_ms);
+
+  /// Playback task: carries out a seek() -- holds the sound, has the reader jump, restarts the sound.
+  void handle_seek_();
+  /// Reader task: positions the file at a video frame and restarts the audio feed there.
+  bool reader_seek_(uint32_t frame);
+  /// Reader task: back to the first frame (loop).
+  bool reader_rewind_();
 
   //========================================================================
   // Frame Processing
@@ -594,7 +612,11 @@ class SimpleVideoPlayer : public Component
   uint64_t audio_cursor_pos_{0};   // reader position of the next chunk the cursor reads (reader task)
   std::atomic<uint32_t> audio_cursor_frames_{0};  // video chunks the cursor has passed
   std::atomic<uint32_t> reader_frames_{0};        // video frames the reader has handed on
+  std::atomic<bool> audio_hold_{false};           // the audio task stops feeding (seek)
+  std::atomic<bool> audio_held_{false};           // set by the audio task once it does
 #ifdef USE_AUDIO
+  audio::AudioFileType audio_file_type_{audio::AudioFileType::NONE};
+  void restart_audio_feed_();
   void advance_audio_cursor_();
   void reader_audio_chunk_(const AVIFrame &frame, const uint8_t *data, size_t size);
   void reader_passed_video_();
@@ -725,6 +747,8 @@ class SimpleVideoPlayer : public Component
     uint8_t *data{nullptr};
     size_t capacity{0};
     int size{0};  // payload bytes (> 0); 0 = EOF sentinel; -1 = read-error sentinel
+    uint32_t gen{0};         // frame_gen_ when read: a seek since makes it stale
+    uint32_t file_frame{0};  // frame number in the file
   };
   FrameSlot frame_slots_[FRAME_SLOT_COUNT]{};
   QueueHandle_t empty_queue_{nullptr};   // slots free for the reader to fill
@@ -737,6 +761,17 @@ class SimpleVideoPlayer : public Component
   // Set true in the teardown of playback_loop_() (and wired to file_reader_'s abort flag) so an
   // in-flight storage wait returns promptly at end of playback.
   volatile bool playback_task_stop_{false};
+
+  // Seeking: seek() (main loop) -> playback task (handle_seek_) -> reader task (reader_seek_).
+  std::atomic<bool> seek_pending_{false};
+  std::atomic<uint32_t> seek_target_{0};       // video frame
+  std::atomic<bool> reader_seek_req_{false};   // set by the playback task, cleared by the reader when done
+  std::atomic<uint32_t> reader_seek_frame_{0};
+  std::atomic<bool> reader_seek_ok_{false};
+  std::atomic<uint32_t> frame_gen_{0};         // reader task: bumped by each seek
+  uint32_t expected_gen_{0};                   // playback task: frames of an older gen are dropped
+  std::atomic<uint32_t> position_frame_{0};    // file frame shown last
+  std::atomic<uint32_t> duration_frames_{0};   // video frames of the file; 0 = no seeking
 
   // FreeRTOS task (decode/playback, Core 1 -- alongside the main loop/LVGL, see play()'s
   // xTaskCreatePinnedToCore comment for why decode specifically needs to share that core)
@@ -805,6 +840,27 @@ template<typename... Ts> class PauseAction : public Action<Ts...> {
 
  protected:
   SimpleVideoPlayer *player_;
+};
+
+template<typename... Ts> class SeekAction : public Action<Ts...> {
+ public:
+  explicit SeekAction(SimpleVideoPlayer *player) : player_(player) {}
+
+  TEMPLATABLE_VALUE(float, position)
+  void set_relative(bool relative) { this->relative_ = relative; }
+
+  void play(const Ts &...x) override {
+    const float seconds = this->position_.value(x...);
+    if (this->relative_) {
+      this->player_->seek_relative(seconds);
+    } else {
+      this->player_->seek(seconds);
+    }
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  bool relative_{false};
 };
 
 template<typename... Ts> class ResumeAction : public Action<Ts...> {

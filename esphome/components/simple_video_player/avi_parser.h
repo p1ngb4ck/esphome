@@ -133,12 +133,17 @@ class AVIParser {
    */
   int read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size);
 
-  /**
-   * @brief Seek to specific video frame
-   * @param frame_number Frame number (0-based)
-   * @return true on success
-   */
+  /// Reads the idx1 index (offsets of the video frames) into PSRAM. Reads from the end of the file
+  /// and needs a blocking reader; seek_to_frame() afterwards. On failure the read position is restored.
+  /// Tried once per file.
+  bool load_index(uint8_t *scratch, size_t scratch_size);
+  bool has_index() const { return this->index_ != nullptr; }
+
+  /// Positions the reader at a video frame (0-based) through the index; clamped to the last frame.
   bool seek_to_frame(uint32_t frame_number);
+
+  /// Video frames read so far: the next frame read has this number.
+  uint32_t current_frame() const { return this->current_frame_; }
 
   /**
    * @brief Seek to beginning of file (rewind)
@@ -197,6 +202,13 @@ class AVIParser {
   uint64_t movi_size_{0};       // Size of 'movi' chunk
   uint64_t current_offset_{0};  // Current read position in movi chunk
   uint32_t current_frame_{0};   // Current frame number
+
+  bool read_index_(uint8_t *scratch, size_t scratch_size);
+  void release_index_();
+  uint32_t *index_{nullptr};  // chunk offset of each video frame (PSRAM)
+  uint32_t index_count_{0};
+  uint64_t index_base_{0};  // what the offsets count from
+  bool index_tried_{false};
 };
 
 }  // namespace simple_video_player

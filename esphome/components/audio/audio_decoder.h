@@ -126,6 +126,12 @@ class AudioDecoder {
   /// @param pause_state If true, audio data is not sent to the sink.
   void set_pause_output_state(bool pause_state) { this->pause_output_ = pause_state; }
 
+  /// @brief Drops decoded audio not yet written to the sink (e.g. before decoding a new position of a stream).
+  void discard_output() {
+    if (this->output_transfer_buffer_ != nullptr)
+      this->output_transfer_buffer_->decrease_buffer_length(this->output_transfer_buffer_->available());
+  }
+
  protected:
 #ifdef USE_AUDIO_AAC_SUPPORT
   FileDecoderState decode_aac_();
