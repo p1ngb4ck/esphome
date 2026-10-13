@@ -684,12 +684,8 @@ void BTHIDDevice::pair(uint32_t duration_ms) {
 // The device paired so far stays stored until another one has paired.
 void BTHIDDevice::open_window_(uint32_t until) {
   Host &h = host();
-  if (this->connected_) {
+  if (this->connected_)
     esp_bt_hid_host_disconnect(this->bda_);
-    // The slot is free for the pairing now: a link still marked connected (its close may never
-    // have arrived) would keep the loop from ever connecting the device that pairs.
-    this->on_close();
-  }
   this->set_bda_(nullptr);
   this->restored_ = true;
   this->auto_connect_ = true;

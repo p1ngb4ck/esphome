@@ -1,7 +1,6 @@
 import esphome.codegen as cg
 from esphome.components import esp32
 from esphome.components.esp32 import (
-    CONF_SDKCONFIG_OPTIONS,
     VARIANT_ESP32P4,
     VARIANT_ESP32S2,
     VARIANT_ESP32S3,
@@ -17,7 +16,7 @@ from esphome.components.usb_host import (
     require_control_transfers,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_ENABLE_ON_BOOT, CONF_FRAMEWORK, CONF_ID, PLATFORM_ESP32
+from esphome.const import CONF_ENABLE_ON_BOOT, CONF_ID
 from esphome.core import CORE, ID
 import esphome.final_validate as fv
 
@@ -147,16 +146,6 @@ async def to_code(config):
         # After esp32_ble's final validation, which turns it off for esp_hosted.
         add_idf_sdkconfig_option("CONFIG_BT_CLASSIC_ENABLED", True)
         cg.add_define("USE_USB_BLUETOOTH_BLUEDROID")
-        # Bluedroid traces every ACL fragment it cannot place as an HCI error, many a second on
-        # a busy link; compiled out, nothing of it is formatted or logged. A level set in
-        # sdkconfig_options wins.
-        user_options = CORE.config[PLATFORM_ESP32][CONF_FRAMEWORK].get(
-            CONF_SDKCONFIG_OPTIONS, {}
-        )
-        if not any(
-            name.startswith("CONFIG_BT_LOG_HCI_TRACE_LEVEL") for name in user_options
-        ):
-            add_idf_sdkconfig_option("CONFIG_BT_LOG_HCI_TRACE_LEVEL_NONE", True)
         if _splits_with_esp32_ble(CORE.config):
             cg.add_define("USE_USB_BLUETOOTH_HCI_SPLIT")
             cg.add_build_flag("-Wl,--wrap=esp_bluedroid_attach_hci_driver")

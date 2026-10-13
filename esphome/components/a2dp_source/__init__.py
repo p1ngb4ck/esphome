@@ -2,22 +2,11 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import esp32, microphone
 from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
-from esphome.components.esp32 import (
-    CONF_SDKCONFIG_OPTIONS,
-    add_idf_sdkconfig_option,
-    get_esp32_variant,
-)
+from esphome.components.esp32 import add_idf_sdkconfig_option, get_esp32_variant
 from esphome.components.esp32.const import VARIANT_ESP32
 from esphome.components.psram import DOMAIN as PSRAM_DOMAIN
 import esphome.config_validation as cv
-from esphome.const import (
-    CONF_FRAMEWORK,
-    CONF_ID,
-    CONF_NAME,
-    CONF_TRIGGER_ID,
-    CONF_VOLUME,
-    PLATFORM_ESP32,
-)
+from esphome.const import CONF_ID, CONF_NAME, CONF_TRIGGER_ID, CONF_VOLUME
 from esphome.core import CORE
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
@@ -224,18 +213,6 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_stop_trigger(trigger))
-
-    # Bluedroid traces "l2cab is_cong_cback_context" as an error each time a congested L2CAP
-    # channel frees up and the stream sends from the callback, which streaming does many times a
-    # second; compiled out, the formatting and logging cost goes with it. A level set in
-    # sdkconfig_options wins.
-    user_options = CORE.config[PLATFORM_ESP32][CONF_FRAMEWORK].get(
-        CONF_SDKCONFIG_OPTIONS, {}
-    )
-    if not any(
-        name.startswith("CONFIG_BT_LOG_L2CAP_TRACE_LEVEL") for name in user_options
-    ):
-        add_idf_sdkconfig_option("CONFIG_BT_LOG_L2CAP_TRACE_LEVEL_NONE", True)
 
     if PSRAM_DOMAIN in CORE.config:
         # Bluedroid takes every queued SBC packet (4 kB) from malloc, which with PSRAM
