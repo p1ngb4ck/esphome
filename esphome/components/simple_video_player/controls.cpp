@@ -212,8 +212,18 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
       bar.button_label[id] = label;
       // Over a picture LVGL runs: the buttons act through their events.
       bar.target[id] = ControlsTarget{this, &bar, id};
-      if (bar.picture)
+      if (bar.picture) {
         lv_obj_add_event_cb(button, &SimpleVideoPlayer::controls_button_event_, LV_EVENT_CLICKED, &bar.target[id]);
+#ifdef SVP_PICTURES
+        // Moving between the buttons with keys keeps the bar shown.
+        lv_obj_add_event_cb(
+            button,
+            [](lv_event_t *event) {
+              static_cast<SimpleVideoPlayer *>(lv_event_get_user_data(event))->picture_controls_touched_();
+            },
+            LV_EVENT_FOCUSED, this);
+#endif
+      }
     }
   }
 #ifdef SVP_PICTURES
@@ -574,6 +584,14 @@ void SimpleVideoPlayer::prerender_controls_() {}
 // Showing, touches (main loop)
 //========================================================================
 
+bool SimpleVideoPlayer::controls_shown() const {
+#ifdef SVP_PICTURES
+  if (this->ctl_picture_.bar != nullptr && !lv_obj_is_hidden(this->ctl_picture_.bar))
+    return true;
+#endif
+  return this->ctl_shown_.load(std::memory_order_acquire);
+}
+
 #ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::controls_active_() const {
   const PlayerState state = this->state_.load(std::memory_order_acquire);
@@ -746,6 +764,12 @@ void SimpleVideoPlayer::show_picture_controls_() {
   lv_obj_move_to_index(bar.bar, -1);
   lv_obj_set_hidden(bar.bar, false);
   bar.shown_ms = millis();
+  // Keys go to the bar: its play/pause button, else its first one.
+  lv_obj_t *focus = bar.button[CTL_PLAY_PAUSE];
+  for (uint8_t id = 0; focus == nullptr && id < CTL_BUTTON_COUNT; id++)
+    focus = bar.button[id];
+  if (focus != nullptr)
+    lv_group_focus_obj(focus);
 }
 
 void SimpleVideoPlayer::hide_picture_controls_() {

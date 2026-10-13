@@ -407,6 +407,8 @@ class SimpleVideoPlayer : public Component
   /// Over a full-screen video, or a picture in full screen.
   void show_controls();
   void hide_controls();
+  /// Whether the controls show (over a full-screen video, or a picture in full screen).
+  bool controls_shown() const;
   /// Listener: a touch (pressed, display coordinates) or its release.
   void controls_touch(bool pressed, int32_t x, int32_t y);
 #endif
