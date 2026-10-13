@@ -1,4 +1,5 @@
 #ifdef USE_ESP32_VARIANT_ESP32P4
+#include <algorithm>
 #include <utility>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
@@ -8,11 +9,18 @@ namespace esphome::mipi_dsi {
 // Maximum bytes to log for init commands (truncated if larger)
 static constexpr size_t MIPI_DSI_MAX_CMD_LOG_BYTES = 64;
 
-static bool notify_refresh_ready(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) {
-  SemaphoreHandle_t sem = static_cast<SemaphoreHandle_t>(user_ctx);
+bool MipiDsi::notify_refresh_ready_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx) {
   BaseType_t need_yield = pdFALSE;
-  xSemaphoreGiveFromISR(sem, &need_yield);
+  xSemaphoreGiveFromISR(static_cast<MipiDsi *>(user_ctx)->io_lock_, &need_yield);
   return (need_yield == pdTRUE);
+}
+
+// The scan DMA has just restarted on the current frame buffer.
+bool MipiDsi::notify_frame_started_(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+                                    void *user_ctx) {
+  static_cast<MipiDsi *>(user_ctx)->scan_frames_.fetch_add(1, std::memory_order_release);
+  return false;
 }
 
 void MipiDsi::smark_failed(const LogString *message, esp_err_t err) {
@@ -163,11 +171,11 @@ void MipiDsi::setup() {
     }
   }
   this->io_lock_ = xSemaphoreCreateBinary();
-  esp_lcd_dpi_panel_event_callbacks_t cbs = {
-      .on_color_trans_done = notify_refresh_ready,
-  };
+  esp_lcd_dpi_panel_event_callbacks_t cbs = {};
+  cbs.on_color_trans_done = notify_refresh_ready_;
+  cbs.on_frame_buf_complete = notify_frame_started_;
 
-  err = (esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this->io_lock_));
+  err = (esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this));
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("Failed to register callbacks"), err);
     return;
@@ -199,6 +207,30 @@ void MipiDsi::present_dsi_frame_buffer(void *fb) {
   // non-blocking -- never wait.
   esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, fb);
   xSemaphoreTake(this->io_lock_, 0);
+}
+
+uint8_t MipiDsi::get_scanout_buffers(void **out, uint8_t max, display::ColorBitness *bitness) {
+  if (this->dsi_fbs_[0] == nullptr)
+    return 0;
+  const uint8_t count = std::min<uint8_t>(std::min<uint8_t>(this->num_fbs_, 3), max);
+  for (uint8_t i = 0; i < count; i++)
+    out[i] = this->dsi_fbs_[i];
+  *bitness = this->color_depth_;
+  return count;
+}
+
+void MipiDsi::present_scanout_buffer(void *buffer) {
+  // An owned buffer is only made the scanout source; the one-pixel window keeps the driver's
+  // cache write-back to a single row, the caller has written its rows back already.
+  esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, 1, 1, buffer);
+  xSemaphoreTake(this->io_lock_, 0);
+  // A restart counted from here may have picked the buffer before the switch; the one after it
+  // cannot have.
+  this->flip_frame_ = this->scan_frames_.load(std::memory_order_acquire) + 2;
+}
+
+bool MipiDsi::scanout_flipped() {
+  return static_cast<int32_t>(this->scan_frames_.load(std::memory_order_acquire) - this->flip_frame_) >= 0;
 }
 
 void MipiDsi::update() {

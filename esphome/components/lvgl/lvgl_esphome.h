@@ -369,6 +369,21 @@ class LvglComponent final : public PollingComponent {
   bool ppa_rotate_(const lv_color_data *src, lv_color_data *dst, uint16_t width, uint16_t height,
                    uint32_t height_rounded);
 #endif
+#ifdef USE_ESP32
+  // A display scanning out of two frame buffers: LVGL draws into the one not shown and flips it in
+  // once a refresh is complete, so a frame is never seen half drawn.
+  bool setup_scanout_();
+  bool scanout_clip_(const lv_area_t *area, lv_area_t *clipped) const;
+  void scanout_rect_(const lv_area_t *area, int32_t &x, int32_t &y, int32_t &w, int32_t &h) const;
+  void draw_scanout_(const lv_area_t *area, const uint8_t *src, uint8_t *fb);
+  void sync_scanout_(const lv_area_t *area);
+  void wait_scanout_flip_();
+  static void scanout_sync_cb(lv_display_t *disp, const lv_area_t *area);
+#ifdef USE_ESP32_VARIANT_ESP32P4
+  bool ppa_blit_(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint16_t sx, uint16_t sy, uint16_t w, uint16_t h,
+                 uint8_t *dst, uint16_t dx, uint16_t dy, ppa_srm_rotation_angle_t angle);
+#endif
+#endif
   void flush_cb_(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p);
 
   std::vector<display::Display *> displays_{};
@@ -412,6 +427,14 @@ class LvglComponent final : public PollingComponent {
   RotationType rotation_type_;
 #ifdef USE_ESP32_VARIANT_ESP32P4
   ppa_client_handle_t ppa_client_{};
+  bool scanout_ppa_{};
+#endif
+#ifdef USE_ESP32
+  uint8_t *scanout_[2]{};
+  size_t scanout_stride_{};
+  uint8_t scanout_back_{1};
+  bool scanout_wait_{};
+  uint32_t scanout_presented_{};
 #endif
 };
 
