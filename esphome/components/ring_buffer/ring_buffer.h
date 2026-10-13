@@ -108,8 +108,6 @@ class RingBuffer {
   };
 
   static std::unique_ptr<RingBuffer> create(size_t len, MemoryPreference preference = MemoryPreference::EXTERNAL_FIRST);
-  /// A ring buffer in memory the caller provides, and frees once the ring buffer is gone.
-  static std::unique_ptr<RingBuffer> create_in(uint8_t *storage, size_t len);
 
  protected:
   /// @brief Discards data from the ring buffer.
@@ -123,7 +121,6 @@ class RingBuffer {
   StaticRingbuffer_t structure_;
   uint8_t *storage_{nullptr};
   size_t size_{0};
-  bool owns_storage_{true};
 };
 
 }  // namespace esphome::ring_buffer

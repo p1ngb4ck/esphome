@@ -122,9 +122,9 @@ void SimpleVideoPlayer::setup() {
 
     const size_t input_bytes = audio_input_bytes(this->max_audio_latency_ms_);
     const size_t decoded_bytes = audio_decoded_bytes(this->max_audio_latency_ms_);
-    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create_in(this->pool_.alloc(input_bytes), input_bytes);
+    this->audio_input_ring_buffer_ = PoolRingBuffer::create(this->pool_.alloc(input_bytes), input_bytes);
     this->audio_decoded_ring_buffer_ =
-        ring_buffer::RingBuffer::create_in(this->pool_.alloc(decoded_bytes), decoded_bytes);
+        PoolRingBuffer::create(this->pool_.alloc(decoded_bytes), decoded_bytes);
     this->audio_temp_buffer_ = this->pool_.alloc(AUDIO_TEMP_BUFFER_SIZE);
     if (this->audio_input_ring_buffer_ == nullptr || this->audio_decoded_ring_buffer_ == nullptr ||
         this->audio_temp_buffer_ == nullptr) {

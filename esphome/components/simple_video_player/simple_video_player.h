@@ -108,6 +108,29 @@ enum class VideoFormat : uint8_t {
 // Forward declarations for automation
 class SimpleVideoPlayer;
 
+#ifdef USE_AUDIO
+/// ring_buffer::RingBuffer in the player's pool memory (create() allocates its own).
+class PoolRingBuffer : public ring_buffer::RingBuffer {
+ public:
+  ~PoolRingBuffer() {
+    if (this->created_)
+      vRingbufferDelete(this->handle_());
+  }
+  static std::unique_ptr<PoolRingBuffer> create(uint8_t *storage, size_t len) {
+    if (storage == nullptr)
+      return nullptr;
+    auto rb = std::make_unique<PoolRingBuffer>();
+    if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
+      return nullptr;
+    rb->created_ = true;
+    return rb;
+  }
+
+ protected:
+  bool created_{false};
+};
+#endif
+
 /// Trigger fired when playback starts
 class PlaybackStartedTrigger : public Trigger<> {
  public:
