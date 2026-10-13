@@ -642,6 +642,9 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       esp_a2d_source_init();
       esp_a2d_register_callback(&ccall_app_a2d_callback);
       esp_a2d_source_register_data_callback(&ccall_bt_app_a2d_data_cb);
+      // ESPHome: 10.24 s instead of the 5.12 s default; a device scanning for pages every 2.56 s
+      // (R2) may not answer within 5.12 s, which ends the connect with a page timeout.
+      esp_bt_gap_set_page_timeout(0x4000);
 
       /* Avoid the state error of s_a2d_state caused by the connection initiated
        * by the peer device. */
