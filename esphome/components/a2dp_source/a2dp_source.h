@@ -54,6 +54,7 @@ class A2DPSource : public Component
   /// @brief Only accept a device whose name starts with this. Empty means the
   ///        strongest signal wins instead.
   void set_target_name(const std::string &name) { this->target_name_ = name; }
+  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
   void set_settle_time(uint32_t seconds) { this->settle_seconds_ = seconds; }
   void set_fallback_time(uint32_t seconds) { this->fallback_seconds_ = seconds; }
   void set_volume(uint8_t volume) { this->volume_ = volume; }
@@ -154,6 +155,7 @@ class A2DPSource : public Component
 
   std::string local_name_{"ESPHome Audio"};
   std::string target_name_;
+  std::string pin_code_;
   uint32_t settle_seconds_{15};
   uint32_t fallback_seconds_{20};
   uint32_t buffer_duration_ms_{100};

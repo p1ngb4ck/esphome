@@ -317,9 +317,11 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
   uint32_t cod = 0;
   int32_t rssi = -129; /* invalid value */
   uint8_t *eir = nullptr;
+  bool has_bdname = false;
   esp_bt_gap_dev_prop_t *p;
 
   ESP_LOGI(BT_AV_TAG, "Scanned device: %s", to_str(param->disc_res.bda));
+  s_peer_bdname[0] = '\0';
   for (int i = 0; i < param->disc_res.num_prop; i++) {
     p = param->disc_res.prop + i;
     switch (p->type) {
@@ -334,51 +336,61 @@ void BluetoothA2DPSource::filter_inquiry_scan_result(
       case ESP_BT_GAP_DEV_PROP_EIR:
         eir = (uint8_t *)(p->val);
         break;
-      case ESP_BT_GAP_DEV_PROP_BDNAME:
+      case ESP_BT_GAP_DEV_PROP_BDNAME: {
+        // ESPHome: a device without EIR reports its name in a later, name-only result
+        size_t len = strnlen((const char *)p->val, p->len);
+        if (len > ESP_BT_GAP_MAX_BDNAME_LEN)
+          len = ESP_BT_GAP_MAX_BDNAME_LEN;
+        memcpy(s_peer_bdname, p->val, len);
+        s_peer_bdname[len] = '\0';
+        has_bdname = true;
+        break;
+      }
       default:
         break;
     }
   }
+  // ESPHome: an inquiry result always carries a class (Bluedroid sets 0 to unclassified),
+  // so no class means the name-only result of a device sighted before.
+  const bool name_only = cod == 0 && has_bdname;
   /* search for device with MAJOR service class as "rendering" in COD */
-  if (!esp_bt_gap_is_valid_cod(cod) || !is_valid_cod_service(cod)) {
+  if (!name_only && (!esp_bt_gap_is_valid_cod(cod) || !is_valid_cod_service(cod))) {
     ESP_LOGI(BT_AV_TAG, "--Compatiblity: Incompatible");
     return;
   }
 
-  /* search for target device in its Extended Inqury Response */
-  if (eir) {
-    ESP_LOGI(BT_AV_TAG, "--Compatiblity: Compatible");
+  ESP_LOGI(BT_AV_TAG, "--Compatiblity: Compatible");
+  if (!has_bdname)
     get_name_from_eir(eir, s_peer_bdname, nullptr);
-    ESP_LOGI(BT_AV_TAG, "--Name: %s", s_peer_bdname);
+  ESP_LOGI(BT_AV_TAG, "--Name: %s", s_peer_bdname);
 
-    // check ssid names from provided list
-    bool found = false;
-    // ssid callback
-    if (ssid_callback != nullptr) {
-      found =
-          ssid_callback((const char *)s_peer_bdname, param->disc_res.bda, rssi);
-    } else {
-      // if no callback we use the list
-      for (const char *name : bt_names) {
-        int len = strlen(name);
-        ESP_LOGD(BT_AV_TAG, "--Checking match: %s", name);
-        if (strncmp((char *)s_peer_bdname, name, len) == 0) {
-          this->bt_name = (char *)s_peer_bdname;
-          found = true;
-          break;
-        }
+  // check ssid names from provided list
+  bool found = false;
+  // ssid callback
+  if (ssid_callback != nullptr) {
+    found =
+        ssid_callback((const char *)s_peer_bdname, param->disc_res.bda, rssi);
+  } else if (s_peer_bdname[0] != '\0') {
+    // if no callback we use the list
+    for (const char *name : bt_names) {
+      int len = strlen(name);
+      ESP_LOGD(BT_AV_TAG, "--Checking match: %s", name);
+      if (strncmp((char *)s_peer_bdname, name, len) == 0) {
+        this->bt_name = (char *)s_peer_bdname;
+        found = true;
+        break;
       }
     }
-    if (found) {
-      ESP_LOGI(BT_AV_TAG, "--Result: Target device found");
-      s_a2d_state = APP_AV_STATE_DISCOVERED;
-      memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
-      set_last_connection(peer_bd_addr);
-      ESP_LOGI(BT_AV_TAG, "Cancel device discovery ...");
-      esp_bt_gap_cancel_discovery();
-    } else {
-      ESP_LOGI(BT_AV_TAG, "--Result: Target device not found");
-    }
+  }
+  if (found) {
+    ESP_LOGI(BT_AV_TAG, "--Result: Target device found");
+    s_a2d_state = APP_AV_STATE_DISCOVERED;
+    memcpy(peer_bd_addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
+    set_last_connection(peer_bd_addr);
+    ESP_LOGI(BT_AV_TAG, "Cancel device discovery ...");
+    esp_bt_gap_cancel_discovery();
+  } else {
+    ESP_LOGI(BT_AV_TAG, "--Result: Target device not found");
   }
 }
 

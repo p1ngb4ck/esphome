@@ -127,6 +127,7 @@ void A2DPSource::setup() {
 #endif
 
   this->source_.set_local_name(this->local_name_.c_str());
+  this->source_.set_pin_code(this->pin_code_.c_str(), ESP_BT_PIN_TYPE_VARIABLE);
   this->source_.set_task_core(CONFIG_BT_BLUEDROID_PINNED_TO_CORE);
   this->source_.set_volume(this->volume_);
   this->source_.set_data_callback_in_frames(A2DPSource::audio_callback_);
@@ -290,15 +291,22 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
   ESP_LOGV(TAG, "Found %-24s %02x:%02x:%02x:%02x:%02x:%02x  %d dBm", name, address[0], address[1], address[2],
            address[3], address[4], address[5], rssi);
 
+  // A device without EIR reports its name in a later result that has no RSSI
+  const bool name_only = rssi < -128;
   bool known = false;
   for (auto &device : this->devices_) {
     if (memcmp(device.address, address, ESP_BD_ADDR_LEN) == 0) {
-      device.rssi = rssi;
+      if (!name_only)
+        device.rssi = rssi;
+      if (*name != '\0' && device.name != name) {
+        device.name = name;
+        this->devices_changed_.store(true);
+      }
       known = true;
       break;
     }
   }
-  if (!known && this->devices_.size() < MAX_DISCOVERED) {
+  if (!known && !name_only && this->devices_.size() < MAX_DISCOVERED) {
     DiscoveredDevice device;
     device.name = name;
     memcpy(device.address, address, ESP_BD_ADDR_LEN);
@@ -317,6 +325,9 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
     return true;
   }
 
+  if (name_only && !known)
+    return false;
+
   if (!this->target_name_.empty()) {
     if (strncmp(name, this->target_name_.c_str(), this->target_name_.size()) != 0) {
       return false;
@@ -331,6 +342,9 @@ bool A2DPSource::accept_device_(const char *name, esp_bd_addr_t address, int rss
   if (this->device_select_ != nullptr) {
     return false;
   }
+
+  if (name_only)
+    return false;
 
   uint32_t now = millis();
 

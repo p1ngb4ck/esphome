@@ -308,9 +308,20 @@ bool BTPairing::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t 
         name.assign(reinterpret_cast<const char *>(text), len);
     }
   }
+  ScannedDevice device{};
+  memcpy(device.address, param->disc_res.bda, sizeof(device.address));
+  device.transport = Transport::CLASSIC;
+  // An inquiry result always has a class; a device without EIR sends its name later without one.
+  if (cod == 0 && !name.empty()) {
+    device.name = std::move(name);
+    LockGuard guard(self->found_lock_);
+    if (self->found_.size() < MAX_SCANNED)
+      self->found_.push_back(std::move(device));
+    self->enable_loop_soon_any_context();
+    return false;
+  }
   if (!esp_bt_gap_is_valid_cod(cod))
     return false;
-  ScannedDevice device{};
   const uint32_t major = esp_bt_gap_get_cod_major_dev(cod);
   if (major == ESP_BT_COD_MAJOR_DEV_PERIPHERAL) {
     device.kind = DeviceKind::HID;
@@ -321,8 +332,6 @@ bool BTPairing::gap_handler_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t 
   } else {
     return false;
   }
-  memcpy(device.address, param->disc_res.bda, sizeof(device.address));
-  device.transport = Transport::CLASSIC;
   device.device_class = cod;
   device.name = std::move(name);
   {
@@ -478,7 +487,8 @@ void BTPairing::add_scanned_(const ScannedDevice &device) {
     }
     return;
   }
-  if (this->scanned_.size() >= MAX_SCANNED)
+  // A Classic name-only result names a device listed before
+  if ((device.transport == Transport::CLASSIC && device.device_class == 0) || this->scanned_.size() >= MAX_SCANNED)
     return;
   this->scanned_.push_back(device);
   char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];

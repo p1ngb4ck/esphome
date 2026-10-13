@@ -24,6 +24,7 @@ CONF_ON_PAIRED = "on_paired"
 CONF_ON_STREAMING_START = "on_streaming_start"
 CONF_ON_STREAMING_STOP = "on_streaming_stop"
 CONF_PAIR_ON_BOOT_IF_EMPTY = "pair_on_boot_if_empty"
+CONF_PIN_CODE = "pin_code"
 CONF_SETTLE_TIME = "settle_time"
 CONF_TARGET_NAME = "target_name"
 
@@ -63,6 +64,10 @@ CONFIG_SCHEMA = cv.All(
             # Empty means the strongest signal in the pairing window wins. Set a
             # name to remove the guesswork when several devices are in range.
             cv.Optional(CONF_TARGET_NAME, default=""): cv.string,
+            # Answered when a device without Secure Simple Pairing asks for a PIN.
+            cv.Optional(CONF_PIN_CODE, default="0000"): cv.All(
+                cv.string_strict, cv.Length(min=1, max=15)
+            ),
             # How long the pairing window only collects and logs before it picks.
             cv.Optional(
                 CONF_SETTLE_TIME, default="15s"
@@ -173,6 +178,7 @@ async def to_code(config):
 
     cg.add(var.set_local_name(config[CONF_LOCAL_NAME]))
     cg.add(var.set_target_name(config[CONF_TARGET_NAME]))
+    cg.add(var.set_pin_code(config[CONF_PIN_CODE]))
     cg.add(var.set_settle_time(config[CONF_SETTLE_TIME].total_seconds))
     cg.add(var.set_fallback_time(config[CONF_FALLBACK_TIME].total_seconds))
     cg.add(var.set_volume(config[CONF_VOLUME]))
