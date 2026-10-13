@@ -80,7 +80,8 @@ void SimpleVideoPlayer::channel_task_loop_() {
         continue;
       std::vector<std::string> names, refs;
       const bool ok = json::parse_json(reinterpret_cast<const uint8_t *>(body), len, [&](JsonObject root) -> bool {
-        for (JsonObject channel : root["channels"].as<JsonArray>()) {
+        JsonArray channels = root["channels"];
+        for (JsonObject channel : channels) {
           if (names.size() >= CHANNEL_MAX)
             break;
           const char *name = channel["name"] | "";

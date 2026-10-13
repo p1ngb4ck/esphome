@@ -8,6 +8,7 @@
 #include "esphome/components/bytebuffer/bytebuffer.h"
 
 #include <cinttypes>
+#include <cstddef>
 #include <cstring>
 #include <atomic>
 #include <span>
@@ -173,7 +174,11 @@ static const char *utf16_to_latin1(const T *data, size_t count, std::span<char, 
 static const char *get_descriptor_string(const usb_str_desc_t *desc, std::span<char, DESC_STRING_BUF_SIZE> buffer) {
   if (desc == nullptr || desc->bLength < 2)
     return "(unspecified)";
-  return utf16_to_latin1(desc->wData, (desc->bLength - 2) / 2, buffer);
+  // wData is a packed member: copied out rather than read through an unaligned pointer.
+  uint16_t chars[(UINT8_MAX - 2) / 2];
+  const size_t count = (desc->bLength - 2) / 2;
+  std::memcpy(chars, reinterpret_cast<const uint8_t *>(desc) + offsetof(usb_str_desc_t, wData), count * 2);
+  return utf16_to_latin1(chars, count, buffer);
 }
 
 static const char *filter_string(const char16_t *filter, std::span<char, DESC_STRING_BUF_SIZE> buffer) {

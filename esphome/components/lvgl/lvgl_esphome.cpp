@@ -813,7 +813,7 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
 void LVHIDPointerListener::set_cursor_image(const void *src) {
   lv_obj_t *cursor = lv_image_create(lv_layer_sys());
   lv_image_set_src(cursor, src);
-  lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_clickable(cursor, false);
   lv_indev_set_cursor(this->drv_, cursor);
 }
 #endif
@@ -827,7 +827,7 @@ void LVHIDPointerListener::set_default_cursor() {
   lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
   lv_obj_set_style_border_width(cursor, 2, 0);
   lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
-  lv_obj_remove_flag(cursor, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_clickable(cursor, false);
   lv_indev_set_cursor(this->drv_, cursor);
 }
 
@@ -845,7 +845,7 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
     return;
   lv_point_t point{this->x_, this->y_};
   for (lv_obj_t *obj = lv_indev_search_obj(lv_screen_active(), &point); obj != nullptr; obj = lv_obj_get_parent(obj)) {
-    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)) {
+    if (lv_obj_is_scrollable(obj)) {
       // One wheel step scrolls about a line of text.
       static constexpr int32_t STEP = 40;
       lv_obj_scroll_by_bounded(obj, -pan * STEP, wheel * STEP, LV_ANIM_ON);
