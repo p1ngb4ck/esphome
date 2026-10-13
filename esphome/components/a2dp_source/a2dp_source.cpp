@@ -300,6 +300,23 @@ void A2DPSource::forget_device() {
   this->drop_device_(true);
 }
 
+#ifdef USE_BT_PAIRING
+// The device picked in the pairing scan is kept once it has paired or connected, whichever is first.
+void A2DPSource::keep_picked_() {
+  if (this->pairing_ == nullptr || !this->picked_valid_)
+    return;
+  this->picked_valid_ = false;
+  bt_pairing::PairingRecord record{};
+  memcpy(record.address, this->picked_.address, sizeof(record.address));
+  record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
+  record.slot = this->slot_;
+  record.device_class = this->picked_.device_class;
+  const std::string &name = this->picked_.name.empty() ? this->paired_name_ : this->picked_.name;
+  strncpy(record.name, name.c_str(), sizeof(record.name) - 1);
+  this->pairing_->store(record);
+}
+#endif
+
 void A2DPSource::drop_device_(bool delete_bond) {
   if (this->connected_.load())
     this->source_.disconnect();
@@ -555,6 +572,9 @@ void A2DPSource::loop() {
 
   if (this->paired_pending_.exchange(false)) {
     ESP_LOGI(TAG, "Paired with %s", this->paired_name_.c_str());
+#ifdef USE_BT_PAIRING
+    this->keep_picked_();
+#endif
     for (auto *trigger : this->paired_triggers_) {
       trigger->trigger(this->paired_name_);
     }
@@ -566,17 +586,7 @@ void A2DPSource::loop() {
     }
 #ifdef USE_BT_PAIRING
     if (this->pairing_ != nullptr) {
-      // The device picked in the pairing scan is kept once it has connected.
-      if (this->picked_valid_) {
-        this->picked_valid_ = false;
-        bt_pairing::PairingRecord record{};
-        memcpy(record.address, this->picked_.address, sizeof(record.address));
-        record.transport = static_cast<uint8_t>(bt_pairing::Transport::CLASSIC);
-        record.slot = this->slot_;
-        record.device_class = this->picked_.device_class;
-        strncpy(record.name, this->picked_.name.c_str(), sizeof(record.name) - 1);
-        this->pairing_->store(record);
-      }
+      this->keep_picked_();
       this->pairing_->on_connection(this, true);
     }
 #endif

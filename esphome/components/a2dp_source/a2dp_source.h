@@ -180,6 +180,9 @@ class A2DPSource : public Component
 
   void publish_device_list_();
   void drop_device_(bool delete_bond);
+#ifdef USE_BT_PAIRING
+  void keep_picked_();
+#endif
   void update_media_();
   void keep_pace_(int32_t frame_count);
 
