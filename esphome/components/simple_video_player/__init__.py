@@ -226,6 +226,22 @@ AUDIO_LATENCY_MS_PER_MIB = 100
 DEFAULT_READ_AHEAD_BUFFER_SIZE = 4 * 1024 * 1024
 MIN_READ_AHEAD_BUFFER_SIZE = 1000000  # 1MB
 MAX_READ_AHEAD_BUFFER_SIZE = 16 * 1024 * 1024
+CONF_PSRAM_POOL_SIZE = "psram_pool_size"
+DEFAULT_PSRAM_POOL_SIZE = 16 * 1024 * 1024
+MIN_PSRAM_POOL_SIZE = 4 * 1024 * 1024
+MAX_PSRAM_POOL_SIZE = 28 * 1024 * 1024
+
+
+def _pool_holds_session(config):
+    # One playback session takes the read-ahead ring and the frame slot from the pool at once.
+    needed = config[CONF_READ_AHEAD_BUFFER_SIZE] + config[CONF_INPUT_BUFFER_SIZE]
+    if config[CONF_PSRAM_POOL_SIZE] < needed:
+        raise cv.Invalid(
+            f"{CONF_PSRAM_POOL_SIZE} must be at least {CONF_READ_AHEAD_BUFFER_SIZE} + "
+            f"{CONF_INPUT_BUFFER_SIZE} ({needed} bytes) plus the output buffers",
+            [CONF_PSRAM_POOL_SIZE],
+        )
+    return config
 
 
 def _next_power_of_two(value):
@@ -602,6 +618,14 @@ CONFIG_SCHEMA = cv.All(
                 ),
                 _next_power_of_two,
             ),
+            # One PSRAM block taken at boot; every player buffer (read-ahead ring, frame slot,
+            # output and decode buffers, picture files) is carved from it.
+            cv.Optional(
+                CONF_PSRAM_POOL_SIZE, default=DEFAULT_PSRAM_POOL_SIZE
+            ): cv.All(
+                cv.validate_bytes,
+                cv.Range(min=MIN_PSRAM_POOL_SIZE, max=MAX_PSRAM_POOL_SIZE),
+            ),
             # Automation triggers
             cv.Optional(CONF_ON_PLAYBACK_STARTED): automation.validate_automation(
                 {
@@ -633,6 +657,7 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
     _latency_within_max,
+    _pool_holds_session,
     _validate_output_target,
     _validate_stream,
     _validate_controls,
@@ -962,6 +987,7 @@ async def to_code(config):
     cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
     cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
     cg.add(var.set_read_ahead_buffer_size(config[CONF_READ_AHEAD_BUFFER_SIZE]))
+    cg.add(var.set_psram_pool_size(config[CONF_PSRAM_POOL_SIZE]))
     cg.add_define("SVP_MAX_AUDIO_LATENCY_MS", _max_audio_latency_ms(config))
     cg.add(
         var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds)

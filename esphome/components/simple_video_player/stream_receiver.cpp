@@ -99,19 +99,7 @@ bool SimpleVideoPlayer::setup_stream_() {
     ESP_LOGE(TAG, "Failed to create stream queues");
     return false;
   }
-  jpeg_decode_memory_alloc_cfg_t in_cfg{};
-  in_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-  for (auto &frame : this->stream_frames_) {
-    size_t got = 0;
-    frame.data = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->stream_max_frame_bytes_, &in_cfg, &got));
-    if (frame.data == nullptr) {
-      ESP_LOGE(TAG, "Failed to allocate a %" PRIu32 "-byte stream frame buffer (PSRAM)", this->stream_max_frame_bytes_);
-      return false;
-    }
-    frame.capacity = got;
-    StreamFrame *p = &frame;
-    xQueueSend(this->stream_empty_q_, &p, 0);
-  }
+  // The frames' memory comes from the pool with the first udisp sender (ensure_stream_frames_()).
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
     this->stream_audio_out_ch_ = this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? 2 : 1;
@@ -367,7 +355,33 @@ void SimpleVideoPlayer::stream_net_loop_() {
   }
 }
 
+// Network task: the udisp frames, from the pool once and kept.
+bool SimpleVideoPlayer::ensure_stream_frames_() {
+  if (this->stream_frames_ready_)
+    return true;
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  bool ok = true;
+  for (auto &frame : this->stream_frames_) {
+    if (frame.data == nullptr) {
+      frame.data = this->media_alloc_(this->stream_max_frame_bytes_);
+      frame.capacity = frame.data != nullptr ? this->stream_max_frame_bytes_ : 0;
+    }
+    ok = ok && frame.data != nullptr;
+  }
+  if (ok) {
+    for (auto &frame : this->stream_frames_) {
+      StreamFrame *p = &frame;
+      xQueueSend(this->stream_empty_q_, &p, 0);
+    }
+    this->stream_frames_ready_ = true;
+  }
+  xSemaphoreGive(this->media_lock_);
+  return ok;
+}
+
 void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
+  if (!this->ensure_stream_frames_())
+    return;
   while (len > 0) {
     if (this->stream_skip_ > 0) {
       const size_t take = std::min<size_t>(this->stream_skip_, len);
@@ -450,7 +464,7 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
 #endif
     const bool usable = w > 0 && h > 0 && static_cast<uint32_t>(x) + w <= out_w &&
                         static_cast<uint32_t>(y) + h <= out_h && total > 0 &&
-                        total <= this->stream_frames_[0].capacity;
+                        total <= this->stream_max_frame_bytes_;
     if (!usable) {
       if (!this->stream_logged_bad_header_) {
         this->stream_logged_bad_header_ = true;
@@ -458,7 +472,7 @@ void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
                  "Ignoring frames: %ux%u at %u,%u of %" PRIu32 " bytes is not a JPEG rectangle inside %ux%u of at most "
                  "%u bytes",
                  w, h, x, y, total, static_cast<unsigned>(out_w), static_cast<unsigned>(out_h),
-                 static_cast<unsigned>(this->stream_frames_[0].capacity));
+                 static_cast<unsigned>(this->stream_max_frame_bytes_));
       }
       this->stream_skip_ = total;
       continue;
@@ -492,7 +506,7 @@ void SimpleVideoPlayer::stream_send_pending_(int client) {
     size_t at = 0;
     uint16_t width = 0, height = 0;
     uint8_t turns = 0;
-    const uint32_t still = static_cast<uint32_t>(this->stream_frames_[0].capacity);
+    const uint32_t still = this->stream_max_frame_bytes_;
 #ifdef SVP_DSI_OUTPUT
     message[at++] = 'C';
     message[at++] = static_cast<uint8_t>(this->dsi_fb_bpp_ * 8);
@@ -602,7 +616,7 @@ void SimpleVideoPlayer::stream_draw_loop_() {
 #ifdef SVP_DSI_OUTPUT
     const display::ColorBitness bitness =
         this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-    if (frame->direct) {
+    if (frame->direct && this->ensure_direct_target_()) {
       decode_cfg.output_format =
           this->dsi_fb_bpp_ == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
       target = this->decode_target_;
@@ -616,7 +630,7 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
-    if (!frame->direct) {
+    if (!frame->direct && this->ensure_canvas_outputs_()) {
       // Canvas output: RGB888 like the video. While no file plays (output_lock_), the second output
       // buffer takes the decoded rectangle and the first is the page the canvas shows.
       decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;

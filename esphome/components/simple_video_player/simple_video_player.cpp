@@ -55,8 +55,15 @@ void SimpleVideoPlayer::setup() {
   this->setup_media_player_();
 #endif
 
+  // Every buffer the player streams through comes from here (psram_pool_size), taken on first use.
+  this->media_lock_ = xSemaphoreCreateMutex();
+  if (this->media_lock_ == nullptr || !this->pool_.init(this->psram_pool_size_)) {
+    ESP_LOGE(TAG, "Could not take the %" PRIu32 "-byte PSRAM pool", this->psram_pool_size_);
+    this->mark_failed();
+    return;
+  }
+
 #ifdef SVP_DSI_OUTPUT
-  // Direct display output: a decode buffer of the panel's size.
   if (this->dsi_ != nullptr && !this->init_dsi_output_()) {
     this->mark_failed();
     return;
@@ -64,39 +71,12 @@ void SimpleVideoPlayer::setup() {
 #endif
 #ifdef SVP_CANVAS_OUTPUT
   {
+    // The output pair comes from the pool the first time a video plays here.
     if (this->canvas_ == nullptr) {
       ESP_LOGE(TAG, "Canvas not set");
       this->mark_failed();
       return;
     }
-
-    // Decoded RGB888 output double-buffer -- allocated ONCE here (ALIGN_UP(w,16) * ALIGN_UP(h,16) * 3)
-    // and reused for every play(); loop() points the canvas at the finished one. RGB888 (not RGB565):
-    // the P4 HW JPEG decoder's RGB565 output path is buggy on some P4 silicon revisions.
-    // jpeg_alloc_decoder_mem() gives the alignment the HW decoder requires and reports the actual
-    // (cache-line-rounded) size it allocated.
-    // Sized to the canvas widget itself (its YAML width/height): the canvas never changes size and
-    // shows nothing beyond it, so nothing larger is played. Portrait and window canvases included.
-    uint32_t fb_w = this->canvas_size_w_;
-    uint32_t fb_h = this->canvas_size_h_;
-    const size_t max_output_size = static_cast<size_t>(ALIGN_UP(fb_w, 16)) * ALIGN_UP(fb_h, 16) * 3;
-    jpeg_decode_memory_alloc_cfg_t out_cfg{};
-    out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-    // Two buffers for the canvas double-buffer (decode writes one while LVGL reads the other).
-    // jpeg_alloc_decoder_mem gives the decoder/PPA alignment both DMA engines need.
-    for (auto &buf : this->output_buffers_) {
-      size_t out_actual = 0;
-      buf = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(max_output_size, &out_cfg, &out_actual));
-      if (buf == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate output buffer (%zu bytes, PSRAM)", max_output_size);
-        this->mark_failed();
-        return;
-      }
-      std::memset(buf, 0, out_actual);
-      this->output_buffer_size_ = out_actual;  // same size for both
-    }
-    ESP_LOGI(TAG, "Output double-buffer allocated: 2 x %zu bytes (PSRAM, %ux%u)", this->output_buffer_size_,
-             static_cast<unsigned>(ALIGN_UP(fb_w, 16)), static_cast<unsigned>(ALIGN_UP(fb_h, 16)));
   }
 #endif
 
@@ -117,28 +97,15 @@ void SimpleVideoPlayer::setup() {
     return;
   }
 
-  // Compressed-frame pre-buffer for the HW decoder: FRAME_SLOT_COUNT INPUT-aligned buffers cycled
-  // between the reader (Core 0) and the decoder (Core 1) through empty_queue_/filled_queue_.
-  {
-    jpeg_decode_memory_alloc_cfg_t in_cfg{};
-    in_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-    this->empty_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
-    this->filled_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
-    if (this->empty_queue_ == nullptr || this->filled_queue_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create frame-slot queues");
-      this->mark_failed();
-      return;
-    }
-    for (auto &slot : this->frame_slots_) {
-      size_t slot_actual = 0;
-      slot.data = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(this->input_buffer_size_, &in_cfg, &slot_actual));
-      if (slot.data == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate frame slot (%" PRIu32 " bytes, PSRAM)", this->input_buffer_size_);
-        this->mark_failed();
-        return;
-      }
-      slot.capacity = this->input_buffer_size_;
-    }
+  // Compressed-frame pre-buffer for the HW decoder: FRAME_SLOT_COUNT buffers cycled between the
+  // reader (Core 0) and the decoder (Core 1) through empty_queue_/filled_queue_; their memory comes
+  // from the pool with the first session (acquire_session_buffers_()).
+  this->empty_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
+  this->filled_queue_ = xQueueCreate(FRAME_SLOT_COUNT, sizeof(FrameSlot *));
+  if (this->empty_queue_ == nullptr || this->filled_queue_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to create frame-slot queues");
+    this->mark_failed();
+    return;
   }
 
 #ifdef USE_AUDIO
@@ -222,6 +189,10 @@ void SimpleVideoPlayer::setup() {
 #endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
+  ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes (PSRAM left: %u bytes, largest block %u)",
+                static_cast<unsigned>(this->pool_.size()),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes (PSRAM)", this->input_buffer_size_);
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
@@ -666,6 +637,7 @@ void SimpleVideoPlayer::seek(float seconds) {
 void SimpleVideoPlayer::playback_task_entry_(void *param) {
   auto *player = static_cast<SimpleVideoPlayer *>(param);
   player->playback_loop_();
+  player->task_handle_ = nullptr;  // also after an early return
   vTaskDelete(nullptr);
 }
 
@@ -730,6 +702,12 @@ void SimpleVideoPlayer::reader_loop_() {
 void SimpleVideoPlayer::playback_loop_() {
   ESP_LOGI(TAG, "Playback task started (Core 1)");
 
+  // The session's buffers from the pool: taken once, kept for the next video.
+  if (!this->acquire_session_buffers_()) {
+    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
+    return;
+  }
+
   // Open file
   if (!this->open_file_(this->video_path_)) {
     ESP_LOGE(TAG, "Failed to open video file: %s", this->video_path_.c_str());
@@ -782,6 +760,20 @@ void SimpleVideoPlayer::playback_loop_() {
 #ifdef SVP_DSI_OUTPUT
   this->direct_.store(direct, std::memory_order_release);
 #endif
+  bool output_ready = false;
+#ifdef SVP_DSI_OUTPUT
+  if (direct)
+    output_ready = this->ensure_direct_target_();
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+  if (!direct)
+    output_ready = this->ensure_canvas_outputs_();
+#endif
+  if (!output_ready) {
+    this->set_error_(PlaybackError::BUFFER_ALLOCATION_FAILED);
+    this->close_file_();
+    return;
+  }
   ESP_LOGI(TAG, "Output: %s", direct ? "display" : "canvas");
   if (!direct) {
     // Record the canvas dimensions for loop() to pass to lv_canvas_set_buffer. The canvas is pointed
@@ -1516,18 +1508,8 @@ bool SimpleVideoPlayer::init_dsi_output_() {
     return false;
   }
 
-  const size_t wanted = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
-  jpeg_decode_memory_alloc_cfg_t out_cfg{};
-  out_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-  this->decode_target_ = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(wanted, &out_cfg, &this->decode_target_len_));
-  if (this->decode_target_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate the %zu-byte decode buffer (PSRAM)", wanted);
-    this->decode_target_len_ = 0;
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Direct output: panel %ux%u, %s, decode buffer %zu bytes (PSRAM), drawn with draw_pixels_at",
-           this->dsi_out_w_, this->dsi_out_h_, this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565", this->decode_target_len_);
+  ESP_LOGI(TAG, "Direct output: panel %ux%u, %s, drawn with draw_pixels_at", this->dsi_out_w_, this->dsi_out_h_,
+           this->dsi_fb_bpp_ == 3 ? "RGB888" : "RGB565");
   return true;
 }
 #endif  // SVP_DSI_OUTPUT
@@ -1645,13 +1627,8 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   ESP_LOGI(TAG, "Opening file: %s", path.c_str());
 
   // Storage-backed file reader (see buffered_file_reader.h): resolves the path against the storage
-  // registry, streams via the storage worker, and its read-ahead window is the shared
-  // storage::TransferBuffer arena -- it allocates nothing. Kept across play() calls; open() closes
-  // any previous stream first.
-  if (!this->file_reader_) {
-    this->file_reader_ = std::make_unique<BufferedFileReader>();
-    this->file_reader_->set_ring_bytes(this->read_ahead_buffer_size_);
-  }
+  // registry and streams via the storage worker into the read-ahead ring (pool) -- it allocates
+  // nothing. Kept across play() calls; open() closes any previous stream first.
   // A wait inside the reader returns early once playback_task_stop_ goes true, so an outstanding
   // storage completion cannot block the end of playback.
   this->file_reader_->set_abort_flag(&this->playback_task_stop_);
@@ -1737,10 +1714,6 @@ void SimpleVideoPlayer::close_file_() {
 bool SimpleVideoPlayer::open_stream_source_() {
   // An AVI arriving on the stream port (svp_relay): read through the same reader and ring as a
   // file, which the network task fills instead of the storage worker.
-  if (!this->file_reader_) {
-    this->file_reader_ = std::make_unique<BufferedFileReader>();
-    this->file_reader_->set_ring_bytes(this->read_ahead_buffer_size_);
-  }
   this->file_reader_->set_abort_flag(&this->playback_task_stop_);
   if (!this->file_reader_->open_stream()) {
     ESP_LOGE(TAG, "Failed to open the network stream");
@@ -1911,14 +1884,13 @@ void SimpleVideoPlayer::free_buffers_() {
     this->hw_jpeg_decoder_ = nullptr;
   }
 
-  // output_buffers_ came from jpeg_alloc_decoder_mem() -- heap_caps_free().
   for (auto *&buf : this->output_buffers_) {
-    if (buf != nullptr) {
-      heap_caps_free(buf);
-      buf = nullptr;
-    }
+    this->pool_.free(buf);
+    buf = nullptr;
   }
   this->output_buffer_size_ = 0;
+  this->pool_.free(this->ring_buf_);
+  this->ring_buf_ = nullptr;
   this->display_buffer_.store(nullptr, std::memory_order_release);
 
 #ifdef USE_AUDIO
@@ -1933,12 +1905,9 @@ void SimpleVideoPlayer::free_buffers_() {
   this->audio_decoded_ring_buffer_.reset();
 #endif
 
-  // Compressed-frame pre-buffer slots (jpeg_alloc_decoder_mem) + their queues.
   for (auto &slot : this->frame_slots_) {
-    if (slot.data != nullptr) {
-      heap_caps_free(slot.data);
-      slot.data = nullptr;
-    }
+    this->pool_.free(slot.data);
+    slot.data = nullptr;
   }
   if (this->empty_queue_ != nullptr) {
     vQueueDelete(this->empty_queue_);
@@ -1950,12 +1919,160 @@ void SimpleVideoPlayer::free_buffers_() {
   }
 
 #ifdef SVP_DSI_OUTPUT
-  if (this->decode_target_ != nullptr) {
-    heap_caps_free(this->decode_target_);  // jpeg_alloc_decoder_mem()
-    this->decode_target_ = nullptr;
-    this->decode_target_len_ = 0;
+  this->pool_.free(this->decode_target_);
+  this->decode_target_ = nullptr;
+  this->decode_target_len_ = 0;
+#endif
+}
+
+//========================================================================
+// PSRAM pool
+//========================================================================
+
+uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
+  uint8_t *piece = this->pool_.alloc(size);
+#ifdef SVP_PICTURES
+  if (piece == nullptr && this->pic_ready_) {
+    // The pictures' buffers, handed back by the main loop once nothing of theirs is in flight.
+    this->pool_reclaim_req_.store(true, std::memory_order_release);
+    for (uint32_t waited = 0; this->pool_reclaim_req_.load(std::memory_order_acquire) && waited < 2000; waited += 5)
+      vTaskDelay(pdMS_TO_TICKS(5));
+    piece = this->pool_.alloc(size);
   }
 #endif
+  if (piece == nullptr)
+    ESP_LOGE(TAG, "PSRAM pool: no room for %zu bytes (%zu of %zu used, largest free %zu)", size, this->pool_.used(),
+             this->pool_.size(), this->pool_.largest_free());
+  return piece;
+}
+
+bool SimpleVideoPlayer::acquire_session_buffers_() {
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  if (this->ring_buf_ == nullptr)
+    this->ring_buf_ = this->media_alloc_(this->read_ahead_buffer_size_);
+  for (auto &slot : this->frame_slots_) {
+    if (slot.data == nullptr) {
+      slot.data = this->media_alloc_(this->input_buffer_size_);
+      slot.capacity = slot.data != nullptr ? this->input_buffer_size_ : 0;
+    }
+  }
+  bool ok = this->ring_buf_ != nullptr;
+  for (auto &slot : this->frame_slots_)
+    ok = ok && slot.data != nullptr;
+  xSemaphoreGive(this->media_lock_);
+  if (!ok)
+    return false;
+  if (!this->file_reader_)
+    this->file_reader_ = std::make_unique<BufferedFileReader>();
+  if (!this->file_reader_->has_ring())
+    this->file_reader_->set_ring(this->ring_buf_, this->read_ahead_buffer_size_);
+  return true;
+}
+
+#ifdef SVP_DSI_OUTPUT
+bool SimpleVideoPlayer::ensure_direct_target_() {
+  if (this->decode_target_ != nullptr)
+    return true;
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  if (this->decode_target_ == nullptr) {
+    // Whole cache lines, as the JPEG unit writes it by DMA.
+    const size_t wanted = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
+    this->decode_target_ = this->media_alloc_(wanted);
+    this->decode_target_len_ = this->decode_target_ != nullptr ? ALIGN_UP(wanted, PsramPool::ALIGN) : 0;
+  }
+  const bool ok = this->decode_target_ != nullptr;
+  xSemaphoreGive(this->media_lock_);
+  return ok;
+}
+#endif
+
+#ifdef SVP_CANVAS_OUTPUT
+bool SimpleVideoPlayer::ensure_canvas_outputs_() {
+  if (this->output_buffers_[1] != nullptr)
+    return true;
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  if (this->output_buffers_[1] == nullptr) {
+    // RGB888 double buffer of the canvas' size (rows of 16): decode writes one while LVGL reads the
+    // other. RGB888, not RGB565: the decoder's RGB565 output is buggy on some P4 revisions.
+    const size_t size = ALIGN_UP(static_cast<size_t>(ALIGN_UP(this->canvas_size_w_, 16)) *
+                                     ALIGN_UP(this->canvas_size_h_, 16) * 3,
+                                 PsramPool::ALIGN);
+    for (auto *&buf : this->output_buffers_) {
+      if (buf == nullptr)
+        buf = this->media_alloc_(size);
+      if (buf != nullptr)
+        std::memset(buf, 0, size);
+    }
+    if (this->output_buffers_[0] == nullptr || this->output_buffers_[1] == nullptr) {
+      for (auto *&buf : this->output_buffers_) {
+        this->pool_.free(buf);
+        buf = nullptr;
+      }
+    }
+    this->output_buffer_size_ = this->output_buffers_[1] != nullptr ? size : 0;
+  }
+  const bool ok = this->output_buffers_[1] != nullptr;
+  xSemaphoreGive(this->media_lock_);
+  return ok;
+}
+#endif
+
+bool SimpleVideoPlayer::release_media_() {
+  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED || this->task_handle_ != nullptr)
+    return false;
+#ifdef SVP_STREAM
+  if (this->stream_connected_.load(std::memory_order_acquire) || this->stream_avi_.load(std::memory_order_acquire))
+    return false;
+  if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
+    return false;  // a rectangle is being drawn
+#endif
+  bool released = false;
+  if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
+#ifdef SVP_CANVAS_OUTPUT
+    if (this->output_buffers_[0] != nullptr) {
+      // LVGL lets go of it first: no source, and the next frame sets the canvas up anew.
+      lv_image_set_src(this->canvas_, nullptr);
+      std::memset(&this->canvas_draw_buf_, 0, sizeof(this->canvas_draw_buf_));
+      this->display_buffer_.store(nullptr, std::memory_order_release);
+      this->frame_ready_.store(false, std::memory_order_release);
+      for (auto *&buf : this->output_buffers_) {
+        this->pool_.free(buf);
+        buf = nullptr;
+      }
+      this->output_buffer_size_ = 0;
+      released = true;
+    }
+#endif
+#ifdef SVP_DSI_OUTPUT
+    if (this->decode_target_ != nullptr) {
+      this->pool_.free(this->decode_target_);
+      this->decode_target_ = nullptr;
+      this->decode_target_len_ = 0;
+      released = true;
+    }
+#endif
+    if (this->ring_buf_ != nullptr) {
+      if (this->file_reader_)
+        this->file_reader_->set_ring(nullptr, 0);
+      this->pool_.free(this->ring_buf_);
+      this->ring_buf_ = nullptr;
+      released = true;
+    }
+    for (auto &slot : this->frame_slots_) {
+      if (slot.data != nullptr) {
+        this->pool_.free(slot.data);
+        slot.data = nullptr;
+        slot.capacity = 0;
+        released = true;
+      }
+    }
+    xSemaphoreGive(this->media_lock_);
+  }
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr)
+    xSemaphoreGive(this->output_lock_);
+#endif
+  return released;
 }
 
 //========================================================================

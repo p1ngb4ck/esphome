@@ -1,13 +1,12 @@
 /**
  * @file buffered_file_reader.cpp
- * @brief Async storage-worker read -> transfer arena -> PSRAM read-ahead ring -> read() / peek().
+ * @brief Async storage-worker read -> PSRAM read-ahead ring -> read() / peek().
  */
 
 #include "buffered_file_reader.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
-#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <cstring>
@@ -16,24 +15,6 @@ namespace esphome {
 namespace simple_video_player {
 
 static const char *const TAG = "buffered_file_reader";
-
-bool BufferedFileReader::LookaheadRing::allocate(size_t bytes) {
-  if (this->data != nullptr && this->size != bytes)
-    this->release();
-  if (this->data == nullptr) {
-    this->data = static_cast<uint8_t *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    this->size = this->data != nullptr ? bytes : 0;
-  }
-  this->reset();
-  return this->data != nullptr;
-}
-
-void BufferedFileReader::LookaheadRing::release() {
-  heap_caps_free(this->data);
-  this->data = nullptr;
-  this->size = 0;
-  this->reset();
-}
 
 void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, size_t len) const {
   const size_t at = pos & (this->size - 1);
@@ -84,11 +65,14 @@ void BufferedFileReader::kick_fill_() {
     this->fill_in_flight_.store(false, std::memory_order_release);  // read() re-kicks after draining
     return;
   }
-  size_t want = FILL_CHUNK;
+  // Straight into the ring, up to its end: chunks start where the last one ended, so with whole
+  // chunks (and a ring of whole chunks) one never wraps.
+  const size_t at = this->ring_.head.load(std::memory_order_relaxed) & (this->ring_.size - 1);
+  const size_t want = std::min(FILL_CHUNK, this->ring_.size - at);
   this->fill_got_ = 0;
   this->fill_submit_us_ = micros();
   storage::StorageError submit = storage::global_storage_worker->read_chunk(
-      this->handle_, this->arena_, want, &this->fill_got_,
+      this->handle_, this->ring_.data + at, want, &this->fill_got_,
       [this](storage::StorageError e) { this->on_fill_done_(e); });
   if (submit != storage::StorageError::STORAGE_ERROR_OK) {
     ESP_LOGW(TAG, "read_chunk submit failed: %s", storage::error_to_string(submit));
@@ -103,8 +87,8 @@ void BufferedFileReader::on_fill_done_(storage::StorageError err) {
   } else if (this->fill_got_ == 0) {
     this->eof_.store(true, std::memory_order_release);
   } else {
-    // want was <= ring free space and read() only frees more, so this always fits whole.
-    this->ring_.write(this->arena_, this->fill_got_);
+    // Read into the ring's free part (read() only frees more), now handed to the reader.
+    this->ring_.commit(this->fill_got_);
     const uint32_t dt = micros() - this->fill_submit_us_;
     this->stats_.chunks++;
     this->stats_.chunk_us += dt;
@@ -133,8 +117,8 @@ bool BufferedFileReader::open(const char *path) {
   if (this->open_)
     this->close();
   if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr ||
-      storage::global_transfer_buffer == nullptr) {
-    ESP_LOGE(TAG, "storage worker / transfer buffer not available");
+      this->ring_.data == nullptr) {
+    ESP_LOGE(TAG, "storage worker or read-ahead ring not available");
     return false;
   }
   const char *rel = nullptr;
@@ -153,24 +137,7 @@ bool BufferedFileReader::open(const char *path) {
     return false;
   }
 
-  this->arena_ = storage::global_transfer_buffer->try_acquire(FILL_CHUNK);
-  if (this->arena_ == nullptr) {
-    ESP_LOGE(TAG, "storage transfer buffer unavailable");
-    this->arm_wait_();
-    storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
-    this->wait_sync_();
-    return false;
-  }
-  if (!this->ring_.allocate(this->ring_bytes_)) {
-    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", this->ring_bytes_);
-    storage::global_transfer_buffer->release();
-    this->arena_ = nullptr;
-    this->arm_wait_();
-    storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
-    this->wait_sync_();
-    return false;
-  }
-
+  this->ring_.reset();
   this->open_ = true;
   this->current_position_ = 0;
   this->eof_.store(false);
@@ -189,7 +156,7 @@ void BufferedFileReader::close() {
     xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
     this->open_ = false;
     this->network_ = false;
-    this->ring_.release();
+    this->ring_.reset();
     xSemaphoreGive(this->stream_lock_);
     this->streaming_ = false;
     this->current_position_ = 0;
@@ -204,10 +171,7 @@ void BufferedFileReader::close() {
   storage::global_storage_worker->end_read(this->handle_, [this](storage::StorageError e) { this->on_sync_done_(e); });
   this->wait_sync_();
 
-  if (storage::global_transfer_buffer != nullptr)
-    storage::global_transfer_buffer->release();
-  this->arena_ = nullptr;
-  this->ring_.release();
+  this->ring_.reset();
   this->open_ = false;
   this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
   this->current_position_ = 0;
@@ -221,11 +185,12 @@ bool BufferedFileReader::open_stream() {
     return false;
   }
   xSemaphoreTake(this->stream_lock_, portMAX_DELAY);
-  if (!this->ring_.allocate(this->ring_bytes_)) {
+  if (this->ring_.data == nullptr) {
     xSemaphoreGive(this->stream_lock_);
-    ESP_LOGE(TAG, "could not allocate the %zu-byte read-ahead ring in PSRAM", this->ring_bytes_);
+    ESP_LOGE(TAG, "no read-ahead ring");
     return false;
   }
+  this->ring_.reset();
   this->network_ = true;
   this->current_position_ = 0;
   this->eof_.store(false);

@@ -19,6 +19,7 @@ namespace esphome::simple_video_player {
 static const char *const TAG = "simple_video_player.pictures";
 
 static constexpr size_t PSRAM_MARGIN = 64 * 1024;
+static constexpr size_t PICTURE_STEP = 1024 * 1024;  // picture buffers grow in these
 static constexpr uint32_t LIST_RETRY_MS = 1000;
 static constexpr size_t MAX_IMAGES = 1000;
 static constexpr int32_t LONG_PRESS_SLOP = 20;  // px the finger may move and still long-press
@@ -124,6 +125,24 @@ void SimpleVideoPlayer::pictures_loop_() {
   if (this->thumb_auto_hide_ms_ > 0 && this->thumbs_visible_ && this->thumb_slide_enabled_ &&
       now - this->thumb_touched_ms_ >= this->thumb_auto_hide_ms_)
     this->slide_thumbnails_(false);
+
+  // A starting video needs the pool: what is in flight finishes, then the pictures' buffers go.
+  if (this->pool_reclaim_req_.load(std::memory_order_acquire)) {
+    if (this->pic_read_.active) {
+      const bool finished =
+          this->pic_read_.decoding ? this->pic_decoded_.load(std::memory_order_acquire) : this->pic_read_.done;
+      if (!finished)
+        return;
+      if (this->pic_read_.decoding && !this->pic_read_.thumbnail) {
+        this->picture_decoded_();  // already in the canvas
+      } else {
+        this->pic_read_ = PictureRead{};
+        this->pic_decoded_.store(false, std::memory_order_relaxed);
+      }
+    }
+    this->release_picture_buffers_();
+    this->pool_reclaim_req_.store(false, std::memory_order_release);
+  }
 
   // While a video plays nothing is read or decoded: the JPEG unit and the storage are its.
   if (this->pictures_held_())
@@ -380,25 +399,58 @@ SimpleVideoPlayer::PicFile *SimpleVideoPlayer::free_file_() {
   return best;
 }
 
+// From the pool; when it is full, the video's idle buffers make room (taken again by the next video).
+uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) {
+  uint8_t *piece = this->pool_.alloc(size);
+  if (piece == nullptr && this->release_media_()) {
+    ESP_LOGI(TAG, "Video buffers handed back to the pool for pictures");
+    piece = this->pool_.alloc(size);
+  }
+  return piece;
+}
+
+// Kept for the next picture; replaced only by a larger one (in whole PICTURE_STEPs).
 bool SimpleVideoPlayer::reserve_file_(PicFile *file, size_t size) {
   if (file->capacity >= size)
     return true;
-  if (file->data != nullptr) {
-    heap_caps_free(file->data);  // jpeg_alloc_decoder_mem()
-    file->data = nullptr;
-    file->capacity = 0;
-  }
-  if (psram_largest() < size + PSRAM_MARGIN)
-    return false;
-  // The hardware decoder reads it by DMA.
-  jpeg_decode_memory_alloc_cfg_t cfg{};
-  cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
-  size_t got = 0;
-  file->data = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &cfg, &got));
+  this->pool_.free(file->data);
+  file->data = nullptr;
+  file->capacity = 0;
+  file->index = -1;
+  file->length = 0;
+  const size_t capacity = align_up(size, PICTURE_STEP);
+  file->data = this->picture_alloc_(capacity);
   if (file->data == nullptr)
     return false;
-  file->capacity = got;
+  file->capacity = capacity;
   return true;
+}
+
+bool SimpleVideoPlayer::reserve_decode_(size_t size) {
+  if (this->pic_decode_cap_ >= size)
+    return true;
+  this->pool_.free(this->pic_decode_buf_);
+  this->pic_decode_buf_ = nullptr;
+  this->pic_decode_cap_ = 0;
+  const size_t capacity = align_up(size, PICTURE_STEP);
+  this->pic_decode_buf_ = this->picture_alloc_(capacity);
+  if (this->pic_decode_buf_ == nullptr)
+    return false;
+  this->pic_decode_cap_ = capacity;
+  return true;
+}
+
+// Main loop, nothing read or decoded meanwhile: the pictures' pool buffers for the video.
+void SimpleVideoPlayer::release_picture_buffers_() {
+  for (PicFile &file : this->pic_files_) {
+    this->pool_.free(file.data);
+    file = PicFile{};
+  }
+  this->pool_.free(this->thumb_file_.data);
+  this->thumb_file_ = PicFile{};
+  this->pool_.free(this->pic_decode_buf_);
+  this->pic_decode_buf_ = nullptr;
+  this->pic_decode_cap_ = 0;
 }
 
 void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, bool preload) {
@@ -420,7 +472,7 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, b
              rel == nullptr || rel[0] == '\0') {
     why = "storage not mounted";
   } else if (file == nullptr || !this->reserve_file_(file, size)) {
-    why = "not enough PSRAM for the file";
+    why = "no room in the PSRAM pool for the file";
   }
   if (why != nullptr) {
     ESP_LOGW(TAG, "%s: %s", entry.path.c_str(), why);
@@ -547,6 +599,20 @@ void SimpleVideoPlayer::preload_neighbours_() {
 // Decoding, on the picture task
 //========================================================================
 
+// The decoder writes whole MCUs (esp_driver_jpeg jpeg_parse_marker.c, process_h/process_v): 16
+// pixels wide for 4:2:2 and 4:2:0, 16 high for 4:2:0, else 8. RGB565.
+static size_t jpeg_decoded_size(const jpeg_decode_picture_info_t &info, uint32_t *padded_w) {
+  const bool wide = info.sample_method == JPEG_DOWN_SAMPLING_YUV422 || info.sample_method == JPEG_DOWN_SAMPLING_YUV420;
+  const uint32_t pw = align_up(info.width, wide ? 16 : 8);
+  const uint32_t ph = align_up(info.height, info.sample_method == JPEG_DOWN_SAMPLING_YUV420 ? 16 : 8);
+  if (padded_w != nullptr)
+    *padded_w = pw;
+  return static_cast<size_t>(pw) * ph * 2;
+}
+
+// Output buffers by DMA: start and size on whole cache lines (the pool's ALIGN covers the P4's).
+static size_t dma_usable(size_t capacity) { return capacity & ~(PsramPool::ALIGN - 1); }
+
 bool SimpleVideoPlayer::start_decode_(bool thumbnail, size_t index, size_t slot, PicFile *file) {
   PictureJob &job = this->pic_job_;
   job = PictureJob{};
@@ -572,6 +638,26 @@ bool SimpleVideoPlayer::start_decode_(bool thumbnail, size_t index, size_t slot,
     job.target_h = this->pic_full_buf_->header.h;
     job.target_stride = this->pic_full_buf_->header.stride;
     job.fit = this->fit_mode_;
+  }
+  // A JPEG that does not go straight into its target (a thumbnail never does) is decoded whole
+  // first: the buffer for that is reserved here, on the main loop.
+  runtime_image::ImageFormat format;
+  jpeg_decode_picture_info_t info{};
+  if (picture_format(job.path, &format) && format == runtime_image::JPEG &&
+      jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) == ESP_OK && info.width != 0 &&
+      info.height != 0) {
+    const size_t bytes = jpeg_decoded_size(info, nullptr);
+    const bool straight = !thumbnail && static_cast<int32_t>(info.width) <= job.target_w &&
+                          static_cast<int32_t>(info.height) <= job.target_h && bytes <= dma_usable(job.target_capacity);
+    if (!straight) {
+      if (!this->reserve_decode_(bytes)) {
+        ESP_LOGW(TAG, "%s: %ux%u needs %u bytes of the PSRAM pool to decode", job.path.c_str(),
+                 static_cast<unsigned>(info.width), static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
+        return false;
+      }
+      job.scratch = this->pic_decode_buf_;
+      job.scratch_capacity = this->pic_decode_cap_;
+    }
   }
   file->used_ms = millis();
   PictureRead &read = this->pic_read_;
@@ -660,19 +746,14 @@ void SimpleVideoPlayer::decode_job_(PictureJob &job) {
       ESP_LOGW(TAG, "%s: not a JPEG the decoder takes", job.path.c_str());
       return;
     }
-    // The decoder writes whole MCUs (esp_driver_jpeg jpeg_parse_marker.c, process_h/process_v):
-    // 16 pixels wide for 4:2:2 and 4:2:0, 16 high for 4:2:0, else 8.
-    const bool wide = info.sample_method == JPEG_DOWN_SAMPLING_YUV422 || info.sample_method == JPEG_DOWN_SAMPLING_YUV420;
-    const uint32_t pw = align_up(info.width, wide ? 16 : 8);
-    const uint32_t ph = align_up(info.height, info.sample_method == JPEG_DOWN_SAMPLING_YUV420 ? 16 : 8);
-    const size_t bytes = static_cast<size_t>(pw) * ph * 2;
+    uint32_t pw = 0;
+    const size_t bytes = jpeg_decoded_size(info, &pw);
     jpeg_decode_cfg_t cfg{};
     cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
     cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // little-endian RGB565, as LVGL's
     cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
-    // Output buffers by DMA: start and size on whole cache lines (128 covers the P4's).
-    const size_t usable = job.target_capacity & ~static_cast<size_t>(127);
+    const size_t usable = dma_usable(job.target_capacity);
     uint32_t out = 0;
     if (!job.thumbnail && static_cast<int32_t>(info.width) <= job.target_w &&
         static_cast<int32_t>(info.height) <= job.target_h && bytes <= usable) {
@@ -691,27 +772,17 @@ void SimpleVideoPlayer::decode_job_(PictureJob &job) {
       job.ok = true;
       return;
     }
-    if (psram_largest() < bytes + PSRAM_MARGIN) {
-      ESP_LOGW(TAG, "%s: %ux%u needs %u bytes of PSRAM to decode", job.path.c_str(), static_cast<unsigned>(info.width),
-               static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
-      return;
-    }
-    jpeg_decode_memory_alloc_cfg_t mem{};
-    mem.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-    size_t got = 0;
-    auto *full = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(bytes, &mem, &got));
-    if (full == nullptr)
-      return;
-    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, full, static_cast<uint32_t>(got), &out) ==
-            ESP_OK &&
+    if (job.scratch == nullptr || bytes > dma_usable(job.scratch_capacity))
+      return;  // reserved by start_decode_(), which said why not
+    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, job.scratch,
+                             static_cast<uint32_t>(dma_usable(job.scratch_capacity)), &out) == ESP_OK &&
         out != 0) {
-      scale_rgb565(full, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2, job.target,
-                   job.target_w, job.target_h, job.target_stride, job.fit);
+      scale_rgb565(job.scratch, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2,
+                   job.target, job.target_w, job.target_h, job.target_stride, job.fit);
       job.ok = true;
     } else {
       ESP_LOGW(TAG, "%s: decoding failed", job.path.c_str());
     }
-    heap_caps_free(full);
     return;
   }
 

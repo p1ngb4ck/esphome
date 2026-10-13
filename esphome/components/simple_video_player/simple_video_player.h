@@ -47,6 +47,7 @@
 #include "esphome/components/ring_buffer/ring_buffer.h"
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
+#include "psram_pool.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -211,6 +212,7 @@ class SimpleVideoPlayer : public Component
   void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
   void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
   void set_read_ahead_buffer_size(uint32_t size) { this->read_ahead_buffer_size_ = size; }
+  void set_psram_pool_size(uint32_t size) { this->psram_pool_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
   void set_prefetch_duration_ms(uint32_t ms) { this->prefetch_duration_ms_ = ms; }
 
@@ -537,6 +539,7 @@ class SimpleVideoPlayer : public Component
   static void stream_draw_task_entry_(void *param);
   void stream_draw_loop_();
   void stream_feed_(const uint8_t *data, size_t len);
+  bool ensure_stream_frames_();
   /// Whether a sender's picture is made for the display (else the canvas).
   bool stream_direct_() const {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
@@ -640,6 +643,19 @@ class SimpleVideoPlayer : public Component
   /// Free all buffers
   void free_buffers_();
 
+  // The PSRAM pool (psram_pool_size). Video ("media") buffers are taken on first use and kept; so
+  // are the pictures' (grown only for a larger file or picture). Only when one side's request does
+  // not fit are the other side's idle buffers handed back.
+  /// From any task: a piece for the media side; asks the main loop for the pictures' if needed.
+  uint8_t *media_alloc_(size_t size);
+  /// Playback task: the read-ahead ring and the compressed-frame slots of a session.
+  bool acquire_session_buffers_();
+  /// The display's decode buffer / the canvas output pair, kept once taken.
+  bool ensure_direct_target_();
+  bool ensure_canvas_outputs_();
+  /// Main loop: the media side's buffers back to the pool, when nothing plays or streams.
+  bool release_media_();
+
   //========================================================================
   // Error Handling
   //========================================================================
@@ -658,6 +674,11 @@ class SimpleVideoPlayer : public Component
   lv_draw_buf_t canvas_draw_buf_{};  // the shown output buffer: the video's own size, the decoder's rows
 #endif
   uint32_t read_ahead_buffer_size_{4 * 1024 * 1024};  // PSRAM read-ahead ring, a power of two
+  uint32_t psram_pool_size_{16 * 1024 * 1024};
+  PsramPool pool_;
+  SemaphoreHandle_t media_lock_{nullptr};      // taking or giving back media buffers
+  uint8_t *ring_buf_{nullptr};                 // the read-ahead ring (pool)
+  std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
   uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
   uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
   float target_fps_{30.0f};                 // Target frame rate
@@ -780,9 +801,8 @@ class SimpleVideoPlayer : public Component
   // DMA2D-writes the next frame into the back buffer while LVGL's PPA reads the front buffer to
   // blit/rotate it, so neither side ever sees a half-written frame -- the former single buffer tore
   // because decode could be tick-preempted mid-write while LVGL blitted it. BOTH buffers come from
-  // jpeg_alloc_decoder_mem: the 16-byte/DMA/cache-line alignment is required because the decoder
-  // (writer) AND LVGL's PPA (reader) are both DMA engines. Allocated once in setup(), freed via
-  // heap_caps_free (NOT delete[]). Not used in the DSI path (that renders into driver FBs).
+  // the PSRAM pool (whole cache lines, as the decoder and LVGL's PPA are both DMA engines), taken
+  // with the first video on the canvas and kept.
   uint8_t *output_buffers_[2]{};
   size_t output_buffer_size_{0};
   uint8_t decode_buf_idx_{0};  // which output buffer decode_frame_() writes next (playback-task-local)
@@ -919,6 +939,8 @@ class SimpleVideoPlayer : public Component
     int32_t target_w{0}, target_h{0};
     uint32_t target_stride{0};
     ImageFitMode fit{ImageFitMode::SCALE_TO_FIT};
+    uint8_t *scratch{nullptr};  // the whole decoded JPEG when it does not go straight in (pool)
+    size_t scratch_capacity{0};
     // Result: straight into the target at the picture's own size (stride: the decoder's rows), or
     // scaled into all of it.
     bool ok{false};
@@ -949,6 +971,8 @@ class SimpleVideoPlayer : public Component
   // Decoding runs on the picture task; the job's file and target are its until pic_decoded_.
   TaskHandle_t pic_task_{nullptr};
   PictureJob pic_job_;
+  uint8_t *pic_decode_buf_{nullptr};  // pool, grown in 1MB steps for a larger picture
+  size_t pic_decode_cap_{0};
   std::atomic<bool> pic_decoded_{false};
   int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none
   lv_draw_buf_t *pic_full_buf_{nullptr};  // the canvas's own buffer (DMA-capable), all of it
@@ -1016,6 +1040,9 @@ class SimpleVideoPlayer : public Component
   void pictures_loop_();
   bool pictures_held_() const;
   void list_directory_();
+  uint8_t *picture_alloc_(size_t size);
+  bool reserve_decode_(size_t size);
+  void release_picture_buffers_();
   PicFile *cached_file_(size_t index);
   PicFile *free_file_();
   bool reserve_file_(PicFile *file, size_t size);
@@ -1060,7 +1087,7 @@ class SimpleVideoPlayer : public Component
   std::atomic<bool> direct_{false};       // the current session draws onto the display
   uint16_t dsi_out_w_{0}, dsi_out_h_{0};  // panel native resolution; the video must match it
   uint8_t dsi_fb_bpp_{2};                 // display color_depth: 24 -> 3, 16 -> 2 bytes/pixel
-  uint8_t *decode_target_{nullptr};       // own decode buffer (jpeg_alloc_decoder_mem, PSRAM)
+  uint8_t *decode_target_{nullptr};       // own decode buffer (PSRAM pool)
   size_t decode_target_len_{0};
 #endif
 
@@ -1077,6 +1104,7 @@ class SimpleVideoPlayer : public Component
   uint16_t stream_port_{0};
   uint32_t stream_max_frame_bytes_{128 * 1024};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
+  bool stream_frames_ready_{false};  // network task only
   QueueHandle_t stream_empty_q_{nullptr};
   QueueHandle_t stream_filled_q_{nullptr};
   TaskHandle_t stream_draw_task_{nullptr};

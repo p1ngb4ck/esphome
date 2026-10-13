@@ -1,16 +1,15 @@
 /**
  * @file buffered_file_reader.h
- * @brief Async file reader: storage::StorageWorker streams the file (on its own task) into the
- *        shared storage::TransferBuffer arena; each read_chunk completion copies into the PSRAM
- *        read-ahead ring and kicks the next read. read() just drains the ring, so
- *        playback and file I/O run in parallel and read() does not block while data is available.
+ * @brief Async file reader: storage::StorageWorker streams the file (on its own task) straight
+ *        into the free part of the PSRAM read-ahead ring; each read_chunk completion publishes
+ *        what arrived and kicks the next read. read() just drains the ring, so playback and file
+ *        I/O run in parallel and read() does not block while data is available.
  */
 
 #pragma once
 
 #include "esphome/components/storage/storage.h"
 #include "esphome/components/storage/storage_worker.h"
-#include "esphome/components/storage/transfer_buffer.h"
 
 #include <atomic>
 #include <cstdint>
@@ -34,8 +33,15 @@ class BufferedFileReader {
   /// While *flag is true, a pending wait returns immediately instead of waiting out a storage
   /// completion -- so playback can be stopped promptly.
   void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
-  /// Size of the PSRAM read-ahead ring, a power of two; takes effect at the next open.
-  void set_ring_bytes(size_t bytes) { this->ring_bytes_ = bytes; }
+  /// The read-ahead ring's memory (the player's, DMA-capable PSRAM), a power of two of at least
+  /// 2 * FILL_CHUNK bytes; only while closed.
+  void set_ring(uint8_t *data, size_t size) {
+    this->ring_.data = data;
+    this->ring_.size = size;
+    this->ring_.reset();
+  }
+  bool has_ring() const { return this->ring_.data != nullptr; }
+  static constexpr size_t FILL_CHUNK = 256 * 1024;  // per read_chunk, straight into the ring
 
   bool open(const char *path);
   void close();
@@ -106,18 +112,17 @@ class BufferedFileReader {
   }
 
   // --- async fill chain -------------------------------------------------------------------------
-  // Submit one non-blocking read_chunk() into the arena if the ring has room and nothing is in
+  // Submit one non-blocking read_chunk() into the ring's free part if it has room and nothing is in
   // flight. Safe to call from the playback task (after read() drains the ring) and from the
   // completion callback on the main loop -- the atomic exchange makes it single-entry.
   void kick_fill_();
-  // read_chunk completion (main loop): copy what was read into the ring, then chain the next fill.
+  // read_chunk completion (main loop): publish what was read into the ring, then chain the next fill.
   void on_fill_done_(storage::StorageError err);
   // Wait (bounded, abortable) for any in-flight fill to finish, so a one-shot stream call can run.
   void quiesce_fill_();
 
   static constexpr uint32_t WAIT_SLICE_MS = 20;
   static constexpr uint32_t WAIT_CAP_MS = 5000;
-  static constexpr size_t FILL_CHUNK = 256 * 1024;   // per read_chunk into the arena
 
   storage::StreamHandle handle_{};
   bool open_{false};
@@ -131,7 +136,6 @@ class BufferedFileReader {
   storage::StorageError sync_result_{storage::StorageError::STORAGE_ERROR_OK};
   const volatile bool *abort_flag_{nullptr};
 
-  uint8_t *arena_{nullptr};  // borrowed storage::TransferBuffer -- read_chunk destination
   // Byte ring with look-ahead: one writer (fill chain or push()), one reader task that read()s and
   // peek()s. Positions count bytes and wrap at 2^32; the size is a power of two, so they index it.
   struct LookaheadRing {
@@ -139,8 +143,6 @@ class BufferedFileReader {
     size_t size{0};
     std::atomic<uint32_t> head{0};  // bytes written
     std::atomic<uint32_t> tail{0};  // bytes read
-    bool allocate(size_t bytes);
-    void release();
     void reset() {
       this->head.store(0, std::memory_order_relaxed);
       this->tail.store(0, std::memory_order_release);
@@ -152,12 +154,15 @@ class BufferedFileReader {
       return this->size - (this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_acquire));
     }
     void write(const uint8_t *src, size_t len);  // len <= free()
+    void commit(size_t len) {                    // len bytes were written at head (len <= free())
+      this->head.store(this->head.load(std::memory_order_relaxed) + static_cast<uint32_t>(len),
+                       std::memory_order_release);
+    }
     size_t read(uint8_t *dst, size_t len);
     bool peek(size_t offset, uint8_t *dst, size_t len) const;
     void copy_out_(uint32_t pos, uint8_t *dst, size_t len) const;
   };
   LookaheadRing ring_;
-  size_t ring_bytes_{4 * 1024 * 1024};
   std::atomic<bool> fill_in_flight_{false};
   std::atomic<bool> draining_{false};   // set during close()/seek(): no new fill may start
   size_t fill_got_{0};                  // bytes the in-flight read_chunk reports
