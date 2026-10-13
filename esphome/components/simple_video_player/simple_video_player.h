@@ -1019,6 +1019,7 @@ class SimpleVideoPlayer : public Component
   int32_t pic_w_{0}, pic_h_{0};           // the canvas size pictures are decoded for
   uint32_t pic_stride_{0};
   size_t pic_page_bytes_{0};              // a page: the display's whole size, any canvas size fits
+  bool pic_buffers_failed_{false};        // the pool had no room for them; tried again after a video
   lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer (YAML), shown while no page is
   bool pic_restore_{false};               // the pages went to a video: the picture decoded again after it
   int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while a picture is decoded
@@ -1084,6 +1085,7 @@ class SimpleVideoPlayer : public Component
   void list_directory_();
   uint8_t *picture_alloc_(size_t size);
   bool reserve_decode_(size_t size);
+  bool acquire_picture_buffers_();
   void release_picture_buffers_();
   PicFile *cached_file_(size_t index);
   PicFile *free_file_();

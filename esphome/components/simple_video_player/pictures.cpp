@@ -420,8 +420,43 @@ uint8_t *SimpleVideoPlayer::picture_alloc_(size_t size) {
   return piece;
 }
 
+// The pictures' buffers, all at once when pictures are first wanted (after boot or a video): the
+// pages, and the files at PICTURE_STEP. Only a larger file or picture takes more, when it comes.
+bool SimpleVideoPlayer::acquire_picture_buffers_() {
+  if (this->pic_pages_[0].data != nullptr)
+    return true;
+  if (this->pic_buffers_failed_)
+    return false;
+  bool ok = true;
+  for (PicPage &page : this->pic_pages_) {
+    page = PicPage{};
+    page.data = ok ? this->picture_alloc_(this->pic_page_bytes_) : nullptr;
+    page.capacity = page.data != nullptr ? this->pic_page_bytes_ : 0;
+    ok = ok && page.data != nullptr;
+  }
+  auto take = [this, &ok](PicFile &file) {
+    if (ok && file.data == nullptr) {
+      file.data = this->picture_alloc_(PICTURE_STEP);
+      file.capacity = file.data != nullptr ? PICTURE_STEP : 0;
+    }
+    ok = ok && file.data != nullptr;
+  };
+  for (PicFile &file : this->pic_files_)
+    take(file);
+  take(this->thumb_file_);
+  if (ok)
+    return true;
+  ESP_LOGE(TAG, "No room in the PSRAM pool for the pictures (%u bytes)",
+           static_cast<unsigned>(PIC_PAGE_COUNT * this->pic_page_bytes_ + (PIC_FILE_COUNT + 1) * PICTURE_STEP));
+  this->release_picture_buffers_();
+  this->pic_buffers_failed_ = true;
+  return false;
+}
+
 // Kept for the next picture; replaced only by a larger one (in whole PICTURE_STEPs).
 bool SimpleVideoPlayer::reserve_file_(PicFile *file, size_t size) {
+  if (!this->acquire_picture_buffers_())
+    return false;
   if (file->capacity >= size)
     return true;
   this->pool_.free(file->data);
@@ -453,6 +488,7 @@ bool SimpleVideoPlayer::reserve_decode_(size_t size) {
 
 // Main loop, nothing read or decoded meanwhile: the pictures' pool buffers for the video.
 void SimpleVideoPlayer::release_picture_buffers_() {
+  this->pic_buffers_failed_ = false;
   if (this->pic_shown_ != nullptr) {
     // The canvas shows its own buffer meanwhile, black; the picture comes back after the video.
     lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_lvgl_buf_);
@@ -638,6 +674,8 @@ SimpleVideoPlayer::PicPage *SimpleVideoPlayer::page_of_(int index) {
 // A page to decode into, at the canvas' current size: never the shown one; an empty or outdated one
 // first, else the one farthest from the shown picture.
 SimpleVideoPlayer::PicPage *SimpleVideoPlayer::free_page_() {
+  if (!this->acquire_picture_buffers_())
+    return nullptr;
   const int count = static_cast<int>(this->images_.size());
   PicPage *best = nullptr;
   int best_distance = -1;
@@ -655,19 +693,9 @@ SimpleVideoPlayer::PicPage *SimpleVideoPlayer::free_page_() {
       best_distance = distance;
     }
   }
-  if (best == nullptr)
+  // At the display's size: any canvas fits.
+  if (best == nullptr || best->capacity < static_cast<size_t>(this->pic_stride_) * this->pic_h_)
     return nullptr;
-  // Taken once at the display's size: no other for another picture or canvas size.
-  const size_t size = std::max(
-      this->pic_page_bytes_, align_up(static_cast<size_t>(this->pic_stride_) * this->pic_h_, PsramPool::ALIGN));
-  if (best->capacity < size) {
-    this->pool_.free(best->data);
-    *best = PicPage{};
-    best->data = this->picture_alloc_(size);
-    if (best->data == nullptr)
-      return nullptr;
-    best->capacity = size;
-  }
   best->index = -1;
   best->w = this->pic_w_;
   best->h = this->pic_h_;
