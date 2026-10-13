@@ -389,6 +389,12 @@ void USBBluetooth::read_acl_(uint32_t generation) {
         if (this->acl_len_ >= 4 && this->acl_len_ >= 4u + (acl[2] | (acl[3] << 8))) {
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
           if (this->stack_attached_.load(std::memory_order_acquire)) {
+            // Packet boundary: a start may come flagged "non-flushable" (00) or "complete" (11), as
+            // Linux takes it (l2cap_recv_acldata()); Bluedroid only knows 10 and drops the rest
+            // as a continuation for an unknown packet.
+            const uint8_t boundary = (acl[1] >> 4) & 0x03;
+            if (boundary == 0x00 || boundary == 0x03)
+              acl[1] = static_cast<uint8_t>((acl[1] & 0xCF) | 0x20);
             this->acl_[0] = H4_ACL;
             this->to_stack_(this->acl_, this->acl_len_ + 1);
           }
