@@ -35,7 +35,7 @@ extern "C" void ccall_bt_app_task_handler(void* arg) {
 
 extern "C" void ccall_app_gap_callback(esp_bt_gap_cb_event_t event,
                                        esp_bt_gap_cb_param_t* param) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (actual_bluetooth_a2dp_common)
     actual_bluetooth_a2dp_common->app_gap_callback(event, param);
 }
@@ -61,13 +61,13 @@ extern "C" void ccall_av_hdl_stack_evt(uint16_t event, void* p_param) {
 
 void ccall_app_rc_tg_callback(esp_avrc_tg_cb_event_t event,
                               esp_avrc_tg_cb_param_t* param) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (actual_bluetooth_a2dp_common)
     actual_bluetooth_a2dp_common->app_rc_tg_callback(event, param);
 }
 
 void ccall_av_hdl_avrc_tg_evt(uint16_t event, void* param) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (actual_bluetooth_a2dp_common)
     actual_bluetooth_a2dp_common->av_hdl_avrc_tg_evt(event, param);
 }
@@ -141,7 +141,7 @@ void BluetoothA2DPCommon::disconnect() {
 }
 
 void BluetoothA2DPCommon::end(bool release_memory) {
-  ESP_LOGI(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   // delay which prevents a crash when log level Warning or Error
   int wait_ms = 50;
   // reconnect should not work after end
@@ -191,19 +191,19 @@ void BluetoothA2DPCommon::end(bool release_memory) {
 
 #ifndef A2DP_EXTERNAL_HOST  // ESPHome: Bluedroid is shared, never released here
   if (release_memory) {
-    ESP_LOGI(BT_AV_TAG, "disable bluetooth");
+    ESP_LOGVV(BT_AV_TAG, "disable bluetooth");
     if (esp_bluedroid_disable() != ESP_OK) {
       ESP_LOGE(BT_AV_TAG, "Failed to disable bluetooth");
     }
     log_free_heap();
 
-    ESP_LOGI(BT_AV_TAG, "deinit bluetooth");
+    ESP_LOGVV(BT_AV_TAG, "deinit bluetooth");
     if (esp_bluedroid_deinit() != ESP_OK) {
       ESP_LOGE(BT_AV_TAG, "Failed to deinit bluetooth");
     }
     log_free_heap();
 
-    ESP_LOGI(BT_AV_TAG, "esp_bt_controller_disable");
+    ESP_LOGVV(BT_AV_TAG, "esp_bt_controller_disable");
     if (esp_bt_controller_disable() != ESP_OK) {
       ESP_LOGE(BT_AV_TAG, "esp_bt_controller_disable failed");
     }
@@ -220,7 +220,7 @@ void BluetoothA2DPCommon::end(bool release_memory) {
     }
 
     if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
-      ESP_LOGI(BT_AV_TAG, "esp_bt_controller_deinit");
+      ESP_LOGVV(BT_AV_TAG, "esp_bt_controller_deinit");
       if (esp_bt_controller_deinit() != ESP_OK) {
         ESP_LOGE(BT_AV_TAG, "esp_bt_controller_deinit failed");
       }
@@ -228,7 +228,7 @@ void BluetoothA2DPCommon::end(bool release_memory) {
     }
 
     // after a release memory - a restart will not be possible
-    ESP_LOGI(BT_AV_TAG, "esp_bt_controller_mem_release");
+    ESP_LOGVV(BT_AV_TAG, "esp_bt_controller_mem_release");
     if (esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT) != ESP_OK) {
       ESP_LOGE(BT_AV_TAG, "esp_bt_controller_mem_release failed");
     }
@@ -250,7 +250,7 @@ void BluetoothA2DPCommon::end(bool release_memory) {
 }
 
 void BluetoothA2DPCommon::init_nvs() {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
       err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -267,7 +267,7 @@ bool BluetoothA2DPCommon::has_last_connection() {
 }
 
 bool BluetoothA2DPCommon::get_last_connection() {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   bool result = false;
 
   if (is_autoreconnect_allowed) {
@@ -277,16 +277,16 @@ bool BluetoothA2DPCommon::get_last_connection() {
       result = true;
     }
   }
-  ESP_LOGD(BT_AV_TAG, "=> %s", to_str(last_connection));
+  ESP_LOGVV(BT_AV_TAG, "=> %s", to_str(last_connection));
   return result;
 }
 
 void BluetoothA2DPCommon::set_last_connection(esp_bd_addr_t bda) {
-  ESP_LOGD(BT_AV_TAG, "set_last_connection: %s", to_str(bda));
+  ESP_LOGVV(BT_AV_TAG, "set_last_connection: %s", to_str(bda));
 
   // same value: nothing to store
   if (memcmp(bda, last_connection, ESP_BD_ADDR_LEN) == 0) {
-    ESP_LOGD(BT_AV_TAG, "no change!");
+    ESP_LOGVV(BT_AV_TAG, "no change!");
     return;
   }
   // update nvs only when autoreconnect is enabled
@@ -298,7 +298,7 @@ void BluetoothA2DPCommon::set_last_connection(esp_bd_addr_t bda) {
 }
 
 void BluetoothA2DPCommon::clean_last_connection() {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   esp_bd_addr_t cleanBda = {0};
   set_last_connection(cleanBda);
 }
@@ -317,7 +317,7 @@ bool BluetoothA2DPCommon::read_address(const char* name, esp_bd_addr_t& bda) {
   err = nvs_get_blob(my_handle, name, bda, &size);
   if (err != ESP_OK) {
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-      ESP_LOGI(BT_AV_TAG, "nvs_blob does not exist");
+      ESP_LOGVV(BT_AV_TAG, "nvs_blob does not exist");
     } else {
       ESP_LOGE(BT_AV_TAG, "nvs_get_blob failed");
     }
@@ -382,7 +382,7 @@ void BluetoothA2DPCommon::debounce(void (*cb)(void), int ms) {
 
 /// Logs the free heap
 void BluetoothA2DPCommon::log_free_heap() {
-  ESP_LOGI(BT_AV_TAG, "Available Heap: %" PRIu32, esp_get_free_heap_size());  // ESPHome: format
+  ESP_LOGVV(BT_AV_TAG, "Available Heap: %" PRIu32, esp_get_free_heap_size());  // ESPHome: format
 }
 
 /// converts esp_a2d_connection_state_t to a string
@@ -448,7 +448,7 @@ bool BluetoothA2DPCommon::bt_start() {
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 1, 0)
   cfg.mode = bt_mode;
   if (cfg.mode == ESP_BT_MODE_CLASSIC_BT) {
-    ESP_LOGI(BT_APP_TAG, "mode is ESP_BT_MODE_CLASSIC_BT");
+    ESP_LOGVV(BT_APP_TAG, "mode is ESP_BT_MODE_CLASSIC_BT");
     esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
   }
 #endif
@@ -473,7 +473,7 @@ bool BluetoothA2DPCommon::bt_start() {
     }
   }
   if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-    ESP_LOGI(BT_APP_TAG, "BT enabled");
+    ESP_LOGVV(BT_APP_TAG, "BT enabled");
     return true;
   }
   ESP_LOGE(BT_APP_TAG, "BT Start failed");
@@ -491,7 +491,7 @@ esp_err_t BluetoothA2DPCommon::bluedroid_init() {
 }
 
 void BluetoothA2DPCommon::app_task_start_up() {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (app_task_queue == nullptr) {
     app_task_queue = xQueueCreate(event_queue_size, sizeof(bt_app_msg_t));
   }
@@ -506,7 +506,7 @@ void BluetoothA2DPCommon::app_task_start_up() {
 }
 
 void BluetoothA2DPCommon::app_task_shut_down(void) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (app_task_handle != nullptr) {
     vTaskDelete(app_task_handle);
     app_task_handle = nullptr;
@@ -520,7 +520,7 @@ void BluetoothA2DPCommon::app_task_shut_down(void) {
 }
 
 void BluetoothA2DPCommon::app_task_handler(void* arg) {
-  ESP_LOGI(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   bt_app_msg_t msg;
 
   for (;;) {
@@ -532,7 +532,7 @@ void BluetoothA2DPCommon::app_task_handler(void* arg) {
     /* receive message from work queue and handle it */
     if (pdTRUE ==
         xQueueReceive(app_task_queue, &msg, (TickType_t)portMAX_DELAY)) {
-      ESP_LOGD(BT_APP_TAG, "%s, signal: 0x%x, event: 0x%x", __func__, msg.sig,
+      ESP_LOGVV(BT_APP_TAG, "%s, signal: 0x%x, event: 0x%x", __func__, msg.sig,
                msg.event);
 
       switch (msg.sig) {
@@ -552,7 +552,7 @@ void BluetoothA2DPCommon::app_task_handler(void* arg) {
 }
 
 void BluetoothA2DPCommon::app_work_dispatched(bt_app_msg_t* msg) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
+  ESP_LOGVV(BT_AV_TAG, "%s", __func__);
   if (msg->cb) {
     msg->cb(msg->event, msg->param);
   }
@@ -592,7 +592,7 @@ void BluetoothA2DPCommon::set_discoverability(esp_bt_discovery_mode_t d) {
 
 /// Defines if the bluetooth is connectable
 void BluetoothA2DPCommon::set_scan_mode_connectable(bool connectable) {
-  ESP_LOGI(BT_AV_TAG, "set_scan_mode_connectable %s",
+  ESP_LOGVV(BT_AV_TAG, "set_scan_mode_connectable %s",
            connectable ? "true" : "false");
   if (connectable) {
     if (esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, discoverability) !=
@@ -609,7 +609,7 @@ void BluetoothA2DPCommon::set_scan_mode_connectable(bool connectable) {
 #else
 
 void BluetoothA2DPCommon::set_scan_mode_connectable(bool connectable) {
-  ESP_LOGI(BT_AV_TAG, "set_scan_mode_connectable %s",
+  ESP_LOGVV(BT_AV_TAG, "set_scan_mode_connectable %s",
            connectable ? "true" : "false");
   if (connectable) {
     if (esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE) !=

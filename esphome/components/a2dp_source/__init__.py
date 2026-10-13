@@ -4,6 +4,7 @@ from esphome.components import esp32, microphone
 from esphome.components.bt_pairing import CONF_BT_PAIRING_ID, BTPairing
 from esphome.components.esp32 import add_idf_sdkconfig_option, get_esp32_variant
 from esphome.components.esp32.const import VARIANT_ESP32
+from esphome.components.psram import DOMAIN as PSRAM_DOMAIN
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_NAME, CONF_TRIGGER_ID, CONF_VOLUME
 from esphome.core import CORE
@@ -205,6 +206,11 @@ async def to_code(config):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(trigger, [], conf)
         cg.add(var.add_on_streaming_stop_trigger(trigger))
+
+    if PSRAM_DOMAIN in CORE.config:
+        # Bluedroid takes every queued SBC packet (4 kB) from malloc, which with PSRAM
+        # in caps-only mode is internal RAM: a slow sink then starves the device.
+        add_idf_sdkconfig_option("CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST", True)
 
     if _external_host(CORE.config):
         # Bluedroid and the controller are usb_bluetooth's (BLE may be the

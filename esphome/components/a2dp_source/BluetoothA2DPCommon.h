@@ -98,6 +98,8 @@ using namespace esp_i2s;
 #else
 #include "esp_log.h"
 #endif
+// ESPHome: its log macros, so the logger levels and tags apply
+#include "esphome/core/log.h"
 
 #if !defined(ESP_IDF_VERSION)
 #error Unsupported ESP32 Version: Upgrade the ESP32 version in the Board Manager
@@ -244,7 +246,7 @@ class BluetoothA2DPCommon {
       return;
     }   
     volume_value = std::min((int)volume, 0x7F);
-    ESP_LOGI(BT_AV_TAG, "set_volume: %d", volume_value);
+    ESP_LOGVV(BT_AV_TAG, "set_volume: %d", volume_value);
     volume_control()->set_volume(volume_value);
     volume_control()->set_enabled(true);
     is_volume_used = true;
