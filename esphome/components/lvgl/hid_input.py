@@ -130,7 +130,7 @@ KEY_BINDINGS_SCHEMA = cv.Schema(
                             automation.Trigger.template()
                         ),
                         cv.GenerateID(CONF_AUTOMATION_ID): cv.declare_id(
-                            automation.Automation.template()
+                            automation.Automation
                         ),
                     }
                 )
