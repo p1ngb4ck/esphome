@@ -264,7 +264,7 @@ static void report_side(AclCheck &check, const char *side) {
   const uint32_t cut = check.cut.exchange(0, std::memory_order_relaxed);
   if (orphans == 0 && cut == 0)
     return;
-  ESP_LOGW(TAG,
+  ESP_LOGV(TAG,
            "ACL from the %s: %" PRIu32 " continuation(s) without a start, %" PRIu32
            " frame(s) cut short, last on handle 0x%03X",
            side, orphans, cut, check.handle.load(std::memory_order_relaxed));
