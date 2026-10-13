@@ -67,8 +67,7 @@ static uint16_t to_rgb565(uint32_t color) {
 void SimpleVideoPlayer::pictures_setup_() {
   if (this->pic_canvas_ == nullptr)
     return;
-  if (!this->adopt_canvas_buffer_())
-    return;
+  this->pic_lvgl_buf_ = lv_canvas_get_draw_buf(this->pic_canvas_);
   this->update_picture_size_();
   lv_display_t *display = lv_obj_get_display(this->pic_canvas_);
   const int32_t dw = std::max(lv_display_get_horizontal_resolution(display), this->pic_w_);
@@ -504,9 +503,14 @@ bool SimpleVideoPlayer::reserve_decode_(size_t size) {
 void SimpleVideoPlayer::release_picture_buffers_() {
   this->pic_buffers_failed_ = false;
   if (this->pic_shown_ != nullptr) {
-    // The canvas shows its own buffer meanwhile, black; the picture comes back after the video.
-    lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_lvgl_buf_);
-    lv_canvas_fill_bg(this->pic_canvas_, lv_color_black(), LV_OPA_COVER);
+    // Meanwhile the canvas shows its own buffer, black, or nothing (external_buffer); the picture
+    // comes back after the video.
+    if (this->pic_lvgl_buf_ != nullptr) {
+      lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_lvgl_buf_);
+      lv_canvas_fill_bg(this->pic_canvas_, lv_color_black(), LV_OPA_COVER);
+    } else {
+      lv_image_set_src(this->pic_canvas_, nullptr);
+    }
     this->pic_shown_ = nullptr;
     this->pic_restore_ = this->current_image_ >= 0;
   }
@@ -748,7 +752,7 @@ bool SimpleVideoPlayer::start_decode_(bool thumbnail, size_t index, size_t slot,
     job.target_stride = this->thumb_stride_;
     job.fit = ImageFitMode::SCALE_TO_FIT;
   } else {
-    PicPage *page = this->pic_lvgl_buf_ != nullptr ? this->free_page_() : nullptr;
+    PicPage *page = this->free_page_();
     if (page == nullptr) {
       if (!preload)
         ESP_LOGW(TAG, "%s: no room in the PSRAM pool for a %dx%d picture", job.path.c_str(),
@@ -1007,29 +1011,14 @@ void SimpleVideoPlayer::picture_decoded_() {
 // Canvas
 //========================================================================
 
-bool SimpleVideoPlayer::adopt_canvas_buffer_() {
-  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
-  if (buf == nullptr || buf->data == nullptr || buf->header.w == 0 || buf->header.h == 0 ||
-      buf->header.cf != LV_COLOR_FORMAT_RGB565) {
-    ESP_LOGE(TAG, "The picture canvas needs an RGB565 buffer (a canvas without transparency)");
-    return false;
-  }
-  this->pic_lvgl_buf_ = buf;
-  return true;
-}
-
-// The canvas' own size, or the widget's in full screen.
+// The canvas widget's size (YAML width/height, or what full screen set).
 void SimpleVideoPlayer::update_picture_size_() {
-  int32_t w = static_cast<int32_t>(this->pic_lvgl_buf_->header.w);
-  int32_t h = static_cast<int32_t>(this->pic_lvgl_buf_->header.h);
-  if (this->fullscreen_) {
-    lv_obj_update_layout(this->pic_canvas_);
-    const int32_t ow = lv_obj_get_width(this->pic_canvas_);
-    const int32_t oh = lv_obj_get_height(this->pic_canvas_);
-    if (ow > 0 && oh > 0) {
-      w = ow;
-      h = oh;
-    }
+  lv_obj_update_layout(this->pic_canvas_);
+  int32_t w = lv_obj_get_width(this->pic_canvas_);
+  int32_t h = lv_obj_get_height(this->pic_canvas_);
+  if ((w <= 0 || h <= 0) && this->pic_lvgl_buf_ != nullptr) {
+    w = static_cast<int32_t>(this->pic_lvgl_buf_->header.w);
+    h = static_cast<int32_t>(this->pic_lvgl_buf_->header.h);
   }
   this->pic_w_ = w;
   this->pic_h_ = h;
@@ -1081,7 +1070,7 @@ void SimpleVideoPlayer::finish_picture_() {
 }
 
 void SimpleVideoPlayer::set_fullscreen(bool fullscreen) {
-  if (this->pic_canvas_ == nullptr || this->pic_lvgl_buf_ == nullptr)
+  if (this->pic_canvas_ == nullptr || !this->pic_ready_)
     return;
   if (this->pic_read_.decoding && !this->pic_read_.thumbnail) {
     this->pic_fullscreen_pending_ = fullscreen ? 1 : 0;  // for the size being decoded

@@ -1019,7 +1019,7 @@ class SimpleVideoPlayer : public Component
   uint32_t pic_stride_{0};
   size_t pic_page_bytes_{0};              // a page: the display's whole size, any canvas size fits
   bool pic_buffers_failed_{false};        // the pool had no room for them; tried again after a video
-  lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer (YAML), shown while no page is
+  lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer, shown while no page is; none: external_buffer
   bool pic_restore_{false};               // the pages went to a video: the picture decoded again after it
   int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while a picture is decoded
 
@@ -1102,7 +1102,6 @@ class SimpleVideoPlayer : public Component
   void update_picture_size_();
   static void picture_task_entry_(void *arg);
   void decode_job_(PictureJob &job);
-  bool adopt_canvas_buffer_();
   void render_current_();
   void finish_picture_();
   void show_overlay_icon_(bool playing);

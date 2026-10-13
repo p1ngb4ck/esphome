@@ -67,6 +67,7 @@ CONF_MAX_WIDTH = "max_width"
 CONF_TRANSPARENT = "transparent"
 CONF_DRAW_BUF_ID = "draw_buf_id"
 CONF_DMA_BUFFER = "dma_buffer"
+CONF_EXTERNAL_BUFFER = "external_buffer"
 
 lv_canvas_t = LvType("lv_canvas_t")
 lv_draw_buf_t = LvType("lv_draw_buf_t")
@@ -83,7 +84,9 @@ class CanvasType(WidgetType):
                     cv.Required(CONF_WIDTH): size,
                     cv.Required(CONF_HEIGHT): size,
                     cv.Optional(CONF_TRANSPARENT, default=False): cv.boolean,
-                    cv.Optional(CONF_DMA_BUFFER, default=False): cv.boolean,
+                    cv.Exclusive(CONF_DMA_BUFFER, "buffer"): cv.boolean,
+                    # No buffer of its own: another component (e.g. simple_video_player) sets one.
+                    cv.Exclusive(CONF_EXTERNAL_BUFFER, "buffer"): cv.boolean,
                     cv.GenerateID(CONF_DRAW_BUF_ID): cv.declare_id(lv_draw_buf_t),
                 }
             ),
@@ -94,6 +97,8 @@ class CanvasType(WidgetType):
         return CONF_IMAGE, CONF_LABEL
 
     async def to_code(self, w: Widget, config):
+        if config.get(CONF_EXTERNAL_BUFFER, False):
+            return
         width = config[CONF_WIDTH]
         height = config[CONF_HEIGHT]
         # LVGL 9.4: Use LV_COLOR_FORMAT instead of LV_IMG_CF
@@ -107,7 +112,7 @@ class CanvasType(WidgetType):
         # stride is 0 for default (width * bytes_per_pixel)
         draw_buf = cg.new_Pvariable(config[CONF_DRAW_BUF_ID])
         buf_size = literal(f"LV_DRAW_BUF_SIZE({width}, {height}, {color_format})")
-        if config[CONF_DMA_BUFFER]:
+        if config.get(CONF_DMA_BUFFER, False):
             lv.append(cg.RawStatement("#ifdef USE_HWJPG"))
             # Round the buffer size up to a cache line (64 B on ESP32-P4). LV_DRAW_BUF_SIZE is not
             # cache-line aligned, and jpeg_alloc_decoder_mem() / the HW decoder's alignment check
