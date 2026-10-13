@@ -5,6 +5,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
+#include <esp_cache.h>
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
 
@@ -17,7 +18,6 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.pictures";
 
-static constexpr size_t READ_CHUNK = 32 * 1024;
 static constexpr size_t PSRAM_MARGIN = 64 * 1024;
 static constexpr uint32_t LIST_RETRY_MS = 1000;
 static constexpr size_t MAX_IMAGES = 1000;
@@ -34,12 +34,10 @@ static bool picture_format(const std::string &name, runtime_image::ImageFormat *
   if (dot == std::string::npos)
     return false;
   const std::string extension = lower(name.substr(dot));
-#ifdef USE_RUNTIME_IMAGE_JPEG
   if (extension == ".jpg" || extension == ".jpeg") {
-    *format = runtime_image::JPEG;
+    *format = runtime_image::JPEG;  // the JPEG unit, not runtime_image
     return true;
   }
-#endif
 #ifdef USE_RUNTIME_IMAGE_PNG
   if (extension == ".png") {
     *format = runtime_image::PNG;
@@ -55,6 +53,8 @@ static bool picture_format(const std::string &name, runtime_image::ImageFormat *
   return false;
 }
 
+static constexpr size_t align_up(size_t value, size_t align) { return (value + align - 1) & ~(align - 1); }
+
 static size_t psram_largest() { return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
 
 static uint16_t to_rgb565(uint32_t color) {
@@ -68,15 +68,14 @@ static uint16_t to_rgb565(uint32_t color) {
 void SimpleVideoPlayer::pictures_setup_() {
   if (this->pic_canvas_ == nullptr)
     return;
+  if (!this->adopt_canvas_buffer_())
+    return;
+#if defined(USE_RUNTIME_IMAGE_PNG) || defined(USE_RUNTIME_IMAGE_BMP)
   this->pic_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
                                                                    image::TRANSPARENCY_OPAQUE);
-  if (this->thumbs_enabled_ && this->thumb_container_ != nullptr && this->thumb_count_ > 0) {
-    if (this->setup_thumbnails_()) {
-      this->thumb_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
-                                                                         image::TRANSPARENCY_OPAQUE, nullptr, false,
-                                                                         this->thumb_w_, this->thumb_h_);
-    }
-  }
+#endif
+  if (this->thumbs_enabled_ && this->thumb_container_ != nullptr && this->thumb_count_ > 0)
+    this->setup_thumbnails_();
 
   lv_obj_t *canvas = this->pic_canvas_;
   lv_obj_set_clickable(canvas, true);
@@ -96,7 +95,7 @@ void SimpleVideoPlayer::pictures_setup_() {
         LV_EVENT_SCREEN_UNLOAD_START, this);
   }
 
-  // A large photo takes seconds to decode: on its own task, on Core 1 at the loop task's priority
+  // Decoding (and scaling a large photo) off the main loop: on Core 1 at the loop task's priority
   // like the video's decode (DMA2D with LVGL's PPA, esp-idf#18999, see play()).
   if (xTaskCreatePinnedToCore(picture_task_entry_, "svp_pictures", 8192, this, 1, &this->pic_task_, 1) != pdPASS) {
     ESP_LOGE(TAG, "Could not create the picture task -- pictures disabled");
@@ -150,17 +149,29 @@ void SimpleVideoPlayer::pictures_loop_() {
     this->next_image();
   }
   if (this->pic_wanted_ >= 0) {
-    this->start_read_(false, static_cast<size_t>(this->pic_wanted_), 0);
+    const size_t index = static_cast<size_t>(this->pic_wanted_);
+    if (PicFile *file = this->cached_file_(index)) {
+      if (!this->start_decode_(false, index, 0, file))
+        this->pic_wanted_ = -1;
+    } else {
+      this->start_read_(false, index, 0);
+    }
     return;
   }
   while (!this->thumb_queue_.empty()) {
     const size_t slot = this->thumb_queue_.front();
     this->thumb_queue_.erase(this->thumb_queue_.begin());
     if (slot < this->thumb_slots_.size() && !this->thumb_slots_[slot].loaded && this->thumb_slots_[slot].image >= 0) {
-      this->start_read_(true, static_cast<size_t>(this->thumb_slots_[slot].image), slot);
+      const size_t index = static_cast<size_t>(this->thumb_slots_[slot].image);
+      if (PicFile *file = this->cached_file_(index)) {
+        this->start_decode_(true, index, slot, file);
+      } else {
+        this->start_read_(true, index, slot);
+      }
       return;
     }
   }
+  this->preload_neighbours_();
 }
 
 //========================================================================
@@ -298,6 +309,7 @@ bool SimpleVideoPlayer::show_image(const std::string &path) {
 bool SimpleVideoPlayer::next_image() {
   if (this->images_.empty())
     return false;
+  this->pic_direction_ = 1;
   const int base = this->pic_wanted_ >= 0 ? this->pic_wanted_ : this->current_image_;
   return this->show_image(static_cast<size_t>((base + 1) % static_cast<int>(this->images_.size())));
 }
@@ -305,6 +317,7 @@ bool SimpleVideoPlayer::next_image() {
 bool SimpleVideoPlayer::previous_image() {
   if (this->images_.empty())
     return false;
+  this->pic_direction_ = -1;
   const int base = this->pic_wanted_ >= 0 ? this->pic_wanted_ : this->current_image_;
   const int count = static_cast<int>(this->images_.size());
   return this->show_image(static_cast<size_t>(base <= 0 ? count - 1 : base - 1));
@@ -341,30 +354,56 @@ void SimpleVideoPlayer::toggle_slideshow() {
 }
 
 //========================================================================
-// Reading through the storage worker
+// Reading through the storage worker: each file whole, in one request
 //========================================================================
 
-bool SimpleVideoPlayer::reserve_file_buffer_(size_t size) {
-  if (this->pic_file_cap_ >= size)
+SimpleVideoPlayer::PicFile *SimpleVideoPlayer::cached_file_(size_t index) {
+  for (PicFile &file : this->pic_files_) {
+    if (file.index == static_cast<int>(index) && file.generation == this->pic_generation_ && file.length != 0)
+      return &file;
+  }
+  return nullptr;
+}
+
+// A file to read into: an empty or stale one, else the least recently used one that is neither
+// shown nor asked for.
+SimpleVideoPlayer::PicFile *SimpleVideoPlayer::free_file_() {
+  PicFile *best = nullptr;
+  for (PicFile &file : this->pic_files_) {
+    if (file.index < 0 || file.generation != this->pic_generation_ || file.length == 0)
+      return &file;
+    if (file.index == this->current_image_ || file.index == this->pic_wanted_)
+      continue;
+    if (best == nullptr || static_cast<int32_t>(file.used_ms - best->used_ms) < 0)
+      best = &file;
+  }
+  return best;
+}
+
+bool SimpleVideoPlayer::reserve_file_(PicFile *file, size_t size) {
+  if (file->capacity >= size)
     return true;
-  if (this->pic_file_ != nullptr) {
-    heap_caps_free(this->pic_file_);
-    this->pic_file_ = nullptr;
-    this->pic_file_cap_ = 0;
+  if (file->data != nullptr) {
+    heap_caps_free(file->data);  // jpeg_alloc_decoder_mem()
+    file->data = nullptr;
+    file->capacity = 0;
   }
   if (psram_largest() < size + PSRAM_MARGIN)
     return false;
-  // Cache-line aligned: the JPEG unit reads it by DMA.
-  this->pic_file_ = static_cast<uint8_t *>(heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (this->pic_file_ == nullptr)
+  // The hardware decoder reads it by DMA.
+  jpeg_decode_memory_alloc_cfg_t cfg{};
+  cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
+  size_t got = 0;
+  file->data = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &cfg, &got));
+  if (file->data == nullptr)
     return false;
-  this->pic_file_cap_ = size;
+  file->capacity = got;
   return true;
 }
 
-void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot) {
+void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot, bool preload) {
   if (index >= this->images_.size()) {
-    if (!thumbnail)
+    if (!thumbnail && !preload)
       this->pic_wanted_ = -1;
     return;
   }
@@ -372,28 +411,35 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot) {
   const char *why = nullptr;
   const char *rel = nullptr;
   storage::PathStorage *storage = nullptr;
+  PicFile *file = thumbnail ? &this->thumb_file_ : this->free_file_();
+  // Room up to a multiple of 16 past the file: the decoder is given that much (as the video's).
+  const size_t size = static_cast<size_t>(entry.size) + 16;
   if (storage::global_storage_registry == nullptr || storage::global_storage_worker == nullptr) {
     why = "no storage";
   } else if ((storage = storage::global_storage_registry->resolve_path(entry.path.c_str(), &rel)) == nullptr ||
              rel == nullptr || rel[0] == '\0') {
     why = "storage not mounted";
-  } else if (!this->reserve_file_buffer_(static_cast<size_t>(entry.size) + 1)) {
+  } else if (file == nullptr || !this->reserve_file_(file, size)) {
     why = "not enough PSRAM for the file";
   }
   if (why != nullptr) {
     ESP_LOGW(TAG, "%s: %s", entry.path.c_str(), why);
-    if (!thumbnail)
+    if (!thumbnail && !preload)
       this->pic_wanted_ = -1;
     return;
   }
 
+  file->index = -1;  // being read
+  file->length = 0;
   PictureRead &read = this->pic_read_;
   read = PictureRead{};
   read.active = true;
   read.thumbnail = thumbnail;
+  read.preload = preload;
   read.index = index;
   read.slot = slot;
   read.generation = this->pic_generation_;
+  read.file = file;
   read.limit = static_cast<size_t>(entry.size) + 1;
   const storage::StorageError err =
       storage::global_storage_worker->begin_read(storage, rel, &read.handle, [this](storage::StorageError result) {
@@ -414,32 +460,32 @@ void SimpleVideoPlayer::start_read_(bool thumbnail, size_t index, size_t slot) {
     return;
   }
   ESP_LOGW(TAG, "%s: %s", entry.path.c_str(), storage::error_to_string(err));
-  if (!thumbnail)
+  if (!thumbnail && !preload)
     this->pic_wanted_ = -1;
 }
 
+// The rest of the file in one request; another only when the storage returned less.
 void SimpleVideoPlayer::read_next_chunk_() {
   PictureRead &read = this->pic_read_;
-  const size_t room = read.limit - read.length;
-  if (room == 0) {
-    read.failed = true;  // larger than when it was listed
-    this->finish_read_();
-    return;
-  }
-  const storage::StorageError err =
-      storage::global_storage_worker->read_chunk(read.handle, this->pic_file_ + read.length, std::min(room, READ_CHUNK),
-                                                 &read.chunk, [this](storage::StorageError result) {
-                                                   PictureRead &read = this->pic_read_;
-                                                   if (result != storage::StorageError::STORAGE_ERROR_OK) {
-                                                     read.failed = true;
-                                                     this->finish_read_();
-                                                   } else if (read.chunk == 0) {
-                                                     this->finish_read_();  // end of file
-                                                   } else {
-                                                     read.length += read.chunk;
-                                                     this->read_next_chunk_();
-                                                   }
-                                                 });
+  const storage::StorageError err = storage::global_storage_worker->read_chunk(
+      read.handle, read.file->data + read.length, read.limit - read.length, &read.chunk,
+      [this](storage::StorageError result) {
+        PictureRead &read = this->pic_read_;
+        if (result != storage::StorageError::STORAGE_ERROR_OK) {
+          read.failed = true;
+          this->finish_read_();
+          return;
+        }
+        read.length += read.chunk;
+        if (read.chunk == 0 || read.length + 1 == read.limit) {
+          this->finish_read_();  // end of file, or all of it
+        } else if (read.length == read.limit) {
+          read.failed = true;  // larger than when it was listed
+          this->finish_read_();
+        } else {
+          this->read_next_chunk_();
+        }
+      });
   if (err != storage::StorageError::STORAGE_ERROR_OK) {
     read.failed = true;
     this->finish_read_();
@@ -456,161 +502,112 @@ void SimpleVideoPlayer::finish_read_() {
 void SimpleVideoPlayer::picture_read_done_() {
   const PictureRead read = this->pic_read_;
   this->pic_read_ = PictureRead{};
-  if (!read.thumbnail && this->pic_wanted_ == static_cast<int>(read.index))
-    this->pic_wanted_ = -1;
   if (read.generation != this->pic_generation_ || read.index >= this->images_.size())
     return;
   const ImageEntry &entry = this->images_[read.index];
   if (read.failed || read.length == 0) {
     ESP_LOGW(TAG, "Cannot read %s", entry.path.c_str());
+    if (!read.thumbnail && !read.preload && this->pic_wanted_ == static_cast<int>(read.index))
+      this->pic_wanted_ = -1;
     return;
   }
-
+  PicFile *file = read.file;
+  file->index = static_cast<int>(read.index);
+  file->generation = read.generation;
+  file->length = read.length;
+  file->used_ms = millis();
+  if (read.preload)
+    return;
   if (read.thumbnail) {
-    if (this->thumb_image_ == nullptr || read.slot >= this->thumb_slots_.size() ||
-        this->thumb_slots_[read.slot].image != static_cast<int>(read.index))
-      return;
-    const size_t need = static_cast<size_t>(this->thumb_w_) * this->thumb_h_ * 2;
-    if (psram_largest() < need + PSRAM_MARGIN) {
-      ESP_LOGW(TAG, "Not enough PSRAM for a thumbnail");
-      return;
-    }
-    this->start_decode_(read, this->thumb_image_.get(), entry.path);
+    if (read.slot < this->thumb_slots_.size() && this->thumb_slots_[read.slot].image == static_cast<int>(read.index))
+      this->start_decode_(true, read.index, read.slot, file);
     return;
   }
-
-  if (this->pic_wanted_ >= 0)
-    return;  // another picture was asked for meanwhile
-  size_t need = 1024 * 1024;
-  if (this->adopt_canvas_buffer_())
-    need = static_cast<size_t>(this->pic_draw_buf_->header.w) * this->pic_draw_buf_->header.h * 2;
-  if (psram_largest() < need + PSRAM_MARGIN) {
-    ESP_LOGW(TAG, "%s: not enough PSRAM to decode", entry.path.c_str());
-    return;
-  }
-  this->start_decode_(read, this->pic_image_.get(), entry.path);
+  // Shown unless another picture was asked for meanwhile (this one stays read).
+  if (this->pic_wanted_ == static_cast<int>(read.index))
+    this->start_decode_(false, read.index, 0, file);
 }
 
-void SimpleVideoPlayer::start_decode_(const PictureRead &read, runtime_image::RuntimeImage *image,
-                                      const std::string &path) {
-  this->pic_read_ = read;
-  this->pic_read_.decoding = true;
-  this->pic_decode_image_ = image;
-  this->pic_decode_path_ = path;
-  this->pic_decode_length_ = read.length;
+// The pictures next to the shown one, read ahead (compressed) while nothing else is to do.
+void SimpleVideoPlayer::preload_neighbours_() {
+  const int count = static_cast<int>(this->images_.size());
+  if (this->current_image_ < 0 || count < 2)
+    return;
+  while (this->pic_preload_tries_ < 2) {
+    const int step = this->pic_preload_tries_++ == 0 ? this->pic_direction_ : -this->pic_direction_;
+    const size_t index = static_cast<size_t>((this->current_image_ + step + count) % count);
+    if (this->cached_file_(index) == nullptr) {
+      this->start_read_(false, index, 0, true);
+      return;
+    }
+  }
+}
+
+//========================================================================
+// Decoding, on the picture task
+//========================================================================
+
+bool SimpleVideoPlayer::start_decode_(bool thumbnail, size_t index, size_t slot, PicFile *file) {
+  PictureJob &job = this->pic_job_;
+  job = PictureJob{};
+  job.thumbnail = thumbnail;
+  job.data = file->data;
+  job.length = file->length;
+  job.path = this->images_[index].path;
+  if (thumbnail) {
+    job.target = this->thumb_slots_[slot].data;
+    job.target_capacity = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
+    job.target_w = this->thumb_w_;
+    job.target_h = this->thumb_h_;
+    job.target_stride = this->thumb_stride_;
+    job.fit = ImageFitMode::SCALE_TO_FIT;
+  } else {
+    if (this->pic_full_buf_ == nullptr)
+      return false;
+    if (this->pic_wanted_ == static_cast<int>(index))
+      this->pic_wanted_ = -1;
+    job.target = this->pic_full_buf_->data;
+    job.target_capacity = this->pic_full_buf_->data_size;
+    job.target_w = this->pic_full_buf_->header.w;
+    job.target_h = this->pic_full_buf_->header.h;
+    job.target_stride = this->pic_full_buf_->header.stride;
+    job.fit = this->fit_mode_;
+  }
+  file->used_ms = millis();
+  PictureRead &read = this->pic_read_;
+  read = PictureRead{};
+  read.active = true;
+  read.decoding = true;
+  read.thumbnail = thumbnail;
+  read.index = index;
+  read.slot = slot;
+  read.generation = this->pic_generation_;
+  read.file = file;
   this->pic_decoded_.store(false, std::memory_order_relaxed);
   xTaskNotifyGive(this->pic_task_);
+  return true;
 }
 
 void SimpleVideoPlayer::picture_task_entry_(void *arg) {
   auto *self = static_cast<SimpleVideoPlayer *>(arg);
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    self->pic_decode_ok_ = self->decode_file_(self->pic_decode_image_, self->pic_decode_path_, self->pic_decode_length_);
+    self->decode_job_(self->pic_job_);
     self->pic_decoded_.store(true, std::memory_order_release);
   }
 }
 
-void SimpleVideoPlayer::picture_decoded_() {
-  const PictureRead read = this->pic_read_;
-  this->pic_read_ = PictureRead{};
-  this->pic_decoded_.store(false, std::memory_order_relaxed);
-  const bool current = read.generation == this->pic_generation_ && read.index < this->images_.size();
-  if (read.thumbnail) {
-    if (this->pic_decode_ok_ && current && read.slot < this->thumb_slots_.size() &&
-        this->thumb_slots_[read.slot].image == static_cast<int>(read.index))
-      this->store_thumbnail_(read.slot);
-    return;
-  }
-  if (!this->pic_decode_ok_)
-    return;
-  if (!current) {
-    this->pic_image_->release();  // of a folder no longer listed
-    return;
-  }
-  const ImageEntry &entry = this->images_[read.index];
-  this->current_image_ = static_cast<int>(read.index);
-  this->compose_picture_();
-  const size_t slots = this->thumb_slots_.size();
-  if (slots != 0 && (read.index < this->thumb_window_ || read.index >= this->thumb_window_ + slots))
-    this->place_thumbnail_window_(read.index > slots / 2 ? read.index - slots / 2 : 0);
-  this->highlight_thumbnail_(true);
-  ESP_LOGD(TAG, "Showing %s (%dx%d)", entry.filename.c_str(), this->pic_image_->get_width(),
-           this->pic_image_->get_height());
-}
-
-bool SimpleVideoPlayer::decode_file_(runtime_image::RuntimeImage *image, const std::string &path, size_t length) {
-  runtime_image::ImageFormat format;
-  if (!picture_format(path, &format) || !image->begin_decode(length, format))
-    return false;
-  size_t offset = 0;
-  while (offset < length) {
-    const int used = image->feed_data(this->pic_file_ + offset, length - offset);
-    if (used < 0) {
-      ESP_LOGW(TAG, "%s: %s", path.c_str(), runtime_image::decode_error_to_string(used));
-      image->release();
-      return false;
-    }
-    if (used == 0)
-      break;
-    offset += static_cast<size_t>(used);
-  }
-  image->end_decode();
-  const uint8_t *pixels = image->get_data_start();
-  if (pixels == nullptr || image->get_width() <= 0 || image->get_height() <= 0) {
-    ESP_LOGW(TAG, "%s: incomplete picture", path.c_str());
-    image->release();
-    return false;
-  }
-  // runtime_image allocates with an internal-RAM fallback: a picture never stays there.
-  if (!esp_ptr_external_ram(pixels)) {
-    ESP_LOGE(TAG, "%s: decoded outside PSRAM -- dropped", path.c_str());
-    image->release();
-    return false;
-  }
-  return true;
-}
-
-//========================================================================
-// Canvas
-//========================================================================
-
-bool SimpleVideoPlayer::adopt_canvas_buffer_() {
-  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
-  if (buf == nullptr || buf->data == nullptr || buf->header.w == 0 || buf->header.h == 0 ||
-      buf->header.cf != LV_COLOR_FORMAT_RGB565) {
-    if (!this->pic_buf_error_logged_) {
-      ESP_LOGE(TAG, "The picture canvas needs an RGB565 buffer (a canvas without transparency)");
-      this->pic_buf_error_logged_ = true;
-    }
-    this->pic_draw_buf_ = nullptr;
-    return false;
-  }
-  this->pic_draw_buf_ = buf;
-  return true;
-}
-
-void SimpleVideoPlayer::compose_picture_() {
-  if (this->pic_read_.decoding && !this->pic_read_.thumbnail)
-    return;  // the picture task is writing pic_image_; composed once it is done
-  if (this->pic_image_ == nullptr || this->pic_image_->get_data_start() == nullptr || !this->adopt_canvas_buffer_())
-    return;
-  lv_draw_buf_t *buf = this->pic_draw_buf_;
-  const int32_t cw = buf->header.w;
-  const int32_t ch = buf->header.h;
-  const uint32_t stride = buf->header.stride;
-  const int32_t iw = this->pic_image_->get_width();
-  const int32_t ih = this->pic_image_->get_height();
-  const auto *src = reinterpret_cast<const uint16_t *>(this->pic_image_->get_data_start());
-
+// Nearest neighbour, 16.16 fixed point, into all of the target as the fit mode says; black around.
+static void scale_rgb565(const uint8_t *src, int32_t iw, int32_t ih, uint32_t src_stride, uint8_t *dst, int32_t cw,
+                         int32_t ch, uint32_t stride, ImageFitMode fit) {
   int32_t dw = iw;
   int32_t dh = ih;
-  switch (this->fit_mode_) {
+  switch (fit) {
     case ImageFitMode::SCALE_TO_FIT:
     case ImageFitMode::SCALE_TO_FILL: {
       const float sx = static_cast<float>(cw) / static_cast<float>(iw);
       const float sy = static_cast<float>(ch) / static_cast<float>(ih);
-      const float scale = this->fit_mode_ == ImageFitMode::SCALE_TO_FIT ? std::min(sx, sy) : std::max(sx, sy);
+      const float scale = fit == ImageFitMode::SCALE_TO_FIT ? std::min(sx, sy) : std::max(sx, sy);
       dw = std::max<int32_t>(1, static_cast<int32_t>(static_cast<float>(iw) * scale));
       dh = std::max<int32_t>(1, static_cast<int32_t>(static_cast<float>(ih) * scale));
       break;
@@ -624,22 +621,20 @@ void SimpleVideoPlayer::compose_picture_() {
   }
   const int32_t dx = (cw - dw) / 2;
   const int32_t dy = (ch - dh) / 2;
-
-  if (this->fit_mode_ != ImageFitMode::STRETCH) {
+  if (fit != ImageFitMode::STRETCH) {
     for (int32_t y = 0; y < ch; y++)
-      memset(buf->data + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(cw) * 2);
+      memset(dst + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(cw) * 2);
   }
   const int32_t x0 = std::max<int32_t>(dx, 0);
   const int32_t x1 = std::min<int32_t>(dx + dw, cw);
   const int32_t y0 = std::max<int32_t>(dy, 0);
   const int32_t y1 = std::min<int32_t>(dy + dh, ch);
-  // Nearest neighbour, 16.16 fixed point.
   const uint64_t step_x = (static_cast<uint64_t>(iw) << 16) / static_cast<uint64_t>(dw);
   const uint64_t step_y = (static_cast<uint64_t>(ih) << 16) / static_cast<uint64_t>(dh);
   for (int32_t y = y0; y < y1; y++) {
     const int32_t sy = std::min<int32_t>(static_cast<int32_t>((static_cast<uint64_t>(y - dy) * step_y) >> 16), ih - 1);
-    const uint16_t *src_row = src + static_cast<size_t>(sy) * iw;
-    auto *dst_row = reinterpret_cast<uint16_t *>(buf->data + static_cast<size_t>(y) * stride);
+    const auto *src_row = reinterpret_cast<const uint16_t *>(src + static_cast<size_t>(sy) * src_stride);
+    auto *dst_row = reinterpret_cast<uint16_t *>(dst + static_cast<size_t>(y) * stride);
     if (dw == iw) {
       memcpy(dst_row + x0, src_row + (x0 - dx), static_cast<size_t>(x1 - x0) * 2);
       continue;
@@ -648,10 +643,188 @@ void SimpleVideoPlayer::compose_picture_() {
     for (int32_t x = x0; x < x1; x++, acc += step_x)
       dst_row[x] = src_row[std::min<int32_t>(static_cast<int32_t>(acc >> 16), iw - 1)];
   }
+}
 
-  if (this->overlay_visible_) {
-    const int cx = cw / 2;
-    const int cy = ch / 2;
+// As the old picture_viewer: the whole file, the hardware decoder's RGB565, the canvas. A picture
+// no larger than the canvas goes straight into its memory; a larger one (a thumbnail always) is
+// decoded once into a buffer of its own and scaled from there.
+void SimpleVideoPlayer::decode_job_(PictureJob &job) {
+  runtime_image::ImageFormat format;
+  if (!picture_format(job.path, &format))
+    return;
+  if (format == runtime_image::JPEG) {
+    jpeg_decode_picture_info_t info{};
+    if (this->hw_jpeg_decoder_ == nullptr ||
+        jpeg_decoder_get_info(job.data, static_cast<uint32_t>(job.length), &info) != ESP_OK || info.width == 0 ||
+        info.height == 0) {
+      ESP_LOGW(TAG, "%s: not a JPEG the decoder takes", job.path.c_str());
+      return;
+    }
+    // The decoder writes whole MCUs (esp_driver_jpeg jpeg_parse_marker.c, process_h/process_v):
+    // 16 pixels wide for 4:2:2 and 4:2:0, 16 high for 4:2:0, else 8.
+    const bool wide = info.sample_method == JPEG_DOWN_SAMPLING_YUV422 || info.sample_method == JPEG_DOWN_SAMPLING_YUV420;
+    const uint32_t pw = align_up(info.width, wide ? 16 : 8);
+    const uint32_t ph = align_up(info.height, info.sample_method == JPEG_DOWN_SAMPLING_YUV420 ? 16 : 8);
+    const size_t bytes = static_cast<size_t>(pw) * ph * 2;
+    jpeg_decode_cfg_t cfg{};
+    cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
+    cfg.rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR;  // little-endian RGB565, as LVGL's
+    cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
+    const uint32_t stream = static_cast<uint32_t>(align_up(job.length, 16));
+    // Output buffers by DMA: start and size on whole cache lines (128 covers the P4's).
+    const size_t usable = job.target_capacity & ~static_cast<size_t>(127);
+    uint32_t out = 0;
+    if (!job.thumbnail && static_cast<int32_t>(info.width) <= job.target_w &&
+        static_cast<int32_t>(info.height) <= job.target_h && bytes <= usable) {
+      // Lines the CPU wrote go out first, or one written back later would land on the picture.
+      esp_cache_msync(job.target, usable, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+      if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, job.target,
+                               static_cast<uint32_t>(usable), &out) != ESP_OK ||
+          out == 0) {
+        ESP_LOGW(TAG, "%s: decoding failed", job.path.c_str());
+        return;
+      }
+      job.direct = true;
+      job.width = static_cast<int32_t>(info.width);
+      job.height = static_cast<int32_t>(info.height);
+      job.stride = pw * 2;
+      job.ok = true;
+      return;
+    }
+    if (psram_largest() < bytes + PSRAM_MARGIN) {
+      ESP_LOGW(TAG, "%s: %ux%u needs %u bytes of PSRAM to decode", job.path.c_str(), static_cast<unsigned>(info.width),
+               static_cast<unsigned>(info.height), static_cast<unsigned>(bytes));
+      return;
+    }
+    jpeg_decode_memory_alloc_cfg_t mem{};
+    mem.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+    size_t got = 0;
+    auto *full = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(bytes, &mem, &got));
+    if (full == nullptr)
+      return;
+    if (jpeg_decoder_process(this->hw_jpeg_decoder_, &cfg, job.data, stream, full, static_cast<uint32_t>(got), &out) ==
+            ESP_OK &&
+        out != 0) {
+      scale_rgb565(full, static_cast<int32_t>(info.width), static_cast<int32_t>(info.height), pw * 2, job.target,
+                   job.target_w, job.target_h, job.target_stride, job.fit);
+      job.ok = true;
+    } else {
+      ESP_LOGW(TAG, "%s: decoding failed", job.path.c_str());
+    }
+    heap_caps_free(full);
+    return;
+  }
+
+  // PNG, BMP: runtime_image, then scaled; its buffer goes again at once.
+  runtime_image::RuntimeImage *image = this->pic_image_.get();
+  if (image == nullptr || !image->begin_decode(job.length, format))
+    return;
+  size_t offset = 0;
+  auto *data = const_cast<uint8_t *>(job.data);
+  while (offset < job.length) {
+    const int used = image->feed_data(data + offset, job.length - offset);
+    if (used < 0) {
+      ESP_LOGW(TAG, "%s: %s", job.path.c_str(), runtime_image::decode_error_to_string(used));
+      image->release();
+      return;
+    }
+    if (used == 0)
+      break;
+    offset += static_cast<size_t>(used);
+  }
+  image->end_decode();
+  const uint8_t *pixels = image->get_data_start();
+  if (pixels != nullptr && image->get_width() > 0 && image->get_height() > 0 && esp_ptr_external_ram(pixels)) {
+    scale_rgb565(pixels, image->get_width(), image->get_height(), image->get_width_stride(), job.target, job.target_w,
+                 job.target_h, job.target_stride, job.fit);
+    job.ok = true;
+  } else {
+    ESP_LOGW(TAG, "%s: incomplete picture, or not in PSRAM", job.path.c_str());
+  }
+  image->release();
+}
+
+void SimpleVideoPlayer::picture_decoded_() {
+  const PictureRead read = this->pic_read_;
+  this->pic_read_ = PictureRead{};
+  this->pic_decoded_.store(false, std::memory_order_relaxed);
+  const PictureJob &job = this->pic_job_;
+  const bool current = read.generation == this->pic_generation_ && read.index < this->images_.size();
+  if (read.thumbnail) {
+    if (!job.ok || !current || read.slot >= this->thumb_slots_.size())
+      return;
+    ThumbSlot &slot = this->thumb_slots_[read.slot];
+    if (slot.image != static_cast<int>(read.index))
+      return;
+    slot.loaded = true;
+    this->show_slot_(read.slot);
+    if (this->thumb_ready_callback_)
+      this->thumb_ready_callback_(read.index);
+    return;
+  }
+
+  if (job.ok && job.direct) {
+    // The canvas memory at the picture's own size: LVGL centres it in the canvas.
+    lv_draw_buf_init(&this->pic_fit_buf_, job.width, job.height, LV_COLOR_FORMAT_RGB565, job.stride,
+                     this->pic_full_buf_->data, this->pic_full_buf_->data_size);
+    this->pic_draw_buf_ = &this->pic_fit_buf_;
+  } else {
+    if (!job.ok)
+      memset(this->pic_full_buf_->data, 0, this->pic_full_buf_->data_size);  // what it was is gone
+    this->pic_draw_buf_ = this->pic_full_buf_;
+  }
+  lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_draw_buf_);
+  if (job.ok && current) {
+    const bool changed = this->current_image_ != static_cast<int>(read.index);
+    this->current_image_ = static_cast<int>(read.index);
+    if (changed) {
+      this->pic_preload_tries_ = 0;
+      const size_t slots = this->thumb_slots_.size();
+      if (slots != 0 && (read.index < this->thumb_window_ || read.index >= this->thumb_window_ + slots))
+        this->place_thumbnail_window_(read.index > slots / 2 ? read.index - slots / 2 : 0);
+      this->highlight_thumbnail_(true);
+      ESP_LOGD(TAG, "Showing %s (%dx%d)", this->images_[read.index].filename.c_str(),
+               static_cast<int>(job.direct ? job.width : job.target_w),
+               static_cast<int>(job.direct ? job.height : job.target_h));
+    }
+  } else if (!job.ok) {
+    this->current_image_ = -1;
+  }
+  this->finish_picture_();
+  if (this->pic_fullscreen_pending_ >= 0) {
+    const bool fullscreen = this->pic_fullscreen_pending_ != 0;
+    this->pic_fullscreen_pending_ = -1;
+    this->set_fullscreen(fullscreen);
+  }
+}
+
+//========================================================================
+// Canvas
+//========================================================================
+
+bool SimpleVideoPlayer::adopt_canvas_buffer_() {
+  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
+  if (buf == nullptr || buf->data == nullptr || buf->header.w == 0 || buf->header.h == 0 ||
+      buf->header.cf != LV_COLOR_FORMAT_RGB565) {
+    ESP_LOGE(TAG, "The picture canvas needs an RGB565 buffer (a canvas without transparency)");
+    return false;
+  }
+  this->pic_full_buf_ = buf;
+  this->pic_draw_buf_ = buf;
+  return true;
+}
+
+// The shown picture once more (overlay gone, canvas resized): decoded again from its file.
+void SimpleVideoPlayer::render_current_() {
+  if (this->current_image_ >= 0 && this->pic_wanted_ < 0)
+    this->pic_wanted_ = this->current_image_;
+}
+
+// The overlay over what shows, and LVGL told.
+void SimpleVideoPlayer::finish_picture_() {
+  if (this->overlay_visible_ && this->pic_draw_buf_ != nullptr) {
+    const int cx = static_cast<int>(this->pic_draw_buf_->header.w) / 2;
+    const int cy = static_cast<int>(this->pic_draw_buf_->header.h) / 2;
     const uint16_t color = to_rgb565(this->overlay_icon_color_);
     if (this->overlay_playing_) {
       this->draw_play_icon_(cx, cy, this->overlay_icon_size_, color);
@@ -663,32 +836,42 @@ void SimpleVideoPlayer::compose_picture_() {
 }
 
 void SimpleVideoPlayer::set_fullscreen(bool fullscreen) {
-  if (this->fullscreen_ == fullscreen || this->pic_canvas_ == nullptr)
+  if (this->pic_canvas_ == nullptr || this->pic_full_buf_ == nullptr)
+    return;
+  if (this->pic_read_.decoding && !this->pic_read_.thumbnail) {
+    this->pic_fullscreen_pending_ = fullscreen ? 1 : 0;  // the task writes the canvas memory
+    return;
+  }
+  if (this->fullscreen_ == fullscreen)
     return;
   this->fullscreen_ = fullscreen;
   lv_obj_update_layout(this->pic_canvas_);
   const int32_t w = lv_obj_get_width(this->pic_canvas_);
   const int32_t h = lv_obj_get_height(this->pic_canvas_);
-  lv_draw_buf_t *buf = lv_canvas_get_draw_buf(this->pic_canvas_);
-  if (w <= 0 || h <= 0 ||
-      (buf != nullptr && buf->header.w == static_cast<uint32_t>(w) && buf->header.h == static_cast<uint32_t>(h))) {
-    this->compose_picture_();
+  if (w <= 0 || h <= 0 || (this->pic_full_buf_->header.w == static_cast<uint32_t>(w) &&
+                           this->pic_full_buf_->header.h == static_cast<uint32_t>(h))) {
+    this->render_current_();
     return;
   }
+  // DMA-capable, as the canvas's own: pictures that fit are decoded straight into it.
   const size_t size = static_cast<size_t>(lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565)) * h;
   uint8_t *memory = nullptr;
-  if (psram_largest() >= size + PSRAM_MARGIN)
-    memory = static_cast<uint8_t *>(heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (psram_largest() >= size + PSRAM_MARGIN) {
+    jpeg_decode_memory_alloc_cfg_t mem{};
+    mem.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+    size_t got = 0;
+    memory = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &mem, &got));
+  }
   if (memory == nullptr) {
     ESP_LOGE(TAG, "No PSRAM for a %dx%d canvas buffer", static_cast<int>(w), static_cast<int>(h));
     return;
   }
-  memset(memory, 0, size);
   lv_canvas_set_buffer(this->pic_canvas_, memory, w, h, LV_COLOR_FORMAT_RGB565);
   if (this->pic_own_buf_ != nullptr)
     heap_caps_free(this->pic_own_buf_);  // the canvas has let go of it
   this->pic_own_buf_ = memory;
-  this->compose_picture_();
+  this->adopt_canvas_buffer_();
+  this->render_current_();
 }
 
 //========================================================================
@@ -699,14 +882,17 @@ void SimpleVideoPlayer::show_overlay_icon_(bool playing) {
   this->overlay_visible_ = true;
   this->overlay_playing_ = playing;
   this->overlay_shown_ms_ = millis();
-  this->compose_picture_();
+  if (this->pic_read_.decoding && !this->pic_read_.thumbnail)
+    return;  // drawn once the picture is there
+  if (this->current_image_ >= 0)
+    this->finish_picture_();
 }
 
 void SimpleVideoPlayer::hide_overlay_icon_() {
   if (!this->overlay_visible_)
     return;
   this->overlay_visible_ = false;
-  this->compose_picture_();
+  this->render_current_();  // the picture without it
 }
 
 void SimpleVideoPlayer::fill_rect_(int x0, int y0, int x1, int y1, uint16_t color) {
@@ -1138,27 +1324,6 @@ void SimpleVideoPlayer::thumbnails_scrolled_() {
     for (size_t k = first; k-- > 0 && first - k <= this->thumb_preload_;)
       this->queue_slot_(k);
   }
-}
-
-void SimpleVideoPlayer::store_thumbnail_(size_t slot_index) {
-  ThumbSlot &slot = this->thumb_slots_[slot_index];
-  runtime_image::RuntimeImage *thumb = this->thumb_image_.get();
-  // Fitted into the slot with its aspect kept: centred, black around it.
-  const int32_t tw = std::min<int32_t>(thumb->get_width(), this->thumb_w_);
-  const int32_t th = std::min<int32_t>(thumb->get_height(), this->thumb_h_);
-  const int32_t ox = (this->thumb_w_ - tw) / 2;
-  const int32_t oy = (this->thumb_h_ - th) / 2;
-  const uint8_t *src = thumb->get_data_start();
-  const size_t src_stride = thumb->get_width_stride();
-  memset(slot.data, 0, static_cast<size_t>(this->thumb_stride_) * this->thumb_h_);
-  for (int32_t y = 0; y < th; y++)
-    memcpy(slot.data + static_cast<size_t>(oy + y) * this->thumb_stride_ + static_cast<size_t>(ox) * 2,
-           src + static_cast<size_t>(y) * src_stride, static_cast<size_t>(tw) * 2);
-  thumb->release();
-  slot.loaded = true;
-  this->show_slot_(slot_index);
-  if (this->thumb_ready_callback_)
-    this->thumb_ready_callback_(static_cast<size_t>(slot.image));
 }
 
 void SimpleVideoPlayer::show_slot_(size_t slot_index) {

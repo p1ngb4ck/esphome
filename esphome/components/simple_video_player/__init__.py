@@ -56,7 +56,7 @@ CONF_PICTURE_CANVAS_ID = "picture_canvas_id"
 
 def AUTO_LOAD(config):
     load = ["image", "audio", "json"]
-    # Pictures are decoded by runtime_image (its formats enabled in to_code).
+    # PNG and BMP pictures are decoded by runtime_image (its formats enabled in to_code).
     if config and CONF_PICTURE_CANVAS_ID in config:
         load.append("runtime_image")
     return load
@@ -207,7 +207,8 @@ CONF_ON_THUMBNAIL_CLICK = "on_thumbnail_click"
 CONF_INDEX = "index"
 CONF_PATH = "path"
 CONF_FULLSCREEN = "fullscreen"
-PICTURE_FORMATS = ("JPEG", "PNG", "BMP")
+# JPEG is the P4's JPEG unit itself (svp's decoder); these go through runtime_image.
+PICTURE_FORMATS = ("PNG", "BMP")
 # Picture keys with no default: setting one without picture_canvas_id is an error.
 PICTURE_ONLY_KEYS = (
     CONF_PICTURE_DIRECTORIES,
@@ -416,7 +417,6 @@ def _picture_schema():
 async def _pictures_to_code(var, config):
     from esphome.components.runtime_image import enable_format
 
-    # JPEG goes through esp32.require_hw_jpeg() (the P4's JPEG unit).
     for name in PICTURE_FORMATS:
         enable_format(name)
     cg.add_define("SVP_PICTURES")
@@ -773,6 +773,20 @@ def _final_validate(config):
 
     if CONF_CANVAS_ID in config:
         _resolve_canvas_size(config, fconf)
+
+    # A picture that fits is decoded straight into the canvas: its buffer must take the JPEG
+    # unit's DMA.
+    if CONF_PICTURE_CANVAS_ID in config:
+        canvas_id = config[CONF_PICTURE_CANVAS_ID]
+        try:
+            canvas_conf = fconf.get_config_for_path(fconf.get_path_for_id(canvas_id)[:-1])
+        except KeyError as err:
+            raise cv.Invalid(f"Could not resolve {CONF_PICTURE_CANVAS_ID} '{canvas_id}' to its own config") from err
+        if not canvas_conf.get("dma_buffer", False):
+            raise cv.Invalid(
+                f"{CONF_PICTURE_CANVAS_ID}: pictures are decoded straight into canvas '{canvas_id}' -- give it "
+                "`dma_buffer: true`."
+            )
 
     # The svp_* actions are registered at runtime (CustomAPIDevice::register_service), which the API
     # only builds in with custom_services.

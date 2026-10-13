@@ -879,20 +879,52 @@ class SimpleVideoPlayer : public Component
     lv_obj_t *canvas{nullptr};
     lv_obj_t *label{nullptr};
   };
-  // The file being read through the storage worker, then decoded on the main loop.
+  // A whole picture file, compressed, in PSRAM: the shown one and the ones read ahead.
+  struct PicFile {
+    int index{-1};  // image, -1 for none
+    uint32_t generation{0};
+    uint8_t *data{nullptr};
+    size_t capacity{0};
+    size_t length{0};
+    uint32_t used_ms{0};
+  };
+  static constexpr size_t PIC_FILE_COUNT = 3;
+  // The file being read through the storage worker (whole, in one request), then decoded on the
+  // picture task.
   struct PictureRead {
     bool active{false};
     bool done{false};
     bool failed{false};
     bool thumbnail{false};
-    size_t index{0};  // image
-    size_t slot{0};   // thumbnail slot
+    bool preload{false};  // only read ahead, not shown
+    size_t index{0};      // image
+    size_t slot{0};       // thumbnail slot
     uint32_t generation{0};
+    PicFile *file{nullptr};
     storage::StreamHandle handle{};
     size_t limit{0};  // one byte more than the listed size: a file that grew is noticed
     size_t length{0};
     size_t chunk{0};
-    bool decoding{false};  // read, handed to the picture task
+    bool decoding{false};  // handed to the picture task
+  };
+  // What the picture task decodes, and into what.
+  struct PictureJob {
+    bool thumbnail{false};
+    const uint8_t *data{nullptr};
+    size_t length{0};
+    std::string path;
+    // The canvas memory (a picture) or the slot (a thumbnail), RGB565.
+    uint8_t *target{nullptr};
+    size_t target_capacity{0};
+    int32_t target_w{0}, target_h{0};
+    uint32_t target_stride{0};
+    ImageFitMode fit{ImageFitMode::SCALE_TO_FIT};
+    // Result: straight into the target at the picture's own size (stride: the decoder's rows), or
+    // scaled into all of it.
+    bool ok{false};
+    bool direct{false};
+    int32_t width{0}, height{0};
+    uint32_t stride{0};
   };
 
   bool pic_ready_{false};
@@ -908,20 +940,22 @@ class SimpleVideoPlayer : public Component
   int current_image_{-1};
   int pic_wanted_{-1};                   // requested, not read yet
   PictureRead pic_read_;
-  uint8_t *pic_file_{nullptr};           // PSRAM, one whole file
-  size_t pic_file_cap_{0};
-  std::unique_ptr<runtime_image::RuntimeImage> pic_image_;    // the picture, unscaled
-  std::unique_ptr<runtime_image::RuntimeImage> thumb_image_;  // a thumbnail, fitted into its slot
-  // Decoding runs on the picture task; pic_file_ and the image are its until pic_decoded_.
+  PicFile pic_files_[PIC_FILE_COUNT];
+  PicFile thumb_file_;
+  int pic_direction_{1};        // of the last step: the next picture read ahead
+  uint8_t pic_preload_tries_{0};  // neighbours of the shown picture tried (each once)
+  // PNG and BMP: no hardware for them; decoded by runtime_image, scaled, and let go.
+  std::unique_ptr<runtime_image::RuntimeImage> pic_image_;
+  // Decoding runs on the picture task; the job's file and target are its until pic_decoded_.
   TaskHandle_t pic_task_{nullptr};
-  runtime_image::RuntimeImage *pic_decode_image_{nullptr};
-  std::string pic_decode_path_;
-  size_t pic_decode_length_{0};
-  bool pic_decode_ok_{false};
+  PictureJob pic_job_;
   std::atomic<bool> pic_decoded_{false};
-  lv_draw_buf_t *pic_draw_buf_{nullptr};  // the canvas's buffer, RGB565
+  int pic_render_{-1};                    // image to decode again (overlay, canvas size), -1 none
+  lv_draw_buf_t *pic_full_buf_{nullptr};  // the canvas's own buffer (DMA-capable), all of it
+  lv_draw_buf_t pic_fit_buf_{};           // the same memory at the shown picture's own size
+  lv_draw_buf_t *pic_draw_buf_{nullptr};  // what the canvas shows: one of the two
   uint8_t *pic_own_buf_{nullptr};         // allocated by set_fullscreen()
-  bool pic_buf_error_logged_{false};
+  int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while the task writes the canvas
 
   uint32_t slideshow_interval_ms_{5000};
   SlideshowMode slideshow_mode_{SlideshowMode::STOPPED};
@@ -982,18 +1016,21 @@ class SimpleVideoPlayer : public Component
   void pictures_loop_();
   bool pictures_held_() const;
   void list_directory_();
-  void start_read_(bool thumbnail, size_t index, size_t slot);
+  PicFile *cached_file_(size_t index);
+  PicFile *free_file_();
+  bool reserve_file_(PicFile *file, size_t size);
+  void start_read_(bool thumbnail, size_t index, size_t slot, bool preload = false);
   void read_next_chunk_();
   void finish_read_();
   void picture_read_done_();
-  void start_decode_(const PictureRead &read, runtime_image::RuntimeImage *image, const std::string &path);
+  void preload_neighbours_();
+  bool start_decode_(bool thumbnail, size_t index, size_t slot, PicFile *file);
   void picture_decoded_();
   static void picture_task_entry_(void *arg);
-  bool reserve_file_buffer_(size_t size);
-  bool decode_file_(runtime_image::RuntimeImage *image, const std::string &path, size_t length);
+  void decode_job_(PictureJob &job);
   bool adopt_canvas_buffer_();
-  void compose_picture_();
-  void after_picture_change_(bool was_playing);
+  void render_current_();
+  void finish_picture_();
   void show_overlay_icon_(bool playing);
   void hide_overlay_icon_();
   void draw_play_icon_(int cx, int cy, int size, uint16_t color);
@@ -1004,7 +1041,6 @@ class SimpleVideoPlayer : public Component
   bool visible_slots_(size_t *first, size_t *last) const;
   void queue_thumbnails_(bool all);
   void queue_slot_(size_t slot);
-  void store_thumbnail_(size_t slot);
   void show_slot_(size_t slot);
   void highlight_thumbnail_(bool scroll);
   void slide_thumbnails_(bool show);
