@@ -217,6 +217,10 @@ void SimpleVideoPlayer::setup() {
   if (this->channel_widget_ != nullptr && !this->setup_channel_list_())
     ESP_LOGE(TAG, "Channel list disabled");
 #endif
+#ifdef SVP_CONTROLS
+  if (this->ctl_widget_ != nullptr && this->ctl_touchscreen_ != nullptr)
+    this->ctl_touchscreen_->register_listener(&this->ctl_listener_);
+#endif
 
   ESP_LOGCONFIG(TAG, "Simple Video Player setup complete");
   ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
@@ -243,6 +247,9 @@ void SimpleVideoPlayer::loop() {
       this->play_index_(0);
     }
   }
+#ifdef SVP_CONTROLS
+  this->controls_loop_();
+#endif
   if (this->start_req_.load(std::memory_order_acquire) == 1) {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_USE_LVGL)
     if (this->dsi_ != nullptr && this->lvgl_component_ != nullptr && !this->dsi_lvgl_paused_) {
@@ -279,8 +286,12 @@ void SimpleVideoPlayer::loop() {
       this->paused_ui_ = false;  // stopped or replaced meanwhile
       this->resume_req_.store(false, std::memory_order_relaxed);
     }
-    if (this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED && !this->is_network_session() &&
-        this->playback_parked_.load(std::memory_order_acquire)) {
+    bool paused_ui = this->dsi_lvgl_paused_ && !streaming && state == PlayerState::PAUSED &&
+                     !this->is_network_session() && this->playback_parked_.load(std::memory_order_acquire);
+#ifdef SVP_CONTROLS
+    paused_ui = paused_ui && (this->ctl_widget_ == nullptr || this->ctl_failed_);  // else the controls draw over it
+#endif
+    if (paused_ui) {
       this->lvgl_component_->set_paused(false, false);
       this->dsi_lvgl_paused_ = false;
       this->paused_ui_ = true;
@@ -990,10 +1001,39 @@ void SimpleVideoPlayer::playback_loop_() {
       // Paused is not playback -- a coarse sleep here is fine (and correct: it lets the rest of
       // the system run at full speed). The zero-wait rule is about the active decode/pace path.
       while (this->state_.load(std::memory_order_acquire) == PlayerState::PAUSED) {
-        if (this->seek_pending_.load(std::memory_order_acquire))
+        if (this->seek_pending_.load(std::memory_order_acquire)) {
           this->handle_seek_();
+#ifdef SVP_CONTROLS
+          this->ctl_step_.store(this->dsi_ != nullptr && this->ctl_widget_ != nullptr, std::memory_order_relaxed);
+#endif
+        }
+#ifdef SVP_CONTROLS
+        if (this->dsi_ != nullptr && this->ctl_widget_ != nullptr) {
+          // After a seek the new picture shows, with the controls over it.
+          FrameSlot *slot = nullptr;
+          if (this->ctl_step_.load(std::memory_order_relaxed) &&
+              xQueueReceive(this->filled_queue_, &slot, 0) == pdTRUE) {
+            if (slot->gen == this->expected_gen_ && slot->size > 0) {
+              this->ctl_step_.store(false, std::memory_order_relaxed);
+              this->video_frame_index_++;
+              this->position_frame_.store(slot->file_frame, std::memory_order_relaxed);
+              const bool decoded = this->decode_frame_(slot->data, static_cast<size_t>(slot->size));
+              xQueueSend(this->empty_queue_, &slot, 0);
+              if (decoded)
+                this->ctl_repaint_.store(true, std::memory_order_release);
+            } else if (slot->gen != this->expected_gen_) {
+              xQueueSend(this->empty_queue_, &slot, 0);
+            } else {
+              this->ctl_step_.store(false, std::memory_order_relaxed);
+              xQueueSendToFront(this->filled_queue_, &slot, 0);  // end of file: the loop takes it
+            }
+          }
+          if (this->ctl_repaint_.exchange(false, std::memory_order_acq_rel))
+            this->repaint_paused_();
+        }
+#endif
         esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(20));
       }
       this->playback_parked_.store(false, std::memory_order_release);
       this->paused_accum_us_ += esp_timer_get_time() - pause_started_us;
@@ -1134,6 +1174,9 @@ void SimpleVideoPlayer::playback_loop_() {
           this->solid_frame_count_++;
         }
       }
+#ifdef SVP_CONTROLS
+      this->composite_controls_();
+#endif
       const uint32_t present_start = micros();
       const display::ColorBitness bitness =
           this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;

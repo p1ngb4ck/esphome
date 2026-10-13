@@ -19,7 +19,7 @@
 #include "esphome/components/display/display.h"
 #endif
 
-#ifdef SVP_STREAM_TOUCH
+#if defined(SVP_STREAM_TOUCH) || defined(SVP_CONTROLS)
 #include "esphome/components/touchscreen/touchscreen.h"
 #endif
 
@@ -124,6 +124,19 @@ class PlaybackErrorTrigger : public Trigger<uint8_t> {
  public:
   explicit PlaybackErrorTrigger(SimpleVideoPlayer *parent);
 };
+
+#ifdef SVP_CONTROLS
+/// Touches for the on-screen controls (LVGL is paused while a file plays on the panel).
+class ControlsTouchListener : public touchscreen::TouchListener {
+ public:
+  explicit ControlsTouchListener(SimpleVideoPlayer *parent) : parent_(parent) {}
+  void update(const touchscreen::TouchPoints_t &points) override;
+  void release() override;
+
+ protected:
+  SimpleVideoPlayer *parent_;
+};
+#endif
 
 #ifdef SVP_STREAM_TOUCH
 /// Forwards the touchscreen to the network stream sender ('T' messages).
@@ -251,6 +264,14 @@ class SimpleVideoPlayer : public Component
 
   /// Pause playback (can be resumed)
   void pause();
+  /// pause() while playing, resume() while paused.
+  void toggle_pause() {
+    if (this->is_playing()) {
+      this->pause();
+    } else if (this->is_paused()) {
+      this->resume();
+    }
+  }
 
   /// Resume playback from paused state
   void resume();
@@ -271,6 +292,25 @@ class SimpleVideoPlayer : public Component
   void seek(float seconds);
   /// seek() relative to the position shown.
   void seek_relative(float seconds) { this->seek(this->get_position() + seconds); }
+#ifdef SVP_CONTROLS
+  // On-screen controls: an LVGL object (hidden; any widgets, laid out where it shows) drawn over
+  // the video. A tap shows it, a tap on one of its widgets sends that widget LV_EVENT_CLICKED (its
+  // on_click), a tap or drag on the seek bar seeks. It hides after hide_after while playing.
+  void set_controls(lv_obj_t *widget, touchscreen::Touchscreen *touchscreen) {
+    this->ctl_widget_ = widget;
+    this->ctl_touchscreen_ = touchscreen;
+  }
+  void set_controls_seek_bar(lv_obj_t *obj) { this->ctl_seek_ = obj; }
+  void set_controls_position_label(lv_obj_t *obj) { this->ctl_position_ = obj; }
+  void set_controls_title_label(lv_obj_t *obj) { this->ctl_title_ = obj; }
+  void set_controls_play_pause(lv_obj_t *obj) { this->ctl_play_pause_ = obj; }
+  void set_controls_repeat(lv_obj_t *obj) { this->ctl_repeat_ = obj; }
+  void set_controls_hide_after(uint32_t ms) { this->ctl_hide_after_ms_ = ms; }
+  void show_controls();
+  void hide_controls();
+  /// Listener: a touch (pressed, display coordinates) or its release.
+  void controls_touch(bool pressed, int32_t x, int32_t y);
+#endif
   /// A local AVI file plays or is paused, so seek() can work.
   bool can_seek() const;
   /// Position of the frame shown and length of the file, in seconds; 0 when unknown.
@@ -654,6 +694,49 @@ class SimpleVideoPlayer : public Component
   uint32_t avi_fps_den_{0};
 
   std::atomic<bool> playback_parked_{false};  // the playback task sits in its pause wait
+#ifdef SVP_CONTROLS
+  struct ControlsBlock {  // header of a controls picture in panel coordinates; the pixels follow
+    uint16_t x, y, w, h;
+  };
+  lv_obj_t *ctl_widget_{nullptr};
+  lv_obj_t *ctl_seek_{nullptr};
+  lv_obj_t *ctl_position_{nullptr};
+  lv_obj_t *ctl_title_{nullptr};
+  lv_obj_t *ctl_play_pause_{nullptr};
+  lv_obj_t *ctl_repeat_{nullptr};
+  touchscreen::Touchscreen *ctl_touchscreen_{nullptr};
+  ControlsTouchListener ctl_listener_{this};
+  uint32_t ctl_hide_after_ms_{5000};
+  lv_draw_buf_t *ctl_snapshot_{nullptr};
+  uint8_t *ctl_bufs_[2]{nullptr, nullptr};  // PSRAM, ControlsBlock + pixels
+  size_t ctl_buf_size_[2]{0, 0};
+  std::atomic<uint8_t *> ctl_shown_{nullptr};   // drawn over each frame; nullptr = hidden
+  std::atomic<uint8_t *> ctl_in_use_{nullptr};  // the playback task copies from it right now
+  std::atomic<bool> ctl_repaint_{false};        // paused: present the frame again with the controls
+  std::atomic<bool> ctl_step_{false};           // paused after a seek: show the new frame
+  lv_area_t ctl_area_{};                        // where the controls are (LVGL coordinates)
+  lv_area_t ctl_seek_area_{};
+  bool ctl_visible_{false};
+  bool ctl_dirty_{false};
+  bool ctl_pressed_{false};
+  bool ctl_dragging_{false};
+  bool ctl_failed_{false};
+  int32_t ctl_x_{0}, ctl_y_{0};
+  float ctl_drag_fraction_{0.0f};
+  uint32_t ctl_last_input_ms_{0};
+  uint32_t ctl_last_render_ms_{0};
+  uint32_t ctl_last_second_{UINT32_MAX};
+  PlayerState ctl_last_state_{PlayerState::STOPPED};
+  RepeatMode ctl_last_repeat_{RepeatMode::OFF};
+  bool controls_active_() const;
+  void controls_loop_();
+  void render_controls_();
+  float controls_fraction_(int32_t x) const;
+  /// Playback task: the controls into decode_target_.
+  void composite_controls_();
+  /// Playback task, paused: shows decode_target_ (with the controls) again.
+  void repaint_paused_();
+#endif
 #ifdef SVP_DSI_OUTPUT
   display::Display *dsi_{nullptr};  // non-null -> direct display output instead of the LVGL canvas
   bool dsi_lvgl_paused_{false};     // LVGL was paused for the duration of direct playback
@@ -879,6 +962,15 @@ template<typename... Ts> class PauseAction : public Action<Ts...> {
   SimpleVideoPlayer *player_;
 };
 
+template<typename... Ts> class TogglePauseAction : public Action<Ts...> {
+ public:
+  explicit TogglePauseAction(SimpleVideoPlayer *player) : player_(player) {}
+  void play(const Ts &...x) override { this->player_->toggle_pause(); }
+
+ protected:
+  SimpleVideoPlayer *player_;
+};
+
 template<typename... Ts> class NextAction : public Action<Ts...> {
  public:
   explicit NextAction(SimpleVideoPlayer *player) : player_(player) {}
@@ -901,11 +993,45 @@ template<typename... Ts> class RepeatAction : public Action<Ts...> {
  public:
   explicit RepeatAction(SimpleVideoPlayer *player) : player_(player) {}
   void set_mode(RepeatMode mode) { this->mode_ = mode; }
-  void play(const Ts &...x) override { this->player_->set_repeat(this->mode_); }
+  /// Instead of a mode: off -> playlist -> file -> off.
+  void set_cycle(bool cycle) { this->cycle_ = cycle; }
+  void play(const Ts &...x) override {
+    if (!this->cycle_) {
+      this->player_->set_repeat(this->mode_);
+      return;
+    }
+    switch (this->player_->get_repeat()) {
+      case RepeatMode::OFF:
+        this->player_->set_repeat(RepeatMode::PLAYLIST);
+        break;
+      case RepeatMode::PLAYLIST:
+        this->player_->set_repeat(RepeatMode::FILE);
+        break;
+      default:
+        this->player_->set_repeat(RepeatMode::OFF);
+        break;
+    }
+  }
 
  protected:
   SimpleVideoPlayer *player_;
   RepeatMode mode_{RepeatMode::OFF};
+  bool cycle_{false};
+};
+
+/// The volume by a step (negative: down), within 0..1.
+template<typename... Ts> class VolumeStepAction : public Action<Ts...> {
+ public:
+  explicit VolumeStepAction(SimpleVideoPlayer *player) : player_(player) {}
+  void set_step(float step) { this->step_ = step; }
+  void play(const Ts &...x) override {
+    float volume = this->player_->get_volume() + this->step_;
+    this->player_->set_volume(volume < 0.0f ? 0.0f : (volume > 1.0f ? 1.0f : volume));
+  }
+
+ protected:
+  SimpleVideoPlayer *player_;
+  float step_{0.05f};
 };
 
 template<typename... Ts> class SeekAction : public Action<Ts...> {

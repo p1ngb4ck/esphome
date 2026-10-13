@@ -40,6 +40,13 @@ try:
 except ImportError:
     lv_dropdown_t = None
 
+try:
+    from esphome.components.lvgl import defines as lvgl_defines
+    from esphome.components.lvgl.types import lv_obj_base_t
+except ImportError:
+    lvgl_defines = None
+    lv_obj_base_t = None
+
 CODEOWNERS = ["@p1ngb4ck"]
 DEPENDENCIES = ["storage"]
 AUTO_LOAD = ["image", "audio", "json"]
@@ -87,14 +94,17 @@ StreamWakeAction = simple_video_player_ns.class_("StreamWakeAction", automation.
 SetVolumeAction = simple_video_player_ns.class_("SetVolumeAction", automation.Action)
 SeekAction = simple_video_player_ns.class_("SeekAction", automation.Action)
 NextAction = simple_video_player_ns.class_("NextAction", automation.Action)
+TogglePauseAction = simple_video_player_ns.class_("TogglePauseAction", automation.Action)
 PreviousAction = simple_video_player_ns.class_("PreviousAction", automation.Action)
 RepeatAction = simple_video_player_ns.class_("RepeatAction", automation.Action)
+VolumeStepAction = simple_video_player_ns.class_("VolumeStepAction", automation.Action)
 RepeatMode = simple_video_player_ns.enum("RepeatMode", is_class=True)
 REPEAT_MODES = {
     "off": RepeatMode.OFF,
     "file": RepeatMode.FILE,
     "playlist": RepeatMode.PLAYLIST,
 }
+REPEAT_CYCLE = "cycle"
 
 # Configuration keys
 CONF_CANVAS_ID = "canvas_id"
@@ -115,6 +125,14 @@ CONF_AUDIO_CODEC = "audio_codec"
 CONF_AUDIO_LATENCY = "audio_latency"
 CONF_RELATIVE = "relative"
 CONF_PLAYLIST = "playlist"
+CONF_CONTROLS = "controls"
+CONF_SEEK_BAR_ID = "seek_bar_id"
+CONF_POSITION_LABEL_ID = "position_label_id"
+CONF_TITLE_LABEL_ID = "title_label_id"
+CONF_PLAY_PAUSE_ID = "play_pause_id"
+CONF_REPEAT_ID = "repeat_id"
+CONF_STEP = "step"
+CONF_HIDE_AFTER = "hide_after"
 CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
 # The read-ahead ring holds the picture the sound runs ahead of: 100 ms per MiB (4MB -> 400 ms).
 AUDIO_LATENCY_MS_PER_MIB = 100
@@ -230,8 +248,23 @@ def _validate_output_target(config):
 def _validate_stream(config):
     if CONF_CHANNEL_LIST in config and CONF_STREAM_PORT not in config:
         raise cv.Invalid(f"'{CONF_CHANNEL_LIST}' plays channels through the stream: it needs '{CONF_STREAM_PORT}'.")
-    if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config:
-        raise cv.Invalid(f"'{CONF_TOUCHSCREEN_ID}' sends touches to a stream sender: it needs '{CONF_STREAM_PORT}'.")
+    if CONF_TOUCHSCREEN_ID in config and CONF_STREAM_PORT not in config and CONF_CONTROLS not in config:
+        raise cv.Invalid(
+            f"'{CONF_TOUCHSCREEN_ID}' is for a stream sender ('{CONF_STREAM_PORT}') or '{CONF_CONTROLS}'."
+        )
+    return config
+
+
+def _validate_controls(config):
+    if CONF_CONTROLS not in config:
+        return config
+    if CONF_DISPLAY_ID not in config or CONF_TOUCHSCREEN_ID not in config:
+        raise cv.Invalid(
+            f"'{CONF_CONTROLS}' are drawn over direct display output: they need '{CONF_DISPLAY_ID}' "
+            f"and '{CONF_TOUCHSCREEN_ID}'."
+        )
+    # The controls are rendered off screen with lv_snapshot while LVGL is paused.
+    lvgl_defines.add_define("LV_USE_SNAPSHOT", "1")
     return config
 
 
@@ -279,6 +312,31 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
             # Channel list from the svp_relay Home Assistant integration, shown in an LVGL dropdown;
             # channels.play asks the relay to stream the selected channel to stream_port.
+            # On-screen controls drawn over the video while it plays on the panel (LVGL paused): an
+            # LVGL object laid out where they show (hidden; opaque background), whose widgets get
+            # LV_EVENT_CLICKED (on_click) when tapped. Optional parts kept up to date by the player.
+            **(
+                {
+                    cv.Optional(CONF_CONTROLS): cv.All(
+                        cv.requires_component("lvgl"),
+                        cv.Schema(
+                            {
+                                cv.Required(CONF_WIDGET_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(CONF_SEEK_BAR_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(CONF_POSITION_LABEL_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(CONF_TITLE_LABEL_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(CONF_PLAY_PAUSE_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(CONF_REPEAT_ID): cv.use_id(lv_obj_base_t),
+                                cv.Optional(
+                                    CONF_HIDE_AFTER, default="5s"
+                                ): cv.positive_time_period_milliseconds,
+                            }
+                        ),
+                    )
+                }
+                if lv_obj_base_t is not None
+                else {}
+            ),
             **(
                 {
                     cv.Optional(CONF_CHANNEL_LIST): cv.Schema(
@@ -381,6 +439,7 @@ CONFIG_SCHEMA = cv.All(
     _latency_within_max,
     _validate_output_target,
     _validate_stream,
+    _validate_controls,
     _request_fast_network,
     only_on_variant(supported=[VARIANT_ESP32P4], msg_prefix="simple_video_player"),
 )
@@ -624,6 +683,22 @@ async def to_code(config):
             cg.add(var.set_channel_widget(widget))
             cg.add_define("SVP_CHANNEL_LIST")
 
+    if controls := config.get(CONF_CONTROLS):
+        cg.add_define("SVP_CONTROLS")
+        widget = await cg.get_variable(controls[CONF_WIDGET_ID])
+        ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
+        cg.add(var.set_controls(widget, ts))
+        for key, setter in (
+            (CONF_SEEK_BAR_ID, "set_controls_seek_bar"),
+            (CONF_POSITION_LABEL_ID, "set_controls_position_label"),
+            (CONF_TITLE_LABEL_ID, "set_controls_title_label"),
+            (CONF_PLAY_PAUSE_ID, "set_controls_play_pause"),
+            (CONF_REPEAT_ID, "set_controls_repeat"),
+        ):
+            if key in controls:
+                cg.add(getattr(var, setter)(await cg.get_variable(controls[key])))
+        cg.add(var.set_controls_hide_after(controls[CONF_HIDE_AFTER]))
+
     # Set speaker (optional - for audio playback)
     if CONF_SPEAKER_ID in config:
         spkr = await cg.get_variable(config[CONF_SPEAKER_ID])
@@ -732,6 +807,17 @@ async def simple_video_player_play_to_code(config, action_id, template_arg, args
 
 
 @automation.register_action(
+    "simple_video_player.toggle",
+    TogglePauseAction,
+    SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def simple_video_player_toggle_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_action(
     "simple_video_player.next",
     NextAction,
     SIMPLE_VIDEO_PLAYER_ACTION_SCHEMA,
@@ -760,7 +846,10 @@ async def simple_video_player_previous_to_code(config, action_id, template_arg, 
     cv.Schema(
         {
             cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
-            cv.Required(CONF_MODE): cv.enum(REPEAT_MODES, lower=True),
+            # cycle: off -> playlist -> file -> off
+            cv.Required(CONF_MODE): cv.Any(
+                cv.one_of(REPEAT_CYCLE, lower=True), cv.enum(REPEAT_MODES, lower=True)
+            ),
         }
     ),
     synchronous=True,
@@ -768,7 +857,46 @@ async def simple_video_player_previous_to_code(config, action_id, template_arg, 
 async def simple_video_player_repeat_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, paren)
-    cg.add(var.set_mode(config[CONF_MODE]))
+    if config[CONF_MODE] == REPEAT_CYCLE:
+        cg.add(var.set_cycle(True))
+    else:
+        cg.add(var.set_mode(config[CONF_MODE]))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.volume_up",
+    VolumeStepAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Optional(CONF_STEP, default="5%"): cv.percentage,
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_volume_up_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_step(config[CONF_STEP]))
+    return var
+
+
+@automation.register_action(
+    "simple_video_player.volume_down",
+    VolumeStepAction,
+    cv.Schema(
+        {
+            cv.Required(CONF_ID): cv.use_id(SimpleVideoPlayer),
+            cv.Optional(CONF_STEP, default="5%"): cv.percentage,
+        }
+    ),
+    synchronous=True,
+)
+async def simple_video_player_volume_down_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    cg.add(var.set_step(-config[CONF_STEP]))
     return var
 
 
