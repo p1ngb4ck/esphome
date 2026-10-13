@@ -2,6 +2,7 @@
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
 
 #include "usb_bluetooth.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include "esp_bluedroid_hci.h"
@@ -97,6 +98,7 @@ struct Pending {
   size_t answer_len[2];
   uint8_t addr_answer[EVENT_BUF];
   size_t addr_answer_len;
+  uint32_t since_ms;  // when the command went out
 };
 
 static SemaphoreHandle_t s_lock = nullptr;
@@ -271,6 +273,19 @@ static void report_side(AclCheck &check, const char *side) {
 void report_acl() {
   report_side(s_check_br, "dongle");
   report_side(s_check_le, "co-processor");
+  uint16_t opcode;
+  uint8_t waiting;
+  uint32_t age;
+  {
+    Lock lock;
+    opcode = s_pending.opcode;
+    waiting = s_pending.waiting;
+    age = millis() - s_pending.since_ms;
+  }
+  // Bluedroid sends the next command only once this one is answered.
+  if (opcode != 0 && waiting != 0 && age > 5000)
+    ESP_LOGW(TAG, "HCI command 0x%04X unanswered for %" PRIu32 " ms (waiting for the%s%s)", opcode, age,
+             (waiting & SIDE_BR) ? " dongle" : "", (waiting & SIDE_LE) ? " co-processor" : "");
 }
 
 // -- To Bluedroid --------------------------------------------------------------------------
@@ -465,6 +480,7 @@ static void send_command(uint8_t *data, size_t len) {
       s_pending.addr_stage = AddrStage::READ_LE;
     }
     s_pending.opcode = opcode;
+    s_pending.since_ms = millis();
     s_pending.both = route == Route::BOTH;
     s_pending.translate = translate;
     s_pending.host_handle = host_handle;
