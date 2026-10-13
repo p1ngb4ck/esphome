@@ -176,6 +176,48 @@ HIDUsage HIDReportMap::application_usage(uint16_t collection_id) const {
   return {};
 }
 
+uint8_t HIDReportMap::device_kinds() const {
+  static constexpr uint16_t GENERIC_DESKTOP = 0x01;
+  static constexpr uint16_t CONSUMER = 0x0C;
+  static constexpr uint16_t DIGITIZER = 0x0D;
+  uint8_t kinds = 0;
+  bool controls = false;
+  for (const auto &collection : this->collections_) {
+    if (collection.type != 0x01)
+      continue;
+    const HIDUsage &usage = collection.usage;
+    if (usage.page == GENERIC_DESKTOP) {
+      switch (usage.usage) {
+        case 0x06:  // keyboard
+        case 0x07:  // keypad
+          kinds |= HID_DEVICE_KEYBOARD;
+          break;
+        case 0x01:  // pointer
+        case 0x02:  // mouse
+          kinds |= HID_DEVICE_MOUSE;
+          break;
+        case 0x04:  // joystick
+        case 0x05:  // gamepad
+        case 0x08:  // multi-axis controller
+          kinds |= HID_DEVICE_GAMEPAD;
+          break;
+        case 0x80:  // system control
+          controls = true;
+          break;
+        default:
+          break;
+      }
+    } else if (usage.page == DIGITIZER && (usage.usage == 0x04 || usage.usage == 0x05)) {
+      kinds |= HID_DEVICE_MOUSE;  // touch screen, touch pad
+    } else if (usage.page == CONSUMER && usage.usage == 0x01) {
+      controls = true;
+    }
+  }
+  if (kinds == 0 && controls)
+    kinds = HID_DEVICE_REMOTE;
+  return kinds;
+}
+
 void HIDReportMap::reset_runtime_state() { this->runtime_.clear(); }
 
 HIDReportMap *HIDReportMap::parse_report_map_data(const uint8_t *data, size_t length) {

@@ -612,6 +612,17 @@ void BLEClientHID::handle_phase_timeout_() {
   }
 }
 
+uint8_t BLEClientHID::get_device_kinds() const {
+  if (!this->hid_connected_)
+    return 0;
+  uint8_t kinds = 0;
+  for (const auto &context : this->hid_services_) {
+    if (context.report_map != nullptr)
+      kinds |= context.report_map->device_kinds();
+  }
+  return kinds;
+}
+
 void BLEClientHID::dump_config() {
   ESP_LOGCONFIG(TAG, "BLE Client HID:");
   ESP_LOGCONFIG(TAG, "  MAC address: %s", this->dynamic_ ? "set by pairing" : this->parent()->address_str());

@@ -37,6 +37,8 @@ class USBHIDClient : public usb_host::USBClient, public hid::HIDInput {
   float get_setup_priority() const override { return setup_priority::IO; }
 
   void register_raw_driver(RawHIDDriver *driver) { this->raw_driver_ = driver; }
+  /// Main loop.
+  uint8_t get_device_kinds() const override;
 #ifdef USE_TEXT_SENSOR
   void register_device_name_sensor(text_sensor::TextSensor *sensor) { this->device_name_sensor_ = sensor; }
 #endif

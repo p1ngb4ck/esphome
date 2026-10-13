@@ -137,6 +137,14 @@ struct HIDReportItemValue {
   std::string to_string() const;
 };
 
+// What a device is, from the application collections of its report descriptor.
+enum HIDDeviceKind : uint8_t {
+  HID_DEVICE_KEYBOARD = 1 << 0,
+  HID_DEVICE_MOUSE = 1 << 1,  // mice, touchpads, pointers
+  HID_DEVICE_GAMEPAD = 1 << 2,
+  HID_DEVICE_REMOTE = 1 << 3,  // consumer or system controls alone
+};
+
 class HIDReportMap {
  public:
   static constexpr size_t MAX_DESCRIPTOR_BYTES = 4096;
@@ -156,6 +164,8 @@ class HIDReportMap {
   const HIDReportSchema *find_report(HIDReportKind kind, uint8_t report_id) const;
   const HIDFieldSchema *find_field(uint16_t field_id) const;
   HIDUsage application_usage(uint16_t collection_id) const;
+  /// HIDDeviceKind bits of the device this descriptor belongs to.
+  uint8_t device_kinds() const;
   void reset_runtime_state();
 
   const std::vector<HIDReportSchema> &reports() const { return this->reports_; }

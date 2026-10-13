@@ -96,6 +96,9 @@ class HIDInput : public key_provider::KeyProvider {
   /// (page, usage, value) for every other control: axes, hat switches, sliders.
   template<typename F> void add_on_control_callback(F &&cb) { this->control_cb_.add(std::forward<F>(cb)); }
 
+  /// HIDDeviceKind bits of the devices connected behind this input; 0 when none is.
+  virtual uint8_t get_device_kinds() const { return 0; }
+
   uint8_t get_modifiers() const { return this->modifiers_; }
   uint8_t get_leds() const { return this->leds_; }
   uint8_t get_pointer_buttons() const { return this->buttons_; }

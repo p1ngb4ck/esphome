@@ -82,6 +82,20 @@ void USBHIDClient::on_disconnected() {
   usb_host::USBClient::on_disconnected();
 }
 
+uint8_t USBHIDClient::get_device_kinds() const {
+  if (!this->is_connected())
+    return 0;
+  uint8_t kinds = 0;
+  for (const auto &intf : this->interfaces_) {
+    if (intf.xbox) {
+      kinds |= hid::HID_DEVICE_GAMEPAD;
+    } else if (intf.map != nullptr) {
+      kinds |= intf.map->device_kinds();
+    }
+  }
+  return kinds;
+}
+
 bool USBHIDClient::find_interfaces_() {
   const usb_config_desc_t *cfg = this->get_config_desc_();
   if (cfg == nullptr)

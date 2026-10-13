@@ -227,6 +227,7 @@ class BLEClientHID : public Component,
   void cancel_device_pairing() override { this->cancel_pairing(); }
 #endif
   bool is_pairing() const { return this->pairing_active_; }
+  uint8_t get_device_kinds() const override;
 
 #ifdef USE_TEXT_SENSOR
   void register_last_event_usage_text_sensor(text_sensor::TextSensor *sensor) {

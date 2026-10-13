@@ -648,7 +648,15 @@ void BTPairing::on_connection(const PairingTarget *target, bool connected) {
 }
 
 #ifdef USE_BT_PAIRING_HID
+uint8_t BTPairing::get_device_kinds() const {
+  uint8_t kinds = 0;
+  for (const auto *input : this->hid_slots_)
+    kinds |= input->get_device_kinds();
+  return kinds;
+}
+
 void BTPairing::add_hid_slot(hid::HIDInput *input, PairingTarget *target) {
+  this->hid_slots_.push_back(input);
   input->add_on_key_event_callback([this, target](uint16_t page, uint16_t usage, bool pressed) {
     this->event_device_ = this->device_label(target);
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG

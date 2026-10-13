@@ -136,6 +136,8 @@ class BTPairing : public Component
 #ifdef USE_BT_PAIRING_HID
   /// A slot's HID input, forwarded as this one's.
   void add_hid_slot(hid::HIDInput *input, PairingTarget *target);
+  /// Main loop: what the connected slots' devices are.
+  uint8_t get_device_kinds() const override;
   /// The device the HID event being handled came from: its name, else its address.
   const std::string &event_device() const { return this->event_device_; }
 #endif
@@ -210,6 +212,9 @@ class BTPairing : public Component
   const PairingTarget *dispatched_target_{nullptr};
   uint8_t max_hid_devices_{0};
   std::vector<PairingTarget *> targets_;
+#ifdef USE_BT_PAIRING_HID
+  std::vector<hid::HIDInput *> hid_slots_;
+#endif
   std::vector<ScannedDevice> scanned_;
   BTPairingSelect *device_select_{nullptr};
   Mutex found_lock_;

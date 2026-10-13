@@ -19,6 +19,8 @@ void add_gap_handler(GapHandler handler, void *arg);
 /// no component knows yet (pairing started from its side).
 void add_gap_fallback(GapHandler handler, void *arg);
 
+/// Bluedroid runs with a controller for Classic.
+bool is_active();
 /// Main loop: registers the dispatcher with Bluedroid once it is enabled (again after it was
 /// disabled), and sets the IO capability and PIN type all components share. True while
 /// registered.
