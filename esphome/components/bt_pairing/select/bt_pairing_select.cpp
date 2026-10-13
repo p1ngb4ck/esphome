@@ -5,6 +5,8 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <algorithm>
+
 namespace esphome::bt_pairing {
 
 static const char *const TAG = "bt_pairing.select";
@@ -20,10 +22,11 @@ void BTPairingSelect::setup() {
 void BTPairingSelect::set_devices(const std::vector<ScannedDevice> &devices) {
   if (this->option_storage_.capacity() == 0)
     return;
-  this->option_storage_.clear();
-  this->option_storage_.emplace_back(devices.empty() ? NO_DEVICES : PICK);
+  std::vector<std::string> wanted;
+  wanted.reserve(std::min(devices.size(), BTPairing::MAX_SCANNED) + 1);
+  wanted.emplace_back(devices.empty() ? NO_DEVICES : PICK);
   for (const auto &device : devices) {
-    if (this->option_storage_.size() > BTPairing::MAX_SCANNED)
+    if (wanted.size() > BTPairing::MAX_SCANNED)
       break;
     char mac[MAC_ADDRESS_PRETTY_BUFFER_SIZE];
     format_mac_addr_upper(device.address, mac);
@@ -31,9 +34,35 @@ void BTPairingSelect::set_devices(const std::vector<ScannedDevice> &devices) {
                        : device.transport == Transport::LE  ? "[BLE HID] "
                        : device.kind == DeviceKind::AUDIO   ? "[BT audio] "
                                                             : "[BT HID] ";
-    this->option_storage_.push_back(kind + (device.name.empty() ? std::string(mac) : device.name + " (" + mac + ")"));
+    wanted.push_back(kind + (device.name.empty() ? std::string(mac) : device.name + " (" + mac + ")"));
   }
-  this->publish_options_();
+  // Slot by slot, so a client gets only what changed. The storage never grows past its reserve,
+  // so the strings the traits point at stay where they are.
+  auto &storage = this->option_storage_;
+  const bool placeholder_changed = storage[0] != wanted[0];
+  bool changed = false;
+  for (size_t i = 0; i < wanted.size() && i < storage.size(); i++) {
+    if (storage[i] == wanted[i])
+      continue;
+    storage[i] = std::move(wanted[i]);
+    this->traits.set_option(i, storage[i].c_str());
+    changed = true;
+  }
+  for (size_t i = storage.size(); i < wanted.size(); i++) {
+    storage.push_back(std::move(wanted[i]));
+    this->traits.add_option(storage.back().c_str());
+    changed = true;
+  }
+  while (storage.size() > wanted.size()) {
+    this->traits.remove_option(storage.size() - 1);
+    storage.pop_back();
+    changed = true;
+  }
+  if (placeholder_changed || this->active_index().value_or(1) != 0) {
+    this->publish_state(size_t{0});
+  } else if (changed) {
+    this->publish_options();
+  }
 }
 
 void BTPairingSelect::publish_options_() {
@@ -42,7 +71,7 @@ void BTPairingSelect::publish_options_() {
   for (const auto &option : this->option_storage_)
     options.push_back(option.c_str());
   this->traits.set_options(options);
-  this->publish_state(this->option_storage_[0]);
+  this->publish_state(size_t{0});
 }
 
 void BTPairingSelect::control(const std::string &value) {
@@ -54,7 +83,7 @@ void BTPairingSelect::control(const std::string &value) {
       continue;
     ESP_LOGI(TAG, "Picked %s", value.c_str());
     // Back to the placeholder, so the same device can be picked again.
-    this->publish_state(this->option_storage_[0]);
+    this->publish_state(size_t{0});
     this->parent_->pair_with(i - 1);
     return;
   }
