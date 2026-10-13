@@ -99,7 +99,17 @@ bool SimpleVideoPlayer::setup_stream_() {
     ESP_LOGE(TAG, "Failed to create stream queues");
     return false;
   }
-  // The frames' memory comes from the pool with the first udisp sender (ensure_stream_frames_()).
+  // The frames stay at the start of the pool (plan_pool_()).
+  for (auto &frame : this->stream_frames_) {
+    frame.data = this->pool_.alloc(this->stream_max_frame_bytes_);
+    if (frame.data == nullptr) {
+      ESP_LOGE(TAG, "No room in the PSRAM pool for the stream frames");
+      return false;
+    }
+    frame.capacity = this->stream_max_frame_bytes_;
+    StreamFrame *p = &frame;
+    xQueueSend(this->stream_empty_q_, &p, 0);
+  }
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
     this->stream_audio_out_ch_ = this->speaker_channel_mode_ == SpeakerChannelMode::SPEAKER_CHANNEL_STEREO ? 2 : 1;
@@ -355,33 +365,7 @@ void SimpleVideoPlayer::stream_net_loop_() {
   }
 }
 
-// Network task: the udisp frames, from the pool once and kept.
-bool SimpleVideoPlayer::ensure_stream_frames_() {
-  if (this->stream_frames_ready_)
-    return true;
-  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  bool ok = true;
-  for (auto &frame : this->stream_frames_) {
-    if (frame.data == nullptr) {
-      frame.data = this->media_alloc_(this->stream_max_frame_bytes_);
-      frame.capacity = frame.data != nullptr ? this->stream_max_frame_bytes_ : 0;
-    }
-    ok = ok && frame.data != nullptr;
-  }
-  if (ok) {
-    for (auto &frame : this->stream_frames_) {
-      StreamFrame *p = &frame;
-      xQueueSend(this->stream_empty_q_, &p, 0);
-    }
-    this->stream_frames_ready_ = true;
-  }
-  xSemaphoreGive(this->media_lock_);
-  return ok;
-}
-
 void SimpleVideoPlayer::stream_feed_(const uint8_t *data, size_t len) {
-  if (!this->ensure_stream_frames_())
-    return;
   while (len > 0) {
     if (this->stream_skip_ > 0) {
       const size_t take = std::min<size_t>(this->stream_skip_, len);
@@ -613,14 +597,14 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     uint8_t *target = nullptr;
     size_t target_len = 0;
     bool output_ok = false;
+    // While a file plays its picture wins: nothing is drawn, nor its outputs taken.
+    const bool file_playing = this->task_handle_ != nullptr;
 #ifdef SVP_DSI_OUTPUT
     const display::ColorBitness bitness =
         this->dsi_fb_bpp_ == 3 ? display::COLOR_BITNESS_888 : display::COLOR_BITNESS_565;
-    if (frame->direct && this->ensure_direct_target_()) {
+    if (frame->direct && !file_playing && this->ensure_direct_target_()) {
       decode_cfg.output_format =
           this->dsi_fb_bpp_ == 3 ? JPEG_DECODE_OUT_FORMAT_RGB888 : JPEG_DECODE_OUT_FORMAT_RGB565;
-      target = this->decode_target_;
-      target_len = this->decode_target_len_;
       // Draw only once loop() has LVGL (if any) paused; released by loop() via notification, also
       // when the stream is made for the canvas meanwhile.
       while (this->stream_connected_.load(std::memory_order_acquire) && this->stream_direct_() &&
@@ -630,17 +614,28 @@ void SimpleVideoPlayer::stream_draw_loop_() {
     }
 #endif
 #ifdef SVP_CANVAS_OUTPUT
-    if (!frame->direct && this->ensure_canvas_outputs_()) {
+    if (!frame->direct && !file_playing && this->ensure_canvas_outputs_()) {
       // Canvas output: RGB888 like the video. While no file plays (output_lock_), the second output
       // buffer takes the decoded rectangle and the first is the page the canvas shows.
       decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB888;
-      target = this->output_buffers_[1];
-      target_len = this->output_buffer_size_;
       output_ok = this->stream_connected_.load(std::memory_order_acquire);
     }
 #endif
     // A playing file holds output_lock_ for its whole session: its picture wins.
     if (output_ok && xSemaphoreTake(this->output_lock_, 0) == pdTRUE) {
+      // Read under the lock: an output given back to the pool goes under it too.
+#ifdef SVP_DSI_OUTPUT
+      if (frame->direct) {
+        target = this->decode_target_;
+        target_len = this->decode_target_len_;
+      }
+#endif
+#ifdef SVP_CANVAS_OUTPUT
+      if (!frame->direct) {
+        target = this->output_buffers_[1];
+        target_len = this->output_buffer_size_;
+      }
+#endif
       uint32_t out_size = 0;
       if (target != nullptr &&
           jpeg_decoder_process(this->hw_jpeg_decoder_, &decode_cfg, frame->data, frame->received, target,

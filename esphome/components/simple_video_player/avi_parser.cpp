@@ -5,7 +5,6 @@
 
 #include "avi_parser.h"
 #include "esphome/core/log.h"
-#include <esp_heap_caps.h>
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
@@ -55,6 +54,8 @@ bool AVIParser::open(BufferedFileReader *reader) {
   this->current_frame_ = 0;
   this->release_index_();
   this->index_tried_ = false;
+  this->recoveries_ = 0;
+  this->damage_logged_ = 0;
 
   // Parse AVI headers
   if (!this->parse_headers_()) {
@@ -407,111 +408,215 @@ bool AVIParser::parse_stream_header_() {
   return true;
 }
 
+static inline uint32_t le32(const uint8_t *p) {
+  return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+static constexpr uint32_t FOURCC_JUNK = 0x4B4E554A;  // 'JUNK'
+static constexpr uint32_t MAX_RECOVERIES = 32;          // in a row: then the file is given up
+static constexpr size_t SCAN_LIMIT = 4 * 1024 * 1024;  // looked through for a chunk header
+static constexpr uint32_t DAMAGE_LOG_MAX = 3;
+
+static bool is_digit(uint8_t c) { return c >= '0' && c <= '9'; }
+
+enum class ChunkKind : uint8_t { VIDEO, AUDIO, LIST, SKIP, INVALID };
+
+// What a chunk header in the movi list is; INVALID for one that cannot be (damage). Its size must
+// fit in what is left of the list (when known).
+static ChunkKind chunk_kind(const uint8_t *hdr, uint64_t remaining) {
+  const uint32_t id = le32(hdr);
+  const uint32_t size = le32(hdr + 4);
+  if (size > remaining)
+    return ChunkKind::INVALID;
+  if (id == FOURCC_LIST)
+    return size >= 4 ? ChunkKind::LIST : ChunkKind::INVALID;
+  if (id == FOURCC_00dc || id == FOURCC_00db)
+    return ChunkKind::VIDEO;
+  if (id == FOURCC_01wb)
+    return ChunkKind::AUDIO;
+  if (is_digit(hdr[0]) && is_digit(hdr[1])) {
+    const char a = static_cast<char>(hdr[2]), b = static_cast<char>(hdr[3]);
+    if ((a == 'd' && (b == 'c' || b == 'b')) || (a == 'w' && b == 'b') || (a == 'p' && b == 'c') ||
+        (a == 't' && b == 'x'))
+      return ChunkKind::SKIP;  // another stream's
+    return ChunkKind::INVALID;
+  }
+  if (id == FOURCC_JUNK || id == FOURCC_idx1 || (hdr[0] == 'i' && hdr[1] == 'x' && is_digit(hdr[2]) && is_digit(hdr[3])))
+    return ChunkKind::SKIP;
+  return ChunkKind::INVALID;
+}
+
+bool AVIParser::plausible_header_(const uint8_t *hdr, size_t max_frame) const {
+  const uint64_t end = this->data_end();
+  const uint64_t at = this->reader_->tell();
+  const ChunkKind kind = chunk_kind(hdr, end == UINT64_MAX ? UINT64_MAX : (end > at ? end - at : 0));
+  return (kind == ChunkKind::VIDEO && le32(hdr + 4) <= max_frame) || kind == ChunkKind::AUDIO;
+}
+
+bool AVIParser::resync_(uint8_t *hdr, size_t max_frame, bool &have_header) {
+  have_header = false;
+  if (this->reader_->failed() && !this->reader_->seek(this->reader_->tell()))
+    return false;
+  const uint64_t at = this->reader_->tell();
+  if (this->index_ != nullptr) {
+    // The first indexed video frame past where reading stopped (offsets grow through the index).
+    uint32_t lo = 0, hi = this->index_count_;
+    while (lo < hi) {
+      const uint32_t mid = lo + (hi - lo) / 2;
+      if (this->index_base_ + this->index_[mid] < at) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (this->damage_logged_ < DAMAGE_LOG_MAX) {
+      this->damage_logged_++;
+      ESP_LOGW(TAG, "Damaged data at %llu: going on at frame %" PRIu32, static_cast<unsigned long long>(at),
+               lo * this->index_stride_);
+    }
+    return lo < this->index_count_ && this->seek_to_frame(lo * this->index_stride_);
+  }
+  // Without an index: the next chunk header that can be one, byte by byte.
+  if (this->damage_logged_ < DAMAGE_LOG_MAX) {
+    this->damage_logged_++;
+    ESP_LOGW(TAG, "Damaged data at %llu: looking for the next frame", static_cast<unsigned long long>(at));
+  }
+  if (this->reader_->read(hdr, 8) != 8)
+    return false;
+  for (size_t scanned = 0; scanned < SCAN_LIMIT; scanned++) {
+    if (this->plausible_header_(hdr, max_frame)) {
+      this->current_offset_ = this->reader_->tell() - this->movi_offset_;
+      have_header = true;
+      return true;
+    }
+    memmove(hdr, hdr + 1, 7);
+    if (this->reader_->read(hdr + 7, 1) != 1)
+      return false;
+  }
+  return false;
+}
+
 int AVIParser::read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size) {
   if (!this->is_open()) {
     return -1;
   }
+  uint8_t hdr[8];
+  bool have_header = false;  // found by resync_()
+  auto damaged = [&]() -> bool {
+    return ++this->recoveries_ <= MAX_RECOVERIES && this->resync_(hdr, buffer_size, have_header);
+  };
 
-  // Search for next frame chunk
   while (this->current_offset_ < this->movi_size_) {
-    // Chunk header is fourcc(4) + size(4). One 8-byte read instead of two 4-byte ring ops.
-    uint8_t hdr[8];
-    const int hn = this->reader_->read(hdr, sizeof(hdr));
-    if (hn == 0) {
-      return 0;  // no more data at a chunk boundary -> end of stream
-    }
-    if (hn != static_cast<int>(sizeof(hdr))) {
-      ESP_LOGW(TAG, "Short chunk header (%d bytes) at offset %llu", hn, this->current_offset_);
-      return -1;
-    }
-    const uint32_t chunk_id = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (static_cast<uint32_t>(hdr[3]) << 24);
-    const uint32_t chunk_size = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (static_cast<uint32_t>(hdr[7]) << 24);
-
-    this->current_offset_ += 8;
-
-    // Handle LIST 'rec ' chunks (some AVI files wrap frames in these)
-    if (chunk_id == FOURCC_LIST) {
-      uint32_t list_type;
-      if (!this->read_fourcc_(list_type)) {
-        return -1;
-      }
-      this->current_offset_ += 4;
-      // Just skip into the LIST - the next iteration will read the actual frame chunk
-      continue;
-    }
-
-    // Check if this is a video or audio chunk
-    bool is_video = (chunk_id == FOURCC_00dc || chunk_id == FOURCC_00db);
-    bool is_audio = (chunk_id == FOURCC_01wb);
-
-    // An empty audio chunk carries nothing: ffmpeg writes one for every gap in a VBR track's
-    // timestamps (write_skip_frames, libavformat/avienc.c -- FLAC and MP3, not PCM). It is not the
-    // end of the stream.
-    if (is_audio && chunk_size == 0)
-      continue;
-
-    if (is_video || is_audio) {
-      // Found a frame. Only stream_type (read every frame) and size (read by seek_to_frame) are
-      // set -- offset/keyframe/timestamp_ms were write-only.
-      frame.stream_type = is_video ? AVIStreamType::VIDEO : AVIStreamType::AUDIO;
-      frame.size = chunk_size;
-
-      // Check buffer size
-      if (chunk_size > buffer_size) {
-        ESP_LOGE(TAG, "Frame too large: %" PRIu32 " > %zu", chunk_size, buffer_size);
-        return -1;
-      }
-
-      // Read frame data
-      int bytes_read = this->reader_->read(buffer, chunk_size);
-      if (bytes_read != static_cast<int>(chunk_size)) {
-        if (bytes_read < 0) {
-          ESP_LOGE(TAG, "Frame data read error");
+    if (!have_header) {
+      // Chunk header is fourcc(4) + size(4). One 8-byte read instead of two 4-byte ring ops.
+      const int hn = this->reader_->read(hdr, sizeof(hdr));
+      if (hn == 0)
+        return 0;  // no more data at a chunk boundary -> end of stream
+      if (hn < 0) {
+        if (!damaged())
           return -1;
-        }
-        // Ran out of data mid-frame (truncated tail / stream ended) -> end of stream.
-        ESP_LOGW(TAG, "Frame payload short (%d/%" PRIu32 ") -- end of stream", bytes_read, chunk_size);
-        return 0;
+        continue;
       }
-
-      this->current_offset_ += chunk_size;
-
-      // Align to word boundary
-      if (chunk_size & 1) {
-        this->skip_bytes_(1);
-        this->current_offset_ += 1;
-      }
-
-      if (is_video) {
-        this->current_frame_++;
-      }
-
-      return bytes_read;
-    } else {
-      // Skip unknown chunk
-      this->skip_bytes_(chunk_size);
-      this->current_offset_ += chunk_size;
-
-      // Align to word boundary
-      if (chunk_size & 1) {
-        this->skip_bytes_(1);
-        this->current_offset_ += 1;
-      }
+      if (hn != static_cast<int>(sizeof(hdr)))
+        return 0;  // the file ends inside a header
+      this->current_offset_ += 8;
     }
+    have_header = false;
+    const uint32_t chunk_size = le32(hdr + 4);
+    const uint64_t remaining =
+        this->movi_size_ == UINT64_MAX ? UINT64_MAX : this->movi_size_ - std::min(this->movi_size_, this->current_offset_);
+
+    switch (chunk_kind(hdr, remaining)) {
+      case ChunkKind::INVALID:
+        if (!damaged())
+          return -1;
+        continue;
+      case ChunkKind::LIST: {
+        // LIST 'rec ' (some AVI files wrap frames in these): its chunks follow.
+        uint32_t list_type;
+        if (!this->read_fourcc_(list_type))
+          return 0;
+        this->current_offset_ += 4;
+        continue;
+      }
+      case ChunkKind::SKIP:
+        if (!this->skip_bytes_(chunk_size + (chunk_size & 1)))
+          return 0;
+        this->current_offset_ += chunk_size + (chunk_size & 1);
+        continue;
+      case ChunkKind::AUDIO:
+        // An empty audio chunk carries nothing: ffmpeg writes one for every gap in a VBR track's
+        // timestamps (write_skip_frames, libavformat/avienc.c -- FLAC and MP3, not PCM).
+        if (chunk_size == 0)
+          continue;
+        if (chunk_size > buffer_size) {
+          if (!this->skip_bytes_(chunk_size + (chunk_size & 1)))
+            return 0;
+          this->current_offset_ += chunk_size + (chunk_size & 1);
+          continue;
+        }
+        frame.stream_type = AVIStreamType::AUDIO;
+        break;
+      case ChunkKind::VIDEO:
+        if (chunk_size == 0) {
+          this->current_frame_++;
+          frame.stream_type = AVIStreamType::VIDEO;
+          frame.size = 0;
+          return REPEAT_FRAME;
+        }
+        if (chunk_size > buffer_size) {
+          // Larger than any frame that plays: passed over, the previous picture stays.
+          if (this->damage_logged_ < DAMAGE_LOG_MAX) {
+            this->damage_logged_++;
+            ESP_LOGW(TAG, "Frame %" PRIu32 " of %" PRIu32 " bytes is larger than the frame slot (%zu): passed over",
+                     this->current_frame_, chunk_size, buffer_size);
+          }
+          if (!this->skip_bytes_(chunk_size + (chunk_size & 1)))
+            return 0;
+          this->current_offset_ += chunk_size + (chunk_size & 1);
+          this->current_frame_++;
+          frame.stream_type = AVIStreamType::VIDEO;
+          frame.size = 0;
+          return REPEAT_FRAME;
+        }
+        frame.stream_type = AVIStreamType::VIDEO;
+        break;
+    }
+
+    frame.size = chunk_size;
+    const int bytes_read = this->reader_->read(buffer, chunk_size);
+    if (bytes_read < 0) {
+      if (!damaged())
+        return -1;
+      continue;
+    }
+    if (bytes_read != static_cast<int>(chunk_size)) {
+      // Ran out of data mid-frame (truncated tail / stream ended) -> end of stream.
+      ESP_LOGW(TAG, "Frame payload short (%d/%" PRIu32 ") -- end of stream", bytes_read, chunk_size);
+      return 0;
+    }
+    this->current_offset_ += chunk_size;
+    if (chunk_size & 1) {
+      this->skip_bytes_(1);
+      this->current_offset_ += 1;
+    }
+    if (frame.stream_type == AVIStreamType::VIDEO) {
+      this->current_frame_++;
+      this->recoveries_ = 0;
+    }
+    return bytes_read;
   }
 
   // End of file
   return 0;
 }
 
-static inline uint32_t le32(const uint8_t *p) {
-  return p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<uint32_t>(p[3]) << 24);
-}
-
 void AVIParser::release_index_() {
-  heap_caps_free(this->index_);
+  if (this->pool_ != nullptr)
+    this->pool_->free(reinterpret_cast<uint8_t *>(this->index_));
   this->index_ = nullptr;
   this->index_count_ = 0;
+  this->index_stride_ = 1;
 }
 
 bool AVIParser::load_index(uint8_t *scratch, size_t scratch_size) {
@@ -522,8 +627,9 @@ bool AVIParser::load_index(uint8_t *scratch, size_t scratch_size) {
   this->index_tried_ = true;
   const uint64_t resume = this->reader_->tell();
   if (this->read_index_(scratch, scratch_size)) {
-    ESP_LOGI(TAG, "Index: %" PRIu32 " video frames", this->index_count_);
-    return true;
+    ESP_LOGI(TAG, "Index: %" PRIu32 " entries, every %" PRIu32 ". video frame", this->index_count_,
+             this->index_stride_);
+    return this->reader_->seek(resume);
   }
   this->release_index_();
   if (!this->reader_->seek(resume)) {
@@ -551,17 +657,23 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
     }
   }
   const uint32_t entries = idx_size / 16;
-  if (entries == 0)
+  if (entries == 0 || this->pool_ == nullptr)
     return false;
-  this->index_ =
-      static_cast<uint32_t *>(heap_caps_malloc(entries * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (this->index_ == nullptr) {
-    ESP_LOGE(TAG, "No PSRAM for an index of %" PRIu32 " entries", entries);
+  // From the pool; when it has not the room for every frame, every second (fourth, ...) is kept.
+  const auto capacity = static_cast<uint32_t>(
+      std::min<size_t>(entries, std::min(this->index_max_bytes_, this->pool_->largest_free()) / sizeof(uint32_t)));
+  if (capacity < 2) {
+    ESP_LOGE(TAG, "No room in the PSRAM pool for the index");
     return false;
   }
+  this->index_ = reinterpret_cast<uint32_t *>(this->pool_->alloc(capacity * sizeof(uint32_t)));
+  if (this->index_ == nullptr)
+    return false;
+  this->index_stride_ = 1;
   const size_t per_read = scratch_size / 16;
   uint32_t left = entries;
   uint32_t count = 0;
+  uint32_t video = 0;
   while (left > 0) {
     const size_t n = std::min<size_t>(left, per_read);
     if (this->reader_->read(scratch, n * 16) != static_cast<int>(n * 16))
@@ -569,8 +681,19 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
     for (size_t i = 0; i < n; i++) {
       const uint8_t *entry = scratch + i * 16;
       const uint32_t id = le32(entry);
-      if (id == FOURCC_00dc || id == FOURCC_00db)
-        this->index_[count++] = le32(entry + 8);
+      if (id != FOURCC_00dc && id != FOURCC_00db)
+        continue;
+      if (video++ % this->index_stride_ != 0)
+        continue;
+      if (count == capacity) {
+        for (uint32_t k = 0; k < capacity / 2; k++)
+          this->index_[k] = this->index_[2 * k];
+        count = capacity / 2;
+        this->index_stride_ *= 2;
+        if ((video - 1) % this->index_stride_ != 0)
+          continue;
+      }
+      this->index_[count++] = le32(entry + 8);
     }
     left -= n;
   }
@@ -592,12 +715,12 @@ bool AVIParser::read_index_(uint8_t *scratch, size_t scratch_size) {
 bool AVIParser::seek_to_frame(uint32_t frame_number) {
   if (this->index_ == nullptr || !this->is_open())
     return false;
-  frame_number = std::min(frame_number, this->index_count_ - 1);
-  const uint64_t pos = this->index_base_ + this->index_[frame_number];
+  const uint32_t entry = std::min(frame_number / this->index_stride_, this->index_count_ - 1);
+  const uint64_t pos = this->index_base_ + this->index_[entry];
   if (pos < this->movi_offset_ || !this->reader_->seek(pos))
     return false;
   this->current_offset_ = pos - this->movi_offset_;
-  this->current_frame_ = frame_number;
+  this->current_frame_ = entry * this->index_stride_;
   return true;
 }
 

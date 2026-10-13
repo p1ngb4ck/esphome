@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include "buffered_file_reader.h"
+#include "psram_pool.h"
 
 namespace esphome {
 namespace simple_video_player {
@@ -124,22 +125,36 @@ class AVIParser {
    */
   const AVIStreamInfo *get_audio_info() const;
 
+  /// An empty video chunk: the previous picture once more (ffmpeg writes one for every jump in the
+  /// picture timestamps, write_skip_frames in libavformat/avienc.c).
+  static constexpr int REPEAT_FRAME = -3;
+
   /**
    * @brief Read next frame (video or audio)
    * @param frame Output: frame information
    * @param buffer Output: buffer to store frame data
    * @param buffer_size Size of output buffer
-   * @return Number of bytes read, 0 on EOF, -1 on error
+   * @return Number of bytes read, 0 on EOF, -1 on error, REPEAT_FRAME
+   *
+   * Damage is passed over: a chunk header that cannot be one, a video frame larger than the
+   * buffer or a failed read continues at the next intact frame (through the index when loaded,
+   * else at the next chunk header found).
    */
   int read_next_frame(AVIFrame &frame, uint8_t *buffer, size_t buffer_size);
 
-  /// Reads the idx1 index (offsets of the video frames) into PSRAM. Reads from the end of the file
-  /// and needs a blocking reader; seek_to_frame() afterwards. On failure the read position is restored.
-  /// Tried once per file.
+  /// The pool the index comes from, and how much of it the index may take.
+  void set_pool(PsramPool *pool, size_t max_bytes) {
+    this->pool_ = pool;
+    this->index_max_bytes_ = max_bytes;
+  }
+
+  /// Reads the idx1 index (offsets of the video frames) into the pool. Reads from the end of the
+  /// file and needs a blocking reader; the read position is restored. Tried once per file.
   bool load_index(uint8_t *scratch, size_t scratch_size);
   bool has_index() const { return this->index_ != nullptr; }
 
   /// Positions the reader at a video frame (0-based) through the index; clamped to the last frame.
+  /// An index too large for the pool keeps every n-th frame: then the frame at or before it.
   bool seek_to_frame(uint32_t frame_number);
 
   /// Video frames read so far: the next frame read has this number.
@@ -205,8 +220,18 @@ class AVIParser {
 
   bool read_index_(uint8_t *scratch, size_t scratch_size);
   void release_index_();
-  uint32_t *index_{nullptr};  // chunk offset of each video frame (PSRAM)
+  /// Whether these 8 bytes can be the header of a chunk inside the movi list.
+  bool plausible_header_(const uint8_t *hdr, size_t max_frame) const;
+  /// After damage: the reader at the next intact video frame (index), else the next plausible
+  /// chunk header read into hdr. False when there is none.
+  bool resync_(uint8_t *hdr, size_t max_frame, bool &have_header);
+  PsramPool *pool_{nullptr};
+  size_t index_max_bytes_{0};
+  uint32_t *index_{nullptr};  // chunk offset of every index_stride_-th video frame (pool)
   uint32_t index_count_{0};
+  uint32_t index_stride_{1};
+  uint32_t recoveries_{0};  // in a row, without an intact frame between
+  uint32_t damage_logged_{0};
   uint64_t index_base_{0};  // what the offsets count from
   bool index_tried_{false};
 };

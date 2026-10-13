@@ -18,7 +18,6 @@ namespace esphome::simple_video_player {
 
 static const char *const TAG = "simple_video_player.pictures";
 
-static constexpr size_t PSRAM_MARGIN = 64 * 1024;
 static constexpr size_t PICTURE_STEP = 1024 * 1024;  // picture buffers grow in these
 static constexpr uint32_t LIST_RETRY_MS = 1000;
 static constexpr size_t MAX_IMAGES = 1000;
@@ -56,7 +55,6 @@ static bool picture_format(const std::string &name, runtime_image::ImageFormat *
 
 static constexpr size_t align_up(size_t value, size_t align) { return (value + align - 1) & ~(align - 1); }
 
-static size_t psram_largest() { return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
 
 static uint16_t to_rgb565(uint32_t color) {
   return ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
@@ -71,6 +69,7 @@ void SimpleVideoPlayer::pictures_setup_() {
     return;
   if (!this->adopt_canvas_buffer_())
     return;
+  this->pic_lvgl_buf_ = this->pic_full_buf_;
 #if defined(USE_RUNTIME_IMAGE_PNG) || defined(USE_RUNTIME_IMAGE_BMP)
   this->pic_image_ = std::make_unique<runtime_image::RuntimeImage>(runtime_image::AUTO, image::IMAGE_TYPE_RGB565,
                                                                    image::TRANSPARENCY_OPAQUE);
@@ -147,6 +146,10 @@ void SimpleVideoPlayer::pictures_loop_() {
   // While a video plays nothing is read or decoded: the JPEG unit and the storage are its.
   if (this->pictures_held_())
     return;
+  if (this->pic_fullscreen_lost_ && !this->pic_read_.active) {
+    this->pic_fullscreen_lost_ = false;
+    this->set_fullscreen(true);
+  }
 
   if (this->pic_read_.active) {
     if (this->pic_read_.decoding) {
@@ -442,6 +445,15 @@ bool SimpleVideoPlayer::reserve_decode_(size_t size) {
 
 // Main loop, nothing read or decoded meanwhile: the pictures' pool buffers for the video.
 void SimpleVideoPlayer::release_picture_buffers_() {
+  if (this->pic_own_buf_ != nullptr) {
+    // The canvas shows its own buffer meanwhile; full screen is set up again with the next picture.
+    lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_lvgl_buf_);
+    this->adopt_canvas_buffer_();
+    this->pool_.free(this->pic_own_buf_);
+    this->pic_own_buf_ = nullptr;
+    this->pic_fullscreen_lost_ = this->fullscreen_;
+    this->fullscreen_ = false;
+  }
   for (PicFile &file : this->pic_files_) {
     this->pool_.free(file.data);
     file = PicFile{};
@@ -924,22 +936,26 @@ void SimpleVideoPlayer::set_fullscreen(bool fullscreen) {
     this->render_current_();
     return;
   }
-  // DMA-capable, as the canvas's own: pictures that fit are decoded straight into it.
-  const size_t size = static_cast<size_t>(lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565)) * h;
-  uint8_t *memory = nullptr;
-  if (psram_largest() >= size + PSRAM_MARGIN) {
-    jpeg_decode_memory_alloc_cfg_t mem{};
-    mem.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
-    size_t got = 0;
-    memory = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &mem, &got));
+  if (w == static_cast<int32_t>(this->pic_lvgl_buf_->header.w) &&
+      h == static_cast<int32_t>(this->pic_lvgl_buf_->header.h)) {
+    // Back to the canvas' own size: its own buffer again.
+    lv_canvas_set_draw_buf(this->pic_canvas_, this->pic_lvgl_buf_);
+    this->pool_.free(this->pic_own_buf_);
+    this->pic_own_buf_ = nullptr;
+    this->adopt_canvas_buffer_();
+    this->render_current_();
+    return;
   }
+  // From the pool, cache-line aligned as the decoder writes it by DMA: pictures that fit are
+  // decoded straight into it.
+  const size_t size = static_cast<size_t>(lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565)) * h;
+  uint8_t *memory = this->picture_alloc_(size);
   if (memory == nullptr) {
-    ESP_LOGE(TAG, "No PSRAM for a %dx%d canvas buffer", static_cast<int>(w), static_cast<int>(h));
+    ESP_LOGE(TAG, "No room in the PSRAM pool for a %dx%d canvas buffer", static_cast<int>(w), static_cast<int>(h));
     return;
   }
   lv_canvas_set_buffer(this->pic_canvas_, memory, w, h, LV_COLOR_FORMAT_RGB565);
-  if (this->pic_own_buf_ != nullptr)
-    heap_caps_free(this->pic_own_buf_);  // the canvas has let go of it
+  this->pool_.free(this->pic_own_buf_);  // the canvas has let go of it
   this->pic_own_buf_ = memory;
   this->adopt_canvas_buffer_();
   this->render_current_();
@@ -1118,10 +1134,10 @@ bool SimpleVideoPlayer::setup_thumbnails_() {
   this->thumb_stride_ = lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565);
   const size_t slot_bytes = static_cast<size_t>(this->thumb_stride_) * this->thumb_h_;
   const size_t total = slot_bytes * this->thumb_count_;
-  if (psram_largest() >= total + PSRAM_MARGIN)
-    this->thumb_buffer_ = static_cast<uint8_t *>(heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  // At the start of the pool for good (plan_pool_()).
+  this->thumb_buffer_ = this->pool_.alloc(total);
   if (this->thumb_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Thumbnails need %u bytes of PSRAM -- disabled", static_cast<unsigned>(total));
+    ESP_LOGE(TAG, "Thumbnails need %u bytes of the PSRAM pool -- disabled", static_cast<unsigned>(total));
     return false;
   }
   memset(this->thumb_buffer_, 0, total);

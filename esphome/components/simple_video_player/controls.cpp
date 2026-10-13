@@ -280,16 +280,12 @@ void SimpleVideoPlayer::render_controls_() {
     this->ctl_dirty_ = true;  // next loop
     return;
   }
+  // Both pictures come from the pool with the display's decode buffer, sized for the widget.
   if (this->ctl_buf_size_[slot] < need) {
-    heap_caps_free(this->ctl_bufs_[slot]);
-    this->ctl_bufs_[slot] = static_cast<uint8_t *>(heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    this->ctl_buf_size_[slot] = this->ctl_bufs_[slot] != nullptr ? need : 0;
-    if (this->ctl_bufs_[slot] == nullptr) {
-      ESP_LOGE(TAG, "No PSRAM for the controls (%zu bytes) -- disabled", need);
-      this->ctl_failed_ = true;
-      this->hide_controls();
-      return;
-    }
+    ESP_LOGE(TAG, "No pool memory for the controls (%zu bytes) -- disabled", need);
+    this->ctl_failed_ = true;
+    this->hide_controls();
+    return;
   }
   uint8_t *block = this->ctl_bufs_[slot];
   const ControlsBlock header{static_cast<uint16_t>(nx), static_cast<uint16_t>(ny), static_cast<uint16_t>(nw),

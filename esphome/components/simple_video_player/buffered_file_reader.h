@@ -33,8 +33,8 @@ class BufferedFileReader {
   /// While *flag is true, a pending wait returns immediately instead of waiting out a storage
   /// completion -- so playback can be stopped promptly.
   void set_abort_flag(const volatile bool *flag) { this->abort_flag_ = flag; }
-  /// The read-ahead ring's memory (the player's, DMA-capable PSRAM), a power of two of at least
-  /// 2 * FILL_CHUNK bytes; only while closed.
+  /// The read-ahead ring's memory (the player's, DMA-capable PSRAM), whole FILL_CHUNKs, at least two;
+  /// only while closed.
   void set_ring(uint8_t *data, size_t size) {
     this->ring_.data = data;
     this->ring_.size = size;
@@ -46,6 +46,8 @@ class BufferedFileReader {
   bool open(const char *path);
   void close();
   bool is_open() const { return this->open_; }
+  /// A read of the file failed; seek() starts over.
+  bool failed() const { return this->fill_err_.load(std::memory_order_acquire); }
 
   /// Network source: the same read-ahead ring and the same read() path as a file, filled by push()
   /// from the network task instead of the storage worker. seek() only goes forward.
@@ -57,12 +59,11 @@ class BufferedFileReader {
   /// Network task: the sender is gone; read() reports the end once the ring is drained.
   void end_stream();
 
-  /// LOAD uses the default (blocking) read -- header/dimension probe needs the bytes now, before
-  /// the async stream has spun up. The play loop calls set_streaming(true) once, right before its
-  /// frame loop, so from then on read() is a single non-blocking ring drain (no 20ms park).
+  /// Playback reads from here on (counted in the fill stats); before, LOAD-time probes.
   void set_streaming(bool streaming) { this->streaming_ = streaming; }
 
-  /// Drain up to `size` bytes from the ring. Returns bytes read (0 = EOF, -1 = error).
+  /// `size` bytes from the ring, waiting for the fill chain as needed. Returns bytes read (fewer only
+  /// at the end of the file; 0 = EOF, -1 = error or stopped).
   int read(uint8_t *buffer, size_t size);
   /// Copies `size` bytes found `offset` bytes past the read position, without taking them; only from
   /// the task that read()s. False while those bytes are not in the ring yet.
@@ -128,7 +129,7 @@ class BufferedFileReader {
   bool open_{false};
   bool network_{false};                       // open_stream(): filled by push(), not the storage worker
   SemaphoreHandle_t stream_lock_{nullptr};    // push()/end_stream() vs close() of a network source
-  bool streaming_{false};  // false = blocking read (LOAD); true = non-blocking single drain (PLAY)
+  bool streaming_{false};  // playback reads (fill stats)
   uint64_t current_position_{0};
 
   TaskHandle_t waiting_task_{nullptr};
@@ -137,26 +138,34 @@ class BufferedFileReader {
   const volatile bool *abort_flag_{nullptr};
 
   // Byte ring with look-ahead: one writer (fill chain or push()), one reader task that read()s and
-  // peek()s. Positions count bytes and wrap at 2^32; the size is a power of two, so they index it.
+  // peek()s. Positions run over twice the size, so a full ring and an empty one differ; any size.
   struct LookaheadRing {
     uint8_t *data{nullptr};
     size_t size{0};
-    std::atomic<uint32_t> head{0};  // bytes written
-    std::atomic<uint32_t> tail{0};  // bytes read
+    std::atomic<uint32_t> head{0};  // write position
+    std::atomic<uint32_t> tail{0};  // read position
     void reset() {
       this->head.store(0, std::memory_order_relaxed);
       this->tail.store(0, std::memory_order_release);
     }
+    size_t at(uint32_t pos) const { return pos < this->size ? pos : pos - this->size; }
+    uint32_t advance(uint32_t pos, size_t len) const {
+      const size_t next = pos + len;
+      return static_cast<uint32_t>(next < 2 * this->size ? next : next - 2 * this->size);
+    }
+    size_t used(uint32_t head_pos, uint32_t tail_pos) const {
+      return head_pos >= tail_pos ? head_pos - tail_pos : head_pos + 2 * this->size - tail_pos;
+    }
     size_t available() const {
-      return this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_relaxed);
+      return this->used(this->head.load(std::memory_order_acquire), this->tail.load(std::memory_order_relaxed));
     }
     size_t free() const {
-      return this->size - (this->head.load(std::memory_order_acquire) - this->tail.load(std::memory_order_acquire));
+      return this->size -
+             this->used(this->head.load(std::memory_order_acquire), this->tail.load(std::memory_order_acquire));
     }
     void write(const uint8_t *src, size_t len);  // len <= free()
     void commit(size_t len) {                    // len bytes were written at head (len <= free())
-      this->head.store(this->head.load(std::memory_order_relaxed) + static_cast<uint32_t>(len),
-                       std::memory_order_release);
+      this->head.store(this->advance(this->head.load(std::memory_order_relaxed), len), std::memory_order_release);
     }
     size_t read(uint8_t *dst, size_t len);
     bool peek(size_t offset, uint8_t *dst, size_t len) const;

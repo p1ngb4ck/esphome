@@ -55,7 +55,7 @@ void SimpleVideoPlayer::setup() {
   this->setup_media_player_();
 #endif
 
-  // Every buffer the player streams through comes from here (psram_pool_size), taken on first use.
+  // Every PSRAM buffer of the player comes from here (psram_pool_size); plan_pool_() shares it out.
   this->media_lock_ = xSemaphoreCreateMutex();
   if (this->media_lock_ == nullptr || !this->pool_.init(this->psram_pool_size_)) {
     ESP_LOGE(TAG, "Could not take the %" PRIu32 "-byte PSRAM pool", this->psram_pool_size_);
@@ -80,13 +80,16 @@ void SimpleVideoPlayer::setup() {
   }
 #endif
 
-  // Allocate cache buffer (internal RAM, aligned for DMA)
-  // ESP32-P4 only
-  this->cache_buffer_.reset(
-      static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, this->cache_buffer_size_, MALLOC_CAP_INTERNAL)));
+  if (!this->plan_pool_()) {
+    this->mark_failed();
+    return;
+  }
 
+  // Internal RAM, aligned for DMA.
+  this->cache_buffer_.reset(
+      static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGNMENT, CACHE_BUFFER_SIZE, MALLOC_CAP_INTERNAL)));
   if (!this->cache_buffer_) {
-    ESP_LOGE(TAG, "Failed to allocate cache buffer (%" PRIu32 " bytes)", this->cache_buffer_size_);
+    ESP_LOGE(TAG, "Failed to allocate cache buffer (%zu bytes)", CACHE_BUFFER_SIZE);
     this->mark_failed();
     return;
   }
@@ -109,36 +112,26 @@ void SimpleVideoPlayer::setup() {
   }
 
 #ifdef USE_AUDIO
-  // Audio ring buffers + temp buffer: allocated ONCE here, sized from the fixed AUDIO_* compile-
-  // time constants (see header) -- not per play(). init_audio_decoder_() only validates each
-  // file's actual audio format against this fixed configuration and resets/reuses these buffers.
+  // Sound rings + temp buffer: once, at the start of the pool, sized for the most the sound can run
+  // ahead (plan_pool_()). init_audio_decoder_() only checks each file against this fixed format.
   if (this->speaker_ != nullptr) {
     this->source_audio_channels_ = AUDIO_SOURCE_CHANNELS;
     this->audio_sample_rate_ = AUDIO_SAMPLE_RATE;
     this->audio_bits_per_sample_ = AUDIO_BITS_PER_SAMPLE;
     this->audio_frame_bytes_ = AUDIO_BYTES_PER_FRAME;
 
-    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create(AUDIO_INPUT_BUFFER_SIZE);
-    if (this->audio_input_ring_buffer_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create audio input ring buffer (%zu KB)", AUDIO_INPUT_BUFFER_SIZE / 1024);
+    const size_t input_bytes = audio_input_bytes(this->max_audio_latency_ms_);
+    const size_t decoded_bytes = audio_decoded_bytes(this->max_audio_latency_ms_);
+    this->audio_input_ring_buffer_ = ring_buffer::RingBuffer::create_in(this->pool_.alloc(input_bytes), input_bytes);
+    this->audio_decoded_ring_buffer_ =
+        ring_buffer::RingBuffer::create_in(this->pool_.alloc(decoded_bytes), decoded_bytes);
+    this->audio_temp_buffer_ = this->pool_.alloc(AUDIO_TEMP_BUFFER_SIZE);
+    if (this->audio_input_ring_buffer_ == nullptr || this->audio_decoded_ring_buffer_ == nullptr ||
+        this->audio_temp_buffer_ == nullptr) {
+      ESP_LOGE(TAG, "No room in the PSRAM pool for the sound buffers");
       this->mark_failed();
       return;
     }
-
-    this->audio_decoded_ring_buffer_ = ring_buffer::RingBuffer::create(AUDIO_DECODED_BUFFER_SIZE);
-    if (this->audio_decoded_ring_buffer_ == nullptr) {
-      ESP_LOGE(TAG, "Failed to create audio decoded ring buffer (%zu KB)", AUDIO_DECODED_BUFFER_SIZE / 1024);
-      this->mark_failed();
-      return;
-    }
-
-    uint8_t *temp_buf = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_TEMP_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
-    if (!temp_buf) {
-      ESP_LOGE(TAG, "Failed to allocate audio temp buffer in PSRAM (%zu KB)", AUDIO_TEMP_BUFFER_SIZE / 1024);
-      this->mark_failed();
-      return;
-    }
-    this->audio_temp_buffer_.reset(temp_buf);
 
 #if defined(SVP_AUDIO_SUPPORT_MP3) || defined(SVP_AUDIO_SUPPORT_FLAC)
     // audio_decoder_ itself: allocated ONCE here too, same as everything else above. One
@@ -193,8 +186,9 @@ void SimpleVideoPlayer::setup() {
                 static_cast<unsigned>(this->pool_.size()),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
-  ESP_LOGCONFIG(TAG, "  Cache buffer: %" PRIu32 " bytes (internal RAM)", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes (PSRAM)", this->input_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  Read-ahead ring: %u bytes (audio latency up to %" PRIu32 " ms), frame slot %u bytes",
+                static_cast<unsigned>(this->ring_size_), this->max_audio_latency_ms_,
+                static_cast<unsigned>(this->frame_bytes_));
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 #ifdef USE_AUDIO
   if (this->speaker_ != nullptr) {
@@ -204,6 +198,7 @@ void SimpleVideoPlayer::setup() {
 }
 
 void SimpleVideoPlayer::loop() {
+  this->handle_output_release_();
 #ifdef SVP_CHANNEL_LIST
   this->channel_loop_();
 #endif
@@ -367,9 +362,10 @@ void SimpleVideoPlayer::loop() {
 
 void SimpleVideoPlayer::dump_config() {
   ESP_LOGCONFIG(TAG, "Simple Video Player:");
-  ESP_LOGCONFIG(TAG, "  Cache buffer size: %" PRIu32 " bytes", this->cache_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Decode input buffer: %" PRIu32 " bytes", this->input_buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Read-ahead buffer: %" PRIu32 " bytes (PSRAM)", this->read_ahead_buffer_size_);
+  ESP_LOGCONFIG(TAG, "  PSRAM pool: %u bytes, %u in use", static_cast<unsigned>(this->pool_.size()),
+                static_cast<unsigned>(this->pool_.used()));
+  ESP_LOGCONFIG(TAG, "  Read-ahead ring: %u bytes, frame slot %u bytes", static_cast<unsigned>(this->ring_size_),
+                static_cast<unsigned>(this->frame_bytes_));
   ESP_LOGCONFIG(TAG, "  Target FPS: %.1f", this->target_fps_);
 
   if (this->state_ != PlayerState::STOPPED) {
@@ -528,7 +524,7 @@ void SimpleVideoPlayer::start_playback_(const std::string &video_path) {
   this->duration_frames_.store(0, std::memory_order_relaxed);
   this->position_frame_.store(0, std::memory_order_relaxed);
 #ifdef USE_AUDIO
-  this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), MAX_AUDIO_LATENCY_MS) * 1000;
+  this->audio_lead_us_ = std::min<uint32_t>(this->audio_latency_.value(), this->max_audio_latency_ms_) * 1000;
 #endif
   this->state_.store(PlayerState::PLAYING, std::memory_order_release);
 
@@ -689,12 +685,12 @@ void SimpleVideoPlayer::reader_loop_() {
       xQueueSend(this->empty_queue_, &slot, 0);
       break;
     }
-    slot->size = n;  // > 0 payload, 0 EOF sentinel, -1 read-error sentinel
+    slot->size = n;  // > 0 payload, REPEAT_FRAME, 0 EOF sentinel, -1 read-error sentinel
     slot->gen = this->frame_gen_.load(std::memory_order_relaxed);
     slot->file_frame =
         this->video_format_ == VideoFormat::AVI_MJPEG ? this->avi_parser_->current_frame() - 1 : raw_frame++;
     xQueueSend(this->filled_queue_, &slot, portMAX_DELAY);
-    if (n <= 0)
+    if (n == 0 || n == -1)
       at_end = true;
   }
 }
@@ -1076,7 +1072,8 @@ void SimpleVideoPlayer::playback_loop_() {
       this->on_finished_callbacks_.call();
       break;
     }
-    if (payload < 0) {  // read-error sentinel
+    const bool repeat = payload == AVIParser::REPEAT_FRAME;  // the previous picture stays one more frame
+    if (payload < 0 && !repeat) {  // read-error sentinel
       xQueueSend(this->empty_queue_, &slot, 0);
       ESP_LOGE(TAG, "Failed to read frame");
       this->set_error_(PlaybackError::FILE_READ_ERROR);
@@ -1124,6 +1121,12 @@ void SimpleVideoPlayer::playback_loop_() {
       this->late_frame_count_++;
     }
     this->last_present_us_ = present_now;
+
+    if (repeat) {
+      xQueueSend(this->empty_queue_, &slot, 0);
+      esp_task_wdt_reset();
+      continue;
+    }
 
     // decode_frame_() consumes slot->data (compressed) into the decode target. Once it returns, the
     // compressed bytes are no longer needed -- the async PPA rotate reads the decoded buffer, not
@@ -1325,7 +1328,7 @@ bool SimpleVideoPlayer::wait_for_task_stop_(TaskHandle_t &handle, uint32_t timeo
 int SimpleVideoPlayer::read_frame_(uint8_t *dest, size_t cap) {
   while (true) {
     int n = this->read_next_frame_(dest, cap);
-    if (n > 0) {
+    if (n > 0 || n == AVIParser::REPEAT_FRAME) {
       return n;
     }
 #ifdef SVP_STREAM
@@ -1359,23 +1362,18 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
     // AVI format - use parser to get next frame (video or audio)
     AVIFrame frame;
     int bytes_read = this->avi_parser_->read_next_frame(frame, dest_buffer, dest_capacity);
-
-    if (bytes_read <= 0) {
-      return bytes_read;  // EOF or error
-    }
-
     // Consume interleaved audio chunks until the next video frame -- feed each one straight
     // through; audio free-runs on the speaker clock.
-    while (frame.stream_type != AVIStreamType::VIDEO) {
+    while (bytes_read > 0 && frame.stream_type != AVIStreamType::VIDEO) {
 #ifdef USE_AUDIO
       if (frame.stream_type == AVIStreamType::AUDIO && this->audio_enabled_) {
         this->reader_audio_chunk_(frame, dest_buffer, bytes_read);
       }
 #endif
       bytes_read = this->avi_parser_->read_next_frame(frame, dest_buffer, dest_capacity);
-      if (bytes_read <= 0) {
-        return bytes_read;
-      }
+    }
+    if (bytes_read <= 0 && bytes_read != AVIParser::REPEAT_FRAME) {
+      return bytes_read;  // EOF or error
     }
 #ifdef USE_AUDIO
     this->reader_passed_video_();
@@ -1391,7 +1389,7 @@ int SimpleVideoPlayer::read_next_frame_(uint8_t *dest_buffer, size_t dest_capaci
       // Read more data into cache if needed
       if (this->cache_buffer_offset_ >= this->cache_buffer_valid_) {
         // Cache is exhausted, read next chunk
-        int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
+        int bytes_read = this->read_data_(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
 
         if (bytes_read <= 0) {
           // EOF or error
@@ -1561,7 +1559,7 @@ bool SimpleVideoPlayer::get_video_dimensions_(uint32_t &width, uint32_t &height)
     return true;
   } else {
     // Raw MJPEG - read first chunk to get JPEG header
-    int bytes_read = this->read_data_(this->cache_buffer_.get(), this->cache_buffer_size_);
+    int bytes_read = this->read_data_(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
     if (bytes_read <= 0) {
       return false;
     }
@@ -1660,6 +1658,7 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
   if (this->video_format_ == VideoFormat::AVI_MJPEG) {
     if (!this->avi_parser_) {
       this->avi_parser_ = std::make_unique<AVIParser>();
+      this->avi_parser_->set_pool(&this->pool_, this->index_reserve_);
     }
 
     // Seek back to start for parser
@@ -1677,6 +1676,8 @@ bool SimpleVideoPlayer::open_file_(const std::string &path) {
     }
 
     ESP_LOGI(TAG, "AVI parser initialized successfully");
+    // The index now: seeking, and damage passed over to the next intact frame.
+    this->avi_parser_->load_index(this->cache_buffer_.get(), CACHE_BUFFER_SIZE);
   } else {
     // Raw MJPEG - seek back to start for frame reading
     if (!this->seek_to_(0)) {
@@ -1724,6 +1725,7 @@ bool SimpleVideoPlayer::open_stream_source_() {
   this->video_format_ = VideoFormat::AVI_MJPEG;
   if (!this->avi_parser_) {
     this->avi_parser_ = std::make_unique<AVIParser>();
+    this->avi_parser_->set_pool(&this->pool_, this->index_reserve_);
   }
   if (!this->avi_parser_->open(this->file_reader_.get())) {
     ESP_LOGE(TAG, "Network stream is not an AVI this player reads");
@@ -1812,7 +1814,7 @@ bool SimpleVideoPlayer::reader_seek_(uint32_t frame) {
   // Index and seek need blocking reads; the ring then restarts empty and is filled before frames
   // are read again, as at the start of playback.
   reader->set_streaming(false);
-  const bool ok = this->avi_parser_->load_index(this->cache_buffer_.get(), this->cache_buffer_size_) &&
+  const bool ok = this->avi_parser_->load_index(this->cache_buffer_.get(), CACHE_BUFFER_SIZE) &&
                   this->avi_parser_->seek_to_frame(frame);
   reader->prefill_cache();
   reader->set_streaming(true);
@@ -1894,15 +1896,10 @@ void SimpleVideoPlayer::free_buffers_() {
   this->display_buffer_.store(nullptr, std::memory_order_release);
 
 #ifdef USE_AUDIO
-  // Permanent audio buffers (allocated once in setup(), see there) -- true end-of-life free.
-  // audio_temp_buffer_ was heap_caps_malloc()'d (PSRAM), so it needs heap_caps_free(), not its
-  // unique_ptr default deleter. The two ring buffers are shared_ptr<RingBuffer> -- resetting them
-  // is enough, RingBuffer's own destructor frees its internal storage.
-  if (this->audio_temp_buffer_) {
-    heap_caps_free(this->audio_temp_buffer_.release());
-  }
+  // The sound buffers live in the pool, which is never given back.
   this->audio_input_ring_buffer_.reset();
   this->audio_decoded_ring_buffer_.reset();
+  this->audio_temp_buffer_ = nullptr;
 #endif
 
   for (auto &slot : this->frame_slots_) {
@@ -1929,6 +1926,76 @@ void SimpleVideoPlayer::free_buffers_() {
 // PSRAM pool
 //========================================================================
 
+static constexpr size_t MIB = 1024 * 1024;
+static size_t pool_round(size_t bytes) { return (bytes + PsramPool::ALIGN - 1) & ~(PsramPool::ALIGN - 1); }
+
+size_t SimpleVideoPlayer::canvas_output_size_() const {
+#ifdef SVP_CANVAS_OUTPUT
+  return pool_round(static_cast<size_t>(ALIGN_UP(this->canvas_size_w_, 16)) * ALIGN_UP(this->canvas_size_h_, 16) * 3);
+#else
+  return 0;
+#endif
+}
+
+// Everything but the ring gets what it needs at most; the ring gets the rest, in whole fill chunks.
+bool SimpleVideoPlayer::plan_pool_() {
+  const size_t pool = this->pool_.size();
+  this->frame_bytes_ = pool_round(std::clamp<size_t>(pool / 24, 256 * 1024, MIB));
+  size_t fixed = this->frame_bytes_ * FRAME_SLOT_COUNT;
+  size_t output = 0;
+#ifdef SVP_DSI_OUTPUT
+  if (this->dsi_ != nullptr)
+    output = pool_round(static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_);
+#endif
+  output = std::max(output, 2 * this->canvas_output_size_());
+  this->output_reserve_ = output;
+  fixed += output;
+#ifdef SVP_CONTROLS
+  if (this->ctl_widget_ != nullptr && this->dsi_ != nullptr) {
+    lv_obj_update_layout(this->ctl_widget_);
+    const size_t area =
+        static_cast<size_t>(lv_obj_get_width(this->ctl_widget_)) * static_cast<size_t>(lv_obj_get_height(this->ctl_widget_));
+    this->controls_reserve_ = 2 * pool_round(sizeof(ControlsBlock) + area * this->dsi_fb_bpp_);
+    fixed += this->controls_reserve_;
+  }
+#endif
+#ifdef SVP_STREAM
+  if (this->stream_port_ != 0) {
+    this->stream_max_frame_bytes_ = pool_round(this->frame_bytes_ / 4);
+    fixed += STREAM_FRAME_COUNT * static_cast<size_t>(this->stream_max_frame_bytes_);
+  }
+#endif
+#ifdef SVP_PICTURES
+  if (this->pic_canvas_ != nullptr && this->thumbs_enabled_ && this->thumb_container_ != nullptr &&
+      this->thumb_count_ > 0)
+    fixed += pool_round(static_cast<size_t>(lv_draw_buf_width_to_stride(this->thumb_w_, LV_COLOR_FORMAT_RGB565)) *
+                        this->thumb_h_ * this->thumb_count_);
+#endif
+  this->index_reserve_ = pool_round(std::clamp<size_t>(pool / 32, 128 * 1024, MIB));
+  fixed += this->index_reserve_ + 32 * PsramPool::ALIGN;  // pieces end on whole cache lines
+
+  const size_t chunk = BufferedFileReader::FILL_CHUNK;
+  auto ring_for = [pool, chunk](size_t taken) -> size_t { return taken + 2 * chunk <= pool ? (pool - taken) / chunk * chunk : 0; };
+  size_t ring = ring_for(fixed);
+#ifdef USE_AUDIO
+  if (this->speaker_ != nullptr && ring != 0) {
+    // The sound buffers hold what the ring lets the sound run ahead; sized for the larger ring, they
+    // fit the smaller one that is left.
+    const auto latency = static_cast<uint32_t>(ring * 100 / MIB);
+    ring = ring_for(fixed + pool_round(audio_input_bytes(latency)) + pool_round(audio_decoded_bytes(latency)) +
+                    pool_round(AUDIO_TEMP_BUFFER_SIZE));
+  }
+#endif
+  if (ring == 0) {
+    ESP_LOGE(TAG, "psram_pool_size %u is too small: %u bytes go to frame slot, outputs, sound, controls and index",
+             static_cast<unsigned>(pool), static_cast<unsigned>(fixed));
+    return false;
+  }
+  this->ring_size_ = ring;
+  this->max_audio_latency_ms_ = static_cast<uint32_t>(ring * 100 / MIB);
+  return true;
+}
+
 uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
   uint8_t *piece = this->pool_.alloc(size);
 #ifdef SVP_PICTURES
@@ -1948,14 +2015,14 @@ uint8_t *SimpleVideoPlayer::media_alloc_(size_t size) {
 
 bool SimpleVideoPlayer::acquire_session_buffers_() {
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  if (this->ring_buf_ == nullptr)
-    this->ring_buf_ = this->media_alloc_(this->read_ahead_buffer_size_);
   for (auto &slot : this->frame_slots_) {
     if (slot.data == nullptr) {
-      slot.data = this->media_alloc_(this->input_buffer_size_);
-      slot.capacity = slot.data != nullptr ? this->input_buffer_size_ : 0;
+      slot.data = this->media_alloc_(this->frame_bytes_);
+      slot.capacity = slot.data != nullptr ? this->frame_bytes_ : 0;
     }
   }
+  if (this->ring_buf_ == nullptr)
+    this->ring_buf_ = this->media_alloc_(this->ring_size_);
   bool ok = this->ring_buf_ != nullptr;
   for (auto &slot : this->frame_slots_)
     ok = ok && slot.data != nullptr;
@@ -1965,24 +2032,51 @@ bool SimpleVideoPlayer::acquire_session_buffers_() {
   if (!this->file_reader_)
     this->file_reader_ = std::make_unique<BufferedFileReader>();
   if (!this->file_reader_->has_ring())
-    this->file_reader_->set_ring(this->ring_buf_, this->read_ahead_buffer_size_);
+    this->file_reader_->set_ring(this->ring_buf_, this->ring_size_);
   return true;
+}
+
+// Playback or stream task, media lock not held. When the other output's memory is needed, the main
+// loop gives it back (handle_output_release_()); then the pictures' if still short.
+uint8_t *SimpleVideoPlayer::output_alloc_(size_t size, uint8_t other) {
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  uint8_t *piece = this->pool_.alloc(size);
+  xSemaphoreGive(this->media_lock_);
+  if (piece != nullptr)
+    return piece;
+  this->output_release_req_.store(other, std::memory_order_release);
+  for (uint32_t waited = 0; this->output_release_req_.load(std::memory_order_acquire) != 0 && waited < 2000;
+       waited += 5)
+    vTaskDelay(pdMS_TO_TICKS(5));
+  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+  piece = this->media_alloc_(size);
+  xSemaphoreGive(this->media_lock_);
+  return piece;
 }
 
 #ifdef SVP_DSI_OUTPUT
 bool SimpleVideoPlayer::ensure_direct_target_() {
   if (this->decode_target_ != nullptr)
     return true;
+  // Whole cache lines, as the JPEG unit writes it by DMA.
+  const size_t size = pool_round(static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_);
+  uint8_t *target = this->output_alloc_(size, RELEASE_CANVAS);
+  if (target == nullptr)
+    return false;
+#ifdef SVP_CONTROLS
+  // The controls drawn over the direct output: both pictures, with the display's decode buffer.
   xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  if (this->decode_target_ == nullptr) {
-    // Whole cache lines, as the JPEG unit writes it by DMA.
-    const size_t wanted = static_cast<size_t>(this->dsi_out_w_) * this->dsi_out_h_ * this->dsi_fb_bpp_;
-    this->decode_target_ = this->media_alloc_(wanted);
-    this->decode_target_len_ = this->decode_target_ != nullptr ? ALIGN_UP(wanted, PsramPool::ALIGN) : 0;
+  for (int i = 0; i < 2 && this->controls_reserve_ != 0; i++) {
+    if (this->ctl_bufs_[i] == nullptr) {
+      this->ctl_bufs_[i] = this->pool_.alloc(this->controls_reserve_ / 2);
+      this->ctl_buf_size_[i] = this->ctl_bufs_[i] != nullptr ? this->controls_reserve_ / 2 : 0;
+    }
   }
-  const bool ok = this->decode_target_ != nullptr;
   xSemaphoreGive(this->media_lock_);
-  return ok;
+#endif
+  this->decode_target_len_ = size;
+  this->decode_target_ = target;
+  return true;
 }
 #endif
 
@@ -1990,36 +2084,86 @@ bool SimpleVideoPlayer::ensure_direct_target_() {
 bool SimpleVideoPlayer::ensure_canvas_outputs_() {
   if (this->output_buffers_[1] != nullptr)
     return true;
-  xSemaphoreTake(this->media_lock_, portMAX_DELAY);
-  if (this->output_buffers_[1] == nullptr) {
-    // RGB888 double buffer of the canvas' size (rows of 16): decode writes one while LVGL reads the
-    // other. RGB888, not RGB565: the decoder's RGB565 output is buggy on some P4 revisions.
-    const size_t size = ALIGN_UP(static_cast<size_t>(ALIGN_UP(this->canvas_size_w_, 16)) *
-                                     ALIGN_UP(this->canvas_size_h_, 16) * 3,
-                                 PsramPool::ALIGN);
-    for (auto *&buf : this->output_buffers_) {
-      if (buf == nullptr)
-        buf = this->media_alloc_(size);
-      if (buf != nullptr)
-        std::memset(buf, 0, size);
-    }
-    if (this->output_buffers_[0] == nullptr || this->output_buffers_[1] == nullptr) {
+  // RGB888 double buffer of the canvas' size (rows of 16): decode writes one while LVGL reads the
+  // other. RGB888, not RGB565: the decoder's RGB565 output is buggy on some P4 revisions.
+  const size_t size = this->canvas_output_size_();
+  uint8_t *buffers[2] = {this->output_buffers_[0], nullptr};
+  for (auto *&buf : buffers) {
+    if (buf == nullptr)
+      buf = this->output_alloc_(size, RELEASE_DIRECT);
+  }
+  if (buffers[0] == nullptr || buffers[1] == nullptr) {
+    xSemaphoreTake(this->media_lock_, portMAX_DELAY);
+    for (auto *buf : buffers)
+      this->pool_.free(buf);
+    this->output_buffers_[0] = nullptr;
+    xSemaphoreGive(this->media_lock_);
+    return false;
+  }
+  for (auto *buf : buffers)
+    std::memset(buf, 0, size);
+  this->output_buffer_size_ = size;
+  this->output_buffers_[0] = buffers[0];
+  this->output_buffers_[1] = buffers[1];
+  return true;
+}
+#endif
+
+// Main loop. Only when nothing draws into the output given back: the stream draws under output_lock_.
+void SimpleVideoPlayer::handle_output_release_() {
+  const uint8_t which = this->output_release_req_.load(std::memory_order_acquire);
+  if (which == 0)
+    return;
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr && xSemaphoreTake(this->output_lock_, 0) != pdTRUE)
+    return;  // next loop
+#endif
+  if (xSemaphoreTake(this->media_lock_, 0) == pdTRUE) {
+#ifdef SVP_CANVAS_OUTPUT
+    if (which == RELEASE_CANVAS && this->output_buffers_[0] != nullptr) {
+      lv_image_set_src(this->canvas_, nullptr);
+      std::memset(&this->canvas_draw_buf_, 0, sizeof(this->canvas_draw_buf_));
+      this->display_buffer_.store(nullptr, std::memory_order_release);
+      this->frame_ready_.store(false, std::memory_order_release);
       for (auto *&buf : this->output_buffers_) {
         this->pool_.free(buf);
         buf = nullptr;
       }
+      this->output_buffer_size_ = 0;
     }
-    this->output_buffer_size_ = this->output_buffers_[1] != nullptr ? size : 0;
-  }
-  const bool ok = this->output_buffers_[1] != nullptr;
-  xSemaphoreGive(this->media_lock_);
-  return ok;
-}
 #endif
+#ifdef SVP_DSI_OUTPUT
+    if (which == RELEASE_DIRECT && this->decode_target_ != nullptr) {
+      this->pool_.free(this->decode_target_);
+      this->decode_target_ = nullptr;
+      this->decode_target_len_ = 0;
+#ifdef SVP_CONTROLS
+      for (int i = 0; i < 2; i++) {
+        this->pool_.free(this->ctl_bufs_[i]);
+        this->ctl_bufs_[i] = nullptr;
+        this->ctl_buf_size_[i] = 0;
+      }
+#endif
+    }
+#endif
+    xSemaphoreGive(this->media_lock_);
+    this->output_release_req_.store(0, std::memory_order_release);
+  }
+#ifdef SVP_STREAM
+  if (this->output_lock_ != nullptr)
+    xSemaphoreGive(this->output_lock_);
+#endif
+}
 
 bool SimpleVideoPlayer::release_media_() {
-  if (this->state_.load(std::memory_order_acquire) != PlayerState::STOPPED || this->task_handle_ != nullptr)
+  const PlayerState state = this->state_.load(std::memory_order_acquire);
+  if (state == PlayerState::PLAYING || state == PlayerState::PAUSED || this->task_handle_ != nullptr ||
+      this->reader_task_handle_ != nullptr)
     return false;
+#ifdef USE_AUDIO
+  if (this->audio_task_handle_ != nullptr)
+    return false;
+#endif
 #ifdef SVP_STREAM
   if (this->stream_connected_.load(std::memory_order_acquire) || this->stream_avi_.load(std::memory_order_acquire))
     return false;
@@ -2050,6 +2194,13 @@ bool SimpleVideoPlayer::release_media_() {
       this->decode_target_len_ = 0;
       released = true;
     }
+#ifdef SVP_CONTROLS
+    for (int i = 0; i < 2; i++) {
+      this->pool_.free(this->ctl_bufs_[i]);
+      this->ctl_bufs_[i] = nullptr;
+      this->ctl_buf_size_[i] = 0;
+    }
+#endif
 #endif
     if (this->ring_buf_ != nullptr) {
       if (this->file_reader_)
@@ -2372,7 +2523,7 @@ void SimpleVideoPlayer::advance_audio_cursor_() {
     if (id == AVI_CHUNK_00DC || id == AVI_CHUNK_00DB) {
       this->audio_cursor_frames_.fetch_add(1, std::memory_order_release);
     } else if (id == AVI_CHUNK_01WB && size > 0) {
-      if (size > this->cache_buffer_size_ || !reader->peek(offset + 8, scratch, size))
+      if (size > CACHE_BUFFER_SIZE || !reader->peek(offset + 8, scratch, size))
         return;
       AVIFrame frame{};
       frame.stream_type = AVIStreamType::AUDIO;
@@ -2468,10 +2619,10 @@ void SimpleVideoPlayer::audio_processing_loop_() {
       size_t available = this->audio_decoded_ring_buffer_->available();
       if (available > 0) {
         size_t to_read = std::min(available, AUDIO_TEMP_BUFFER_SIZE);
-        size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_.get(), to_read, 0);
+        size_t bytes_read = this->audio_decoded_ring_buffer_->read(this->audio_temp_buffer_, to_read, 0);
 
         size_t bytes_remaining = bytes_read;
-        const uint8_t *write_ptr = this->audio_temp_buffer_.get();
+        const uint8_t *write_ptr = this->audio_temp_buffer_;
         while (bytes_remaining > 0 && !this->audio_task_stop_) {
           size_t written = this->speaker_->play(write_ptr, bytes_remaining);
           if (written > 0) {

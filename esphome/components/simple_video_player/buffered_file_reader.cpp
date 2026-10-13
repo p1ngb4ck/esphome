@@ -17,7 +17,7 @@ namespace simple_video_player {
 static const char *const TAG = "buffered_file_reader";
 
 void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, size_t len) const {
-  const size_t at = pos & (this->size - 1);
+  const size_t at = this->at(pos);
   const size_t first = std::min(len, this->size - at);
   memcpy(dst, this->data + at, first);
   if (first < len)
@@ -26,26 +26,26 @@ void BufferedFileReader::LookaheadRing::copy_out_(uint32_t pos, uint8_t *dst, si
 
 void BufferedFileReader::LookaheadRing::write(const uint8_t *src, size_t len) {
   const uint32_t pos = this->head.load(std::memory_order_relaxed);
-  const size_t at = pos & (this->size - 1);
+  const size_t at = this->at(pos);
   const size_t first = std::min(len, this->size - at);
   memcpy(this->data + at, src, first);
   if (first < len)
     memcpy(this->data, src + first, len - first);
-  this->head.store(pos + static_cast<uint32_t>(len), std::memory_order_release);
+  this->head.store(this->advance(pos, len), std::memory_order_release);
 }
 
 size_t BufferedFileReader::LookaheadRing::read(uint8_t *dst, size_t len) {
   const uint32_t pos = this->tail.load(std::memory_order_relaxed);
-  len = std::min(len, static_cast<size_t>(this->head.load(std::memory_order_acquire) - pos));
+  len = std::min(len, this->used(this->head.load(std::memory_order_acquire), pos));
   this->copy_out_(pos, dst, len);
-  this->tail.store(pos + static_cast<uint32_t>(len), std::memory_order_release);
+  this->tail.store(this->advance(pos, len), std::memory_order_release);
   return len;
 }
 
 bool BufferedFileReader::LookaheadRing::peek(size_t offset, uint8_t *dst, size_t len) const {
   if (offset + len > this->available())
     return false;
-  this->copy_out_(this->tail.load(std::memory_order_relaxed) + static_cast<uint32_t>(offset), dst, len);
+  this->copy_out_(this->advance(this->tail.load(std::memory_order_relaxed), offset), dst, len);
   return true;
 }
 
@@ -67,7 +67,7 @@ void BufferedFileReader::kick_fill_() {
   }
   // Straight into the ring, up to its end: chunks start where the last one ended, so with whole
   // chunks (and a ring of whole chunks) one never wraps.
-  const size_t at = this->ring_.head.load(std::memory_order_relaxed) & (this->ring_.size - 1);
+  const size_t at = this->ring_.at(this->ring_.head.load(std::memory_order_relaxed));
   const size_t want = std::min(FILL_CHUNK, this->ring_.size - at);
   this->fill_got_ = 0;
   this->fill_submit_us_ = micros();
@@ -160,6 +160,7 @@ void BufferedFileReader::close() {
     xSemaphoreGive(this->stream_lock_);
     this->streaming_ = false;
     this->current_position_ = 0;
+    this->waiting_task_ = nullptr;
     return;
   }
   // The abort flag exists to abandon an in-flight read so playback stops promptly -- it must NOT
@@ -173,8 +174,9 @@ void BufferedFileReader::close() {
 
   this->ring_.reset();
   this->open_ = false;
-  this->streaming_ = false;  // next open() starts back in blocking (LOAD) mode
+  this->streaming_ = false;
   this->current_position_ = 0;
+  this->waiting_task_ = nullptr;  // no completion is due any more
 }
 
 bool BufferedFileReader::open_stream() {
@@ -252,39 +254,24 @@ bool BufferedFileReader::prefill_cache() {
   return true;
 }
 
+// From the reader task (or a LOAD-time probe): what the ring has, and for the rest a wait for the
+// fill chain (woken by each completion) until it is there, the file ends, a read fails, playback
+// stops or WAIT_CAP_MS pass. A slow storage then delays frames instead of ending the video.
 int BufferedFileReader::read(uint8_t *buffer, size_t size) {
   if (!this->open_)
     return -1;
-
   if (this->streaming_) {
-    // PLAY path: single non-blocking drain. The storage worker streams chunks in ahead via the
-    // async read_chunk() completion chain (on_fill_done_ -> kick_fill_), so in normal playback the
-    // ring is already primed and this returns the full `size`. Never parks, never spins.
     const size_t avail = this->ring_.available();
     if (!this->stats_.min_set || avail < this->stats_.min_avail) {
       this->stats_.min_avail = avail;
       this->stats_.min_set = true;
     }
-    size_t n = this->ring_.read(buffer, size);
-    if (n < size && !this->eof_.load(std::memory_order_acquire))
-      this->stats_.underruns++;
-    this->current_position_ += n;
-    this->kick_fill_();  // keep the async stream fed
-    if (n == 0) {
-      if (this->fill_err_.load(std::memory_order_acquire))
-        return -1;
-      if (this->eof_.load(std::memory_order_acquire))
-        return 0;
-    }
-    return static_cast<int>(n);
   }
-
-  // LOAD path (unchanged): header / dimension probe needs the bytes now, before the async stream
-  // has spun up -- wait them out.
   size_t copied = 0;
   uint32_t waited = 0;
+  bool short_counted = false;
   while (copied < size) {
-    size_t n = this->ring_.read(buffer + copied, size - copied);
+    const size_t n = this->ring_.read(buffer + copied, size - copied);
     if (n > 0) {
       copied += n;
       this->current_position_ += n;
@@ -298,8 +285,13 @@ int BufferedFileReader::read(uint8_t *buffer, size_t size) {
       break;  // stream ended and ring drained
     if (this->abort_flag_ != nullptr && *this->abort_flag_)
       return copied > 0 ? static_cast<int>(copied) : -1;
+    if (this->streaming_ && !short_counted) {
+      this->stats_.underruns++;
+      short_counted = true;
+    }
     this->kick_fill_();
-    vTaskDelay(pdMS_TO_TICKS(WAIT_SLICE_MS));
+    this->waiting_task_ = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WAIT_SLICE_MS));
     if ((waited += WAIT_SLICE_MS) >= WAIT_CAP_MS)
       return copied > 0 ? static_cast<int>(copied) : -1;
   }

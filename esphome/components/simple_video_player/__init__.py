@@ -151,12 +151,8 @@ CONF_CANVAS_ID = "canvas_id"
 CONF_DISPLAY_ID = "display_id"
 CONF_SPEAKER_ID = "speaker_id"
 CONF_MEDIA_PLAYER_ID = "media_player_id"
-CONF_CACHE_BUFFER_SIZE = "cache_buffer_size"
-CONF_INPUT_BUFFER_SIZE = "input_buffer_size"
-CONF_PREFETCH_DURATION = "prefetch_duration"
 CONF_TARGET_FPS = "target_fps"
 CONF_STREAM_PORT = "stream_port"
-CONF_STREAM_MAX_FRAME_BYTES = "stream_max_frame_bytes"
 CONF_STREAM_OUTPUT = "stream_output"
 STREAM_OUTPUT_FULLSCREEN = "fullscreen"
 STREAM_OUTPUT_CANVAS = "canvas"
@@ -176,7 +172,6 @@ CONF_PLAY_PAUSE_ID = "play_pause_id"
 CONF_REPEAT_ID = "repeat_id"
 CONF_STEP = "step"
 CONF_HIDE_AFTER = "hide_after"
-CONF_READ_AHEAD_BUFFER_SIZE = "read_ahead_buffer_size"
 CONF_PICTURE_DIRECTORIES = "picture_directories"
 CONF_SLIDESHOW_INTERVAL = "slideshow_interval"
 CONF_FIT_MODE = "fit_mode"
@@ -221,48 +216,10 @@ PICTURE_ONLY_KEYS = (
     CONF_THUMBNAIL_LABEL_STYLE_ID,
     CONF_ON_THUMBNAIL_CLICK,
 )
-# The read-ahead ring holds the picture the sound runs ahead of: 100 ms per MiB (4MB -> 400 ms).
-AUDIO_LATENCY_MS_PER_MIB = 100
-DEFAULT_READ_AHEAD_BUFFER_SIZE = 4 * 1024 * 1024
-MIN_READ_AHEAD_BUFFER_SIZE = 1000000  # 1MB
-MAX_READ_AHEAD_BUFFER_SIZE = 16 * 1024 * 1024
 CONF_PSRAM_POOL_SIZE = "psram_pool_size"
-DEFAULT_PSRAM_POOL_SIZE = 16 * 1024 * 1024
-MIN_PSRAM_POOL_SIZE = 4 * 1024 * 1024
+DEFAULT_PSRAM_POOL_SIZE = 12 * 1024 * 1024
+MIN_PSRAM_POOL_SIZE = 6 * 1024 * 1024
 MAX_PSRAM_POOL_SIZE = 28 * 1024 * 1024
-
-
-def _pool_holds_session(config):
-    # One playback session takes the read-ahead ring and the frame slot from the pool at once.
-    needed = config[CONF_READ_AHEAD_BUFFER_SIZE] + config[CONF_INPUT_BUFFER_SIZE]
-    if config[CONF_PSRAM_POOL_SIZE] < needed:
-        raise cv.Invalid(
-            f"{CONF_PSRAM_POOL_SIZE} must be at least {CONF_READ_AHEAD_BUFFER_SIZE} + "
-            f"{CONF_INPUT_BUFFER_SIZE} ({needed} bytes) plus the output buffers",
-            [CONF_PSRAM_POOL_SIZE],
-        )
-    return config
-
-
-def _next_power_of_two(value):
-    # The ring indexes with a mask: "4MB" (4000000) becomes 4 MiB.
-    return 1 << (value - 1).bit_length()
-
-
-def _max_audio_latency_ms(config):
-    return config[CONF_READ_AHEAD_BUFFER_SIZE] // (1024 * 1024) * AUDIO_LATENCY_MS_PER_MIB
-
-
-def _latency_within_max(config):
-    latency = config.get(CONF_AUDIO_LATENCY)
-    limit = _max_audio_latency_ms(config)
-    if isinstance(latency, cv.TimePeriod) and latency.total_milliseconds > limit:
-        raise cv.Invalid(
-            f"{CONF_AUDIO_LATENCY} can be at most {limit}ms with this "
-            f"{CONF_READ_AHEAD_BUFFER_SIZE} ({AUDIO_LATENCY_MS_PER_MIB}ms per MB)",
-            [CONF_AUDIO_LATENCY],
-        )
-    return config
 # Internal-only keys (never part of CONFIG_SCHEMA): _final_validate resolves these from the
 # referenced speaker's own config and stashes them here for to_code() to read back.
 CONF_AUDIO_SAMPLE_RATE = "audio_sample_rate"
@@ -295,27 +252,9 @@ CONF_ON_PLAYBACK_PAUSED = "on_playback_paused"
 CONF_ON_PLAYBACK_ERROR = "on_playback_error"
 
 # Default values
-DEFAULT_CACHE_BUFFER_SIZE = 64 * 1024  # 64KB - optimized for better I/O performance
-DEFAULT_INPUT_BUFFER_SIZE = 256 * 1024  # 256KB (per frame-ring-buffer slot)
-# How much of the video's COMPRESSED source stream to keep prefetched (loader task, Core 0 ->
-# decode task, Core 1) at all times, expressed as TIME, not a fixed slot count -- the number of
-# ring slots this actually needs depends on target_fps (resolved in setup(), once both this and
-# target_fps are known: slots = ceil(prefetch_duration * target_fps)). 1s is a sane default that
-# comfortably absorbs real storage-read jitter without over-committing PSRAM.
-DEFAULT_PREFETCH_DURATION = "1s"
 DEFAULT_TARGET_FPS = 30.0
 
 # Validation ranges
-MIN_CACHE_BUFFER_SIZE = 8 * 1024  # 8KB
-MAX_CACHE_BUFFER_SIZE = 128 * 1024  # 128KB - increased for performance
-MIN_INPUT_BUFFER_SIZE = 128 * 1024  # 128KB
-MAX_INPUT_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
-MIN_PREFETCH_DURATION_MS = (
-    100  # below this, storage-read jitter has essentially no headroom
-)
-MAX_PREFETCH_DURATION_MS = (
-    5000  # above this, PSRAM cost stops being worth the extra headroom
-)
 MIN_FPS = 1.0
 MAX_FPS = 60.0
 
@@ -511,9 +450,6 @@ CONFIG_SCHEMA = cv.All(
             # Network receiver: an AVI (svp_relay) plays like a file, into either output. With
             # display_id also Portall-style udisp JPEG rectangles, drawn while no file plays.
             cv.Optional(CONF_STREAM_PORT): cv.All(cv.requires_component("network"), cv.port),
-            cv.Optional(CONF_STREAM_MAX_FRAME_BYTES, default=131072): cv.int_range(
-                min=16384, max=1048576
-            ),
             # The output a stream sender makes its picture for (stream.output changes it at runtime):
             # fullscreen (display_id, the default with it) or canvas.
             cv.Optional(CONF_STREAM_OUTPUT): cv.one_of(
@@ -568,27 +504,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MEDIA_PLAYER_ID): cv.All(
                 cv.requires_component("api"), cv.use_id(media_player.MediaPlayer)
             ),
-            cv.Optional(
-                CONF_CACHE_BUFFER_SIZE, default=DEFAULT_CACHE_BUFFER_SIZE
-            ): cv.All(
-                cv.validate_bytes,
-                cv.Range(min=MIN_CACHE_BUFFER_SIZE, max=MAX_CACHE_BUFFER_SIZE),
-            ),
-            cv.Optional(
-                CONF_INPUT_BUFFER_SIZE, default=DEFAULT_INPUT_BUFFER_SIZE
-            ): cv.All(
-                cv.validate_bytes,
-                cv.Range(min=MIN_INPUT_BUFFER_SIZE, max=MAX_INPUT_BUFFER_SIZE),
-            ),
-            cv.Optional(
-                CONF_PREFETCH_DURATION, default=DEFAULT_PREFETCH_DURATION
-            ): cv.All(
-                cv.positive_time_period_milliseconds,
-                cv.Range(
-                    min=cv.TimePeriod(milliseconds=MIN_PREFETCH_DURATION_MS),
-                    max=cv.TimePeriod(milliseconds=MAX_PREFETCH_DURATION_MS),
-                ),
-            ),
             cv.Optional(CONF_TARGET_FPS, default=DEFAULT_TARGET_FPS): cv.float_range(
                 min=MIN_FPS, max=MAX_FPS
             ),
@@ -607,19 +522,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUDIO_LATENCY): cv.templatable(
                 cv.positive_time_period_milliseconds
             ),
-            # PSRAM ring the file or stream is read ahead into; it also holds the picture the sound
-            # runs ahead of, so it sets how large audio_latency can be.
-            cv.Optional(
-                CONF_READ_AHEAD_BUFFER_SIZE, default=DEFAULT_READ_AHEAD_BUFFER_SIZE
-            ): cv.All(
-                cv.validate_bytes,
-                cv.Range(
-                    min=MIN_READ_AHEAD_BUFFER_SIZE, max=MAX_READ_AHEAD_BUFFER_SIZE
-                ),
-                _next_power_of_two,
-            ),
-            # One PSRAM block taken at boot; every player buffer (read-ahead ring, frame slot,
-            # output and decode buffers, picture files) is carved from it.
+            # The player's PSRAM, one block taken at boot: every buffer it uses is cut from it
+            # (read-ahead ring -- the rest once the others have their share --, compressed-frame
+            # slot, output and decode buffers, sound, index, controls, pictures and thumbnails).
+            # The read-ahead ring also bounds audio_latency: 100 ms per MiB.
             cv.Optional(
                 CONF_PSRAM_POOL_SIZE, default=DEFAULT_PSRAM_POOL_SIZE
             ): cv.All(
@@ -656,8 +562,6 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_audio_codec_required,
-    _latency_within_max,
-    _pool_holds_session,
     _validate_output_target,
     _validate_stream,
     _validate_controls,
@@ -905,7 +809,6 @@ async def to_code(config):
 
     if CONF_STREAM_PORT in config:
         cg.add(var.set_stream_port(config[CONF_STREAM_PORT]))
-        cg.add(var.set_stream_max_frame_bytes(config[CONF_STREAM_MAX_FRAME_BYTES]))
         cg.add(var.init_stream_fullscreen(config[CONF_STREAM_OUTPUT] == STREAM_OUTPUT_FULLSCREEN))
         cg.add_define("SVP_STREAM")
         if CONF_TOUCHSCREEN_ID in config:
@@ -983,15 +886,7 @@ async def to_code(config):
         cg.add(var.set_media_player(await cg.get_variable(config[CONF_MEDIA_PLAYER_ID])))
         cg.add_define("SVP_MEDIA_PLAYER")
 
-    # Set buffer sizes
-    cg.add(var.set_cache_buffer_size(config[CONF_CACHE_BUFFER_SIZE]))
-    cg.add(var.set_input_buffer_size(config[CONF_INPUT_BUFFER_SIZE]))
-    cg.add(var.set_read_ahead_buffer_size(config[CONF_READ_AHEAD_BUFFER_SIZE]))
     cg.add(var.set_psram_pool_size(config[CONF_PSRAM_POOL_SIZE]))
-    cg.add_define("SVP_MAX_AUDIO_LATENCY_MS", _max_audio_latency_ms(config))
-    cg.add(
-        var.set_prefetch_duration_ms(config[CONF_PREFETCH_DURATION].total_milliseconds)
-    )
 
     # Set target FPS
     cg.add(var.set_target_fps(config[CONF_TARGET_FPS]))

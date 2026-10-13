@@ -48,6 +48,7 @@
 #include "buffered_file_reader.h"
 #include "avi_parser.h"
 #include "psram_pool.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <memory>
@@ -209,12 +210,8 @@ class SimpleVideoPlayer : public Component
     this->canvas_size_h_ = height;
   }
 #endif
-  void set_cache_buffer_size(uint32_t size) { this->cache_buffer_size_ = size; }
-  void set_input_buffer_size(uint32_t size) { this->input_buffer_size_ = size; }
-  void set_read_ahead_buffer_size(uint32_t size) { this->read_ahead_buffer_size_ = size; }
   void set_psram_pool_size(uint32_t size) { this->psram_pool_size_ = size; }
   void set_target_fps(float fps) { this->target_fps_ = fps; }
-  void set_prefetch_duration_ms(uint32_t ms) { this->prefetch_duration_ms_ = ms; }
 
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
@@ -255,7 +252,6 @@ class SimpleVideoPlayer : public Component
   // Network receiver: an AVI (svp_relay) plays like a file; with direct display output also
   // Portall-style udisp JPEG rectangles, drawn while no file is playing.
   void set_stream_port(uint16_t port) { this->stream_port_ = port; }
-  void set_stream_max_frame_bytes(uint32_t bytes) { this->stream_max_frame_bytes_ = bytes; }
   // Tell the sender the panel sleeps (it stops drawing) or is awake again (it redraws), as Portall's
   // portall.sleep / portall.wake.
   void stream_sleep(bool asleep);
@@ -539,7 +535,6 @@ class SimpleVideoPlayer : public Component
   static void stream_draw_task_entry_(void *param);
   void stream_draw_loop_();
   void stream_feed_(const uint8_t *data, size_t len);
-  bool ensure_stream_frames_();
   /// Whether a sender's picture is made for the display (else the canvas).
   bool stream_direct_() const {
 #if defined(SVP_DSI_OUTPUT) && defined(SVP_CANVAS_OUTPUT)
@@ -643,18 +638,27 @@ class SimpleVideoPlayer : public Component
   /// Free all buffers
   void free_buffers_();
 
-  // The PSRAM pool (psram_pool_size). Video ("media") buffers are taken on first use and kept; so
-  // are the pictures' (grown only for a larger file or picture). Only when one side's request does
-  // not fit are the other side's idle buffers handed back.
-  /// From any task: a piece for the media side; asks the main loop for the pictures' if needed.
+  // The PSRAM pool (psram_pool_size) holds every buffer of the player. setup() shares it out once
+  // (plan_pool_()): the stream frames, sound buffers and thumbnails stay at its start for good; a
+  // video session takes its frame slot, outputs, controls and index, and the read-ahead ring gets
+  // the rest. Session ("media") buffers are kept after a video; the pictures' are kept after a
+  // picture. Only when one side's request does not fit are the other side's idle buffers handed back.
+  bool plan_pool_();
+  /// From any task but the main loop: a piece for the media side; asks the main loop for the
+  /// pictures' if needed.
   uint8_t *media_alloc_(size_t size);
-  /// Playback task: the read-ahead ring and the compressed-frame slots of a session.
+  /// Playback task: the read-ahead ring and the compressed-frame slot of a session.
   bool acquire_session_buffers_();
-  /// The display's decode buffer / the canvas output pair, kept once taken.
+  /// The display's decode buffer (and the controls) / the canvas output pair, kept once taken. Only
+  /// when it does not fit beside the other output, the main loop gives that back first.
   bool ensure_direct_target_();
   bool ensure_canvas_outputs_();
+  uint8_t *output_alloc_(size_t size, uint8_t other);
   /// Main loop: the media side's buffers back to the pool, when nothing plays or streams.
   bool release_media_();
+  /// Main loop: what output_alloc_() asked for (an idle output back to the pool).
+  void handle_output_release_();
+  size_t canvas_output_size_() const;
 
   //========================================================================
   // Error Handling
@@ -673,16 +677,23 @@ class SimpleVideoPlayer : public Component
   uint16_t canvas_size_w_{0}, canvas_size_h_{0};
   lv_draw_buf_t canvas_draw_buf_{};  // the shown output buffer: the video's own size, the decoder's rows
 #endif
-  uint32_t read_ahead_buffer_size_{4 * 1024 * 1024};  // PSRAM read-ahead ring, a power of two
-  uint32_t psram_pool_size_{16 * 1024 * 1024};
+  uint32_t psram_pool_size_{12 * 1024 * 1024};
   PsramPool pool_;
   SemaphoreHandle_t media_lock_{nullptr};      // taking or giving back media buffers
   uint8_t *ring_buf_{nullptr};                 // the read-ahead ring (pool)
   std::atomic<bool> pool_reclaim_req_{false};  // media side waits for the pictures' buffers
-  uint32_t cache_buffer_size_{16 * 1024};   // 16KB internal RAM (aligned cache)
-  uint32_t input_buffer_size_{256 * 1024};  // 256KB PSRAM (worst-case single compressed frame size)
-  float target_fps_{30.0f};                 // Target frame rate
-  uint32_t prefetch_duration_ms_{1000};     // accepted for config compat; read-ahead is the transfer-buffer arena
+  enum : uint8_t { RELEASE_CANVAS = 1, RELEASE_DIRECT = 2 };
+  std::atomic<uint8_t> output_release_req_{0};  // an output waits for the other one's memory
+  // The shares of the pool (plan_pool_()).
+  size_t ring_size_{0};         // read-ahead ring: what is left
+  size_t frame_bytes_{0};       // compressed-frame slot: the largest frame that plays
+  size_t output_reserve_{0};    // the larger of the display's decode buffer and the canvas pair
+  size_t controls_reserve_{0};  // both controls pictures
+  size_t index_reserve_{0};     // a file's index
+  uint32_t max_audio_latency_ms_{0};  // what the ring holds of the picture: 100 ms per MiB
+  // Internal RAM: raw MJPEG reads, index and audio-chunk scratch.
+  static constexpr size_t CACHE_BUFFER_SIZE = 64 * 1024;
+  float target_fps_{30.0f};  // Target frame rate
 
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};  // Optional speaker for audio playback
@@ -722,11 +733,6 @@ class SimpleVideoPlayer : public Component
   // allocation after setup()). Per-file auto-detected format info is still read at open time
   // (init_audio_decoder_()), but only to VALIDATE it matches this fixed format -- a mismatch is
   // a hard error (no audio for that file), never a reason to resize anything.
-#ifdef SVP_MAX_AUDIO_LATENCY_MS
-  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = SVP_MAX_AUDIO_LATENCY_MS;
-#else
-  static constexpr uint32_t MAX_AUDIO_LATENCY_MS = 400;
-#endif
 #if defined(SVP_AUDIO_SAMPLE_RATE)
   static constexpr uint32_t AUDIO_SAMPLE_RATE = SVP_AUDIO_SAMPLE_RATE;
   static constexpr uint8_t AUDIO_SOURCE_CHANNELS = SVP_AUDIO_SOURCE_CHANNELS;
@@ -734,17 +740,13 @@ class SimpleVideoPlayer : public Component
   static constexpr size_t AUDIO_BYTES_PER_FRAME =
       static_cast<size_t>(AUDIO_SOURCE_CHANNELS) * (AUDIO_BITS_PER_SAMPLE / 8);
   static constexpr size_t AUDIO_BYTES_PER_SEC = static_cast<size_t>(AUDIO_SAMPLE_RATE) * AUDIO_BYTES_PER_FRAME;
-  // Same target durations / minimums init_audio_decoder_() always used -- just resolved at
-  // compile time now instead of recomputed from a parsed file header every play().
-  // Both hold at least MAX_AUDIO_LATENCY_MS ahead plus room, as the audio runs ahead of the picture.
-  static constexpr uint32_t AUDIO_INPUT_MS = MAX_AUDIO_LATENCY_MS + 250 > 250 ? MAX_AUDIO_LATENCY_MS + 250 : 250;
-  static constexpr uint32_t AUDIO_DECODED_MS = MAX_AUDIO_LATENCY_MS + 250 > 500 ? MAX_AUDIO_LATENCY_MS + 250 : 500;
-  static constexpr size_t AUDIO_INPUT_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * AUDIO_INPUT_MS / 1000) > (32 * 1024)
-                                                        ? (AUDIO_BYTES_PER_SEC * AUDIO_INPUT_MS / 1000)
-                                                        : (32 * 1024);
-  static constexpr size_t AUDIO_DECODED_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * AUDIO_DECODED_MS / 1000) > (16 * 1024)
-                                                          ? (AUDIO_BYTES_PER_SEC * AUDIO_DECODED_MS / 1000)
-                                                          : (16 * 1024);
+  // Both sound rings hold the most the sound can run ahead of the picture plus room (plan_pool_()).
+  static size_t audio_input_bytes(uint32_t latency_ms) {
+    return std::max<size_t>(AUDIO_BYTES_PER_SEC * (latency_ms + 250) / 1000, 32 * 1024);
+  }
+  static size_t audio_decoded_bytes(uint32_t latency_ms) {
+    return std::max<size_t>(AUDIO_BYTES_PER_SEC * std::max<uint32_t>(latency_ms + 250, 500) / 1000, 16 * 1024);
+  }
   static constexpr size_t AUDIO_TEMP_BUFFER_SIZE = (AUDIO_BYTES_PER_SEC * 100 / 1000) > (8 * 1024)
                                                        ? (AUDIO_BYTES_PER_SEC * 100 / 1000)
                                                        : (8 * 1024);
@@ -764,7 +766,7 @@ class SimpleVideoPlayer : public Component
   std::shared_ptr<ring_buffer::RingBuffer> audio_input_ring_buffer_;  // Ring buffer for encoded audio (in PSRAM)
   std::shared_ptr<ring_buffer::RingBuffer>
       audio_decoded_ring_buffer_;                 // Ring buffer for decoded audio (in PSRAM, before conversion)
-  std::unique_ptr<uint8_t[]> audio_temp_buffer_;  // Temporary buffer for audio processing (in PSRAM)
+  uint8_t *audio_temp_buffer_{nullptr};           // Temporary buffer for audio processing (pool)
   uint8_t source_audio_channels_{0};              // Fixed source channel count (mirrors AUDIO_SOURCE_CHANNELS)
   uint8_t speaker_audio_channels_{1};             // Number of channels speaker expects
   uint32_t audio_sample_rate_{0};                 // Fixed sample rate (mirrors AUDIO_SAMPLE_RATE)
@@ -978,7 +980,9 @@ class SimpleVideoPlayer : public Component
   lv_draw_buf_t *pic_full_buf_{nullptr};  // the canvas's own buffer (DMA-capable), all of it
   lv_draw_buf_t pic_fit_buf_{};           // the same memory at the shown picture's own size
   lv_draw_buf_t *pic_draw_buf_{nullptr};  // what the canvas shows: one of the two
-  uint8_t *pic_own_buf_{nullptr};         // allocated by set_fullscreen()
+  uint8_t *pic_own_buf_{nullptr};         // set_fullscreen()'s, from the pool
+  lv_draw_buf_t *pic_lvgl_buf_{nullptr};  // the canvas' own buffer (YAML)
+  bool pic_fullscreen_lost_{false};       // its full-screen buffer went to a video meanwhile
   int8_t pic_fullscreen_pending_{-1};     // set_fullscreen() while the task writes the canvas
 
   uint32_t slideshow_interval_ms_{5000};
@@ -1104,7 +1108,6 @@ class SimpleVideoPlayer : public Component
   uint16_t stream_port_{0};
   uint32_t stream_max_frame_bytes_{128 * 1024};
   StreamFrame stream_frames_[STREAM_FRAME_COUNT]{};
-  bool stream_frames_ready_{false};  // network task only
   QueueHandle_t stream_empty_q_{nullptr};
   QueueHandle_t stream_filled_q_{nullptr};
   TaskHandle_t stream_draw_task_{nullptr};

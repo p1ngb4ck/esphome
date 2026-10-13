@@ -13,8 +13,10 @@ RingBuffer::~RingBuffer() {
   // create() only builds the ring buffer once storage_ is allocated
   if (this->storage_ != nullptr) {
     vRingbufferDelete(this->handle_());
-    RAMAllocator<uint8_t> allocator;
-    allocator.deallocate(this->storage_, this->size_);
+    if (this->owns_storage_) {
+      RAMAllocator<uint8_t> allocator;
+      allocator.deallocate(this->storage_, this->size_);
+    }
   }
 }
 
@@ -40,6 +42,18 @@ std::unique_ptr<RingBuffer> RingBuffer::create(size_t len, MemoryPreference pref
   }
   ESP_LOGD(TAG, "Created ring buffer with size %u", len);
 
+  return rb;
+}
+
+std::unique_ptr<RingBuffer> RingBuffer::create_in(uint8_t *storage, size_t len) {
+  if (storage == nullptr)
+    return nullptr;
+  std::unique_ptr<RingBuffer> rb = make_unique<RingBuffer>();
+  rb->size_ = len;
+  rb->owns_storage_ = false;
+  if (xRingbufferCreateStatic(len, RINGBUF_TYPE_BYTEBUF, storage, &rb->structure_) != rb->handle_())
+    return nullptr;
+  rb->storage_ = storage;
   return rb;
 }
 
