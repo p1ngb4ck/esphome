@@ -651,7 +651,8 @@ void BluetoothA2DPSource::av_hdl_stack_evt(uint16_t event, void *p_param) {
       set_scan_mode_connectable(false);
 #endif
 
-      if (reconnect_status == AutoReconnect && has_last_connection()) {
+      if (reconnect_status == AutoReconnect && has_last_connection() &&
+          (reconnect_gate == nullptr || reconnect_gate())) {
         ESP_LOGW(BT_AV_TAG, "Reconnecting to %s", to_str(last_connection));
         memcpy(peer_bd_addr, last_connection, ESP_BD_ADDR_LEN);
         connect_to(last_connection);
@@ -827,6 +828,14 @@ void BluetoothA2DPSource::resume_discovery() {
 }
 
 bool BluetoothA2DPSource::handle_reconnect_logic() {
+  // ESPHome: in the pairing window only the pairing connects; a second page of the same
+  // device fails both with "connection exists".
+  if (discovery_gate != nullptr && discovery_gate()) {
+    resume_discovery();
+    return true;
+  }
+  if (!has_last_connection() || (reconnect_gate != nullptr && !reconnect_gate()))
+    return true;
   if (!is_autoreconnect_allowed){
     ESP_LOGVV(BT_AV_TAG, "Auto-reconnect disabled, not attempting to reconnect");
     return false;

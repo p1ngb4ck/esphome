@@ -74,6 +74,8 @@ void A2DPSource::audio_state_(esp_a2d_audio_state_t state, void *self) {
 
 bool A2DPSource::discovery_gate_() { return global_a2dp_source != nullptr && global_a2dp_source->pairing_mode_.load(); }
 
+bool A2DPSource::reconnect_gate_() { return global_a2dp_source != nullptr && global_a2dp_source->device_kept_.load(); }
+
 bool A2DPSource::gap_fallback_(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param, void *arg) {
   return static_cast<A2DPSource *>(arg)->source_.handle_unclaimed_pairing(event, param);
 }
@@ -145,10 +147,12 @@ void A2DPSource::setup() {
   this->source_.set_media_active(this->media_wanted_);
   this->source_.set_auto_reconnect(true);
   this->source_.set_discovery_gate(A2DPSource::discovery_gate_);
+  this->source_.set_reconnect_gate(A2DPSource::reconnect_gate_);
   bt_classic::add_gap_handler(A2DPSource::gap_handler_, this);
   bt_classic::add_gap_fallback(A2DPSource::gap_fallback_, this);
 #ifdef USE_BT_PAIRING
   if (this->pairing_ != nullptr) {
+    this->device_kept_.store(false);
     this->pairing_->add_target(this);
     this->pairing_->add_on_forget_callback([this](const bt_pairing::PairingRecord &record) {
       if (record.slot != this->slot_)
@@ -492,6 +496,10 @@ void A2DPSource::loop() {
     this->source_.start();
     this->started_.store(true);
   }
+#endif
+#ifdef USE_BT_PAIRING
+  if (this->pairing_ != nullptr)
+    this->device_kept_.store(this->pairing_->find_slot(this->slot_) != nullptr, std::memory_order_relaxed);
 #endif
   uint8_t conn_state = this->pending_connection_state_.exchange(0xFF);
   if (conn_state != 0xFF) {
