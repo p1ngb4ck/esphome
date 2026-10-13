@@ -609,15 +609,21 @@ class LVHIDPointerListener final : public Parented<LvglComponent> {
   void set_cursor_image(const void *src);
 #endif
   void set_default_cursor();
+  // The cursor hides after this long without motion (0: never) and shows again with the next.
+  void set_hide_after(uint32_t ms);
   lv_indev_t *get_drv() { return this->drv_; }
 
  protected:
   void move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons);
+  void set_cursor_(lv_obj_t *cursor);
 
   int32_t x_{0};
   int32_t y_{0};
   bool pressed_{false};
   lv_indev_t *drv_{};
+  lv_obj_t *cursor_{};
+  uint32_t hide_after_{0};
+  uint32_t last_motion_{0};
 };
 #endif  // USE_LVGL_HID
 

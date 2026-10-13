@@ -1310,18 +1310,34 @@ LVHIDPointerListener::LVHIDPointerListener(hid::HIDInput *input, uint16_t long_p
     data->point.x = l->x_;
     data->point.y = l->y_;
     data->state = l->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    if (l->hide_after_ != 0 && l->cursor_ != nullptr && !l->pressed_ && millis() - l->last_motion_ > l->hide_after_ &&
+        !lv_obj_has_flag(l->cursor_, LV_OBJ_FLAG_HIDDEN))
+      lv_obj_add_flag(l->cursor_, LV_OBJ_FLAG_HIDDEN);
   });
   input->add_on_pointer_callback([this](int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
     this->move_(dx, dy, wheel, pan, buttons);
   });
 }
 
+void LVHIDPointerListener::set_cursor_(lv_obj_t *cursor) {
+  lv_obj_set_clickable(cursor, false);
+  lv_indev_set_cursor(this->drv_, cursor);
+  this->cursor_ = cursor;
+  if (this->hide_after_ != 0)
+    lv_obj_add_flag(cursor, LV_OBJ_FLAG_HIDDEN);  // until the pointer first moves
+}
+
+void LVHIDPointerListener::set_hide_after(uint32_t ms) {
+  this->hide_after_ = ms;
+  if (ms != 0 && this->cursor_ != nullptr)
+    lv_obj_add_flag(this->cursor_, LV_OBJ_FLAG_HIDDEN);
+}
+
 #ifdef USE_LVGL_IMAGE
 void LVHIDPointerListener::set_cursor_image(const void *src) {
   lv_obj_t *cursor = lv_image_create(lv_layer_sys());
   lv_image_set_src(cursor, src);
-  lv_obj_set_clickable(cursor, false);
-  lv_indev_set_cursor(this->drv_, cursor);
+  this->set_cursor_(cursor);
 }
 #endif
 
@@ -1334,8 +1350,7 @@ void LVHIDPointerListener::set_default_cursor() {
   lv_obj_set_style_bg_color(cursor, lv_color_white(), 0);
   lv_obj_set_style_border_width(cursor, 2, 0);
   lv_obj_set_style_border_color(cursor, lv_color_black(), 0);
-  lv_obj_set_clickable(cursor, false);
-  lv_indev_set_cursor(this->drv_, cursor);
+  this->set_cursor_(cursor);
 }
 
 void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t pan, uint8_t buttons) {
@@ -1344,6 +1359,9 @@ void LVHIDPointerListener::move_(int16_t dx, int16_t dy, int16_t wheel, int16_t 
       this->parent_->maybe_wakeup();
     return;
   }
+  this->last_motion_ = millis();
+  if (this->cursor_ != nullptr && lv_obj_has_flag(this->cursor_, LV_OBJ_FLAG_HIDDEN))
+    lv_obj_remove_flag(this->cursor_, LV_OBJ_FLAG_HIDDEN);
   lv_display_t *disp = this->parent_->get_disp();
   this->x_ = std::clamp<int32_t>(this->x_ + dx, 0, lv_display_get_horizontal_resolution(disp) - 1);
   this->y_ = std::clamp<int32_t>(this->y_ + dy, 0, lv_display_get_vertical_resolution(disp) - 1);

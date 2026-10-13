@@ -30,6 +30,7 @@ CONF_HID_ID = "hid_id"
 CONF_HID_KEYBOARDS = "hid_keyboards"
 CONF_HID_POINTERS = "hid_pointers"
 CONF_CURSOR = "cursor"
+CONF_HIDE_AFTER = "hide_after"
 CONF_KEY_BINDINGS = "key_bindings"
 CONF_KEYS = "keys"
 CONF_ON_LEARNED = "on_learned"
@@ -162,6 +163,8 @@ HID_POINTERS_CONFIG = cv.ensure_list(
             cv.GenerateID(): cv.declare_id(LVHIDPointerListener),
             cv.Required(CONF_HID_ID): _hid_id,
             cv.Optional(CONF_CURSOR): lv_image,
+            # The cursor hides when the pointer has not moved this long; the next motion shows it.
+            cv.Optional(CONF_HIDE_AFTER): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_LONG_PRESS_TIME, default="400ms"): PRESS_TIME,
             cv.Optional(CONF_LONG_PRESS_REPEAT_TIME, default="100ms"): PRESS_TIME,
         },
@@ -241,6 +244,8 @@ async def hid_inputs_to_code(lv_component, config, default_group):
             cg.add(listener.set_cursor_image(await lv_image.process(cursor)))
         else:
             cg.add(listener.set_default_cursor())
+        if (hide_after := conf.get(CONF_HIDE_AFTER)) is not None:
+            cg.add(listener.set_hide_after(hide_after.total_milliseconds))
 
 
 KEY_BINDINGS_ID_SCHEMA = cv.Schema({cv.GenerateID(): cv.use_id(KeyBindings)})
