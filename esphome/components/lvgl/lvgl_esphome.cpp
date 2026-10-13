@@ -1000,7 +1000,8 @@ void LVHIDKeypadListener::push_(uint32_t code, uint8_t mods, EventKind kind) {
   if (this->parent_->is_paused()) {
     if (kind == KEY_RELEASE)
       this->parent_->maybe_wakeup();
-    return;
+    if (kind == TEXT)
+      return;
   }
   const uint8_t tail = this->tail_.load(std::memory_order_relaxed);
   if (static_cast<uint8_t>(tail - this->head_.load(std::memory_order_acquire)) == QUEUE_SIZE)
@@ -1059,6 +1060,30 @@ void LVHIDKeypadListener::read_(lv_indev_data_t *data) {
   data->state = this->pressed_ ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
   data->continue_reading =
       this->release_next_ || this->head_.load(std::memory_order_relaxed) != this->tail_.load(std::memory_order_acquire);
+}
+
+void LVHIDKeypadListener::run_paused() {
+  uint8_t head = this->head_.load(std::memory_order_relaxed);
+  while (head != this->tail_.load(std::memory_order_acquire)) {
+    const Event event = this->queue_[head % QUEUE_SIZE];
+    this->head_.store(++head, std::memory_order_release);
+    if (event.kind == KEY_RELEASE) {
+      for (Held &held : this->held_) {
+        if (held.code == event.code) {
+          held.code = 0;
+          this->pressed_ = false;
+        }
+      }
+      continue;
+    }
+    if (event.kind != KEY_PRESS)
+      continue;
+    const uint16_t page = event.code >> 16;
+    const uint16_t usage = event.code & 0xFFFF;
+    if (this->bindings_->take_learned(page, usage, event.mods))
+      continue;
+    this->bindings_->fire(this->bindings_->resolve(page, usage, event.mods));
+  }
 }
 
 uint32_t LVHIDKeypadListener::press_(uint16_t page, uint16_t usage, uint8_t mods) {
@@ -1690,6 +1715,10 @@ void LvglComponent::update() {
 
 void LvglComponent::loop() {
   if (this->paused_) {
+#ifdef USE_LVGL_HID
+    for (auto *keypad : this->hid_keypads_)
+      keypad->run_paused();
+#endif
     if (this->show_snow_)
       this->write_random_();
     return;

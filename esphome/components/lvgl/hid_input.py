@@ -223,6 +223,7 @@ async def hid_inputs_to_code(lv_component, config, default_group):
             conf[CONF_LONG_PRESS_REPEAT_TIME].total_milliseconds,
         )
         await cg.register_parented(listener, lv_component)
+        cg.add(lv_component.add_hid_keypad(listener))
         if group := conf.get(CONF_GROUP):
             group = lv_Pvariable(lv_group_t, group)
             lv_assign(group, lv_expr.group_create())

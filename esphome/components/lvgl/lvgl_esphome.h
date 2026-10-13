@@ -163,6 +163,9 @@ template<typename T> void delete_lv_compound_on_delete(lv_event_t *e) {
 }
 
 class LvglComponent;
+#ifdef USE_LVGL_HID
+class LVHIDKeypadListener;
+#endif
 
 class LvPageType : public Parented<LvglComponent> {
  public:
@@ -266,6 +269,10 @@ class LvglComponent final : public PollingComponent {
 
   // Returns true if the display has been explicitly paused via set_paused().
   bool is_paused() const { return this->paused_; }
+#ifdef USE_LVGL_HID
+  // Keypads whose keys still run their actions while the display is paused.
+  void add_hid_keypad(LVHIDKeypadListener *keypad) { this->hid_keypads_.push_back(keypad); }
+#endif
   // If the display is paused and we have resume_on_input_ set to true, resume the display.
   void maybe_wakeup() {
     if (this->paused_ && this->resume_on_input_) {
@@ -405,6 +412,9 @@ class LvglComponent final : public PollingComponent {
   uint16_t width_{};
   uint16_t height_{};
   bool paused_{};
+#ifdef USE_LVGL_HID
+  std::vector<LVHIDKeypadListener *> hid_keypads_{};
+#endif
   std::vector<LvPageType *> pages_{};
   size_t current_page_{0};
   bool show_snow_{};
@@ -557,6 +567,9 @@ class LVHIDKeypadListener final : public Parented<LvglComponent> {
   LVHIDKeypadListener(hid::HIDInput *input, KeyBindings *bindings, uint16_t long_press_time,
                       uint16_t long_press_repeat_time);
   lv_indev_t *get_drv() { return this->drv_; }
+  /// While the display is paused (main loop): the keys run their actions' own automations, without
+  /// navigation, and keys let go are let go.
+  void run_paused();
 
  protected:
   enum EventKind : uint8_t { KEY_PRESS, KEY_RELEASE, TEXT };
