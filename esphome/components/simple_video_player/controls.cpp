@@ -113,6 +113,12 @@ void SimpleVideoPlayer::controls_setup_() {
   lv_style_set_bg_color(&this->ctl_accent_style_, lv_color_hex(0x2F81F7));
   lv_style_set_min_width(&this->ctl_accent_style_, 120);
 
+  lv_style_init(&this->ctl_focus_style_);
+  lv_style_set_outline_width(&this->ctl_focus_style_, 4);
+  lv_style_set_outline_pad(&this->ctl_focus_style_, 3);
+  lv_style_set_outline_color(&this->ctl_focus_style_, lv_color_hex(0xFFFFFF));
+  lv_style_set_outline_opa(&this->ctl_focus_style_, LV_OPA_COVER);
+
   lv_style_init(&this->ctl_seek_style_);
   lv_style_set_width(&this->ctl_seek_style_, lv_pct(100));
   lv_style_set_height(&this->ctl_seek_style_, 10);
@@ -204,6 +210,7 @@ bool SimpleVideoPlayer::build_controls_bar_(ControlsBar &bar) {
         if (this->ctl_user_accent_style_ != nullptr)
           lv_obj_add_style(button, this->ctl_user_accent_style_, LV_PART_MAIN);
       }
+      lv_obj_add_style(button, &this->ctl_focus_style_, LV_STATE_FOCUS_KEY);
       lv_obj_t *label = lv_label_create(button);
       lv_label_set_text(label, button_text(id));
       lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);

@@ -973,6 +973,7 @@ class SimpleVideoPlayer : public Component
   lv_style_t ctl_row_style_{};
   lv_style_t ctl_button_style_{};
   lv_style_t ctl_accent_style_{};
+  lv_style_t ctl_focus_style_{};  // the button keys are on
   lv_style_t ctl_seek_style_{};
   lv_style_t ctl_indicator_style_{};
   touchscreen::Touchscreen *ctl_touchscreen_{nullptr};
