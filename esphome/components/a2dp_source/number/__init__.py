@@ -12,7 +12,7 @@ A2DPDelayNumber = a2dp_source_ns.class_(
 )
 
 # The connected device's output delay, kept per device (A2DPSource::MAX_OUTPUT_DELAY_MS).
-MAX_DELAY_MS = 3000
+MAX_DELAY_MS = 1600
 
 CONFIG_SCHEMA = number.number_schema(
     A2DPDelayNumber,
