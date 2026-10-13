@@ -206,8 +206,8 @@ static void to_host(uint8_t *p) {
 
 // Per side, the L2CAP frames still waiting for continuations. Each table is touched only by the
 // task its side receives on (USB task, esp_hosted RX task); the counts are read by the main loop.
-// A continuation for no frame is dropped here and counted (verbose log every 10s), instead of
-// reaching Bluedroid, which drops it as well but logs every one.
+// Every ACL packet reaches Bluedroid: only the packets it takes are returned to the controller
+// (Host_Number_Of_Completed_Packets), so one dropped here is a host buffer lost for good.
 struct OpenFrame {
   uint16_t handle{NO_HANDLE};
   uint16_t remaining{0};
@@ -223,7 +223,7 @@ static AclCheck s_check_br;
 static AclCheck s_check_le;
 
 // Follows the frames as Bluedroid's packet_fragmenter.c does: only boundary 10 starts one.
-// Returns false for a continuation Bluedroid would drop (and log) as belonging to no frame.
+// Returns false for a continuation Bluedroid will drop as belonging to no frame.
 static bool check_acl(AclCheck &check, const uint8_t *h4, size_t len) {
   if (len < 5)
     return true;
@@ -877,8 +877,8 @@ static int le_recv(uint8_t *data, uint16_t len) {
       Lock lock;
       to_host(s_le_rx + 1);
     }
-    if (check_acl(s_check_le, s_le_rx, len))
-      deliver(s_le_rx, len);
+    check_acl(s_check_le, s_le_rx, len);
+    deliver(s_le_rx, len);
     return 0;
   }
   deliver(data, len);
@@ -941,8 +941,8 @@ void br_recv(uint8_t *h4, size_t len) {
     on_event(SIDE_BR, h4, len);
     return;
   }
-  if (h4[0] == H4_ACL && !check_acl(s_check_br, h4, len))
-    return;
+  if (h4[0] == H4_ACL)
+    check_acl(s_check_br, h4, len);
   deliver(h4, len);
 }
 
